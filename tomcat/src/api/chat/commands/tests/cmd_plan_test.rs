@@ -169,6 +169,9 @@ fn run_plan_build_returns_continue_for_existing_plan() {
             );
         }
         ChatCommandOutcome::Handled => panic!("/plan build 成功时不应被当作纯本地 handled"),
+        ChatCommandOutcome::ResumePendingQuestion => {
+            panic!("/plan build must not resume an old question")
+        }
     }
 
     assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
@@ -246,6 +249,9 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
             );
         }
         ChatCommandOutcome::Handled => panic!("/plan build 默认源成功时不应被当作 handled"),
+        ChatCommandOutcome::ResumePendingQuestion => {
+            panic!("/plan build must not resume an old question")
+        }
     }
     assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
     assert_eq!(

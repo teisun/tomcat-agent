@@ -3,6 +3,16 @@
 use super::super::{parse_chat_command, ChatCommand};
 use crate::api::chat::commands::help_text;
 
+#[test]
+fn help_text_renders_each_shared_command_once() {
+    let help = help_text();
+    for command in super::super::SHARED_SLASH_COMMANDS {
+        assert!(help.contains(command.usage));
+        assert!(help.contains(command.summary));
+    }
+    assert_eq!(help.matches("/install").count(), 1);
+}
+
 fn assert_not_command(input: &str) {
     assert!(matches!(
         parse_chat_command(input),
@@ -24,7 +34,7 @@ fn help_command_is_lowercase_only() {
 fn help_text_mentions_checkpoint_commands() {
     let h = help_text();
     assert!(
-        h.contains("/install <source>"),
+        h.contains("/install <来源>"),
         "/help 应列出 /install：{}",
         h
     );

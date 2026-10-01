@@ -28,6 +28,8 @@ pub struct SessionSlot {
     pub mode: SessionMode,
     pub cwd: Option<String>,
     pub busy: AtomicBool,
+    /// Admission is busy during maintenance, but no agent turn is running.
+    pub(super) command_job: AtomicBool,
     /// A restart recovered an unanswered ask_question before the frontend
     /// completed the initialize handshake. It must be re-armed only after the
     /// client is ready to receive the new response route.
@@ -59,6 +61,7 @@ impl SessionSlot {
             mode,
             cwd,
             busy: AtomicBool::new(false),
+            command_job: AtomicBool::new(false),
             resume_pending_ask_question: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
             turn_state: Mutex::new(Some(turn_state)),
@@ -67,6 +70,14 @@ impl SessionSlot {
             background_task_listener: Mutex::new(None),
             listener_ids: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn is_command_job_running(&self) -> bool {
+        self.command_job.load(Ordering::SeqCst)
+    }
+
+    pub fn is_turn_running(&self) -> bool {
+        self.is_busy() && !self.is_command_job_running()
     }
 
     pub fn is_busy(&self) -> bool {
@@ -203,7 +214,7 @@ impl ChatContextRegistry {
             .filter_map(|session_id| {
                 self.get(&session_id).map(|slot| SessionSummary {
                     session_id,
-                    busy: slot.is_busy(),
+                    busy: slot.is_turn_running(),
                     interrupted: slot.is_interrupted(),
                 })
             })

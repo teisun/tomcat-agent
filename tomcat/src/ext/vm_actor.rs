@@ -89,11 +89,15 @@ impl VmActorHandle {
     }
 }
 
+pub(crate) type StartupSignal =
+    Arc<parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<Result<(), String>>>>>;
+
 /// VM actor：封装 `PluginVmInstance`，在专属线程中运行。
 pub struct VmActor {
     instance: PluginVmInstance,
     script_path: PathBuf,
     cmd_rx: tokio::sync::mpsc::Receiver<VmCommand>,
+    startup: Option<StartupSignal>,
     state: Arc<AtomicU8>,
 }
 
@@ -104,7 +108,16 @@ impl VmActor {
     pub fn spawn(
         instance: PluginVmInstance,
         script_path: PathBuf,
+        event_capacity: usize,
+    ) -> VmActorHandle {
+        Self::spawn_with_startup(instance, script_path, event_capacity, None)
+    }
+
+    pub(crate) fn spawn_with_startup(
+        instance: PluginVmInstance,
+        script_path: PathBuf,
         _event_capacity: usize,
+        startup: Option<StartupSignal>,
     ) -> VmActorHandle {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<VmCommand>(32);
         let state = Arc::new(AtomicU8::new(VmActorState::Created as u8));
@@ -119,6 +132,7 @@ impl VmActor {
             script_path,
             cmd_rx,
             state,
+            startup,
         };
 
         tokio::task::spawn_blocking(move || actor.run());
@@ -178,6 +192,19 @@ impl VmActor {
                 "[VmActor {pid}] drained {drained} VmCommand(s) from cmd_rx after _start returned; \
                  these were not processed while VM blocked (Shutdown/DispatchEvent are no-ops on the actor thread during _start)"
             );
+        }
+
+        // A session VM is initialized when it first reaches waitForEvent.
+        // If it exits before that point, propagate the initialization failure.
+        if let Some(startup) = &self.startup {
+            if let Some(sender) = startup.lock().take() {
+                let error = match &result {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "plugin initialization panicked".to_string(),
+                    Ok(Ok(())) => "plugin exited before entering its event loop".to_string(),
+                };
+                let _ = sender.send(Err(error));
+            }
         }
 
         match result {

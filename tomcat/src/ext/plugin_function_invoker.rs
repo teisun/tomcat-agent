@@ -91,7 +91,7 @@ impl PluginFunctionInvoker {
 
         let call_id = self.alloc_call_id(session_id, &function.plugin_id, &function.function);
         let rx = dispatcher.register_command_waiter(&call_id);
-        plugin_manager.dispatch_session_event(
+        let dispatched = plugin_manager.dispatch_session_event(
             session_id,
             &function.plugin_id,
             wire::vm::WIRE_COMMAND_INVOKE,
@@ -108,7 +108,11 @@ impl PluginFunctionInvoker {
                 "functionName": function.function,
                 "point": function.point,
             }),
-        )?;
+        );
+        if let Err(error) = dispatched {
+            dispatcher.drop_command_waiter(&call_id);
+            return Err(error);
+        }
 
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),

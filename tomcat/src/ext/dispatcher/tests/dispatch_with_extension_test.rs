@@ -29,6 +29,53 @@ use crate::ext::host_binding::HostRequest;
 use crate::infra::DefaultEventBus;
 use crate::infra::{error::AppError, PrimitiveConfig, TracingAuditRecorder};
 
+#[tokio::test]
+async fn stale_instance_rejects_capability_writes_but_keeps_logging() {
+    use crate::ext::PluginManager;
+    let bus = Arc::new(DefaultEventBus::new());
+    let manager = Arc::new(PluginManager::new(bus.clone()));
+    let dispatcher = HostApiDispatcher::new(bus).with_plugin_manager(Arc::downgrade(&manager));
+    for (module, method) in [
+        ("tools", "registerTool"),
+        ("tools", "unregisterTool"),
+        ("tools", "setActiveTools"),
+        ("commands", "registerCommand"),
+        ("events", "on"),
+        ("events", "subscribe"),
+        ("events", "once"),
+    ] {
+        let response = dispatcher
+            .dispatch_async(
+                "session/missing",
+                HostRequest {
+                    module: module.into(),
+                    method: method.into(),
+                    params: serde_json::json!({}),
+                    call_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!response.ok);
+        assert!(response.error.unwrap().contains("stale"));
+    }
+    assert!(
+        dispatcher
+            .dispatch_async(
+                "session/missing",
+                HostRequest {
+                    module: "agent".into(),
+                    method: "log".into(),
+                    params: serde_json::json!({"message":"still finishing"}),
+                    call_id: None
+                }
+            )
+            .await
+            .unwrap()
+            .ok
+    );
+}
+
 #[derive(Clone)]
 struct RecordingLlm {
     reply: &'static str,

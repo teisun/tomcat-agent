@@ -201,7 +201,7 @@ describe("picked uri classification", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: {} as never,
     });
@@ -280,7 +280,7 @@ describe("draft fork delivery", () => {
         extensionUri: vscode.Uri.file("/workspace/extension"),
         getDefaultCwd: () => "/workspace",
         ide: {} as never,
-        initialize: async () => ({} as never),
+        initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
         messenger: { onEvent: () => ({ dispose() {} }) } as never,
         sessionRouter: {} as never,
       });
@@ -328,7 +328,7 @@ describe("draft fork delivery", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: {} as never,
     });
@@ -348,7 +348,7 @@ describe("draft fork delivery", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: {} as never,
     });
@@ -472,7 +472,7 @@ describe("error-turn recovery", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "s1" } as never),
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: { retry, resume } as never,
     });
@@ -693,7 +693,7 @@ describe("thinking level intent handling", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
         sendSetThinkingLevel,
@@ -780,7 +780,7 @@ describe("webview html asset resolution", () => {
       extensionUri,
       getDefaultCwd: () => undefined,
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -813,7 +813,7 @@ describe("webview html asset resolution", () => {
       extensionUri,
       getDefaultCwd: () => undefined,
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -841,7 +841,7 @@ describe("webview html asset resolution", () => {
       extensionUri,
       getDefaultCwd: () => undefined,
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -870,7 +870,7 @@ function buildSearchProvider(): {
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {} as never,
-    initialize: async () => ({} as never),
+    initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
     messenger: {
       onEvent: () => ({ dispose() {} }),
     } as never,
@@ -1109,7 +1109,7 @@ describe("mutation diff stat injection", () => {
         rememberToolResult,
         rememberToolStart,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: (listener: (event: Record<string, unknown>) => void) => {
           emitEvent = listener;
@@ -1160,7 +1160,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1274,7 +1274,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1347,7 +1347,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1397,7 +1397,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1474,7 +1474,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1516,7 +1516,7 @@ describe("mutation diff stat injection", () => {
       ide: {
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1541,7 +1541,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: { showFile } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       openExternal,
       sessionRouter: {} as never,
@@ -1576,7 +1576,7 @@ describe("mutation diff stat injection", () => {
       ide: {
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1616,7 +1616,7 @@ describe("mutation diff stat injection", () => {
         rememberToolResult,
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1686,7 +1686,7 @@ describe("mutation diff stat injection", () => {
         rememberToolStart,
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1767,7 +1767,7 @@ describe("mutation diff stat injection", () => {
         rememberToolResult,
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1821,7 +1821,7 @@ describe("mutation diff stat injection", () => {
         rememberToolResult: vi.fn().mockResolvedValue(undefined),
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -1870,7 +1870,7 @@ describe("checkpoint intent handling", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "s1" } as never),
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -2069,7 +2069,7 @@ describe("plan build orchestration", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "s1" } as never),
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
         ...messenger,
@@ -2204,7 +2204,7 @@ describe("plan preview auto-open after review", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: { openWith, showFile } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -2380,7 +2380,7 @@ describe("draft fork provider transaction", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "source-1" } as never),
+      initialize: async () => ({ sessionId: "source-1", capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: router as never,
     });
@@ -2496,7 +2496,7 @@ describe("serve connection readiness", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: initialize as never,
+      initialize: (async () => ({ capabilities: [], slashCommands: [], ...(await initialize() as object) })) as never,
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: {} as never,
     });
@@ -2673,7 +2673,7 @@ describe("serve connection readiness", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "s1" } as never),
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
       messenger: { onEvent: () => ({ dispose() {} }) } as never,
       reportBootstrapFailure,
       sessionRouter: {} as never,

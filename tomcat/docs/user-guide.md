@@ -603,7 +603,7 @@ Supported source shapes:
 
 The three visibility layers are:
 
-- `scope`: the current project, written to `<scope_root>/.tomcat/{plugins,skills,packages}`
+- `scope`: the current project, written to `<scope_root>/<workspace.project_resource_dir>/{plugins,skills,packages}` (default `.agents`)
 - `agent`: the current agent, written to `~/.tomcat/agents/<id>/{plugins,skills,packages}`
 - `global`: the globally shared layer, written to `~/.tomcat/{plugins,skills,packages}`
 
@@ -631,19 +631,25 @@ tomcat packages --visibility agent
 tomcat uninstall my-package --visibility scope
 ```
 
-Install from inside chat:
+Manage resources from terminal chat or the VS Code composer:
 
 ```text
-/install ./my-package
-/install ./my-plugin agent
+/reload
+/install './source with space/my-plugin' agent
 /install ./my-skill current-project
+/uninstall my-package agent
 ```
 
-Notes:
+```text
+External CLI / manual file change → /reload → current skills, tools and plugin instances
+Chat /install or /uninstall       → the same synchronization runs automatically
+```
 
-- `current-project` inside `/install` is only a user-facing label; internally it maps to `scope`.
-- In `code` / `claw` sessions, after `/install` succeeds, the current session immediately refreshes `SkillSet` plus the plugin catalog/static tool list, so newly installed skills and static plugin capabilities become visible without restarting the session.
-- This live refresh **does not** execute plugin code inside the install path, and **does not** hot-swap plugin instances that are already loaded. If a plugin is already running in the current session, it keeps using the old instance until a later normal runtime path reactivates it.
+- `/reload` rescans effective Skill and plugin resources, reports additions/removals/updates, and refreshes the next model request. It does not reload arbitrary configuration or reconnect MCP servers. External changes are **not scanned on every prompt**; run `/reload` explicitly.
+- `current-project` is a label for `scope`; `agent` and `global` are also accepted. Terminal `/install` and `/uninstall` can ask for the layer if omitted; VS Code is non-interactive and returns usage instead. Quote paths containing spaces; `/install SOURCE LAYER --force` replaces a same-layer resource.
+- `/uninstall` takes the **package name** from `tomcat packages`, not a tool name. It only uninstalls ledger-managed packages in the specified layer. For manually placed resources, delete the directory under that layer's `plugins/` or `skills/`, then run `/reload`.
+- Package installation itself remains static. The subsequent session synchronization revokes removed/changed plugins, drains already admitted work, retires stale VMs, and reuses normal activation. Static Lazy plugins remain lazy; Session initialization can run during synchronization. Unrelated plugins are preserved.
+- In VS Code, `/` opens suggestions at the start, after whitespace, or on a new line; paths and URLs do not open them. Selecting inserts text, not executes it. Only a leading shared command with **text only** is intercepted on send; mid-message commands and drafts with references/attachments remain ordinary prompts. Waiting commands disable send, compact and Build; replies appear as notice/error bubbles. Older servers without the command table do not show this menu.
 
 ---
 
@@ -720,6 +726,9 @@ Inside interactive chat, tomcat intercepts local commands starting with `/` befo
 
 | Command | Description |
 |---------|-------------|
+| `/reload` | Rescan Skills and plugin tools in the running session |
+| `/install <source> <current-project\|agent\|global> [--force]` | Install and synchronize resources |
+| `/uninstall <package-name> <current-project\|agent\|global>` | Uninstall a ledger-managed package and synchronize |
 | `/help` | Show the currently supported local commands |
 | `/path <absolute path>` | Open the authorization menu for one path (this session / write to workspace / read-only / deny / cancel) |
 | `/model` (`current` / `list` / `use <id>`) | View or switch the current session model (catalog = built-in table + `models.toml`) |
@@ -733,6 +742,8 @@ Inside interactive chat, tomcat intercepts local commands starting with `/` befo
 | `/plan list` | List plan files under `~/.tomcat/plans/` |
 
 Dragging or pasting a path and pressing Enter does not open the authorization menu. It is sent to the LLM as a normal chat message. If you need to authorize a path explicitly, use `/path <absolute path>`.
+
+After a successful terminal `/restore`, the durable transcript is reloaded into memory, just like VS Code checkpoint restore. If the restored tail contains an unanswered question, terminal chat resumes it automatically; dry-run and failed restore leave memory unchanged.
 
 #### Recommended Startup Directory for Checkpoints
 
@@ -1080,6 +1091,6 @@ tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
 
-`tomcat plugin load` is still the **runtime loading entry point**. It performs a short-lived initialization check once and writes the registration data into the global `{work_dir}/plugins/registry.json`. By contrast, `tomcat install` and `/install` are the **installation management entry points**: they write the corresponding layer's `plugins/registry.json` and `packages/registry.json` under `scope|agent|global`, but they do not execute plugin code inside the install path. The actual long-lived session VM is still created lazily only when the session first needs that plugin.
+`tomcat plugin load` is still the **runtime loading entry point**. It performs a short-lived initialization check once and writes the registration data into the global `{work_dir}/plugins/registry.json`. By contrast, `tomcat install` and `/install` are the **installation management entry points**: they write the corresponding layer's `plugins/registry.json` and `packages/registry.json` under `scope|agent|global`, but they do not execute plugin code inside the install path. The subsequent session activation creates Session VMs immediately, while static Lazy plugins wait for first use. `/install` and `/reload` reuse that activation policy after synchronizing the inventory.
 
 Implementation details: [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) and [src/ext/README.md](../src/ext/README.md).

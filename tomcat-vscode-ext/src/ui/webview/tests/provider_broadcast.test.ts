@@ -29,7 +29,7 @@ function createProvider() {
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {} as never,
-    initialize: async () => ({ sessionId: "s1" } as never),
+    initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
     messenger: {
       onEvent: () => ({ dispose() {} }),
     } as never,

@@ -331,6 +331,7 @@ fn scope_runtime_for(
                 .map(|registry| registry.mcp_executor()),
         )?;
     let shared = Arc::new(ScopeContainer {
+        inventory_sync: tokio::sync::Mutex::new(()),
         event_bus,
         tool_registry,
         function_registry,
@@ -576,65 +577,13 @@ impl ChatContext {
             ));
         }
         if !overrides.skip_session_plugin_activation {
-            if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
-                for plugin_id in plugin_manager_ref.list_loaded() {
-                    let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
-                        continue;
-                    };
-                    if info.manifest.tools.is_empty() && info.loaded_at == 0 {
-                        if let Err(err) = plugin_manager_ref.load_plugin(&info.plugin_root) {
-                            warn!(
-                                plugin = %plugin_id,
-                                path = %info.plugin_root.display(),
-                                error = %err,
-                                "scope activation failed to pre-register legacy dynamic plugin"
-                            );
-                        }
-                        if info.manifest.activation == crate::ext::PluginActivation::Lazy {
-                            continue;
-                        }
-                    }
-                    if info.manifest.activation != crate::ext::PluginActivation::Session {
-                        continue;
-                    }
-                    if plugin_manager_ref
-                        .has_session_vm(&current_session_entry.session_id, &plugin_id)
-                    {
-                        continue;
-                    }
-
-                    let pm = Arc::clone(plugin_manager_ref);
-                    let session_id = current_session_entry.session_id.clone();
-                    let plugin_id_for_start = plugin_id.clone();
-                    if let Err(err) = block_on_plugin_future(async move {
-                        pm.start_session_vm(&session_id, &plugin_id_for_start)
-                            .await
-                            .map(|_| ())
-                    }) {
-                        warn!(
-                            plugin = %plugin_id,
-                            session = %current_session_entry.session_id,
-                            error = %err,
-                            "scope activation failed to prestart session plugin"
-                        );
-                        continue;
-                    }
-                    if let Err(err) = plugin_manager_ref.dispatch_session_event(
-                        &current_session_entry.session_id,
-                        &plugin_id,
-                        crate::infra::wire::vm::WIRE_SESSION_START,
-                        serde_json::json!({}),
-                        serde_json::json!({
-                            "sessionId": current_session_entry.session_id.clone(),
-                        }),
-                    ) {
-                        warn!(
-                            plugin = %plugin_id,
-                            session = %current_session_entry.session_id,
-                            error = %err,
-                            "scope activation failed to deliver session_start"
-                        );
-                    }
+            if let Some(manager) = plugin_manager.clone() {
+                let session_id = current_session_entry.session_id.clone();
+                let (_, warnings) = block_on_plugin_future(async move {
+                    Ok(activate_session_plugins(manager, &session_id).await)
+                })?;
+                for warning in warnings {
+                    warn!("{warning}");
                 }
             }
         }
@@ -1060,26 +1009,6 @@ impl ChatContext {
         }
     }
 
-    /// Refresh cacheable skill/plugin inventories only before a later user turn. Active plugin
-    /// VMs are intentionally left alone by `refresh_plugin_catalog_inventory`; a new inventory
-    /// must not replace live plugin code halfway through a conversation.
-    pub(crate) async fn refresh_resource_inventory_before_turn(&self) -> Result<(), AppError> {
-        let current = crate::api::chat::current_resource_inventory_epoch();
-        let seen = self
-            .session_runtime
-            .seen_resource_inventory_epoch
-            .load(std::sync::atomic::Ordering::Acquire);
-        if current <= seen {
-            return Ok(());
-        }
-        self.reload_skill_set().await;
-        self.refresh_plugin_catalog_inventory().await?;
-        self.session_runtime
-            .seen_resource_inventory_epoch
-            .store(current, std::sync::atomic::Ordering::Release);
-        Ok(())
-    }
-
     pub(crate) async fn reload_skill_set(&self) -> crate::core::skill::SkillSet {
         if let Some(handle) = self
             .scope_services
@@ -1103,103 +1032,6 @@ impl ChatContext {
         }
         *self.scope_services.skill_set.write() = skill_set.clone();
         skill_set
-    }
-
-    pub(crate) async fn refresh_plugin_catalog_inventory(&self) -> Result<Vec<String>, AppError> {
-        let Some(plugin_manager) = self.global_services.plugin_manager.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let current_session_id = self
-            .session_runtime
-            .session
-            .current_session_id()
-            .ok()
-            .flatten();
-
-        let catalog = PluginCatalog::discover(&self.config, &self.scope_services.resource_root)?;
-        let discovered_ids = catalog
-            .iter()
-            .map(|(plugin_id, _)| plugin_id.clone())
-            .collect::<std::collections::HashSet<_>>();
-
-        for existing_id in plugin_manager.list_loaded() {
-            let Some(info) = plugin_manager.get_plugin(&existing_id) else {
-                continue;
-            };
-            let has_session_vm = current_session_id
-                .as_deref()
-                .map(|session_id| plugin_manager.has_session_vm(session_id, &existing_id))
-                .unwrap_or(false);
-            if info.loaded_at != 0 || has_session_vm {
-                continue;
-            }
-            if discovered_ids.contains(&existing_id) {
-                continue;
-            }
-            self.global_services
-                .tool_registry
-                .unregister_plugin_tools(&existing_id);
-            let _ = plugin_manager.unload_plugin(&existing_id);
-        }
-
-        for (plugin_id, entry) in catalog.iter() {
-            let loaded = plugin_manager
-                .get_plugin(plugin_id)
-                .map(|info| info.loaded_at > 0)
-                .unwrap_or(false);
-            let has_session_vm = current_session_id
-                .as_deref()
-                .map(|session_id| plugin_manager.has_session_vm(session_id, plugin_id))
-                .unwrap_or(false);
-            if loaded || has_session_vm {
-                continue;
-            }
-
-            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
-            self.global_services
-                .tool_registry
-                .unregister_plugin_tools(plugin_id);
-            for manifest_tool in &entry.manifest.tools {
-                self.global_services
-                    .tool_registry
-                    .register_tool(
-                        Tool {
-                            name: manifest_tool.name.clone(),
-                            label: manifest_tool.name.clone(),
-                            description: manifest_tool.description.clone(),
-                            parameters: manifest_tool.parameters.clone(),
-                            plugin_id: plugin_id.clone(),
-                            is_enabled: true,
-                            created_at: 0,
-                        },
-                        plugin_id,
-                    )
-                    .await?;
-            }
-        }
-
-        let function_catalog = refresh_host_function_registry(
-            &self.config,
-            &self.scope_services.resource_root,
-            &self.global_services.function_registry,
-        )?;
-        let mut warnings = catalog.warnings.clone();
-        warnings.extend(function_catalog.warnings.clone());
-        warnings.extend(catalog.diagnostics.iter().map(|diagnostic| {
-            format!(
-                "plugin catalog ignored {}: {}",
-                diagnostic.path.display(),
-                diagnostic.reason
-            )
-        }));
-        warnings.extend(function_catalog.diagnostics.iter().map(|diagnostic| {
-            format!(
-                "host function catalog ignored {}: {}",
-                diagnostic.path.display(),
-                diagnostic.reason
-            )
-        }));
-        Ok(warnings)
     }
 }
 
@@ -1324,10 +1156,18 @@ fn host_function_source_rank(source: PluginSource) -> u8 {
     }
 }
 
-fn materialize_host_functions_from_catalog(
+pub(super) fn materialize_host_functions_from_catalog(
     registry: &FunctionRegistry,
     catalog: &PluginCatalog,
 ) -> Vec<String> {
+    let (functions, warnings) = collect_host_functions_from_catalog(catalog);
+    registry.replace_all(functions);
+    warnings
+}
+
+pub(super) fn collect_host_functions_from_catalog(
+    catalog: &PluginCatalog,
+) -> (Vec<RegisteredFunction>, Vec<String>) {
     #[derive(Debug)]
     struct HostFunctionCandidate {
         order: usize,
@@ -1392,20 +1232,89 @@ fn materialize_host_functions_from_catalog(
         winners.insert(candidate.point.clone(), (candidate.source, registered));
     }
 
-    registry.replace_all(winners.into_values().map(|(_, function)| function));
-    warnings
+    (
+        winners
+            .into_values()
+            .map(|(_, function)| function)
+            .collect(),
+        warnings,
+    )
 }
 
-fn refresh_host_function_registry(
-    config: &AppConfig,
-    agent_workspace_dir: &std::path::Path,
-    registry: &FunctionRegistry,
-) -> Result<PluginCatalog, AppError> {
-    let mut catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
-    catalog
-        .warnings
-        .extend(materialize_host_functions_from_catalog(registry, &catalog));
-    Ok(catalog)
+pub(super) fn register_catalog_entry(
+    manager: &PluginManager,
+    entry: &crate::ext::plugin::CatalogEntry,
+) -> Result<Vec<Tool>, AppError> {
+    manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
+    manager.set_catalog_fingerprint(&entry.manifest.id, entry.fingerprint);
+    Ok(entry
+        .manifest
+        .tools
+        .iter()
+        .map(|tool| Tool {
+            name: tool.name.clone(),
+            label: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+            plugin_id: entry.manifest.id.clone(),
+            is_enabled: true,
+            created_at: 0,
+        })
+        .collect())
+}
+
+pub(super) async fn activate_session_plugins(
+    manager: Arc<PluginManager>,
+    session_id: &str,
+) -> (bool, Vec<String>) {
+    let mut worked = false;
+    let mut warnings = Vec::new();
+    for id in manager.list_loaded() {
+        let Some(info) = manager.get_plugin(&id) else {
+            continue;
+        };
+        // Keep legacy dynamic discovery identical to new-session startup. A
+        // Lazy plugin with no manifest tools can still run this short script.
+        if info.manifest.tools.is_empty() && info.loaded_at == 0 {
+            worked = true;
+            let pm = manager.clone();
+            let root = info.plugin_root.clone();
+            match tokio::task::spawn_blocking(move || pm.load_plugin(&root)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warnings.push(format!("scope activation failed for {id}: {error}"))
+                }
+                Err(error) => {
+                    warnings.push(format!("scope activation worker failed for {id}: {error}"))
+                }
+            }
+            if info.manifest.activation == crate::ext::PluginActivation::Lazy {
+                continue;
+            }
+        }
+        if info.manifest.activation != crate::ext::PluginActivation::Session
+            || manager.has_session_vm(session_id, &id)
+        {
+            continue;
+        }
+        worked = true;
+        if let Err(error) = manager.start_session_vm(session_id, &id).await {
+            warnings.push(format!("scope activation failed to start {id}: {error}"));
+            continue;
+        }
+        if let Err(error) = manager.dispatch_session_event(
+            session_id,
+            &id,
+            crate::infra::wire::vm::WIRE_SESSION_START,
+            serde_json::json!({}),
+            serde_json::json!({"sessionId": session_id}),
+        ) {
+            warnings.push(format!(
+                "scope activation failed to deliver session_start to {id}: {error}"
+            ));
+        }
+    }
+    (worked, warnings)
 }
 
 fn build_plugin_runtime(
@@ -1526,35 +1435,15 @@ fn build_plugin_runtime(
 
     let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
     for (plugin_id, entry) in catalog.iter() {
-        if let Err(err) =
-            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())
-        {
-            warn!(
-                plugin = %plugin_id,
-                path = %entry.plugin_root.display(),
-                error = %err,
-                "catalog register plugin failed; continuing without this plugin"
-            );
-            continue;
-        }
-        for manifest_tool in &entry.manifest.tools {
-            let tool = Tool {
-                name: manifest_tool.name.clone(),
-                label: manifest_tool.name.clone(),
-                description: manifest_tool.description.clone(),
-                parameters: manifest_tool.parameters.clone(),
-                plugin_id: plugin_id.clone(),
-                is_enabled: true,
-                created_at: 0,
-            };
-            if let Err(err) = default_tool_registry.register_tool_local(tool, plugin_id) {
-                warn!(
-                    plugin = %plugin_id,
-                    tool = %manifest_tool.name,
-                    error = %err,
-                    "catalog materialize static tool failed; continuing without this tool"
-                );
+        match register_catalog_entry(&plugin_manager, entry) {
+            Ok(tools) => {
+                for tool in tools {
+                    if let Err(error) = default_tool_registry.register_tool_local(tool, plugin_id) {
+                        warn!(plugin = %plugin_id, %error, "catalog materialize static tool failed");
+                    }
+                }
             }
+            Err(error) => warn!(plugin = %plugin_id, %error, "catalog register plugin failed"),
         }
     }
     for diagnostic in &catalog.diagnostics {
@@ -1564,14 +1453,8 @@ fn build_plugin_runtime(
             "plugin catalog scan ignored invalid entry"
         );
     }
-    let host_function_catalog =
-        refresh_host_function_registry(config, agent_workspace_dir, &function_registry)?;
-    for diagnostic in &host_function_catalog.diagnostics {
-        warn!(
-            path = %diagnostic.path.display(),
-            reason = %diagnostic.reason,
-            "host function catalog scan ignored invalid entry"
-        );
+    for warning in materialize_host_functions_from_catalog(&function_registry, &catalog) {
+        warn!("{warning}");
     }
 
     let plugins_dir = resolve_plugins_dir(config)?;

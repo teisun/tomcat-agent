@@ -6,7 +6,6 @@ use reqwest::Method;
 use serde_json::Value;
 use tracing::debug;
 
-use super::helpers::plugin_id_from_instance;
 use super::types::HostApiDispatcher;
 use crate::core::tools::web_fetch::types::MAX_URL_LENGTH;
 use crate::ext::host_binding::HostResponse;
@@ -27,17 +26,15 @@ impl HostApiDispatcher {
         instance_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let plugin_id = plugin_id_from_instance(instance_id);
         let plugin = self
             .plugin_manager
             .as_ref()
             .and_then(|weak| weak.upgrade())
-            .and_then(|manager| manager.get_plugin(plugin_id))
+            .and_then(|manager| manager.instance_manifest(instance_id))
             .ok_or_else(|| {
                 fetch_error("dispatcher_unavailable", "pi.fetch runtime is unavailable")
             })?;
         if !plugin
-            .manifest
             .required_permissions
             .iter()
             .any(|perm| perm == "net:fetch")
@@ -48,7 +45,7 @@ impl HostApiDispatcher {
             ));
         }
 
-        let spec = parse_fetch_spec(params, &plugin.manifest.required_secrets)?;
+        let spec = parse_fetch_spec(params, &plugin.required_secrets)?;
         let validated = validate_http_url(
             &spec.url,
             UrlValidationOptions {
@@ -65,7 +62,7 @@ impl HostApiDispatcher {
             .ok_or_else(|| {
                 fetch_error("invalid_url", "pi.fetch target URL is missing a valid host")
             })?;
-        if !is_allowed_host(&host, &plugin.manifest.allowed_hosts) {
+        if !is_allowed_host(&host, &plugin.allowed_hosts) {
             return Err(fetch_error(
                 "host_not_allowed",
                 format!("pi.fetch target host `{host}` is not in manifest.allowedHosts"),

@@ -2700,6 +2700,16 @@ export class WebviewStateStore {
     this.state.buildModel = buildModel;
   }
 
+  setSlashCommands(commands: NonNullable<WebviewStateSnapshot["slashCommands"]>): void {
+    this.state.slashCommands = commands.map((command) => ({ ...command }));
+  }
+
+  setCommandPending(sessionId: string, pending: boolean): void {
+    // A late reply must not recreate a closed session.
+    const session = this.state.sessionViews[sessionId];
+    if (session) session.commandPending = pending;
+  }
+
   setModelAdminSupported(supported: boolean): void {
     this.state.modelAdminSupported = supported;
   }

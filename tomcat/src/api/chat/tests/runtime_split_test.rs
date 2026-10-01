@@ -1905,9 +1905,10 @@ async fn function_override_same_layer_conflict_first_wins_with_warning() {
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
     let warnings = ctx
-        .refresh_plugin_catalog_inventory()
+        .sync_resource_inventory()
         .await
-        .expect("refresh plugin catalog");
+        .expect("refresh plugin catalog")
+        .warnings;
     let targets = function_targets(&ctx, "test.echo");
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].plugin_id, "alpha-function");
@@ -1950,7 +1951,7 @@ async fn function_override_recomputes_winner_on_refresh_after_higher_layer_added
         &[("test.echo", "projectEcho")],
         r#"pi.registerFunction("projectEcho", function () { return { source: "project" }; });"#,
     );
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog");
 
@@ -1996,7 +1997,7 @@ async fn function_override_lower_layer_reemerges_after_higher_layer_removed() {
     );
 
     fs::remove_dir_all(&project_plugin_dir).expect("remove higher-layer plugin");
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog");
 
@@ -2156,10 +2157,10 @@ async fn catalog_refresh_does_not_duplicate_function_entries() {
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
     assert_eq!(function_targets(&ctx, "test.echo").len(), 1);
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog");
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog twice");
     assert_eq!(

@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 
 import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
 import type { ModelPickerModel } from "./ModelPicker";
+import type { SharedSlashCommand } from "../../../src/serveClient/wire";
 
 type DraftChange = (draft: {
   hasContent: boolean;
@@ -44,6 +45,7 @@ vi.mock("../attachments/imagePipeline", () => ({
 function renderComposer({
   availableModelDetails,
   availableModels = ["gpt-5.4"],
+  slashCommands = [],
   busy = false,
   canInterrupt = true,
   canPrompt = true,
@@ -76,6 +78,7 @@ function renderComposer({
 }: {
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels?: string[];
+  slashCommands?: SharedSlashCommand[];
   busy?: boolean;
   canInterrupt?: boolean;
   canPrompt?: boolean;
@@ -126,6 +129,7 @@ function renderComposer({
     <Composer
       availableModelDetails={availableModelDetails}
       availableModels={availableModels}
+      slashCommands={slashCommands}
       busy={busy}
       canInterrupt={canInterrupt}
       canPrompt={canPrompt}
@@ -168,6 +172,52 @@ function renderComposer({
     ref,
   };
 }
+
+describe("resource slash menu", () => {
+  const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:`${name} 说明`}));
+  const paste = async (value:string) => { await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>value}}); }); };
+  it.each(["/", "help /"])("opens at a boundary without submitting: %s", async (value) => {
+    const onSubmit = vi.fn();
+    renderComposer({slashCommands:commands, onSubmit});
+    await paste(value);
+    expect(screen.getAllByTestId("slash-command-option")).toHaveLength(3);
+    if (value.startsWith("help")) expect(screen.getAllByText("仅在开头生效")).toHaveLength(3);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+  it("filters without case sensitivity, inserts plain text on Enter and closes on Escape", async () => {
+    const onSubmit = vi.fn();
+    const {ref} = renderComposer({slashCommands:commands, onSubmit});
+    await paste("/UN");
+    expect(screen.getAllByTestId("slash-command-option")).toHaveLength(1);
+    await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"), {key:"Enter"}); });
+    expect(ref.current?.getDraft()).toMatchObject({text:"/uninstall ", segments:[{type:"text",text:"/uninstall "}]});
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => { ref.current?.clear(); });
+    await paste("/");
+    await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"), {key:"Escape"}); });
+    expect(screen.queryByTestId("slash-command-menu")).toBeNull();
+  });
+  it.each(["src/", "https://"])("does not open in a path or URL: %s", async (value) => {
+    renderComposer({slashCommands:commands}); await paste(value);
+    expect(screen.queryByTestId("slash-command-menu")).toBeNull();
+  });
+  it("does not mount a slash menu for an old server", async () => {
+    renderComposer(); await paste("/"); expect(screen.queryByTestId("slash-command-menu")).toBeNull();
+  });
+  it("opens slash and mention after the real Shift+Enter hardBreak", async () => {
+    const onOpen = vi.fn();
+    const {ref} = renderComposer({slashCommands:commands, onContextSearchOpen:onOpen});
+    await paste("line");
+    await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"), {key:"Enter", shiftKey:true}); });
+    expect(ref.current?.getDraft().text).toBe("line\n");
+    await paste("/"); expect(screen.getByTestId("slash-command-menu")).toBeTruthy();
+    await act(async () => { ref.current?.clear(); });
+    await paste("line");
+    await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"), {key:"Enter", shiftKey:true}); });
+    await paste("@app"); expect(onOpen).toHaveBeenCalled();
+    expect(screen.getByTestId("context-search-dropdown")).toBeTruthy();
+  });
+});
 
 beforeAll(() => {
   const emptyRect = () => ({

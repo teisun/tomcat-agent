@@ -2,13 +2,20 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-09-25 10:04 +0800 |
+| Updated | 2026-10-01 16:49 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | MCP concurrent-call lifecycle, recovery and project trust; connector Settings management and acceptance; tolerant MCP configuration migration; composer layout documentation; CLI/extension release metadata |
+| Scope | Session Skill/plugin inventory reload and shared slash commands; plugin retirement and single-flight initialization; Serve background jobs and terminal restore; MCP lifecycle/project trust and connector Settings; CLI/extension release metadata |
 | Cov% | - |
 
 ### DONE
+
+- Added explicit session resource synchronization through `/reload`, shared with `/install` and `/uninstall` in terminal and VS Code; external changes require reload rather than a disk scan before every prompt.
+- Matched effective plugin IDs by source/content fingerprint, skipped staging directories, preserved the last good inventory after read failures, and retired revoked capabilities without aborting other sessions' current calls.
+- Kept VM birth manifests for permission checks, rejected stale registry writes, and made session/plugin initialization single-flight with readiness/error receipts and retry after failed initialization.
+- Moved slow Serve maintenance commands into session jobs so another session can continue; rehydrated terminal memory after `/restore` and resumed restored pending questions.
+- Added shared-table composer suggestions and pending-command controls, real external-uninstall/request-boundary regressions, multi-session checks, and responsive browser capture coverage.
+- Repaired the existing planner-wording assertion, default-provider credential isolation, and serial-group/nextest contract; kept request-source tickets and in-flight counters out of the trimmed implementation.
 
 - Preserved independent unsent drafts, references, and attachments for every chat session across switching and webview reload.
 - Prevented late storage/state results and send acknowledgements from deleting newer edits.
@@ -37,6 +44,11 @@
 
 ### INTERFACE
 
+- Serve initialization advertises `slashCommands` and `run_slash_command`; `run_slash_command` accepts a session ID plus raw text and returns shared `SlashReply { ok, text }` without interactive prompts or model requests.
+- `/uninstall` takes a package-ledger name, not a tool name; manually copied resources must be deleted from their layer's `plugins/` or `skills/` directory before `/reload`.
+- Resource reload updates the current session and shared inventory; other sessions finish the current round and synchronize at their next epoch boundary. MCP, builtin tools, and model configuration are outside this reload contract.
+- Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
+
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
 - Release metadata declares VS Code extension `0.1.74` with bundled CLI `0.1.60`; changing these values is not evidence of publishing or installing the artifact, while the separately built pure VSIX intentionally contains no bundled CLI.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
@@ -52,14 +64,21 @@
 
 ### BLOCKED
 
-- The earlier Rust full integration run was not fully green: `completion_flow_test` expects Chinese acceptance wording, and `missing_live_credentials_is_not_a_successful_skip` has an exit-code mismatch. These previously recorded failures are not repaired by this commit.
+- The resource-inventory acceptance's initial `gate-fast` command exited 1. Its affected failures were resolved or passed focused reruns while unchanged successful results were reused; the whole command was not rerun and is not claimed as a single all-green run.
 - A pure extension VSIX was built during implementation acceptance, but this commit does not verify installation in the user's daily profile or the artifact loaded by its current window.
 - Large fonts, very short windows, or long questions may still require scrolling within the current question; preserving the height cap does not guarantee every possible question fits fully above the fold.
-- Full Rust gate evidence retains two pre-existing failures: the stale planner acceptance-wording assertion and the missing-live-credentials preflight that sees the configured default provider key. Focused MCP, Clippy, schema, real-LLM, and extension batches are recorded in the architecture acceptance notes rather than treating these baselines as new regressions.
+- The unchanged Git large-output timing assertion failed under load and passed alone in 3.25s; load sensitivity remains a risk. Browser acceptance used the production App/TipTap with a simulated webview host plus separately verified real Serve/host boundaries, not an installed-profile end-to-end manual walkthrough.
+- Per-turn disk reconciliation remains disabled: the debug/test-profile no-change medians were about 13ms for 30 Skills/5 plugins and 351ms for 1000 Skills/20 plugins, above the plan's auto-sync thresholds. The isolated-HOME real-project PTY observed project MCP 401 warnings; these are retained as environment evidence, not claimed as MCP reload acceptance.
 - Settings connection state is snapshot/poll based rather than pushed live from Serve; a newly opened connector route may briefly display its previous/default state until `list_connectors` and the subsequent tool-catalog request settle.
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- The resource-inventory implementation acceptance recorded the real process regression red to green: external CLI uninstall, same live session `/reload`, then actual model system/tools without the removed resources. Task `1790819140533-2osppy` also recorded the initial full gate failures, 2962 passing lib tests, 359 passing parallel integration tests, and 32 passing serial integration tests; its failure result is preserved.
+- Focused closure passed all-targets Clippy, shared/session-job tests, the four-scenario timing matrix (`1790821426978-em3rel`), the unchanged Git timeout test (`1790823581755-itk8fd`), and 5 reminder plus 5 integration-gate configuration tests with lib/tests Clippy (`1790823725702-ambbw9`).
+- Extension acceptance passed 530 host tests, 644 GUI tests, lint and 2 real Serve integration tests (`1790817201495-ap1ww5`); the final UI production edits passed GUI lint and 50 Composer tests (`1790818326722-e0koku`). Eight latest PNG/ARIA/console captures passed with zero console errors (`1790824012649-2hpbio`).
+- Real PTY acceptance passed all three resource commands and verified that the actual post-restore request excluded later conversation rounds (`1790823725739-ywndxz`). Ten reloads of the real project directory with isolated HOME had median 2.9ms, maximum 5.1ms, and zero model requests (`1790823867158-e32zqm`).
+- Wire/version and final diff/console checks passed before this commit request (`1790824127537-ych0ml`, `1790829374515-25c8sr`). Detailed local evidence and timing data remain in `.agents/shots/resource-slash/PR-description.md`; generated captures, request logs, temporary profiles and backups stay ignored. CLI/extension versions were not changed by resource reload.
 
 - The 2026-09-20 implementation acceptance for `plan_add_model_id_edit_id_aee801f9` recorded a passing extension `npm run gate:full`, focused Rust/GUI/extension checks, schema/wire checks, and desktop/mobile browser checks with zero console errors. These are earlier results, not new runs for this commit.
 - The 2026-09-21 acceptance for `plan_verify_4885bbfb` recorded five passing focused Rust contract tests (tasks `1789964332987-e8fgyh` and `1789964544981-u8z0jk`) and prompt-source alignment checks. Those runs preceded the later Markdown formatting and paragraph relocation; they are not new test runs for this commit.

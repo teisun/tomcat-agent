@@ -46,6 +46,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "retry",
                             "get_state",
                             "compact",
+                            "run_slash_command",
                             "set_plan_mode",
                             "set_model",
                             "set_thinking_level",
@@ -82,6 +83,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "ask_question",
                             "confirmation"
                         ],
+                        "slashCommands": crate::api::chat::commands::SHARED_SLASH_COMMANDS,
                         "sessionId": state.registry.active_session_id(),
                         // 见 `serve::attachment_root`：宿主必须在渲染 webview 之前拿到它。
                         "attachmentRoot": super::attachment_root(&state)

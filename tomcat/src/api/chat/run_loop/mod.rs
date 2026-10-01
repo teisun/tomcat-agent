@@ -43,6 +43,7 @@ use self::cleanup::ensure_session;
 pub(crate) use self::persist::drain_checkpoint_record_tasks;
 use self::persist::push_turn_message;
 pub(crate) use self::rehydrate::has_resumable_tail_ask_question;
+pub(crate) use self::rehydrate::reload_context_state;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
 pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
@@ -57,6 +58,10 @@ const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// continuing the model request.
 pub(crate) fn should_auto_drain_resume(resume_requested: bool, has_pending_question: bool) -> bool {
     resume_requested && has_pending_question
+}
+
+pub(crate) fn should_resume_after_command(outcome: &ChatCommandOutcome) -> bool {
+    matches!(outcome, ChatCommandOutcome::ResumePendingQuestion)
 }
 
 #[cfg(test)]
@@ -549,7 +554,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                         }
                         (line, history_line)
                     }
-                    ChatCommandOutcome::Handled => continue,
+                    command_outcome @ (ChatCommandOutcome::Handled
+                    | ChatCommandOutcome::ResumePendingQuestion) => {
+                        resume_without_input = should_resume_after_command(&command_outcome);
+                        continue;
+                    }
                 };
                 let history_line = history_line.unwrap_or_else(|| parsed.clone());
                 let _ = rl.add_history_entry(&history_line);
@@ -684,7 +693,7 @@ pub(crate) async fn run_chat_turn_with_message_and_snapshot(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
-    ctx.refresh_resource_inventory_before_turn().await?;
+    ctx.sync_resource_inventory_before_turn().await?;
     let previous_system_len = prompt_snapshot.system_text().len();
     if refresh_prompt_snapshot(ctx, context_state.context_budget_chars, prompt_snapshot).await {
         context_state
@@ -709,7 +718,7 @@ pub async fn run_chat_turn_with_message(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
-    ctx.refresh_resource_inventory_before_turn().await?;
+    ctx.sync_resource_inventory_before_turn().await?;
     let tool_definitions = build_tool_definitions(ctx).await;
     run_chat_turn_with_message_and_tool_definitions(
         ctx,

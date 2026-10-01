@@ -107,6 +107,18 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`
 
+### 输入框资源命令
+
+```text
+输入 / → 选择命令（只插入文字）→ 发送执行 → 提示/错误气泡
+```
+
+- `/reload` 同时重扫 Skill 和插件工具，不必重启会话。外部 CLI 或手工改资源后主动执行；不是配置热加载，也不是 MCP 重连。
+- `/install './带空格路径' agent` 与 `/uninstall 包名 agent` 自动同步资源。必须指定 `current-project`（`scope`）、`agent` 或 `global`；缺参数返回用法。
+- 卸载用 `tomcat packages` 列出的包名，不是工具名。手工放入、不在账本的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
+- 菜单在开头、空格后或换行后触发，路径/URL 内不触发；句中条目标注“仅在开头生效”。只有开头命令且纯文字才执行；附件、引用和未知命令仍发普通提示词。
+- 等回包时禁用发送、压缩和 Build，不追加虚假用户消息。旧 Serve 没有命令表时保持原输入行为。
+
 ## 故障排查
 
 如果 Tomcat Agent Box 没有出现：

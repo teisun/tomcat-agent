@@ -26,6 +26,190 @@ use crate::{
     RestoreOptions,
 };
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_shared_slash_handshake_reload_and_rejected_inputs_do_not_write_transcript() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", home.path().as_os_str());
+    let _api_key = install_test_api_key();
+    let (state, buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlRequest {
+            request_id: "slash-init".into(),
+            subtype: "initialize".into(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::Value::Null,
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |frame| frame["requestId"] == "slash-init").await;
+    let handshake = lines
+        .iter()
+        .find(|frame| frame["requestId"] == "slash-init")
+        .unwrap();
+    assert_eq!(
+        handshake["payload"]["slashCommands"],
+        serde_json::to_value(crate::api::chat::commands::SHARED_SLASH_COMMANDS).unwrap()
+    );
+    assert!(handshake["payload"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("run_slash_command")));
+    let before = slot
+        .ctx
+        .session_runtime
+        .session
+        .get_entries(256)
+        .unwrap()
+        .len();
+    for (index, text) in [
+        "/reload",
+        "/foo",
+        "/model list",
+        "reload",
+        "/reload now",
+        "/install x",
+        "/install 'unterminated",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("slash-{index}");
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::RunSlashCommand {
+                id: Some(id.clone()),
+                session_id: Some(slot.session_id.clone()),
+                text: text.into(),
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |frame| frame["id"] == id).await;
+        let reply = lines.iter().find(|frame| frame["id"] == id).unwrap();
+        assert_eq!(reply["success"], true, "{reply:?}");
+        assert_eq!(reply["payload"]["ok"], index == 0);
+        let message = reply["payload"]["text"].as_str().unwrap();
+        if index == 0 {
+            assert!(message.contains("没有变化"));
+        } else if index <= 3 {
+            assert!(message.contains("未知命令") && message.contains("/uninstall"));
+        } else {
+            assert!(message.contains("用法"));
+        }
+        assert!(!slot.is_busy() && !slot.is_command_job_running());
+        assert!(slot.run_task.lock().is_none());
+    }
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .get_entries(256)
+            .unwrap()
+            .len(),
+        before
+    );
+    cleanup_session_slot(&state, &slot, true, "test_finished")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_shared_slash_busy_rejects_without_executing() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    assert!(slot.mark_busy());
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RunSlashCommand {
+            id: Some("slash-busy".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "/reload".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |frame| frame["id"] == "slash-busy").await;
+    assert_eq!(
+        lines
+            .iter()
+            .find(|frame| frame["id"] == "slash-busy")
+            .unwrap()["error"],
+        "busy"
+    );
+    assert!(!slot.is_command_job_running());
+    assert!(slot.run_task.lock().is_none());
+    slot.mark_idle();
+    cleanup_session_slot(&state, &slot, true, "test_finished")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_shared_slash_install_and_uninstall_agent_with_quoted_source() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", home.path().as_os_str());
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.skills.enabled = true;
+    let source = temp.path().join("source with spaces");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: remote-hello\ndescription: greeting\n---\nhello",
+    )
+    .unwrap();
+    let (state, buffer, _work, slot) = build_initialized_state_with_config(temp, cfg).await;
+    for (id, text, installed) in [
+        (
+            "remote-install",
+            format!("/install '{}' agent", source.display()),
+            true,
+        ),
+        (
+            "remote-uninstall",
+            "/uninstall remote-hello agent".into(),
+            false,
+        ),
+    ] {
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::RunSlashCommand {
+                id: Some(id.into()),
+                session_id: Some(slot.session_id.clone()),
+                text,
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |frame| frame["id"] == id).await;
+        let response = lines.iter().find(|frame| frame["id"] == id).unwrap();
+        assert_eq!(response["payload"]["ok"], true, "{response:?}");
+        assert!(response["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("当前会话已同步"));
+        assert_eq!(
+            slot.ctx
+                .skill_set_snapshot()
+                .by_name
+                .contains_key("remote-hello"),
+            installed
+        );
+        assert!(!slot.is_busy());
+    }
+    cleanup_session_slot(&state, &slot, true, "test_finished")
+        .await
+        .unwrap();
+}
+
 // ── 附件测试脚手架 ────────────────────────────────────────────────────
 //
 // 协议上只有 ingest_attachment 携带字节，因此测试也必须先把字节交给后端换回哈希，

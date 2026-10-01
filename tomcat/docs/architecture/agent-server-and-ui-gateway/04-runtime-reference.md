@@ -20,24 +20,32 @@
 
 ---
 
-## 6.1 stdin 调度：FIFO 工作线与急停控制线
+## 6.1 stdin 调度：队列只做快事
 
 ```text
 stdin 一行命令
-   │
-   ├─ interrupt ─────────────► 立即调用 control handler ─► cancel token
-   │
-   └─ 其它命令 ──────────────► FIFO worker ─► commands.rs
-                                （保持原有顺序）
+   ├─ interrupt → 立即处理（绕过 FIFO）
+   └─ 普通命令 → FIFO 验证/路由
+                  ├─ 快查询/状态修改 → 直接回包
+                  ├─ compact / run_slash_command → 占本会话忙门 → 后台 job
+                  │                                  ↓ 完成/错误/panic
+                  │                            清句柄、先置闲 → 回包
+                  └─ test_connector / login_connector → 后台任务 → 回包
+
+                         等待时 FIFO 可继续处理其它会话
 ```
 
-`src/api/serve/stdin.rs::run_stdio_loop` 只将需要保持状态顺序的普通命令送入 FIFO。
-`interrupt` 是控制信号，不能排在 `get_messages`、磁盘分页或模型初始化后面；它被读到后立即
-处理。取消 handler 本身不得做整份 transcript 的同步读取。
+`src/api/serve/stdin.rs::run_stdio_loop` 保持普通命令的接纳顺序，`interrupt` 仍绕过队列。耗时的模型压缩、包文件事务和连接测试不在全局 worker 里等待。
 
-对照 `codex/codex-rs/core/src/session/handlers.rs::submission_loop`（约 530 行）：Codex 也用
-单个 submission 队列串行分派，但 `Op::Interrupt` 分支只执行轻量 `interrupt(&sess)`。Tomcat
-保留普通命令的同一语义，同时在 stdio 读入层将急停提前，避免重命令已经在执行时控制帧根本读不到。
+`session_job.rs::spawn_session_job` 用现有忙标记和 `run_task` 管理 compact/共享命令，不新增平行生命周期。启动与完成共用句柄锁，避免立即完成留下旧句柄，或旧任务清除新任务。完成先清句柄、置闲再发响应；panic 也复位并回错误；关闭/EOF 按现有关闭预算回收。忙时 prompt/steer/follow_up 拒绝，不能往正在压缩的历史中追加。
+
+这些是维护命令，不制造 `agent_start/end/idle` 假事件；`get_state.busy` 仍表示 agent turn。VS Code 以自己的 `commandPending` 等待回包，禁用发送/压缩/Build，不能用普通 `agent_idle` 提前解除等待。`test_connector` 是连接级命令，不带 sessionId，也不占 session 忙门。
+
+## 6.2 会话内共享资源命令
+
+握手增加 `run_slash_command` capability 与 `slashCommands: [{name, usage, summary}]`；内容来自 Rust `SHARED_SLASH_COMMANDS`，不是 UI 硬编码。调用帧是 `{type:"run_slash_command", id, sessionId, text}`，原始 text 经共享解析器处理。外层响应成功时 payload 为 `SlashReply {ok, text}`：业务失败显示错误气泡，传输/忙失败仍是外层错误。未知命令、缺参数返回文本，不写用户 transcript、不调用模型。
+
+`/reload` 重扫 Skill + 插件；`/install`、`/uninstall` 静态事务后调用同一核对引擎。旧 Serve 没有表时客户端使用空表，不展示资源菜单。外部 CLI/手工改动请主动 `/reload`；它不重载任意配置或 MCP。参见 [package-manager](../package-manager.md#当前会话内前门与清单同步)。
 
 ---
 

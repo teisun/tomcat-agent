@@ -8,6 +8,15 @@ import {
   THINKING_LEVELS,
 } from "../protocol";
 
+describe("shared slash intents", () => {
+  it.each([{text:"/reload",sessionId:"s1"},{text:"/install './p' agent",sessionId:null},{text:"/reload"}])("accepts a text-only command shape: %j", (data) => {
+    expect(isWebviewIntent({type:"runSlashCommand",messageId:"slash-1",data})).toBe(true);
+  });
+  it.each([{}, {text:42}, {text:"/reload",sessionId:42}, null])("rejects malformed data: %j", (data) => {
+    expect(isWebviewIntent({type:"runSlashCommand",messageId:"slash-1",data})).toBe(false);
+  });
+});
+
 describe("webview protocol helpers", () => {
   it("accepts a bounded webview crash report", () => {
     expect(

@@ -333,6 +333,87 @@ async fn exercise(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
+async fn test_connector_catalog_gate_does_not_block_other_session_commands() {
+    let mcp = McpFixture::start().await;
+    let llm = spawn_routed_openai_stream_server(|_| {
+        response(vec![
+            sse_delta("B completed"),
+            sse_finish("stop"),
+            sse_done(),
+        ])
+    });
+    let fx = setup_serve_fixture(&llm.base_url);
+    let config = fx.home_path.join(".tomcat/tomcat.config.toml");
+    let mut cfg = tomcat::load_config_toml_file(&config).unwrap();
+    cfg.connector.enabled = true;
+    std::fs::write(&config, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    std::fs::write(
+        fx.home_path.join(".tomcat/mcp.json"),
+        json!({"mcpServers":{"fixture":{"url":format!("{}/mcp",mcp.url),"auth":"none"}}})
+            .to_string(),
+    )
+    .unwrap();
+    let mut child = spawn_serve_child(&fx);
+    let a = initialize(&mut child);
+    let b = super::new_session(&mut child, "connector-b");
+    let deadline = std::time::Instant::now() + SERVE_TIMEOUT;
+    let key = loop {
+        child.send_value(&json!({"type":"list_connectors","id":"connector-ready","context":{}}));
+        let frames = child.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "connector-ready");
+        if let Some(row) = frames.last().unwrap()["payload"]["connectors"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["name"] == "fixture" && row["state"] == "connected")
+            })
+        {
+            break row["configKey"].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "connector startup: {frames:?}"
+        );
+        sleep(Duration::from_millis(10)).await;
+    };
+    let baseline = mcp.state().await["requests"].as_array().unwrap().len();
+    mcp.control(json!({"listGate":"connector-test"})).await;
+    child.send_value(
+        &json!({"type":"test_connector","id":"test-held","configKey":key,"context":{}}),
+    );
+    mcp.until(|state| {
+        state["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(baseline)
+            .any(|request| request["method"] == "tools/list")
+    })
+    .await;
+    child.send_value(&json!({"type":"get_state","id":"connector-b-state","sessionId":b}));
+    let mut frames = child.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "connector-b-state");
+    assert_eq!(frames.last().unwrap()["success"], true);
+    child.send_value(&json!({"type":"prompt","id":"connector-b-prompt","sessionId":b,"text":"B independent","params":{}}));
+    frames.extend(child.recv_until(SERVE_TIMEOUT, |frame| is_event(frame, "agent_idle", &b)));
+    assert!(
+        !frames.iter().any(|frame| frame["id"] == "test-held"),
+        "catalog gate must remain closed while B finishes"
+    );
+    mcp.control(json!({"release":"connector-test"})).await;
+    frames.extend(child.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "test-held"));
+    assert_eq!(frames.last().unwrap()["success"], true);
+    assert_eq!(frames.last().unwrap()["payload"]["connected"], true);
+    assert!(!frames.iter().any(|frame| frame["sessionId"] == a
+        && matches!(
+            frame["type"].as_str(),
+            Some("agent_start" | "agent_end" | "agent_idle")
+        )));
+    drop(child);
+    mcp.stop().await;
+    drop(llm);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
 async fn serve_mcp_same_tool_headers_overlap_and_interrupt_isolated() {
     exercise("headers", false, false, false).await;
 }

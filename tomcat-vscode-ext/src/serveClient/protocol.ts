@@ -4,6 +4,7 @@ import type {
   ResponseFrame,
   ServeCommand,
   ServeEvent,
+  SharedSlashCommand,
 } from "./wire";
 
 export type ControlRequestFrame = Extract<ControlFrame, { type: "control_request" }>;
@@ -20,6 +21,7 @@ export interface InitializePayload {
   /** Absolute path of the attachment directory, absent on older servers. */
   attachmentRoot?: string | null;
   capabilities: string[];
+  slashCommands?: SharedSlashCommand[];
   sessionId?: string | null;
   serverVersion?: string | null;
 }
@@ -124,6 +126,13 @@ export function parseInitializePayload(payload: unknown): InitializePayload {
     throw new Error("initialize payload is missing capabilities");
   }
 
+  const slashCommands = payload.slashCommands;
+  if (slashCommands !== undefined && (!Array.isArray(slashCommands) || !slashCommands.every((command) =>
+    isRecord(command) && typeof command.name === "string" && typeof command.usage === "string" && typeof command.summary === "string"
+  ))) {
+    throw new Error("initialize payload has invalid slashCommands");
+  }
+
   return {
     protocolVersion: payload.protocolVersion,
     attachmentRoot:
@@ -131,6 +140,7 @@ export function parseInitializePayload(payload: unknown): InitializePayload {
         ? payload.attachmentRoot
         : null,
     capabilities: payload.capabilities,
+    slashCommands: (slashCommands ?? []) as SharedSlashCommand[],
     sessionId:
       payload.sessionId === undefined || payload.sessionId === null
         ? null

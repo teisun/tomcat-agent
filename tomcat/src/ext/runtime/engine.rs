@@ -31,7 +31,6 @@ impl PluginEngine {
         super::instance::PluginVmInstance::new(self.config.clone(), plugin_id.to_string())
     }
 
-    #[cfg(test)]
     pub(crate) fn config(&self) -> &PluginEngineConfig {
         &self.config
     }

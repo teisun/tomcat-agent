@@ -35,6 +35,10 @@ import {
 } from "./ContextSearchDropdown";
 import { buildPickerModels } from "./buildPickerModels";
 import { createMentionSuggestion } from "./mentionSuggestion";
+import type { SharedSlashCommand } from "../../../src/serveClient/wire";
+import { buildSlashMenuSections } from "../slashMenu";
+import { SlashCommandMenu, type SlashCommandMenuHandle } from "./SlashCommandMenu";
+import { createSlashCommandSuggestion, type SlashSuggestionState } from "./slashCommandSuggestion";
 import { ReferenceChip } from "./ReferenceChip";
 import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
 
@@ -445,6 +449,8 @@ interface ComposerProps {
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
+  slashCommands?: readonly SharedSlashCommand[];
+  commandPending?: boolean;
   busy?: boolean;
   canInterrupt: boolean;
   canPrompt: boolean;
@@ -483,6 +489,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   availableModelReasoningLevels,
   availableModels,
   busy = false,
+  slashCommands = [],
+  commandPending = false,
   canInterrupt,
   canPrompt,
   contextSearchLoading,
@@ -526,6 +534,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
+  const [slashState, setSlashState] = useState<SlashSuggestionState | null>(null);
+  const isSlashOpenRef = useRef(false);
+  const slashMenuRef = useRef<SlashCommandMenuHandle | null>(null);
+  const slashCommandsRef = useRef(slashCommands);
+  slashCommandsRef.current = slashCommands;
   const isComposingRef = useRef(false);
   const isMentionOpenRef = useRef(false);
   const contextSearchDropdownRef = useRef<ContextSearchDropdownHandle | null>(null);
@@ -599,6 +612,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }),
   []);
 
+  const slashSuggestion = useMemo(() => createSlashCommandSuggestion({
+    getCommands: () => slashCommandsRef.current,
+    getKeyHandler: () => slashMenuRef.current?.onKeyDown,
+    isComposing: () => isComposingRef.current,
+    onState: (next) => {
+      isSlashOpenRef.current = next !== null && buildSlashMenuSections(slashCommandsRef.current, next.query).length > 0;
+      setSlashState(next);
+    },
+  }), []);
+
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
@@ -645,7 +668,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             event.stopPropagation();
             return false;
           }
-          if (isMentionOpenRef.current) {
+          if (isMentionOpenRef.current || isSlashOpenRef.current) {
             return false;
           }
           if (
@@ -749,6 +772,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       updateDraft(serializeComposerDocument(nextEditor.getJSON()));
     },
   });
+
+  const hasSlashCommands = slashCommands.length > 0;
+  useEffect(() => {
+    if (!editor || !hasSlashCommands) return;
+    return slashSuggestion.attach(editor);
+  }, [editor, hasSlashCommands, slashSuggestion]);
 
   useEffect(() => {
     if (!editor) {
@@ -902,6 +931,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     closeMention() {
       mentionSuggestion.close();
+      slashSuggestion.close();
     },
     getDraft() {
       return draftRef.current;
@@ -926,7 +956,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       editor.commands.focus("end");
       applyDraft(serializeComposerDocument(editor.getJSON()));
     },
-  }), [editor, insertReferences, mentionSuggestion]);
+  }), [editor, insertReferences, mentionSuggestion, slashSuggestion]);
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
     if (!canPrompt) {
@@ -1005,7 +1035,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         tone: "plan",
       }
     : null;
-  const hasNotice = Boolean(warningNotice || dragNotice || planNotice);
+  const hasNotice = Boolean(warningNotice || dragNotice || planNotice || commandPending);
 
   return (
     <section className="tc-composer" aria-label="prompt" data-testid="composer">
@@ -1020,6 +1050,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       >
         {hasNotice ? (
           <div className="tc-composer__notices" role="status" aria-live="polite" data-testid="composer-notices">
+            {commandPending && <span className="tc-notice tc-notice--info" data-testid="composer-notice-command">命令处理中，请稍候…</span>}
             {warningNotice ? (
               <span className="tc-notice tc-notice--warning" data-testid="composer-notice-capability">
                 {warningNotice.text}
@@ -1061,6 +1092,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           query={contextSearchQuery}
           truncated={contextSearchTruncated}
         />
+        <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "")} query={slashState?.query ?? ""} leading={slashState?.leading ?? true} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
         <EditorContent editor={editor} />
         <div className="tc-composer__bar" data-testid="composer-bar">
           <button

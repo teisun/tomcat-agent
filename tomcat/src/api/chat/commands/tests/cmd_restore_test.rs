@@ -16,6 +16,152 @@ use crate::{
     RetentionPolicy,
 };
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn cmd_restore_rehydrates_three_rounds_and_preserves_memory_on_dry_run_or_failure() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = super::test_support::Fixture::new();
+    let ctx = fixture.ctx();
+    std::fs::write(fixture.workspace.path().join("a.txt"), "stable").unwrap();
+    let sid = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .unwrap();
+    let mut anchor = String::new();
+    let mut checkpoint = None;
+    for round in 0..3 {
+        ctx.session_runtime
+            .session
+            .try_append_message_to_session(
+                &sid,
+                json!({"role":"user","content":format!("question {round}")}),
+            )
+            .unwrap();
+        let id = ctx
+            .session_runtime
+            .session
+            .try_append_message_to_session(
+                &sid,
+                json!({"role":"assistant","content":format!("answer {round}")}),
+            )
+            .unwrap();
+        if round == 0 {
+            anchor = id.clone();
+            checkpoint = Some(
+                ctx.scope_services
+                    .checkpoint_store
+                    .record(CheckpointRecordRequest {
+                        session_id: sid.clone(),
+                        turn_id: "first-round".into(),
+                        kind: CheckpointKind::TurnEnd,
+                        message_anchor: Some(id),
+                        notes: Some(json!({"changedPaths":["a.txt"]})),
+                    })
+                    .unwrap(),
+            );
+        }
+    }
+    let checkpoint = checkpoint.unwrap();
+    let mut state = crate::api::chat::reload_context_state(&ctx, "sys").unwrap();
+    assert_eq!(state.messages.len(), 6);
+    let before = state
+        .messages
+        .iter()
+        .map(|message| message.msg_id.clone())
+        .collect::<Vec<_>>();
+    let estimate = state.estimate_context_chars;
+    for (id, dry_run) in [
+        (checkpoint.to_string(), true),
+        ("missing-checkpoint".into(), false),
+    ] {
+        let outcome = run_restore(&ctx, id, vec![], dry_run, &mut state, "sys");
+        assert!(matches!(
+            outcome,
+            crate::api::chat::commands::ChatCommandOutcome::Handled
+        ));
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .map(|message| message.msg_id.clone())
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(state.estimate_context_chars, estimate);
+    }
+    let outcome = run_restore(
+        &ctx,
+        checkpoint.to_string(),
+        vec![],
+        false,
+        &mut state,
+        "sys",
+    );
+    assert!(matches!(
+        outcome,
+        crate::api::chat::commands::ChatCommandOutcome::Handled
+    ));
+    assert_eq!(state.messages.len(), 2);
+    assert_eq!(
+        state.messages.last().unwrap().msg_id.as_deref(),
+        Some(anchor.as_str())
+    );
+    assert!(state
+        .messages
+        .last()
+        .unwrap()
+        .text_content()
+        .expect("restored assistant text")
+        .contains("answer 0"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn cmd_restore_revived_pending_question_requests_zero_input_resume() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = super::test_support::Fixture::new();
+    let ctx = fixture.ctx();
+    std::fs::write(fixture.workspace.path().join("a.txt"), "stable").unwrap();
+    let session = &ctx.session_runtime.session;
+    let sid = session.current_session_id().unwrap().unwrap();
+    session
+        .try_append_message_to_session(&sid, json!({"role":"user","content":"Choose environment"}))
+        .unwrap();
+    let arguments = json!({"questions":[{"id":"env","prompt":"Where?","options":[{"id":"stage","label":"staging","recommended":true},{"id":"prod","label":"production","recommended":false}]}]}).to_string();
+    let anchor = session.try_append_message_to_session(&sid, json!({"role":"assistant","content":null,"tool_calls":[{"id":"pending-call","type":"function","function":{"name":"ask_question","arguments":arguments}}]})).unwrap();
+    let checkpoint = ctx
+        .scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: sid.clone(),
+            turn_id: "pending-question".into(),
+            kind: CheckpointKind::Interrupt,
+            message_anchor: Some(anchor),
+            notes: Some(json!({"changedPaths":["a.txt"]})),
+        })
+        .unwrap();
+    session.try_append_message_to_session(&sid, json!({"role":"tool","tool_call_id":"pending-call","content":"{\"outcome\":\"answered\",\"answers\":[]}"})).unwrap();
+    session
+        .try_append_message_to_session(&sid, json!({"role":"assistant","content":"done"}))
+        .unwrap();
+    let mut state = crate::api::chat::reload_context_state(&ctx, "sys").unwrap();
+    let outcome = run_restore(
+        &ctx,
+        checkpoint.to_string(),
+        vec![],
+        false,
+        &mut state,
+        "sys",
+    );
+    assert!(matches!(
+        outcome,
+        crate::api::chat::commands::ChatCommandOutcome::ResumePendingQuestion
+    ));
+    assert!(crate::api::chat::has_resumable_tail_ask_question(session).unwrap());
+}
+
 struct EnvGuard {
     key: &'static str,
     prev: Option<OsString>,
@@ -522,7 +668,15 @@ fn restore_keeps_other_session_owned_paths_untouched() {
         .session
         .switch_current_to_session_id(&session_a)
         .expect("switch back to session a");
-    let outcome = run_restore(&ctx, checkpoint_a.to_string(), Vec::new(), false);
+    let mut context_state = crate::api::chat::reload_context_state(&ctx, "sys").unwrap();
+    let outcome = run_restore(
+        &ctx,
+        checkpoint_a.to_string(),
+        Vec::new(),
+        false,
+        &mut context_state,
+        "sys",
+    );
     assert!(matches!(
         outcome,
         crate::api::chat::commands::parse::ChatCommandOutcome::Handled

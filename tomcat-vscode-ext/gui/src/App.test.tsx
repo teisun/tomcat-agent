@@ -42,6 +42,54 @@ function mount(initialState?: unknown) {
   };
 }
 
+describe("shared slash submission and command waiting", () => {
+  const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:name}));
+  const ready = async (session:Partial<WebviewSessionSnapshot> = {}, slashCommands = commands) => {
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.sessionViews.s1.timeline = [];
+    Object.assign(snapshot.sessionViews.s1, session);
+    snapshot.slashCommands = slashCommands;
+    await emitState({channel:"state",content:snapshot,messageId:"slash-ready"});
+  };
+  const submit = async (text:string) => {
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>text}}); });
+    fireEvent.click(screen.getByTestId("send-button"));
+  };
+  it.each(["/reload", "/install './folder with space' agent"])("routes plain leading command without a transcript user message: %s", async (text) => {
+    const {postMessage} = mount(); await ready(); await submit(text);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"runSlashCommand", data:{sessionId:"s1",text}}));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+  });
+  it.each(["/foo x", "/model list", "/Users/me/a.txt", "help /reload"])("keeps ordinary messages: %s", async (text) => {
+    const {postMessage} = mount(); await ready(); await submit(text);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"prompt",data:expect.objectContaining({text})}));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "runSlashCommand")).toBe(false);
+  });
+  it("does not steal a legacy-server prompt or a command carrying a reference", async () => {
+    const first = mount(); await ready({}, []); await submit("/reload");
+    expect(first.postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
+    first.unmount();
+    const second = mount(); await ready({composerDraft:{segments:[{type:"text",text:"/reload "},{type:"reference",kind:"file",label:"app.ts",path:"app.ts"}], text:"/reload app.ts"}});
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(second.postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
+    expect(second.postMessage.mock.calls.some(([message]) => message.type === "runSlashCommand")).toBe(false);
+  });
+  it("preserves attachment prompts and disables send, compact and Build for metadata-only pending", async () => {
+    const {postMessage} = mount();
+    await ready({pendingAttachments:[{id:"attachment-1",label:"a.png",blobSha:"a".repeat(64),filename:"a.png",kind:"image",mimeType:"image/png",bytes:42}]});
+    await submit("/reload");
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
+    await ready({commandPending:true, activePlan:{path:"/tmp/example.plan.md",planId:"plan-1",state:"pending"}, timeline:[{type:"tool", id:"plan-create",toolCallId:"call-plan",toolName:"create_plan",isError:false,status:"complete",summary:"created",planId:"plan-1",planPath:"/tmp/example.plan.md",planActivity:{kind:"create",stateAfter:"pending",title:"Plan"}}]});
+    expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("compact-context-button") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("composer-notice-command").textContent).toContain("处理中");
+    await ready({commandPending:false});
+    expect((screen.getByTestId("compact-context-button") as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
 type StateTestSession = Partial<WebviewSessionSnapshot> &
   Pick<WebviewSessionSnapshot, "sessionId" | "timeline">;
 
@@ -50,6 +98,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     activePlan: fixture.activePlan ?? null,
     agentMode: fixture.agentMode ?? "chat",
     busy: fixture.busy ?? false,
+    commandPending: fixture.commandPending,
     checkpoints: fixture.checkpoints,
     composerDraft: fixture.composerDraft,
     contextRatio: fixture.contextRatio,

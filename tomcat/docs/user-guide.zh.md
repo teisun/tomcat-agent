@@ -603,7 +603,7 @@ tomcat workspace remove /path/to/project
 
 三层可见范围：
 
-- `scope`：当前项目，落到 `<scope_root>/.tomcat/{plugins,skills,packages}`。
+- `scope`：当前项目，落到 `<scope_root>/<workspace.project_resource_dir>/{plugins,skills,packages}`（默认 `.agents`）。
 - `agent`：当前 agent，落到 `~/.tomcat/agents/<id>/{plugins,skills,packages}`。
 - `global`：全局共享层，落到 `~/.tomcat/{plugins,skills,packages}`。
 
@@ -631,19 +631,25 @@ tomcat packages --visibility agent
 tomcat uninstall my-package --visibility scope
 ```
 
-对话内安装：
+终端对话和 VS Code 输入框都能管理资源：
 
 ```text
-/install ./my-package
-/install ./my-plugin agent
+/reload
+/install './source with space/my-plugin' agent
 /install ./my-skill current-project
+/uninstall my-package agent
 ```
 
-说明：
+```text
+外部 CLI / 手工改文件 → /reload → 本会话 Skill、工具和插件实例更新
+对话内安装 / 卸载     → 自动执行同一套核对，不必再 /reload
+```
 
-- `/install` 里的 `current-project` 只是用户标签，内部映射到 `scope`。
-- code/claw 会话里 `/install` 成功后，当前会话会立即刷新 `SkillSet` 与 plugin catalog/static tool 清单，因此新装的 skill / 静态 plugin 能力无需重进会话即可可见。
-- 这个 live refresh **不会**在安装路径执行插件代码，也**不会**热替换已经加载的 plugin 实例；若当前会话里某个 plugin 已在跑，它会继续沿用旧实例，直到后续正常 runtime 路径重新激活。
+- `/reload` 重扫有效 Skill 和插件资源，汇报增、删、改并更新下一轮模型请求；不重读任意配置，也不重连 MCP。当前**没有每次发送提示词都扫盘**，外部改动后请主动 `/reload`。
+- `current-project` 是 `scope` 的用户标签，也可选 `agent` / `global`。终端 `/install`、`/uninstall` 缺层时弹选择面板；VS Code 不弹交互面板，缺参数返回用法。带空格的路径用引号；同层覆盖用 `/install SOURCE LAYER --force`。
+- `/uninstall` 参数是 `tomcat packages` 列出的**包名**，不是工具名；只卸载指定层包账本管理的资源。手工放入的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
+- 包安装本身仍只做静态操作；安装后的会话核对会撤销已删除/更新插件的新调用资格、收尾已获准调用、回收过期 VM 并复用正常激活逻辑。静态 Lazy 插件保持懒加载；Session 插件初始化可能在核对期间执行。无关插件保持不变。
+- VS Code 在输入开头、空格后或换行后输入 `/` 弹菜单；路径和 URL 内不弹。选择只是插入文字，发送才执行；只有开头的共享命令且**纯文字**才被拦截，句中命令、含引用/附件的草稿仍当普通消息。等待回包期间禁用发送、压缩和 Build，结果显示为提示/错误气泡。旧 Serve 未下发命令表时不显示该菜单。
 
 ---
 
@@ -720,6 +726,9 @@ agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中�
 
 | 命令 | 说明 |
 |------|------|
+| `/reload` | 重扫本会话 Skill 与插件工具 |
+| `/install <source> <current-project\|agent\|global> [--force]` | 安装并同步资源 |
+| `/uninstall <package-name> <current-project\|agent\|global>` | 卸载账本管理的包并同步 |
 | `/help` | 显示当前支持的本地命令 |
 | `/path <绝对路径>` | 为单个路径打开授权菜单（本次会话 / 写入工作区 / 只读 / 禁止 / 取消） |
 | `/model`（`current` / `list` / `use <id>`） | 查看或切换当前会话模型（catalog 来自内置表 + `models.toml`） |
@@ -733,6 +742,8 @@ agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中�
 | `/plan list` | 列出 `~/.tomcat/plans/` 下计划文件 |
 
 直接拖拽或粘贴路径后回车不会触发授权菜单，会按普通聊天消息发送给 LLM。需要显式授权路径时，请输入 `/path <绝对路径>`。
+
+终端 `/restore` 成功后会把磁盘历史重新装入内存，和 VS Code checkpoint 恢复保持一致；恢复后尾部若是未回答的问题，会自动续问。dry-run 或失败不改变内存上下文。
 
 #### Checkpoint 启动目录建议
 
@@ -1080,6 +1091,6 @@ tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
 
-`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。真正的长生命周期 session VM 仍只会在会话里首次用到该插件时按需创建。
+`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。后续会话激活会立即创建 Session 插件 VM，静态 Lazy 插件则等首次调用；`/install` 与 `/reload` 同步清单后复用这套激活策略。
 
 实现细节见 [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) 与 [src/ext/README.md](../src/ext/README.md)。

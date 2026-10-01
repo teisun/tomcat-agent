@@ -360,8 +360,9 @@
 
 - [ ] **[P0] `[UX]`** `#T-149` chat `/reload` 配置热加载
   - 档位：T2-P0-004 follow-up（原 PR-11 暂不实施）
-  - 用户在另一终端 `tomcat config edit` / `tomcat pathrules add` 改了配置 → 当前 chat 进程用 `/reload` 即时生效，无需重启
-  - 改动点：`src/api/chat/mod.rs` chat_loop 增 slash command 解析；`DefaultPermissionGate::reload(new_cfg)` 原子替换 user_config + 重编译 path_rules glob / bash_* regex
+  - 本期 `/reload` 已专用于 Skill + 插件资源清单同步（见 [用户指南](user-guide.zh.md#packagemanager-安装)）；T-149 的配置/权限热加载仍未实现，不要与现有资源命令混同。未来若实现，需独立命令或显式子入口，不能改变 `/reload` 的当前契约。
+  - 用户在另一终端 `tomcat config edit` / `tomcat pathrules add` 改了配置 → 未来配置热加载入口即时生效；本期仍需重启进程
+  - 改动点（未来）：`DefaultPermissionGate::reload(new_cfg)` 原子替换 user_config + 重编译 path_rules glob / bash_* regex
   - reload 失败 → 保留旧配置 + 渲染错误提示
   - system prompt **不**重新拼接（避免 LLM context 漂移）；如需 Agent 看新配置应让它调 `config_get`
 

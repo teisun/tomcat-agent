@@ -66,6 +66,176 @@ fn ingest(
         .to_string()
 }
 
+/// Protect the actual consumer, not just the uninstalling process. On the old
+/// binary `/reload` is unknown; inspect inventory BEFORE checking that reply so
+/// the red assertion proves stale system/tools, not a missing protocol endpoint.
+#[test]
+#[serial]
+fn slash_reload_after_external_uninstall() {
+    use common::serve::{isolated_serve_command, sse_tool_call};
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
+        response(vec![
+            sse_tool_call("echo-1", "qa_echo", "{}"),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![sse_delta("activated"), sse_finish("stop"), sse_done()]),
+        response(vec![
+            sse_delta("after reload"),
+            sse_finish("stop"),
+            sse_done(),
+        ]),
+    ]);
+    let fx = setup_serve_fixture(&server.base_url);
+    let config_path = fx.home_path.join(".tomcat/tomcat.config.toml");
+    let mut cfg = tomcat::load_config_toml_file(&config_path).unwrap();
+    cfg.skills.enabled = true;
+    fs::write(&config_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    let source = fx.home_path.join("qa-pack-source");
+    fs::create_dir_all(source.join("skills/qa-hello")).unwrap();
+    fs::create_dir_all(source.join("plugins/qa-echo")).unwrap();
+    fs::write(
+        source.join("package.json"),
+        json!({
+            "name": "qa-pack", "version": "1.0.0",
+            "tomcat": {"skills": ["skills/qa-hello"], "plugins": ["plugins/qa-echo"]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        source.join("skills/qa-hello/SKILL.md"),
+        "---\nname: qa-hello\ndescription: unique-removed-skill-marker\n---\nHello\n",
+    )
+    .unwrap();
+    fs::write(
+        source.join("plugins/qa-echo/plugin.json"),
+        json!({
+            "id": "qa-echo", "name": "qa-echo", "version": "1.0.0", "author": "tests",
+            "description": "unique-removed-plugin-marker", "main": "main.js",
+            "requiredPermissions": [], "requiredApiVersion": "1.0", "tags": [],
+            "tools": [{"name": "qa_echo", "description": "unique-removed-tool-marker",
+                       "parameters": {"type": "object", "properties": {}}}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(source.join("plugins/qa-echo/main.js"),
+        "pi.registerTool({name:'qa_echo', description:'unique-removed-tool-marker', parameters:{type:'object',properties:{}}, execute:function(){return {marker:'executed-in-quickjs'};}});").unwrap();
+    let output = isolated_serve_command(&fx.home_path)
+        .current_dir(&fx.workspace)
+        .args(["install", source.to_str().unwrap(), "--visibility", "scope"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "install: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let control = fx.workspace.join(".agents/skills/unrelated-control");
+    fs::create_dir_all(&control).unwrap();
+    fs::write(
+        control.join("SKILL.md"),
+        "---\nname: unrelated-control\ndescription: unique-retained-skill-marker\n---\nControl\n",
+    )
+    .unwrap();
+    let mut child = spawn_serve_child(&fx);
+    let pid = child.pid();
+    let session_id = initialize(&mut child);
+    child.send_value(&json!({"type":"prompt", "id":"before", "sessionId":session_id, "text":"activate echo", "params":{}}));
+    let before_frames = child.recv_until(WAIT_TIMEOUT, |v| v["type"] == "agent_idle");
+    assert_eq!(
+        count_event(&before_frames, "agent_end"),
+        1,
+        "{before_frames:?}"
+    );
+    let before = non_title_requests(&server);
+    assert_eq!(
+        before.len(),
+        2,
+        "plugin call must produce a tool continuation"
+    );
+    let first = extract_json_body(&before[0]);
+    assert!(first["messages"][0]["content"]
+        .to_string()
+        .contains("unique-removed-skill-marker"));
+    assert!(first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["function"]["name"] == "qa_echo"));
+    assert!(
+        extract_json_body(&before[1])["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |m| m["role"] == "tool" && m["content"].to_string().contains("executed-in-quickjs")
+            ),
+        "fixture must actually execute the plugin VM"
+    );
+    let output = isolated_serve_command(&fx.home_path)
+        .current_dir(&fx.workspace)
+        .args(["uninstall", "qa-pack", "--visibility", "scope"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "uninstall: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fx.workspace.join(".agents/skills/qa-hello").exists());
+    assert!(!fx.workspace.join(".agents/plugins/qa-echo").exists());
+    let requests_before_reload = server.captured_requests().len();
+    child.send_value(&json!({"type":"run_slash_command", "id":"reload", "sessionId":session_id, "text":"/reload"}));
+    let reload = child.recv_until(WAIT_TIMEOUT, |v| v["id"] == "reload");
+    assert_eq!(
+        server.captured_requests().len(),
+        requests_before_reload,
+        "reload must not call any LLM"
+    );
+    child.send_value(&json!({"type":"prompt", "id":"after", "sessionId":session_id, "text":"after uninstall", "params":{}}));
+    let after_frames = child.recv_until(WAIT_TIMEOUT, |v| v["type"] == "agent_idle");
+    for v in &after_frames {
+        assert_ndjson_line(v);
+    }
+    assert_eq!(
+        count_event(&after_frames, "agent_end"),
+        1,
+        "{after_frames:?}"
+    );
+    let requests = non_title_requests(&server);
+    assert_eq!(requests.len(), 3);
+    let last = extract_json_body(&requests[2]);
+    let system = last["messages"][0]["content"].to_string();
+    assert!(
+        !system.contains("unique-removed-skill-marker"),
+        "STALE INVENTORY: removed Skill still in actual system prompt"
+    );
+    assert!(
+        !system.contains("unique-removed-tool-marker"),
+        "STALE INVENTORY: removed plugin still in actual system prompt"
+    );
+    assert!(
+        !last["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["function"]["name"] == "qa_echo"),
+        "STALE INVENTORY: removed plugin still in tools schema"
+    );
+    assert!(system.contains("unique-retained-skill-marker"));
+    assert_eq!(child.pid(), pid);
+    assert!(after_frames.iter().any(|v| v["sessionId"] == session_id));
+    let reply = reload.last().unwrap();
+    assert_eq!(reply["payload"]["ok"], true, "{reply:?}");
+    assert!(reply["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Skill -1"));
+    assert!(child.wait_for_exit(WAIT_TIMEOUT).status.success());
+}
+
 fn configure_openai_responses_fixture(fx: &ServeFixture, base_url: &str) {
     fs::write(
         fx.home_path.join(".tomcat").join("models.toml"),

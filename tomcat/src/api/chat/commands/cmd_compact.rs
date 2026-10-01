@@ -1,10 +1,9 @@
 //! `/compact`：用户主动触发一次持久化上下文压缩。
 
-use crate::api::chat::ChatContext;
+use crate::api::chat::{reload_context_state, ChatContext};
 use crate::core::compaction::compact_tool_results;
 use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::llm::{LlmScene, PromptCacheKeyFamily};
-use crate::core::session::manager::{init_context_state_with_limits, ContextState};
 use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
 
 use crate::AppError;
@@ -41,7 +40,7 @@ pub(crate) async fn run(
             println!("当前会话没有可压缩的上下文。");
         }
         Ok(report) => {
-            match load_context_state(ctx, system_text) {
+            match reload_context_state(ctx, system_text) {
                 Ok(rehydrated) => *context_state = rehydrated,
                 Err(error) => {
                     println!("压缩结果已保存，但内存上下文重载失败：{error}");
@@ -62,7 +61,7 @@ pub(crate) async fn run(
 
 /// 执行 `/compact` 的共享核心，供 CLI 和 serve 入口调用。
 pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, AppError> {
-    let mut state = load_context_state(ctx, "")?;
+    let mut state = reload_context_state(ctx, "")?;
     let mut messages = std::mem::take(&mut state.messages);
     if messages.is_empty() {
         return Ok(CompactReport {
@@ -113,24 +112,10 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
     )?;
     let _ = ensure_user_message_sidecar_current(&state.transcript_path).await;
 
-    let after_ratio = load_context_state(ctx, "")?.usage_ratio();
+    let after_ratio = reload_context_state(ctx, "")?.usage_ratio();
     Ok(CompactReport {
         before_ratio,
         after_ratio,
         covered_count,
     })
-}
-
-fn load_context_state(ctx: &ChatContext, system_text: &str) -> Result<ContextState, AppError> {
-    let entry = ctx
-        .session_runtime
-        .session
-        .get_session(ctx.session_runtime.session.current_session_key())?;
-    let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
-    init_context_state_with_limits(
-        &ctx.session_runtime.session,
-        &ctx.config.context,
-        system_text,
-        &main_call.limits,
-    )
 }

@@ -189,5 +189,8 @@ async fn run_skill_use_allows_user_only_skill_and_injects_body() {
             );
         }
         ChatCommandOutcome::Handled => panic!("/skill use should continue into the next turn"),
+        ChatCommandOutcome::ResumePendingQuestion => {
+            panic!("/skill use must not resume an old question")
+        }
     }
 }

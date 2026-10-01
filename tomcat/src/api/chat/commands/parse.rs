@@ -17,12 +17,11 @@ use std::path::PathBuf;
 use crate::api::chat::ChatContext;
 
 use super::{
-    cmd_ckpt, cmd_compact, cmd_connector, cmd_context, cmd_effort, cmd_help, cmd_install,
-    cmd_model, cmd_path, cmd_plan, cmd_restore, cmd_skill, cmd_thinking,
+    cmd_ckpt, cmd_compact, cmd_connector, cmd_context, cmd_effort, cmd_help, cmd_model, cmd_path,
+    cmd_plan, cmd_restore, cmd_skill, cmd_thinking, shared,
 };
 
 pub use cmd_connector::ConnectorCommand;
-pub use cmd_install::InstallCommand;
 pub use cmd_model::ModelCommand;
 pub use cmd_plan::PlanCommand;
 pub use cmd_skill::SkillCommand;
@@ -73,8 +72,11 @@ pub enum ChatCommand {
     },
     /// `/plan` 子命令族（plan-runtime.md §4.1 R1）。
     Plan(PlanCommand),
-    /// `/install`：安装 package / bare plugin / bare skill。
-    Install(InstallCommand),
+    /// A command from the shared resource-command table.
+    Shared {
+        name: String,
+        args: Vec<String>,
+    },
     /// `/skill` 子命令族：列出 / 重载 / 显式注入技能正文。
     Skill(SkillCommand),
     /// `/connector` 子命令族：管理 MCP server。
@@ -94,12 +96,21 @@ pub(crate) enum ChatCommandOutcome {
     },
     /// Command was fully handled locally; skip the current turn.
     Handled,
+    /// Disk restore revived a pending ask_question; resume without new input.
+    ResumePendingQuestion,
 }
 
 pub fn parse_chat_command(line: &str) -> ChatCommand {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return ChatCommand::NotACommand(line.to_string());
+    }
+
+    if let Some(parsed) = shared::parse_shared_slash(trimmed) {
+        return match parsed {
+            Ok((name, args)) => ChatCommand::Shared { name, args },
+            Err(message) => ChatCommand::UsageError { message },
+        };
     }
 
     let first_token = trimmed.split_whitespace().next().unwrap_or_default();
@@ -115,7 +126,6 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
             | "/ckpt"
             | "/restore"
             | "/plan"
-            | "/install"
             | "/skill"
             | "/connector"
     ) {
@@ -142,7 +152,6 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/ckpt" => parse_ckpt_args(tokens),
         "/restore" => parse_restore_args(tokens),
         "/plan" => cmd_plan::parse_args(tokens),
-        "/install" => cmd_install::parse_args(tokens),
         "/skill" => cmd_skill::parse_args(tokens),
         "/connector" => cmd_connector::parse_args(tokens),
         _ => ChatCommand::NotACommand(line.to_string()),
@@ -183,9 +192,16 @@ pub(crate) async fn dispatch_chat_command(
             checkpoint_id,
             paths,
             dry_run,
-        } => cmd_restore::run(ctx, checkpoint_id, paths, dry_run),
+        } => cmd_restore::run(
+            ctx,
+            checkpoint_id,
+            paths,
+            dry_run,
+            context_state,
+            system_text,
+        ),
         ChatCommand::Plan(plan_cmd) => cmd_plan::run(ctx, plan_cmd),
-        ChatCommand::Install(install_cmd) => cmd_install::run(ctx, install_cmd).await,
+        ChatCommand::Shared { name, args } => shared::run_terminal_shared(ctx, &name, args).await,
         ChatCommand::Skill(skill_cmd) => cmd_skill::run(ctx, skill_cmd).await,
         ChatCommand::Connector(connector_cmd) => cmd_connector::run(ctx, connector_cmd).await,
     }

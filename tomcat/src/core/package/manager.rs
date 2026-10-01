@@ -449,8 +449,10 @@ impl<'a> PackageManager<'a> {
                 .position(|record| record.name == package_name)
             else {
                 return Err(AppError::Config(format!(
-                    "package 未安装在 {}: {package_name}",
-                    layer_paths.visibility
+                    "package 未安装在 {}: {package_name}\n  如果它是手动放进目录的插件或 Skill，请到下面目录里删掉它所在的子目录，再在会话里执行 /reload\n  （子目录名不一定等于 ID，以 plugin.json 的 id、SKILL.md 的 name 为准）：\n  - {}\n  - {}",
+                    layer_paths.visibility,
+                    crate::infra::platform::format_home_path(&layer_paths.plugins_dir),
+                    crate::infra::platform::format_home_path(&layer_paths.skills_dir)
                 )));
             };
             let record = package_registry.packages.remove(index);

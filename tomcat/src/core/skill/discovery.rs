@@ -110,6 +110,10 @@ fn scan_root(
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
+        // Package transactions keep unpublished staging/backup siblings here.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         if *hit_limit {
             return;
         }
@@ -154,6 +158,9 @@ fn inspect_skill_file(
     let prefix = match read_frontmatter_prefix(skill_file) {
         Ok(prefix) => prefix,
         Err(error) => {
+            skill_set
+                .warnings
+                .push(format!("skills_scan_unreadable:{}", skill_file.display()));
             skill_set.diagnostics.push(SkillDiagnostic {
                 path: skill_file.to_path_buf(),
                 reason: error,

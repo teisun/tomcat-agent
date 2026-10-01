@@ -37,7 +37,6 @@ use crate::core::session::attachments::{
     safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
     REBUILDABLE_MAX_BYTES,
 };
-use crate::core::session::manager::init_context_state_with_limits;
 use crate::core::session::tool_display_sidecar::read_tool_displays_for_calls;
 use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
@@ -299,6 +298,10 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
+            if slot.is_command_job_running() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
             let mut input_message = ChatMessage::steering(text);
             let persisted = persist_turn_input_message(&slot, &input_message, &params)?;
             input_message.msg_id = Some(persisted.row_id);
@@ -330,6 +333,10 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
+            if slot.is_command_job_running() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
             let (archival_message, mut input_message) =
                 match build_turn_messages(&slot, text, &params) {
                     Ok(pair) => pair,
@@ -666,46 +673,29 @@ pub(crate) async fn handle_command(
                 Some(restore_core_payload(report)),
             )))?;
         }
+        ServeCommand::RunSlashCommand {
+            id,
+            session_id,
+            text,
+        } => super::slash::run(state, id, session_id, text).await?,
         ServeCommand::Compact { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id).await? else {
                 return Ok(());
             };
-            if slot.is_busy() {
-                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
-                return Ok(());
-            }
-            let report = match compact_session(&slot.ctx).await {
-                Ok(report) => report,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        Some(slot.session_id.clone()),
-                        format!("compact failed: {error}"),
-                    )?;
-                    return Ok(());
-                }
-            };
-            // `/compact` 已将 boundary 写入 transcript。与 /restore 一样必须立刻重载
-            // slot 的内存状态，否则下一轮会继续带着已失效的消息。
-            if let Err(error) = rehydrate_slot_context_state(&slot) {
-                send_error(
-                    &state,
-                    id,
-                    Some(slot.session_id.clone()),
-                    format!("compact persisted but failed to refresh runtime context: {error}"),
-                )?;
-                return Ok(());
-            }
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                Some(slot.session_id.clone()),
-                Some(json!({
+            let job_slot = Arc::clone(&slot);
+            super::session_job::spawn_session_job(state, slot, id, async move {
+                let report = compact_session(&job_slot.ctx)
+                    .await
+                    .map_err(|error| format!("compact failed: {error}"))?;
+                rehydrate_slot_context_state(&job_slot).map_err(|error| {
+                    format!("compact persisted but failed to refresh runtime context: {error}")
+                })?;
+                Ok(json!({
                     "beforeUsageRatio": report.before_ratio,
                     "afterUsageRatio": report.after_ratio,
                     "coveredMessageCount": report.covered_count,
-                })),
-            )))?;
+                }))
+            })?;
         }
         ServeCommand::ListSessions { id, scope } => {
             match scope.unwrap_or(ListSessionsScope::Live) {
@@ -744,7 +734,7 @@ pub(crate) async fn handle_command(
                         let busy = state
                             .registry
                             .get(&session_id)
-                            .map(|live_slot| live_slot.is_busy())
+                            .map(|live_slot| live_slot.is_turn_running())
                             .unwrap_or(false);
                         let interrupted = state
                             .registry
@@ -811,7 +801,7 @@ pub(crate) async fn handle_command(
                 Some(slot.session_id.clone()),
                 Some(serde_json::json!({
                     "sessionId": slot.session_id,
-                    "busy": slot.is_busy(),
+                    "busy": slot.is_turn_running(),
                     "interrupted": slot.is_interrupted(),
                     "workspaceMode": match slot.mode { crate::SessionMode::Code => "code", crate::SessionMode::Claw => "claw" },
                     "cwd": slot.cwd,
@@ -1829,20 +1819,22 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            if let Err(error) = connector.mcp_manager().test_server(&config_key).await {
-                send_error(
-                    &state,
-                    id,
-                    state.registry.active_session_id(),
-                    render_error_message(&error),
-                )?;
-                return Ok(());
-            }
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "configKey": config_key, "connected": true })),
-            )))?;
+            let session_id = state.registry.active_session_id();
+            tokio::spawn(async move {
+                let response = match connector.mcp_manager().test_server(&config_key).await {
+                    Ok(()) => ResponseFrame::ok(
+                        id,
+                        session_id,
+                        Some(json!({ "configKey": config_key, "connected": true })),
+                    ),
+                    Err(error) => {
+                        ResponseFrame::error(id, session_id, render_error_message(&error))
+                    }
+                };
+                if let Err(error) = state.writer.send(OutFrame::Response(response)) {
+                    warn!(%error, "connector test response failed");
+                }
+            });
         }
         ServeCommand::LoginConnector {
             id,
@@ -2226,7 +2218,7 @@ fn attach_page_tool_displays(
     Ok(())
 }
 
-async fn resolve_slot_or_error(
+pub(super) async fn resolve_slot_or_error(
     state: &ServeState,
     id: Option<String>,
     session_id: Option<String>,
@@ -2661,18 +2653,7 @@ fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Res
         .as_ref()
         .map(|state| state.prompt_snapshot.system_text().to_string())
         .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
-    let entry = slot
-        .ctx
-        .session_runtime
-        .session
-        .get_session(slot.ctx.session_runtime.session.current_session_key())?;
-    let main_call = slot.ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
-    let context_state = init_context_state_with_limits(
-        &slot.ctx.session_runtime.session,
-        &slot.ctx.config.context,
-        &system_text,
-        &main_call.limits,
-    )?;
+    let context_state = crate::api::chat::reload_context_state(&slot.ctx, &system_text)?;
     let context_budget_chars = context_state.context_budget_chars;
     let mut turn_state = slot.turn_state.lock();
     let state = turn_state

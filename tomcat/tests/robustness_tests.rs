@@ -124,6 +124,7 @@ fn test_plugin_manager_repeated_register_unload_state_consistent(
         let instance = PluginInstance {
             id: "stress".to_string(),
             manifest: manifest.clone(),
+            fingerprint: None,
             plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: vec![],

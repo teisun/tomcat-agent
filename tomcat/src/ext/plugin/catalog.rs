@@ -4,6 +4,7 @@ use crate::infra::error::AppError;
 use crate::AppConfig;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub struct CatalogEntry {
     pub manifest_path: PathBuf,
     pub plugin_root: PathBuf,
     pub source: PluginSource,
+    pub fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -42,6 +44,8 @@ pub struct PluginCatalog {
     entries: BTreeMap<String, CatalogEntry>,
     pub warnings: Vec<String>,
     pub diagnostics: Vec<PluginCatalogDiagnostic>,
+    /// A root/registry read failure must not be mistaken for an uninstall.
+    pub unreadable: bool,
 }
 
 impl PluginCatalog {
@@ -100,6 +104,7 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
     let registry_filter = load_registry_filter(root, catalog);
 
     let Ok(entries) = std::fs::read_dir(root) else {
+        catalog.unreadable = true;
         catalog.diagnostics.push(PluginCatalogDiagnostic {
             path: root.to_path_buf(),
             reason: "plugin 根目录不可读取".to_string(),
@@ -111,6 +116,10 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
+        // Package transactions keep unpublished staging/backup siblings here.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let Ok(file_type) = entry.file_type() else {
             catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: entry.path(),
@@ -134,10 +143,13 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
                     catalog.insert_entry(catalog_entry);
                 }
             }
-            Err(error) => catalog.diagnostics.push(PluginCatalogDiagnostic {
-                path: manifest_path,
-                reason: error.to_string(),
-            }),
+            Err(error) => {
+                catalog.unreadable |= matches!(&error, AppError::Io(_));
+                catalog.diagnostics.push(PluginCatalogDiagnostic {
+                    path: manifest_path,
+                    reason: error.to_string(),
+                });
+            }
         }
     }
 }
@@ -165,14 +177,21 @@ fn read_catalog_entry(
     plugin_root: &Path,
     source: PluginSource,
 ) -> Result<CatalogEntry, AppError> {
-    let manifest_json = std::fs::read_to_string(manifest_path)
-        .map_err(|error| AppError::Plugin(format!("read manifest failed: {error}")))?;
+    let manifest_json = std::fs::read_to_string(manifest_path).map_err(AppError::Io)?;
     let manifest = parse_manifest(&manifest_json)?;
+    let script = std::fs::read(plugin_root.join(&manifest.main)).map_err(AppError::Io)?;
+    let normalized_root = std::fs::canonicalize(plugin_root).map_err(AppError::Io)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalized_root.hash(&mut hasher);
+    manifest_json.as_bytes().hash(&mut hasher);
+    script.hash(&mut hasher);
+    let fingerprint = hasher.finish();
     Ok(CatalogEntry {
         manifest,
         manifest_path: manifest_path.to_path_buf(),
         plugin_root: plugin_root.to_path_buf(),
         source,
+        fingerprint,
     })
 }
 
@@ -215,6 +234,7 @@ fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFil
     let raw = match std::fs::read_to_string(&registry_path) {
         Ok(raw) => raw,
         Err(error) => {
+            catalog.unreadable = true;
             catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: registry_path,
                 reason: format!("读取 plugin registry 失败: {error}"),
@@ -225,6 +245,7 @@ fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFil
     let parsed: LayerPluginRegistryFile = match serde_json::from_str(&raw) {
         Ok(parsed) => parsed,
         Err(error) => {
+            catalog.unreadable = true;
             catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: registry_path,
                 reason: format!("plugin registry 解析失败: {error}"),

@@ -81,6 +81,58 @@ fn write_named_package_manifest(
 }
 
 #[test]
+fn uninstall_manual_plugin_keeps_resources_and_registries_and_lists_real_paths() {
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work.path());
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    let manual = paths.plugins_dir.join("directory-not-id");
+    write_plugin(&manual, "qa-echo", "1.0.0", "qa_echo");
+    crate::core::package::save_package_registry(
+        &paths.package_registry_path,
+        &load_package_registry(&paths.package_registry_path).unwrap(),
+    )
+    .unwrap();
+    crate::core::package::save_plugin_registry(
+        &paths.plugin_registry_path,
+        &load_plugin_registry(&paths.plugin_registry_path).unwrap(),
+    )
+    .unwrap();
+    let package_before = std::fs::read(&paths.package_registry_path).unwrap();
+    let plugin_before = std::fs::read(&paths.plugin_registry_path).unwrap();
+    let manifest_before = std::fs::read(manual.join("plugin.json")).unwrap();
+    let error = PackageManager::new(&cfg)
+        .uninstall("qa-echo", PackageVisibility::Scope, Some(workspace.path()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("package 未安装")
+            && error.contains("手动放进目录")
+            && error.contains("子目录名不一定等于 ID")
+            && error.contains("/reload"),
+        "{error}"
+    );
+    assert!(error.contains(&crate::infra::platform::format_home_path(
+        &paths.plugins_dir
+    )));
+    assert!(error.contains(&crate::infra::platform::format_home_path(&paths.skills_dir)));
+    assert_eq!(
+        std::fs::read(&paths.package_registry_path).unwrap(),
+        package_before
+    );
+    assert_eq!(
+        std::fs::read(&paths.plugin_registry_path).unwrap(),
+        plugin_before
+    );
+    assert_eq!(
+        std::fs::read(manual.join("plugin.json")).unwrap(),
+        manifest_before
+    );
+    assert!(manual.join("main.js").is_file());
+}
+
+#[test]
 fn detect_bare_plugin_and_bare_skill() {
     let work_dir = tempfile::tempdir().unwrap();
     let cfg = test_config(work_dir.path());

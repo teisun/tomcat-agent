@@ -233,8 +233,83 @@ fn discover_respects_registry_enabled_flags_when_registry_exists() {
     assert!(catalog.get("unregistered-plugin").is_none());
 }
 
+#[test]
+fn discover_ignores_hidden_transaction_directories() {
+    let work = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = project.path().join(".agents/plugins");
+    for name in [".demo.staging.x", ".demo.backup.x"] {
+        write_plugin(&root.join(name), "demo", "unpublished");
+    }
+    write_plugin(&root.join("demo"), "demo", "published");
+    let catalog = PluginCatalog::discover(&cfg, project.path()).unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(
+        catalog.get("demo").unwrap().manifest.description,
+        "published"
+    );
+    assert!(catalog.warnings.is_empty());
+    fs::remove_dir_all(root.join("demo")).unwrap();
+    assert!(PluginCatalog::discover(&cfg, project.path())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn catalog_fingerprint_tracks_content_and_effective_source() {
+    let work = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = project.path().join(".agents/plugins/a");
+    write_plugin(&root, "demo", "same");
+    let fingerprint = || {
+        PluginCatalog::discover(&cfg, project.path())
+            .unwrap()
+            .get("demo")
+            .unwrap()
+            .fingerprint
+    };
+    let original = fingerprint();
+    assert_eq!(fingerprint(), original);
+    fs::write(root.join("index.js"), "// updated entry").unwrap();
+    let changed = fingerprint();
+    assert_ne!(changed, original);
+    fs::rename(&root, root.with_file_name("b")).unwrap();
+    assert_ne!(
+        fingerprint(),
+        changed,
+        "same bytes in another source root are an update"
+    );
+    fs::write(
+        root.with_file_name("b").join("plugin.json"),
+        "broken manifest",
+    )
+    .unwrap();
+    let invalid = PluginCatalog::discover(&cfg, project.path()).unwrap();
+    assert!(invalid.is_empty());
+    assert!(
+        !invalid.unreadable,
+        "a single invalid manifest is not a failed root scan"
+    );
+    assert!(!invalid.diagnostics.is_empty());
+    fs::write(
+        project.path().join(".agents/plugins/registry.json"),
+        "broken registry",
+    )
+    .unwrap();
+    assert!(
+        PluginCatalog::discover(&cfg, project.path())
+            .unwrap()
+            .unreadable
+    );
+}
+
 fn write_plugin(root: &Path, plugin_id: &str, description: &str) {
     fs::create_dir_all(root).expect("create plugin root");
+    fs::write(root.join("index.js"), "// catalog fixture").unwrap();
     fs::write(
         root.join("plugin.json"),
         format!(

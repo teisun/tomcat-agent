@@ -370,6 +370,26 @@ impl HostApiDispatcher {
         let method = request.method.clone();
         let params = request.params.clone();
 
+        let writes_capabilities = matches!(
+            (module.as_str(), method.as_str()),
+            (
+                "tools",
+                "registerTool" | "unregisterTool" | "setActiveTools" | "registerCommand"
+            ) | ("commands", "registerCommand")
+                | ("events", "on" | "subscribe" | "once")
+        );
+        if writes_capabilities
+            && self
+                .plugin_manager
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+                .is_some_and(|manager| !manager.is_instance_current(instance_id))
+        {
+            return Ok(HostResponse::err(
+                "plugin instance is stale; capability registration rejected",
+            ));
+        }
+
         let result = match (request.module.as_str(), request.method.as_str()) {
             ("__async", "poll") => self.do_async_poll(&params),
             ("log" | "agent", "log")

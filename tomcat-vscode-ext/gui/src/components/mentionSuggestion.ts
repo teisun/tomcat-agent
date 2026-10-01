@@ -6,6 +6,7 @@ import Suggestion, {
 import { PluginKey } from "@tiptap/pm/state";
 
 import type { ContextSearchMatch, WebviewReference } from "../types";
+import { isTriggerBoundary } from "./suggestionBoundary";
 
 const MENTION_PLUGIN_KEY = new PluginKey("tomcat-context-search-mention");
 
@@ -23,19 +24,6 @@ interface CreateMentionSuggestionOptions {
   onOpen(): void;
   onQueryChange(query: string): void;
   referenceNodeName: string;
-}
-
-function isWhitespaceBoundary(editor: Editor, range: Range): boolean {
-  if (range.from <= 1) {
-    return true;
-  }
-  const previousCharacter = editor.state.doc.textBetween(
-    range.from - 1,
-    range.from,
-    "\n",
-    "\0",
-  );
-  return previousCharacter === "" || /\s/u.test(previousCharacter);
 }
 
 function insertReferenceAtRange(
@@ -88,11 +76,12 @@ export function createMentionSuggestion(
       addProseMirrorPlugins() {
         return [
           Suggestion<never, ContextSearchMatch>({
-            allow: ({ editor, range }) => {
+            allow: ({ editor, state, range }) => {
               if (options.isComposing() || editor.view.composing) {
                 return false;
               }
-              return isWhitespaceBoundary(editor, range);
+              // During plugin.apply the editor still holds the previous document.
+              return isTriggerBoundary({ state }, range);
             },
             allowSpaces: false,
             allowedPrefixes: [" ", "\t", "\n"],

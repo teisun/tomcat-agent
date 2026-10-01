@@ -44,6 +44,8 @@ pub(crate) fn run(
     checkpoint_id: String,
     paths: Vec<PathBuf>,
     dry_run: bool,
+    context_state: &mut crate::core::ContextState,
+    system_text: &str,
 ) -> ChatCommandOutcome {
     let checkpoint_id = CheckpointId::new(checkpoint_id);
     let report = match restore_core_with_paths(ctx, checkpoint_id.clone(), &paths, true, dry_run) {
@@ -69,6 +71,14 @@ pub(crate) fn run(
         return ChatCommandOutcome::Handled;
     }
 
+    match crate::api::chat::reload_context_state(ctx, system_text) {
+        Ok(reloaded) => *context_state = reloaded,
+        Err(error) => {
+            println!("已恢复 checkpoint {checkpoint_id}，但内存上下文重载失败：{error}");
+            return ChatCommandOutcome::Handled;
+        }
+    }
+
     if report.restored_paths.is_empty() {
         println!("已恢复 checkpoint {}。", checkpoint_id);
     } else {
@@ -81,7 +91,14 @@ pub(crate) fn run(
     if let Some(plan_id) = report.reloaded_plan_id {
         println!("plan_runtime 已对齐磁盘：EXEC plan_id={plan_id}");
     }
-    ChatCommandOutcome::Handled
+    match crate::api::chat::has_resumable_tail_ask_question(&ctx.session_runtime.session) {
+        Ok(true) => ChatCommandOutcome::ResumePendingQuestion,
+        Ok(false) => ChatCommandOutcome::Handled,
+        Err(error) => {
+            println!("警告：恢复后检查未答提问失败：{error}");
+            ChatCommandOutcome::Handled
+        }
+    }
 }
 
 pub(crate) fn restore_core(

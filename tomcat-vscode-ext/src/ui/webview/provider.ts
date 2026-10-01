@@ -1515,6 +1515,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return this.initialized;
     }
     this.initialized = await this.deps.initialize();
+    this.stateStore.setSlashCommands(hasServeCapability(this.initialized, "run_slash_command") ? this.initialized.slashCommands ?? [] : []);
     this.adoptAttachmentRoot(this.initialized.attachmentRoot);
     return this.initialized;
   }
@@ -1930,34 +1931,43 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "runSlashCommand":
       case "compact": {
-        await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSessionWithoutHistory(intent.data.sessionId);
+        const initialized = await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(intent.data.sessionId ?? null);
         if (!sessionId) {
           await this.postState();
           return;
         }
-        try {
-          const report = await this.deps.sessionRouter.compact(sessionId);
-          this.stateStore.appendMessage(
-            sessionId,
-            "notice",
-            `上下文已压缩：${(report.beforeUsageRatio * 100).toFixed(1)}% → ${(
-              report.afterUsageRatio * 100
-            ).toFixed(1)}%。`,
-          );
-        } catch (error) {
-          this.stateStore.appendMessage(
-            sessionId,
-            "error",
-            formatBridgeError("compact context", error),
-          );
+        const session = this.peekState().sessionViews[sessionId];
+        if (session?.busy || session?.commandPending) {
+          this.stateStore.appendMessage(sessionId, "error", "当前会话仍在处理中，请等待完成后再执行命令。");
           await this.postState();
           return;
         }
-        await this.refreshSessionState(sessionId, { trustBusy: true });
-        await this.refreshSessionHistory(sessionId);
-        await this.postState();
+        this.stateStore.setCommandPending(sessionId, true);
+        try {
+          await this.postState();
+          if (intent.type === "runSlashCommand") {
+            if (!hasServeCapability(initialized, "run_slash_command")) throw new Error("当前 CLI 不支持共享命令，请更新 CLI 后重启 Serve。");
+            const reply = await this.deps.sessionRouter.runSlashCommand(sessionId, intent.data.text);
+            if (this.peekState().sessionViews[sessionId]) this.stateStore.appendMessage(sessionId, reply.ok ? "notice" : "error", reply.text);
+          } else {
+            const report = await this.deps.sessionRouter.compact(sessionId);
+            if (!this.peekState().sessionViews[sessionId]) return;
+            await this.refreshSessionState(sessionId, { trustBusy: true });
+            await this.refreshSessionHistory(sessionId);
+            this.stateStore.appendMessage(sessionId, "notice", `上下文已压缩：${(report.beforeUsageRatio * 100).toFixed(1)}% → ${(report.afterUsageRatio * 100).toFixed(1)}%。`);
+          }
+        } catch (error) {
+          if (this.peekState().sessionViews[sessionId]) {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.stateStore.appendMessage(sessionId, "error", detail.trim() === "busy" ? "当前会话仍在处理中，请等待完成后再执行命令。" : formatBridgeError(intent.type === "compact" ? "compact context" : "run command", error));
+          }
+        } finally {
+          this.stateStore.setCommandPending(sessionId, false);
+          await this.postState();
+        }
         return;
       }
       case "setModel": {

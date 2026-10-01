@@ -25,7 +25,7 @@ pub struct ServeFixture {
 // A standalone test instance owns a disposable HOME and workspace. Do not let
 // parent-agent markers, configuration overrides, proxies or real keys escape
 // into it; this never mutates the parent process environment or real config.
-fn isolated_serve_command(home: &Path) -> StdCommand {
+pub fn isolated_serve_command(home: &Path) -> StdCommand {
     let mut command = StdCommand::new(cargo_bin_path());
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy();
@@ -120,6 +120,10 @@ pub struct ServeChild {
 }
 
 impl ServeChild {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn send_value(&mut self, value: &Value) {
         self.send_raw(&value.to_string());
     }
@@ -383,7 +387,13 @@ where
                 let (headers, parts) = if request_is_session_title_request(&request) {
                     session_title_response(&request, "MCP session")
                 } else {
-                    ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n", route(&extract_json_body(&request)).parts)
+                    let body = extract_json_body(&request);
+                    let headers = if body.get("stream").and_then(Value::as_bool) == Some(false) {
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                    };
+                    (headers, route(&body).parts)
                 };
                 if stream.write_all(headers.as_bytes()).is_err() { return; }
                 for part in parts {

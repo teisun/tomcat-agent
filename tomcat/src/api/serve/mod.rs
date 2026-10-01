@@ -17,6 +17,8 @@ mod fanout_event_bus;
 pub mod ndjson;
 pub mod registry;
 pub mod schema;
+mod session_job;
+mod slash;
 pub mod stdin;
 pub mod types;
 pub mod writer;

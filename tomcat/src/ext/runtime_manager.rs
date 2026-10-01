@@ -18,15 +18,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Immutable manifest used by an existing VM even after its catalog entry changes.
+#[derive(Clone)]
+pub struct VmBirth {
+    pub fingerprint: Option<u64>,
+    pub manifest: Arc<crate::ext::PluginManifest>,
+}
+
 struct RuntimeEntry {
     handle: VmActorHandle,
     last_used_ms: AtomicU64,
+    birth: Option<VmBirth>,
 }
 
 impl RuntimeEntry {
-    fn new(handle: VmActorHandle) -> Self {
+    fn new(handle: VmActorHandle, birth: Option<VmBirth>) -> Self {
         Self {
             handle,
+            birth,
             last_used_ms: AtomicU64::new(now_ms()),
         }
     }
@@ -65,6 +74,7 @@ impl std::fmt::Display for PluginRuntimeKey {
 /// 管理所有活跃的 VM actor handle，按 `PluginRuntimeKey` 索引。
 pub struct PluginRuntimeManager {
     handles: DashMap<PluginRuntimeKey, RuntimeEntry>,
+    start_gates: DashMap<PluginRuntimeKey, Arc<tokio::sync::Mutex<()>>>,
     idle_ttl: Duration,
 }
 
@@ -76,6 +86,7 @@ impl PluginRuntimeManager {
     pub fn with_idle_ttl(idle_ttl: Duration) -> Self {
         Self {
             handles: DashMap::new(),
+            start_gates: DashMap::new(),
             idle_ttl,
         }
     }
@@ -92,7 +103,31 @@ impl PluginRuntimeManager {
     }
 
     pub fn insert(&self, key: PluginRuntimeKey, handle: VmActorHandle) {
-        self.handles.insert(key, RuntimeEntry::new(handle));
+        self.handles.insert(key, RuntimeEntry::new(handle, None));
+    }
+
+    pub fn insert_with_birth(&self, key: PluginRuntimeKey, handle: VmActorHandle, birth: VmBirth) {
+        self.handles
+            .insert(key, RuntimeEntry::new(handle, Some(birth)));
+    }
+
+    pub fn birth(&self, key: &PluginRuntimeKey) -> Option<VmBirth> {
+        self.handles.get(key).and_then(|entry| entry.birth.clone())
+    }
+
+    pub fn session_keys(&self, session_id: &str) -> Vec<PluginRuntimeKey> {
+        self.handles
+            .iter()
+            .filter(|entry| entry.key().session_id == session_id)
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    pub fn start_gate(&self, key: &PluginRuntimeKey) -> Arc<tokio::sync::Mutex<()>> {
+        self.start_gates
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     pub fn touch(&self, key: &PluginRuntimeKey) -> bool {
@@ -113,6 +148,8 @@ impl PluginRuntimeManager {
         &self,
         session_id: &str,
     ) -> Vec<(PluginRuntimeKey, VmActorHandle)> {
+        self.start_gates
+            .retain(|key, _| key.session_id != session_id);
         let keys_to_remove: Vec<PluginRuntimeKey> = self
             .handles
             .iter()
@@ -187,6 +224,10 @@ impl PluginRuntimeManager {
 
     pub fn configured_idle_ttl(&self) -> Duration {
         self.idle_ttl
+    }
+
+    pub fn start_gate_count(&self) -> usize {
+        self.start_gates.len()
     }
 
     pub fn len(&self) -> usize {

@@ -2,6 +2,25 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SessionRouter } from "../sessionRouter";
 
+describe("SessionRouter shared slash commands", () => {
+  it("sends original text and session identity with a ten-minute wait", async () => {
+    const messenger = {request:vi.fn().mockResolvedValue({success:true, payload:{ok:true, text:"done"}})};
+    const router = new SessionRouter(messenger as never, () => "/workspace");
+    const text = "  /install './folder with space' agent\n";
+    await expect(router.runSlashCommand("s1", text)).resolves.toEqual({ok:true, text:"done"});
+    expect(messenger.request).toHaveBeenCalledWith({type:"run_slash_command", sessionId:"s1", text}, 600_000);
+  });
+  it("preserves usage errors and rejects invalid payloads or a transport-level busy", async () => {
+    const messenger = {request:vi.fn().mockResolvedValue({success:true, payload:{ok:false, text:"用法"}})};
+    const router = new SessionRouter(messenger as never, () => undefined);
+    await expect(router.runSlashCommand("s1", "/install")).resolves.toEqual({ok:false, text:"用法"});
+    messenger.request.mockResolvedValueOnce({success:true, payload:{ok:"true", text:"bad"}});
+    await expect(router.runSlashCommand("s1", "/reload")).rejects.toThrow("payload is invalid");
+    messenger.request.mockResolvedValueOnce({success:false, error:"busy"});
+    await expect(router.runSlashCommand("s1", "/reload")).rejects.toThrow("busy");
+  });
+});
+
 describe("SessionRouter checkpoint methods", () => {
   it("parses listCheckpoints payloads", async () => {
     const messenger = {

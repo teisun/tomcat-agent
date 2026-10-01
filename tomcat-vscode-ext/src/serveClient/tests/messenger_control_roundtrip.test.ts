@@ -65,6 +65,7 @@ describe("TomcatMessenger control roundtrip", () => {
 
     await expect(pending).resolves.toEqual({
       attachmentRoot: null,
+      slashCommands: [],
       capabilities: ["prompt", "ask_question"],
       protocolVersion: 1,
       serverVersion: "0.1.20",

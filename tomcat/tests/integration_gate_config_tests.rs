@@ -166,21 +166,22 @@ fn every_integration_binary_has_one_explicit_classification() {
 #[test]
 fn missing_live_credentials_is_not_a_successful_skip() {
     for target in ["", "gpt-5.4", "gpt-5.4_litellm-sunmi"] {
+        let effective = if target.is_empty() {
+            common::OPENAI_TEST_DEFAULT_MODEL
+        } else {
+            target
+        };
         let output = std::process::Command::new("bash")
             .arg(repo_root().join("scripts/run-integration-tests.sh"))
             .arg("integration-openai-responses-wire")
             .env("TOMCAT_E2E_OPENAI_TARGET", target)
             .env_remove("OPENAI_API_KEY")
             .env_remove("LITELLM_SUNMI_API_KEY")
+            .env_remove(common::openai_test_api_key_env_for_model(effective))
             .output()
             .expect("run preflight without credentials");
         assert_eq!(output.status.code(), Some(2));
         let log = String::from_utf8_lossy(&output.stdout);
-        let effective = if target.is_empty() {
-            common::OPENAI_TEST_DEFAULT_MODEL
-        } else {
-            target
-        };
         assert!(
             log.contains(common::openai_test_api_key_env_for_model(effective)),
             "{log}"
@@ -221,6 +222,7 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
     assert_eq!(
         serial,
         [
+            "project_trust_cli_tests",
             "serve_multi_session",
             "serve_ask_question_tests",
             "serve_robustness_tests",

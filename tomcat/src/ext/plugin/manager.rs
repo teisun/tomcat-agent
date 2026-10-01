@@ -258,6 +258,11 @@ impl PluginManager {
         let manifest_functions = manifest.functions.clone();
         let plugin_instance = PluginInstance {
             id: manifest.id.clone(),
+            fingerprint: self
+                .plugins
+                .read()
+                .get(&manifest.id)
+                .and_then(|inst| inst.fingerprint),
             manifest: manifest.clone(),
             plugin_vm_instance: Some(instance),
             status: PluginStatus::Loaded,
@@ -399,6 +404,7 @@ impl PluginManager {
         let manifest_functions = manifest.functions.clone();
         let instance = PluginInstance {
             id: manifest.id.clone(),
+            fingerprint: None,
             manifest,
             plugin_vm_instance: None,
             status: PluginStatus::Enabled,
@@ -557,6 +563,8 @@ impl PluginManager {
             }
         }
 
+        let gate = runtime_manager.start_gate(&key);
+        let _start_guard = gate.lock().await;
         if let Some(existing) = runtime_manager.get(&key) {
             match existing.current_state() {
                 VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
@@ -583,9 +591,20 @@ impl PluginManager {
         let instance_id = key.to_string();
         let mut plugin_vm_instance = engine.create_instance(&instance_id)?;
 
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let startup: crate::ext::vm_actor::StartupSignal =
+            Arc::new(parking_lot::Mutex::new(Some(ready_tx)));
         let dispatcher_opt = self.host_dispatcher.read().clone();
         let iid = instance_id.clone();
+        let ready_for_host = startup.clone();
         let invoke_fn = move |request_json: &str| {
+            if let Ok(request) = serde_json::from_str::<crate::ext::HostRequest>(request_json) {
+                if request.module == "__session" && request.method == "waitForEvent" {
+                    if let Some(sender) = ready_for_host.lock().take() {
+                        let _ = sender.send(Ok(()));
+                    }
+                }
+            }
             let resp = invoke_host_func_with(dispatcher_opt.as_deref(), &iid, request_json)?;
             serde_json::to_string(&resp).map_err(AppError::from)
         };
@@ -595,21 +614,49 @@ impl PluginManager {
             dispatcher.register_event_channel(&instance_id, self.event_channel_capacity);
         }
 
-        let plugin_root = {
+        let (plugin_root, birth) = {
             let map = self.plugins.read();
-            map.get(plugin_id)
-                .map(|inst| inst.main_script_path())
-                .ok_or_else(|| {
-                    AppError::Plugin(format!("plugin '{plugin_id}' not found in registry"))
-                })?
+            let inst = map.get(plugin_id).ok_or_else(|| {
+                AppError::Plugin(format!("plugin '{plugin_id}' not found in registry"))
+            })?;
+            (
+                inst.main_script_path(),
+                crate::ext::runtime_manager::VmBirth {
+                    fingerprint: inst.fingerprint,
+                    manifest: Arc::new(inst.manifest.clone()),
+                },
+            )
         };
 
-        let handle = VmActor::spawn(plugin_vm_instance, plugin_root, self.event_channel_capacity);
+        let handle = VmActor::spawn_with_startup(
+            plugin_vm_instance,
+            plugin_root,
+            self.event_channel_capacity,
+            Some(startup),
+        );
 
-        handle.dispatch(VmCommand::Init).await?;
+        // Install authority before JS initialization can issue any hostcall.
+        runtime_manager.insert_with_birth(key.clone(), handle.clone(), birth);
+        if let Err(error) = handle.dispatch(VmCommand::Init).await {
+            let _ = self.stop_vm_entry(&key).await;
+            return Err(error);
+        }
+        let initialized = tokio::time::timeout(
+            std::time::Duration::from_millis(engine.config().call_timeout_ms.max(1)),
+            ready_rx,
+        )
+        .await;
+        let error = match initialized {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(error))) => Some(error),
+            Ok(Err(_)) => Some("plugin initialization worker stopped".to_string()),
+            Err(_) => Some("plugin initialization timed out".to_string()),
+        };
+        if let Some(error) = error {
+            self.stop_vm_entry(&key).await?;
+            return Err(AppError::Plugin(error));
+        }
         self.sync_registered_capabilities(plugin_id);
-
-        runtime_manager.insert(key, handle.clone());
         Ok(handle)
     }
 
@@ -728,6 +775,94 @@ impl PluginManager {
         self.plugin_runtime_manager
             .as_ref()
             .map(|manager| manager.configured_idle_ttl())
+    }
+
+    pub fn set_catalog_fingerprint(&self, plugin_id: &str, fingerprint: u64) {
+        if let Some(instance) = self.plugins.write().get_mut(plugin_id) {
+            instance.fingerprint = Some(fingerprint);
+        }
+    }
+
+    /// Retire shared capabilities without interrupting another session's work.
+    pub fn retire_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
+        let instance = self
+            .plugins
+            .write()
+            .remove(plugin_id)
+            .ok_or_else(|| AppError::Plugin(format!("plugin not found: {plugin_id}")))?;
+        self.event_bus.remove_plugin_listeners(plugin_id);
+        if let Some(tools) = self.tools.read().clone() {
+            tools.unregister_plugin_tools(plugin_id);
+        }
+        if let Some(functions) = self.functions.read().clone() {
+            functions.remove_by_plugin(plugin_id);
+        }
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+            dispatcher.cleanup_plugin_capabilities(plugin_id);
+        }
+        if let Some(vm) = instance.plugin_vm_instance {
+            vm.destroy();
+        }
+        Ok(())
+    }
+
+    pub fn is_instance_current(&self, instance_id: &str) -> bool {
+        let Some((session, plugin)) = instance_id.rsplit_once('/') else {
+            return true;
+        };
+        let map = self.plugins.read();
+        let Some(current) = map.get(plugin) else {
+            return false;
+        };
+        self.plugin_runtime_manager
+            .as_ref()
+            .and_then(|runtime| runtime.birth(&PluginRuntimeKey::new(session, plugin)))
+            .is_none_or(|birth| birth.fingerprint == current.fingerprint)
+    }
+
+    pub fn instance_manifest(&self, instance_id: &str) -> Option<Arc<PluginManifest>> {
+        if let Some((session, plugin)) = instance_id.rsplit_once('/') {
+            if let Some(birth) = self
+                .plugin_runtime_manager
+                .as_ref()
+                .and_then(|runtime| runtime.birth(&PluginRuntimeKey::new(session, plugin)))
+            {
+                return Some(birth.manifest);
+            }
+        }
+        let plugin = instance_id.rsplit('/').next()?;
+        self.plugins
+            .read()
+            .get(plugin)
+            .map(|inst| Arc::new(inst.manifest.clone()))
+    }
+
+    pub async fn stop_stale_session_vms(&self, session_id: &str) -> Result<usize, AppError> {
+        let Some(runtime) = &self.plugin_runtime_manager else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        // Only invoked while this session is idle, never from another session's reload.
+        for key in runtime.session_keys(session_id) {
+            if !self.is_instance_current(&key.to_string()) {
+                count += usize::from(self.stop_vm_entry(&key).await?);
+            }
+        }
+        Ok(count)
+    }
+
+    async fn stop_vm_entry(&self, key: &PluginRuntimeKey) -> Result<bool, AppError> {
+        let Some(runtime) = &self.plugin_runtime_manager else {
+            return Ok(false);
+        };
+        let Some(handle) = runtime.remove(key) else {
+            return Ok(false);
+        };
+        let _ = handle.shutdown().await;
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+            dispatcher.cleanup_instance(&key.to_string());
+        }
+        Ok(true)
     }
 
     /// 卸载：移除事件监听、注销工具、销毁插件 VM 实例、从 map 移除。

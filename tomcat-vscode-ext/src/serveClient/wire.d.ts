@@ -616,6 +616,11 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   sessionId?: null | string;
+  text: string;
+  type: "run_slash_command";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
   thumbnail: CacheThumbnailInput;
   type: "cache_attachment_thumbnail";
 } | {
@@ -676,6 +681,15 @@ export interface SetConnectorToolEnabledResponse {
 export interface SetProviderKeyResponse {
   envName: string;
   keyPresent: boolean;
+}
+export interface SharedSlashCommand {
+  name: string;
+  summary: string;
+  usage: string;
+}
+export interface SlashReply {
+  ok: boolean;
+  text: string;
 }
 export interface UpsertModelResponse {
   model: ModelView;

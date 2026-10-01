@@ -254,6 +254,37 @@
         }
       },
       {
+        "description": "Execute a resource command from the initialize handshake's shared table.",
+        "type": "object",
+        "required": [
+          "text",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "run_slash_command"
+            ]
+          }
+        }
+      },
+      {
         "description": "主动压缩当前会话上下文，保留摘要以继续会话。",
         "type": "object",
         "required": [
@@ -6583,6 +6614,44 @@
         "items": {
           "type": "string"
         }
+      }
+    }
+  },
+  "shared_slash_command": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SharedSlashCommand",
+    "type": "object",
+    "required": [
+      "name",
+      "summary",
+      "usage"
+    ],
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      },
+      "usage": {
+        "type": "string"
+      }
+    }
+  },
+  "slash_reply": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SlashReply",
+    "type": "object",
+    "required": [
+      "ok",
+      "text"
+    ],
+    "properties": {
+      "ok": {
+        "type": "boolean"
+      },
+      "text": {
+        "type": "string"
       }
     }
   }

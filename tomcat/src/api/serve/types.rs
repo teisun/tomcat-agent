@@ -360,6 +360,15 @@ pub enum ServeCommand {
         #[serde(default, rename = "dryRun", skip_serializing_if = "Option::is_none")]
         dry_run: Option<bool>,
     },
+    /// Execute a resource command from the initialize handshake's shared table.
+    #[serde(rename_all = "camelCase")]
+    RunSlashCommand {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        text: String,
+    },
     /// 主动压缩当前会话上下文，保留摘要以继续会话。
     #[serde(rename_all = "camelCase")]
     Compact {
@@ -760,6 +769,7 @@ impl ServeCommand {
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
             | Self::Compact { id, .. }
+            | Self::RunSlashCommand { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
@@ -809,6 +819,7 @@ impl ServeCommand {
             | Self::ListCheckpoints { session_id, .. }
             | Self::RestoreCheckpoint { session_id, .. }
             | Self::Compact { session_id, .. }
+            | Self::RunSlashCommand { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
@@ -874,6 +885,7 @@ impl ServeCommand {
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",
             Self::Compact { .. } => "compact",
+            Self::RunSlashCommand { .. } => "run_slash_command",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",

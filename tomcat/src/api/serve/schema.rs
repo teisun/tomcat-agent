@@ -42,6 +42,8 @@ pub(crate) struct ServeSchemaBundle {
     /// 而漂移风险最大的恰恰是响应方向。
     ingest_attachment_response: schemars::schema::RootSchema,
     retain_attachment_leases_response: schemars::schema::RootSchema,
+    shared_slash_command: schemars::schema::RootSchema,
+    slash_reply: schemars::schema::RootSchema,
 }
 
 pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -73,6 +75,8 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         set_connector_tool_enabled_response: schema_for!(SetConnectorToolEnabledResponse),
         ingest_attachment_response: schema_for!(IngestAttachmentResponse),
         retain_attachment_leases_response: schema_for!(RetainAttachmentLeasesResponse),
+        shared_slash_command: schema_for!(crate::api::chat::commands::SharedSlashCommand),
+        slash_reply: schema_for!(crate::api::chat::commands::SlashReply),
     }
 }
 
@@ -102,6 +106,8 @@ pub fn read_schema_fixture(path: &Path) -> Result<String, AppError> {
 fn render_typescript(bundle: &ServeSchemaBundle) -> String {
     let root_schemas = [
         ("ServeCommand", &bundle.serve_command),
+        ("SharedSlashCommand", &bundle.shared_slash_command),
+        ("SlashReply", &bundle.slash_reply),
         ("ControlFrame", &bundle.control_frame),
         ("ResponseFrame", &bundle.response_frame),
         ("WireEvent", &bundle.wire_event),

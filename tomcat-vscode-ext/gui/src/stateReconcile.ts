@@ -134,6 +134,7 @@ export function reconcileSessionSnapshot(
   if (
     previous &&
     previous.busy === next.busy &&
+    previous.commandPending === next.commandPending &&
     previous.agentMode === next.agentMode &&
     previous.contextRatio === next.contextRatio &&
     previous.hasMoreHistory === next.hasMoreHistory &&
@@ -198,6 +199,7 @@ export function reconcileStateSnapshot(
     next.availableModelReasoningLevels,
   );
   const mediaRoots = reconcileValue(previous.mediaRoots, next.mediaRoots);
+  const slashCommands = reconcileValue(previous.slashCommands, next.slashCommands);
   if (
     previous.activeSessionId === next.activeSessionId &&
     previous.availableModels === availableModels &&
@@ -208,6 +210,7 @@ export function reconcileStateSnapshot(
     previous.connectionStatus === next.connectionStatus &&
     previous.mediaRoots === mediaRoots &&
     previous.modelAdminSupported === next.modelAdminSupported &&
+    previous.slashCommands === slashCommands &&
     previous.ready === next.ready &&
     previous.sessions === sessions &&
     !sessionViewsChanged
@@ -222,6 +225,7 @@ export function reconcileStateSnapshot(
     availableModels,
     mediaRoots,
     sessions,
+    slashCommands,
     sessionViews,
   };
 }

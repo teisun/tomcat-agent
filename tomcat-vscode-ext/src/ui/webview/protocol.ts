@@ -7,6 +7,7 @@ import type {
   ServeAttachment,
   ServeContentSegment,
   ServeEvent,
+  SharedSlashCommand,
 } from "../../serveClient/wire";
 import type {
   WebviewAgentMode,
@@ -371,6 +372,8 @@ export interface WebviewSessionSnapshot {
   agentMode: WebviewAgentMode;
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
+  /** Waiting for a maintenance-command reply, not an agent turn. */
+  commandPending?: boolean;
   composerDraft?: WebviewComposerDraft;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
@@ -428,6 +431,7 @@ export interface WebviewStateSnapshot {
   connectionStatus?: WebviewConnectionStatus;
   mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
+  slashCommands?: SharedSlashCommand[];
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
@@ -863,6 +867,11 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "runSlashCommand";
+      data: { sessionId?: string | null; text: string };
+    }
+  | {
+      messageId: string;
       type: "compact";
       data: {
         sessionId: string;
@@ -1289,6 +1298,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         isString(value.data.checkpointId) &&
         typeof value.data.revertFiles === "boolean"
       );
+    case "runSlashCommand":
+      return isRecord(value.data) && isString(value.data.text) &&
+        (value.data.sessionId === undefined || value.data.sessionId === null || isString(value.data.sessionId));
     case "compact":
       return isRecord(value.data) && isString(value.data.sessionId);
     case "recoverErrorTurn":

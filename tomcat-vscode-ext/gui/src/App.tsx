@@ -16,6 +16,7 @@ import { AttachmentChips } from "./components/AttachmentChips";
 import { AttachmentStrip } from "./components/AttachmentStrip";
 import { injectCheckpointMarkers } from "./components/checkpointMarkers";
 import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
+import { matchSlashCommand } from "./slashMenu";
 import { ImageLightbox, type ZoomedImage } from "./components/ImageLightbox";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
@@ -1253,9 +1254,18 @@ function submitPrompt(
   activeSessionId: string | null | undefined,
   canPrompt: boolean,
   onSubmitted: (pending: PendingComposerSubmission) => void,
+  slashNames: readonly string[],
+  hasAttachments: boolean,
 ): void {
   const draft = composer?.getDraft() ?? EMPTY_DRAFT;
   if (!canPrompt || !draft.hasContent) {
+    return;
+  }
+  if (!hasAttachments && draft.segments.every((segment) => segment.type === "text") && matchSlashCommand(draft.text, slashNames)) {
+    postIntent(vscodeApi, "runSlashCommand", { sessionId: activeSessionId ?? null, text: draft.text });
+    // Commands are not transcript messages and have no user-message delivery ack.
+    // Clear via the normal local draft callback so a subsequent snapshot cannot revive it.
+    composer?.clear();
     return;
   }
   const userMessageId = createMessageId("user");
@@ -1489,9 +1499,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const latestUserMessageId = userMessages.at(-1)?.id ?? null;
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
-  const canPrompt = state.ready && !activeSession?.busy && !draftForkFeedback.pending;
+  const commandPending = activeSession?.commandPending === true;
+  const canPrompt = state.ready && !activeSession?.busy && !commandPending && !draftForkFeedback.pending;
   const canInterrupt = state.ready;
-  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy;
+  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending;
   const modelAdminSupported = state.modelAdminSupported;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
@@ -2535,10 +2546,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     <main className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
-        canCompact={Boolean(activeSession && !activeSession.busy)}
+        canCompact={Boolean(activeSession && !activeSession.busy && !commandPending)}
         creating={draftForkFeedback.pending}
         onCompact={() => {
-          if (!activeSession || activeSession.busy) return;
+          if (!activeSession || activeSession.busy || commandPending) return;
           postIntent(vscodeApi, "compact", { sessionId: activeSession.sessionId });
         }}
         onNewSession={handleNewSession}
@@ -2765,6 +2776,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         busy={!!activeSession?.busy}
         canInterrupt={canInterrupt}
         canPrompt={canPrompt}
+        slashCommands={state.slashCommands}
+        commandPending={commandPending}
         contextSearchLoading={contextSearch.loading}
         contextSearchMatches={contextSearch.matches}
         contextSearchQuery={contextSearch.query}
@@ -2867,6 +2880,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                   : 0,
               };
             },
+            state.slashCommands?.map((command) => command.name) ?? [],
+            (activeSession?.pendingAttachments.length ?? 0) > 0,
           );
         }}
         planState={activeSession?.activePlan?.state}

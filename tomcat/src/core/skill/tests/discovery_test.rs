@@ -4,6 +4,24 @@ use crate::core::skill::{discover, skill_roots, SkillSource};
 use crate::AppConfig;
 
 #[test]
+fn discover_ignores_hidden_transaction_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let cfg = base_config(&temp.path().join("work"));
+    let root = project.join(".agents/skills");
+    for name in [".foo.staging.x", ".foo.backup.x"] {
+        write_skill(&root.join(name).join("SKILL.md"), "foo", "unpublished");
+    }
+    write_skill(&root.join("foo/SKILL.md"), "foo", "published");
+    let set = discover(&cfg, &project);
+    assert_eq!(set.by_name.len(), 1);
+    assert_eq!(set.by_name["foo"].description, "published");
+    assert!(set.warnings.is_empty());
+    std::fs::remove_dir_all(root.join("foo")).unwrap();
+    assert!(discover(&cfg, &project).by_name.is_empty());
+}
+
+#[test]
 fn skill_roots_follow_project_agent_managed_order() {
     let temp = temp_dir("roots_order");
     let project = temp.join("project");

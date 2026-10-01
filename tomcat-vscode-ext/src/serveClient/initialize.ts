@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { assertRequiredCapabilities, parseInitializePayload } from "./protocol";
 import type { TomcatMessenger } from "./TomcatMessenger";
+import type { SharedSlashCommand } from "./wire";
 
 export const SERVE_CAPABILITY_LIST_MODELS = "list_models";
 export const SERVE_CAPABILITY_LIST_PROVIDER_KEYS = "list_provider_keys";
@@ -27,6 +28,7 @@ export interface InitializeResult {
    */
   attachmentRoot: string | null;
   capabilities: string[];
+  slashCommands?: SharedSlashCommand[];
   protocolVersion: number;
   sessionId: string | null;
   serverVersion: string | null;
@@ -76,6 +78,7 @@ export async function initializeServe(
   return {
     attachmentRoot: payload.attachmentRoot ?? null,
     capabilities: payload.capabilities,
+    slashCommands: payload.slashCommands ?? [],
     protocolVersion: payload.protocolVersion,
     sessionId: payload.sessionId ?? frame.sessionId ?? null,
     serverVersion: payload.serverVersion ?? null,

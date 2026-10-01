@@ -17,6 +17,25 @@ use crate::infra::error::{
     LlmFailureKind,
 };
 
+/// Rebuild the in-memory request context from the durable transcript with the
+/// currently selected Main model's limits. All explicit history rewrites use it.
+pub(crate) fn reload_context_state(
+    ctx: &ChatContext,
+    system_text: &str,
+) -> Result<crate::core::ContextState, AppError> {
+    let entry = ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())?;
+    let call = ctx.resolve_call(crate::core::llm::LlmScene::Main, entry.as_ref())?;
+    crate::core::session::manager::init_context_state_with_limits(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+        &call.limits,
+    )
+}
+
 const MAX_ERROR_DETAIL_CHARS: usize = 8 * 1024;
 
 #[derive(Debug, Clone)]

@@ -231,6 +231,23 @@ fn compose_planned_turn_messages_preserves_auto_turn_follow_up_order() {
 }
 
 #[test]
+fn resume_pending_question_command_is_the_only_command_that_auto_drains() {
+    use crate::api::chat::commands::ChatCommandOutcome;
+    use crate::api::chat::run_loop::should_resume_after_command;
+    assert!(should_resume_after_command(
+        &ChatCommandOutcome::ResumePendingQuestion
+    ));
+    assert!(!should_resume_after_command(&ChatCommandOutcome::Handled));
+    assert!(!should_resume_after_command(
+        &ChatCommandOutcome::Continue {
+            line: "normal user input".into(),
+            echo_user: false,
+            history_line: None
+        }
+    ));
+}
+
+#[test]
 fn resume_without_pending_question_does_not_start_a_zero_input_turn() {
     assert!(
         !should_auto_drain_resume(true, false),

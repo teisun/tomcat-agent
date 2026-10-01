@@ -4,6 +4,7 @@ import type {
   GetMessagesParams,
   ListSessionsScope,
   ResponseFrame,
+  SlashReply,
   RetainAttachmentLeaseRef,
 } from "./wire";
 
@@ -425,6 +426,16 @@ export class SessionRouter {
       transcriptTruncated: payload.transcriptTruncated === true,
       warnings: parseStringArray(payload.warnings),
     };
+  }
+
+  async runSlashCommand(sessionId: string, text: string): Promise<SlashReply> {
+    const response = await this.messenger.request({ sessionId, text, type: "run_slash_command" }, 600_000);
+    requireSuccessfulResponse(response, "run_slash_command");
+    const payload = response.payload;
+    if (!isRecord(payload) || typeof payload.ok !== "boolean" || typeof payload.text !== "string") {
+      throw new Error("Tomcat run_slash_command payload is invalid");
+    }
+    return { ok: payload.ok, text: payload.text };
   }
 
   async compact(sessionId: string): Promise<CompactPayload> {

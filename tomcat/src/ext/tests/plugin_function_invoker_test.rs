@@ -230,6 +230,80 @@ fn function_search_harness_with_net_fetch(
     (invoker, function_registry, manager, dispatcher)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
+    let fixture = plugin_function_fixture_with_manifest(
+        "birth-fetch",
+        json!({
+            "requiredPermissions": ["net:fetch"], "allowedHosts": ["example.com"]
+        }),
+        "pi.on('noop', function(){});",
+    );
+    let (_, _, manager, dispatcher) =
+        function_search_harness_with_net_fetch(Duration::from_secs(3));
+    let manifest = crate::ext::parse_manifest(
+        &fs::read_to_string(fixture.path().join("plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manager
+        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .unwrap();
+    manager.set_catalog_fingerprint("birth-fetch", 1);
+    let old_handle = manager
+        .start_session_vm("old", "birth-fetch")
+        .await
+        .unwrap();
+    manager.retire_plugin("birth-fetch").unwrap();
+    let fetch = || HostRequest {
+        module: "net".into(),
+        method: "fetch".into(),
+        params: json!({"url":"http://example.com"}),
+        call_id: None,
+    };
+    let error = dispatcher
+        .dispatch_async("old/birth-fetch", fetch())
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(error.contains("ssrf_rejected"), "{error}");
+    let mut updated = manifest;
+    updated.required_permissions.clear();
+    manager
+        .register_catalog_plugin(fixture.path(), updated)
+        .unwrap();
+    manager.set_catalog_fingerprint("birth-fetch", 2);
+    let new_handle = manager
+        .start_session_vm("new", "birth-fetch")
+        .await
+        .unwrap();
+    let error = dispatcher
+        .dispatch_async("old/birth-fetch", fetch())
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(error.contains("ssrf_rejected"), "{error}");
+    let error = dispatcher
+        .dispatch_async("new/birth-fetch", fetch())
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(error.contains("permission_denied"), "{error}");
+    manager.end_session("old").await.unwrap();
+    manager.end_session("new").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while old_handle.current_state() != crate::ext::VmActorState::Stopped
+            || new_handle.current_state() != crate::ext::VmActorState::Stopped
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 fn function_search_harness_with_custom_net_fetch(
     timeout: Duration,
     client: reqwest::Client,

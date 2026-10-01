@@ -4,6 +4,7 @@ import type {
   DraftForkResult,
 } from "../../src/shared/draftForkProtocol";
 import type { PathResolution } from "../../src/shared/pathResolution";
+import type { SharedSlashCommand } from "../../src/serveClient/wire";
 
 export type { PathResolution } from "../../src/shared/pathResolution";
 
@@ -377,6 +378,7 @@ export interface WebviewSessionSnapshot {
   agentMode: WebviewAgentMode;
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
+  commandPending?: boolean;
   composerDraft?: WebviewComposerDraft;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
@@ -434,6 +436,7 @@ export interface WebviewStateSnapshot {
   connectionStatus?: WebviewConnectionStatus;
   mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
+  slashCommands?: SharedSlashCommand[];
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
@@ -813,6 +816,11 @@ export type WebviewIntent =
         revertFiles: boolean;
         sessionId: string;
       };
+    }
+  | {
+      messageId: string;
+      type: "runSlashCommand";
+      data: { sessionId?: string | null; text: string };
     }
   | {
       messageId: string;

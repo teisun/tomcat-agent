@@ -75,6 +75,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
         .register_plugin(PluginInstance {
             id: plugin_id.to_string(),
             manifest,
+            fingerprint: None,
             plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: manifest_tool_names,

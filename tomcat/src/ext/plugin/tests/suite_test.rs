@@ -217,6 +217,58 @@ fn parse_manifest_missing_id_fails() {
     assert!(r.unwrap_err().to_string().contains("id"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
+    let fixture = plugin_fixture(
+        "retiring",
+        serde_json::json!([]),
+        PluginActivation::Lazy,
+        "pi.on('noop', function(){});",
+    );
+    let (manager, dispatcher, _, runtime) = manager_with_runtime();
+    let manifest =
+        parse_manifest(&std::fs::read_to_string(fixture.path().join("plugin.json")).unwrap())
+            .unwrap();
+    manager
+        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .unwrap();
+    manager.set_catalog_fingerprint("retiring", 1);
+    let a = manager.start_session_vm("A", "retiring").await.unwrap();
+    let b = manager.start_session_vm("B", "retiring").await.unwrap();
+    assert!(manager.is_instance_current("A/retiring"));
+    assert!(manager.is_instance_current("retiring")); // legacy initialization stays legal
+    manager.retire_plugin("retiring").unwrap();
+    assert_eq!(
+        runtime.len(),
+        2,
+        "retire must not stop another session's VM"
+    );
+    assert!(!manager.is_instance_current("A/retiring"));
+    assert!(dispatcher.get_event_sender("B/retiring").is_some());
+    assert_eq!(
+        manager.instance_manifest("B/retiring").unwrap().id,
+        "retiring"
+    );
+    manager
+        .register_catalog_plugin(fixture.path(), manifest)
+        .unwrap();
+    manager.set_catalog_fingerprint("retiring", 2);
+    assert!(!manager.is_instance_current("A/retiring"));
+    assert_eq!(manager.stop_stale_session_vms("A").await.unwrap(), 1);
+    assert!(manager.has_session_vm("B", "retiring"));
+    assert!(!manager.has_session_vm("A", "retiring"));
+    manager.stop_stale_session_vms("B").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while a.current_state() != crate::ext::VmActorState::Stopped
+            || b.current_state() != crate::ext::VmActorState::Stopped
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 fn manager_register_and_unload() {
     let bus = Arc::new(DefaultEventBus::new());
@@ -240,6 +292,7 @@ fn manager_register_and_unload() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
+        fingerprint: None,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -280,6 +333,7 @@ fn get_plugin_returns_some_after_register_none_for_unknown() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
+        fingerprint: None,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -322,6 +376,7 @@ fn register_plugin_duplicate_returns_err() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
+        fingerprint: None,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -353,6 +408,7 @@ fn register_plugin_duplicate_returns_err() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
+        fingerprint: None,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -392,6 +448,7 @@ fn enable_disable_changes_status() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
+        fingerprint: None,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],

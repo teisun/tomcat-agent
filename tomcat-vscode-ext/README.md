@@ -113,6 +113,18 @@ The extension contributes these commands:
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`
 
+### Resource commands in the composer
+
+```text
+Type / → choose a command (inserts text) → send → notice/error reply
+```
+
+- `/reload` rescans Skills and plugin tools without restarting the running session. After external CLI or manual resource changes, run it explicitly; it is not a configuration reload or MCP reconnect.
+- `/install './path with spaces' agent` and `/uninstall package-name agent` install/uninstall and synchronize automatically. Specify `current-project` (`scope`), `agent`, or `global`; missing arguments return usage.
+- Uninstall uses the package name listed by `tomcat packages`, not a tool name. Only ledger-managed packages are uninstalled; manually placed directories must be removed from that layer's `plugins/` / `skills/`, then `/reload`.
+- Suggestions open at the start, after whitespace, or on a new line, not inside paths/URLs. Mid-message commands are labelled as active only at the start. Only leading shared commands in text-only drafts execute; references/attachments and unknown commands remain normal prompts.
+- Send, compact, and Build are disabled while a command reply is pending. No fake user turn is added. Servers that do not advertise the command table keep the old composer behavior.
+
 ## Troubleshooting
 
 If Tomcat Agent Box does not appear:

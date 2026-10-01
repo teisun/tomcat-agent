@@ -83,6 +83,8 @@ pub enum PluginStatus {
 pub struct PluginInstance {
     pub id: String,
     pub manifest: PluginManifest,
+    /// Discovery fingerprint; None for explicitly loaded/non-catalog plugins.
+    pub fingerprint: Option<u64>,
     pub plugin_vm_instance: Option<PluginVmInstance>,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
@@ -101,6 +103,8 @@ pub struct PluginInstance {
 pub struct PluginInfo {
     pub id: String,
     pub manifest: PluginManifest,
+    /// Discovery fingerprint; None for explicitly loaded/non-catalog plugins.
+    pub fingerprint: Option<u64>,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
     pub registered_functions: Vec<ManifestFunction>,
@@ -126,6 +130,7 @@ impl PluginInstance {
         PluginInfo {
             id: self.id.clone(),
             manifest: self.manifest.clone(),
+            fingerprint: self.fingerprint,
             status: self.status,
             registered_tools: self.registered_tools.clone(),
             registered_functions: self.registered_functions.clone(),

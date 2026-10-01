@@ -52,6 +52,7 @@ pub struct GlobalServices {
 }
 
 pub struct ScopeContainer {
+    pub inventory_sync: tokio::sync::Mutex<()>,
     pub event_bus: Arc<dyn EventBus>,
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub function_registry: Arc<FunctionRegistry>,
