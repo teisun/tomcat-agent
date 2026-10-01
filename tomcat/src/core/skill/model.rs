@@ -47,6 +47,15 @@ pub struct SkillSet {
 }
 
 impl SkillSet {
+    /// Only a failed root scan makes the whole category untrustworthy.
+    /// Single-file failures remain diagnostics and do not block reconciliation.
+    pub fn discovery_failed(&self) -> bool {
+        self.warnings.iter().any(|warning| {
+            warning == "skills_discovery_roots_failed"
+                || warning.starts_with("skills_root_unreadable:")
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }

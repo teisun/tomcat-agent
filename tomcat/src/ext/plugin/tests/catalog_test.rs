@@ -307,6 +307,34 @@ fn catalog_fingerprint_tracks_content_and_effective_source() {
     );
 }
 
+#[test]
+fn catalog_file_read_failure_isolated_to_entry() {
+    let work = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = project.path().join(".agents/plugins");
+    write_plugin(&root.join("good"), "good", "still discoverable");
+    write_plugin(&root.join("broken"), "broken", "unreadable entry");
+    let entry = root.join("broken/index.js");
+    fs::remove_file(&entry).unwrap();
+    // Exercise both missing files and I/O failure without relying on chmod/UID.
+    for as_directory in [false, true] {
+        if as_directory {
+            fs::create_dir(&entry).unwrap();
+        }
+        let catalog = PluginCatalog::discover(&cfg, project.path()).unwrap();
+        assert!(catalog.get("good").is_some());
+        assert!(catalog.get("broken").is_none());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(catalog.diagnostics[0].path, root.join("broken/plugin.json"));
+        assert!(
+            !catalog.unreadable,
+            "one bad entry must not freeze its category"
+        );
+    }
+}
+
 fn write_plugin(root: &Path, plugin_id: &str, description: &str) {
     fs::create_dir_all(root).expect("create plugin root");
     fs::write(root.join("index.js"), "// catalog fixture").unwrap();

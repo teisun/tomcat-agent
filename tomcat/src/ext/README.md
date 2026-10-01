@@ -72,25 +72,24 @@ Rust 侧 `install_host_globals()` 另外会注入：
 长生命周期路径与 `load_plugin` 不同：
 
 1. 先对 `PluginRuntimeManager` 执行一次**机会式 idle 回收**。
-2. 获取 `(session_id, plugin_id)` 单飞锁；锁内复查并复用健康且来源指纹仍有效的 VM。
+2. 获取 `(session_id, plugin_id)` 单飞锁；锁内复查并复用健康 VM，不在复用路径检查来源指纹。更新时，本会话通过清单核对切换；其他对话在当前轮仍可使用已有旧 VM，下一轮核对再切换。
 3. 否则创建新的 `PluginVmInstance`，登记出生证（来源指纹 + manifest 快照）、事件通道与 host binding。
 4. 通过 `VmActor::spawn()` 在专属线程启动长跑事件循环，等待最小启动回执。初始化失败不留下健康 VM 登记，后续可重试；同键并发仅初始化一次。
 
 ### `retire_plugin` 与会话内 `/reload`
 
 ```text
-磁盘插件删除/更新 → retire_plugin 撤销共享能力 → 已获准调用收尾
-                                                    ↓
-                           stop_stale_session_vms 观察本会话旧 VM 退出
-                                                    ↓
-                           activate_session_plugins 按正常策略激活
+磁盘插件删除/更新 → retire_plugin 下架共享能力
+                         ├─ 本会话：清理旧 VM 登记、通知退出 → 正常激活
+                         └─ 其他会话：当前调用收尾；更新时本轮仍可用旧 VM
+                                      下一轮核对再切换
 ```
 
 - 来源指纹覆盖规范化根目录、manifest 与入口字节；RuntimeEntry 保存 VM 出生时指纹和清单。
-- `retire_plugin` 只下架共享目录/工具/函数等能力，不把它误当作全会话 VM 已退出；新调用和旧来源注册均检查当前实例资格。
-- 运行中的旧 VM 仍按出生清单判断 `net.fetch` 权限，不能借新版本清单提权。已获准工作安全收尾，撤销后不接新工作。
-- 仅发送 Shutdown 不等于退出，回收需可观测的停止状态；无关插件/会话工作不被一并中断。
-- `/reload`、会话内安装和卸载共用清单引擎；同名更新先撤销、收尾与清理，再启用替代，不维护新旧版本同时运行机制。
+- `retire_plugin` 只下架共享目录/工具/函数等能力，不代表所有会话 VM 已退出。删除插件立即从共享工具表下架；更新插件时，其他会话已有旧 VM 在当前轮仍可服务，下一轮核对再切换。过期 VM 的能力登记写入会被拒绝。
+- 运行中的旧 VM 仍按出生清单判断 `net.fetch` 权限，不能借新版本清单提权；已获准工作可以安全收尾，不把能力下架描述成所有 hostcall 的即时撤权。
+- `stop_stale_session_vms` 清理本会话过期登记、发送 Shutdown 并清理 dispatcher；发送 Shutdown 不等于线程已退出。无关插件/会话工作不被一并中断。
+- `/reload`、会话内安装和卸载共用清单引擎；同名更新复用上述会话边界切换，不另建按代次调度新旧插件的机制。
 
 ### `end_session(session_id)`
 

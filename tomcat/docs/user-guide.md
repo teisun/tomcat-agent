@@ -646,9 +646,9 @@ Chat /install or /uninstall       → the same synchronization runs automaticall
 ```
 
 - `/reload` rescans effective Skill and plugin resources, reports additions/removals/updates, and refreshes the next model request. It does not reload arbitrary configuration or reconnect MCP servers. External changes are **not scanned on every prompt**; run `/reload` explicitly.
-- `current-project` is a label for `scope`; `agent` and `global` are also accepted. Terminal `/install` and `/uninstall` can ask for the layer if omitted; VS Code is non-interactive and returns usage instead. Quote paths containing spaces; `/install SOURCE LAYER --force` replaces a same-layer resource.
+- `current-project` is a label for `scope`; `agent` and `global` are also accepted. Terminal `/install` and `/uninstall` can ask for the layer if omitted; VS Code is non-interactive and returns usage instead. Quote paths containing spaces. Slash `/install` does not support `--force`: uninstall first and then install, or use the outer CLI's `tomcat install --force`.
 - `/uninstall` takes the **package name** from `tomcat packages`, not a tool name. It only uninstalls ledger-managed packages in the specified layer. For manually placed resources, delete the directory under that layer's `plugins/` or `skills/`, then run `/reload`.
-- Package installation itself remains static. The subsequent session synchronization revokes removed/changed plugins, drains already admitted work, retires stale VMs, and reuses normal activation. Static Lazy plugins remain lazy; Session initialization can run during synchronization. Unrelated plugins are preserved.
+- Package installation itself remains static. Synchronization removes deleted plugins from the shared tool catalog and lets already admitted calls finish. For an update, this session clears its stale VM registration and requests shutdown; other sessions may keep using their existing VM for the current turn and switch at the next turn. Old VMs cannot register new capabilities, and their permissions still come from their birth manifest. Static Lazy plugins remain lazy; Session initialization can run during synchronization. Unrelated plugins are preserved.
 - In VS Code, `/` opens suggestions at the start, after whitespace, or on a new line; paths and URLs do not open them. Selecting inserts text, not executes it. Only a leading shared command with **text only** is intercepted on send; mid-message commands and drafts with references/attachments remain ordinary prompts. Waiting commands disable send, compact and Build; replies appear as notice/error bubbles. Older servers without the command table do not show this menu.
 
 ---
@@ -727,7 +727,7 @@ Inside interactive chat, tomcat intercepts local commands starting with `/` befo
 | Command | Description |
 |---------|-------------|
 | `/reload` | Rescan Skills and plugin tools in the running session |
-| `/install <source> <current-project\|agent\|global> [--force]` | Install and synchronize resources |
+| `/install <source> <current-project\|agent\|global>` | Install and synchronize resources |
 | `/uninstall <package-name> <current-project\|agent\|global>` | Uninstall a ledger-managed package and synchronize |
 | `/help` | Show the currently supported local commands |
 | `/path <absolute path>` | Open the authorization menu for one path (this session / write to workspace / read-only / deny / cancel) |

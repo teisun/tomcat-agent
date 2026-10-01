@@ -641,11 +641,12 @@ impl PluginManager {
             let _ = self.stop_vm_entry(&key).await;
             return Err(error);
         }
-        let initialized = tokio::time::timeout(
-            std::time::Duration::from_millis(engine.config().call_timeout_ms.max(1)),
-            ready_rx,
-        )
-        .await;
+        let timeout_ms = engine.config().call_timeout_ms;
+        let initialized = if timeout_ms == 0 {
+            Ok(ready_rx.await)
+        } else {
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), ready_rx).await
+        };
         let error = match initialized {
             Ok(Ok(Ok(()))) => None,
             Ok(Ok(Err(error))) => Some(error),

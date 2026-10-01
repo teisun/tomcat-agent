@@ -69,27 +69,56 @@ pub fn parse_shared_slash(text: &str) -> Option<Result<(String, Vec<String>), St
     )
 }
 
-/// Validate without changing state; Serve uses this before reserving a session.
-pub fn shared_usage_error(name: &str, args: &[String]) -> Option<SlashReply> {
-    let Some(command) = shared_command(name) else {
-        return Some(SlashReply::error(format!(
-            "未知命令 /{name}，输入框可用：{}",
-            SHARED_SLASH_COMMANDS
-                .iter()
-                .map(|command| format!("/{}", command.name))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )));
+enum SharedInvocation<'a> {
+    Reload,
+    Install {
+        source: &'a str,
+        target: cmd_install::InstallTarget,
+    },
+    Uninstall {
+        package: &'a str,
+        target: cmd_install::InstallTarget,
+    },
+}
+
+fn unknown_command(name: &str) -> SlashReply {
+    SlashReply::error(format!(
+        "未知命令 /{name}，输入框可用：{}",
+        SHARED_SLASH_COMMANDS
+            .iter()
+            .map(|command| format!("/{}", command.name))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ))
+}
+
+fn parse_invocation<'a>(
+    name: &str,
+    args: &'a [String],
+) -> Result<SharedInvocation<'a>, SlashReply> {
+    let command = shared_command(name).ok_or_else(|| unknown_command(name))?;
+    let invocation = match name {
+        "reload" => args.is_empty().then_some(SharedInvocation::Reload),
+        "install" | "uninstall" => match args {
+            [subject, layer] => cmd_install::parse_target(layer).map(|target| {
+                if name == "install" {
+                    SharedInvocation::Install {
+                        source: subject,
+                        target,
+                    }
+                } else {
+                    SharedInvocation::Uninstall {
+                        package: subject,
+                        target,
+                    }
+                }
+            }),
+            _ => None,
+        },
+        _ => return Err(unknown_command(name)),
     };
-    let valid = match name {
-        "reload" => args.is_empty(),
-        "install" | "uninstall" => args.len() == 2 && cmd_install::parse_target(&args[1]).is_some(),
-        _ => false,
-    };
-    if valid {
-        None
-    } else {
-        Some(SlashReply::error(format!(
+    invocation.ok_or_else(|| {
+        SlashReply::error(format!(
             "[{name}] 用法：{}{}",
             command.usage,
             if name == "reload" {
@@ -97,8 +126,13 @@ pub fn shared_usage_error(name: &str, args: &[String]) -> Option<SlashReply> {
             } else {
                 ""
             }
-        )))
-    }
+        ))
+    })
+}
+
+/// Validate without changing state; Serve uses this before reserving a session.
+pub fn shared_usage_error(name: &str, args: &[String]) -> Option<SlashReply> {
+    parse_invocation(name, args).err()
 }
 
 /// No printing, transcript mutation, model call, or interactive question here.
@@ -107,18 +141,16 @@ pub async fn run_shared_slash_command(
     name: &str,
     args: &[String],
 ) -> SlashReply {
-    if let Some(reply) = shared_usage_error(name, args) {
-        return reply;
-    }
-    match name {
-        "reload" => cmd_reload::run(ctx).await,
-        "install" => {
-            cmd_install::run(ctx, &args[0], cmd_install::parse_target(&args[1]).unwrap()).await
+    let invocation = match parse_invocation(name, args) {
+        Ok(invocation) => invocation,
+        Err(reply) => return reply,
+    };
+    match invocation {
+        SharedInvocation::Reload => cmd_reload::run(ctx).await,
+        SharedInvocation::Install { source, target } => cmd_install::run(ctx, source, target).await,
+        SharedInvocation::Uninstall { package, target } => {
+            cmd_uninstall::run(ctx, package, target).await
         }
-        "uninstall" => {
-            cmd_uninstall::run(ctx, &args[0], cmd_install::parse_target(&args[1]).unwrap()).await
-        }
-        _ => unreachable!("the shared table and executor are checked together"),
     }
 }
 

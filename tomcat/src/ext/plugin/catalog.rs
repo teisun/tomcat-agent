@@ -144,7 +144,6 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
                 }
             }
             Err(error) => {
-                catalog.unreadable |= matches!(&error, AppError::Io(_));
                 catalog.diagnostics.push(PluginCatalogDiagnostic {
                     path: manifest_path,
                     reason: error.to_string(),

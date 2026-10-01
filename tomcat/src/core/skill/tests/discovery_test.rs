@@ -258,6 +258,43 @@ fn discover_ignores_loose_markdown_files_in_project_root() {
     let _ = std::fs::remove_dir_all(&temp);
 }
 
+#[test]
+fn discovery_failed_distinguishes_single_file_and_root_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let work = temp.path().join("work");
+    let cfg = base_config(&work);
+    let bad = project.join(".agents/skills/broken/SKILL.md");
+    write_raw(&bad, "placeholder");
+    std::fs::write(&bad, [0xff, 0xfe]).unwrap();
+    write_skill(&work.join("skills/good/SKILL.md"), "good", "still visible");
+
+    let single_file = discover(&cfg, &project);
+    assert!(single_file.by_name.contains_key("good"));
+    assert!(!single_file.by_name.contains_key("broken"));
+    assert!(!single_file.diagnostics.is_empty());
+    assert!(single_file
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("skills_scan_unreadable:")));
+    assert!(!single_file.discovery_failed());
+
+    // A file at the root path makes read_dir fail without chmod/UID assumptions.
+    let root = project.join(".agents/skills");
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, "not a directory").unwrap();
+    let failed_root = discover(&cfg, &project);
+    assert!(failed_root.discovery_failed());
+    assert!(failed_root.by_name.contains_key("good"));
+
+    let mut set = crate::core::skill::SkillSet::default();
+    assert!(!set.discovery_failed());
+    set.warnings.push("skill_shadowed:good by project".into());
+    assert!(!set.discovery_failed());
+    set.warnings.push("skills_discovery_roots_failed".into());
+    assert!(set.discovery_failed());
+}
+
 fn base_config(work_dir: &Path) -> AppConfig {
     let mut cfg = AppConfig::default();
     cfg.agent.id = "spike".to_string();

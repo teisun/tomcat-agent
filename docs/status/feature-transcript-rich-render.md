@@ -2,16 +2,23 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-01 16:49 +0800 |
+| Updated | 2026-10-01 19:55 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Session Skill/plugin inventory reload and shared slash commands; plugin retirement and single-flight initialization; Serve background jobs and terminal restore; MCP lifecycle/project trust and connector Settings; CLI/extension release metadata |
+| Scope | Session Skill/plugin inventory reload and bad-entry isolation; zero-timeout plugin startup; Serve task-handle synchronization and shared slash parsing; plugin retirement and terminal restore; MCP lifecycle/project trust and connector Settings; CLI/extension release metadata |
 | Cov% | - |
 
 ### DONE
 
+- Isolated unreadable Skill/plugin entries so one bad file no longer freezes the category; healthy additions/removals continue, the reconciled inventory matches an independent new session, and repaired entries return on reload.
+- Shared `SkillSet::discovery_failed()` between `/reload` and `/skill reload` to preserve the old category only when root discovery fails, rather than for a single unreadable file.
+- Made `call_timeout_ms = 0` disable plugin startup waiting limits as well as call timeouts; retained initialization-error reporting, cleanup, and same-key retry.
+- Protected Serve turn handle installation and completion with the existing `run_task` mutex so an old completion cannot erase a following task's handle or release busy before cleanup is synchronized.
+- Parsed shared command arguments into `SharedInvocation` before execution, removed the corresponding `unwrap()`/`unreachable!`, and corrected slash `--force`, existing-VM reuse, and shutdown documentation.
+- Synchronized release metadata to CLI `0.1.61`, VS Code extension `0.1.75`, and bundled CLI pin `0.1.61`; the separately built pure `0.1.75` VSIX remains an ignored local artifact.
+
 - Added explicit session resource synchronization through `/reload`, shared with `/install` and `/uninstall` in terminal and VS Code; external changes require reload rather than a disk scan before every prompt.
-- Matched effective plugin IDs by source/content fingerprint, skipped staging directories, preserved the last good inventory after read failures, and retired revoked capabilities without aborting other sessions' current calls.
+- Matched effective plugin IDs by source/content fingerprint, skipped staging directories, preserved the last good inventory after root/registry discovery failures, and retired revoked capabilities without aborting other sessions' current calls.
 - Kept VM birth manifests for permission checks, rejected stale registry writes, and made session/plugin initialization single-flight with readiness/error receipts and retry after failed initialization.
 - Moved slow Serve maintenance commands into session jobs so another session can continue; rehydrated terminal memory after `/restore` and resumed restored pending questions.
 - Added shared-table composer suggestions and pending-command controls, real external-uninstall/request-boundary regressions, multi-session checks, and responsive browser capture coverage.
@@ -44,13 +51,17 @@
 
 ### INTERFACE
 
+- `SkillSet::discovery_failed()` distinguishes root discovery failure from per-file warnings; both reload paths use the same predicate, and unreadable entries stop appearing in the effective inventory until repaired.
+- `PluginEngineConfig::call_timeout_ms = 0` means unlimited startup readiness waiting; nonzero startup deadlines and initialization-failure cleanup remain in place.
+- Shared slash command names, layer aliases, and `SlashReply`/Serve wire contracts are unchanged; slash `/install` does not accept `--force`, while the outer CLI retains its own force-install option.
+
 - Serve initialization advertises `slashCommands` and `run_slash_command`; `run_slash_command` accepts a session ID plus raw text and returns shared `SlashReply { ok, text }` without interactive prompts or model requests.
 - `/uninstall` takes a package-ledger name, not a tool name; manually copied resources must be deleted from their layer's `plugins/` or `skills/` directory before `/reload`.
 - Resource reload updates the current session and shared inventory; other sessions finish the current round and synchronize at their next epoch boundary. MCP, builtin tools, and model configuration are outside this reload contract.
 - Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata declares VS Code extension `0.1.74` with bundled CLI `0.1.60`; changing these values is not evidence of publishing or installing the artifact, while the separately built pure VSIX intentionally contains no bundled CLI.
+- Release metadata declares VS Code extension `0.1.75` with bundled CLI `0.1.61`; changing these values is not evidence of publishing or installing the artifact, while the separately built pure VSIX intentionally contains no bundled CLI.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
@@ -64,7 +75,8 @@
 
 ### BLOCKED
 
-- The resource-inventory acceptance's initial `gate-fast` command exited 1. Its affected failures were resolved or passed focused reruns while unchanged successful results were reused; the whole command was not rerun and is not claimed as a single all-green run.
+- The latest remediation's complete `gate-fast` run exited 1 because the new error-path test used a Clippy-rejected assertion. After fixing it, full all-targets Clippy and both affected regressions passed; the complete library/doc/integration results remain valid. The initial exit 1 is retained, not relabeled as one all-green command.
+- Earlier resource-inventory gate failures and focused closure results remain historical evidence; the later complete remediation run passed all library and integration tests.
 - A pure extension VSIX was built during implementation acceptance, but this commit does not verify installation in the user's daily profile or the artifact loaded by its current window.
 - Large fonts, very short windows, or long questions may still require scrolling within the current question; preserving the height cap does not guarantee every possible question fits fully above the fold.
 - The unchanged Git large-output timing assertion failed under load and passed alone in 3.25s; load sensitivity remains a risk. Browser acceptance used the production App/TipTap with a simulated webview host plus separately verified real Serve/host boundaries, not an installed-profile end-to-end manual walkthrough.
@@ -73,6 +85,12 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- Remediation acceptance completed the full `gate-fast` command (`1790851903945-ucldnd`): 2967 library tests passed / 3 ignored, doctest had 0 cases, parallel integration had 363 passed / 26 skipped, and serial integration had 32 passed. Its exit 1 came from the initial Clippy assertion issue described above.
+- After fixing that assertion, formatting, complete `cargo clippy --all-targets -- -D warnings`, both zero-timeout regressions, and whitespace checks passed (`1790853571921-23wfnj`). Earlier focused checks also covered bad-file isolation/recovery, controlled turn completion, session jobs, and unchanged shared-command behavior.
+- The complete extension `npm test` passed 530 host tests and 644 GUI tests (`1790851903982-yz2g4s`); these are implementation acceptance results, not reruns for this commit.
+- Final version/scope checks passed (`1790854496587-ud369l`). The three unrelated gate-configuration fixes were already committed in `11d61f60`; this remediation leaves those files unchanged and does not rewrite that history.
+- The pure `tomcat-vscode-ext-0.1.75.vsix` was built and checked before this commit request (`1790846968883-2ufpc1`, `1790847479940-67seee`): 220 files, no bundled CLI, archive integrity passed, SHA-256 `d8a538748565816d4c7112725d4ebc66650c8d3745e63b09ec099eb674f9b1d4`.
 
 - The resource-inventory implementation acceptance recorded the real process regression red to green: external CLI uninstall, same live session `/reload`, then actual model system/tools without the removed resources. Task `1790819140533-2osppy` also recorded the initial full gate failures, 2962 passing lib tests, 359 passing parallel integration tests, and 32 passing serial integration tests; its failure result is preserved.
 - Focused closure passed all-targets Clippy, shared/session-job tests, the four-scenario timing matrix (`1790821426978-em3rel`), the unchanged Git timeout test (`1790823581755-itk8fd`), and 5 reminder plus 5 integration-gate configuration tests with lib/tests Clippy (`1790823725702-ambbw9`).

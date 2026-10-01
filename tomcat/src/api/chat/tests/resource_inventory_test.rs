@@ -391,36 +391,95 @@ async fn resource_inventory_diff_noop_description_update_and_removal() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial(env_lock)]
-async fn resource_inventory_file_read_failure_preserves_last_good_category() {
+async fn resource_inventory_file_read_failure_isolates_bad_entries_and_matches_new_context() {
     let _lock = crate::test_support::home_env_lock().lock().unwrap();
     let fixture = Fixture::new();
     let skill = fixture.skill("keep-file", "last good description");
+    fixture.skill("stable", "unchanged");
+    let removed_skill = fixture.skill("gone", "removed later");
     let plugin = fixture.plugin("keep-plugin", "lazy", &script("keep-plugin", "old"));
+    fixture.plugin(
+        "stable-plugin",
+        "lazy",
+        &script("stable-plugin", "unchanged"),
+    );
+    let removed_plugin = fixture.plugin("gone-plugin", "lazy", &script("gone-plugin", "old"));
     let ctx = fixture.ctx(SessionMode::Code, false);
     ctx.spawn_skill_discovery_if_needed().await;
     ctx.await_skill_discovery().await;
-    let before = ctx.skill_set_snapshot();
-    // Invalid UTF-8 fails the disk reader, independently of process UID/chmod.
+    // Invalid UTF-8 and IsADirectory are deterministic, even when running as root.
     std::fs::write(skill.join("SKILL.md"), [0xff, 0xfe]).unwrap();
-    // Manifest stays valid; reading its script as bytes fails (IsADirectory).
     std::fs::remove_file(plugin.join("main.js")).unwrap();
     std::fs::create_dir(plugin.join("main.js")).unwrap();
+    std::fs::remove_dir_all(removed_skill).unwrap();
+    std::fs::remove_dir_all(removed_plugin).unwrap();
+    fixture.skill("added", "new skill");
+    fixture.plugin("added-plugin", "lazy", &script("added-plugin", "new"));
+
     let report = ctx.sync_resource_inventory().await.unwrap();
-    assert!(
-        !report.has_changes(),
-        "read failure is not uninstall: {report:?}"
+    assert_eq!(report.skills_added, ["added"]);
+    assert_eq!(report.skills_removed, ["gone", "keep-file"]);
+    assert_eq!(report.plugins_added, ["added-plugin"]);
+    assert_eq!(report.plugins_removed, ["gone-plugin", "keep-plugin"]);
+    assert!(ctx.skill_set_snapshot().by_name.contains_key("stable"));
+    assert_eq!(
+        names(&ctx).await,
+        ["added-plugin_tool", "stable-plugin_tool"]
     );
-    assert_eq!(ctx.skill_set_snapshot(), before);
-    assert_eq!(names(&ctx).await, ["keep-plugin_tool"]);
     assert!(report
         .warnings
         .iter()
-        .any(|warning| warning.starts_with("skills_scan_unreadable:")));
+        .any(|w| w.starts_with("skills_scan_unreadable:")));
     assert!(report
         .warnings
         .iter()
-        .any(|warning| warning.contains("plugin catalog ignored")));
+        .any(|w| w.contains("plugin catalog ignored")));
+
+    let cold = fixture.ctx(SessionMode::Code, true);
+    cold.spawn_skill_discovery_if_needed().await;
+    cold.await_skill_discovery().await;
+    assert!(!Arc::ptr_eq(
+        &ctx.scope_services.scope_container,
+        &cold.scope_services.scope_container
+    ));
+    assert_eq!(
+        ctx.skill_set_snapshot().by_name,
+        cold.skill_set_snapshot().by_name
+    );
+    let mut current_tools = ctx
+        .global_services
+        .tool_registry
+        .list_tools(None)
+        .await
+        .unwrap();
+    let mut new_tools = cold
+        .global_services
+        .tool_registry
+        .list_tools(None)
+        .await
+        .unwrap();
+    // Registration times differ across sessions; all actual tool definitions must match.
+    for tool in current_tools.iter_mut().chain(new_tools.iter_mut()) {
+        tool.created_at = 0;
+    }
+    assert_eq!(
+        serde_json::to_value(current_tools).unwrap(),
+        serde_json::to_value(new_tools).unwrap()
+    );
+
+    fixture.skill("keep-file", "repaired description");
+    std::fs::remove_dir(plugin.join("main.js")).unwrap();
+    fixture.plugin("keep-plugin", "lazy", &script("keep-plugin", "repaired"));
+    let repaired = ctx.sync_resource_inventory().await.unwrap();
+    assert_eq!(repaired.skills_added, ["keep-file"]);
+    assert_eq!(repaired.plugins_added, ["keep-plugin"]);
+    assert_eq!(
+        ctx.skill_set_snapshot().by_name["keep-file"].description,
+        "repaired description"
+    );
+    assert!(names(&ctx).await.contains(&"keep-plugin_tool".to_string()));
     stop(&ctx).await;
+    stop(&cold).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

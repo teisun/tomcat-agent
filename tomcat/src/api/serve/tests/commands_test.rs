@@ -1963,6 +1963,87 @@ async fn serve_resume_replaces_legacy_synthetic_ask_question_result() {
     assert_eq!(result["answers"][0]["option_ids"][0], "no");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_turn_completion_keeps_busy_until_run_task_lock_is_available() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+    let provider: Arc<dyn LlmProvider> = Arc::new(ChannelMockLlm::new(vec![stream_rx]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("locked-turn".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "controlled completion".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    stream_tx
+        .send(Ok(StreamEvent::ContentDelta {
+            delta: "reply".into(),
+        }))
+        .unwrap();
+    wait_for_line(&buffer, |frame| frame["type"] == "message_update").await;
+
+    let (locked_tx, locked_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held_slot = Arc::clone(&slot);
+    // Hold the synchronous mutex on a separate thread, not across an async await.
+    let holder = tokio::task::spawn_blocking(move || {
+        let running = held_slot.run_task.lock();
+        assert!(running.is_some());
+        locked_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let still_busy = held_slot.is_busy();
+        drop(running);
+        still_busy
+    });
+    locked_rx.await.unwrap();
+    stream_tx
+        .send(Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        }))
+        .unwrap();
+    drop(stream_tx);
+    // A returned lease proves the model run has finished; cleanup is still locked.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while slot.turn_state.lock().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("turn must return its context state");
+    // Let the completion poll reach the held mutex, without relying on racing two jobs.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before_release = read_ndjson_lines(&buffer);
+    release_tx.send(()).unwrap();
+    let busy_while_locked = holder.await.unwrap();
+    let lines = wait_for_line(&buffer, |frame| frame["type"] == "agent_idle").await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while slot.run_task.lock().is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        busy_while_locked,
+        "completion must acquire run_task before marking idle"
+    );
+    assert_eq!(count_event(&before_release, "agent_idle"), 0);
+    assert_eq!(count_event(&lines, "agent_idle"), 1);
+    assert!(!slot.is_busy());
+    cleanup_session_slot(&state, &slot, true, "test_finished")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {

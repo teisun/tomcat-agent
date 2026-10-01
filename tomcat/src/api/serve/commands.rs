@@ -2537,6 +2537,8 @@ pub(crate) async fn start_turn(
         TurnAck::Silent => {}
     }
 
+    // Install the handle before an immediately completed turn can clear it.
+    let mut running = slot.run_task.lock();
     let slot_for_task = Arc::clone(&slot);
     let state_for_task = Arc::clone(&state);
     let handle = tokio::spawn(async move {
@@ -2586,11 +2588,14 @@ pub(crate) async fn start_turn(
                 );
             }
         }
-        slot_for_task.mark_idle();
+        {
+            let mut running = slot_for_task.run_task.lock();
+            slot_for_task.mark_idle();
+            *running = None;
+        }
         emit_agent_idle(&state_for_task, &slot_for_task);
-        *slot_for_task.run_task.lock() = None;
     });
-    *slot.run_task.lock() = Some(handle);
+    *running = Some(handle);
     Ok(())
 }
 
@@ -2645,7 +2650,8 @@ fn emit_estimated_context_metrics_snapshot(slot: &Arc<super::registry::SessionSl
 /// 任何直接改写 transcript 历史的 serve 命令都经此处同步内存 context。
 ///
 /// `/compact`、`/restore` 与 pending-question 结算都会改变逻辑消息链；只改 JSONL 会让
-/// 下一轮仍发送旧内存副本。入口处已保证 slot 不 busy，故可安全读取并替换 turn state。
+/// 下一轮仍发送旧内存副本。调用方保证期间没有模型轮次在运行；后台命令会持有忙标记，
+/// 空闲同步入口也可调用，故可安全读取并替换 turn state。
 fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Result<(), AppError> {
     let system_text = slot
         .turn_state

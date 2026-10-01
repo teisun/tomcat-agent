@@ -1024,10 +1024,7 @@ impl ChatContext {
         } else {
             crate::core::skill::SkillSet::default()
         };
-        if skill_set.warnings.iter().any(|warning| {
-            warning == "skills_discovery_roots_failed"
-                || warning.starts_with("skills_root_unreadable:")
-        }) {
+        if skill_set.discovery_failed() {
             return self.skill_set_snapshot();
         }
         *self.scope_services.skill_set.write() = skill_set.clone();

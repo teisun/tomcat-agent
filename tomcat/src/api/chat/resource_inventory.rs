@@ -99,12 +99,7 @@ impl ChatContext {
         report.timings.discover_plugins = plugins_time;
         report.warnings.extend(skills.warnings.clone());
         let phase = Instant::now();
-        let skill_read_failed = skills.warnings.iter().any(|warning| {
-            warning == "skills_discovery_roots_failed"
-                || warning.starts_with("skills_root_unreadable:")
-                || warning.starts_with("skills_scan_unreadable:")
-        });
-        if !skill_read_failed {
+        if !skills.discovery_failed() {
             let old = self.skill_set_snapshot();
             if skills != old {
                 for (name, skill) in &skills.by_name {

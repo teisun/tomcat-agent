@@ -646,9 +646,9 @@ tomcat uninstall my-package --visibility scope
 ```
 
 - `/reload` 重扫有效 Skill 和插件资源，汇报增、删、改并更新下一轮模型请求；不重读任意配置，也不重连 MCP。当前**没有每次发送提示词都扫盘**，外部改动后请主动 `/reload`。
-- `current-project` 是 `scope` 的用户标签，也可选 `agent` / `global`。终端 `/install`、`/uninstall` 缺层时弹选择面板；VS Code 不弹交互面板，缺参数返回用法。带空格的路径用引号；同层覆盖用 `/install SOURCE LAYER --force`。
+- `current-project` 是 `scope` 的用户标签，也可选 `agent` / `global`。终端 `/install`、`/uninstall` 缺层时弹选择面板；VS Code 不弹交互面板，缺参数返回用法。带空格的路径用引号。斜杠命令 `/install` 不支持 `--force`；要覆盖安装，先 `/uninstall` 再 `/install`，或使用外层命令行 `tomcat install --force`。
 - `/uninstall` 参数是 `tomcat packages` 列出的**包名**，不是工具名；只卸载指定层包账本管理的资源。手工放入的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
-- 包安装本身仍只做静态操作；安装后的会话核对会撤销已删除/更新插件的新调用资格、收尾已获准调用、回收过期 VM 并复用正常激活逻辑。静态 Lazy 插件保持懒加载；Session 插件初始化可能在核对期间执行。无关插件保持不变。
+- 包安装本身仍只做静态操作。核对会把已删除插件从共享工具表下架，已获准调用可以收尾。更新插件时，本会话清理旧 VM 登记并通知退出；其他对话在当前轮仍可使用已有的旧 VM，下一轮核对再切换。旧 VM 不能再登记新能力，权限仍按出生时的清单判断。静态 Lazy 插件保持懒加载；Session 插件初始化可能在核对期间执行。无关插件保持不变。
 - VS Code 在输入开头、空格后或换行后输入 `/` 弹菜单；路径和 URL 内不弹。选择只是插入文字，发送才执行；只有开头的共享命令且**纯文字**才被拦截，句中命令、含引用/附件的草稿仍当普通消息。等待回包期间禁用发送、压缩和 Build，结果显示为提示/错误气泡。旧 Serve 未下发命令表时不显示该菜单。
 
 ---
@@ -727,7 +727,7 @@ agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中�
 | 命令 | 说明 |
 |------|------|
 | `/reload` | 重扫本会话 Skill 与插件工具 |
-| `/install <source> <current-project\|agent\|global> [--force]` | 安装并同步资源 |
+| `/install <source> <current-project\|agent\|global>` | 安装并同步资源 |
 | `/uninstall <package-name> <current-project\|agent\|global>` | 卸载账本管理的包并同步 |
 | `/help` | 显示当前支持的本地命令 |
 | `/path <绝对路径>` | 为单个路径打开授权菜单（本次会话 / 写入工作区 / 只读 / 禁止 / 取消） |
