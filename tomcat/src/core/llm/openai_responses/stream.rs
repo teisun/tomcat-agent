@@ -46,6 +46,11 @@ pub(super) struct ResponsesStream<S> {
     /// 已成功解码出的有效 provider 事件数。首帧就解析失败通常是中转流被截断/
     /// SSE keepalive 嗅探错误，可重试；已经收到事件之后再解析失败则是协议错误。
     seen_valid_event: bool,
+    /// 只有协议终止事件才算响应终结，EOF 本身不是完成证据。
+    terminal_seen: bool,
+    finished: bool,
+    /// EOF 残留产生的正常事件交付完后，至多交付一次中断错误。
+    eof_error: Option<AppError>,
 }
 
 #[derive(Debug)]
@@ -250,6 +255,9 @@ impl<S> ResponsesStream<S> {
             source_profile,
             continuity_enabled,
             seen_valid_event: false,
+            terminal_seen: false,
+            finished: false,
+            eof_error: None,
         }
     }
 
@@ -268,15 +276,29 @@ impl<S> ResponsesStream<S> {
                 llm_stream_interrupted_error(PROVIDER_NAME, summary)
             }
         })?;
+        Ok(self.process_value(&value))
+    }
+
+    fn process_value(&mut self, value: &Value) -> Vec<StreamEvent> {
+        self.terminal_seen |= matches!(
+            value.get("type").and_then(Value::as_str),
+            Some(
+                "response.completed"
+                    | "response.done"
+                    | "response.incomplete"
+                    | "response.failed"
+                    | "error"
+            )
+        );
         let events = responses_chunk_to_events_with_state(
-            &value,
+            value,
             &mut self.tool_calls,
             &mut self.reasoning,
             &self.source_profile,
             self.continuity_enabled,
         );
         self.seen_valid_event |= !events.is_empty();
-        Ok(events)
+        events
     }
 }
 
@@ -289,6 +311,12 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(evt) = self.pending.next() {
             return Poll::Ready(Some(Ok(evt)));
+        }
+        if let Some(error) = self.eof_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
+        if self.finished {
+            return Poll::Ready(None);
         }
 
         loop {
@@ -328,59 +356,62 @@ where
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
-                    // 流结束：把残留 buffer 当作最后一帧再尝试解析。
-                    if !self.buffer.is_empty() {
-                        let is_ndjson = self.mode.unwrap_or(true);
-                        let mut chunks = match drain_buffer(&mut self.buffer, is_ndjson) {
-                            Ok(chunks) => chunks,
+                    self.finished = true;
+                    let is_ndjson = self.mode.unwrap_or(true);
+                    // 有分隔符的完整帧仍使用原来的严格解析与错误分类。
+                    let chunks = match drain_buffer(&mut self.buffer, is_ndjson) {
+                        Ok(chunks) => chunks,
+                        Err(error) => return Poll::Ready(Some(Err(error))),
+                    };
+                    let mut events = Vec::new();
+                    for raw in chunks {
+                        match self.process_chunk(&raw) {
+                            Ok(parsed) => events.extend(parsed),
                             Err(error) => return Poll::Ready(Some(Err(error))),
-                        };
-                        // `drain_buffer` 只处理完整分隔符；EOF 时剩下的半帧也必须
-                        // 向上报告，不能被当成“正常没有事件”静默吞掉。
-                        if !self.buffer.is_empty() {
-                            let raw = std::mem::take(&mut self.buffer);
-                            let raw = match String::from_utf8(raw) {
-                                Ok(raw) => raw,
-                                Err(error) => {
-                                    return Poll::Ready(Some(Err(llm_error_with_source(
-                                        PROVIDER_NAME,
-                                        LlmErrorStage::Parse,
-                                        "流结束时 Responses chunk 不是 UTF-8".to_string(),
-                                        error,
-                                    ))))
-                                }
-                            };
-                            if is_ndjson {
-                                let trimmed = raw.trim();
-                                if !trimmed.is_empty() && !trimmed.starts_with(':') {
-                                    chunks.push(trimmed.to_string());
-                                }
-                            } else {
-                                for line in raw.lines().map(str::trim) {
-                                    if let Some(data) = line.strip_prefix("data: ") {
-                                        if data != "[DONE]" {
-                                            chunks.push(data.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let mut events = Vec::new();
-                        for raw in chunks {
-                            match self.process_chunk(&raw) {
-                                Ok(mut parsed) => events.append(&mut parsed),
-                                Err(error) => return Poll::Ready(Some(Err(error))),
-                            }
-                        }
-                        if let Some((first, rest)) = events.split_first() {
-                            let first = first.clone();
-                            #[allow(clippy::unnecessary_to_owned)]
-                            let pending_vec = rest.to_vec();
-                            self.pending = pending_vec.into_iter();
-                            return Poll::Ready(Some(Ok(first)));
                         }
                     }
-                    return Poll::Ready(None);
+
+                    // 仅 EOF 的未分隔残留宽松解析；不从半帧猜终态，也不泄露 raw。
+                    let residual = std::mem::take(&mut self.buffer);
+                    let mut discarded_bytes = 0;
+                    match std::str::from_utf8(&residual) {
+                        Ok(raw) => {
+                            let chunks = if is_ndjson {
+                                let trimmed = raw.trim();
+                                if trimmed.is_empty() || trimmed.starts_with(':') {
+                                    Vec::new()
+                                } else {
+                                    vec![trimmed]
+                                }
+                            } else {
+                                raw.lines()
+                                    .map(str::trim)
+                                    .filter_map(|line| line.strip_prefix("data: "))
+                                    .filter(|data| *data != "[DONE]")
+                                    .collect()
+                            };
+                            for raw in chunks {
+                                match serde_json::from_str::<Value>(raw) {
+                                    Ok(value) => events.extend(self.process_value(&value)),
+                                    Err(_) => discarded_bytes = residual.len(),
+                                }
+                            }
+                        }
+                        Err(_) => discarded_bytes = residual.len(),
+                    }
+                    if !self.terminal_seen {
+                        self.eof_error = Some(llm_stream_interrupted_error(
+                            PROVIDER_NAME,
+                            format!("stream closed before response.completed（丢弃 {discarded_bytes} 字节未完成帧）"),
+                        ));
+                    }
+                    self.pending = events.into_iter();
+                    return Poll::Ready(
+                        self.pending
+                            .next()
+                            .map(Ok)
+                            .or_else(|| self.eof_error.take().map(Err)),
+                    );
                 }
                 Poll::Pending => return Poll::Pending,
             }

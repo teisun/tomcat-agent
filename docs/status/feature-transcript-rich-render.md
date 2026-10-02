@@ -2,13 +2,18 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-02 19:17 +0800 |
+| Updated | 2026-10-02 20:51 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | OpenAI Fast/Ultrafast service speeds and Max reasoning; end-to-end Speed protocol and model configuration preservation; Settings example placeholder; CLI/extension release metadata |
+| Scope | EOF interruption recovery across Responses, Chat Completions and Anthropic; OpenAI Fast/Ultrafast service speeds and Max reasoning; CLI/extension release metadata |
 | Cov% | - |
 
 ### DONE
+
+- Made all three streaming adapters require a protocol terminal signal before accepting EOF as a completed response; missing terminals now produce one retryable `StreamInterrupted` / `BodyRead`, then stable EOF, instead of a fatal Parse error or silent success.
+- Preserved complete-frame protocol errors and existing terminal metadata, tolerated incomplete EOF JSON/UTF-8 without exposing raw prompt data, and prevented Anthropic EOF from fabricating a successful ending.
+- Added eight regression functions, including a two-scenario local HTTP/agent recovery test proving automatic re-request, `MessageEnd` before `AutoRetryStart`, successful-attempt-only persistence and no failed-attempt tool execution; kept the deliberate early-close negative fixture truncated.
+- Applied this commit's one-time repository-script patch bump: CLI `0.1.63 -> 0.1.64`, extension `0.1.77 -> 0.1.78`, bundled CLI `0.1.63 -> 0.1.64`; dependency versions and private GUI metadata are unchanged.
 
 - Added independent OpenAI service speed and reasoning controls: Fast maps to `service_tier: "priority"`, Ultrafast to `"ultrafast"`, and Max remains a reasoning effort; Ultra multi-agent execution and WebSocket transport changes are excluded.
 - Declared accelerated capabilities per complete catalog model ID, inherited matching built-in declarations, persisted model speed preferences, and resolved unsupported saved speeds to Standard without implicitly enabling a paid option.
@@ -59,6 +64,8 @@
 
 ### INTERFACE
 
+- EOF is transport termination, not response completion. Responses terminal evidence is completed/done/incomplete/failed/error; Chat uses its emitted `FinishReason` or `[DONE]`; Anthropic uses an existing stop reason or processed message_stop/error. Existing agent retry budgets and public event/configuration contracts are unchanged.
+
 - `ModelEntry`/`ModelView` expose `supported_speeds` / `supportedSpeeds` and the effective `selectedSpeed`; Standard is implicit and an empty accelerated list hides Speed options.
 - `set_speed { model, speed, sessionId? }` and its receipt use `speed`; the old `tier` key is rejected. Chat, plan preview, Settings and the generated Serve contracts carry the same capability data.
 - OpenAI adapters alone translate Speed into `service_tier`; `reasoning.effort` remains independent. Anthropic request bodies do not gain OpenAI speed fields.
@@ -74,7 +81,7 @@
 - Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata now declares CLI `0.1.63`, VS Code extension `0.1.77`, and bundled CLI pin `0.1.63`; this metadata-only bump does not rebuild or replace the previously deployed `0.1.62` / `0.1.76` runtime.
+- Release metadata now declares CLI `0.1.64`, VS Code extension `0.1.78`, and bundled CLI pin `0.1.64`; this metadata-only bump does not build artifacts or replace any installed CLI/extension process.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
@@ -88,10 +95,13 @@
 
 ### BLOCKED
 
+- EOF recovery does not prevent upstream disconnections or increase the existing retry budget; repeated interruptions can still exhaust attempts. The new `0.1.64` / `0.1.78` artifacts have not been built, installed or published by this request.
+- The initial EOF implementation test batch had two new-fixture mistakes (mixed incomplete/error payloads and a read-tool/write-preview mismatch), fixed before final acceptance; two unchanged Anthropic non-stream tests also reported local Connection refused in parallel, then passed both individually and in the final serial module run. The original failing result is retained, not relabeled green.
+
 - The latest Speed implementation's original Rust/extension aggregate gates exited 1 under the conditions recorded during acceptance; failed cases passed focused rechecks, Rust subsequently passed all 2979 library tests in a separate single-thread run, and the remaining installed-E2E/VSIX stages passed. These staged results do not retroactively make the original aggregate commands green or prove default-concurrency stability.
 - Six bounded JSON probes were accepted with HTTP 200, but all four accelerated requests echoed `default`; upstream acceleration eligibility, actual tier and billing remain unconfirmed. This is not proof that Fast/Ultrafast provides no acceleration, and no declarations were removed.
 - The precise historical writer/event that dropped model speed declarations remains unverified. Preservation tests and restored runtime/UI data do not identify the original cause.
-- No test, build, package, install, restart, coverage run or push is part of this requested bump/commit. Existing installation and implementation evidence describe the earlier runtime, not newly built `0.1.63` / `0.1.77` artifacts.
+- No test, build, package, install, restart, coverage run or push is part of this requested bump/commit. Earlier implementation checks precede the metadata-only bump; they are not verification of newly built `0.1.64` / `0.1.78` artifacts.
 
 - The latest remediation's complete `gate-fast` run exited 1 because the new error-path test used a Clippy-rejected assertion. After fixing it, full all-targets Clippy and both affected regressions passed; the complete library/doc/integration results remain valid. The initial exit 1 is retained, not relabeled as one all-green command.
 - Earlier resource-inventory gate failures and focused closure results remain historical evidence; the later complete remediation run passed all library and integration tests.
@@ -103,6 +113,9 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- EOF implementation acceptance before the version bump passed `cargo test --manifest-path tomcat/Cargo.toml --lib core::llm:: -- --test-threads=1` (428 passed / 0 failed / 1 existing real-API test ignored, task `1790944908351-6fud0q`) and `core::agent_loop::` with the same serial setting (343 passed / 0 failed / 1 existing manual test ignored), followed by `cargo clippy --manifest-path tomcat/Cargo.toml --all-targets -- -D warnings` (task `1790944953000-i17hqw`, exit 0). All eight new regressions passed; these are prior results, not reruns for this commit.
+- This bump operation passed both `release-version.mjs check` calls and the five-file version-only diff/whitespace check. Only release metadata, Cargo root-package version and extension manifest/lock root versions changed; no test suite, compilation, packaging or coverage measurement was run.
 
 - This bump/commit request explicitly skips tests, builds and coverage. Commit-time validation is limited to repository version consistency, the five-file version-only delta, Git scope/whitespace, status metadata and commit-message format; Cov% remains unmeasured (`-`).
 - Earlier Speed acceptance passed Rust declaration/unknown-field/Speed-wire regressions, generated schema checks, extension host checks and GUI tests. Its later independent library run passed 2979 tests / 0 failed / 3 ignored (`1790936321885-i644nb`); valid Clippy/doc/integration results and extension core 563 / GUI 654 passes were reused, while five init-fixture failures passed their focused recheck and remaining installed E2E/VSIX stages passed. These are historical results, not reruns for this commit.

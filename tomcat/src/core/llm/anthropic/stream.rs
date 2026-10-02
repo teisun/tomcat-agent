@@ -37,6 +37,7 @@ pub(super) struct AnthropicStream<S> {
     source_profile: ProviderCompatProfile,
     continuity_enabled: bool,
     terminal_emitted: bool,
+    finished: bool,
     /// 与 OpenAI Responses 对齐：首个有效事件前的解析失败更可能是中转流截断，可重试；
     /// 已输出事件后才失败则是协议错误，保留 Parse 阶段供诊断。
     seen_valid_event: bool,
@@ -59,6 +60,7 @@ impl<S> AnthropicStream<S> {
             source_profile,
             continuity_enabled,
             terminal_emitted: false,
+            finished: false,
             seen_valid_event: false,
         }
     }
@@ -350,6 +352,9 @@ where
             if let Some(event) = self.pending.next() {
                 return Poll::Ready(Some(Ok(event)));
             }
+            if self.finished {
+                return Poll::Ready(None);
+            }
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
                     self.buffer.extend_from_slice(&chunk);
@@ -383,13 +388,19 @@ where
                     ))));
                 }
                 Poll::Ready(None) => {
+                    self.finished = true;
+                    // 未分隔残留沿用原行为丢弃，不能把 EOF 伪装成协议终止。
+                    self.buffer.clear();
                     if !self.terminal_emitted {
-                        self.terminal_emitted = true;
-                        let events = self.build_terminal_events();
-                        if !events.is_empty() {
-                            self.pending = events.into_iter();
-                            continue;
+                        if self.stop_reason.is_none() {
+                            return Poll::Ready(Some(Err(llm_stream_interrupted_error(
+                                PROVIDER_NAME,
+                                "stream closed before stop_reason or message_stop",
+                            ))));
                         }
+                        self.terminal_emitted = true;
+                        self.pending = self.build_terminal_events().into_iter();
+                        continue;
                     }
                     return Poll::Ready(None);
                 }
@@ -412,7 +423,7 @@ mod tests {
     use super::AnthropicStream;
     use crate::core::llm::replay_policy::ProviderCompatProfile;
     use crate::core::llm::types::{ReasoningFormat, StreamEvent};
-    use crate::infra::error::{classify_llm_failure, LlmFailureKind};
+    use crate::infra::error::{classify_llm_failure, llm_stage, LlmErrorStage, LlmFailureKind};
 
     #[test]
     fn parse_block_emits_thinking_and_terminal_events() {
@@ -482,6 +493,93 @@ mod tests {
             event,
             StreamEvent::FinishReason { reason } if reason == "stop"
         )));
+    }
+
+    #[tokio::test]
+    async fn eof_without_stop_signal_is_interrupted() {
+        let source = tokio_stream::iter(vec![Ok::<Bytes, reqwest::Error>(Bytes::from(
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+        ))]);
+        let mut stream = AnthropicStream::new(
+            source,
+            ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
+            true,
+        );
+        assert!(
+            matches!(stream.next().await.expect("delta").expect("valid delta"),
+                StreamEvent::ContentDelta { delta } if delta == "partial"
+            )
+        );
+        let error = stream
+            .next()
+            .await
+            .expect("interruption, not fabricated terminal events")
+            .expect_err("missing stop signal");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn eof_after_stop_reason_without_message_stop_finishes_once() {
+        let body = concat!(
+            "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
+            "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n",
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n",
+        );
+        let source = tokio_stream::iter(vec![Ok::<Bytes, reqwest::Error>(Bytes::from(body))]);
+        let mut stream = AnthropicStream::new(
+            source,
+            ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
+            true,
+        );
+        assert!(
+            matches!(stream.next().await.expect("thinking").expect("valid thinking"),
+                StreamEvent::Thinking { delta, .. } if delta == "plan"
+            )
+        );
+        let mut terminal = Vec::new();
+        for _ in 0..3 {
+            terminal.push(
+                stream
+                    .next()
+                    .await
+                    .expect("terminal event")
+                    .expect("no interruption"),
+            );
+        }
+        assert_eq!(
+            terminal
+                .iter()
+                .filter(|event| matches!(event,
+                    StreamEvent::FinishReason { reason } if reason == "stop"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            terminal
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    StreamEvent::Usage {
+                        prompt_tokens: 1,
+                        completion_tokens: 2,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(terminal.iter().filter(|event| matches!(event,
+            StreamEvent::ReasoningSnapshot { thinking_text: Some(text), .. } if text == "plan"
+        )).count(), 1);
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]

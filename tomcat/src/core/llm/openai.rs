@@ -1160,6 +1160,10 @@ struct SseEventStream<S> {
     /// 首个有效事件前的畸形帧往往是中转站截断/拼接问题，允许上层重试；已开始输出后
     /// 才损坏则保留 Parse，避免掩盖协议不兼容。
     seen_valid_event: bool,
+    terminal_seen: bool,
+    finished: bool,
+    /// EOF 正常事件排空之后，至多交付一次中断错误。
+    eof_error: Option<AppError>,
 }
 
 #[derive(Debug)]
@@ -1291,6 +1295,9 @@ impl<S> SseEventStream<S> {
                 ..OpenAiReasoningState::default()
             },
             seen_valid_event: false,
+            terminal_seen: false,
+            finished: false,
+            eof_error: None,
         }
     }
 }
@@ -1309,9 +1316,10 @@ fn map_completions_stream_parse_error(error: AppError, seen_valid_event: bool) -
 fn drain_ready_sse_events(
     buffer: &mut Vec<u8>,
     reasoning: &mut OpenAiReasoningState,
+    terminal_seen: &mut bool,
 ) -> Result<Vec<StreamEvent>, AppError> {
     let mut events = Vec::new();
-    while let Some(iter) = parse_sse_buffer(buffer, reasoning)? {
+    while let Some(iter) = parse_sse_buffer(buffer, reasoning, terminal_seen)? {
         events.extend(iter);
     }
     Ok(events)
@@ -1331,12 +1339,22 @@ where
         if let Some(evt) = this.pending.next() {
             return Poll::Ready(Some(Ok(evt)));
         }
+        if let Some(error) = this.eof_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
+        if this.finished {
+            return Poll::Ready(None);
+        }
 
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     this.buffer.extend_from_slice(&bytes);
-                    match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
+                    match drain_ready_sse_events(
+                        &mut this.buffer,
+                        &mut this.reasoning,
+                        &mut this.terminal_seen,
+                    ) {
                         Ok(events) => {
                             if let Some((first, rest)) = events.split_first() {
                                 this.seen_valid_event = true;
@@ -1358,40 +1376,38 @@ where
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
+                    this.finished = true;
+                    let mut events = Vec::new();
                     if !this.buffer.is_empty() {
-                        // `parse_sse_buffer` 只消费以空行结束的完整 frame。EOF 时把残留
-                        // 视为最后一个 frame：合法但缺分隔符的服务端响应仍可消费，畸形 JSON
-                        // 则必须上抛，不能静默 flush 后伪装成正常结束。
+                        // 只对 EOF 未分隔残留宽松解析，半帧 JSON / UTF-8 丢弃。
+                        // 完整但缺空行的尾帧仍可消费，是否中断只由终止信号决定。
                         this.buffer.extend_from_slice(b"\n\n");
-                        match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
-                            Ok(events) => {
-                                if let Some((first, rest)) = events.split_first() {
-                                    this.seen_valid_event = true;
-                                    #[allow(clippy::unnecessary_to_owned)]
-                                    let pending_vec = rest.to_vec();
-                                    this.pending = pending_vec.into_iter();
-                                    return Poll::Ready(Some(Ok(first.clone())));
-                                }
-                            }
-                            Err(error) => {
-                                return Poll::Ready(Some(Err(map_completions_stream_parse_error(
-                                    error,
-                                    this.seen_valid_event,
-                                ))));
-                            }
+                        if let Ok(parsed) = drain_ready_sse_events(
+                            &mut this.buffer,
+                            &mut this.reasoning,
+                            &mut this.terminal_seen,
+                        ) {
+                            events.extend(parsed);
                         }
+                        this.buffer.clear();
                     }
-                    let flushed = this.reasoning.flush_scrubber();
-                    if let Some((first, rest)) = flushed.split_first() {
-                        #[allow(clippy::unnecessary_to_owned)]
-                        let pending_vec = rest.to_vec();
-                        this.pending = pending_vec.into_iter();
-                        return Poll::Ready(Some(Ok(first.clone())));
-                    }
+                    events.extend(this.reasoning.flush_scrubber());
                     if let Some(snapshot) = this.reasoning.maybe_snapshot() {
-                        return Poll::Ready(Some(Ok(snapshot)));
+                        events.push(snapshot);
                     }
-                    return Poll::Ready(None);
+                    if !this.terminal_seen {
+                        this.eof_error = Some(llm_stream_interrupted_error(
+                            PROVIDER_NAME,
+                            "stream closed before finish_reason or [DONE]",
+                        ));
+                    }
+                    this.pending = events.into_iter();
+                    return Poll::Ready(
+                        this.pending
+                            .next()
+                            .map(Ok)
+                            .or_else(|| this.eof_error.take().map(Err)),
+                    );
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -1403,6 +1419,7 @@ where
 fn parse_sse_buffer(
     buffer: &mut Vec<u8>,
     reasoning: &mut OpenAiReasoningState,
+    terminal_seen: &mut bool,
 ) -> Result<Option<std::vec::IntoIter<StreamEvent>>, AppError> {
     let sep = b"\n\n";
     let pos = buffer.windows(sep.len()).position(|w| w == sep);
@@ -1420,6 +1437,7 @@ fn parse_sse_buffer(
         let line = line.trim();
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
+                *terminal_seen = true;
                 continue;
             }
             let parsed: OpenAiStreamChunk =
@@ -1427,6 +1445,9 @@ fn parse_sse_buffer(
             events.extend(openai_chunk_to_stream_events_with_state(parsed, reasoning));
         }
     }
+    *terminal_seen |= events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::FinishReason { .. }));
     Ok(Some(events.into_iter()))
 }
 

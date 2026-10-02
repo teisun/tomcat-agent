@@ -145,8 +145,8 @@ fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S>
     ResponsesStream::new(stream, prefer_ndjson, test_profile(), true)
 }
 
-/// The cross-layer flows below are text-only. Reaching this executor would mean
-/// the adapter or agent loop incorrectly invented a tool call.
+/// Guard against executing tools from failed stream attempts. Any call reaching
+/// this executor is a test failure, including the complete-but-discarded fixture.
 struct UnusedPrimitive;
 
 #[async_trait::async_trait]
@@ -2327,6 +2327,200 @@ async fn responses_stream_parses_ndjson_fallback() {
 }
 
 #[tokio::test]
+async fn responses_stream_eof_mid_frame_is_interrupted() {
+    use tokio_stream::StreamExt;
+
+    let delta = r#"{"type":"response.output_text.delta","delta":"partial"}"#;
+    let half_json = r#"{"type":"response.completed","response":{"id":"r"#;
+    for (ndjson, utf8_cut) in [(false, false), (true, false), (false, true), (true, true)] {
+        let first = if ndjson {
+            format!("{delta}\n")
+        } else {
+            responses_sse_body(&[delta])
+        };
+        let mut tail = if ndjson {
+            half_json.as_bytes().to_vec()
+        } else {
+            format!("data: {half_json}").into_bytes()
+        };
+        if utf8_cut {
+            tail.extend_from_slice(&"中".as_bytes()[..2]);
+        }
+        let discarded_bytes = tail.len();
+        let source = tokio_stream::iter(vec![Ok(Bytes::from(first)), Ok(Bytes::from(tail))]);
+        let mut stream = new_responses_stream(source, ndjson);
+        assert!(matches!(
+            stream.next().await.expect("delta").expect("valid delta"),
+            StreamEvent::ContentDelta { delta } if delta == "partial"
+        ));
+        let error = stream
+            .next()
+            .await
+            .expect("interruption")
+            .expect_err("truncated frame");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        let summary = llm_summary(&error).expect("interruption summary");
+        assert!(
+            summary.contains(&format!("丢弃 {discarded_bytes} 字节")),
+            "{summary}"
+        );
+        assert!(!summary.contains("raw="), "{summary}");
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn responses_stream_eof_between_frames_is_interrupted() {
+    use tokio_stream::StreamExt;
+
+    let delta = r#"{"type":"response.output_text.delta","delta":"partial"}"#;
+    let tool = r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{\"path\":\"fixture.txt\"}"}}"#;
+    let cases = [
+        (responses_sse_body(&[delta, tool]), true),
+        (
+            format!("event: response.output_text.delta\ndata: {delta}"),
+            false,
+        ),
+        (
+            format!("{}data: [DONE]\n\n", responses_sse_body(&[delta])),
+            false,
+        ),
+    ];
+    for (body, has_tool) in cases {
+        let mut stream =
+            new_responses_stream(tokio_stream::iter(vec![Ok(Bytes::from(body))]), false);
+        assert!(matches!(
+            stream.next().await.expect("delta").expect("valid delta"),
+            StreamEvent::ContentDelta { delta } if delta == "partial"
+        ));
+        if has_tool {
+            assert!(matches!(
+                stream.next().await.expect("tool delta").expect("valid tool"),
+                StreamEvent::ToolCallDelta { name: Some(name), arguments_delta: Some(_), .. }
+                    if name == "read"
+            ));
+        }
+        let error = stream
+            .next()
+            .await
+            .expect("interruption")
+            .expect_err("missing terminal");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        let summary = llm_summary(&error).expect("summary");
+        assert!(
+            summary.contains("stream closed before response.completed"),
+            "{summary}"
+        );
+        assert!(summary.contains("丢弃 0 字节"), "{summary}");
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn responses_stream_terminal_then_eof_ends_cleanly() {
+    use tokio_stream::StreamExt;
+
+    for kind in [
+        "response.completed",
+        "response.done",
+        "response.incomplete",
+        "response.failed",
+        "error",
+    ] {
+        let mut terminal = if kind == "error" {
+            json!({"type":kind, "error":{"code":"server_error","message":"boom"}})
+        } else {
+            json!({
+                "type": kind,
+                "response": {
+                    "usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}
+                }
+            })
+        };
+        if kind == "response.incomplete" {
+            terminal["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+        } else if kind == "response.failed" {
+            terminal["response"]["error"] = json!({"code":"server_error","message":"boom"});
+        }
+        let raw = terminal.to_string();
+        let expected = responses_chunk_to_events(&terminal, &mut Vec::new());
+        for (ndjson, tail_variant) in [(false, 0), (true, 0), (false, 1), (true, 1), (false, 2)] {
+            // 0: 完整终止帧；1: 合法 JSON 缺分隔符；2: 终止后垃圾半帧。
+            let body = if ndjson {
+                format!("{raw}{}", if tail_variant == 1 { "" } else { "\n" })
+            } else if tail_variant == 1 {
+                format!("event: {kind}\ndata: {raw}")
+            } else {
+                format!(
+                    "{}{}",
+                    responses_sse_body(&[&raw]),
+                    if tail_variant == 2 {
+                        "data: {garbage"
+                    } else {
+                        ""
+                    }
+                )
+            };
+            let mut stream =
+                new_responses_stream(tokio_stream::iter(vec![Ok(Bytes::from(body))]), ndjson);
+            // 固定读预期数量，再检查 None，避免错误实现无限 collect。
+            for event in &expected {
+                let actual = stream
+                    .next()
+                    .await
+                    .expect("terminal event")
+                    .expect("no EOF error");
+                assert_eq!(
+                    serde_json::to_value(&actual).expect("serialize actual event"),
+                    serde_json::to_value(event).expect("serialize expected event"),
+                    "{kind}"
+                );
+            }
+            assert!(
+                stream.next().await.is_none(),
+                "{kind}: no extra events or errors"
+            );
+            assert!(stream.next().await.is_none(), "{kind}: stable EOF");
+        }
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::FinishReason { .. }))
+                .count(),
+            1
+        );
+        if kind == "response.failed" || kind == "error" {
+            assert!(expected.iter().any(|e| matches!(e,
+                StreamEvent::LlmError { code: Some(code), message, .. }
+                    if code == "server_error" && message == "boom"
+            )));
+        }
+        if kind == "response.incomplete" {
+            assert!(expected
+                .iter()
+                .any(|e| matches!(e, StreamEvent::LlmNotice { .. })));
+        }
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::Usage { .. }))
+                .count(),
+            usize::from(kind != "error")
+        );
+    }
+}
+
+#[tokio::test]
 async fn responses_stream_early_close_does_not_fabricate_finish_reason() {
     use tokio_stream::StreamExt;
 
@@ -2335,15 +2529,21 @@ async fn responses_stream_early_close_does_not_fabricate_finish_reason() {
     ))];
     let stream = tokio_stream::iter(chunks);
     let mut s = new_responses_stream(stream, true);
-    let mut events = Vec::new();
-    while let Some(item) = s.next().await {
-        events.push(item.expect("ok"));
-    }
-    assert_eq!(events.len(), 1);
     assert!(matches!(
-        &events[0],
+        s.next().await.expect("delta").expect("valid delta"),
         StreamEvent::ContentDelta { delta } if delta == "partial"
     ));
+    let error = s
+        .next()
+        .await
+        .expect("interruption, not FinishReason")
+        .expect_err("early close");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
+    );
+    assert!(s.next().await.is_none());
+    assert!(s.next().await.is_none());
 }
 
 #[tokio::test]
@@ -2681,6 +2881,119 @@ async fn responses_chat_stream_retries_503_before_first_delta_and_succeeds() {
     assert_eq!(server.request_count(), 2);
     assert_eq!(text, "Hello");
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_truncated_stream_retries_without_persisting_partial() {
+    for tail in [
+        "",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r",
+    ] {
+        let first = format!(
+            "{}{tail}",
+            responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","delta":"partial"}"#,
+                // write emits a streaming preview, so the test proves the tool was
+                // actually consumed before EOF, but never executed.
+                r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"write","arguments":"{\"path\":\"fixture.txt\",\"content\":\"discarded\",\"overwrite\":false}"}}"#,
+            ])
+        );
+        let server = MockHttpServer::start(vec![
+            ScriptedHttpResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                body: first,
+                delay_ms: 0,
+                declared_content_length: None,
+            },
+            ScriptedHttpResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                body: responses_sse_body(&[
+                    r#"{"type":"response.output_text.delta","delta":"recovered"}"#,
+                    r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                ]),
+                delay_ms: 0,
+                declared_content_length: None,
+            },
+        ]).await;
+        let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+        let sink = Arc::new(CrossLayerAppendSink::default());
+        let (mut agent, event_bus) = cross_layer_agent(provider, Some(sink.clone()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _listeners = [
+            wire::WIRE_MESSAGE_END,
+            wire::WIRE_AUTO_RETRY_START,
+            wire::WIRE_TOOL_EXECUTION_START,
+            wire::WIRE_TOOL_CALL_STREAMING,
+        ]
+        .map(|event_name| {
+            let events = events.clone();
+            event_bus.on(
+                event_name,
+                Box::new(move |_context: EventContext| {
+                    events.lock().unwrap().push(event_name);
+                    Ok(())
+                }),
+            )
+        });
+
+        let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+        assert!(
+            matches!(outcome,
+                AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
+            ),
+            "truncated stream must automatically recover: {outcome:?}"
+        );
+        assert_eq!(server.request_count(), 2);
+        {
+            let events = events.lock().unwrap();
+            let end = events
+                .iter()
+                .position(|e| *e == wire::WIRE_MESSAGE_END)
+                .expect("first MessageEnd");
+            let retry = events
+                .iter()
+                .position(|e| *e == wire::WIRE_AUTO_RETRY_START)
+                .expect("automatic retry");
+            assert!(end < retry, "{events:?}");
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| **e == wire::WIRE_AUTO_RETRY_START)
+                    .count(),
+                1
+            );
+            assert!(
+                events.contains(&wire::WIRE_TOOL_CALL_STREAMING),
+                "fixture must deliver a tool call"
+            );
+            assert!(
+                !events.contains(&wire::WIRE_TOOL_EXECUTION_START),
+                "failed attempt must not execute tools"
+            );
+        }
+        {
+            let messages = sink.messages.lock().unwrap();
+            assert_eq!(
+                messages.len(),
+                1,
+                "only the successful assistant message persists"
+            );
+            let stored = messages[0].to_string();
+            assert!(stored.contains("recovered"), "{stored}");
+            assert!(
+                !stored.contains("partial") && !stored.contains("call_1"),
+                "{stored}"
+            );
+            assert!(
+                messages[0].get("tool_calls").is_none_or(
+                    |calls| calls.is_null() || calls.as_array().is_some_and(Vec::is_empty)
+                )
+            );
+        }
+        server.shutdown().await;
+    }
 }
 
 #[tokio::test]

@@ -188,6 +188,79 @@ async fn sse_stream_drain_skips_empty_first_block_and_keeps_following_events() {
 }
 
 #[tokio::test]
+async fn sse_stream_eof_without_terminal_is_interrupted() {
+    use tokio_stream::StreamExt;
+
+    for tail in ["", "data: {\"choices\":[{\"delta\":{\"content\":\"a"] {
+        let source = tokio_stream::iter(vec![
+            Ok(Bytes::from(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            )),
+            Ok(Bytes::from(tail)),
+        ]);
+        let mut stream = SseEventStream::new(
+            source,
+            ProviderCompatProfile::chat_completions("gpt-4"),
+            true,
+        );
+        assert!(
+            matches!(stream.next().await.expect("delta").expect("valid delta"),
+                StreamEvent::ContentDelta { delta } if delta == "partial"
+            )
+        );
+        let error = stream
+            .next()
+            .await
+            .expect("interruption")
+            .expect_err("no terminal signal");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        assert!(!llm_summary(&error).expect("summary").contains("raw="));
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn sse_stream_eof_after_terminal_ends_cleanly() {
+    use tokio_stream::StreamExt;
+
+    for (terminal, has_finish) in [
+        (
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            true,
+        ),
+        ("data: [DONE]\n\n", false),
+    ] {
+        let body =
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\n{terminal}");
+        let source = tokio_stream::iter(vec![Ok(Bytes::from(body))]);
+        let mut stream = SseEventStream::new(
+            source,
+            ProviderCompatProfile::chat_completions("gpt-4"),
+            true,
+        );
+        assert!(
+            matches!(stream.next().await.expect("delta").expect("valid delta"),
+                StreamEvent::ContentDelta { delta } if delta == "ok"
+            )
+        );
+        if has_finish {
+            assert!(
+                matches!(stream.next().await.expect("finish").expect("valid finish"),
+                    StreamEvent::FinishReason { reason } if reason == "stop"
+                )
+            );
+        }
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
 async fn sse_stream_eof_residual_invalid_first_frame_is_retryable_transport() {
     use tokio_stream::StreamExt;
 
