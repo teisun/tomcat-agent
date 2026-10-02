@@ -435,6 +435,9 @@ function normalizeModelEntry(entry, source) {
     api,
     thinkingFormat,
   );
+  const supportedSpeeds = Array.isArray(entry?.supportedSpeeds)
+    ? entry.supportedSpeeds.filter((speed) => speed === "fast" || speed === "ultrafast")
+    : [];
   const id = typeof entry?.id === "string" ? entry.id : "fake-model";
   const preference = modelPreferences.get(id) || {};
   const contextWindow = typeof entry?.contextWindow === "number" ? entry.contextWindow : null;
@@ -483,6 +486,8 @@ function normalizeModelEntry(entry, source) {
     provider,
     source,
     supportedReasoningLevels,
+    supportedSpeeds,
+    selectedSpeed: supportedSpeeds.includes(preference.speed) ? preference.speed : "standard",
     thinkingFormat,
   };
 }
@@ -2317,6 +2322,7 @@ function handleCommand(frame) {
                 "list_provider_keys",
                 "set_model",
                 "set_thinking_level",
+                "set_speed",
                 "set_context_window",
                 "set_plan_mode",
               ],
@@ -2619,6 +2625,18 @@ function handleCommand(frame) {
         success: true,
         type: "response",
       });
+      break;
+    }
+    case "set_speed": {
+      const modelId = frame.model;
+      const model = listModelViews().find((candidate) => candidate.id === modelId);
+      if (!model || !(frame.speed === "standard" || model.supportedSpeeds.includes(frame.speed))) {
+        send({ id: frame.id, error: "invalid_speed", success: false, type: "response" });
+        break;
+      }
+      modelPreferences.set(modelId, { ...modelPreferences.get(modelId), speed: frame.speed });
+      persistModelPreferences();
+      send({ id: frame.id, payload: { model: modelId, speed: frame.speed, sessionId: frame.sessionId || activeSessionId }, success: true, type: "response" });
       break;
     }
     case "set_thinking_level": {

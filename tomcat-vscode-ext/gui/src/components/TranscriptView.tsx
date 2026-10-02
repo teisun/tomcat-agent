@@ -19,6 +19,7 @@ import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
 import { injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
+import type { Speed } from "../../../src/shared/modelSpeed";
 import type { ModelPickerModel } from "./ModelPicker";
 import { createPlanFileCardFromTool, PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
@@ -135,6 +136,7 @@ export function TranscriptView({
   onRetryUserMessage,
   onSelectContextWindow,
   onSelectThinkingLevel,
+  onSelectSpeed,
   onSetBuildModel,
   onZoomImage,
   resolvePaths,
@@ -174,6 +176,7 @@ export function TranscriptView({
   onRetryUserMessage?(messageId: string): void;
   onSelectContextWindow(modelId: string, contextWindow: number): void;
   onSelectThinkingLevel(modelId: string, level: string): void;
+  onSelectSpeed(modelId: string, speed: Speed): void;
   onSetBuildModel(modelId: string): void;
   onZoomImage?(image: { alt: string; src: string }): void;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
@@ -212,6 +215,7 @@ export function TranscriptView({
       buildModel,
       onSelectContextWindow,
       onSelectThinkingLevel,
+      onSelectSpeed,
       onSetBuildModel,
       sessionContextWindow,
       sessionModel,

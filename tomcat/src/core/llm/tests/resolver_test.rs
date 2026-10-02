@@ -35,6 +35,7 @@ fn limit_test_entry(
         context_window_options: Vec::new(),
         max_output_tokens,
         description: None,
+        supported_speeds: Vec::new(),
         thinking_format: None,
         supported_reasoning_levels: Vec::new(),
     }

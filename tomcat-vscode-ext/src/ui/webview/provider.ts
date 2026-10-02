@@ -31,6 +31,7 @@ import {
   attachmentResourceRoots,
   resolveAttachmentUris,
 } from "../../shared/attachmentUris";
+import { isSpeed, type Speed } from "../../shared/modelSpeed";
 import { classifyLink } from "../../shared/linkTarget";
 import {
   ComposerDraftStore,
@@ -245,6 +246,8 @@ export function parseModelCatalog(payload: unknown): {
     selectedContextWindow?: number | null;
     selectedReasoningLevel?: string | null;
     supportedReasoningLevels: string[];
+    supportedSpeeds?: Speed[];
+    selectedSpeed?: Speed | null;
   }>;
   reasoningLevels: Record<string, string[]>;
 } {
@@ -267,6 +270,8 @@ export function parseModelCatalog(payload: unknown): {
     selectedContextWindow?: number | null;
     selectedReasoningLevel?: string | null;
     supportedReasoningLevels: string[];
+    supportedSpeeds?: Speed[];
+    selectedSpeed?: Speed | null;
   }> = {};
   const reasoningLevels: Record<string, string[]> = {};
   for (const entry of models) {
@@ -284,6 +289,10 @@ export function parseModelCatalog(payload: unknown): {
       ? ((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels as unknown[]).filter(
           (level): level is string => typeof level === "string",
         )
+      : [];
+    const speedFields = entry as { supportedSpeeds?: unknown; selectedSpeed?: unknown };
+    const supportedSpeeds = Array.isArray(speedFields.supportedSpeeds)
+      ? speedFields.supportedSpeeds.filter((speed): speed is Speed => isSpeed(speed) && speed !== "standard")
       : [];
     const contextWindowOptions = Array.isArray((entry as { contextWindowOptions?: unknown }).contextWindowOptions)
       ? ((entry as { contextWindowOptions?: unknown }).contextWindowOptions as unknown[]).filter(
@@ -318,6 +327,8 @@ export function parseModelCatalog(payload: unknown): {
           ? (entry as { selectedReasoningLevel: string }).selectedReasoningLevel
           : null,
       supportedReasoningLevels,
+      supportedSpeeds,
+      selectedSpeed: isSpeed(speedFields.selectedSpeed) ? speedFields.selectedSpeed : null,
     };
   }
   return { capabilities, ids, modelDetails, reasoningLevels };
@@ -2026,6 +2037,27 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             "error",
             formatBridgeError("change reasoning effort", error),
           );
+        }
+        await this.refreshSessionState(sessionId, { trustBusy: true });
+        await this.postState();
+        return;
+      }
+      case "setSpeed": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        try {
+          const response = await this.deps.messenger.sendSetSpeed(sessionId, intent.data.modelId, intent.data.speed);
+          if (!response.success) {
+            this.stateStore.appendMessage(sessionId, "error", response.error ?? "Unable to change speed");
+          } else {
+            await this.refreshModels();
+          }
+        } catch (error) {
+          this.stateStore.appendMessage(sessionId, "error", formatBridgeError("change speed", error));
         }
         await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();

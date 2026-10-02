@@ -529,6 +529,11 @@ export class WorkbenchFindDriver {
     );
   }
 
+  async setViewport(width: number, height: number): Promise<void> {
+    await this.cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
   async captureScreenshot(): Promise<string> {
     const result = await this.cdp.send("Page.captureScreenshot", {
       format: "png",

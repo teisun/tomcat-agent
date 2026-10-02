@@ -852,6 +852,47 @@ summary: verify ok
 }
 
 #[tokio::test]
+async fn speed_subagent_override_does_not_inherit_parent_paid_preference() {
+    use crate::core::llm::Speed;
+    let _g = home_lock().lock().unwrap();
+    let (parent, parent_requests) = RecordingProvider::success("relay", "unused");
+    let (child, child_requests) = RecordingProvider::success("child", "read-only findings");
+    let fx = build_fixture(
+        parent,
+        child,
+        parent_requests.clone(),
+        child_requests.clone(),
+        false,
+    );
+    let path = fx.home.path.join(".tomcat/models.toml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!("{original}\nsupported_speeds = [\"fast\"]\n"),
+    )
+    .unwrap();
+    fx.model_catalog.reload(&AppConfig::default()).unwrap();
+    fx.model_prefs
+        .set_speed("fcodex/gpt-5.6-sol", Speed::Fast)
+        .unwrap();
+    // Even a stale paid child preference is ignored when that model declares no speeds.
+    fx.model_prefs
+        .set_speed("deepseek-v4-flash", Speed::Fast)
+        .unwrap();
+    let dispatcher =
+        ProdExplorerDispatcher::new("speed", reviewer_deps(&fx, Some("deepseek-v4-flash")));
+    let report = dispatcher
+        .dispatch(&ExplorerTask {
+            id: "speed".into(),
+            prompt: "look around".into(),
+        })
+        .await;
+    assert!(!report.aborted, "{}", report.report);
+    assert!(parent_requests.lock().is_empty());
+    assert_eq!(child_requests.lock()[0].speed, None);
+}
+
+#[tokio::test]
 async fn resolve_failure_aborts_with_model_unresolved_and_keeps_plan_file() {
     let _g = home_lock().lock().unwrap();
     let (fcodex, fcodex_requests) = RecordingProvider::success("fcodex", "unused");

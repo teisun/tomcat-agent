@@ -146,6 +146,7 @@ async fn chat_text_with_parts(
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };

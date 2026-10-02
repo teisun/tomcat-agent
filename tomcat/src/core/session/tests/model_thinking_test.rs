@@ -60,7 +60,8 @@ fn updates_write_only_object_preferences_in_clean_shape() {
             "models": {
                 "gpt-5.6": {
                     "reasoning": "high",
-                    "contextWindow": 400_000
+                    "contextWindow": 400_000,
+                    "speed": "standard"
                 }
             }
         })
@@ -169,6 +170,49 @@ fn object_preferences_roundtrip_without_reserved_context_keys() {
         serde_json::json!(400_000),
     );
     assert!(!written.contains("__tomcat_context_window__:"));
+}
+
+#[test]
+fn speed_defaults_roundtrips_and_preserves_other_preferences() {
+    use crate::core::llm::Speed;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model-thinking.json");
+    let original = r#"{"models":{"relay":{"reasoning":"high","contextWindow":400000}}}"#;
+    std::fs::write(&path, original).unwrap();
+    let store = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
+    assert_eq!(store.speed_for("relay"), Speed::Standard);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    store.set_speed("relay", Speed::Ultrafast).unwrap();
+    let loaded = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
+    assert_eq!(loaded.speed_for("relay"), Speed::Ultrafast);
+    assert_eq!(loaded.reasoning_for("relay"), ThinkingLevel::High);
+    assert_eq!(loaded.context_window_for("relay"), Some(400_000));
+    loaded.set_reasoning("relay", ThinkingLevel::Max).unwrap();
+    loaded.set_context_window("relay", Some(1_000_000)).unwrap();
+    assert_eq!(loaded.speed_for("relay"), Speed::Ultrafast);
+}
+
+#[test]
+fn speed_failed_save_keeps_memory_and_disk_unchanged() {
+    use crate::core::llm::Speed;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model-thinking.json");
+    let store = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
+    store.set_reasoning("relay", ThinkingLevel::High).unwrap();
+    let saved = dir.path().join("saved.json");
+    std::fs::rename(&path, &saved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let before = std::fs::read(&saved).unwrap();
+    let prefs_before = store.snapshot();
+    assert!(store.set_speed("relay", Speed::Fast).is_err());
+    assert_eq!(store.snapshot(), prefs_before);
+    assert_eq!(std::fs::read(&saved).unwrap(), before);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&saved, &path).unwrap();
+    store.set_context_window("relay", Some(400_000)).unwrap();
+    let loaded = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
+    assert_eq!(loaded.speed_for("relay"), Speed::Standard);
+    assert_eq!(loaded.reasoning_for("relay"), ThinkingLevel::High);
 }
 
 #[test]

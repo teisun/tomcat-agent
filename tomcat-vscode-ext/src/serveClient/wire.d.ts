@@ -69,6 +69,7 @@ export interface ModelEntryInput {
   modelName?: null | string;
   provider: string;
   supportedReasoningLevels?: null | string[];
+  supportedSpeeds?: Speed[] | null;
   thinkingFormat?: null | string;
 }
 export type ModelSource = "builtin" | "user";
@@ -88,8 +89,10 @@ export interface ModelView {
   provider: string;
   selectedContextWindow?: null | number;
   selectedReasoningLevel?: null | string;
+  selectedSpeed?: Speed | null;
   source: ModelSource;
   supportedReasoningLevels?: string[];
+  supportedSpeeds?: Speed[];
   thinkingFormat?: null | string;
 }
 export interface NewSessionParams {
@@ -324,6 +327,8 @@ export type ServeTurnEvent = {
 
 export type SetPlanModeAction = "enter" | "exit" | "build";
 
+export type Speed = "standard" | "fast" | "ultrafast";
+
 export type ToolDisplay = {
   added?: null | number;
   diff?: FileDiffLine[] | null;
@@ -552,6 +557,12 @@ export type ServeCommand = {
   id?: null | string;
   model: ModelEntryInput;
   type: "upsert_model";
+} | {
+  id?: null | string;
+  model: string;
+  sessionId?: null | string;
+  speed: Speed;
+  type: "set_speed";
 } | {
   id?: null | string;
   model: string;
@@ -880,7 +891,9 @@ export interface WireModelView {
   provider: string;
   selectedContextWindow?: null | number;
   selectedReasoningLevel?: null | string;
+  selectedSpeed?: Speed | null;
   source: ModelSource;
   supportedReasoningLevels?: string[];
+  supportedSpeeds?: Speed[];
   thinkingFormat?: null | string;
 }

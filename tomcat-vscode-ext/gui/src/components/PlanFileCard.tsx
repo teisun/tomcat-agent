@@ -1,5 +1,6 @@
 import { memo } from "react";
 
+import type { Speed } from "../../../src/shared/modelSpeed";
 import { buildPickerModels } from "./buildPickerModels";
 import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
 import type {
@@ -126,6 +127,7 @@ export interface PlanFileCardModelPicker {
   buildModel?: string;
   onSelectContextWindow(modelId: string, contextWindow: number): void;
   onSelectThinkingLevel(modelId: string, level: string): void;
+  onSelectSpeed(modelId: string, speed: Speed): void;
   onSetBuildModel(modelId: string): void;
   sessionContextWindow?: number | null;
   sessionModel?: string;
@@ -228,6 +230,7 @@ function PlanFileCardComponent({
             onSelectContextWindow={modelPicker.onSelectContextWindow}
             onSelectModel={modelPicker.onSetBuildModel}
             onSelectThinkingLevel={modelPicker.onSelectThinkingLevel}
+            onSelectSpeed={modelPicker.onSelectSpeed}
             placement="above"
             selectedModelId={selectedModelId}
             testId="plan-card-build-model"

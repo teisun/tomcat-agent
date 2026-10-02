@@ -379,7 +379,7 @@ describe("draft fork delivery", () => {
 });
 
 describe("model catalog parsing", () => {
-  it("retains per-model capability metadata for the webview", () => {
+  it("retains per-model metadata and defaults speeds for legacy catalogs", () => {
     expect(
       parseModelCatalog({
         models: [
@@ -433,6 +433,8 @@ describe("model catalog parsing", () => {
           modelName: null,
           selectedContextWindow: 1000000,
           selectedReasoningLevel: "max",
+          selectedSpeed: null,
+          supportedSpeeds: [],
           supportedReasoningLevels: ["high", "max"],
         },
         "gpt-5.4": {
@@ -442,6 +444,8 @@ describe("model catalog parsing", () => {
           id: "gpt-5.4",
           modelName: null,
           selectedReasoningLevel: null,
+          selectedSpeed: null,
+          supportedSpeeds: [],
           supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
         },
         "text-only": {
@@ -451,6 +455,8 @@ describe("model catalog parsing", () => {
           id: "text-only",
           modelName: null,
           selectedReasoningLevel: null,
+          selectedSpeed: null,
+          supportedSpeeds: [],
           supportedReasoningLevels: [],
         },
       },

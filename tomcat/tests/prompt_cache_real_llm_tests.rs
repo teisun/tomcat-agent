@@ -465,6 +465,7 @@ fn request(messages: Vec<ChatMessage>, model: &str, cache_key: &str) -> ChatRequ
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: Some(cache_key.to_string()),
         tools: None,
     }

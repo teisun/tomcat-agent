@@ -37,6 +37,7 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec!["high".to_string(), "max".to_string()],
         thinking_format: Some("deepseek".to_string()),
     }
@@ -55,6 +56,7 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -78,6 +80,7 @@ fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> Mod
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -107,6 +110,7 @@ fn openai_multimodal_entry(api_key_env: &str) -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec![],
         thinking_format: Some("openai".to_string()),
     }
@@ -131,6 +135,7 @@ fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
         thinking_format: Some("openai".to_string()),
     }
@@ -209,6 +214,7 @@ fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
         diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -763,6 +769,7 @@ async fn chat_real_request_response_print() {
         diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -778,6 +785,69 @@ async fn chat_real_request_response_print() {
                 e
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn speed_completions_http_stream_and_non_stream_keep_max_independent() {
+    use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
+    use crate::core::llm::Speed;
+    use tokio_stream::StreamExt;
+    let speeds = [
+        (None, None),
+        (Some(Speed::Standard), Some("default")),
+        (Some(Speed::Fast), Some("priority")),
+        (Some(Speed::Ultrafast), Some("ultrafast")),
+    ];
+    for stream in [false, true] {
+        let payload = if stream {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n"
+        } else {
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}"#
+        };
+        let server =
+            MockHttpServer::start(vec![ScriptedHttpResponse::json(200, payload); speeds.len()])
+                .await;
+        let mut entry = openai_entry("SPEED_TEST_KEY");
+        entry.base_url = Some(server.base_url.clone());
+        let mut provider = OpenAiProvider::new(
+            &entry,
+            &LlmConfig::default().runtime(),
+            &Credential {
+                provider: "relay".into(),
+                env_name: "SPEED_TEST_KEY".into(),
+                value: "stub".into(),
+            },
+        )
+        .unwrap();
+        provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (speed, _) in speeds {
+            let request = ChatRequest {
+                messages: vec![ChatMessage::user("OK")],
+                model: "gpt-5.6-sol".into(),
+                speed,
+                thinking_level: Some(ThinkingLevel::Max),
+                ..Default::default()
+            };
+            if stream {
+                let mut events = provider.chat_stream(request).await.unwrap();
+                while let Some(event) = events.next().await {
+                    event.unwrap();
+                }
+            } else {
+                provider.chat(request).await.unwrap();
+            }
+        }
+        for (raw, (_, expected)) in server.request_texts().iter().zip(speeds) {
+            let body: serde_json::Value =
+                serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body.get("service_tier").and_then(|v| v.as_str()), expected);
+            assert_eq!(body["reasoning_effort"], "max");
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["model"], "gpt-5.6-sol");
+        }
+        assert_eq!(server.request_count(), 4);
+        server.shutdown().await;
     }
 }
 
@@ -800,6 +870,7 @@ fn thinking_level_override_updates_openai_reasoning_effort() {
         diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: Some(ThinkingLevel::Low),
         cache_key: None,
         tools: None,
@@ -831,6 +902,7 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
         diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: Some(ThinkingLevel::Xhigh),
         cache_key: None,
         tools: None,

@@ -907,6 +907,12 @@ impl ChatContext {
             .resolve_reasoning_level(self.global_services.model_prefs.as_ref(), model_id)
     }
 
+    pub(crate) fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {
+        self.global_services
+            .model_catalog
+            .resolve_speed(self.global_services.model_prefs.as_ref(), model_id)
+    }
+
     pub(crate) fn resolve_call(
         &self,
         scene: LlmScene,
@@ -1800,7 +1806,7 @@ mod tests {
 
     #[test]
     #[serial(env_lock)]
-    fn resolve_thinking_level_uses_catalog_id_key_when_model_name_differs() {
+    fn resolve_thinking_level_and_speed_use_catalog_id_key_when_model_name_differs() {
         const ENV_KEY: &str = "TOMCAT_REASONING_LOOKUP_TEST_KEY";
 
         let dir = tempfile::tempdir().unwrap();
@@ -1837,6 +1843,52 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
             .model_prefs
             .set_reasoning("relay/gpt-sol", ThinkingLevel::Xhigh)
             .expect("persist relay override");
+        ctx.global_services
+            .model_prefs
+            .set_speed("relay/gpt-sol", crate::core::llm::Speed::Fast)
+            .unwrap();
+        assert_eq!(
+            ctx.resolve_speed("relay/gpt-sol"),
+            None,
+            "undeclared model ignores speed preference"
+        );
+        assert_eq!(
+            ctx.resolve_speed("gpt-sol"),
+            None,
+            "wire name is not the preference key"
+        );
+        let path = dir.path().join("models.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!("{original}\nsupported_speeds = [\"fast\", \"ultrafast\"]\n"),
+        )
+        .unwrap();
+        ctx.global_services
+            .model_catalog
+            .reload(&ctx.config)
+            .unwrap();
+        assert_eq!(
+            ctx.resolve_speed("relay/gpt-sol"),
+            Some(crate::core::llm::Speed::Fast)
+        );
+        ctx.global_services
+            .model_prefs
+            .set_speed("relay/gpt-sol", crate::core::llm::Speed::Ultrafast)
+            .unwrap();
+        std::fs::write(
+            &path,
+            format!("{original}\nsupported_speeds = [\"fast\"]\n"),
+        )
+        .unwrap();
+        ctx.global_services
+            .model_catalog
+            .reload(&ctx.config)
+            .unwrap();
+        assert_eq!(
+            ctx.resolve_speed("relay/gpt-sol"),
+            Some(crate::core::llm::Speed::Standard)
+        );
 
         assert_eq!(
             ctx.resolve_thinking_level("relay/gpt-sol"),

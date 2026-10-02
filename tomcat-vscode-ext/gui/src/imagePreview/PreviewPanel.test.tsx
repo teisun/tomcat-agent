@@ -199,15 +199,15 @@ describe("PreviewPanel", () => {
     pushState();
     await screen.findByText("2 / 11");
     const copyButton = screen.getByRole("button", { name: "Copy image" });
-    fireEvent.click(copyButton);
-    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    // Own the feedback clock: machine load must not consume the flash before assertions.
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(copyButton); });
+    expect(write).toHaveBeenCalledTimes(1);
     expect(copyButton.classList.contains("is-copied")).toBe(true);
     expect(copyButton.querySelector(".codicon-check")).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("Image copied");
-    await waitFor(
-      () => expect(copyButton.classList.contains("is-copied")).toBe(false),
-      { timeout: COPY_FLASH_MS + 1_000 },
-    );
+    act(() => { vi.advanceTimersByTime(COPY_FLASH_MS); });
+    expect(copyButton.classList.contains("is-copied")).toBe(false);
     expect(copyButton.querySelector(".codicon-copy")).toBeTruthy();
   });
 

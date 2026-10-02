@@ -12,6 +12,7 @@ function renderStrip(overrides: Partial<Parameters<typeof PlanActionStrip>[0]> =
     onBuild: vi.fn(),
     onSelectContextWindow: vi.fn(),
     onSelectThinkingLevel: vi.fn(),
+    onSelectSpeed: vi.fn(),
     onSetBuildModel: vi.fn(),
     sessionModel: "gpt-5.6",
     ...overrides,
@@ -21,6 +22,21 @@ function renderStrip(overrides: Partial<Parameters<typeof PlanActionStrip>[0]> =
 }
 
 describe("PlanActionStrip", () => {
+  it("passes Speed through the plan picker without switching its build model", () => {
+    const onSelectSpeed = vi.fn();
+    const props = renderStrip({
+      availableModelDetails: { "gpt-5.6": { id: "gpt-5.6", supportedSpeeds: ["fast"], selectedSpeed: "standard" } },
+      onSelectSpeed,
+    });
+    fireEvent.click(screen.getByTestId("plan-build-model-select"));
+    const edit = screen.getByTestId("model-edit-gpt-5.6");
+    fireEvent.mouseEnter(edit.closest(".tc-model-picker-option")!);
+    fireEvent.click(edit);
+    fireEvent.click(screen.getByRole("button", { name: "Fast" }));
+    expect(onSelectSpeed).toHaveBeenCalledWith("gpt-5.6", "fast");
+    expect(props.onSetBuildModel).not.toHaveBeenCalled();
+  });
+
   it("shows a yellow Build button and the model dropdown, but no path or mode toggle", () => {
     renderStrip();
     const strip = screen.getByTestId("plan-action-strip");

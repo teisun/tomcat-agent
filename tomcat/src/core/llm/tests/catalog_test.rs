@@ -3,6 +3,78 @@ use crate::core::llm::ModelCatalog;
 use crate::infra::config::AppConfig;
 
 #[test]
+fn speed_declarations_inherit_clear_normalize_and_reject_invalid_apis() {
+    use crate::core::llm::{SharedModelCatalog, Speed, ThinkingLevel};
+    use crate::core::session::ModelPrefsStore;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    let prefs = ModelPrefsStore::load(dir.path().join("prefs.json"), ThinkingLevel::High).unwrap();
+    prefs.set_speed("gpt-5.6", Speed::Ultrafast).unwrap();
+    for (declaration, expected) in [
+        ("", vec![Speed::Fast]),
+        ("supported_speeds = []", vec![]),
+        (
+            "supported_speeds = [\"standard\", \"fast\", \"fast\", \"ultrafast\"]",
+            vec![Speed::Fast, Speed::Ultrafast],
+        ),
+        ("supported_speeds = [\"standard\"]", vec![]),
+    ] {
+        std::fs::write(&path, format!("[[models]]\nid = \"gpt-5.6\"\nsupported_reasoning_levels = [\"high\", \"xhigh\"]\n{declaration}\n")).unwrap();
+        let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path.clone()).unwrap();
+        let entry = catalog.lookup("gpt-5.6").unwrap();
+        assert_eq!(entry.supported_speeds, expected);
+        assert_eq!(entry.supported_reasoning_levels, vec!["high", "xhigh"]);
+        let selected = if expected.is_empty() {
+            None
+        } else if expected.contains(&Speed::Ultrafast) {
+            Some(Speed::Ultrafast)
+        } else {
+            Some(Speed::Standard)
+        };
+        assert_eq!(
+            SharedModelCatalog::from(catalog).resolve_speed(&prefs, "gpt-5.6"),
+            selected
+        );
+    }
+    std::fs::write(
+        &path,
+        "[[models]]\nid = \"gpt-5.6\"\nsupported_speeds = [\"warp\"]\n",
+    )
+    .unwrap();
+    assert!(ModelCatalog::load_from_path(&AppConfig::default(), path.clone()).is_err());
+
+    std::fs::write(
+        &path,
+        "[[models]]\nid = \"claude\"\napi = \"anthropic-messages\"\nprovider = \"anthropic\"\nsupported_speeds = [\"fast\"]\n\n[[models]]\nid = \"gpt-5.6\"\nsupported_speeds = [\"fast\", \"ultrafast\"]\n",
+    )
+    .unwrap();
+    let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path).unwrap();
+    let claude = catalog.lookup("claude").unwrap();
+    assert!(claude.supported_speeds.is_empty());
+    assert_eq!(claude.resolve_speed(Speed::Fast), None);
+    assert_eq!(
+        catalog.lookup("gpt-5.6").unwrap().supported_speeds,
+        vec![Speed::Fast, Speed::Ultrafast]
+    );
+}
+
+#[test]
+fn inherited_speeds_degrade_when_user_changes_builtin_to_non_openai_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        "[[models]]\nid = \"gpt-5.6\"\napi = \"anthropic-messages\"\nprovider = \"anthropic\"\n",
+    )
+    .unwrap();
+    let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path).unwrap();
+    let entry = catalog.lookup("gpt-5.6").unwrap();
+    assert_eq!(entry.api, "anthropic-messages");
+    assert!(entry.supported_speeds.is_empty());
+    assert_eq!(entry.resolve_speed(crate::core::llm::Speed::Fast), None);
+}
+
+#[test]
 fn resolve_known_model() {
     let cfg = AppConfig::default();
     let catalog = ModelCatalog::load_from_path(
@@ -166,8 +238,10 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
             "medium".to_string(),
             "high".to_string(),
             "xhigh".to_string(),
+            "max".to_string(),
         ]
     );
+    assert_eq!(gpt.supported_speeds, vec![crate::core::llm::Speed::Fast]);
     assert_eq!(gpt.context_window_options, vec![400_000, 1_000_000]);
     assert_eq!(gpt.max_output_tokens, Some(128_000));
 

@@ -24,6 +24,7 @@ mod registry;
 pub mod replay_policy;
 pub mod resolver;
 pub(crate) mod retry_delay;
+pub mod speed;
 pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;
@@ -54,6 +55,7 @@ pub use replay_policy::{
 pub use resolver::{
     DefaultLlmResolver, EffectiveModelLimits, LimitSource, LlmResolver, LlmScene, ResolvedCall,
 };
+pub use speed::Speed;
 pub use system_prompt::{SystemPromptSnapshot, ToolSurface};
 pub use thinking_policy::ThinkingLevel;
 pub use token_usage::SessionTokenUsage;

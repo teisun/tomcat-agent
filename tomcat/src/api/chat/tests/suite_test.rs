@@ -595,6 +595,7 @@ async fn request_prefix_is_byte_identical_across_turns() {
             diagnostic_request_id: None,
             stream: Some(true),
             model_override: None,
+            speed: None,
             thinking_level: None,
             cache_key: Some("prefix-test:main".to_string()),
             tools: Some(snapshot.tool_definitions().to_vec()),

@@ -451,6 +451,23 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
     expect(postState).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["success", "rejected", "transport"])("routes speed and reports %s", async (outcome) => {
+    const sendSetSpeed = outcome === "transport"
+      ? vi.fn().mockRejectedValue(new Error("offline"))
+      : vi.fn().mockResolvedValue({ success: outcome === "success", error: "invalid_speed" });
+    const provider = new PlanPreviewEditorProvider(makeDeps({
+      ensureSession: vi.fn().mockResolvedValue("s1"), messenger: { sendSetSpeed } as never,
+    }));
+    const toast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined as never);
+    const postState = vi.fn().mockResolvedValue(undefined);
+    try {
+      await provider.handleIntent({ messageId: "speed", type: "setSpeed", data: { modelId: "relay/model", speed: "fast" } }, makeDoc(), postState);
+      expect(sendSetSpeed).toHaveBeenCalledWith("s1", "relay/model", "fast");
+      expect(postState).toHaveBeenCalledTimes(outcome === "success" ? 1 : 0);
+      if (outcome !== "success") expect(toast).toHaveBeenCalledWith(expect.stringContaining(outcome === "rejected" ? "invalid_speed" : "offline"));
+    } finally { toast.mockRestore(); }
+  });
+
   it("reports failed plan-picker preference updates instead of silently reverting", async () => {
     const sendSetContextWindow = vi.fn().mockRejectedValue(new Error("invalid tier"));
     const sendSetThinkingLevel = vi.fn().mockRejectedValue(new Error("unsupported effort"));

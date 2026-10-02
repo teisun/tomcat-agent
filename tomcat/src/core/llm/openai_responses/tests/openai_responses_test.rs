@@ -62,6 +62,7 @@ fn responses_entry() -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),
@@ -855,6 +856,59 @@ fn responses_chunk_incomplete_max_output_tokens_emits_notice_finish_and_usage() 
     assert!(matches!(&events[2], StreamEvent::Usage { .. }));
 }
 
+#[tokio::test]
+async fn speed_responses_http_stream_and_non_stream_keep_max_independent() {
+    use crate::core::llm::{Speed, ThinkingLevel};
+    use tokio_stream::StreamExt;
+    let speeds = [
+        (None, None),
+        (Some(Speed::Standard), Some("default")),
+        (Some(Speed::Fast), Some("priority")),
+        (Some(Speed::Ultrafast), Some("ultrafast")),
+    ];
+    for stream in [false, true] {
+        let payload = if stream {
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        } else {
+            r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}]}"#
+        };
+        let server =
+            MockHttpServer::start(vec![ScriptedHttpResponse::json(200, payload); speeds.len()])
+                .await;
+        let mut entry = responses_entry();
+        entry.base_url = Some(server.base_url.clone());
+        let mut provider = provider_from_entry(entry, LlmConfig::default());
+        provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (speed, _) in speeds {
+            let request = ChatRequest {
+                messages: vec![ChatMessage::user("OK")],
+                model: "gpt-5.6-sol".into(),
+                speed,
+                thinking_level: Some(ThinkingLevel::Max),
+                ..Default::default()
+            };
+            if stream {
+                let mut events = provider.chat_stream(request).await.unwrap();
+                while let Some(event) = events.next().await {
+                    event.unwrap();
+                }
+            } else {
+                provider.chat(request).await.unwrap();
+            }
+        }
+        for (raw, (_, expected)) in server.request_texts().iter().zip(speeds) {
+            let body: serde_json::Value =
+                serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body.get("service_tier").and_then(|v| v.as_str()), expected);
+            assert_eq!(body["reasoning"]["effort"], "max");
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["model"], "gpt-5.6-sol");
+        }
+        assert_eq!(server.request_count(), 4);
+        server.shutdown().await;
+    }
+}
+
 #[test]
 fn responses_build_request_body_uses_model_name_when_present() {
     let mut entry = responses_entry();
@@ -877,6 +931,7 @@ fn responses_build_request_body_uses_model_name_when_present() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: Some("session-1:main".to_string()),
         tools: None,
@@ -908,6 +963,7 @@ fn responses_build_request_body_maps_catalog_id_to_model_name() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -938,6 +994,7 @@ fn responses_build_request_body_without_model_name_uses_id() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -966,6 +1023,7 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1024,6 +1082,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1063,6 +1122,7 @@ fn responses_auto_thinking_format_ignores_claude_model_name_on_responses_wire() 
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1097,6 +1157,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1130,6 +1191,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1163,6 +1225,7 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1192,6 +1255,7 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1243,6 +1307,7 @@ fn openai_responses_roundtrip_replays_reasoning_items_and_promotes_ephemeral_tai
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1305,6 +1370,7 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1456,6 +1522,7 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1536,6 +1603,7 @@ fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_u
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1615,6 +1683,7 @@ fn responses_build_request_body_skips_previous_response_id_across_routed_relays(
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -1703,6 +1772,7 @@ fn responses_build_request_body_does_not_fall_back_to_older_same_route_response_
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -2500,6 +2570,7 @@ fn responses_stream_test_request() -> ChatRequest {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,
@@ -3070,6 +3141,7 @@ fn responses_build_request_body_degrades_unsupported_history_attachments_to_inpu
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,

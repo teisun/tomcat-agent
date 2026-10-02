@@ -631,6 +631,7 @@ fn apply_model_choice_updates_provider_and_key_env() {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: Vec::new(),
         thinking_format: Some("deepseek".to_string()),
     };
@@ -727,6 +728,7 @@ fn apply_model_choice_skips_default_openai_base_url() {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: Vec::new(),
         thinking_format: None,
     };

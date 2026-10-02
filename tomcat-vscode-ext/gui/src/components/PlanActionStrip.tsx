@@ -1,3 +1,4 @@
+import type { Speed } from "../../../src/shared/modelSpeed";
 import { buildPickerModels } from "./buildPickerModels";
 import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
 import type { PlanFileState } from "../../../src/shared/planPreviewProtocol";
@@ -17,6 +18,7 @@ export function PlanActionStrip({
   onBuild,
   onSelectContextWindow,
   onSelectThinkingLevel,
+  onSelectSpeed,
   onSetBuildModel,
   sessionContextWindow,
   sessionModel,
@@ -30,6 +32,7 @@ export function PlanActionStrip({
   onBuild(): void;
   onSelectContextWindow(modelId: string, contextWindow: number): void;
   onSelectThinkingLevel(modelId: string, level: string): void;
+  onSelectSpeed(modelId: string, speed: Speed): void;
   onSetBuildModel(modelId: string): void;
   sessionContextWindow?: number | null;
   sessionModel: string;
@@ -55,6 +58,7 @@ export function PlanActionStrip({
         onSelectContextWindow={onSelectContextWindow}
         onSelectModel={onSetBuildModel}
         onSelectThinkingLevel={onSelectThinkingLevel}
+        onSelectSpeed={onSelectSpeed}
         placement="below"
         selectedModelId={selectedModelId}
         testId="plan-build-model-select"

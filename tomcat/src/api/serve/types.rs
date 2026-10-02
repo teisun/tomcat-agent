@@ -405,6 +405,15 @@ pub enum ServeCommand {
         level: String,
     },
     #[serde(rename_all = "camelCase")]
+    SetSpeed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        model: String,
+        speed: crate::core::llm::Speed,
+    },
+    #[serde(rename_all = "camelCase")]
     SetContextWindow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -773,6 +782,7 @@ impl ServeCommand {
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
+            | Self::SetSpeed { id, .. }
             | Self::SetContextWindow { id, .. }
             | Self::ListModels { id, .. }
             | Self::UpsertModel { id, .. }
@@ -823,6 +833,7 @@ impl ServeCommand {
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
+            | Self::SetSpeed { session_id, .. }
             | Self::SetContextWindow { session_id, .. }
             | Self::GetMessages { session_id, .. }
             | Self::CloseSession { session_id, .. }
@@ -889,6 +900,7 @@ impl ServeCommand {
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",
+            Self::SetSpeed { .. } => "set_speed",
             Self::SetContextWindow { .. } => "set_context_window",
             Self::ListModels { .. } => "list_models",
             Self::UpsertModel { .. } => "upsert_model",

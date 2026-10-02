@@ -71,6 +71,7 @@ fn make_request() -> ChatRequest {
         diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: None,
         tools: None,

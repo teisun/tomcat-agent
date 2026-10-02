@@ -1,3 +1,4 @@
+import type { Speed } from "../../src/shared/modelSpeed";
 import type { AttachmentCandidate } from "../../src/shared/attachmentProtocol";
 import type {
   DraftForkCapture,
@@ -417,6 +418,8 @@ export interface WebviewModelInfo {
   selectedContextWindow?: number | null;
   selectedReasoningLevel?: string | null;
   supportedReasoningLevels: string[];
+  supportedSpeeds?: Speed[];
+  selectedSpeed?: Speed | null;
 }
 
 export type WebviewConnectionStatus =
@@ -720,6 +723,7 @@ export type WebviewIntent =
         sessionId?: string | null;
       };
     }
+  | { messageId: string; type: "setSpeed"; data: { speed: Speed; modelId: string; sessionId?: string | null } }
   | {
       messageId: string;
       type: "setContextWindow";

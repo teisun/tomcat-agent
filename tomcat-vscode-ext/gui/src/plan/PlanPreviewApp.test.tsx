@@ -290,6 +290,21 @@ describe("PlanPreviewApp", () => {
     expect((intents[0] as { data: { modelId: string } }).data.modelId).toBe("claude-opus");
   });
 
+  it("emits setSpeed from the hybrid picker without switching the build model", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState({
+      availableModelDetails: { "gpt-5.6": { capabilities: [], contextWindowOptions: [], supportedReasoningLevels: [], id: "gpt-5.6", supportedSpeeds: ["fast", "ultrafast"], selectedSpeed: "standard" } },
+      toolbarStyle: "hybrid",
+    }));
+    fireEvent.click(screen.getByTestId("plan-build-model-select"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.6"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-gpt-5.6"));
+    fireEvent.click(screen.getByRole("button", { name: "Ultrafast" }));
+    expect(intentsOfType(api, "setSpeed")).toEqual([expect.objectContaining({ data: { modelId: "gpt-5.6", speed: "ultrafast" } })]);
+    expect(intentsOfType(api, "setBuildModel")).toHaveLength(0);
+  });
+
   it("overlays the session's context and effort in the hybrid model picker", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);

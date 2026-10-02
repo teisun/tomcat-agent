@@ -46,6 +46,7 @@ fn custom_claude_input() -> ModelEntryInput {
         context_window_options: None,
         max_output_tokens: Some(128_000),
         description: None,
+        supported_speeds: None,
         supported_reasoning_levels: None,
         thinking_format: Some("anthropic".to_string()),
     }
@@ -73,6 +74,7 @@ fn upsert_list_and_remove_user_model_roundtrip() {
         context_window_options: None,
         max_output_tokens: Some(128_000),
         description: None,
+        supported_speeds: None,
         supported_reasoning_levels: None,
         thinking_format: Some("openai".to_string()),
     };
@@ -99,6 +101,169 @@ fn upsert_list_and_remove_user_model_roundtrip() {
     remove_user_model(&cfg, "custom-openai").expect("remove custom model");
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog after remove");
     assert!(catalog.lookup("custom-openai").is_none());
+}
+
+#[test]
+fn speed_admin_roundtrip_keeps_all_eight_synthetic_declarations() {
+    use crate::core::llm::Speed;
+    let (work, cfg) = temp_cfg();
+    let prefs = model_prefs(work.path());
+    for (i, speeds) in [
+        vec![Speed::Fast, Speed::Ultrafast],
+        vec![Speed::Fast],
+        vec![Speed::Fast],
+        vec![Speed::Fast],
+        vec![Speed::Fast, Speed::Ultrafast],
+        vec![Speed::Fast],
+        vec![Speed::Fast],
+        vec![Speed::Fast],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("relay/synthetic-{i}");
+        let mut input = custom_claude_input();
+        input.id = id.clone();
+        input.model_name = Some(format!("synthetic-{i}"));
+        input.api = "openai-responses".into();
+        input.thinking_format = Some("openai".into());
+        input.supported_speeds = Some(speeds.clone());
+        input.supported_reasoning_levels = Some(vec!["high".into(), "xhigh".into(), "max".into()]);
+        let view = upsert_user_model(&cfg, input.clone()).unwrap().model;
+        assert_eq!(view.supported_speeds, speeds);
+        upsert_user_model(
+            &cfg,
+            ModelEntryInput {
+                description: Some("edited".into()),
+                ..input
+            },
+        )
+        .unwrap();
+        prefs.set_speed(&id, Speed::Ultrafast).unwrap();
+        let catalog = ModelCatalog::load(&cfg).unwrap();
+        let reloaded = list_model_views_with_prefs(&catalog, &prefs)
+            .into_iter()
+            .find(|m| m.id == id)
+            .unwrap();
+        assert_eq!(reloaded.supported_speeds, speeds);
+        assert_eq!(
+            reloaded.selected_speed,
+            Some(if speeds.contains(&Speed::Ultrafast) {
+                Speed::Ultrafast
+            } else {
+                Speed::Standard
+            })
+        );
+        assert!(reloaded.supported_reasoning_levels.contains(&"max".into()));
+    }
+}
+
+#[test]
+fn upsert_user_model_rejects_speeds_on_non_openai_api() {
+    let (work, cfg) = temp_cfg();
+    upsert_user_model(&cfg, custom_claude_input()).unwrap();
+    let path = work.path().join("models.toml");
+    let original = fs::read(&path).unwrap();
+    let error = upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            supported_speeds: Some(vec![crate::core::llm::Speed::Fast]),
+            ..custom_claude_input()
+        },
+    )
+    .expect_err("non-OpenAI speed declaration must be rejected before writing");
+    assert!(error.to_string().contains("supported_speeds"));
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn upsert_and_remove_keep_unknown_model_fields() {
+    use crate::core::llm::Speed;
+    let (work, cfg) = temp_cfg();
+    let path = work.path().join("models.toml");
+    fs::write(
+        &path,
+        r#"
+[[models]]
+id = "model-a"
+api = "openai-responses"
+provider = "openai"
+supported_speeds = ["fast"]
+future_field = "x"
+future_options = { enabled = true, weights = [1, 2], nested = { label = "keep" } }
+
+[[models]]
+id = "model-b"
+api = "anthropic-messages"
+provider = "anthropic"
+future_flag = false
+"#,
+    )
+    .unwrap();
+    let original: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let assert_preserved = || {
+        let value: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let models = value["models"].as_array().unwrap();
+        let a = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("model-a"))
+            .unwrap();
+        let b = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("model-b"))
+            .unwrap();
+        assert_eq!(a["future_field"], original["models"][0]["future_field"]);
+        assert_eq!(a["future_options"], original["models"][0]["future_options"]);
+        assert_eq!(
+            a["supported_speeds"],
+            original["models"][0]["supported_speeds"]
+        );
+        assert_eq!(b["future_flag"], original["models"][1]["future_flag"]);
+    };
+    upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: "model-c".into(),
+            ..custom_claude_input()
+        },
+    )
+    .unwrap();
+    assert_preserved();
+    upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: "model-b".into(),
+            description: Some("edited B".into()),
+            ..custom_claude_input()
+        },
+    )
+    .unwrap();
+    assert_preserved();
+    remove_user_model(&cfg, "model-c").unwrap();
+    assert_preserved();
+    upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: "model-a".into(),
+            api: "openai-responses".into(),
+            thinking_format: Some("openai".into()),
+            supported_speeds: Some(vec![Speed::Fast]),
+            description: Some("edited A".into()),
+            ..custom_claude_input()
+        },
+    )
+    .unwrap();
+    assert_preserved();
+    let catalog = ModelCatalog::load(&cfg).unwrap();
+    assert_eq!(
+        catalog.lookup("model-a").unwrap().description.as_deref(),
+        Some("edited A")
+    );
+    assert_eq!(
+        catalog.lookup("model-b").unwrap().description.as_deref(),
+        Some("edited B")
+    );
+    assert!(catalog.lookup("model-c").is_none());
 }
 
 #[test]
@@ -237,6 +402,7 @@ fn upsert_user_model_accepts_id_with_slash() {
         context_window_options: None,
         max_output_tokens: None,
         description: None,
+        supported_speeds: None,
         supported_reasoning_levels: None,
         thinking_format: None,
     };
@@ -274,6 +440,7 @@ fn upsert_user_model_collects_warning_for_openai_api_with_non_effort_format() {
             context_window_options: None,
             max_output_tokens: None,
             description: None,
+            supported_speeds: None,
             supported_reasoning_levels: None,
             thinking_format: Some("anthropic".to_string()),
         },
@@ -652,6 +819,7 @@ fn upsert_user_model_rejects_unknown_api() {
             context_window_options: None,
             max_output_tokens: None,
             description: None,
+            supported_speeds: None,
             supported_reasoning_levels: None,
             thinking_format: None,
         },
@@ -788,6 +956,7 @@ fn model_config_reload_rebuilds_provider_without_restart() {
             context_window_options: None,
             max_output_tokens: None,
             description: None,
+            supported_speeds: None,
             supported_reasoning_levels: None,
             thinking_format: Some("openai".to_string()),
         },
@@ -827,6 +996,7 @@ fn model_config_reload_rebuilds_provider_without_restart() {
             context_window_options: None,
             max_output_tokens: None,
             description: None,
+            supported_speeds: None,
             supported_reasoning_levels: None,
             thinking_format: Some("anthropic".to_string()),
         },

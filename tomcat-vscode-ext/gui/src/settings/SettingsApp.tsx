@@ -31,7 +31,13 @@ import { KeySlotCombobox, type KeySlotOption } from "./KeySlotCombobox";
 import { isValidKeySlotName } from "./keySlot";
 import { ConnectorsSettingsView } from "./ConnectorsSettingsView";
 
-type FormState = SettingsModelInput;
+import { isSpeed, type Speed } from "../../../src/shared/modelSpeed";
+import { parseCommaList } from "./commaList";
+
+type FormState = Omit<SettingsModelInput, "supportedReasoningLevels" | "supportedSpeeds"> & {
+  reasoningLevelsText: string | null;
+  speedsText: string | null;
+};
 type FormMode = "create" | "edit";
 type DialogKind = "official" | "relay";
 const DEFAULT_CONTEXT_WINDOW = 400_000;
@@ -81,6 +87,8 @@ function cloneCapabilities(
 
 function createEmptyForm(): FormState {
   return {
+    reasoningLevelsText: null,
+    speedsText: null,
     api: "",
     apiKeyEnv: "",
     baseUrl: "",
@@ -138,17 +146,6 @@ function finiteNumberOrNull(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function parseReasoningLevels(value: string): string[] {
-  return Array.from(
-    new Set(
-      value
-        .split(",")
-        .map((level) => level.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
 function hasScheme(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }
@@ -191,9 +188,14 @@ function normalizeModel(model: FormState): SettingsModelInput {
     maxOutputTokens: finiteNumberOrNull(model.maxOutputTokens),
     modelName: normalizeOptionalText(model.modelName),
     provider: fieldText(model.provider),
-    supportedReasoningLevels: Array.isArray(model.supportedReasoningLevels)
-      ? [...model.supportedReasoningLevels]
-      : null,
+    supportedReasoningLevels: model.reasoningLevelsText === null
+      ? null
+      : parseCommaList(model.reasoningLevelsText),
+    supportedSpeeds: model.speedsText === null
+      ? null
+      : parseCommaList(model.speedsText).filter(
+          (speed): speed is Speed => isSpeed(speed) && speed !== "standard",
+        ),
     thinkingFormat: normalizeOptionalText(model.thinkingFormat),
   };
 }
@@ -304,7 +306,8 @@ function modelToForm(model: SettingsModelView): FormState {
     maxOutputTokens: model.maxOutputTokens ?? null,
     modelName: model.modelName ?? "",
     provider: model.provider,
-    supportedReasoningLevels: model.supportedReasoningLevels ?? null,
+    reasoningLevelsText: model.supportedReasoningLevels?.join(", ") ?? null,
+    speedsText: model.supportedSpeeds?.join(", ") ?? null,
     thinkingFormat: model.thinkingFormat ?? "",
   };
 }
@@ -752,8 +755,8 @@ export function SettingsApp({
       api: automaticReusableModel.api,
       capabilities: cloneCapabilities(automaticReusableModel.capabilities),
       description: automaticReusableModel.description ?? null,
-      supportedReasoningLevels:
-        automaticReusableModel.supportedReasoningLevels ?? null,
+      reasoningLevelsText: automaticReusableModel.supportedReasoningLevels?.join(", ") ?? null,
+      speedsText: automaticReusableModel.supportedSpeeds?.join(", ") ?? null,
       thinkingFormat: automaticReusableModel.thinkingFormat ?? "",
     }));
   }, [
@@ -846,7 +849,8 @@ export function SettingsApp({
     modelName: effectiveModelName,
     provider: effectiveProvider,
     description: form.description,
-    supportedReasoningLevels: form.supportedReasoningLevels,
+    reasoningLevelsText: form.reasoningLevelsText,
+    speedsText: form.speedsText,
     thinkingFormat: effectiveThinkingFormat,
   });
 
@@ -1087,6 +1091,10 @@ export function SettingsApp({
   }
 
   function handleSave() {
+    if (parseCommaList(form.speedsText ?? "").some((speed) => !isSpeed(speed))) {
+      setValidationError("Supported speeds accepts fast and ultrafast only. Standard is always available.");
+      return;
+    }
     if (dialogKind === "official" && !selectedPreset) {
       setValidationError("Choose an official provider preset first.");
       return;
@@ -1353,6 +1361,7 @@ export function SettingsApp({
                           </div>
                           <button
                             className="tc-button tc-button--secondary"
+                            data-testid={`settings-edit-${model.id}`}
                             onClick={() => openEditForm(model)}
                             type="button"
                           >
@@ -1417,6 +1426,7 @@ export function SettingsApp({
                           </div>
                           <button
                             className="tc-button tc-button--secondary"
+                            data-testid={`settings-edit-${model.id}`}
                             onClick={() => openEditForm(model)}
                             type="button"
                           >
@@ -1820,6 +1830,7 @@ export function SettingsApp({
                     <button
                       aria-expanded={showAdvanced}
                       className="tc-settings-advanced__toggle"
+                      data-testid="settings-model-advanced"
                       onClick={() => setShowAdvanced((current) => !current)}
                       type="button"
                     >
@@ -1984,21 +1995,34 @@ export function SettingsApp({
                               onChange={(event) =>
                                 setForm((current) => ({
                                   ...current,
-                                  supportedReasoningLevels: parseReasoningLevels(
-                                    event.target.value,
-                                  ),
+                                  reasoningLevelsText: event.target.value,
                                 }))
                               }
-                              placeholder="low, medium, high, xhigh"
-                              value={
-                                form.supportedReasoningLevels?.join(", ") ?? ""
-                              }
+                              placeholder="low, medium, high, xhigh, max"
+                              data-testid="settings-supported-effort-levels"
+                              aria-label="Supported effort levels"
+                              value={form.reasoningLevelsText ?? ""}
                             />
                             <small className="tc-field__hint">
-                              Comma-separated levels supported by this relay.
+                              English or Chinese comma-separated effort levels supported by the upstream model.
                             </small>
                           </label>
                         </div>
+
+                        <label className="tc-field">
+                          <span>Supported speeds</span>
+                          <input
+                            className="tc-input"
+                            data-testid="settings-supported-speeds"
+                            aria-label="Supported speeds"
+                            onChange={(event) => setForm((current) => ({ ...current, speedsText: event.target.value }))}
+                            placeholder="e.g. fast, ultrafast"
+                            value={form.speedsText ?? ""}
+                          />
+                          <small className="tc-field__hint">
+                            Enter fast or ultrafast only if supported. Leave empty to hide Speed options. Acceleration may cost more.
+                          </small>
+                        </label>
 
                         <div className="tc-settings-capabilities">
                           {CAPABILITY_OPTIONS.map(([key, label]) => (
@@ -2047,6 +2071,7 @@ export function SettingsApp({
                   <button
                     className="tc-button tc-button--primary"
                     disabled={saveDisabled || Boolean(deletingModelId)}
+                    data-testid="settings-save-model"
                     onClick={handleSave}
                     type="button"
                   >

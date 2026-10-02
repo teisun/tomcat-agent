@@ -160,6 +160,19 @@ describe("settings panel model management flow", () => {
     return { messenger, panel };
   }
 
+  it("preserves supportedSpeeds in host state and a subsequent full model edit", async () => {
+    const model = { id: "relay/model", modelName: "model", api: "openai-responses", apiKeyEnv: "STUB_KEY", baseUrl: "https://relay.example.test", provider: "relay", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: true, web_search: false }, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"], contextWindowOptions: [] };
+    const sendUpsertModel = vi.fn().mockResolvedValue({ success: true });
+    const { panel } = createPanel({ messenger: { sendListModels: vi.fn().mockResolvedValue({ success: true, payload: { models: [model] } }), sendUpsertModel } });
+    try {
+      await panel.__testingDispatchIntent({ messageId: "ready-speed", type: "settings.ready" });
+      const view = panel.__testingSnapshot().state.models[0];
+      expect(view.supportedSpeeds).toEqual(["fast", "ultrafast"]);
+      await panel.__testingDispatchIntent({ messageId: "save-speed", type: "upsertModel", data: { model: { ...view, description: "edited only description" } } });
+      expect(sendUpsertModel).toHaveBeenCalledWith(expect.objectContaining({ id: "relay/model", description: "edited only description", supportedSpeeds: ["fast", "ultrafast"] }));
+    } finally { panel.dispose(); }
+  });
+
   it("publishes route changes before slow model discovery completes", async () => {
     let release!: (value: unknown) => void;
     const models = new Promise((resolve) => { release = resolve; });

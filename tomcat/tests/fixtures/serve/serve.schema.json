@@ -414,6 +414,40 @@
       {
         "type": "object",
         "required": [
+          "model",
+          "speed",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "speed": {
+            "$ref": "#/definitions/Speed"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_speed"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "contextWindow",
           "model",
           "type"
@@ -1614,6 +1648,15 @@
               "type": "string"
             }
           },
+          "supportedSpeeds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
+          },
           "thinkingFormat": {
             "type": [
               "string",
@@ -1849,6 +1892,14 @@
           "enter",
           "exit",
           "build"
+        ]
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
         ]
       }
     }
@@ -5902,6 +5953,16 @@
           "null"
         ]
       },
+      "selectedSpeed": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/Speed"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "source": {
         "$ref": "#/definitions/ModelSource"
       },
@@ -5910,6 +5971,13 @@
         "type": "array",
         "items": {
           "type": "string"
+        }
+      },
+      "supportedSpeeds": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/Speed"
         }
       },
       "thinkingFormat": {
@@ -5950,6 +6018,14 @@
         "enum": [
           "builtin",
           "user"
+        ]
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
         ]
       }
     }
@@ -6134,6 +6210,16 @@
               "null"
             ]
           },
+          "selectedSpeed": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Speed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source": {
             "$ref": "#/definitions/ModelSource"
           },
@@ -6144,6 +6230,13 @@
               "type": "string"
             }
           },
+          "supportedSpeeds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
+          },
           "thinkingFormat": {
             "type": [
               "string",
@@ -6151,6 +6244,14 @@
             ]
           }
         }
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
+        ]
       }
     }
   },
@@ -6292,6 +6393,16 @@
               "null"
             ]
           },
+          "selectedSpeed": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Speed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source": {
             "$ref": "#/definitions/ModelSource"
           },
@@ -6302,6 +6413,13 @@
               "type": "string"
             }
           },
+          "supportedSpeeds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
+          },
           "thinkingFormat": {
             "type": [
               "string",
@@ -6309,6 +6427,14 @@
             ]
           }
         }
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
+        ]
       }
     }
   },

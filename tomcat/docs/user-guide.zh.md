@@ -242,6 +242,33 @@ tomcat init
 - `base_url`：既可以只填 host，也可以带显式厂商路径。tomcat 会自动补 leaf，所以 `https://api.openai.com` 会拼成 `/v1/...`，而 GLM 这类 `https://open.bigmodel.cn/api/paas/v4` 会保留 `/api/paas/v4/...`
 - `kimi-k2.7-code` / Moonshot 端点说明：当前内置预置默认走 Moonshot 中国站 `https://api.moonshot.cn`，因为本仓 real-LLM 冒烟已按这个端点验证通过。Moonshot 全球站使用 `https://api.moonshot.ai`。如果你的 API Key 是在全球站申请的，请在 `models.toml` 里把 `base_url` 改成 `https://api.moonshot.ai`。
 
+### 模型 Speed 与 Effort（VS Code）
+
+```text
+模型菜单 → 点某一行 Edit
+              Speed   Standard / Fast / Ultrafast
+              ──────────────────────────────────
+              Context 400K / 1M
+              Effort  Low … Xhigh / Max
+```
+
+Speed 是服务加速，Effort 是思考强度，两者互不替代：模型同时支持时，可以 Fast + Max。改某一行的 Speed 不会切换当前模型，也不会改 Context/Effort；选择按模型记住，下次运行生效。
+
+- 默认 **Standard**。声明了速度控制的模型会明确发送 `service_tier = "default"`，防止上游项目默认启用收费加速档。
+- **Fast** 发 `service_tier = "priority"`，**Ultrafast** 发 `service_tier = "ultrafast"`。加速可能更贵，上游也可能拒绝或降档；菜单选中 Fast 不等于服务端真的按 Fast 执行。
+- 模型声明了加速档才出现 Speed 区。`supported_speeds` 只列 `fast`、`ultrafast`，Standard 永远隐含。空列表隐藏 Speed 区，也不发速度字段。
+- 只有上游支持时才在 `supported_reasoning_levels` 里补 `max`；不会自动把已有 Xhigh 偏好改为 Max。
+- Ultrafast 按模型、账号开放：GPT-6 Astra 支持，GPT-5.6 Sol 需要预览权限；GPT-6 Sol 与 GPT-6.1 Sol 不声明支持。**本期不接 Ultra 多代理**，也没有 `reasoning.effort = "ultra"`。
+
+对于确实支持两档加速的 OpenAI Responses 模型，在已有 `[[models]]` 条目中写：
+
+```toml
+supported_speeds = ["fast", "ultrafast"]
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+```
+
+**Tomcat Settings → Models → Edit → Advanced** 里的 **Supported effort levels** 与 **Supported speeds** 都支持英文、中文逗号。输入时原样保留文字，点保存才 trim、去空、去重。中转站配置是用户对能力的声明，不会自动探测网关是否透传。
+
 ### tomcat model —— 不手改文件也能管模型与 Key
 
 如果你不想手动编辑 `models.toml` 或 `.env`，可以直接使用专门的模型管理子命令：

@@ -9,6 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { SPEEDS, type Speed } from "../../../src/shared/modelSpeed";
 import { filterModels } from "./modelSearch";
 import { formatModelLabel, modelLabelParts, thinkingLevelLabel } from "./modelLabel";
 
@@ -22,6 +23,8 @@ export interface ModelPickerModel {
   selectedContextWindow?: number | null;
   selectedReasoningLevel?: string | null;
   supportedReasoningLevels?: readonly string[];
+  supportedSpeeds?: readonly Speed[];
+  selectedSpeed?: Speed | null;
 }
 
 export interface ModelPickerProps {
@@ -37,6 +40,7 @@ export interface ModelPickerProps {
   onSelectContextWindow?: (modelId: string, contextWindow: number) => void;
   onSelectModel: (modelId: string) => void;
   onSelectThinkingLevel?: (modelId: string, level: string) => void;
+  onSelectSpeed?: (modelId: string, speed: Speed) => void;
   optionTestId?: string;
   selectedModelId: string | null | undefined;
   testId?: string;
@@ -71,6 +75,7 @@ export function ModelPicker({
   onSelectContextWindow,
   onSelectModel,
   onSelectThinkingLevel,
+  onSelectSpeed,
   optionTestId = "model-option",
   placement = "above",
   selectedModelId,
@@ -426,6 +431,7 @@ export function ModelPicker({
               model={configModel}
               onSelectContextWindow={onSelectContextWindow}
               onSelectThinkingLevel={onSelectThinkingLevel}
+              onSelectSpeed={onSelectSpeed}
               placement={configPosition?.placement ?? "right"}
               popoverRef={configPopoverRef}
               position={configPosition}
@@ -443,10 +449,11 @@ function ModelConfigPopover({
   onMouseLeave,
   onSelectContextWindow,
   onSelectThinkingLevel,
+  onSelectSpeed,
   placement,
   popoverRef,
   position,
-}: Pick<ModelPickerProps, "onSelectContextWindow" | "onSelectThinkingLevel"> & {
+}: Pick<ModelPickerProps, "onSelectContextWindow" | "onSelectThinkingLevel" | "onSelectSpeed"> & {
   model: ModelPickerModel;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
@@ -477,6 +484,24 @@ function ModelConfigPopover({
         visibility: position ? "visible" : "hidden",
       }}
     >
+      {onSelectSpeed && (model.supportedSpeeds?.length ?? 0) > 0 ? (
+        <ConfigSection title="Speed">
+          {SPEEDS.filter(
+            (speed) => speed === "standard" || model.supportedSpeeds?.includes(speed),
+          ).map((speed) => (
+            <ConfigOption
+              key={speed}
+              label={{ standard: "Standard", fast: "Fast", ultrafast: "Ultrafast" }[speed]}
+              onSelect={() => onSelectSpeed(model.id, speed)}
+              selected={speed === (model.selectedSpeed ?? "standard")}
+              testId="speed-option"
+              title={speed === "standard"
+                ? undefined
+                : "Faster output; higher cost. Upstream access required."}
+            />
+          ))}
+        </ConfigSection>
+      ) : null}
       {onSelectContextWindow && contextWindowOptions.length > 0 ? (
         <ConfigSection title="Context">
           {contextWindowOptions.map((contextWindow) => (
@@ -535,15 +560,20 @@ function ConfigOption({
   onSelect,
   selected,
   testId,
+  title,
 }: {
   label: string;
   onSelect: () => void;
   selected: boolean;
   testId: string;
+  title?: string;
 }) {
   return (
     <button
       className="tc-model-config-option"
+      aria-label={label}
+      aria-pressed={selected}
+      title={title}
       data-testid={testId}
       onClick={onSelect}
       type="button"

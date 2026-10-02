@@ -18,6 +18,7 @@ fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: Vec::new(),
         thinking_format: None,
     }

@@ -1124,6 +1124,64 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::SetSpeed {
+            id,
+            session_id,
+            model,
+            speed,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            let model = model.trim().to_string();
+            let entry = match slot
+                .ctx
+                .global_services
+                .model_catalog
+                .lookup_explicit(&model)
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        Some(slot.session_id.clone()),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if speed != crate::core::llm::Speed::Standard
+                && !entry.supported_speeds.contains(&speed)
+            {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    "invalid_speed: model does not support this speed",
+                )?;
+                return Ok(());
+            }
+            if let Err(error) = slot
+                .ctx
+                .global_services
+                .model_prefs
+                .set_speed(&model, speed)
+            {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id, Some(slot.session_id.clone()),
+                Some(serde_json::json!({ "sessionId": slot.session_id, "model": model, "speed": speed })),
+            )))?;
+        }
         ServeCommand::SetContextWindow {
             id,
             session_id,

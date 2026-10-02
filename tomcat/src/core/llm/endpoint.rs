@@ -13,6 +13,15 @@ pub(crate) fn build_path_aware_endpoint(base_url: &str, leaf: &str) -> String {
     }
 }
 
+/// OpenAI adapter mapping; product preferences remain provider-neutral.
+pub(crate) fn openai_service_tier(speed: super::Speed) -> &'static str {
+    match speed {
+        super::Speed::Standard => "default",
+        super::Speed::Fast => "priority",
+        super::Speed::Ultrafast => "ultrafast",
+    }
+}
+
 fn has_explicit_path(base_url: &str) -> bool {
     if let Ok(url) = Url::parse(base_url) {
         return !url.path().is_empty() && url.path() != "/";

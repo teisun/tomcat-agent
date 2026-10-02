@@ -7,11 +7,12 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::core::llm::thinking_policy::ThinkingLevel;
+use crate::core::llm::Speed;
 use crate::infra::error::AppError;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 
 /// A user's per-model choices. Model capabilities stay in `models.toml`; this
-/// only records the two choices the user can make for a capable model.
+/// only records the user's reasoning, context-window and speed choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPrefs {
@@ -19,6 +20,8 @@ pub struct ModelPrefs {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub speed: Speed,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +61,7 @@ impl ModelPrefsStore {
             return ModelPrefs {
                 reasoning: self.default_reasoning,
                 context_window: None,
+                speed: Speed::Standard,
             };
         }
         self.models
@@ -67,6 +71,7 @@ impl ModelPrefsStore {
             .unwrap_or(ModelPrefs {
                 reasoning: self.default_reasoning,
                 context_window: None,
+                speed: Speed::Standard,
             })
     }
 
@@ -91,6 +96,14 @@ impl ModelPrefsStore {
         self.update(model, |prefs| prefs.reasoning = reasoning)
     }
 
+    pub fn speed_for(&self, model: &str) -> Speed {
+        self.prefs_for(model).speed
+    }
+
+    pub fn set_speed(&self, model: &str, speed: Speed) -> Result<(), AppError> {
+        self.update(model, |prefs| prefs.speed = speed)
+    }
+
     pub fn set_context_window(
         &self,
         model: &str,
@@ -109,12 +122,18 @@ impl ModelPrefsStore {
             return Ok(());
         }
         let mut guard = self.models.lock();
-        let prefs = guard.entry(normalized.to_string()).or_insert(ModelPrefs {
-            reasoning: self.default_reasoning,
-            context_window: None,
-        });
+        let mut candidate = guard.clone();
+        let prefs = candidate
+            .entry(normalized.to_string())
+            .or_insert(ModelPrefs {
+                reasoning: self.default_reasoning,
+                context_window: None,
+                speed: Speed::Standard,
+            });
         change(prefs);
-        save_models(&self.path, &guard)
+        save_models(&self.path, &candidate)?;
+        *guard = candidate;
+        Ok(())
     }
 }
 

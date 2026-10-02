@@ -63,6 +63,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -136,6 +137,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };

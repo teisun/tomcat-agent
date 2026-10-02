@@ -73,6 +73,40 @@ describe("ModelPicker", () => {
     );
   }
 
+  it.each([{ supportedSpeeds: ["fast"] as const }, { supportedSpeeds: ["fast", "ultrafast"] as const }])("shows declared Speed above Context and edits another model without switching", ({ supportedSpeeds }) => {
+    const onSelectSpeed = vi.fn();
+    const { onSelectModel, onSelectContextWindow, onSelectThinkingLevel } = renderPicker({
+      models: [{ ...MODELS[0], supportedSpeeds, selectedSpeed: "fast" }, MODELS[1]],
+      selectedModelId: "plain-model", onSelectSpeed,
+    });
+    fireEvent.click(screen.getByTestId("model-select"));
+    openConfig(modelOption("fcodex/gpt-5.6-terra"));
+    const config = screen.getByTestId("thinking-level-dropdown");
+    expect([...config.querySelectorAll("h3")].map((heading) => heading.textContent)).toEqual(["Speed", "Context", "Effort"]);
+    const options = within(config).getAllByTestId("speed-option");
+    expect(options.map((option) => option.textContent)).toEqual(["Standard", "Fast", ...(supportedSpeeds.length === 2 ? ["Ultrafast"] : [])]);
+    const fast = within(config).getByRole("button", { name: "Fast", pressed: true });
+    expect(fast.title).toContain("higher cost");
+    fireEvent.mouseDown(fast);
+    fireEvent.click(fast);
+    expect(onSelectSpeed).toHaveBeenCalledWith("fcodex/gpt-5.6-terra", "fast");
+    fireEvent.click(within(config).getByRole("button", { name: "Standard" }));
+    expect(onSelectSpeed).toHaveBeenLastCalledWith("fcodex/gpt-5.6-terra", "standard");
+    expect(onSelectModel).not.toHaveBeenCalled();
+    expect(onSelectContextWindow).not.toHaveBeenCalled();
+    expect(onSelectThinkingLevel).not.toHaveBeenCalled();
+    expect(screen.getByTestId("model-select").textContent).toContain("plain-model");
+    expect(screen.getByTestId("thinking-level-dropdown")).toBeTruthy();
+  });
+
+  it("hides Speed for an undeclared model", () => {
+    renderPicker({ onSelectSpeed: vi.fn() });
+    fireEvent.click(screen.getByTestId("model-select"));
+    openConfig(modelOption("plain-model"));
+    expect(screen.queryByText("Speed")).toBeNull();
+    expect(screen.queryAllByTestId("speed-option")).toHaveLength(0);
+  });
+
   it("shows a combined label, swaps the selected check for Edit, and searches flexibly", () => {
     renderPicker();
     expect(screen.getByTestId("model-select").textContent).toContain("fcodex/gpt-5.6-terra Xhigh");

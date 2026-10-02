@@ -5285,6 +5285,7 @@ async fn serve_set_model_rejects_a_model_removed_after_the_catalog_was_cached() 
             context_window_options: None,
             max_output_tokens: None,
             description: None,
+            supported_speeds: None,
             supported_reasoning_levels: None,
             thinking_format: Some("openai".to_string()),
         },
@@ -5370,6 +5371,87 @@ async fn serve_set_model_rejects_a_model_removed_after_the_catalog_was_cached() 
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn speed_serve_persists_lists_rejects_and_keeps_failed_save_unchanged() {
+    use crate::core::llm::Speed;
+    let _api_key = install_test_api_key();
+    let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    for (id, model, speed, success) in [
+        ("speed-fast", "gpt-5.6", Speed::Fast, true),
+        ("speed-unsupported", "gpt-5.4", Speed::Fast, false),
+        ("speed-ultra", "gpt-5.6", Speed::Ultrafast, false),
+        ("speed-missing", "missing-model", Speed::Standard, false),
+        ("speed-standard", "gpt-5.4", Speed::Standard, true),
+    ] {
+        handle_command(
+            state.clone(),
+            ServeCommand::SetSpeed {
+                id: Some(id.into()),
+                session_id: Some(slot.session_id.clone()),
+                model: model.into(),
+                speed,
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |v| v["id"] == id).await;
+        let response = lines.iter().find(|v| v["id"] == id).unwrap();
+        assert_eq!(response["success"], success, "{response:?}");
+        if success {
+            assert_eq!(response["payload"]["speed"], serde_json::json!(speed));
+            assert!(response["payload"].get("tier").is_none());
+        }
+    }
+    let path = crate::infra::config::resolve_model_thinking_path(&state.cfg).unwrap();
+    let reloaded = crate::ModelPrefsStore::load(&path, crate::ThinkingLevel::High).unwrap();
+    assert_eq!(reloaded.speed_for("gpt-5.6"), Speed::Fast);
+    let disk = std::fs::read(&path).unwrap();
+    let backup = temp.path().join("prefs-backup.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    handle_command(
+        state.clone(),
+        ServeCommand::SetSpeed {
+            id: Some("speed-save-failed".into()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.6".into(),
+            speed: Speed::Standard,
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |v| v["id"] == "speed-save-failed").await;
+    assert_eq!(
+        lines
+            .iter()
+            .find(|v| v["id"] == "speed-save-failed")
+            .unwrap()["success"],
+        false
+    );
+    assert_eq!(state.shared_model_prefs.speed_for("gpt-5.6"), Speed::Fast);
+    assert_eq!(slot.ctx.resolve_speed("gpt-5.6"), Some(Speed::Fast));
+    assert_eq!(std::fs::read(&backup).unwrap(), disk);
+    handle_command(
+        state.clone(),
+        ServeCommand::ListModels {
+            id: Some("speed-list".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |v| v["id"] == "speed-list").await;
+    let response = lines.iter().find(|v| v["id"] == "speed-list").unwrap();
+    let model = response["payload"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "gpt-5.6")
+        .unwrap();
+    assert_eq!(model["selectedSpeed"], "fast");
+    assert_eq!(model["supportedSpeeds"], serde_json::json!(["fast"]));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_set_thinking_level_roundtrips_in_get_state() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
@@ -5435,6 +5517,7 @@ async fn upsert_model_response_includes_non_fatal_warnings() {
                 context_window_options: None,
                 max_output_tokens: None,
                 description: None,
+                supported_speeds: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
@@ -5495,6 +5578,7 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                 context_window_options: None,
                 max_output_tokens: Some(128_000),
                 description: None,
+                supported_speeds: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
@@ -6442,6 +6526,7 @@ async fn serve_set_context_window_persists_and_lists_selected_tier() {
                 context_window_options: Some(vec![1_000_000, 400_000]),
                 max_output_tokens: None,
                 description: Some("测试 Context 档位".to_string()),
+                supported_speeds: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("openai".to_string()),
             },
@@ -6555,6 +6640,7 @@ async fn serve_set_thinking_level_for_relay_persists_under_catalog_id_and_lists_
                 context_window_options: None,
                 max_output_tokens: None,
                 description: None,
+                supported_speeds: None,
                 supported_reasoning_levels: Some(vec!["high".to_string(), "xhigh".to_string()]),
                 thinking_format: Some("openai".to_string()),
             },
@@ -6893,6 +6979,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
                 context_window_options: None,
                 max_output_tokens: None,
                 description: None,
+                supported_speeds: None,
                 supported_reasoning_levels: Some(vec![
                     "low".to_string(),
                     "medium".to_string(),

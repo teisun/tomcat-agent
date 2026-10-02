@@ -1102,6 +1102,9 @@ pub struct ChatRequest {
     pub model_override: Option<String>,
     #[serde(skip)]
     pub thinking_level: Option<ThinkingLevel>,
+    /// Per-run speed snapshot; never deserialized from plugin requests.
+    #[serde(skip)]
+    pub speed: Option<super::Speed>,
     /// Provider routing hint for prompt-cache affinity. This is intentionally
     /// local-only and must not be serialized as part of a generic request.
     #[serde(skip)]

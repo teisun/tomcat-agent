@@ -36,6 +36,7 @@ import type {
   UpsertModelResponse,
 } from "./wire";
 
+import type { Speed } from "../shared/modelSpeed";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface TomcatMessengerLogger {
@@ -601,6 +602,15 @@ export class TomcatMessenger {
       },
       timeoutMs,
     );
+  }
+
+  sendSetSpeed(
+    sessionId: string | null | undefined,
+    model: string,
+    speed: Speed,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ model, speed, sessionId, type: "set_speed" }, timeoutMs);
   }
 
   sendSetContextWindow(

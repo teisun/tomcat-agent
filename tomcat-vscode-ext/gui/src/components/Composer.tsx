@@ -33,6 +33,7 @@ import {
   ContextSearchDropdown,
   type ContextSearchDropdownHandle,
 } from "./ContextSearchDropdown";
+import type { Speed } from "../../../src/shared/modelSpeed";
 import { buildPickerModels } from "./buildPickerModels";
 import { createMentionSuggestion } from "./mentionSuggestion";
 import type { SharedSlashCommand } from "../../../src/serveClient/wire";
@@ -479,6 +480,7 @@ interface ComposerProps {
   onOpenModelSettings?(): void;
   onResolveDrop(uris: string[]): void;
   onThinkingLevelChange(modelId: string, value: string): void;
+  onSpeedChange(modelId: string, speed: Speed): void;
   onInterrupt?(): void;
   onSubmit(): void;
   planState?: WebviewPlanFileState | null;
@@ -517,6 +519,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onOpenModelSettings,
   onResolveDrop,
   onThinkingLevelChange,
+  onSpeedChange,
   onInterrupt,
   onSubmit,
   planState,
@@ -1171,6 +1174,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onSelectModel={(selectedModelId) => {
                 setModeMenuOpen(false);
                 onModelChange(selectedModelId);
+              }}
+              onSelectSpeed={(selectedModelId, speed) => {
+                setModeMenuOpen(false);
+                onSpeedChange(selectedModelId, speed);
               }}
               onSelectThinkingLevel={(selectedModelId, level) => {
                 setModeMenuOpen(false);

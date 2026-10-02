@@ -242,6 +242,33 @@ Field meanings:
 - `base_url`: either a bare host or a host with an explicit provider path. tomcat appends the leaf automatically, so `https://api.openai.com` becomes `/v1/...`, while GLM-style paths such as `https://open.bigmodel.cn/api/paas/v4` keep `/api/paas/v4/...`
 - `kimi-k2.7-code` / Moonshot endpoint note: the built-in preset currently defaults to Moonshot China `https://api.moonshot.cn`, because that is the endpoint verified by the live smoke setup in this repo. Moonshot's global platform uses `https://api.moonshot.ai` instead. If your API key was created on the global platform, override `base_url` in `models.toml` to `https://api.moonshot.ai`.
 
+### Model Speed and Effort (VS Code)
+
+```text
+Model menu → Edit a row
+              Speed   Standard / Fast / Ultrafast
+              ──────────────────────────────────
+              Context 400K / 1M
+              Effort  Low … Xhigh / Max
+```
+
+Speed controls service acceleration; Effort controls how much the model reasons. They are independent: Fast + Max is valid when both are supported. Editing a row's Speed does not switch the selected model or change Context/Effort. Choices are remembered per model and take effect on the next run.
+
+- Standard is the default. For models declaring speed control, Tomcat explicitly sends `service_tier = "default"` so an upstream project's paid default cannot enable Fast implicitly.
+- Fast sends `service_tier = "priority"`; Ultrafast sends `service_tier = "ultrafast"`. Acceleration may cost more and the upstream may reject or downgrade a request. A selected option is not proof of the tier actually served.
+- The Speed section appears only for a model with declared accelerated speeds. `supported_speeds` lists only `fast` and/or `ultrafast`; Standard is implicit. An empty list hides the section and omits the request field.
+- Add `max` only to a model's declared `supported_reasoning_levels` when its upstream supports it. This does not automatically change an existing Xhigh preference to Max.
+- Ultrafast availability is model- and account-specific: GPT-6 Astra supports it, GPT-5.6 Sol requires preview access. GPT-6 Sol and GPT-6.1 Sol are not declared as Ultrafast-capable. **Ultra multi-agent mode is not included**, and `ultra` is not a reasoning-effort value.
+
+For an OpenAI Responses model that supports both acceleration tiers, add these fields to its existing `[[models]]` entry:
+
+```toml
+supported_speeds = ["fast", "ultrafast"]
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+```
+
+In **Tomcat Settings → Models → Edit → Advanced**, **Supported effort levels** and **Supported speeds** accept English or Chinese commas. Typing preserves the raw text; Save trims, removes empty items and duplicates. A gateway declaration is an assertion of support, not an automatic gateway capability probe.
+
 ### tomcat model - Manage models and keys without hand-editing files
 
 If you do not want to edit `models.toml` or `.env` manually, use the dedicated model-management subcommands:

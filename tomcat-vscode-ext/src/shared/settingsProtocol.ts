@@ -8,6 +8,7 @@ import type {
   ConnectorView,
 } from "./connectorsProtocol";
 
+import { isSpeed, type Speed } from "./modelSpeed";
 export type SettingsRoute = "models" | "connectors";
 
 export interface SettingsModelCapabilities {
@@ -35,6 +36,7 @@ export interface SettingsModelView {
   provider: string;
   source: SettingsModelSource;
   supportedReasoningLevels?: string[] | null;
+  supportedSpeeds?: Speed[] | null;
   thinkingFormat?: string | null;
 }
 
@@ -51,6 +53,7 @@ export interface SettingsModelInput {
   modelName?: string | null;
   provider: string;
   supportedReasoningLevels?: string[] | null;
+  supportedSpeeds?: Speed[] | null;
   thinkingFormat?: string | null;
 }
 
@@ -292,6 +295,8 @@ function isSettingsModelInput(value: unknown): value is SettingsModelInput {
     (value.supportedReasoningLevels === undefined ||
       value.supportedReasoningLevels === null ||
       isStringArray(value.supportedReasoningLevels)) &&
+    (value.supportedSpeeds === undefined || value.supportedSpeeds === null ||
+      (Array.isArray(value.supportedSpeeds) && value.supportedSpeeds.every(isSpeed))) &&
     (value.thinkingFormat === undefined ||
       value.thinkingFormat === null ||
       typeof value.thinkingFormat === "string")

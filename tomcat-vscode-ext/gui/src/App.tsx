@@ -24,6 +24,7 @@ import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { TodoListWidget } from "./components/TodoListWidget";
 import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
+import type { Speed } from "../../src/shared/modelSpeed";
 import { readContextSearchDebounceMs } from "./contextSearchConfig";
 import { ComposerWorkRegistry } from "./composerWorkRegistry";
 import { isWebviewReference, referenceIdentity } from "./contextReferences";
@@ -2253,6 +2254,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     [vscodeApi],
   );
+  const handleSetSpeed = useCallback(
+    (modelId: string, speed: Speed) => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (!sessionId || !modelId) return;
+      postIntent(vscodeApi, "setSpeed", { speed, modelId, sessionId });
+    },
+    [vscodeApi],
+  );
   const handleSetThinkingLevel = useCallback(
     (modelId: string, level: string) => {
       const sessionId = stateRef.current.activeSessionId;
@@ -2630,6 +2639,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onSetBuildModel={handleSetBuildModel}
                 onSelectContextWindow={handleSetContextWindow}
                 onSelectThinkingLevel={handleSetThinkingLevel}
+                onSelectSpeed={handleSetSpeed}
                 checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={handleOpenDiff}
                 onOpenFile={handleOpenFile}
@@ -2832,6 +2842,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             }
           : undefined}
         onThinkingLevelChange={handleSetThinkingLevel}
+        onSpeedChange={handleSetSpeed}
         onPrepareAttachments={(work) => {
           const sessionId = stateRef.current.activeSessionId;
           if (!sessionId) return;

@@ -113,6 +113,7 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
         diagnostic_request_id: None,
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
+        speed: None,
         thinking_level: None,
         cache_key: params
             .get("session_id")

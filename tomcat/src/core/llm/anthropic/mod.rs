@@ -621,6 +621,7 @@ mod tests {
             context_window_options: Vec::new(),
             max_output_tokens: Some(32_000),
             description: None,
+            supported_speeds: Vec::new(),
             thinking_format: Some("anthropic-adaptive".to_string()),
             supported_reasoning_levels: vec!["high".to_string()],
         };
@@ -643,6 +644,7 @@ mod tests {
             diagnostic_request_id: None,
             stream: Some(false),
             model_override: None,
+            speed: None,
             thinking_level: None,
             cache_key: None,
             tools: None,
@@ -699,6 +701,7 @@ mod tests {
             context_window_options: Vec::new(),
             max_output_tokens: Some(8_192),
             description: None,
+            supported_speeds: Vec::new(),
             thinking_format: Some("anthropic-adaptive".to_string()),
             supported_reasoning_levels: vec!["high".to_string()],
         };

@@ -26,6 +26,7 @@ fn entry_with_api(api: &str) -> ModelEntry {
         context_window_options: Vec::new(),
         max_output_tokens: None,
         description: None,
+        supported_speeds: Vec::new(),
         supported_reasoning_levels: vec![
             "low".to_string(),
             "medium".to_string(),

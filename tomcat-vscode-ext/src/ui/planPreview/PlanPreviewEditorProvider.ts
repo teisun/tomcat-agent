@@ -682,6 +682,21 @@ export class PlanPreviewEditorProvider
         await this.deps.setBuildModel(intent.data.modelId);
         await postState();
         return;
+      case "setSpeed": {
+        const sessionId = (await this.deps.ensureSession?.()) ?? null;
+        if (!sessionId) return;
+        try {
+          const response = await this.deps.messenger.sendSetSpeed(sessionId, intent.data.modelId, intent.data.speed);
+          if (!response.success) throw new Error(response.error ?? "Unable to change speed");
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            error instanceof Error ? `Speed was not changed: ${error.message}` : "Speed was not changed.",
+          );
+          return;
+        }
+        await postState();
+        return;
+      }
       case "setContextWindow": {
         const sessionId = (await this.deps.ensureSession?.()) ?? null;
         if (!sessionId) return;

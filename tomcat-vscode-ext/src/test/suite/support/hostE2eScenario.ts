@@ -17,7 +17,7 @@ import type {
   WebviewIntent,
 } from "../../../extension";
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
-import { captureWorkbenchArtifacts, WorkbenchFindDriver } from "./workbenchFindDriver";
+import { captureWorkbenchArtifacts, SettingsFrameDriver, WorkbenchFindDriver } from "./workbenchFindDriver";
 
 
 function requireEnv(name: string): string {
@@ -998,6 +998,7 @@ export async function assertWebviewAddModelsFlow(
           modelName,
           provider: relayProvider,
           thinkingFormat: null,
+          supportedSpeeds: ["fast", "ultrafast"],
         },
       },
       messageId: "settings-upsert-model-restored",
@@ -1018,6 +1019,69 @@ export async function assertWebviewAddModelsFlow(
     },
     20_000,
   );
+
+  const openListInputs = async () => {
+    await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: `settings-edit-${modelId}` });
+    await waitForSettingsPanelDom(api, (dom) => dom.html.includes('data-testid="settings-model-form"') ? dom : undefined);
+    await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-model-advanced" });
+    await waitForSettingsPanelDom(api, (dom) => dom.html.includes('data-testid="settings-supported-effort-levels"') ? dom : undefined);
+  };
+  await openListInputs();
+  let levelsText = materializedModel.supportedReasoningLevels?.join(", ") ?? "";
+  for (const character of ",max，high,") {
+    levelsText += character;
+    await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-effort-levels", value: levelsText });
+    await waitForSettingsPanelDom(api, (dom) => dom.html.includes(`value="${levelsText}"`) ? dom : undefined);
+  }
+  let speedsText = "";
+  for (const character of "fast，ultrafast,") {
+    speedsText += character;
+    await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-speeds", value: speedsText });
+    await waitForSettingsPanelDom(api, (dom) => dom.html.includes(`value="${speedsText}"`) ? dom : undefined);
+  }
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    const driver = await SettingsFrameDriver.connectFromEnvironment();
+    try {
+      // Capture the real empty state; restore the unsaved draft before the comma check.
+      await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-speeds", value: "" });
+      await waitForSettingsPanelDom(api, (dom) => /data-testid="settings-supported-speeds"[^>]*placeholder="e\.g\. fast, ultrafast"[^>]*value=""/.test(dom.html) ? dom : undefined);
+      await api.__testing.executeCommand("workbench.action.closeSidebar");
+      await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
+      for (const [width, height, suffix] of [[1440, 900, ""], [390, 844, "-narrow"]] as const) {
+        await driver.setViewport(width, height);
+        await driver.waitForSnapshot((dom) => dom.viewport.width > 0 && (suffix ? dom.viewport.width <= 400 : dom.viewport.width > 400), "empty Settings frame reflow");
+        await driver.evaluate(`document.querySelector('[data-testid="settings-supported-speeds"]').scrollIntoView({block: "center"})`);
+        await driver.capture(transcriptVisualArtifactPath(`settings-speed-empty${suffix}.png`));
+      }
+      await driver.setViewport(1440, 900);
+      await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-speeds", value: speedsText });
+      await waitForSettingsPanelDom(api, (dom) => dom.html.includes(`value="${speedsText}"`) ? dom : undefined);
+      await driver.evaluate(`document.querySelector('[data-testid="settings-supported-speeds"]').scrollIntoView({block: "center"})`);
+      await driver.capture(transcriptVisualArtifactPath("settings-speed-comma.png"));
+      await api.__testing.executeCommand("workbench.action.closeSidebar");
+      await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
+      await driver.setViewport(390, 844);
+      await driver.waitForSnapshot((dom) => dom.viewport.width > 0 && dom.viewport.width <= 400, "narrow Settings frame reflow");
+      await driver.evaluate(`document.querySelector('[data-testid="settings-supported-speeds"]').scrollIntoView({block: "center"})`);
+      await driver.capture(transcriptVisualArtifactPath("settings-speed-comma-narrow.png"));
+    } finally {
+      await driver.setViewport(1440, 900);
+      driver.close();
+    }
+  }
+  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-save-model" });
+  await waitForSettingsPanelState(api, (snapshot) => {
+    const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+    return model?.supportedReasoningLevels?.includes("max") && model.supportedSpeeds?.length === 2 ? model : undefined;
+  });
+  await waitForSettingsPanelDom(api, (dom) => !dom.html.includes('data-testid="settings-model-form"') ? dom : undefined);
+  await openListInputs();
+  const reopened = await api.__testing.captureSettingsDom();
+  assert.ok(reopened.html.includes('value="fast, ultrafast"'), "saved Speed declarations must reopen intact");
+  assert.ok(reopened.html.includes(`value="${materializedModel.supportedReasoningLevels?.join(", ")}, max"`), "typed Max must survive save and reopen");
+  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-close-model-form" });
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
 
   await waitForWebviewState(
     api,
@@ -1124,6 +1188,11 @@ export async function assertWebviewAddModelsFlow(
         : undefined,
     10_000,
   );
+  assert.ok(configPopover.html.includes("Speed") && configPopover.html.includes("Ultrafast"));
+  await api.__testing.sendWebviewDomAction({ index: 1, kind: "clickTestId", testId: "speed-option" });
+  await waitForWebviewState(api, (state) => state.availableModelDetails?.[modelId]?.selectedSpeed === "fast" ? state : undefined);
+  const speedState = await api.__testing.getSessionState();
+  assert.equal(speedState.model, modelId, "setting Speed must not switch the active model");
   assert.ok(
     configPopover.html.includes("Xhigh"),
     "expected the Edit popover to show the resolved Xhigh Effort tier",
@@ -1209,6 +1278,66 @@ export async function assertWebviewAddModelsFlow(
     sessionId,
     type: "agent_idle",
   });
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    const driver = await WorkbenchFindDriver.connectFromEnvironment();
+    const maximizeAuxiliaryBar = "workbench.action.toggleMaximizedAuxiliaryBar";
+    let auxiliaryMaximized = false;
+    const openConfigForCapture = async (id: string) => {
+      const details = await waitForWebviewState(api, (state) => state.availableModelDetails?.[id]);
+      const configLabel = `aria-label="Configure ${details.modelName ?? id}"`;
+      const editId = `model-edit-${id}`;
+      if (!(await api.__testing.captureWebviewDom()).html.includes(`data-testid="${editId}"`)) {
+        await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "model-select" });
+      }
+      await waitForWebviewDomSnapshot(api, (dom) => dom.html.includes(`data-testid="${editId}"`) ? dom : undefined);
+      // Programmatic focus scrolls the model list and queues the popover's
+      // intentional close-on-scroll handler. Click directly, as the base flow does.
+      await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: editId });
+      return waitForWebviewDomSnapshot(api, (dom) =>
+        dom.html.includes(configLabel) &&
+        dom.html.includes('data-testid="speed-option"') === Boolean(details.supportedSpeeds?.length)
+          ? dom : undefined,
+      );
+    };
+    try {
+      for (const [width, height, suffix] of [[1440, 900, ""], [448, 844, "-narrow"]] as const) {
+        if (suffix) {
+          const commands = await vscode.commands.getCommands(true);
+          assert.ok(commands.includes(maximizeAuxiliaryBar), "VS Code must provide its native auxiliary-bar maximize command");
+          await api.__testing.executeCommand(maximizeAuxiliaryBar);
+          auxiliaryMaximized = true;
+        }
+        // Maximize the chat pane: a 390px window split with Settings is not a
+        // 390px chat frame. The native activity bar takes approximately 58px.
+        await driver.setViewport(width, height);
+        await openConfigForCapture(modelId);
+        await captureWorkbenchArtifacts(transcriptVisualArtifactPath(`speed-picker${suffix}.png`));
+        await openConfigForCapture("fake-model");
+        await captureWorkbenchArtifacts(transcriptVisualArtifactPath(`no-speed-picker${suffix}.png`));
+      }
+      // Reuse the same isolated model to verify the Fast-only capability boundary.
+      const savedModel = await waitForSettingsPanelState(api, (snapshot) => snapshot.state.models.find((model) => model.id === modelId));
+      await api.__testing.sendSettingsIntent(buildSettingsIntent({
+        type: "upsertModel", messageId: "visual-fast-only", data: { model: { ...savedModel, supportedSpeeds: ["fast"] } },
+      }));
+      await waitForWebviewState(api, (state) => state.availableModelDetails?.[modelId]?.supportedSpeeds?.length === 1 ? state : undefined);
+      for (const [width, height, suffix] of [[1440, 900, ""], [448, 844, "-narrow"]] as const) {
+        await driver.setViewport(width, height);
+        const dom = await openConfigForCapture(modelId);
+        assert.ok(dom.html.includes("Fast") && !dom.html.includes(">Ultrafast<"), "Fast-only model must not expose Ultrafast");
+        await captureWorkbenchArtifacts(transcriptVisualArtifactPath(`fast-only-speed-picker${suffix}.png`));
+      }
+      await api.__testing.sendSettingsIntent(buildSettingsIntent({ type: "upsertModel", messageId: "visual-restore-speeds", data: { model: savedModel } }));
+      await waitForWebviewState(api, (state) => state.availableModelDetails?.[modelId]?.supportedSpeeds?.length === 2 ? state : undefined);
+    } finally {
+      await driver.setViewport(1440, 900);
+      if (auxiliaryMaximized) await api.__testing.executeCommand(maximizeAuxiliaryBar);
+      driver.close();
+    }
+    if ((await api.__testing.captureWebviewDom()).html.includes('data-testid="model-dropdown"')) {
+      await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "model-select" });
+    }
+  }
   await api.__testing.restartServe();
   await api.__testing.waitForWebviewReady();
   const restartedState = api.__testing.getWebviewState();
@@ -1228,7 +1357,8 @@ export async function assertWebviewAddModelsFlow(
         state.availableModelDetails?.[modelId]?.selectedContextWindow ===
           32_768 &&
         state.availableModelDetails?.[modelId]?.selectedReasoningLevel ===
-          "xhigh"
+          "xhigh" &&
+        state.availableModelDetails?.[modelId]?.selectedSpeed === "fast"
           ? state
           : undefined,
       30_000,

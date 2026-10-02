@@ -20,13 +20,15 @@ use crate::infra::platform::write_file_atomic;
 use crate::{AppConfig, AppError};
 
 use super::catalog::{
-    load_user_models_file, render_user_models_file, validate_context_window_options, Capabilities,
-    ModelCatalog, ModelEntry, PartialCapabilities, UserModelEntry, UserModelsFile,
+    load_user_models_file, render_user_models_file, validate_context_window_options,
+    validate_supported_speeds, Capabilities, ModelCatalog, ModelEntry, PartialCapabilities,
+    UserModelEntry, UserModelsFile,
 };
 use super::thinking_policy::{
     clamp_reasoning_level, default_thinking_format_for_api, normalize_supported_reasoning_levels,
     resolve_request_fields, safe_supported_reasoning_levels_for, ThinkingFormat,
 };
+use super::Speed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +64,10 @@ pub struct ModelView {
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub supported_reasoning_levels: Vec<String>,
+    #[serde(default)]
+    pub supported_speeds: Vec<Speed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_speed: Option<Speed>,
     pub source: ModelSource,
     pub api_key_env: String,
     pub key_present: bool,
@@ -93,6 +99,8 @@ pub struct ModelEntryInput {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_reasoning_levels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_speeds: Option<Vec<Speed>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +150,8 @@ impl ModelView {
             description: entry.description.clone(),
             max_output_tokens: entry.max_output_tokens,
             supported_reasoning_levels: entry.supported_reasoning_levels.clone(),
+            supported_speeds: entry.supported_speeds.clone(),
+            selected_speed: entry.resolve_speed(Speed::Standard),
             source: if catalog.is_builtin_seed(&entry.id) {
                 ModelSource::Builtin
             } else {
@@ -195,6 +205,11 @@ impl ModelEntryInput {
             }
             None => safe_supported_reasoning_levels_for(api.as_str(), thinking_format.as_deref()),
         };
+        let supported_speeds = validate_supported_speeds(
+            &id,
+            &api,
+            self.supported_speeds.as_deref().unwrap_or_default(),
+        )?;
         Ok(ModelEntry {
             id,
             model_name,
@@ -209,6 +224,7 @@ impl ModelEntryInput {
             description,
             thinking_format,
             supported_reasoning_levels,
+            supported_speeds,
         })
     }
 }
@@ -241,6 +257,7 @@ pub fn list_model_views_with_prefs(
                         .as_str()
                         .to_string()
                 });
+            view.selected_speed = entry.resolve_speed(prefs.speed_for(&entry.id));
             view.selected_context_window = explicit_prefs
                 .and_then(|prefs| prefs.context_window)
                 .filter(|value| entry.context_window_options.contains(value))
@@ -532,6 +549,8 @@ fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
         description: entry.description.clone(),
         thinking_format: entry.thinking_format.clone(),
         supported_reasoning_levels: Some(entry.supported_reasoning_levels.clone()),
+        supported_speeds: Some(entry.supported_speeds.clone()),
+        extra: toml::Table::new(),
     }
 }
 
@@ -555,8 +574,9 @@ fn collect_model_warnings(entry: &ModelEntry) -> Vec<String> {
     warnings
 }
 
-fn upsert_user_model_entry(file: &mut UserModelsFile, next: UserModelEntry) {
+fn upsert_user_model_entry(file: &mut UserModelsFile, mut next: UserModelEntry) {
     if let Some(existing) = file.models.iter_mut().find(|entry| entry.id == next.id) {
+        next.extra = std::mem::take(&mut existing.extra);
         *existing = next;
     } else {
         file.models.push(next);

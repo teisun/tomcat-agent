@@ -953,6 +953,84 @@ describe("SettingsApp", () => {
     expect(screen.getByText("A later catalog refresh is still required.")).toBeTruthy();
   });
 
+  it("shows an empty speed declaration without saving the placeholder example", async () => {
+    const { postMessage } = mount();
+    await emitState(readyState({
+      models: [builtinModel({ id: "relay/model", modelName: "model", source: "user", keyPresent: true, supportedSpeeds: [] })],
+      providerKeys: [providerKey({ keyPresent: true })],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    const input = within(dialog).getByRole("textbox", { name: "Supported speeds" }) as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("e.g. fast, ultrafast");
+    expect(within(dialog).getByText("Enter fast or ultrafast only if supported. Leave empty to hide Speed options. Acceleration may cost more.")).toBeTruthy();
+    postMessage.mockClear();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "upsertModel", data: expect.objectContaining({ model: expect.objectContaining({ supportedSpeeds: [] }) }),
+    }));
+  });
+
+  it("preserves each typed comma, parses only the payload, and reopens saved speeds", async () => {
+    const { postMessage } = mount();
+    const model = builtinModel({ id: "relay/model", modelName: "model", source: "user", keyPresent: true, supportedReasoningLevels: ["high"], supportedSpeeds: ["fast"] });
+    const initial = readyState({ models: [model], providerKeys: [providerKey({ keyPresent: true })] });
+    await emitState(initial);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    let dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    const effort = within(dialog).getByRole("textbox", { name: "Supported effort levels" }) as HTMLInputElement;
+    for (const value of ["high,", "high,m", "high,ma", "high,max", " high，max, high, "]) {
+      fireEvent.change(effort, { target: { value } });
+      expect(effort.value).toBe(value);
+    }
+    const speeds = within(dialog).getByRole("textbox", { name: "Supported speeds" }) as HTMLInputElement;
+    for (const value of ["fast,", "fast,u", "fast,ultrafast", " fast，ultrafast, fast, "]) {
+      fireEvent.change(speeds, { target: { value } });
+      expect(speeds.value).toBe(value);
+    }
+    postMessage.mockClear();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "upsertModel", data: expect.objectContaining({ model: expect.objectContaining({ supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"] }) }) }));
+    const savedModel = { ...model, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"] as const };
+    await emitState(readyState({ ...initial, models: [{ ...savedModel, supportedSpeeds: [...savedModel.supportedSpeeds] }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    expect(within(dialog).getByRole("textbox", { name: "Supported effort levels" })).toHaveProperty("value", "high, max");
+    expect(within(dialog).getByRole("textbox", { name: "Supported speeds" })).toHaveProperty("value", "fast, ultrafast");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Description" }), { target: { value: "edited only description" } });
+    postMessage.mockClear();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: expect.objectContaining({ supportedSpeeds: ["fast", "ultrafast"] }) }) }));
+  });
+
+  it("clears lists explicitly, rejects unknown speed, and does not leak cancelled drafts", async () => {
+    const { postMessage } = mount();
+    await emitState(readyState({ models: [builtinModel({ keyPresent: true, supportedReasoningLevels: ["high"], supportedSpeeds: ["fast"] })], providerKeys: [providerKey({ keyPresent: true })] }));
+    const open = () => {
+      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      const dialog = screen.getByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+      return dialog;
+    };
+    let dialog = open();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Supported speeds" }), { target: { value: "warp" } });
+    postMessage.mockClear();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(screen.getByText(/Supported speeds accepts/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    dialog = open();
+    expect(within(dialog).getByRole("textbox", { name: "Supported speeds" })).toHaveProperty("value", "fast");
+    for (const name of ["Supported effort levels", "Supported speeds"]) fireEvent.change(within(dialog).getByRole("textbox", { name }), { target: { value: "" } });
+    postMessage.mockClear();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: expect.objectContaining({ supportedReasoningLevels: [], supportedSpeeds: [] }) }) }));
+  });
+
   it("copies matching built-in metadata, but keeps only catalog limits read-only", async () => {
     const { postMessage } = mount();
     await emitState(
@@ -966,6 +1044,7 @@ describe("SettingsApp", () => {
             maxOutputTokens: 32768,
             modelName: "gpt-5.6",
             supportedReasoningLevels: ["high", "xhigh"],
+            supportedSpeeds: ["fast"],
           }),
         ],
         providerKeys: [
@@ -1025,6 +1104,7 @@ describe("SettingsApp", () => {
           id: "chatanywhere/gpt-5.6",
           maxOutputTokens: 32768,
           supportedReasoningLevels: ["high", "xhigh"],
+          supportedSpeeds: ["fast"],
         },
       },
       type: "upsertModel",

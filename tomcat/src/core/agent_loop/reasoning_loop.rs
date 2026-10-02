@@ -217,6 +217,7 @@ pub(super) async fn run_reasoning_loop(
             stream: Some(true),
             model_override: None,
             thinking_level: agent.config.thinking_level,
+            speed: agent.config.speed,
             cache_key: cache_key_for(agent),
             tools: Some(agent.config.tool_definitions.clone()),
         };

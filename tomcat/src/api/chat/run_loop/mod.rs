@@ -831,6 +831,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         .plan_runtime
         .set_session_model(&thinking_model_id);
     let thinking_level = Some(ctx.resolve_thinking_level(&thinking_model_id));
+    let speed = ctx.resolve_speed(&thinking_model_id);
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
@@ -960,6 +961,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         thinking_level,
+        speed,
         session_id: session_id.clone(),
         tool_definitions,
         context_config: context_config.clone(),

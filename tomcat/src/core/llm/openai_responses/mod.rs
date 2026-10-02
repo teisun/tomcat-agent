@@ -621,6 +621,9 @@ impl OpenAiResponsesProvider {
         {
             body["prompt_cache_key"] = Value::String(cache_key.clone());
         }
+        if let Some(speed) = request.speed {
+            body["service_tier"] = json!(crate::core::llm::endpoint::openai_service_tier(speed));
+        }
         if explicit_replay {
             body["include"] = json!(["reasoning.encrypted_content"]);
         }

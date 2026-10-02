@@ -110,6 +110,7 @@ async fn test_openai_responses_chat_real_request_returns_ok(
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -151,6 +152,7 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -196,6 +198,7 @@ async fn test_openai_responses_chat_real_request_accepts_stop_or_max_output_toke
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -242,6 +245,7 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -300,6 +304,7 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
             stream: Some(true),
             model_override: None,
             thinking_level: None,
+            speed: None,
             cache_key: None,
             tools: None,
         };
@@ -402,6 +407,7 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: Some(tools),
     };
@@ -463,6 +469,7 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
         stream: Some(true),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -537,6 +544,7 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };
@@ -635,6 +643,7 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         stream: Some(false),
         model_override: None,
         thinking_level: None,
+        speed: None,
         cache_key: None,
         tools: None,
     };

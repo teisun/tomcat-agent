@@ -29,6 +29,7 @@ import type {
   PreviewSave,
   PreviewSelect,
 } from "../../shared/imagePreviewProtocol";
+import { isSpeed, type Speed } from "../../shared/modelSpeed";
 import type { PathResolution } from "../../shared/pathResolution";
 
 export type WebviewMessageSegment = ServeContentSegment;
@@ -412,6 +413,8 @@ export interface WebviewModelInfo {
   selectedContextWindow?: number | null;
   selectedReasoningLevel?: string | null;
   supportedReasoningLevels: string[];
+  supportedSpeeds?: Speed[];
+  selectedSpeed?: Speed | null;
 }
 
 export type WebviewConnectionStatus =
@@ -764,6 +767,15 @@ export type WebviewIntent =
       type: "setThinkingLevel";
       data: {
         level: WebviewThinkingLevel;
+        modelId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setSpeed";
+      data: {
+        speed: Speed;
         modelId: string;
         sessionId?: string | null;
       };
@@ -1169,6 +1181,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         isString(value.data.modelId) &&
         isThinkingLevel(value.data.level)
       );
+    case "setSpeed":
+      return isRecord(value.data) && isString(value.data.modelId) && isSpeed(value.data.speed);
     case "setContextWindow":
       return (
         isRecord(value.data) &&

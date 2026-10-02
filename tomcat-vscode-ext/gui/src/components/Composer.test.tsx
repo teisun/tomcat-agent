@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 
 import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
 import type { ModelPickerModel } from "./ModelPicker";
+import type { Speed } from "../../../src/shared/modelSpeed";
 import type { SharedSlashCommand } from "../../../src/serveClient/wire";
 
 type DraftChange = (draft: {
@@ -71,6 +72,7 @@ function renderComposer({
   onOpenModelSettings = vi.fn(),
   onResolveDrop = vi.fn(),
   onThinkingLevelChange = vi.fn(),
+  onSpeedChange = vi.fn(),
   onSubmit = vi.fn(),
   planState = "planning",
   supportedReasoningLevels = ["low", "medium", "high", "xhigh"],
@@ -123,6 +125,7 @@ function renderComposer({
   supportedReasoningLevels?: string[];
   thinkingLevelValue?: string;
   onThinkingLevelChange?: (modelId: string, value: string) => void;
+  onSpeedChange?: (modelId: string, speed: Speed) => void;
 } = {}) {
   const ref = createRef<ComposerHandle>();
   const renderResult = render(
@@ -156,6 +159,7 @@ function renderComposer({
       onOpenModelSettings={onOpenModelSettings ?? undefined}
       onResolveDrop={onResolveDrop}
       onThinkingLevelChange={onThinkingLevelChange}
+      onSpeedChange={onSpeedChange}
       onInterrupt={onInterrupt}
       onSubmit={onSubmit}
       planState={planState}
@@ -264,6 +268,23 @@ describe("Composer", () => {
       type: "reference" as const,
     },
   };
+
+  it("routes Fast from the model picker without changing model or effort", () => {
+    const onSpeedChange = vi.fn();
+    const onModelChange = vi.fn();
+    const onThinkingLevelChange = vi.fn();
+    renderComposer({
+      availableModelDetails: { "gpt-5.4": { id: "gpt-5.4", supportedSpeeds: ["fast"], selectedSpeed: "standard" } },
+      onSpeedChange, onModelChange, onThinkingLevelChange,
+    });
+    fireEvent.click(screen.getByTestId("model-select"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.4"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-gpt-5.4"));
+    fireEvent.click(screen.getByRole("button", { name: "Fast" }));
+    expect(onSpeedChange).toHaveBeenCalledExactlyOnceWith("gpt-5.4", "fast");
+    expect(onModelChange).not.toHaveBeenCalled();
+    expect(onThinkingLevelChange).not.toHaveBeenCalled();
+  });
 
   it("keeps the context slot mounted when no measurement is available", () => {
     renderComposer({ contextLabel: "" });

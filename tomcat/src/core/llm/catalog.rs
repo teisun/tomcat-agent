@@ -13,6 +13,7 @@ use super::thinking_policy::{
     clamp_reasoning_level, normalize_supported_reasoning_levels,
     safe_supported_reasoning_levels_for, ThinkingLevel,
 };
+use super::Speed;
 use crate::core::session::ModelPrefsStore;
 use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
@@ -74,11 +75,24 @@ pub struct ModelEntry {
     pub thinking_format: Option<String>,
     #[serde(default)]
     pub supported_reasoning_levels: Vec<String>,
+    /// Accelerated speeds only; Standard is implicit.
+    #[serde(default)]
+    pub supported_speeds: Vec<Speed>,
 }
 
 impl ModelEntry {
     pub fn request_model_name(&self) -> &str {
         self.model_name.as_deref().unwrap_or(self.id.as_str())
+    }
+
+    pub fn resolve_speed(&self, requested: Speed) -> Option<Speed> {
+        if self.supported_speeds.is_empty() {
+            None
+        } else if requested == Speed::Standard || self.supported_speeds.contains(&requested) {
+            Some(requested)
+        } else {
+            Some(Speed::Standard)
+        }
     }
 }
 
@@ -142,6 +156,27 @@ pub(crate) fn validate_context_window_options(
         }
     }
 
+    Ok(normalized)
+}
+
+/// Accept Standard in input, but store only the accelerated capabilities.
+pub(crate) fn validate_supported_speeds(
+    model_id: &str,
+    api: &str,
+    speeds: &[Speed],
+) -> Result<Vec<Speed>, AppError> {
+    let mut normalized: Vec<_> = speeds
+        .iter()
+        .copied()
+        .filter(|speed| *speed != Speed::Standard)
+        .collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    if !normalized.is_empty() && !matches!(api, "openai" | "openai-responses") {
+        return Err(AppError::Config(format!(
+            "模型 `{model_id}` 的 supported_speeds 当前只支持 openai / openai-responses。"
+        )));
+    }
     Ok(normalized)
 }
 
@@ -312,6 +347,11 @@ impl SharedModelCatalog {
         })
     }
 
+    pub fn resolve_speed(&self, prefs: &ModelPrefsStore, model_id: &str) -> Option<Speed> {
+        self.lookup(model_id)?
+            .resolve_speed(prefs.speed_for(model_id))
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -380,6 +420,11 @@ pub(crate) struct UserModelEntry {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) supported_reasoning_levels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) supported_speeds: Option<Vec<Speed>>,
+    /// Preserve unknown top-level model fields across admin writes.
+    #[serde(flatten)]
+    pub(crate) extra: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -446,7 +491,7 @@ fn merge_user_model(
     raw: UserModelEntry,
     existing: Option<ModelEntry>,
     context: &ContextConfig,
-    degrade_invalid_context_options: bool,
+    degrade_invalid_user_options: bool,
 ) -> Result<ModelEntry, AppError> {
     let mut merged = existing.unwrap_or_else(|| ModelEntry {
         id: raw.id.clone(),
@@ -462,6 +507,7 @@ fn merge_user_model(
         description: None,
         thinking_format: None,
         supported_reasoning_levels: Vec::new(),
+        supported_speeds: Vec::new(),
     });
     merged.id = raw.id.clone();
     if let Some(model_name) = raw.model_name {
@@ -531,6 +577,21 @@ fn merge_user_model(
             merged.thinking_format.as_deref(),
         );
     }
+    if let Some(speeds) = raw.supported_speeds {
+        merged.supported_speeds = speeds;
+    }
+    match validate_supported_speeds(&merged.id, &merged.api, &merged.supported_speeds) {
+        Ok(speeds) => merged.supported_speeds = speeds,
+        Err(error) if degrade_invalid_user_options => {
+            tracing::warn!(
+                model_id = %merged.id,
+                error = %error,
+                "discarding invalid user supported_speeds; model remains without accelerated speeds"
+            );
+            merged.supported_speeds.clear();
+        }
+        Err(error) => return Err(error),
+    }
     match validate_context_window_options(
         &merged.id,
         merged.context_window,
@@ -538,7 +599,7 @@ fn merge_user_model(
         merged.max_output_tokens,
     ) {
         Ok(options) => merged.context_window_options = options,
-        Err(error) if degrade_invalid_context_options => {
+        Err(error) if degrade_invalid_user_options => {
             tracing::warn!(
                 model_id = %merged.id,
                 error = %error,

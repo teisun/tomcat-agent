@@ -139,6 +139,7 @@ function parseModelView(value: WireModelView): SettingsModelView {
     provider: value.provider,
     source: value.source === "user" ? "user" : "builtin",
     supportedReasoningLevels: parseStringArray(value.supportedReasoningLevels),
+    supportedSpeeds: value.supportedSpeeds ?? [],
     thinkingFormat: value.thinkingFormat ?? null,
   };
 }
@@ -215,6 +216,7 @@ function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
     modelName: model.modelName ?? null,
     provider: model.provider,
     supportedReasoningLevels: model.supportedReasoningLevels ?? null,
+    supportedSpeeds: model.supportedSpeeds ?? null,
     thinkingFormat: model.thinkingFormat ?? null,
   };
 }

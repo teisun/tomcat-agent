@@ -97,6 +97,7 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
                         .then_some(context_window_options),
                     max_output_tokens,
                     description,
+                    supported_speeds: None,
                     supported_reasoning_levels: None,
                     thinking_format,
                 },

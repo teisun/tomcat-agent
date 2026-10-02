@@ -630,6 +630,8 @@ struct OpenAiRequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
@@ -863,6 +865,9 @@ impl OpenAiProvider {
             tools: request.tools.clone(),
             stream_options: None,
             reasoning_effort: thinking_fields.reasoning_effort,
+            service_tier: request
+                .speed
+                .map(crate::core::llm::endpoint::openai_service_tier),
             thinking: thinking_fields.thinking,
             prompt_cache_key: request.cache_key.clone(),
         };
@@ -1091,6 +1096,9 @@ impl LlmProvider for OpenAiProvider {
                 include_usage: true,
             }),
             reasoning_effort: thinking_fields.reasoning_effort,
+            service_tier: request
+                .speed
+                .map(crate::core::llm::endpoint::openai_service_tier),
             thinking: thinking_fields.thinking,
             prompt_cache_key: request.cache_key.clone(),
         };

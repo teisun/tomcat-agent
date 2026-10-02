@@ -117,6 +117,7 @@ async fn serve_initialize_control_request_sets_ready_state() {
         "set_plan_mode",
         "set_model",
         "set_thinking_level",
+        "set_speed",
         "set_context_window",
         "list_models",
         "upsert_model",

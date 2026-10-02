@@ -1,4 +1,5 @@
 import { acquireVsCodeApiLike, type VsCodeApiLike } from "./settingsProtocol";
+import { isSpeed, type Speed } from "./modelSpeed";
 import type { PathResolution } from "./pathResolution";
 
 export { acquireVsCodeApiLike };
@@ -37,6 +38,8 @@ export interface PlanPreviewModelInfo {
   selectedContextWindow?: number | null;
   selectedReasoningLevel?: string | null;
   supportedReasoningLevels: string[];
+  supportedSpeeds?: Speed[];
+  selectedSpeed?: Speed | null;
 }
 
 export interface PlanPreviewStateSnapshot {
@@ -129,6 +132,7 @@ export type PlanPreviewDomAction =
   | { kind: "setFindQuery"; query: string }
   | { kind: "selectBuildModel"; modelId: string }
   | { contextWindow: number; kind: "selectContextWindow"; modelId: string }
+  | { kind: "selectSpeed"; speed: Speed; modelId: string }
   | { kind: "selectThinkingLevel"; level: string; modelId: string }
   | { kind: "selectText"; selector: string };
 
@@ -206,6 +210,11 @@ export type PlanPreviewIntent =
     }
   | {
       messageId: string;
+      type: "setSpeed";
+      data: { speed: Speed; modelId: string };
+    }
+  | {
+      messageId: string;
       type: "setContextWindow";
       data: {
         contextWindow: number;
@@ -263,6 +272,8 @@ export function isPlanPreviewIntent(value: unknown): value is PlanPreviewIntent 
       );
     case "setBuildModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
+    case "setSpeed":
+      return isRecord(value.data) && typeof value.data.modelId === "string" && isSpeed(value.data.speed);
     case "setContextWindow":
       return (
         isRecord(value.data) &&

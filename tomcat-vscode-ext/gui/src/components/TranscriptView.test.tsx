@@ -15,6 +15,7 @@ type TranscriptViewTestProps = Omit<
   | "onApprovalDraftChange"
   | "onSelectContextWindow"
   | "onSelectThinkingLevel"
+  | "onSelectSpeed"
   | "onSetBuildModel"
 > & {
   onApprovalDraftChange?: ComponentProps<
@@ -26,6 +27,9 @@ type TranscriptViewTestProps = Omit<
   onSelectThinkingLevel?: ComponentProps<
     typeof TranscriptViewComponent
   >["onSelectThinkingLevel"];
+  onSelectSpeed?: ComponentProps<
+    typeof TranscriptViewComponent
+  >["onSelectSpeed"];
   onSetBuildModel?: ComponentProps<
     typeof TranscriptViewComponent
   >["onSetBuildModel"];
@@ -40,6 +44,9 @@ const noopSelectContextWindow: ComponentProps<
 const noopSelectThinkingLevel: ComponentProps<
   typeof TranscriptViewComponent
 >["onSelectThinkingLevel"] = () => {};
+const noopSelectSpeed: ComponentProps<
+  typeof TranscriptViewComponent
+>["onSelectSpeed"] = () => {};
 const noopSetBuildModel: ComponentProps<
   typeof TranscriptViewComponent
 >["onSetBuildModel"] = () => {};
@@ -48,6 +55,7 @@ function TranscriptView({
   onApprovalDraftChange = noopApprovalDraftChange,
   onSelectContextWindow = noopSelectContextWindow,
   onSelectThinkingLevel = noopSelectThinkingLevel,
+  onSelectSpeed = noopSelectSpeed,
   onSetBuildModel = noopSetBuildModel,
   ...props
 }: TranscriptViewTestProps) {
@@ -58,6 +66,7 @@ function TranscriptView({
       onSelectContextWindow={onSelectContextWindow}
       onSelectThinkingLevel={onSelectThinkingLevel}
       onSetBuildModel={onSetBuildModel}
+      onSelectSpeed={onSelectSpeed}
     />
   );
 }

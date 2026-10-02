@@ -356,6 +356,13 @@ function runDomAction(action: PlanPreviewDomAction): void {
       });
       return;
     }
+    case "selectSpeed": {
+      openModelConfig(action.modelId, () => {
+        Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="speed-option"]'))
+          .find((option) => option.textContent?.trim().toLowerCase() === action.speed)?.click();
+      });
+      return;
+    }
     case "selectThinkingLevel": {
       openModelConfig(action.modelId, () => {
         Array.from(
@@ -592,6 +599,9 @@ export function PlanPreviewApp({
               data: { contextWindow, modelId },
               type: "setContextWindow",
             })
+          }
+          onSelectSpeed={(modelId, speed) =>
+            send(vscodeApi, { data: { modelId, speed }, type: "setSpeed" })
           }
           onSelectThinkingLevel={(modelId, level) =>
             send(vscodeApi, {

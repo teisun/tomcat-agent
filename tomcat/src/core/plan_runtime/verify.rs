@@ -272,6 +272,11 @@ impl ProdVerifierDeps {
         self.model_catalog
             .resolve_reasoning_level(self.model_prefs.as_ref(), model_id)
     }
+
+    fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {
+        self.model_catalog
+            .resolve_speed(self.model_prefs.as_ref(), model_id)
+    }
 }
 
 impl ProdVerifierDispatcher {
@@ -330,6 +335,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
         let model_id = deps.resolve_model(&plan_runtime);
         let thinking_level = Some(deps.resolve_thinking_level(&model_id));
+        let speed = deps.resolve_speed(&model_id);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
@@ -426,6 +432,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
                         thinking_level,
+                        speed,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,

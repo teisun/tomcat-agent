@@ -1,10 +1,10 @@
-# ModelPicker：模型 + Effort + Context 合并选择器技术方案
+# ModelPicker：模型 + Speed + Effort + Context 合并选择器技术方案
 
 > 适用范围：把「选模型」与「选思考深度 / 上下文窗口」合并进一个入口、一套弹框，三处表面（Composer 底栏 / 聊天内计划卡片 / 计划预览工具条）复用同一组件；内置模型声明可选 Context 档位与 Effort 档位，新建中转站同名模型时按 `model_name` 快照复用 `models.toml` 用户配置或内置目录的能力。
 > 上位文档：[`model-management-add-models.md`](model-management-add-models.md)（模型管理与 Add Models 的写盘中枢、`admin.rs` 单一事实源）。本文只覆盖「选择与配置」这一层，写盘与目录合并语义沿用上位文档。
 > 单一事实源：模型能力以 `tomcat/src/core/llm/builtin_models.toml` + `catalog.rs` 解析结果为准；用户选择以 `~/.tomcat/model-thinking.json`（`ModelPrefsStore`）为准；协议以 `tomcat/src/api/serve/types.rs` 为准，三份产物 `serve.schema.json` / `serve.d.ts` / `wire.d.ts` 由它重生。
 
-**一句话定位**：本方案把「一个模型该怎么用」拆成两件互不污染的事——**能力**（`context_window_options` / `supported_reasoning_levels`，来自 `builtin_models.toml`，用户改不动）与**选择**（`reasoning` + `contextWindow`，存在 `ModelPrefsStore`，必须被夹回能力集合内）。UI 上用一个入口、两层弹框表达这层从属关系：点整行切模型，点该行 Edit 侧浮一个配置框选 Context / Effort。三处表面共用同一个 `ModelPicker` 组件与同一份 `buildPickerModels` 拼装逻辑。
+**一句话定位**：一个模型该怎么用，分成**能力声明**（`context_window_options` / `supported_reasoning_levels` / `supported_speeds`）与**用户选择**（`reasoning` / `contextWindow` / `speed`，存在 `ModelPrefsStore`）。模型能力由内置目录与用户 `models.toml` 合并；Settings 可维护用户的 Effort / Speed 声明，Context / output 仍只读。点整行切模型，点该行 Edit 侧浮配置框选 Speed / Context / Effort。三处表面共用 `ModelPicker` 与 `buildPickerModels`。
 
 ---
 
@@ -52,7 +52,7 @@
 
 ## 2. 架构主线：能力与选择分离
 
-这是全篇最重要的一个决定。一个模型能开多大的窗口、支持哪些推理档位，是**模型能力**，来自 `builtin_models.toml`，用户不该改也改不动；用户点了 1M 而不是 400K，是**用户选择**，是运行时状态，要单独存，并且必须被夹回能力允许的范围内。
+这是全篇最重要的一个决定。窗口、推理档和速度档是**模型能力声明**，来自内置目录与用户 `models.toml`。Settings 可编辑用户的推理和速度声明，但不能改变上游真正支持的能力。选择 1M、Max 或 Fast 是另存的**用户偏好**，运行时必须落在声明允许的范围内。
 
 改造前推理档位已经是这么做的（能力 `supported_reasoning_levels` + 选择 `model-thinking.json` + 夹取 `clamp_reasoning_level`），Context 却只有一个标量能力、没有档位也没有选择。本方案把 Context 补成和 Reasoning 完全对称的形状，并把两个「选择」合并进同一个存储。
 
@@ -101,6 +101,7 @@ pub struct ModelEntry {
     pub description: Option<String>,
     pub thinking_format: Option<String>,
     pub supported_reasoning_levels: Vec<String>,
+    pub supported_speeds: Vec<Speed>,      // 只列 fast / ultrafast，Standard 隐含
 }
 ```
 
@@ -389,7 +390,36 @@ top  = clamp(centeredTop, 8, innerHeight - configHeight - 8)
 
 ---
 
+### 7.9 Speed：第三个兄弟，不是 Effort 的别名
+
+```text
+models.toml：supported_speeds = ["fast", "ultrafast"]  （只列加速档）
+                              │
+ModelPicker：Speed → Standard / Fast / Ultrafast
+             ────────────────────────────────
+             Context / Effort（含声明的 Max）
+                              │ setSpeed(modelId, speed)
+宿主：sendSetSpeed → serve set_speed → ModelPrefsStore.set_speed
+                              │ 按 catalog ID 保存，成功后刷新目录
+下次运行：resolve_speed → AgentLoopConfig.speed → ChatRequest.speed
+                              │ 只在 OpenAI 适配器转换
+Standard → service_tier="default"  Fast → "priority"  Ultrafast → "ultrafast"
+```
+
+- Standard 默认、隐含；空声明隐藏整个 Speed 区且不发速度字段。曾存的付费档被撤掉后回落 Standard，不自动改成另一个收费档。
+- 对声明了速度控制的模型显式发 `default`，防止省略字段时使用上游项目的默认 Fast。选中 Fast 只是请求意图，不证明上游没有降档。
+- Fast / Ultrafast 复用 `ConfigSection` / `ConfigOption`、分隔线与两层关闭机制，title 提示“更快输出、费用更高、需上游权限”。不新增 pending 锁或 busy 禁用。
+- Speed 与 Effort 独立；`max` 仍是现有字符串档位。Ultrafast 逐模型开放，不按版本继承资格；Ultra 多代理不属于本期，也不是合法 effort。
+- ModelPrefsStore 持锁复制 → 原子写盘 → 成功才提交内存，失败时 Effort / Context / Speed 全部保持原值。
+- Settings 使用 nullable 原始 `reasoningLevelsText` / `speedsText`：null 保留未声明/继承，空串保存为空数组表示显式清空；输入只改文字，生成保存 payload 时用共享 `parseCommaList` 按 `/[,，]/` 拆分、trim、去空、去重。取消、切换模型与重开重新初始化草稿。
+- `ModelView` / `ModelEntryInput` 增 `supportedSpeeds`；目录视图增 `selectedSpeed`；聊天与计划预览两条宿主链都透传。Rust 是协议源，三份 wire 产物自动重生。
+- 新测试分层：Rust mock HTTP 覆盖流式/非流式三档 + Max；GUI 覆盖三表面、逐字符逗号与保存往返；既有 Add Models E2E 覆盖真实 VS Code 渲染与重启偏好，并采集普通/窄宽 PNG、ARIA、console。真实网关档位由单独的限量 smoke 报告核实。
+
+---
+
 ## 8. 中转站同名模型复用
+
+Speed 能力也纳入同名模型创建期快照：初始化 `speedsText`、保存为 `supported_speeds`，后续只编辑描述也不能丢档位。
 
 ### 8.1 问题：匹配维度选错了
 

@@ -226,6 +226,7 @@ describe("PlanFileCard", () => {
           buildModel: "gpt-5.6",
           onSelectContextWindow: vi.fn(),
           onSelectThinkingLevel: vi.fn(),
+          onSelectSpeed: vi.fn(),
           onSetBuildModel,
         }}
         onBuild={onBuild}
@@ -250,6 +251,23 @@ describe("PlanFileCard", () => {
     expect(document.querySelector(".tc-plan-model-select__label")).toBeNull();
     expect(screen.queryByText("Model")).toBeNull();
     expect(screen.getByLabelText("Model")).toBeTruthy();
+  });
+
+  it("routes Speed from a plan card to its own model ID", () => {
+    const onSelectSpeed = vi.fn();
+    const onSetBuildModel = vi.fn();
+    render(<PlanFileCard
+      canBuild
+      item={{ id: "speed-plan", path: "/tmp/speed.plan.md", planId: "speed", state: "planning", type: "plan" }}
+      modelPicker={{ availableModels: ["relay/model"], buildModel: "relay/model", availableModelDetails: { "relay/model": { id: "relay/model", supportedSpeeds: ["fast"], selectedSpeed: "standard" } }, onSelectContextWindow: vi.fn(), onSelectThinkingLevel: vi.fn(), onSelectSpeed, onSetBuildModel }}
+      onBuild={vi.fn()} onOpenPlanFile={vi.fn()}
+    />);
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="relay/model"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-relay/model"));
+    fireEvent.click(screen.getByRole("button", { name: "Fast" }));
+    expect(onSelectSpeed).toHaveBeenCalledWith("relay/model", "fast");
+    expect(onSetBuildModel).not.toHaveBeenCalled();
   });
 
   it("overlays the active session's context and effort in its model picker", () => {
@@ -277,6 +295,7 @@ describe("PlanFileCard", () => {
           buildModel: "gpt-5.6",
           onSelectContextWindow: vi.fn(),
           onSelectThinkingLevel: vi.fn(),
+          onSelectSpeed: vi.fn(),
           onSetBuildModel: vi.fn(),
           sessionContextWindow: 1_000_000,
           sessionModel: "gpt-5.6",
