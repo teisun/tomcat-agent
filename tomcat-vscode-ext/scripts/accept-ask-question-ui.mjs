@@ -170,8 +170,8 @@ try {
       });
       await writeFile(path.join(out, `${name}.geometry.json`), JSON.stringify(composer,null,2));
       assert.ok(composer.height <= composer.limit + 1, "Same 30vh limit with/without questions");
-      assert.ok(Math.abs(composer.surfaceLeft-10)<=1 && Math.abs(composer.surfaceRight-10)<=1, "Control inset in question state");
-      assert.ok(Math.abs(composer.left-15)<=1, "Content inset in question state");
+      assert.ok(Math.abs(composer.surfaceLeft-15)<=1 && Math.abs(composer.surfaceRight-15)<=1, "Control inset in question state");
+      assert.ok(Math.abs(composer.left-25)<=1, "Content inset in question state");
       assert.equal(events.filter((e) => e.level === "error").length, 0, JSON.stringify(events));
       if (!baseline && suffix !== "completed") {
         assert.equal(await page.getByRole("radiogroup").count(), 1);

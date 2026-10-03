@@ -49,6 +49,22 @@ function buildGroup(overrides: Partial<AssistantResponseGroup> = {}): AssistantR
 }
 
 describe("ThinkingGroup", () => {
+  it("reveals flat read file details inside the existing group fold", () => {
+    const onOpenFile = vi.fn();
+    const { container } = render(<ThinkingGroup group={buildGroup({ thinking: undefined, tools: [{
+      type: "tool", id: "read-batch", toolCallId: "batch-call", toolName: "read", status: "complete", isError: false,
+      summary: "RAW_READ_BODY_SENTINEL", display: { kind: "files", summary: "", files: [{ file: "/workspace/guide.md", range: "L1-9 (9 lines)" }] },
+    }] })} onOpenFile={onOpenFile} />);
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+    fireEvent.click(screen.getByTestId("thinking-group-toggle"));
+    expect(screen.queryByTestId("disclosure-card")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-file-range").textContent).toBe("L1-9 (9 lines)");
+    expect(container.textContent).not.toContain("RAW_READ_BODY_SENTINEL");
+    fireEvent.click(screen.getByTestId("file-chip"));
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/guide.md");
+  });
+
   it("shows summaryTitle in header and keeps preamble above fold header", () => {
     render(
       <ThinkingGroup

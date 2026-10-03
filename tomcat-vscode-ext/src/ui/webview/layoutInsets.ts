@@ -7,5 +7,5 @@ function inset(value: unknown, fallback: number): number {
 
 /** Only finite integers are interpolated into HTML; no live settings channel is needed. */
 export function layoutInsetStyle(config: ConfigReader): string {
-  return `--tc-controls-inset:${inset(config.get(TOMCAT_CONTROLS_INSET_SETTING),10)}px;--tc-content-inset:${inset(config.get(TOMCAT_CONTENT_INSET_SETTING),15)}px`;
+  return `--tc-controls-inset:${inset(config.get(TOMCAT_CONTROLS_INSET_SETTING),15)}px;--tc-content-inset:${inset(config.get(TOMCAT_CONTENT_INSET_SETTING),25)}px`;
 }

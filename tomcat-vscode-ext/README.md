@@ -94,12 +94,12 @@ You only need these settings when you want to override the default behavior:
   "tomcat.path": "/absolute/path/to/tomcat",
   "tomcat.session.defaultCwd": "/absolute/path/to/workspace",
   "tomcat.serve.extraArgs": [],
-  "tomcat.layout.controlsInset": 10,
-  "tomcat.layout.contentInset": 15
+  "tomcat.layout.controlsInset": 15,
+  "tomcat.layout.contentInset": 25
 }
 ```
 
-Sidebar spacing is configured in VS Code Settings: search `tomcat.layout` (User or Workspace settings), then **Developer: Reload Window**. Values are pixels from the sidebar edge, clamped to 0–40. Controls Inset sets the session bar/input border; Content Inset sets replies/cards/todos/attachments. Keep Content Inset greater than Controls Inset to align input text with replies; otherwise inner padding clamps to zero. The editor grows from one line up to 30% of webview height, then scrolls internally; attachments stay outside it.
+Sidebar spacing is configured in VS Code Settings: search `tomcat.layout` (User or Workspace settings), then **Developer: Reload Window**. Defaults are Controls Inset **15px** and Content Inset **25px**; explicit User/Workspace values are retained. Values are pixels from the sidebar edge, clamped to 0–40. Controls Inset sets the session bar/input border; Content Inset sets replies/cards/todos/attachments. Keep Content Inset greater than Controls Inset to align input text with replies; otherwise inner padding clamps to zero. The editor grows from one line up to 30% of webview height, then scrolls internally; attachments stay outside it.
 
 Resolution order, in plain English:
 

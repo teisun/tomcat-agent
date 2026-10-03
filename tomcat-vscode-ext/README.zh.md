@@ -88,12 +88,12 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
   "tomcat.path": "/absolute/path/to/tomcat",
   "tomcat.session.defaultCwd": "/absolute/path/to/workspace",
   "tomcat.serve.extraArgs": [],
-  "tomcat.layout.controlsInset": 10,
-  "tomcat.layout.contentInset": 15
+  "tomcat.layout.controlsInset": 15,
+  "tomcat.layout.contentInset": 25
 }
 ```
 
-侧栏间距在 **VS Code 设置** 中搜索 `tomcat.layout`，可写入用户或工作区设置；修改后执行 **Developer: Reload Window（重新加载窗口）** 生效。数值是距离侧栏真实边缘的像素，范围 0–40：`controlsInset` 控制会话栏和输入框边框，`contentInset` 控制回复、卡片、Todo、附件条。内容线应大于控件线（例如 10/15 或 10/17），框内文字才与回复对齐；否则框内缩进按 0 处理。正文从一行自然增长，最高为 webview 高度的 30%，超过后内部滚动；附件保持在框外。
+侧栏间距在 **VS Code 设置** 中搜索 `tomcat.layout`，可写入用户或工作区设置；修改后执行 **Developer: Reload Window（重新加载窗口）** 生效。默认控件线 **15px**、内容线 **25px**，用户或工作区显式配置不会被覆盖。数值是距离侧栏真实边缘的像素，范围 0–40：`controlsInset` 控制会话栏和输入框边框，`contentInset` 控制回复、卡片、Todo、附件条。内容线应大于控件线（例如 15/25 或 15/27），框内文字才与回复对齐；否则框内缩进按 0 处理。正文从一行自然增长，最高为 webview 高度的 30%，超过后内部滚动；附件保持在框外。
 
 按优先级从高到低：
 

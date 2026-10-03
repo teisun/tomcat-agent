@@ -86,9 +86,9 @@ try {
     };
     const geometry=()=>page.evaluate(()=>{
       const rect=selector=>{const el=document.querySelector(selector);if(!el)return null;const r=el.getBoundingClientRect(),cs=getComputedStyle(el);return {left:r.left,right:innerWidth-r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,lineHeight:parseFloat(cs.lineHeight),padding:cs.padding,scrollHeight:el.scrollHeight,clientHeight:el.clientHeight,scrollTop:el.scrollTop};};
-      return {viewport:[innerWidth,innerHeight],bodyPadding:getComputedStyle(document.body).padding,controls:parseFloat(getComputedStyle(document.body).getPropertyValue('--tc-controls-inset'))||10,content:parseFloat(getComputedStyle(document.body).getPropertyValue('--tc-content-inset'))||15,surface:rect('[data-testid="composer-surface"]'),editor:rect('.tc-composer__editor'),toolbar:rect('[data-testid="composer-bar"]'),firstButton:rect('[data-testid="attachment-add"]'),topbar:rect('.tc-topbar'),stream:rect('.tc-stream'),menu:rect('[data-testid="slash-command-menu"]'),mention:rect('[data-testid="context-search-dropdown"]')};
+      return {viewport:[innerWidth,innerHeight],bodyPadding:getComputedStyle(document.body).padding,controls:parseFloat(getComputedStyle(document.body).getPropertyValue('--tc-controls-inset')),content:parseFloat(getComputedStyle(document.body).getPropertyValue('--tc-content-inset')),surface:rect('[data-testid="composer-surface"]'),editor:rect('.tc-composer__editor'),toolbar:rect('[data-testid="composer-bar"]'),firstButton:rect('[data-testid="attachment-add"]'),topbar:rect('.tc-topbar'),stream:rect('.tc-stream'),menu:rect('[data-testid="slash-command-menu"]'),mention:rect('[data-testid="context-search-dropdown"]')};
     });
-    const capture=async suffix=>{
+    const capture=async (suffix, expectedInsets = [15,25])=>{
       const name=`${scenario.name}-${suffix}`,g=await geometry();
       await page.screenshot({path:path.join(out,`${name}.png`)});
       await writeFile(path.join(out,`${name}.aria.txt`),await page.locator('body').ariaSnapshot());
@@ -96,6 +96,8 @@ try {
       await writeFile(path.join(out,`${name}.geometry.json`),JSON.stringify(g,null,2));
       assert.equal(events.filter(e=>e.level === "error").length,0,JSON.stringify(events));
       assert.equal(g.bodyPadding,"0px");
+      assert.ok(Number.isFinite(g.controls) && Number.isFinite(g.content), "Inset variables must be defined");
+      assert.deepEqual([g.controls,g.content], expectedInsets, "Independent layout defaults/overrides");
       assert.ok(Math.abs(g.topbar.left-g.controls)<=1 && Math.abs(g.topbar.right-g.controls)<=1,"Session bar/control alignment");
       assert.ok(Math.abs(g.stream.left-g.content)<=1,"Transcript/content alignment");
       assert.ok(Math.abs(g.surface.left-g.controls)<=1 && Math.abs(g.surface.right-g.controls)<=1,JSON.stringify(g));
@@ -159,7 +161,84 @@ try {
     const attached=await capture("long-attachments");assert.deepEqual([attached.editor.height,attached.surface.height],sizes);
     await replace("");await capture("collapsed");
     await page.evaluate(()=>{window.__fixture.sessionViews.s1.pendingAttachments=[];window.__emitState();document.body.style.setProperty('--tc-controls-inset','4px');document.body.style.setProperty('--tc-content-inset','24px');});
-    await replace("/");await page.getByTestId("slash-command-menu").waitFor();await capture("custom-insets");
+    await replace("/");await page.getByTestId("slash-command-menu").waitFor();await capture("custom-insets", [4,24]);
+    if (["narrow-dark", "desktop-light", "narrowest"].includes(scenario.name)) {
+      await page.keyboard.press("Escape");
+      await replace("");
+      await page.evaluate(() => {
+        document.body.style.removeProperty("--tc-controls-inset");
+        document.body.style.removeProperty("--tc-content-inset");
+        const tool = (id, toolName, overrides = {}) => ({ type:"tool", id, toolCallId:id, toolName, status:"complete", isError:false, assistantMessageId:"read-group", ...overrides });
+        const files = (entries) => ({ kind:"files", summary:"文件明细", files:entries });
+        window.__fixture.sessionViews.s1.timeline = [
+          { type:"message", id:"read-user", kind:"user", text:"读取工具的扁平展示验收" },
+          tool("read-single", "read", { assistantMessageId:"read-solo", summary:"RAW_READ_BODY_SENTINEL", display:files([{file:"docs/STATUS_GUIDE.md",range:"L1-92 (92 lines)"}]) }),
+          tool("read-multiple", "read", { summary:"RAW_READ_BODY_SENTINEL", display:files([
+            {file:"docs/STATUS_GUIDE.md",range:"L1-92 (92 lines)"},
+            {file:"docs/COMMIT_MESSAGE_SPEC.md",range:"L1-77 (77 lines)"},
+            {file:"docs/long-commands-rules-composer-acceptance.md",range:"L112-120 (9 lines)"},
+          ]) }),
+          tool("read-failed", "read_file", { summary:"RAW_READ_BODY_SENTINEL", display:files([
+            {file:"docs/missing.md",status:"failed",note:"Permission denied"},
+            {file:"docs/skipped.md",status:"skipped",note:"Output budget exhausted"},
+          ]) }),
+          tool("read-legacy", "read", { args:{path:"docs/legacy.md"}, display:{kind:"file",file:"docs/legacy.md"}, summary:"Legacy summary" }),
+          tool("read-context", "list_dir", { args:{path:"docs"}, summary:"STATUS_GUIDE.md" }),
+          tool("read-bash", "bash", { args:{command:"git status"}, summary:"Archive acceptance output" }),
+          tool("read-edit", "edit", { display:{kind:"file",file:"src/app.ts"}, diffStat:{added:1,removed:0}, diff:[{tag:"add",newLine:1,oldLine:null,text:"const flat = true;"}], summary:"Edited" }),
+        ];
+        window.__emitState();
+      });
+      const rowFor = (label) => page.getByTestId("tool-row").filter({has:page.getByTestId("tool-row-label").filter({hasText:label})});
+      const single = rowFor("Read 1 file");
+      await single.waitFor();
+      assert.equal(await single.getAttribute("data-tool-variant"), "standalone");
+      const readShot = async (suffix, row) => {
+        await row.scrollIntoViewIfNeeded();
+        const style = await row.evaluate(el => {
+          const c = getComputedStyle(el), r = el.getBoundingClientRect();
+          const body = el.querySelector('[data-testid="tool-row-body"]');
+          return {background:c.backgroundColor,border:c.borderWidth,top:r.top,bottom:r.bottom,viewport:innerHeight,variant:el.dataset.toolVariant,bodyBorder:body ? getComputedStyle(body).borderWidth : null};
+        });
+        assert.equal(await row.getByTestId("disclosure-card").count(), 0, "Read must not be a disclosure card");
+        assert.equal(await row.locator('.tc-disclosure-card__status').count(), 0, "Read has no status stripe");
+        assert.equal(style.background, "rgba(0, 0, 0, 0)"); assert.equal(style.border, "0px");
+        if (style.variant === "standalone" && style.bodyBorder !== null) assert.equal(style.bodyBorder, "0px");
+        assert.ok(style.top>=0 && style.bottom<=style.viewport, "Target tool row must be in viewport");
+        assert.ok(!(await row.innerText()).includes("RAW_READ_BODY_SENTINEL"), "Do not expose raw read body");
+        const g = await capture(suffix);
+        await writeFile(path.join(out,`${scenario.name}-${suffix}.geometry.json`),JSON.stringify({...g,readTarget:style},null,2));
+      };
+      assert.equal(await single.getByTestId("tool-row-toggle").getAttribute("aria-expanded"), "false");
+      await readShot("read-single-collapsed", single);
+      await single.getByTestId("tool-row-toggle").click();
+      assert.equal(await single.getByTestId("tool-row-file-range").innerText(), "L1-92 (92 lines)");
+      await readShot("read-single-expanded", single);
+      await single.getByTestId("file-chip").click();
+      assert.ok(await page.evaluate(() => window.__intents.some(i=>i.type === "openFile" && i.data.path === "docs/STATUS_GUIDE.md")), "File click must send correct openFile intent");
+      await single.getByTestId("tool-row-toggle").click();
+      await page.getByTestId("thinking-group-toggle").click();
+      const multiple = rowFor("Read 3 files"), failed = rowFor("Read 2 files");
+      assert.equal(await multiple.getAttribute("data-tool-variant"), "grouped");
+      await readShot("read-multiple-collapsed", multiple);
+      await multiple.getByTestId("tool-row-toggle").click();
+      assert.equal(await multiple.getByTestId("tool-row-file-entry").count(), 3);
+      await readShot("read-multiple-expanded", multiple);
+      await multiple.getByTestId("tool-row-toggle").click();
+      assert.equal(await failed.getByTestId("tool-row-toggle").getAttribute("aria-expanded"), "true");
+      assert.ok((await failed.getByTestId("tool-row-body").innerText()).includes("Permission denied"));
+      await readShot("read-failed-expanded", failed);
+      await failed.getByTestId("tool-row-toggle").click();
+      assert.ok((await failed.getByTestId("tool-row-files-status").innerText()).includes("1 failed · 1 skipped"));
+      await readShot("read-failed-collapsed", failed);
+      const legacy = rowFor("legacy.md");
+      assert.equal(await legacy.getByTestId("disclosure-card").count(), 0);
+      const bash = page.locator('[data-testid="tool-row"][data-tool-category="command"]'), edit = rowFor("app.ts");
+      assert.equal(await bash.getByTestId("disclosure-card").count(), 1, "Bash card unchanged");
+      assert.equal(await edit.getByTestId("disclosure-card").count(), 1, "Edit card unchanged");
+      await bash.scrollIntoViewIfNeeded(); await capture("read-bash-control");
+      await edit.scrollIntoViewIfNeeded(); await capture("read-edit-control");
+    }
     await page.close();
   }
 } finally {

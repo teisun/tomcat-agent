@@ -29,6 +29,16 @@ async function readManifest(): Promise<Manifest> {
 }
 
 describe("extension manifest contract", () => {
+  it("declares 15/25 layout defaults with bounded integer settings", async () => {
+    const properties = (await readManifest()).contributes?.configuration?.properties;
+    for (const [setting, defaultValue] of [
+      ["tomcat.layout.controlsInset", 15],
+      ["tomcat.layout.contentInset", 25],
+    ] as const) {
+      expect(properties?.[setting]).toMatchObject({ type: "integer", minimum: 0, maximum: 40, default: defaultValue });
+    }
+  });
+
   it("does not contribute a chat participant after the webview-only migration", async () => {
     const manifest = await readManifest();
 

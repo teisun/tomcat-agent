@@ -3,8 +3,8 @@
   font-family: var(--vscode-font-family);
   --tc-field-control-height: 38px;
   --tc-field-label-height: 26px;
-  --tc-controls-inset: 10px;
-  --tc-content-inset: 15px;
+  --tc-controls-inset: 15px;
+  --tc-content-inset: 25px;
   --tc-invocation-fg: #F1B567;
 }
 

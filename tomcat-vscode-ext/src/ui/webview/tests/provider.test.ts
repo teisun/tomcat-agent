@@ -801,12 +801,19 @@ describe("webview html asset resolution", () => {
 
     expect(html).toContain('rel="stylesheet"');
     expect(html).toContain('class="tc-chat-webview"');
-    expect(html).toContain('--tc-controls-inset:10px;--tc-content-inset:15px');
+    expect(html).toContain('--tc-controls-inset:15px;--tc-content-inset:25px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",10);
+    __testing.setConfiguration("tomcat.layout.contentInset",15);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:10px;--tc-content-inset:15px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",0);
+    __testing.setConfiguration("tomcat.layout.contentInset",0);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:0px;--tc-content-inset:0px');
     __testing.setConfiguration("tomcat.layout.controlsInset",4);
     __testing.setConfiguration("tomcat.layout.contentInset",24);
     expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:4px;--tc-content-inset:24px');
     __testing.setConfiguration("tomcat.layout.controlsInset",undefined);
     __testing.setConfiguration("tomcat.layout.contentInset",undefined);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:15px;--tc-content-inset:25px');
     expect(html).toContain("styles.css");
     provider.dispose();
   });

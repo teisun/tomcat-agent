@@ -1338,19 +1338,22 @@ function ToolRowComponent({
   variant = "standalone",
 }: ToolRowProps) {
   const category = toolCategory(item.toolName);
+  const filesDisplay = item.display?.kind === "files" ? item.display : null;
+  const readFiles = (item.toolName === "read" || item.toolName === "read_file") ? filesDisplay : null;
+  // A batch can succeed overall while individual files fail.
+  const hasFailedFileEntry = Boolean(filesDisplay?.files.some((entry) => entry.status === "failed"));
   const terminalText =
     item.status === "complete" && !item.backgroundRunning
       ? item.summary
       : (item.liveOutput ?? item.summary);
   const boundedTerminalText = limitTerminalOutput(terminalText);
   const genericArgs = formatToolArgsForDisplay(item);
-  const contentVisible =
-    hasMeaningfulContent(item) ||
-    Boolean(boundedTerminalText) ||
-    Boolean(genericArgs);
+  const contentVisible = readFiles
+    ? readFiles.files.length > 0
+    : hasMeaningfulContent(item) || Boolean(boundedTerminalText) || Boolean(genericArgs);
   const alwaysVisibleBody = category === "answer" && contentVisible;
   const canToggle = contentVisible && !alwaysVisibleBody;
-  const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible);
+  const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible) || Boolean(readFiles && hasFailedFileEntry);
   const [collapsed, setCollapsed] = useState(!shouldExpandByDefault);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [userInteracted, setUserInteracted] = useState(false);
@@ -1422,20 +1425,15 @@ function ToolRowComponent({
     Boolean(
       item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0),
     );
-  const filesDisplay = item.display?.kind === "files" ? item.display : null;
   const filesDiffStat = filesDisplay
     ? sumFilesDiffStat(filesDisplay.files)
     : null;
   const filesStatusLabel = filesDisplay
     ? buildFilesStatusLabel(filesDisplay.files)
     : null;
-  // 有文件失败就默认展开：折叠态只有一个计数，看不到是哪个文件为什么失败。
-  const hasFailedFileEntry = Boolean(
-    filesDisplay?.files.some((entry) => entry.status === "failed"),
-  );
   const usesDisclosureCard =
     (category === "command" && contentVisible) ||
-    filesDisplay !== null ||
+    (filesDisplay !== null && readFiles === null) ||
     (category === "edit" &&
       fileDisplay !== undefined &&
       (hasStructuredDiff || hasLargeDiffFallback));
@@ -1625,7 +1623,18 @@ function ToolRowComponent({
           <>
             <div className="tc-tool-row__header">
               <span className="tc-tool-row__label" data-testid="tool-row-label">
-                {renderFlatContent(item, onOpenFile, onOpenPlanFile, nowTick)}
+                {readFiles ? (
+                  <>
+                    <span className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}>
+                      {buildFilesLabel(item, readFiles.files.length)}
+                    </span>
+                    {filesStatusLabel ? (
+                      <span className="tc-tool-row__files-status" data-testid="tool-row-files-status">
+                        {filesStatusLabel}
+                      </span>
+                    ) : null}
+                  </>
+                ) : renderFlatContent(item, onOpenFile, onOpenPlanFile, nowTick)}
               </span>
               {canToggle ? (
                 <button
@@ -1649,7 +1658,7 @@ function ToolRowComponent({
             </div>
             {collapsed || !contentVisible ? null : (
               <div className="tc-tool-row__body" data-testid="tool-row-body">
-                {renderExpandedBody(item, genericArgs)}
+                {readFiles ? renderFileEntries(readFiles.files, onOpenFile) : renderExpandedBody(item, genericArgs)}
               </div>
             )}
           </>

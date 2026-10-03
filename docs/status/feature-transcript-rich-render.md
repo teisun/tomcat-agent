@@ -2,10 +2,10 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-03 23:27 +0800 |
+| Updated | 2026-10-04 02:22 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Project Commands/Rules and Cursor compatibility; invocation snapshots and duplicate references; composer layout/menu remediation; CLI/extension release metadata |
+| Scope | VS Code 15px/25px layout defaults and flat read rows; project Commands/Rules and composer/menu interactions; preserved interaction contracts and delivery evidence |
 | Cov% | - |
 
 ### DONE
@@ -13,9 +13,11 @@
 - Added project Commands/Rules discovery from `.agents` and `.cursor`; `.md`/`.mdc` rules auto-apply only with boolean `alwaysApply: true`, with hard-Deny/budget diagnostics surfaced through `/reload`.
 - Kept command/skill invocations as semantic references: chip selection freezes the body when sending/queueing, while retry reuses the stored snapshot; no path guessing, asynchronous preparation phase or new resource database.
 - Added Skills/Commands/Terminal groups, two-line descriptions, Show N more and shared yellow composer/history chips; preserved repeated references with draft-only occurrence identity and delivery idempotence.
-- Applied configurable 10px/15px control/content lines and a 30vh scrolling editor; tied `/`/`@` menu height to actual composer space, repaired CLI help and shell quoting, unified diagnostic prefixes and removed redundant prompt/GUI code.
+- Applied configurable 15px/25px control/content defaults consistently in settings, host fallback and CSS without overwriting explicit user/workspace values; retained the 0–40 bounds, Reload Window application and 30vh editor. Existing `/`/`@` menu geometry, CLI help/quoting and diagnostic-prefix remediation remain in place.
+- Routed `read`/`read_file` file-list results through the existing flat ToolRow instead of selecting a card by data shape; retained file links/ranges/notes, per-file failure/skipped counters, default failure expansion and user fold choices. Raw read output stays out of the file-list UI; bash/edit cards and backend/history protocols are unchanged.
+- Protected single/multiple and standalone/grouped reads, empty lists, streaming completion and explicit configuration; extended the existing browser harness rather than introducing another component, state hook, dependency or acceptance launcher.
 - Protected real Serve follow_up queue-drain semantics and fixed create/delete invalidation overwritten by asynchronous file indexing; synchronized host file/directory fixtures with observed creation rather than silent request retries.
-- Applied this request's one-time script patch bump: CLI `0.1.64 -> 0.1.65`, extension `0.1.78 -> 0.1.79`, bundled CLI `0.1.64 -> 0.1.65`. This bump/commit operation runs no tests, builds, coverage, packaging or publication.
+- The earlier Commands/Rules request applied one repository-script patch bump: CLI `0.1.64 -> 0.1.65`, extension `0.1.78 -> 0.1.79`, bundled CLI `0.1.64 -> 0.1.65`. That bump/commit operation ran no tests, builds, coverage, packaging or publication; the current layout/read commit changes no versions.
 
 - Made all three streaming adapters require a protocol terminal signal before accepting EOF as a completed response; missing terminals now produce one retryable `StreamInterrupted` / `BodyRead`, then stable EOF, instead of a fatal Parse error or silent success.
 - Preserved complete-frame protocol errors and existing terminal metadata, tolerated incomplete EOF JSON/UTF-8 without exposing raw prompt data, and prevented Anthropic EOF from fabricating a successful ending.
@@ -73,7 +75,8 @@
 
 - `get_instruction_catalog` is the shared capability for project command/skill catalog and explicit instruction segments; Serve reads authoritative bodies and snapshots them, rejects instruction-bearing steer, and never executes a plain `/name` by guessing.
 - `ContextRefKind` includes Command/Skill; archival/provider projections share one snapshot. Draft schema 3 holds occurrence IDs; Serve/history retain ordered duplicate parts without those IDs. Keep a matching runtime for new history replay.
-- `tomcat.layout.controlsInset` / `contentInset` are integer VS Code settings (0–40, default10/15) applied on Reload Window; only editor body is height-budgeted, with attachments/Todo/questions outside it.
+- `tomcat.layout.controlsInset` / `contentInset` are integer VS Code settings (0–40, default15/25) applied on Reload Window; explicit10/15,4/24 and0 settings are retained. Only editor body is height-budgeted, with attachments/Todo/questions outside it.
+- `read`/`read_file` results with `display.kind=files` use the existing flat row, file count/status labels and structured file entries. Empty lists do not create a raw-output expander; file-level failures can coexist with overall `isError=false`. No new wire/display schema or fold-state authority is introduced.
 
 - EOF is transport termination, not response completion. Responses terminal evidence is completed/done/incomplete/failed/error; Chat uses its emitted `FinishReason` or `[DONE]`; Anthropic uses an existing stop reason or processed message_stop/error. Existing agent retry budgets and public event/configuration contracts are unchanged.
 
@@ -109,7 +112,7 @@
 - The commands delivery's web_search timeout remains unresolved, suspected system-proxy related, without an unmodified-code baseline; it is not proven pre-existing. The old invocation DOM timeout did not recur in the final three complete host runs, but its cause remains unconfirmed.
 - Remediation host sequences first reproduced empty `@` file/directory results; original failed logs are retained alongside the deterministic index regression and final 3×8/8 evidence, not rewritten as all-green initial commands.
 - At 280px height with eleven attachments, history may have no remaining height; menu fit is limited to the accepted viewport/layout matrix, not all arbitrary window sizes.
-- New `0.1.65` / `0.1.79` artifacts are not built, installed or published by this bump/commit. One leftover failed `@` directory fixture and ignored screenshots/profiles are excluded from source control; no related source/documentation change is omitted.
+- The earlier commands version-bump/commit did not build artifacts. A pure `0.1.79` VSIX was subsequently rebuilt for the latest layout/read changes without a bundled CLI, but has not been installed or published. VSIX, screenshots and disposable host profiles remain ignored local artifacts; no related source/documentation change is omitted.
 
 - EOF recovery does not prevent upstream disconnections or increase the existing retry budget; repeated interruptions can still exhaust attempts. The new `0.1.64` / `0.1.78` artifacts have not been built, installed or published by this request.
 - The initial EOF implementation test batch had two new-fixture mistakes (mixed incomplete/error payloads and a read-tool/write-preview mismatch), fixed before final acceptance; two unchanged Anthropic non-stream tests also reported local Connection refused in parallel, then passed both individually and in the final serial module run. The original failing result is retained, not relabeled green.
@@ -130,8 +133,13 @@
 
 ### VERIFICATION
 
+- Latest layout/read implementation acceptance, before this commit request, passed GUI97 plus two final focused streaming-success cases (combined99), layout/provider75 and manifest9 cases, with extension/GUI lint. Tasks `1791050271254-qlwfrg` and `1791050801238-qugloe`; the initial fixture-only lint errors in `1791050106805-a1iw0l` were fixed, not relabeled as a passing original run.
+- The production-App/simulated-host browser matrix passed123 PNG/ARIA/console/geometry groups across nine layout/menu viewports and three representative read/control viewports (`1791050500282-az8qsr`); all capture consoles/default geometry were checked (`1791050801377-elv4zn`). A separate real VS Code host layout target passed1/1 (`1791050500320-6xxmot`). Simulated file-link checks prove an `openFile` intent, not an actual editor opening.
+- Pure `tomcat-vscode-ext-0.1.79.vsix` packaging and archive/current-build consistency passed before this commit request (`1791051404349-6xjqed`, `1791051513468-m26c98`):227 entries,1,651,690 bytes,no bundled CLI, SHA-256 `7a72adcd4615b982ac0e2ccd76353892238c1233fc5b306fb8dc98a743c14517`. Details remain in ignored `.agents/shots/layout-flat-read/acceptance.md`; current source versions stay CLI0.1.65/extension0.1.79.
+- This commit request explicitly runs no tests, builds or coverage measurement. Commit-time checks cover all Git regions, source/whitespace scope, this branch's status and what/why message format; Cov% remains unmeasured (`-`), with no push or installation.
+
 - Historical commands/remediation acceptance, before this bump/commit, passed Rust241, GUI139, layout7, real Serve3, index12 and provider-flow57 focused cases; final host ran the same eight targets consecutively three times, and nine browser scenarios produced99 PNG/ARIA/console/geometry groups. See `tomcat/docs/reports/commands-rules-composer-acceptance.md:57` for exact commands, task IDs, retained failures and boundaries.
-- These results predate the metadata-only version change and are not reruns for this commit. The user explicitly requested no tests; Cov% stays `-`. Current checks cover release mirrors, allowed-field changes, Git scope/whitespace, branch status and commit-message structure only.
+- These historical commands/remediation results predate the earlier metadata-only version change and are not reruns for this commit; the latest layout/read evidence is recorded separately above. No new coverage percentage is claimed.
 
 - EOF implementation acceptance before the version bump passed `cargo test --manifest-path tomcat/Cargo.toml --lib core::llm:: -- --test-threads=1` (428 passed / 0 failed / 1 existing real-API test ignored, task `1790944908351-6fud0q`) and `core::agent_loop::` with the same serial setting (343 passed / 0 failed / 1 existing manual test ignored), followed by `cargo clippy --manifest-path tomcat/Cargo.toml --all-targets -- -D warnings` (task `1790944953000-i17hqw`, exit 0). All eight new regressions passed; these are prior results, not reruns for this commit.
 - This bump operation passed both `release-version.mjs check` calls and the five-file version-only diff/whitespace check. Only release metadata, Cargo root-package version and extension manifest/lock root versions changed; no test suite, compilation, packaging or coverage measurement was run.

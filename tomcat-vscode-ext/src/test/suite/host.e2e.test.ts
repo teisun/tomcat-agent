@@ -75,8 +75,8 @@ suite("Tomcat host E2E", () => {
     const surface = snapshot.composerControlMetrics["composer-surface"];
     const first = snapshot.composerControlMetrics["attachment-add"];
     assert.ok(surface && first, "expected measured composer controls");
-    assert.ok(Math.abs(surface.left-10)<=1 && Math.abs(surface.right-10)<=1, JSON.stringify(surface));
-    assert.ok(Math.abs(first.left-15)<=1, JSON.stringify(first));
+    assert.ok(Math.abs(surface.left-15)<=1 && Math.abs(surface.right-15)<=1, JSON.stringify(surface));
+    assert.ok(Math.abs(first.left-25)<=1, JSON.stringify(first));
   });
 
   test("interrupts an executing plan and resumes it in Chat", async () => {

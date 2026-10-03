@@ -224,14 +224,14 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 40,
-          "default": 10,
+          "default": 15,
           "description": "Distance in pixels from sidebar edges to the session bar and input box. Reload the window to apply."
         },
         "tomcat.layout.contentInset": {
           "type": "integer",
           "minimum": 0,
           "maximum": 40,
-          "default": 15,
+          "default": 25,
           "description": "Distance in pixels from sidebar edges to replies, tool cards, todos and attachments. Set greater than Controls Inset to align input text with replies. Reload the window to apply."
         },
         "tomcat.contextSearch.maxFiles": {

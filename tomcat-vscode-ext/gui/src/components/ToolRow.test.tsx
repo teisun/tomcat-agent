@@ -1442,7 +1442,7 @@ describe("ToolRow", () => {
     );
   });
 
-  it("batch read card shows per-file ranges and skipped entries", () => {
+  it("flat batch read shows per-file ranges and skipped entries", () => {
     render(
       <ToolRow
         item={buildTool({
@@ -1478,6 +1478,78 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-file-note").textContent).toContain(
       "output budget exhausted",
     );
+  });
+
+  it.each([
+    ["read", "standalone", 1], ["read", "grouped", 2],
+    ["read_file", "standalone", 2], ["read_file", "grouped", 1],
+  ] as const)("keeps %s files flat in %s (%s entries), without raw body", (toolName, variant, count) => {
+    const onOpenFile = vi.fn();
+    const item = buildTool({ toolName, summary: count === 1 ? undefined : "RAW_READ_BODY_SENTINEL", display: {
+      kind: "files", summary: "", files: Array.from({ length: count }, (_, n) => ({ file: `/workspace/file-${n}.md`, range: "L1-9 (9 lines)" })),
+    } });
+    const { container } = render(<ToolRow item={item} variant={variant} onOpenFile={onOpenFile} />);
+    expect(screen.queryByTestId("disclosure-card")).toBeNull();
+    expect(screen.getByTestId("tool-row-label").textContent).toBe(`Read ${count} ${count === 1 ? "file" : "files"}`);
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getAllByTestId("tool-row-file-entry")).toHaveLength(count);
+    expect(screen.getAllByTestId("tool-row-file-range")[0].textContent).toBe("L1-9 (9 lines)");
+    expect(container.textContent).not.toContain("RAW_READ_BODY_SENTINEL");
+    fireEvent.click(screen.getAllByTestId("file-chip")[0]);
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/file-0.md");
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+  });
+
+  it("opens file-level failures even when the batch succeeded, but keeps the user's collapse", () => {
+    const item = buildTool({ isError: false, summary: "RAW_READ_BODY_SENTINEL", display: { kind: "files", summary: "", files: [
+      { file: "/workspace/missing.md", status: "failed", note: "Permission denied" },
+      { file: "/workspace/skipped.md", status: "skipped", note: "output budget exhausted" },
+    ] } });
+    const { rerender } = render(<ToolRow item={item} onOpenFile={vi.fn()} />);
+    expect(screen.queryByTestId("disclosure-card")).toBeNull();
+    expect(screen.getByTestId("tool-row-files-status").textContent).toBe("1 failed · 1 skipped");
+    expect(screen.getAllByTestId("tool-row-file-note")[0].textContent).toBe("Permission denied");
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    rerender(<ToolRow item={{ ...item, summary: "a later result" }} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    expect(screen.getByTestId("tool-row-files-status").textContent).toContain("1 failed");
+  });
+
+  it.each([false, true])("applies file results after streaming without replacing user choice (interacted=%s)", (interacted) => {
+    const initial = buildTool({ status: "streaming", summary: undefined });
+    const { rerender } = render(<ToolRow item={initial} onOpenFile={vi.fn()} />);
+    const streaming = { ...initial, display: { kind: "files" as const, summary: "", files: [{ file: "/workspace/a.md" }] } };
+    rerender(<ToolRow item={streaming} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("true");
+    if (interacted) fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    rerender(<ToolRow item={{ ...streaming, status: "complete", display: { kind: "files", summary: "", files: [{ file: "/workspace/a.md", status: "failed", note: "read failed" }] } }} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe(interacted ? "false" : "true");
+  });
+
+  it.each([false, true])("collapses a successful streaming read unless the user explicitly opened it (interacted=%s)", (interacted) => {
+    const initial = buildTool({ status: "streaming", summary: undefined });
+    const { rerender } = render(<ToolRow item={initial} onOpenFile={vi.fn()} />);
+    const streaming = { ...initial, display: { kind: "files" as const, summary: "", files: [{ file: "/workspace/a.md" }] } };
+    rerender(<ToolRow item={streaming} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("true");
+    if (interacted) {
+      fireEvent.click(screen.getByTestId("tool-row-toggle"));
+      fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    }
+    rerender(<ToolRow item={{ ...streaming, status: "complete" }} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe(interacted ? "true" : "false");
+  });
+
+  it("does not turn an empty read files result into a raw-output expander", () => {
+    render(<ToolRow item={buildTool({ summary: "RAW_READ_BODY_SENTINEL", display: { kind: "files", summary: "", files: [] } })} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("tool-row-label").textContent).toBe("Read 0 files");
+    expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    expect(screen.queryByTestId("disclosure-card")).toBeNull();
   });
 
   it("batch card lets each file open its own diff", () => {
