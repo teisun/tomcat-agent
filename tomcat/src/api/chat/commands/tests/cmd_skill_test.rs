@@ -122,6 +122,133 @@ fn write_skill(workspace: &Path, name: &str, description: &str, user_only: bool)
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn run_command_shortcuts_and_exact_ids_preserve_local_routing() {
+    use super::super::{cmd_command, parse_chat_command, ChatCommand};
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", home.path().as_os_str());
+    let _api = EnvGuard::set("TOMCAT_COMMAND_TEST_KEY", "stub");
+    let _cwd = CurrentDirGuard::set(workspace.path());
+    let dir = workspace.path().join(".cursor/commands");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("review.md"), "COMMAND_BODY").unwrap();
+    std::fs::write(dir.join("reload.md"), "RELOAD_PROMPT").unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into());
+    cfg.llm.api_key_env = Some("TOMCAT_COMMAND_TEST_KEY".into());
+    let ctx = ChatContext::from_config(cfg).unwrap();
+    for line in ["/review", "/review check tests"] {
+        let ChatCommandOutcome::UserMessage { message, .. } =
+            cmd_command::shortcut(&ctx, line.into())
+        else {
+            panic!("expected invocation");
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(
+            json.contains("COMMAND_BODY") && json.contains("command:.cursor/commands/review.md")
+        );
+    }
+    assert!(matches!(
+        parse_chat_command("/reload"),
+        ChatCommand::Shared { .. }
+    ));
+    assert!(matches!(
+        cmd_command::run(
+            &ctx,
+            "/command use command:.cursor/commands/reload.md".into()
+        ),
+        ChatCommandOutcome::UserMessage { .. }
+    ));
+    assert!(matches!(
+        cmd_command::shortcut(&ctx, "/foo".into()),
+        ChatCommandOutcome::Continue { .. }
+    ));
+    let native = workspace.path().join(".agents/commands");
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(native.join("review.md"), "SECOND").unwrap();
+    assert!(matches!(
+        cmd_command::shortcut(&ctx, "/review".into()),
+        ChatCommandOutcome::Handled
+    ));
+    assert!(matches!(
+        cmd_command::run(&ctx, "/command list".into()),
+        ChatCommandOutcome::Handled
+    ));
+    assert!(matches!(
+        cmd_command::run(&ctx, "/command use command:../../etc/passwd".into()),
+        ChatCommandOutcome::Handled
+    ));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn command_printed_ids_round_trip_spaces_and_quotes() {
+    use super::super::cmd_command;
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", home.path().as_os_str());
+    let _api = EnvGuard::set("TOMCAT_COMMAND_QUOTE_TEST_KEY", "stub");
+    let _cwd = CurrentDirGuard::set(workspace.path());
+    for (source, name, body) in [
+        (".cursor", "my review", "SPACE_BODY"),
+        (".cursor", "review's", "CURSOR_QUOTE_BODY"),
+        (".agents", "review's", "AGENTS_QUOTE_BODY"),
+    ] {
+        let directory = workspace.path().join(source).join("commands");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(format!("{name}.md")), body).unwrap();
+    }
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into());
+    cfg.llm.api_key_env = Some("TOMCAT_COMMAND_QUOTE_TEST_KEY".into());
+    let ctx = ChatContext::from_config(cfg).unwrap();
+    let commands = ctx.project_commands();
+    let list = cmd_command::list_text(&commands.files);
+    let printed = list
+        .lines()
+        .find(|line| line.contains("/my review  "))
+        .unwrap();
+    let quoted_id = printed.split_once("  .cursor  ").unwrap().1;
+    let check = |line: String, expected_id: &str, body: &str| {
+        let ChatCommandOutcome::UserMessage { message, .. } = cmd_command::run(&ctx, line) else {
+            panic!("printed command did not invoke");
+        };
+        let serialized = serde_json::to_string(&message).unwrap();
+        assert!(
+            serialized.contains(expected_id) && serialized.contains(body),
+            "{serialized}"
+        );
+    };
+    check(
+        format!("/command use {quoted_id}"),
+        "command:.cursor/commands/my review.md",
+        "SPACE_BODY",
+    );
+    assert!(matches!(
+        cmd_command::shortcut(&ctx, "/review's".into()),
+        ChatCommandOutcome::Handled
+    ));
+    let duplicates = commands
+        .files
+        .iter()
+        .filter(|file| file.card.name == "review's")
+        .collect::<Vec<_>>();
+    let prompt = cmd_command::duplicate_text("review's", &duplicates);
+    assert_eq!(duplicates.len(), 2);
+    for (line, file) in prompt.lines().skip(1).zip(duplicates) {
+        let body = if file.card.source == ".cursor" {
+            "CURSOR_QUOTE_BODY"
+        } else {
+            "AGENTS_QUOTE_BODY"
+        };
+        check(line.trim().into(), &file.card.id, body);
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn run_skill_reload_replaces_runtime_skill_set() {
     const API_ENV: &str = "TOMCAT_CMD_SKILL_RELOAD_TEST_KEY";
 
@@ -175,22 +302,17 @@ async fn run_skill_use_allows_user_only_skill_and_injects_body() {
     .await;
 
     match outcome {
-        ChatCommandOutcome::Continue {
-            line,
-            echo_user,
+        ChatCommandOutcome::UserMessage {
+            message,
             history_line,
         } => {
-            assert!(!echo_user);
-            assert!(line.contains("<skill name=\"secret\""));
-            assert!(line.contains("Current user intent:\nsummarize the request"));
-            assert_eq!(
-                history_line.as_deref(),
-                Some("/skill use secret summarize the request")
-            );
+            let text = serde_json::to_string(&message).unwrap();
+            assert!(text.contains("Follow the requested procedure"));
+            assert!(text.contains("summarize the request"));
+            assert!(text.contains("skill:secret"));
+            assert!(!text.contains("User explicitly requested skill"));
+            assert_eq!(history_line, "/skill use secret summarize the request");
         }
-        ChatCommandOutcome::Handled => panic!("/skill use should continue into the next turn"),
-        ChatCommandOutcome::ResumePendingQuestion => {
-            panic!("/skill use must not resume an old question")
-        }
+        _ => panic!("/skill use should produce a structured user message"),
     }
 }

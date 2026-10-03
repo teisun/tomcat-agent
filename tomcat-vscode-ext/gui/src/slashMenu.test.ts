@@ -5,13 +5,18 @@ import type { WebviewSessionSnapshot, WebviewStateSnapshot } from "./types";
 const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:name}));
 
 describe("slash menu and dispatch", () => {
-  it("keeps one command section, typed items and the backend order", () => {
+  it("keeps the Terminal section and backend order for legacy services", () => {
     const sections = buildSlashMenuSections(commands);
-    expect(sections.map((section) => section.title)).toEqual(["命令"]);
+    expect(sections.map((section) => section.title)).toEqual(["Terminal"]);
     expect(sections[0].items.map((item) => item.name)).toEqual(commands.map((command) => command.name));
-    expect(sections[0].items.every((item) => item.kind === "command")).toBe(true);
+    expect(sections[0].items.every((item) => item.kind === "terminal")).toBe(true);
     expect(buildSlashMenuSections([])).toEqual([]);
     expect(buildSlashMenuSections(commands, "UN")[0].items.map((item) => item.name)).toEqual(["uninstall"]);
+  });
+  it("keeps same names in different groups and hides Terminal mid-message", () => {
+    const catalog = [{id:"skill:review",kind:"skill" as const,name:"review",description:"check",source:"managed",path:"/skill/SKILL.md"},{id:"command:.cursor/commands/review.md",kind:"command" as const,name:"review",description:"",source:".cursor",path:".cursor/commands/review.md"}];
+    expect(buildSlashMenuSections(commands,"",catalog).map((s)=>s.title)).toEqual(["Skills","Commands","Terminal"]);
+    expect(buildSlashMenuSections(commands,"",catalog,false).map((s)=>s.title)).toEqual(["Skills","Commands"]);
   });
   it.each(["/reload", "  /reload\n", "/install './source with space' agent", "/uninstall package scope"])("routes a leading known token: %s", (input) => {
     expect(matchSlashCommand(input, commands.map((command) => command.name))).toBe(true);

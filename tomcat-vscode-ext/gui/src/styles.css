@@ -3,6 +3,9 @@
   font-family: var(--vscode-font-family);
   --tc-field-control-height: 38px;
   --tc-field-label-height: 26px;
+  --tc-controls-inset: 10px;
+  --tc-content-inset: 15px;
+  --tc-invocation-fg: #F1B567;
 }
 
 * {
@@ -31,6 +34,26 @@ body.tc-plan-webview {
   color: var(--vscode-editor-foreground, var(--vscode-foreground));
   padding: 0;
 }
+
+body.tc-chat-webview { padding: 0; }
+
+body.vscode-light { --tc-invocation-fg: #7A4F00; }
+.tc-chip--invocation {
+  background: color-mix(in srgb, var(--tc-invocation-fg) 25%, transparent);
+  color: var(--tc-invocation-fg);
+  border-radius: 6px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.tc-chip--invocation-selected { background: color-mix(in srgb, var(--tc-invocation-fg) 40%, transparent); }
+body.vscode-high-contrast .tc-chip--invocation,
+body.vscode-high-contrast-light .tc-chip--invocation { border: 1px solid var(--vscode-contrastBorder); }
+.tc-invocation-node { display: inline; }
+.tc-slash-menu .tc-slash-menu__item { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+.tc-slash-menu__heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.tc-slash-menu__source { color: var(--vscode-descriptionForeground); flex: 0 0 auto; font-size: 11px; }
+.tc-slash-menu__description, .tc-slash-menu__more { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 
 button,
 select,
@@ -62,7 +85,7 @@ input:focus-visible {
   height: 100%;
   min-height: 100%;
   overflow: hidden;
-  padding: 10px 0 10px 10px;
+  padding: 10px var(--tc-content-inset);
   position: relative;
 }
 
@@ -385,6 +408,7 @@ span.tc-attachment-strip__file-chip {
 
 .tc-topbar {
   align-items: center;
+  margin-inline: calc(var(--tc-controls-inset) - var(--tc-content-inset));
   display: flex;
   gap: 8px;
   position: relative;
@@ -606,6 +630,12 @@ span.tc-attachment-strip__file-chip {
 
 .tc-context-search-dropdown {
   bottom: calc(100% + 8px);
+  /* 10px shell bottom inset + 8px gap + 8px top clearance. */
+  max-height: clamp(40px, calc(100vh - 100% - 26px), 480px);
+  left: var(--tc-composer-pad);
+  right: auto;
+  min-width: 0;
+  width: min(260px, calc(100% - 2 * var(--tc-composer-pad)));
   top: auto;
 }
 
@@ -1879,6 +1909,7 @@ span.tc-attachment-strip__file-chip {
 
 .tc-stream-shell {
   flex: 1 1 0;
+  margin-right: calc(-1 * var(--tc-content-inset));
   min-height: 0;
   position: relative;
 }
@@ -1887,7 +1918,7 @@ span.tc-attachment-strip__file-chip {
   height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
-  padding-right: 10px;
+  padding-right: max(0px, calc(var(--tc-content-inset) - 10px));
   scrollbar-color: color-mix(
       in srgb,
       var(--vscode-scrollbarSlider-background, rgba(127, 127, 127, 0.38)) 82%,
@@ -3043,11 +3074,6 @@ span.tc-attachment-strip__file-chip {
   padding: 0.125em 0.75em;
 }
 
-.tc-shell--question-pending .tc-composer__editor {
-  min-height: 3em;
-  max-height: min(20vh, 12em);
-  overflow-y: auto;
-}
 
 .tc-thinking {
   display: flex;
@@ -4172,15 +4198,16 @@ span.tc-attachment-strip__file-chip {
   flex-direction: column;
   flex: 0 0 auto;
   gap: 8px;
-  margin-inline: -6px;
+  margin-inline: calc(var(--tc-controls-inset) - var(--tc-content-inset));
 }
 
 .tc-composer__surface {
+  --tc-composer-pad: max(0px, calc(var(--tc-content-inset) - var(--tc-controls-inset) - 1px));
   border-radius: 4px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 10px;
+  padding: 10px var(--tc-composer-pad);
   position: relative;
 }
 
@@ -4341,10 +4368,11 @@ span.tc-attachment-strip__file-chip {
   border-radius: 0;
   color: var(--vscode-input-foreground);
   line-height: 1.45;
-  min-height: 84px;
+  max-height: 30vh;
+  overflow-y: auto;
   outline: none;
   overflow-wrap: anywhere;
-  padding: 4px 2px;
+  padding: 4px 0;
   white-space: pre-wrap;
 }
 
@@ -4619,10 +4647,6 @@ span.tc-attachment-strip__file-chip {
 }
 
 @media (max-width: 420px) {
-  .tc-topbar {
-    width: 100%;
-  }
-
   .tc-topbar .tc-chip {
     max-width: 110px;
     overflow: hidden;

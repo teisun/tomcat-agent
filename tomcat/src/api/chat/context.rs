@@ -113,6 +113,169 @@ pub struct ChatContextOverrides {
     pub session_cwd_override: Option<std::path::PathBuf>,
 }
 
+impl ChatContext {
+    pub(crate) fn instruction_catalog(
+        &self,
+    ) -> Vec<crate::core::project_instructions::InstructionCard> {
+        use crate::core::project_instructions::{InstructionCard, InstructionKind};
+        let mut cards: Vec<_> = self
+            .project_commands()
+            .files
+            .into_iter()
+            .map(|f| f.card)
+            .collect();
+        if self.config.skills.enabled {
+            let snapshot = self.skill_set_snapshot();
+            for skill in snapshot.by_name.values() {
+                if matches!(
+                    self.global_services
+                        .gate
+                        .check(PrimitiveOperation::Read, &skill.file_path.to_string_lossy()),
+                    Ok(crate::core::permission::PermissionDecision::Deny { .. }) | Err(_)
+                ) {
+                    continue;
+                }
+                cards.push(InstructionCard {
+                    id: format!("skill:{}", skill.name),
+                    kind: InstructionKind::Skill,
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                    source: skill.source.as_str().into(),
+                    path: skill.file_path.to_string_lossy().into_owned(),
+                });
+            }
+        }
+        cards
+    }
+
+    pub(crate) fn resolve_instruction(
+        &self,
+        id: &str,
+        kind: crate::core::project_instructions::InstructionKind,
+    ) -> Result<crate::core::llm::ContextReference, String> {
+        use crate::core::llm::{ContextRefKind, ContextReference};
+        use crate::core::project_instructions::{read_body, InstructionKind};
+        let (path, label, body) = match kind {
+            InstructionKind::Command => {
+                let commands = self.project_commands();
+                let file = commands
+                    .files
+                    .iter()
+                    .find(|f| f.card.id == id)
+                    .ok_or_else(|| format!("命令已不存在或不可读取：{id}"))?;
+                let root = self
+                    .scope_services
+                    .resource_root
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                (
+                    file.card.path.clone(),
+                    format!("/{}", file.card.name),
+                    read_body(&root, &file.file_path, self.global_services.gate.as_ref())?,
+                )
+            }
+            InstructionKind::Skill => {
+                if !self.config.skills.enabled {
+                    return Err("技能系统已禁用".into());
+                }
+                let name = id.strip_prefix("skill:").ok_or("非法 skill ID")?;
+                let snapshot = self.skill_set_snapshot();
+                let skill = snapshot
+                    .resolve_any(name)
+                    .ok_or_else(|| format!("技能已不存在：{name}"))?;
+                let base = skill.base_dir.canonicalize().map_err(|e| e.to_string())?;
+                let file = base.join("SKILL.md");
+                (
+                    skill.file_path.to_string_lossy().into_owned(),
+                    format!("/{name}"),
+                    read_body(&base, &file, self.global_services.gate.as_ref())?
+                        .trim()
+                        .to_string(),
+                )
+            }
+        };
+        Ok(ContextReference {
+            ref_kind: match kind {
+                InstructionKind::Command => ContextRefKind::Command,
+                InstructionKind::Skill => ContextRefKind::Skill,
+            },
+            path,
+            label,
+            line_start: None,
+            line_end: None,
+            text: Some(body),
+            resource_id: Some(id.into()),
+        })
+    }
+
+    pub(crate) fn project_commands(&self) -> crate::core::project_instructions::Discovery {
+        crate::core::project_instructions::discover(
+            &self.scope_services.resource_root,
+            &self.config.workspace.project_resource_dir,
+            false,
+            self.global_services.gate.as_ref(),
+        )
+    }
+
+    pub(crate) fn project_rules(&self, budget: usize) -> (String, Vec<String>, usize) {
+        let root = self
+            .scope_services
+            .resource_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.scope_services.resource_root.clone());
+        let rules = crate::core::project_instructions::discover(
+            &root,
+            &self.config.workspace.project_resource_dir,
+            true,
+            self.global_services.gate.as_ref(),
+        );
+        crate::core::project_instructions::render_rules(
+            &rules,
+            &root,
+            self.global_services.gate.as_ref(),
+            budget,
+        )
+    }
+
+    pub(crate) fn instruction_summary(&self) -> String {
+        let commands = self.project_commands();
+        let entry = self
+            .session_runtime
+            .session
+            .get_session(self.session_runtime.session.current_session_key())
+            .ok()
+            .flatten();
+        let budget = self
+            .resolve_call(LlmScene::Main, entry.as_ref())
+            .map(|call| {
+                crate::infra::config::compute_context_budget_chars_from_tokens(
+                    call.limits.input_budget_tokens,
+                )
+            })
+            .unwrap_or(320_000);
+        let (_, errors, loaded) = self.project_rules(budget);
+        let summarize = |label: &str, count: usize, diagnostics: &[String]| {
+            let mut text = if label == "Rules" {
+                format!("  - Rules：{count} 条生效，{} 条未生效", diagnostics.len())
+            } else {
+                format!("  - Commands：{count} 个可用，{} 个跳过", diagnostics.len())
+            };
+            for error in diagnostics.iter().take(20) {
+                text.push_str(&format!("\n      {error}"));
+            }
+            if diagnostics.len() > 20 {
+                text.push_str(&format!("\n      …另 {} 项", diagnostics.len() - 20));
+            }
+            text
+        };
+        format!(
+            "{}\n{}",
+            summarize("Commands", commands.files.len(), &commands.diagnostics),
+            summarize("Rules", loaded, &errors)
+        )
+    }
+}
+
 impl ChatContextOverrides {
     pub fn with_ask_question_panel(mut self, panel: Arc<dyn panels::AskQuestionPanel>) -> Self {
         self.ask_question_panel = Some(panel);

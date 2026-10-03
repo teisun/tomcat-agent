@@ -44,6 +44,7 @@ pub(crate) struct ServeSchemaBundle {
     retain_attachment_leases_response: schemars::schema::RootSchema,
     shared_slash_command: schemars::schema::RootSchema,
     slash_reply: schemars::schema::RootSchema,
+    instruction_card: schemars::schema::RootSchema,
 }
 
 pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -77,6 +78,7 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         retain_attachment_leases_response: schema_for!(RetainAttachmentLeasesResponse),
         shared_slash_command: schema_for!(crate::api::chat::commands::SharedSlashCommand),
         slash_reply: schema_for!(crate::api::chat::commands::SlashReply),
+        instruction_card: schema_for!(crate::core::project_instructions::InstructionCard),
     }
 }
 
@@ -108,6 +110,7 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("ServeCommand", &bundle.serve_command),
         ("SharedSlashCommand", &bundle.shared_slash_command),
         ("SlashReply", &bundle.slash_reply),
+        ("InstructionCard", &bundle.instruction_card),
         ("ControlFrame", &bundle.control_frame),
         ("ResponseFrame", &bundle.response_frame),
         ("WireEvent", &bundle.wire_event),

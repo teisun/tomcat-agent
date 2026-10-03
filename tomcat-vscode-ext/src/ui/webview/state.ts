@@ -828,6 +828,10 @@ function contentToMessageSegments(
           }
           break;
         case "input_reference":
+          if ((entry.ref_kind === "command" || entry.ref_kind === "skill") && typeof entry.resource_id === "string" && typeof entry.label === "string") {
+            segments.push({type:"instruction",kind:entry.ref_kind,resourceId:entry.resource_id,label:entry.label,path:typeof entry.path === "string" ? entry.path : undefined});
+            break;
+          }
           if (
             (entry.ref_kind === "selection" || entry.ref_kind === "file") &&
             typeof entry.path === "string" &&
@@ -865,6 +869,9 @@ function contentToMessageSegments(
     return segments.length ? segments : undefined;
   }
   if (isRecord(content)) {
+    if (content.type === "input_reference" && (content.ref_kind === "command" || content.ref_kind === "skill") && typeof content.resource_id === "string" && typeof content.label === "string") {
+      return [{type:"instruction",kind:content.ref_kind,resourceId:content.resource_id,label:content.label,path:typeof content.path === "string" ? content.path : undefined}];
+    }
     if (
       content.type === "input_reference" &&
       (content.ref_kind === "selection" || content.ref_kind === "file") &&
@@ -2702,6 +2709,11 @@ export class WebviewStateStore {
 
   setSlashCommands(commands: NonNullable<WebviewStateSnapshot["slashCommands"]>): void {
     this.state.slashCommands = commands.map((command) => ({ ...command }));
+  }
+
+  setInstructionCatalog(sessionId: string, items: import("../../serveClient/wire").InstructionCard[]): void {
+    const session = this.state.sessionViews[sessionId];
+    if (session) session.instructionCatalog = items;
   }
 
   setCommandPending(sessionId: string, pending: boolean): void {

@@ -3917,6 +3917,36 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
   );
 }
 
+export async function assertWebviewInstructionInvocationFlow(api: TomcatExtensionApi): Promise<void> {
+  console.log("[instruction invocation] creating session");
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api,"instruction-invocation-session");
+  console.log("[instruction invocation] session ready", sessionId);
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const command = path.join(workspaceDir,".cursor/commands/host-review.md");
+  await fs.mkdir(path.dirname(command),{recursive:true});
+  await fs.writeFile(command,"MODEL_ONLY_INSTRUCTION_BODY","utf8");
+  await setComposerInputValue(api,"/host-review");
+  console.log("[instruction invocation] requested menu");
+  await waitForWebviewDomSnapshot(api,snapshot=>snapshot.html.includes('data-testid="slash-command-option"') && snapshot.html.includes("/host-review") ? snapshot : undefined,20000);
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"slash-command-option",index:0});
+  console.log("[instruction invocation] chip selected");
+  await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.composerDraft?.segments.some(s=>s.type === "instruction") ? state : undefined,20000);
+  await api.__testing.reloadWebview();
+  const restored = await waitForWebviewDomSnapshot(api,s=>s.html.includes('data-testid="invocation-chip"') ? s : undefined,20000);
+  assert.ok(restored.html.includes("/host-review"));
+  console.log("[instruction invocation] draft restored");
+  assert.ok(!restored.html.includes("MODEL_ONLY_INSTRUCTION_BODY"));
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"send-button"});
+  await api.__testing.waitForEvent({sessionId,type:"agent_end",timeoutMs:30000});
+  await api.__testing.reloadWebview();
+  const history = await waitForWebviewDomSnapshot(api,s=>s.html.includes('data-kind="user"') && s.html.includes('data-testid="invocation-chip"') ? s : undefined,20000);
+  assert.ok(!history.html.includes("MODEL_ONLY_INSTRUCTION_BODY"));
+  assert.ok(history.messageTexts.some(text=>text.includes("/host-review")));
+}
+
 export async function assertWebviewSelectionReferenceFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -4189,18 +4219,18 @@ export async function assertWebviewFileDropReferenceFlow(
       const references = segments.filter(
         (segment) => segment.type === "reference",
       );
-      return references.length === 2 ? references : undefined;
+      return references.length === 3 ? references : undefined;
     },
     20_000,
   );
   assert.equal(
     draft.length,
-    2,
-    "expected distinct file drops to remain while duplicate file drops dedupe away",
+    3,
+    "expected two drops of the same file to produce independent occurrences",
   );
   assert.deepEqual(
     draft.map((segment) => segment.path).sort(),
-    [filePath, secondFilePath].sort(),
+    [filePath, filePath, secondFilePath].sort(),
     "expected both dropped files to be preserved as composer references",
   );
   const rendered = await waitForWebviewDomSnapshot(
@@ -4218,6 +4248,29 @@ export async function assertWebviewFileDropReferenceFlow(
     rendered.html.includes('data-testid="composer-reference-chip"'),
     "expected the dropped references to render as visible composer chips",
   );
+}
+
+async function writeCreatedMentionFixture(filePath: string, body: string): Promise<void> {
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(path.dirname(filePath), path.basename(filePath)),
+  );
+  let subscription: vscode.Disposable | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const created = new Promise<void>((resolve, reject) => {
+      subscription = watcher.onDidCreate((uri) => {
+        if (uri.fsPath !== filePath) return;
+        clearTimeout(timer); resolve();
+      });
+      timer = setTimeout(() => reject(new Error("ATMENTION fixture create event did not arrive")), 10000);
+    });
+    created.catch(() => undefined);
+    await fs.writeFile(filePath, body, "utf8");
+    await created;
+    const found = await vscode.workspace.findFiles(new vscode.RelativePattern(path.dirname(filePath), path.basename(filePath)));
+    assert.ok(found.some((uri) => uri.fsPath === filePath), "ATMENTION fixture must be discoverable before typing");
+    console.log("[ATMENTION] fixture create event and discovery confirmed", filePath);
+  } finally { clearTimeout(timer); subscription?.dispose(); watcher.dispose(); }
 }
 
 export async function assertWebviewAtMentionReferenceFlow(
@@ -4246,11 +4299,8 @@ export async function assertWebviewAtMentionReferenceFlow(
     await fs.mkdir(scratchDir, { recursive: true });
     const stem = `at-mention-target-${Date.now().toString(36)}`;
     const filePath = path.join(scratchDir, `${stem}.ts`);
-    await fs.writeFile(
-      filePath,
-      "export const atMentionTarget = true;\n",
-      "utf8",
-    );
+    // Node writes notify VS Code asynchronously: synchronize both file and directory fixtures.
+    await writeCreatedMentionFixture(filePath, "export const atMentionTarget = true;\n");
     const fileReference = await resolveUriToFileReference(
       vscode.Uri.file(filePath),
     );
@@ -4273,7 +4323,9 @@ export async function assertWebviewAtMentionReferenceFlow(
           ? snapshot
           : undefined,
       20_000,
-    ).catch((error: Error) => {
+    ).catch(async (error: Error) => {
+      const files = await vscode.workspace.findFiles("**/*", undefined, 20000);
+      console.log("[ATMENTION] index diagnostics", JSON.stringify({count:files.length,fixtureIncluded:files.some((uri)=>uri.fsPath === filePath)}));
       throw new Error(`ATMENTION file dropdown stage failed: ${error.message}`);
     });
 
@@ -4409,7 +4461,7 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   const dirStem = `directory-target-${Date.now().toString(36)}`;
   const dirPath = path.join(scratchDir, dirStem);
   await fs.mkdir(dirPath, { recursive: true });
-  await fs.writeFile(path.join(dirPath, "nested.txt"), "nested\n", "utf8");
+  await writeCreatedMentionFixture(path.join(dirPath, "nested.txt"), "nested\n");
   const dirReference = await resolveUriToFileReference(
     vscode.Uri.file(dirPath),
   );
@@ -4432,7 +4484,9 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
         ? snapshot
         : undefined,
     20_000,
-  ).catch((error: Error) => {
+  ).catch(async (error: Error) => {
+    const files = await vscode.workspace.findFiles("**/*", undefined, 20000);
+    console.log("[ATMENTION] directory index diagnostics", JSON.stringify({count:files.length,fixtureIncluded:files.some((uri)=>uri.fsPath === path.join(dirPath,"nested.txt"))}));
     throw new Error(
       `ATMENTION directory dropdown stage failed: ${error.message}`,
     );

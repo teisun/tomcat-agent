@@ -1,8 +1,14 @@
 import { act, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent } from "@testing-library/react";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { HostToWebviewFrame, VsCodeApiLike, WebviewStateSnapshot } from "./types";
+
+beforeAll(() => {
+  Object.defineProperty(Range.prototype,"getClientRects",{configurable:true,value:()=>[]});
+  Object.defineProperty(Range.prototype,"getBoundingClientRect",{configurable:true,value:()=>({left:0,right:0,top:0,bottom:0,width:0,height:0})});
+});
 
 function mount() {
   const postMessage = vi.fn();
@@ -69,6 +75,24 @@ function baseState(): WebviewStateSnapshot {
 }
 
 describe("App session frames", () => {
+  it.each([true,false])("keeps repeated additions but not duplicate deliveries (event first=%s)", async (eventFirst) => {
+    mount();
+    const initial = baseState(); initial.sessionViews.s1.timeline = [];
+    await emitFrame({channel:"state",content:initial,messageId:"init"});
+    const reference = {type:"reference" as const,kind:"file" as const,label:"app.ts",path:"src/app.ts",occurrenceId:"first"};
+    const event = {channel:"event" as const,content:{type:"insertReference" as const,sessionId:"s1",reference},messageId:"event"};
+    const next = baseState(); next.sessionViews.s1.timeline = []; next.sessionViews.s1.composerDraft = {text:"",segments:[reference]};
+    const snapshot = {channel:"state" as const,content:next,messageId:"snapshot"};
+    await emitFrame(eventFirst ? event : snapshot);
+    await emitFrame(eventFirst ? snapshot : event);
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(1);
+    await emitFrame({...event,messageId:"second",content:{...event.content,reference:{...reference,occurrenceId:"second"}}});
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    await act(async () => { fireEvent.click(screen.getAllByTestId("composer-reference-chip")[0].querySelector('button')!); });
+    await emitFrame({...event,messageId:"late"});
+    await emitFrame({...snapshot,messageId:"late-snapshot"});
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(1);
+  });
   it("applies sessionPatch frames to the active transcript", async () => {
     mount();
     await emitFrame({

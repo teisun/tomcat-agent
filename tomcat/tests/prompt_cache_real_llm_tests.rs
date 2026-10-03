@@ -36,7 +36,7 @@ fn main_agent_prompt_and_tools() -> (String, Vec<serde_json::Value>) {
         tool_lines: None,
     };
     let tool_surface = ToolSurface::from_plugin_tools(false, &[]);
-    let snapshot = SystemPromptSnapshot::new(&context, &tool_surface, None, None, 400_000);
+    let snapshot = SystemPromptSnapshot::new(&context, &tool_surface, None, None, 400_000, "");
     (
         snapshot.system_text().to_string(),
         snapshot.tool_definitions().to_vec(),

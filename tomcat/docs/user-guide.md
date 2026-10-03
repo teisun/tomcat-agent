@@ -772,6 +772,33 @@ Dragging or pasting a path and pressing Enter does not open the authorization me
 
 After a successful terminal `/restore`, the durable transcript is reloaded into memory, just like VS Code checkpoint restore. If the restored tail contains an unanswered question, terminal chat resumes it automatically; dry-run and failed restore leave memory unchanged.
 
+#### Project Commands and Rules
+
+```text
+.cursor/commands/*.md or .agents/commands/*.md -> explicit user-turn instructions
+.cursor/rules/*.{md,mdc} or .agents/rules/*.{md,mdc} -> User Custom Instructions
+```
+
+Commands are named by their relative path without `.md` (`git/commit.md` becomes `/git/commit`). Optional frontmatter `description` supplies a menu description; absent descriptions are omitted. Both roots, and a configured `workspace.project_resource_dir`, are scanned recursively (maximum 8 levels); hidden subdirectories and symlinks are skipped. The scope is the session's persisted project root, with cwd fallback for legacy sessions. CLI sessions keep their startup-root semantics; Serve with an explicit cwd may use the Git root. No parent/subproject/home rules are added.
+
+- `/command list` lists names, sources and IDs; `/command use command:.cursor/commands/review.md [intent]` invokes an exact entry.
+- `/review [intent]` in the CLI invokes a unique command. Duplicate names require an exact ID; unknown names remain ordinary chat and built-in commands win collisions.
+- `/skill use <name> <intent>` retains its existing syntax and user-only skill support, but stores the same structured snapshot as a VS Code skill chip.
+- In VS Code, select a menu item to create a yellow chip; unselected `/name` text remains ordinary text. Prompt and follow_up support instruction segments; steer rejects them. Failed loading preserves the draft. Retry uses the already-sent body snapshot; restoring a message to composer and sending again reads the current file.
+- Rules in **both `.md` and `.mdc` require boolean `alwaysApply: true`** in YAML frontmatter. No frontmatter, false, missing, or quoted `"true"` does not apply. `globs`, intelligent selection and rule-specific manual activation are not implemented. Rules refresh at each user-turn boundary and are not injected into internal reviewers/explorers.
+- Runtime instruction reads respect hard Deny, do not grant tool access and do not request per-file confirmation. LLM read/load_skill tools retain the full permission gate. Individual files are capped at 64 KiB; discovery is capped at 4096 entries / 256 candidates / 4 KiB headers with truncation diagnostics. Rule chapters are capped at 32,000 Unicode characters or 10% of the model character budget, whichever is smaller; whole rules only. Explicit invocations have no aggregate body limit beyond existing model-context handling.
+- `/reload` (also install/uninstall receipts) reports Commands/Rules counts and skip reasons. Old servers without `get_instruction_catalog` retain Terminal commands only; new clients migrate old drafts. Downgrading the runtime cannot read newly stored command/skill reference kinds; keep the matching runtime for replay.
+
+Example rule:
+
+```md
+---
+alwaysApply: true
+description: Team conventions
+---
+Follow the team's code style and testing conventions.
+```
+
 #### Recommended Startup Directory for Checkpoints
 
 The checkpoint system in `tomcat code` treats the **current directory at startup** as the workspace root. That means if you start it inside a shared directory that contains many projects, every checkpoint turn scans the entire large tree.

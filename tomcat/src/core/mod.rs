@@ -11,6 +11,7 @@ pub mod llm;
 pub mod package;
 pub mod permission;
 pub mod plan_runtime;
+pub mod project_instructions;
 pub mod prompts;
 pub mod security;
 pub mod session;

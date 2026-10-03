@@ -145,12 +145,17 @@ pub async fn run_shared_slash_command(
         Ok(invocation) => invocation,
         Err(reply) => return reply,
     };
-    match invocation {
+    let reply = match invocation {
         SharedInvocation::Reload => cmd_reload::run(ctx).await,
         SharedInvocation::Install { source, target } => cmd_install::run(ctx, source, target).await,
         SharedInvocation::Uninstall { package, target } => {
             cmd_uninstall::run(ctx, package, target).await
         }
+    };
+    if reply.ok {
+        SlashReply::success(format!("{}\n{}", reply.text, ctx.instruction_summary()))
+    } else {
+        reply
     }
 }
 

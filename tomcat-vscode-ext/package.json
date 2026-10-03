@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
-  "version": "0.1.78",
+  "version": "0.1.79",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/teisun/tomcat-agent.git"
   },
   "tomcat": {
-    "bundledCliVersion": "0.1.64"
+    "bundledCliVersion": "0.1.65"
   },
   "categories": [
     "AI",
@@ -219,6 +219,20 @@
           "type": "string",
           "default": "",
           "description": "Default working directory used when creating a new Tomcat session. Empty means the first workspace folder."
+        },
+        "tomcat.layout.controlsInset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 40,
+          "default": 10,
+          "description": "Distance in pixels from sidebar edges to the session bar and input box. Reload the window to apply."
+        },
+        "tomcat.layout.contentInset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 40,
+          "default": 15,
+          "description": "Distance in pixels from sidebar edges to replies, tool cards, todos and attachments. Set greater than Controls Inset to align input text with replies. Reload the window to apply."
         },
         "tomcat.contextSearch.maxFiles": {
           "type": "integer",

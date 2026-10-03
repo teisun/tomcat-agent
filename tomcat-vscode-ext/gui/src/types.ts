@@ -11,25 +11,8 @@ export type { PathResolution } from "../../src/shared/pathResolution";
 
 export type WebviewReferenceKind = "selection" | "file";
 
-export type WebviewMessageSegment =
-  | {
-      text: string;
-      type: "text";
-    }
-  | {
-      kind: WebviewReferenceKind;
-      label: string;
-      lineEnd?: number | null;
-      lineStart?: number | null;
-      path: string;
-      text?: string | null;
-      type: "reference";
-    };
-
-export type WebviewReference = Extract<
-  WebviewMessageSegment,
-  { type: "reference" }
->;
+import type { WebviewReference, WebviewMessageSegment } from "../../src/ui/webview/protocol";
+export type { WebviewReference, WebviewInstruction, WebviewMessageSegment } from "../../src/ui/webview/protocol";
 
 export interface ContextSearchMatch {
   description?: string | null;
@@ -375,6 +358,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  instructionCatalog?: import("../../src/serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;
   agentMode: WebviewAgentMode;
   busy: boolean;
@@ -554,6 +538,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {
       messageId: string;
       type: "answerQuestion";
@@ -860,6 +845,8 @@ export type WebviewIntent =
           {
             top: number;
             width: number;
+            left: number;
+            right: number;
           }
         >;
         composerFooterPlanStatus: string | null;

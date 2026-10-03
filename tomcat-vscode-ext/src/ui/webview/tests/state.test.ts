@@ -12,6 +12,28 @@ import {
   WebviewStateStore,
 } from "../state";
 
+describe("instruction history mapping", () => {
+  it("keeps command/skill identity but never pushes their body into webview state", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      sessionId: "s1",
+      upToSeq: null,
+      messages: [{
+        id: "user-command", type: "message",
+        message: { role: "user", content: [
+          { type: "input_reference", ref_kind: "command", label: "/review", path: ".cursor/commands/review.md", resource_id: "command:.cursor/commands/review.md", text: "SECRET_BODY" },
+          { type: "input_reference", ref_kind: "skill", label: "/verify", path: "/skills/verify/SKILL.md", resource_id: "skill:verify", text: "SKILL_BODY" },
+        ] },
+      }],
+    });
+    const message = store.snapshot().sessionViews.s1.timeline.find((item)=>item.type === "message");
+    expect(message).toMatchObject({segments:[{type:"instruction",kind:"command",resourceId:"command:.cursor/commands/review.md",label:"/review"},{type:"instruction",kind:"skill",resourceId:"skill:verify",label:"/verify"}]});
+    expect(JSON.stringify(store.snapshot())).not.toContain("SECRET_BODY");
+    expect(JSON.stringify(store.snapshot())).not.toContain("SKILL_BODY");
+  });
+});
+
 describe("derivePlanActivity", () => {
   it("derives create_plan counts from args.todos", () => {
     expect(

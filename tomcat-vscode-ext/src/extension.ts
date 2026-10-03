@@ -135,6 +135,8 @@ export interface TomcatExtensionApi {
         {
           top: number;
           width: number;
+          left: number;
+          right: number;
         }
       >;
       composerFooterPlanStatus: string | null;

@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from "react";
 
 import { AttachmentStrip } from "./AttachmentStrip";
 import { ReferenceChip } from "./ReferenceChip";
+import { InvocationChip } from "./InvocationChip";
 import { ChatMarkdown } from "./markdown/ChatMarkdown";
 import type {
   WebviewMessageBlock,
@@ -121,6 +122,8 @@ function MessageBubbleComponent({
               <span className="tc-message__text-segment" key={`${item.id}-text-${index}`}>
                 {segment.text}
               </span>
+            ) : segment.type === "instruction" ? (
+              <InvocationChip key={`${item.id}-instruction-${index}`} instruction={segment} />
             ) : (
               <ReferenceChip
                 key={`${item.id}-reference-${index}`}

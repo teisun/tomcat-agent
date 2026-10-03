@@ -800,6 +800,13 @@ describe("webview html asset resolution", () => {
     ).renderHtml(createWebview());
 
     expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain('class="tc-chat-webview"');
+    expect(html).toContain('--tc-controls-inset:10px;--tc-content-inset:15px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",4);
+    __testing.setConfiguration("tomcat.layout.contentInset",24);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:4px;--tc-content-inset:24px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",undefined);
+    __testing.setConfiguration("tomcat.layout.contentInset",undefined);
     expect(html).toContain("styles.css");
     provider.dispose();
   });

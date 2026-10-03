@@ -71,6 +71,7 @@ function isReferenceSegment(value: unknown): value is Extract<WebviewMessageSegm
 function isSegment(value: unknown): value is WebviewMessageSegment {
   return isRecord(value) && (
     (value.type === "text" && typeof value.text === "string")
+    || (value.type === "instruction" && (value.kind === "command" || value.kind === "skill") && typeof value.resourceId === "string" && typeof value.label === "string")
     || isReferenceSegment(value)
   );
 }

@@ -3352,6 +3352,7 @@ describe("Tomcat webview App", () => {
               label: "app.ts",
               lineEnd: null,
               lineStart: null,
+              occurrenceId: expect.any(String),
               path: "src/app.ts",
               text: null,
               type: "reference",
@@ -3552,6 +3553,7 @@ describe("Tomcat webview App", () => {
         reference: {
           kind: "file",
           label: "app.ts",
+          occurrenceId: "app-occurrence",
           path: "src/app.ts",
           type: "reference",
         },
@@ -3564,8 +3566,8 @@ describe("Tomcat webview App", () => {
     const state = approvalDraftSnapshot("s1");
     state.sessionViews.s1.composerDraft = {
       segments: [
-        { kind: "file", label: "app.ts", path: "src/app.ts", type: "reference" },
-        { kind: "file", label: "folder/", path: "src/folder/", type: "reference" },
+        { kind: "file", label: "app.ts", path: "src/app.ts", type: "reference", occurrenceId: "app-occurrence" },
+        { kind: "file", label: "folder/", path: "src/folder/", type: "reference", occurrenceId: "folder-occurrence" },
       ],
       text: "app.ts folder/ ",
     };

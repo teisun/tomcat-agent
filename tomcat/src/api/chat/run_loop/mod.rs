@@ -171,6 +171,7 @@ pub(crate) async fn build_prompt_snapshot(
         Some(&skill_set),
         Some(&ctx.config.skills),
         context_budget_chars,
+        &ctx.project_rules(context_budget_chars).0,
     )
 }
 
@@ -187,6 +188,7 @@ pub(crate) async fn refresh_prompt_snapshot(
         Some(&skill_set),
         Some(&ctx.config.skills),
         context_budget_chars,
+        &ctx.project_rules(context_budget_chars).0,
     )
 }
 
@@ -499,6 +501,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             auto_turn_count = 0;
         }
 
+        let mut instruction_message = None;
         let input = if auto_drain {
             String::new()
         } else {
@@ -554,6 +557,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                         }
                         (line, history_line)
                     }
+                    ChatCommandOutcome::UserMessage {
+                        message,
+                        history_line,
+                    } => {
+                        instruction_message = Some(message);
+                        (history_line.clone(), Some(history_line))
+                    }
                     command_outcome @ (ChatCommandOutcome::Handled
                     | ChatCommandOutcome::ResumePendingQuestion) => {
                         resume_without_input = should_resume_after_command(&command_outcome);
@@ -595,9 +605,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 AppError::Config(format!("agent_registry root rearm 失败: {error}"))
             })?;
 
-        let outcome = run_chat_turn_with_snapshot(
+        let input_message =
+            instruction_message.or_else(|| (!input.is_empty()).then(|| ChatMessage::user(&input)));
+        let outcome = run_chat_turn_with_message_and_snapshot(
             ctx,
-            &input,
+            input_message,
             &mut prompt_snapshot,
             &mut context_state,
             turn_token,
@@ -668,24 +680,6 @@ pub async fn run_chat_turn(
     run_chat_turn_with_message(ctx, input_message, system_text, context_state, turn_token).await
 }
 
-pub(crate) async fn run_chat_turn_with_snapshot(
-    ctx: &ChatContext,
-    input: &str,
-    prompt_snapshot: &mut SystemPromptSnapshot,
-    context_state: &mut crate::core::ContextState,
-    turn_token: CancellationToken,
-) -> Result<AgentRunOutcome, AppError> {
-    let input_message = (!input.is_empty()).then(|| ChatMessage::user(input));
-    run_chat_turn_with_message_and_snapshot(
-        ctx,
-        input_message,
-        prompt_snapshot,
-        context_state,
-        turn_token,
-    )
-    .await
-}
-
 pub(crate) async fn run_chat_turn_with_message_and_snapshot(
     ctx: &ChatContext,
     input_message: Option<ChatMessage>,
@@ -694,6 +688,11 @@ pub(crate) async fn run_chat_turn_with_message_and_snapshot(
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
     ctx.sync_resource_inventory_before_turn().await?;
+    let entry = ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())?;
+    context_state.apply_limits(&ctx.resolve_call(LlmScene::Main, entry.as_ref())?.limits);
     let previous_system_len = prompt_snapshot.system_text().len();
     if refresh_prompt_snapshot(ctx, context_state.context_budget_chars, prompt_snapshot).await {
         context_state

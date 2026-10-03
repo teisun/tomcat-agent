@@ -41,6 +41,8 @@ import { buildSlashMenuSections } from "../slashMenu";
 import { SlashCommandMenu, type SlashCommandMenuHandle } from "./SlashCommandMenu";
 import { createSlashCommandSuggestion, type SlashSuggestionState } from "./slashCommandSuggestion";
 import { ReferenceChip } from "./ReferenceChip";
+import { InvocationNode, instructionFromAttrs } from "./InvocationNode";
+import { withOccurrence } from "../../../src/shared/composerOccurrences";
 import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
 
 function formatPlanStatus(planState?: WebviewPlanFileState | null): string | null {
@@ -197,6 +199,7 @@ function normalizeReferenceAttrs(attrs: Record<string, unknown>): WebviewReferen
   }
   return {
     kind: attrs.kind,
+    occurrenceId: typeof attrs.occurrenceId === "string" ? attrs.occurrenceId : undefined,
     label: attrs.label,
     lineEnd: typeof attrs.lineEnd === "number" ? attrs.lineEnd : null,
     lineStart: typeof attrs.lineStart === "number" ? attrs.lineStart : null,
@@ -242,6 +245,11 @@ function walkContentNode(
     appendProjectionText(projection, "\n");
     return;
   }
+  if (node.type === "instruction" && node.attrs) {
+    const instruction = instructionFromAttrs(node.attrs);
+    if (instruction) { segments.push(instruction); appendProjectionText(projection, instruction.label); }
+    return;
+  }
   if (node.type === REFERENCE_NODE_NAME && node.attrs) {
     const reference = normalizeReferenceAttrs(node.attrs as Record<string, unknown>);
     if (reference) {
@@ -270,7 +278,7 @@ export function serializeComposerDocument(
   });
   return {
     hasContent: segments.some(
-      (segment) => segment.type === "reference" || segment.text.trim().length > 0,
+      (segment) => segment.type !== "text" || segment.text.trim().length > 0,
     ),
     segments,
     text: projection.join(""),
@@ -302,8 +310,8 @@ function createComposerDocument(segments: WebviewMessageSegment[]): JSONContent 
       return;
     }
     paragraphContent.push({
-      attrs: segment,
-      type: REFERENCE_NODE_NAME,
+      attrs: withOccurrence(segment),
+      type: segment.type === "instruction" ? "instruction" : REFERENCE_NODE_NAME,
     });
   });
   return {
@@ -384,6 +392,7 @@ const ReferenceNode = TiptapNode.create({
   selectable: false,
   addAttributes() {
     return {
+      occurrenceId: { default: null, parseHTML: () => crypto.randomUUID() },
       kind: {
         default: "file",
       },
@@ -451,6 +460,8 @@ interface ComposerProps {
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   slashCommands?: readonly SharedSlashCommand[];
+  instructionCatalog?: readonly import("../../../src/serveClient/wire").InstructionCard[];
+  onSlashOpen?(): void;
   commandPending?: boolean;
   busy?: boolean;
   canInterrupt: boolean;
@@ -492,6 +503,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   availableModels,
   busy = false,
   slashCommands = [],
+  instructionCatalog = [],
+  onSlashOpen,
   commandPending = false,
   canInterrupt,
   canPrompt,
@@ -542,6 +555,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const slashMenuRef = useRef<SlashCommandMenuHandle | null>(null);
   const slashCommandsRef = useRef(slashCommands);
   slashCommandsRef.current = slashCommands;
+  const catalogRef = useRef(instructionCatalog);
+  catalogRef.current = instructionCatalog;
+  const slashOpenHandlerRef = useRef(onSlashOpen);
+  slashOpenHandlerRef.current = onSlashOpen;
+  const previousSlashState = useRef<SlashSuggestionState | null>(null);
   const isComposingRef = useRef(false);
   const isMentionOpenRef = useRef(false);
   const contextSearchDropdownRef = useRef<ContextSearchDropdownHandle | null>(null);
@@ -617,10 +635,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const slashSuggestion = useMemo(() => createSlashCommandSuggestion({
     getCommands: () => slashCommandsRef.current,
+    getCatalog: () => catalogRef.current,
     getKeyHandler: () => slashMenuRef.current?.onKeyDown,
     isComposing: () => isComposingRef.current,
     onState: (next) => {
-      isSlashOpenRef.current = next !== null && buildSlashMenuSections(slashCommandsRef.current, next.query).length > 0;
+      if (next && !previousSlashState.current) slashOpenHandlerRef.current?.();
+      previousSlashState.current = next;
+      isSlashOpenRef.current = next !== null && buildSlashMenuSections(slashCommandsRef.current, next.query, catalogRef.current, next.leading).length > 0;
       setSlashState(next);
     },
   }), []);
@@ -641,6 +662,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         placeholder: DEFAULT_PROMPT_PLACEHOLDER,
       }),
       ReferenceNode,
+      InvocationNode,
       mentionSuggestion.extension,
     ],
     editorProps: {
@@ -742,6 +764,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           return true;
         }
 
+        const html = event.clipboardData?.getData("text/html") ?? "";
+        if (html.includes("data-tomcat-reference") || html.includes("data-tomcat-instruction")) return false;
         // No images: handle text paste as before
         const text = event.clipboardData?.getData("text/plain");
         if (text === undefined) {
@@ -776,11 +800,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
   });
 
-  const hasSlashCommands = slashCommands.length > 0;
   useEffect(() => {
-    if (!editor || !hasSlashCommands) return;
+    isSlashOpenRef.current = slashState !== null && buildSlashMenuSections(slashCommands, slashState.query, instructionCatalog, slashState.leading).length > 0;
+  }, [slashState, slashCommands, instructionCatalog]);
+  useEffect(() => {
+    if (!editor) return;
     return slashSuggestion.attach(editor);
-  }, [editor, hasSlashCommands, slashSuggestion]);
+  }, [editor, slashSuggestion]);
 
   useEffect(() => {
     if (!editor) {
@@ -889,11 +915,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     const seenReferenceIds = new Set<string>();
-    const inserted = references.filter((reference) => {
+    const inserted = references.map((reference) => withOccurrence(reference)).filter((reference) => {
       const id = referenceIdentity(reference);
-      if (seenReferenceIds.has(id) || editorHasReference(editor, reference)) {
-        return false;
-      }
+      if (seenReferenceIds.has(id) || editorHasReference(editor, reference)) return false;
       seenReferenceIds.add(id);
       return true;
     });
@@ -1095,7 +1119,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           query={contextSearchQuery}
           truncated={contextSearchTruncated}
         />
-        <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "")} query={slashState?.query ?? ""} leading={slashState?.leading ?? true} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
+        <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "", instructionCatalog, slashState?.leading ?? true)} query={slashState?.query ?? ""} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
         <EditorContent editor={editor} />
         <div className="tc-composer__bar" data-testid="composer-bar">
           <button

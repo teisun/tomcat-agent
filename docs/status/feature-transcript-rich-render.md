@@ -2,13 +2,20 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-02 20:51 +0800 |
+| Updated | 2026-10-03 23:27 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | EOF interruption recovery across Responses, Chat Completions and Anthropic; OpenAI Fast/Ultrafast service speeds and Max reasoning; CLI/extension release metadata |
+| Scope | Project Commands/Rules and Cursor compatibility; invocation snapshots and duplicate references; composer layout/menu remediation; CLI/extension release metadata |
 | Cov% | - |
 
 ### DONE
+
+- Added project Commands/Rules discovery from `.agents` and `.cursor`; `.md`/`.mdc` rules auto-apply only with boolean `alwaysApply: true`, with hard-Deny/budget diagnostics surfaced through `/reload`.
+- Kept command/skill invocations as semantic references: chip selection freezes the body when sending/queueing, while retry reuses the stored snapshot; no path guessing, asynchronous preparation phase or new resource database.
+- Added Skills/Commands/Terminal groups, two-line descriptions, Show N more and shared yellow composer/history chips; preserved repeated references with draft-only occurrence identity and delivery idempotence.
+- Applied configurable 10px/15px control/content lines and a 30vh scrolling editor; tied `/`/`@` menu height to actual composer space, repaired CLI help and shell quoting, unified diagnostic prefixes and removed redundant prompt/GUI code.
+- Protected real Serve follow_up queue-drain semantics and fixed create/delete invalidation overwritten by asynchronous file indexing; synchronized host file/directory fixtures with observed creation rather than silent request retries.
+- Applied this request's one-time script patch bump: CLI `0.1.64 -> 0.1.65`, extension `0.1.78 -> 0.1.79`, bundled CLI `0.1.64 -> 0.1.65`. This bump/commit operation runs no tests, builds, coverage, packaging or publication.
 
 - Made all three streaming adapters require a protocol terminal signal before accepting EOF as a completed response; missing terminals now produce one retryable `StreamInterrupted` / `BodyRead`, then stable EOF, instead of a fatal Parse error or silent success.
 - Preserved complete-frame protocol errors and existing terminal metadata, tolerated incomplete EOF JSON/UTF-8 without exposing raw prompt data, and prevented Anthropic EOF from fabricating a successful ending.
@@ -64,6 +71,10 @@
 
 ### INTERFACE
 
+- `get_instruction_catalog` is the shared capability for project command/skill catalog and explicit instruction segments; Serve reads authoritative bodies and snapshots them, rejects instruction-bearing steer, and never executes a plain `/name` by guessing.
+- `ContextRefKind` includes Command/Skill; archival/provider projections share one snapshot. Draft schema 3 holds occurrence IDs; Serve/history retain ordered duplicate parts without those IDs. Keep a matching runtime for new history replay.
+- `tomcat.layout.controlsInset` / `contentInset` are integer VS Code settings (0–40, default10/15) applied on Reload Window; only editor body is height-budgeted, with attachments/Todo/questions outside it.
+
 - EOF is transport termination, not response completion. Responses terminal evidence is completed/done/incomplete/failed/error; Chat uses its emitted `FinishReason` or `[DONE]`; Anthropic uses an existing stop reason or processed message_stop/error. Existing agent retry budgets and public event/configuration contracts are unchanged.
 
 - `ModelEntry`/`ModelView` expose `supported_speeds` / `supportedSpeeds` and the effective `selectedSpeed`; Standard is implicit and an empty accelerated list hides Speed options.
@@ -81,7 +92,7 @@
 - Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata now declares CLI `0.1.64`, VS Code extension `0.1.78`, and bundled CLI pin `0.1.64`; this metadata-only bump does not build artifacts or replace any installed CLI/extension process.
+- Release metadata now declares CLI `0.1.65`, VS Code extension `0.1.79`, and bundled CLI pin `0.1.65`; this metadata-only bump does not build artifacts or replace any installed CLI/extension process.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
@@ -94,6 +105,11 @@
 - Settings reads connector state from local Serve snapshots and polls while visible; it fetches a tool catalog only for a connected source and validates config key, generation, and attempt before applying it.
 
 ### BLOCKED
+
+- The commands delivery's web_search timeout remains unresolved, suspected system-proxy related, without an unmodified-code baseline; it is not proven pre-existing. The old invocation DOM timeout did not recur in the final three complete host runs, but its cause remains unconfirmed.
+- Remediation host sequences first reproduced empty `@` file/directory results; original failed logs are retained alongside the deterministic index regression and final 3×8/8 evidence, not rewritten as all-green initial commands.
+- At 280px height with eleven attachments, history may have no remaining height; menu fit is limited to the accepted viewport/layout matrix, not all arbitrary window sizes.
+- New `0.1.65` / `0.1.79` artifacts are not built, installed or published by this bump/commit. One leftover failed `@` directory fixture and ignored screenshots/profiles are excluded from source control; no related source/documentation change is omitted.
 
 - EOF recovery does not prevent upstream disconnections or increase the existing retry budget; repeated interruptions can still exhaust attempts. The new `0.1.64` / `0.1.78` artifacts have not been built, installed or published by this request.
 - The initial EOF implementation test batch had two new-fixture mistakes (mixed incomplete/error payloads and a read-tool/write-preview mismatch), fixed before final acceptance; two unchanged Anthropic non-stream tests also reported local Connection refused in parallel, then passed both individually and in the final serial module run. The original failing result is retained, not relabeled green.
@@ -113,6 +129,9 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- Historical commands/remediation acceptance, before this bump/commit, passed Rust241, GUI139, layout7, real Serve3, index12 and provider-flow57 focused cases; final host ran the same eight targets consecutively three times, and nine browser scenarios produced99 PNG/ARIA/console/geometry groups. See `tomcat/docs/reports/commands-rules-composer-acceptance.md:57` for exact commands, task IDs, retained failures and boundaries.
+- These results predate the metadata-only version change and are not reruns for this commit. The user explicitly requested no tests; Cov% stays `-`. Current checks cover release mirrors, allowed-field changes, Git scope/whitespace, branch status and commit-message structure only.
 
 - EOF implementation acceptance before the version bump passed `cargo test --manifest-path tomcat/Cargo.toml --lib core::llm:: -- --test-threads=1` (428 passed / 0 failed / 1 existing real-API test ignored, task `1790944908351-6fud0q`) and `core::agent_loop::` with the same serial setting (343 passed / 0 failed / 1 existing manual test ignored), followed by `cargo clippy --manifest-path tomcat/Cargo.toml --all-targets -- -D warnings` (task `1790944953000-i17hqw`, exit 0). All eight new regressions passed; these are prior results, not reruns for this commit.
 - This bump operation passed both `release-version.mjs check` calls and the five-file version-only diff/whitespace check. Only release metadata, Cargo root-package version and extension manifest/lock root versions changed; no test suite, compilation, packaging or coverage measurement was run.

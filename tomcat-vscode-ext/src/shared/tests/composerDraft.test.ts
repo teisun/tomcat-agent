@@ -160,6 +160,18 @@ describe("ComposerDraftStore persistence", () => {
 });
 
 describe("ComposerDraftStore hydration", () => {
+  it("migrates duplicate old occurrences once and retains invocation metadata without body", async () => {
+    const reference = {type:"reference",kind:"file",path:"src/app.ts",label:"app.ts"};
+    __testing.registerFile(draftPath(),JSON.stringify({schemaVersion:2,text:"",segments:[reference,reference,{type:"instruction",kind:"command",resourceId:"command:.cursor/commands/review.md",label:"/review"}],attachments:[]}));
+    const store = newStore();
+    const draft = await store.hydrate(SESSION);
+    const ids = draft.segments.map((s)=>s.occurrenceId);
+    expect(new Set(ids).size).toBe(3);
+    await vi.runAllTimersAsync(); await store.flush();
+    const restored = await newStore().hydrate(SESSION);
+    expect(restored.segments).toEqual(draft.segments);
+    expect(__testing.readFile(draftPath())).toContain('"schemaVersion":3');
+  });
   it("restores text, segments and attachment references from disk", async () => {
     __testing.registerFile(
       draftPath(),

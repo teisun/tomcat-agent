@@ -13,6 +13,14 @@ fn help_text_renders_each_shared_command_once() {
     assert_eq!(help.matches("/install").count(), 1);
 }
 
+#[test]
+fn help_text_mentions_project_command_invocation() {
+    let text = help_text();
+    for command in ["/command list", "/command use", "/<命令名>"] {
+        assert!(text.contains(command), "missing {command}: {text}");
+    }
+}
+
 fn assert_not_command(input: &str) {
     assert!(matches!(
         parse_chat_command(input),

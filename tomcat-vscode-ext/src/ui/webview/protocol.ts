@@ -32,9 +32,10 @@ import type {
 import { isSpeed, type Speed } from "../../shared/modelSpeed";
 import type { PathResolution } from "../../shared/pathResolution";
 
-export type WebviewMessageSegment = ServeContentSegment;
+export type WebviewMessageSegment = ServeContentSegment & { occurrenceId?: string; path?: string };
+export type WebviewInstruction = Extract<WebviewMessageSegment, { type: "instruction" }>;
 export type WebviewReference = Extract<
-  ServeContentSegment,
+  WebviewMessageSegment,
   { type: "reference" }
 >;
 
@@ -369,6 +370,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  instructionCatalog?: import("../../serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;
   agentMode: WebviewAgentMode;
   busy: boolean;
@@ -588,6 +590,7 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {
       messageId: string;
       type: "answerQuestion";
@@ -925,6 +928,8 @@ export type WebviewIntent =
           {
             top: number;
             width: number;
+            left: number;
+            right: number;
           }
         >;
         composerFooterPlanStatus: string | null;
@@ -1122,6 +1127,10 @@ function isWebviewMessageSegmentShape(
   if (value.type === "text") {
     return isString(value.text);
   }
+  if (value.type === "instruction") {
+    return (value.kind === "command" || value.kind === "skill") && isString(value.resourceId) && isString(value.label)
+      && (value.occurrenceId === undefined || isString(value.occurrenceId));
+  }
   if (value.type === "reference") {
     return isWebviewReferenceShape(value);
   }
@@ -1284,6 +1293,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "removeAttachment":
       return isRecord(value.data) && isString(value.data.attachmentId);
+    case "getInstructionCatalog":
+      return isRecord(value.data) && isString(value.data.sessionId);
     case "searchContext":
       return (
         isRecord(value.data) &&

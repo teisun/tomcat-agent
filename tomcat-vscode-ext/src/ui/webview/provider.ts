@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { layoutInsetStyle } from "./layoutInsets";
+import { withOccurrence } from "../../shared/composerOccurrences";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -536,10 +538,6 @@ function displayRecoveryError(error: unknown): string {
     return "没有完整的工具结果可继续。请重新输入你的请求。";
   }
   return formatBridgeError("recover this turn", error);
-}
-
-function referenceDraftKey(reference: WebviewReference): string {
-  return `${reference.kind}\0${reference.path}\0${reference.lineStart}\0${reference.lineEnd}`;
 }
 
 function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
@@ -1256,6 +1254,27 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     };
   }
 
+  private async refreshInstructionCatalog(sessionId: string): Promise<void> {
+    // A failed best-effort refresh must not turn a committed fork or successful
+    // terminal operation into a failed user action. Keep the last usable catalog.
+    try {
+      const initialized = await this.ensureInitialized();
+      if (!hasServeCapability(initialized, "get_instruction_catalog")) return;
+      const response = await this.deps.messenger.request({ type: "get_instruction_catalog", sessionId });
+      if (!response.success) throw new Error(response.error ?? "Unable to read instruction catalog");
+      const items = (response.payload as { items?: unknown } | undefined)?.items;
+      if (!Array.isArray(items) || !items.every((item) =>
+        typeof item === "object" && item !== null && typeof item.id === "string" &&
+        (item.kind === "command" || item.kind === "skill") &&
+        [item.name, item.description, item.source, item.path].every((value) => typeof value === "string")
+      )) throw new Error("Invalid instruction catalog");
+      if (response.sessionId && response.sessionId !== sessionId) return;
+      this.stateStore.setInstructionCatalog(sessionId, items);
+    } catch (error) {
+      console.warn(`Tomcat could not refresh instructions for ${sessionId}`, error);
+    }
+  }
+
   private async sendUserMessage(
     sessionId: string,
     submitKind: UserSubmitKind,
@@ -1308,6 +1327,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     await this.postState();
     try {
+      if (segments?.some((s) => s.type === "instruction")) {
+        if (!this.initialized || !hasServeCapability(this.initialized, "get_instruction_catalog")) throw new Error("当前 CLI 不支持 command/skill 标签，请更新 CLI 后重启 Serve。");
+        if (submitKind === "steer") throw new Error("steer 不支持 command/skill 调用。");
+      }
       const response = await this.deps.messenger.request({
         params: {
           // Hashes only. The bytes went across once, at paste time.
@@ -1318,7 +1341,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             mimeType: attachment.mimeType,
             providerSha: attachment.providerSha ?? null,
           })),
-          segments: segments as ServeContentSegment[] | undefined,
+          segments: segments?.map((segment) => {
+            const {occurrenceId: _occurrence, ...wire} = segment;
+            if (wire.type === "instruction") return {type:wire.type,kind:wire.kind,label:wire.label,resourceId:wire.resourceId};
+            return wire;
+          }),
           userMessageId,
         },
         sessionId,
@@ -1746,6 +1773,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       }
+      case "getInstructionCatalog": {
+        await this.refreshInstructionCatalog(intent.data.sessionId);
+        await this.postState();
+        return;
+      }
       case "searchContext":
         await this.handleContextSearch(intent);
         return;
@@ -1962,6 +1994,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           if (intent.type === "runSlashCommand") {
             if (!hasServeCapability(initialized, "run_slash_command")) throw new Error("当前 CLI 不支持共享命令，请更新 CLI 后重启 Serve。");
             const reply = await this.deps.sessionRouter.runSlashCommand(sessionId, intent.data.text);
+            if (reply.ok) await this.refreshInstructionCatalog(sessionId);
             if (this.peekState().sessionViews[sessionId]) this.stateStore.appendMessage(sessionId, reply.ok ? "notice" : "error", reply.text);
           } else {
             const report = await this.deps.sessionRouter.compact(sessionId);
@@ -2635,6 +2668,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   async postInsertReference(sessionId: string, reference: WebviewReference): Promise<void> {
+    reference = withOccurrence(reference);
     // Persist first. A webview event is an immediate rendering aid, not the source of
     // truth: it can arrive while another session is active or after the UI has reloaded.
     const inserted = await this.draftCoordinator.run(sessionId, () =>
@@ -2667,22 +2701,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     references: readonly WebviewReference[],
   ): Promise<WebviewReference[]> {
     const current = this.draftStore.peek(sessionId);
-    const existing = new Set(
-      current.segments.flatMap((segment) =>
-        segment.type === "reference"
-          ? [referenceDraftKey(segment)]
-          : [],
-      ),
-    );
-    const inserted: WebviewReference[] = [];
-    for (const reference of references) {
-      const key = referenceDraftKey(reference);
-      if (existing.has(key)) {
-        continue;
-      }
-      existing.add(key);
-      inserted.push(reference);
-    }
+    const inserted = references.map((reference) => withOccurrence(reference));
     if (inserted.length === 0) {
       return inserted;
     }
@@ -3592,7 +3611,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     ${styleTags}
     <title>Tomcat</title>
   </head>
-  <body>
+  <body class="tc-chat-webview" style="${layoutInsetStyle(vscode.workspace.getConfiguration("tomcat"))}">
     <div id="root"></div>
     ${scriptTags}
   </body>
@@ -3758,6 +3777,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await refresh("session list", () => this.refreshSessions({ post: false }));
     this.stateStore.setActiveSession(sessionId);
     await this.hydrateDraft(sessionId);
+    await this.refreshInstructionCatalog(sessionId);
     await this.postState().catch(() => undefined);
   }
 
@@ -3778,6 +3798,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
     // Hydrate composer draft from Rust backend (pending images/text/segments)
     await this.hydrateDraft(sessionId);
+    await this.refreshInstructionCatalog(sessionId);
 
     await this.postState();
   }
@@ -3792,6 +3813,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.stateStore.setActiveSession(sessionId);
     // Hydrate draft for this session
     await this.hydrateDraft(sessionId);
+    await this.refreshInstructionCatalog(sessionId);
     await this.postState();
   }
 }

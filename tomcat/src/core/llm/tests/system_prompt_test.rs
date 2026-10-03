@@ -372,6 +372,32 @@ fn stable_system_prompt_excludes_runtime_workspace_state() {
     assert!(!first.contains("/Users/yan/newly-authorized"));
 }
 
+#[test]
+fn user_instructions_invalidate_snapshot_without_leaking_into_default_builders() {
+    let context = fixture_context();
+    let surface = ToolSurface::from_plugin_tools(false, &[]);
+    let rules = "## User Custom Instructions\n\n### Source: .cursor/rules/team.mdc\nDescription: team\nRULE_OLD";
+    let mut snapshot = SystemPromptSnapshot::new(&context, &surface, None, None, 400_000, rules);
+    assert!(snapshot.system_text().contains(rules));
+    assert!(!snapshot.refresh(&context, &surface, None, None, 400_000, rules));
+    assert!(snapshot.refresh(
+        &context,
+        &surface,
+        None,
+        None,
+        400_000,
+        &rules.replace("OLD", "NEW")
+    ));
+    assert!(!snapshot.system_text().contains("RULE_OLD"));
+    assert!(snapshot.refresh(&context, &surface, None, None, 400_000, ""));
+    assert!(!snapshot.system_text().contains("User Custom Instructions"));
+    assert!(
+        !SystemPromptSnapshot::new(&context, &surface, None, None, 400_000, "")
+            .system_text()
+            .contains("RULE_OLD")
+    );
+}
+
 fn plugin_tool(name: &str, description: &str) -> crate::core::tools::contract::registry::Tool {
     crate::core::tools::contract::registry::Tool {
         name: name.to_string(),
@@ -396,6 +422,7 @@ fn system_prompt_snapshot_reuses_unchanged_surface_and_rebuilds_with_plugin_chan
         Some(&skills),
         Some(&SkillsConfig::default()),
         400_000,
+        "",
     );
     let stable_text = snapshot.system_text().to_string();
     let stable_tools = snapshot.tool_definitions().to_vec();
@@ -408,6 +435,7 @@ fn system_prompt_snapshot_reuses_unchanged_surface_and_rebuilds_with_plugin_chan
             Some(&skills),
             Some(&SkillsConfig::default()),
             400_000,
+            "",
         ),
         "unchanged prompt inputs must preserve a byte-identical snapshot"
     );
@@ -429,6 +457,7 @@ fn system_prompt_snapshot_reuses_unchanged_surface_and_rebuilds_with_plugin_chan
             Some(&skills),
             Some(&SkillsConfig::default()),
             400_000,
+            "",
         ),
         "a plugin catalog change must rebuild both representations together"
     );
@@ -512,6 +541,7 @@ fn connectors_skill_index_is_static_in_the_prompt_cache_signature() {
         Some(&skills),
         Some(&SkillsConfig::default()),
         400_000,
+        "",
     );
     let after_connector_catalog_changes = SystemPromptSnapshot::new(
         &context,
@@ -519,6 +549,7 @@ fn connectors_skill_index_is_static_in_the_prompt_cache_signature() {
         Some(&skills),
         Some(&SkillsConfig::default()),
         400_000,
+        "",
     );
 
     assert_eq!(

@@ -59,7 +59,7 @@ fn resolve_target_path(
     Ok((target, "SKILL.md".to_string(), true))
 }
 
-fn xml_escape(value: &str) -> String {
+pub(crate) fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")

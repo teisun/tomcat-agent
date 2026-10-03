@@ -74,6 +74,8 @@ pub enum ChatMessageContent {
 pub enum ContextRefKind {
     Selection,
     File,
+    Command,
+    Skill,
 }
 
 /// 结构化上下文引用，既用于 transcript 落盘，也用于发送前投影成 LLM 可读文本。
@@ -95,6 +97,8 @@ pub enum ContextRefKind {
 #[serde(rename_all = "snake_case")]
 pub struct ContextReference {
     pub ref_kind: ContextRefKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
     pub path: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +119,7 @@ impl ContextReference {
     ) -> Self {
         Self {
             ref_kind: ContextRefKind::Selection,
+            resource_id: None,
             path: path.into(),
             label: label.into(),
             line_start,
@@ -126,6 +131,7 @@ impl ContextReference {
     pub fn file(path: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             ref_kind: ContextRefKind::File,
+            resource_id: None,
             path: path.into(),
             label: label.into(),
             line_start: None,
@@ -156,6 +162,17 @@ impl ContextReference {
                 )
             }
             ContextRefKind::File => format!("[file reference] {}", self.path),
+            ContextRefKind::Command => format!(
+                "<command name=\"{}\" source=\"{}\">\n{}\n</command>",
+                crate::core::skill::load::xml_escape(&self.label),
+                crate::core::skill::load::xml_escape(&self.path),
+                self.text.as_deref().unwrap_or_default()
+            ),
+            ContextRefKind::Skill => format!(
+                "<skill name=\"{}\" location=\"SKILL.md\">\n{}\n</skill>",
+                crate::core::skill::load::xml_escape(self.label.trim_start_matches('/')),
+                self.text.as_deref().unwrap_or_default()
+            ),
         }
     }
 }

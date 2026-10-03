@@ -72,6 +72,12 @@ pub struct ServeContextReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServeContentSegment {
+    Instruction {
+        #[serde(rename = "resourceId")]
+        resource_id: String,
+        kind: crate::core::project_instructions::InstructionKind,
+        label: String,
+    },
     Text {
         text: String,
     },
@@ -359,6 +365,13 @@ pub enum ServeCommand {
         revert_files: bool,
         #[serde(default, rename = "dryRun", skip_serializing_if = "Option::is_none")]
         dry_run: Option<bool>,
+    },
+    #[serde(rename_all = "camelCase")]
+    GetInstructionCatalog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     /// Execute a resource command from the initialize handshake's shared table.
     #[serde(rename_all = "camelCase")]
@@ -779,6 +792,7 @@ impl ServeCommand {
             | Self::RestoreCheckpoint { id, .. }
             | Self::Compact { id, .. }
             | Self::RunSlashCommand { id, .. }
+            | Self::GetInstructionCatalog { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
@@ -830,6 +844,7 @@ impl ServeCommand {
             | Self::RestoreCheckpoint { session_id, .. }
             | Self::Compact { session_id, .. }
             | Self::RunSlashCommand { session_id, .. }
+            | Self::GetInstructionCatalog { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
@@ -897,6 +912,7 @@ impl ServeCommand {
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",
             Self::Compact { .. } => "compact",
             Self::RunSlashCommand { .. } => "run_slash_command",
+            Self::GetInstructionCatalog { .. } => "get_instruction_catalog",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",

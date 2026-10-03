@@ -47,6 +47,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "get_state",
                             "compact",
                             "run_slash_command",
+                            "get_instruction_catalog",
                             "set_plan_mode",
                             "set_model",
                             "set_thinking_level",

@@ -302,6 +302,19 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
                 return Ok(());
             }
+            if params
+                .segments
+                .iter()
+                .any(|s| matches!(s, ServeContentSegment::Instruction { .. }))
+            {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    "steer 不支持 command/skill 调用；请使用 prompt 或 follow_up",
+                )?;
+                return Ok(());
+            }
             let mut input_message = ChatMessage::steering(text);
             let persisted = persist_turn_input_message(&slot, &input_message, &params)?;
             input_message.msg_id = Some(persisted.row_id);
@@ -671,6 +684,16 @@ pub(crate) async fn handle_command(
                 id,
                 Some(slot.session_id.clone()),
                 Some(restore_core_payload(report)),
+            )))?;
+        }
+        ServeCommand::GetInstructionCatalog { id, session_id } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id).await? else {
+                return Ok(());
+            };
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(serde_json::json!({"items":slot.ctx.instruction_catalog()})),
             )))?;
         }
         ServeCommand::RunSlashCommand {
@@ -2791,6 +2814,7 @@ fn to_context_ref_kind(kind: ServeContextRefKind) -> ContextRefKind {
 fn to_context_reference(reference: &ServeContextReference) -> ContextReference {
     ContextReference {
         ref_kind: to_context_ref_kind(reference.kind),
+        resource_id: None,
         path: reference.path.clone(),
         label: reference.label.clone(),
         line_start: reference.line_start,
@@ -2807,13 +2831,29 @@ fn to_context_reference(reference: &ServeContextReference) -> ContextReference {
 /// 旧实现的做法是「先建一条，再无条件 `.clone()` 一份去做 SVG 替换」——
 /// 11 张图就是把几十 MB base64 白拷一次，哪怕一张 SVG 都没有。这里改成只在
 /// 真的存在 provider 覆盖（即某个附件带 `provider_sha`）时才构造第二条，否则直接复用同一条。
-fn build_turn_messages(
+pub(crate) fn build_turn_messages(
     slot: &Arc<super::registry::SessionSlot>,
     text: String,
     params: &ServeMessageParams,
 ) -> Result<(ChatMessage, ChatMessage), String> {
+    let resolved = params
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            ServeContentSegment::Instruction {
+                resource_id, kind, ..
+            } => Some(slot.ctx.resolve_instruction(resource_id, *kind)),
+            _ => None,
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let store = slot.ctx.session_runtime.session.attachment_store();
-    let archival = build_user_message(&store, text, params, AttachmentBytes::Archival)?;
+    let archival = build_user_message_with_instructions(
+        &store,
+        text,
+        params,
+        AttachmentBytes::Archival,
+        &resolved,
+    )?;
     // Sent image history uses a content reference, while the provider needs base64 for
     // this request. Only image blobs therefore need distinct archival/input messages.
     let needs_provider_message = params.attachments.iter().any(|attachment| {
@@ -2824,11 +2864,17 @@ fn build_turn_messages(
         return Ok((archival, input));
     }
     let text_for_provider = single_text_of(&archival);
-    let input = build_user_message(&store, text_for_provider, params, AttachmentBytes::Provider)?;
+    let input = build_user_message_with_instructions(
+        &store,
+        text_for_provider,
+        params,
+        AttachmentBytes::Provider,
+        &resolved,
+    )?;
     Ok((archival, input))
 }
 
-/// `build_user_message` 取哪一份字节。
+/// `build_user_message_with_instructions` 取哪一份字节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttachmentBytes {
     /// 用户实际附上的那份，落 transcript。
@@ -2837,7 +2883,7 @@ pub(crate) enum AttachmentBytes {
     Provider,
 }
 
-/// 当 params 没有 segments 时，`build_user_message` 只用到 `text`；
+/// 当 params 没有 segments 时，`build_user_message_with_instructions` 只用到 `text`；
 /// 构造第二条消息时把它取回来，避免要求调用方复制一份 String。
 fn single_text_of(message: &ChatMessage) -> String {
     match message.content.as_ref() {
@@ -2853,12 +2899,14 @@ fn single_text_of(message: &ChatMessage) -> String {
     }
 }
 
-pub(crate) fn build_user_message(
+pub(super) fn build_user_message_with_instructions(
     store: &AttachmentBlobStore,
     text: String,
     params: &ServeMessageParams,
     which: AttachmentBytes,
+    resolved: &[ContextReference],
 ) -> Result<ChatMessage, String> {
+    let mut instructions = resolved.iter();
     if params.segments.is_empty() && params.attachments.is_empty() {
         return Ok(ChatMessage::user(text));
     }
@@ -2871,6 +2919,10 @@ pub(crate) fn build_user_message(
             match segment {
                 ServeContentSegment::Text { text } => {
                     parts.push(ChatMessageContentPart::text(text.clone()));
+                }
+                ServeContentSegment::Instruction { .. } => {
+                    let reference = instructions.next().ok_or("调用尚未由后端解析")?;
+                    parts.push(ChatMessageContentPart::reference(reference.clone()));
                 }
                 ServeContentSegment::Reference { reference } => {
                     parts.push(ChatMessageContentPart::reference(to_context_reference(

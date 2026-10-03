@@ -22,6 +22,7 @@ mod commands_test;
 mod confirmation_test;
 mod control_test;
 mod event_pump_test;
+mod instruction_prompt_test;
 mod ndjson_test;
 mod registry_test;
 mod schema_test;

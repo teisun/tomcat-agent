@@ -131,6 +131,7 @@ export function reconcileSessionSnapshot(
     ) ?? nextPendingAttachments;
   const activePlan = reconcileValue(previous?.activePlan, next.activePlan);
   const composerDraft = reconcileValue(previous?.composerDraft, next.composerDraft);
+  const instructionCatalog = reconcileValue(previous?.instructionCatalog, next.instructionCatalog);
   if (
     previous &&
     previous.busy === next.busy &&
@@ -149,7 +150,8 @@ export function reconcileSessionSnapshot(
     previous.sessionTodos === sessionTodos &&
     previous.pendingAttachments === pendingAttachments &&
     previous.activePlan === activePlan &&
-    previous.composerDraft === composerDraft
+    previous.composerDraft === composerDraft &&
+    previous.instructionCatalog === instructionCatalog
   ) {
     return previous;
   }
@@ -157,6 +159,7 @@ export function reconcileSessionSnapshot(
     ...next,
     checkpoints,
     composerDraft,
+    instructionCatalog,
     pendingAttachments,
     activePlan,
     planTodos,

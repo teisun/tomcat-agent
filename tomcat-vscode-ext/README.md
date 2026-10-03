@@ -93,9 +93,13 @@ You only need these settings when you want to override the default behavior:
 {
   "tomcat.path": "/absolute/path/to/tomcat",
   "tomcat.session.defaultCwd": "/absolute/path/to/workspace",
-  "tomcat.serve.extraArgs": []
+  "tomcat.serve.extraArgs": [],
+  "tomcat.layout.controlsInset": 10,
+  "tomcat.layout.contentInset": 15
 }
 ```
+
+Sidebar spacing is configured in VS Code Settings: search `tomcat.layout` (User or Workspace settings), then **Developer: Reload Window**. Values are pixels from the sidebar edge, clamped to 0–40. Controls Inset sets the session bar/input border; Content Inset sets replies/cards/todos/attachments. Keep Content Inset greater than Controls Inset to align input text with replies; otherwise inner padding clamps to zero. The editor grows from one line up to 30% of webview height, then scrolls internally; attachments stay outside it.
 
 Resolution order, in plain English:
 
@@ -122,8 +126,20 @@ Type / → choose a command (inserts text) → send → notice/error reply
 - `/reload` rescans Skills and plugin tools without restarting the running session. After external CLI or manual resource changes, run it explicitly; it is not a configuration reload or MCP reconnect.
 - `/install './path with spaces' agent` and `/uninstall package-name agent` install/uninstall and synchronize automatically. Specify `current-project` (`scope`), `agent`, or `global`; missing arguments return usage.
 - Uninstall uses the package name listed by `tomcat packages`, not a tool name. Only ledger-managed packages are uninstalled; manually placed directories must be removed from that layer's `plugins/` / `skills/`, then `/reload`.
-- Suggestions open at the start, after whitespace, or on a new line, not inside paths/URLs. Mid-message commands are labelled as active only at the start. Only leading shared commands in text-only drafts execute; references/attachments and unknown commands remain normal prompts.
+- Suggestions open at the start, after whitespace, or on a new line, not inside paths/URLs. Terminal operations are hidden mid-message. Only leading shared operations in text-only drafts execute locally; references/attachments and unknown text remain normal prompts.
 - Send, compact, and Build are disabled while a command reply is pending. No fake user turn is added. Servers that do not advertise the command table keep the old composer behavior.
+
+### Project prompt commands, skills and rules
+
+```text
+/ menu → Skills / Commands / Terminal
+Skills or Commands → yellow invocation chip → send → backend body snapshot
+Terminal → ordinary slash text → local operation
+```
+
+Project `.cursor/commands/**/*.md` and `.agents/commands/**/*.md` appear in Commands; an optional frontmatter `description` is shown on the second line. Same names from different sources remain distinct. Each group shows three entries plus **Show N more** (four entries are shown directly). Invocation chips have no remove button: select them or place the caret adjacent and use Backspace/Delete. History displays the same chip; retry preserves the originally sent body. Ordinary file/selection references can be inserted repeatedly.
+
+Rules under either directory's `rules/` (`.md` or `.mdc`) only apply with boolean `alwaysApply: true`; they enter **User Custom Instructions**, refresh at the next user turn, and do not activate Cursor globs/intelligent/manual triggers. `/reload` reports counts and skip reasons. Project instruction reads respect Deny but need no tool-path confirmation; agent tools still retain their permission gate. An older CLI shows Terminal only and refuses restored invocation chips without deleting the draft. New draft schema migrates older drafts; an older runtime cannot replay new command/skill history kinds. See [CLI usage and compatibility](../tomcat/docs/user-guide.md#project-commands-and-rules).
 
 ## Troubleshooting
 

@@ -461,6 +461,38 @@ fn context_reference_selection_to_prompt_text_escapes_path_quotes() {
 }
 
 #[test]
+fn invocation_reference_freezes_body_and_projects_typed_blocks() {
+    for (kind, tag) in [
+        (ContextRefKind::Command, "command"),
+        (ContextRefKind::Skill, "skill"),
+    ] {
+        let reference = ContextReference {
+            ref_kind: kind,
+            path: ".cursor/commands/review\".md".into(),
+            label: "/review".into(),
+            resource_id: Some("command:test".into()),
+            line_start: None,
+            line_end: None,
+            text: Some("BODY".into()),
+        };
+        let projected = reference.to_prompt_text();
+        assert!(projected.starts_with(&format!("<{tag} name=")));
+        assert!(projected.contains("BODY"));
+        assert!(!projected.contains("hint="));
+        if tag == "command" {
+            assert!(projected.contains("&quot;"));
+        } else {
+            assert!(projected.contains("location=\"SKILL.md\""));
+        }
+        let part = ChatMessageContentPart::reference(reference);
+        assert_eq!(part.estimated_chars(), projected.chars().count());
+        let back: ChatMessageContentPart =
+            serde_json::from_value(serde_json::to_value(&part).unwrap()).unwrap();
+        assert_eq!(part, back);
+    }
+}
+
+#[test]
 fn context_reference_file_to_prompt_text_mentions_path() {
     let reference = ContextReference::file("src/app.ts", "app.ts");
     assert_eq!(reference.to_prompt_text(), "[file reference] src/app.ts");
@@ -494,6 +526,7 @@ fn content_part_serde_roundtrip_reference() {
             line_start: Some(10),
             line_end: Some(12),
             text: Some(text),
+            ..
         } } if path == "src/app.ts" && label == "app.ts:10-12" && text == "const answer = 42;"
     ));
     assert_eq!(

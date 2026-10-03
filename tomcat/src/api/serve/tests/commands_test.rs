@@ -403,7 +403,7 @@ fn forged_sha() -> String {
 
 /// 在临时 store 上装配一条消息。
 ///
-/// `build_user_message` 只依赖 blob store 而不依赖整个 session slot，
+/// `build_user_message_with_instructions` 只依赖 blob store 而不依赖整个 session slot，
 /// 所以这类纯装配逻辑的测试不需要拉起一个会话。
 fn build_message_for_test(
     text: &str,
@@ -411,11 +411,12 @@ fn build_message_for_test(
 ) -> Result<crate::core::llm::ChatMessage, String> {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let store = crate::core::session::attachments::AttachmentBlobStore::new(tmp.path());
-    crate::api::serve::commands::build_user_message(
+    crate::api::serve::commands::build_user_message_with_instructions(
         &store,
         text.to_string(),
         params,
         crate::api::serve::commands::AttachmentBytes::Archival,
+        &[],
     )
 }
 

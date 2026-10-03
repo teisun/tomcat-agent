@@ -141,6 +141,7 @@ try {
     }, state);
     await page.goto(url);
     await page.addStyleTag({ content: theme(scenario.light, scenario.fontSize) });
+    await page.evaluate(light => { document.body.classList.add("tc-chat-webview", light ? "vscode-light" : "vscode-dark"); }, !!scenario.light);
     await page.getByTestId("approval-option-q1-a").waitFor();
     await page.evaluate(() => document.fonts.ready);
     const assertQuestionVisible = async (questionId) => {
@@ -162,6 +163,15 @@ try {
       await page.screenshot({ path: path.join(out, `${name}.png`) });
       await writeFile(path.join(out, `${name}.aria.txt`), await page.locator("body").ariaSnapshot());
       await writeFile(path.join(out, `${name}.console.json`), JSON.stringify(events, null, 2));
+      const composer = await page.getByTestId("composer-input").evaluate(editor => {
+        const surface = editor.closest('.tc-composer__surface').getBoundingClientRect();
+        const r = editor.getBoundingClientRect();
+        return {height:r.height,limit:innerHeight*0.3,left:r.left,surfaceLeft:surface.left,surfaceRight:innerWidth-surface.right};
+      });
+      await writeFile(path.join(out, `${name}.geometry.json`), JSON.stringify(composer,null,2));
+      assert.ok(composer.height <= composer.limit + 1, "Same 30vh limit with/without questions");
+      assert.ok(Math.abs(composer.surfaceLeft-10)<=1 && Math.abs(composer.surfaceRight-10)<=1, "Control inset in question state");
+      assert.ok(Math.abs(composer.left-15)<=1, "Content inset in question state");
       assert.equal(events.filter((e) => e.level === "error").length, 0, JSON.stringify(events));
       if (!baseline && suffix !== "completed") {
         assert.equal(await page.getByRole("radiogroup").count(), 1);

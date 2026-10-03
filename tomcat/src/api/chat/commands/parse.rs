@@ -77,6 +77,7 @@ pub enum ChatCommand {
         name: String,
         args: Vec<String>,
     },
+    Command(String),
     /// `/skill` 子命令族：列出 / 重载 / 显式注入技能正文。
     Skill(SkillCommand),
     /// `/connector` 子命令族：管理 MCP server。
@@ -93,6 +94,10 @@ pub(crate) enum ChatCommandOutcome {
         line: String,
         echo_user: bool,
         history_line: Option<String>,
+    },
+    UserMessage {
+        message: crate::core::llm::ChatMessage,
+        history_line: String,
     },
     /// Command was fully handled locally; skip the current turn.
     Handled,
@@ -128,6 +133,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
             | "/plan"
             | "/skill"
             | "/connector"
+            | "/command"
     ) {
         return ChatCommand::NotACommand(line.to_string());
     }
@@ -153,6 +159,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/restore" => parse_restore_args(tokens),
         "/plan" => cmd_plan::parse_args(tokens),
         "/skill" => cmd_skill::parse_args(tokens),
+        "/command" => ChatCommand::Command(trimmed.to_string()),
         "/connector" => cmd_connector::parse_args(tokens),
         _ => ChatCommand::NotACommand(line.to_string()),
     }
@@ -166,11 +173,8 @@ pub(crate) async fn dispatch_chat_command(
     system_text: &str,
 ) -> ChatCommandOutcome {
     match command {
-        ChatCommand::NotACommand(line) => ChatCommandOutcome::Continue {
-            line,
-            echo_user: false,
-            history_line: None,
-        },
+        ChatCommand::NotACommand(line) => super::cmd_command::shortcut(ctx, line),
+        ChatCommand::Command(line) => super::cmd_command::run(ctx, line),
         ChatCommand::Help => cmd_help::run(),
         ChatCommand::Compact => cmd_compact::run(ctx, context_state, system_text).await,
         ChatCommand::UsageError { message } => {

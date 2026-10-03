@@ -172,15 +172,23 @@ impl SystemPromptSnapshot {
         skill_set: Option<&crate::core::skill::SkillSet>,
         skill_cfg: Option<&crate::infra::config::SkillsConfig>,
         context_budget_chars: usize,
+        user_instructions: &str,
     ) -> Self {
-        let signature =
-            prompt_snapshot_signature(context, surface, skill_set, skill_cfg, context_budget_chars);
+        let signature = prompt_snapshot_signature(
+            context,
+            surface,
+            skill_set,
+            skill_cfg,
+            context_budget_chars,
+            user_instructions,
+        );
         let system_text = build_system_prompt_for_surface(
             context,
             surface,
             skill_set,
             skill_cfg,
             context_budget_chars,
+            user_instructions,
         );
         Self {
             signature,
@@ -197,9 +205,16 @@ impl SystemPromptSnapshot {
         skill_set: Option<&crate::core::skill::SkillSet>,
         skill_cfg: Option<&crate::infra::config::SkillsConfig>,
         context_budget_chars: usize,
+        user_instructions: &str,
     ) -> bool {
-        let signature =
-            prompt_snapshot_signature(context, surface, skill_set, skill_cfg, context_budget_chars);
+        let signature = prompt_snapshot_signature(
+            context,
+            surface,
+            skill_set,
+            skill_cfg,
+            context_budget_chars,
+            user_instructions,
+        );
         if self.signature == signature {
             return false;
         }
@@ -210,6 +225,7 @@ impl SystemPromptSnapshot {
             skill_set,
             skill_cfg,
             context_budget_chars,
+            user_instructions,
         );
         self.tool_definitions = surface.function_definitions.clone();
         true
@@ -234,10 +250,17 @@ fn build_system_prompt_for_surface(
     skill_set: Option<&crate::core::skill::SkillSet>,
     skill_cfg: Option<&crate::infra::config::SkillsConfig>,
     context_budget_chars: usize,
+    user_instructions: &str,
 ) -> String {
     let mut context = context.clone();
     context.tool_lines = Some(surface.identity_tool_lines().to_string());
-    build_system_prompt_with_skills(context, skill_set, skill_cfg, context_budget_chars)
+    build_system_prompt_with_instructions(
+        context,
+        skill_set,
+        skill_cfg,
+        context_budget_chars,
+        user_instructions,
+    )
 }
 
 fn prompt_snapshot_signature(
@@ -246,6 +269,7 @@ fn prompt_snapshot_signature(
     skill_set: Option<&crate::core::skill::SkillSet>,
     skill_cfg: Option<&crate::infra::config::SkillsConfig>,
     context_budget_chars: usize,
+    user_instructions: &str,
 ) -> String {
     let rendered_skills = match (skill_set, skill_cfg) {
         (Some(skill_set), Some(skill_cfg)) => {
@@ -262,6 +286,7 @@ fn prompt_snapshot_signature(
         },
         "tool_surface": surface.signature(),
         "available_skills": rendered_skills,
+        "user_custom_instructions": user_instructions,
         "context_budget_chars": context_budget_chars,
     }))
     .expect("prompt snapshot inputs are JSON-serializable")
@@ -698,7 +723,35 @@ pub fn build_system_prompt_with_skills(
     skill_cfg: Option<&crate::infra::config::SkillsConfig>,
     context_budget_chars: usize,
 ) -> String {
+    build_system_prompt_with_instructions(context, skill_set, skill_cfg, context_budget_chars, "")
+}
+
+struct UserCustomInstructionsSection(String);
+impl SystemPromptSection for UserCustomInstructionsSection {
+    fn section_name(&self) -> &str {
+        "user_custom_instructions"
+    }
+    fn render(&self, _: &WorkspaceContext) -> String {
+        self.0.clone()
+    }
+    fn priority(&self) -> u32 {
+        60
+    }
+}
+
+fn build_system_prompt_with_instructions(
+    context: WorkspaceContext,
+    skill_set: Option<&crate::core::skill::SkillSet>,
+    skill_cfg: Option<&crate::infra::config::SkillsConfig>,
+    context_budget_chars: usize,
+    user_instructions: &str,
+) -> String {
     let mut builder = SystemPromptBuilder::default();
+    if !user_instructions.is_empty() {
+        builder.register(Box::new(UserCustomInstructionsSection(
+            user_instructions.to_owned(),
+        )));
+    }
     if let (Some(skill_set), Some(skill_cfg)) = (skill_set, skill_cfg) {
         if let Some(section) =
             AvailableSkillsSection::from_skill_set(skill_set, context_budget_chars, skill_cfg)

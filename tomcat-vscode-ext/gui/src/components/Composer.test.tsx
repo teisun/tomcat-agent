@@ -47,6 +47,7 @@ function renderComposer({
   availableModelDetails,
   availableModels = ["gpt-5.4"],
   slashCommands = [],
+  instructionCatalog = [],
   busy = false,
   canInterrupt = true,
   canPrompt = true,
@@ -81,6 +82,7 @@ function renderComposer({
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels?: string[];
   slashCommands?: SharedSlashCommand[];
+  instructionCatalog?: import("../../../src/serveClient/wire").InstructionCard[];
   busy?: boolean;
   canInterrupt?: boolean;
   canPrompt?: boolean;
@@ -133,6 +135,7 @@ function renderComposer({
       availableModelDetails={availableModelDetails}
       availableModels={availableModels}
       slashCommands={slashCommands}
+      instructionCatalog={instructionCatalog}
       busy={busy}
       canInterrupt={canInterrupt}
       canPrompt={canPrompt}
@@ -184,9 +187,23 @@ describe("resource slash menu", () => {
     const onSubmit = vi.fn();
     renderComposer({slashCommands:commands, onSubmit});
     await paste(value);
-    expect(screen.getAllByTestId("slash-command-option")).toHaveLength(3);
-    if (value.startsWith("help")) expect(screen.getAllByText("仅在开头生效")).toHaveLength(3);
+    if (value.startsWith("help")) expect(screen.queryByTestId("slash-command-menu")).toBeNull();
+    else expect(screen.getAllByTestId("slash-command-option")).toHaveLength(3);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+  it("chooses a command as an atom, preserves draft identity and deletes by keyboard", async () => {
+    const onSubmit = vi.fn();
+    const {ref} = renderComposer({onSubmit,instructionCatalog:[{id:"command:.cursor/commands/review.md",kind:"command",name:"review",description:"Check",source:".cursor",path:".cursor/commands/review.md"}]});
+    await paste("/review");
+    await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"),{key:"Enter"}); });
+    expect(screen.getByTestId("invocation-chip").textContent).toBe("/review");
+    expect(onSubmit).not.toHaveBeenCalled();
+    const draft = ref.current!.getDraft();
+    expect(draft.segments[0]).toMatchObject({type:"instruction",resourceId:"command:.cursor/commands/review.md",occurrenceId:expect.any(String)});
+    await act(async () => { ref.current?.replaceDraft(draft); });
+    expect(ref.current!.getDraft().segments).toEqual(draft.segments);
+    await act(async () => { fireEvent.mouseDown(screen.getByTestId("invocation-chip")); fireEvent.keyDown(screen.getByTestId("composer-input"),{key:"Backspace"}); });
+    expect(screen.queryByTestId("invocation-chip")).toBeNull();
   });
   it("filters without case sensitivity, inserts plain text on Enter and closes on Escape", async () => {
     const onSubmit = vi.fn();
@@ -214,7 +231,7 @@ describe("resource slash menu", () => {
     await paste("line");
     await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"), {key:"Enter", shiftKey:true}); });
     expect(ref.current?.getDraft().text).toBe("line\n");
-    await paste("/"); expect(screen.getByTestId("slash-command-menu")).toBeTruthy();
+    await paste("/"); expect(screen.queryByTestId("slash-command-menu")).toBeNull();
     await act(async () => { ref.current?.clear(); });
     await paste("line");
     await act(async () => { fireEvent.keyDown(screen.getByTestId("composer-input"), {key:"Enter", shiftKey:true}); });
@@ -509,7 +526,7 @@ describe("Composer", () => {
     expect(onDraftChange).not.toHaveBeenCalled();
   });
 
-  it("inserts references as inline chips and deduplicates them", async () => {
+  it("inserts repeated selections with distinct occurrence identities", async () => {
     const { onDraftChange, ref } = renderComposer();
 
     await act(async () => {
@@ -533,26 +550,11 @@ describe("Composer", () => {
       });
     });
 
-    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(1);
-    expect(onDraftChange).toHaveBeenLastCalledWith({
-      hasContent: true,
-      segments: [
-        {
-          kind: "selection",
-          label: "app.ts:3-5",
-          lineEnd: 5,
-          lineStart: 3,
-          path: "app.ts",
-          text: "const answer = 42;",
-          type: "reference",
-        },
-        {
-          text: " ",
-          type: "text",
-        },
-      ],
-      text: "app.ts:3-5 ",
-    });
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    const references = ref.current!.getDraft().segments.filter((s) => s.type === "reference");
+    expect(references).toHaveLength(2);
+    expect(references[0].occurrenceId).not.toBe(references[1].occurrenceId);
+    expect(onDraftChange).toHaveBeenCalled();
   });
 
   it("commits a picker batch as one draft update", async () => {
@@ -582,7 +584,7 @@ describe("Composer", () => {
       ]);
     });
 
-    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(3);
     expect(onDraftChange).toHaveBeenCalledTimes(1);
   });
 
@@ -624,10 +626,10 @@ describe("Composer", () => {
         type: "reference",
       });
     });
-    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(3);
   });
 
-  it("keeps same-range selections with different text and deduplicates exact re-adds", async () => {
+  it("keeps same-range selections with different text and repeated re-adds", async () => {
     const { ref } = renderComposer();
     const makeReference = (text: string) => ({
       kind: "selection" as const,
@@ -646,7 +648,7 @@ describe("Composer", () => {
     });
 
     const chips = screen.getAllByTestId("composer-reference-chip");
-    expect(chips).toHaveLength(2);
+    expect(chips).toHaveLength(3);
     expect(chips.every((chip) => chip.getAttribute("title") === "plans/notes.plan.md:20")).toBe(true);
   });
 
@@ -979,7 +981,7 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-reference-chip").textContent).toContain("app.ts");
   });
 
-  it("deduplicates @ selections and keeps them as file references without line numbers", async () => {
+  it("allows repeated @ mentions, each as a separate occurrence", async () => {
     const { onDraftChange, ref } = renderComposer({
       contextSearchMatches: [searchMatch],
       contextSearchQuery: "app.ts:12",
@@ -999,26 +1001,10 @@ describe("Composer", () => {
     });
     fireEvent.keyDown(textbox, { key: "Enter" });
 
-    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(1);
-    expect(onDraftChange).toHaveBeenLastCalledWith({
-      hasContent: true,
-      segments: [
-        {
-          kind: "file",
-          label: "app.ts",
-          lineEnd: null,
-          lineStart: null,
-          path: "src/app.ts",
-          text: null,
-          type: "reference",
-        },
-        {
-          text: " ",
-          type: "text",
-        },
-      ],
-      text: "app.ts ",
-    });
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    const references = ref.current!.getDraft().segments.filter((s) => s.type === "reference");
+    expect(references.every((s) => s.kind === "file" && s.lineStart == null)).toBe(true);
+    expect(references[0].occurrenceId).not.toBe(references[1].occurrenceId);
   });
 
   it("extracts multiple clipboard image Files without inserting placeholder text", async () => {

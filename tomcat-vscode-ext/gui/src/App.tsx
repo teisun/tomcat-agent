@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { freshOccurrences } from "../../src/shared/composerOccurrences";
 
 import {
   blobToBase64,
@@ -392,11 +393,11 @@ function draftTextFromSegments(segments: ComposerDraft["segments"]): string {
 
 function draftFromUserMessage(message: WebviewMessageBlock): ComposerDraft {
   const segments = message.segments?.length
-    ? message.segments.map((segment) => ({ ...segment }))
+    ? freshOccurrences(message.segments)
     : [{ text: message.text, type: "text" } as const];
   return {
     hasContent: segments.some(
-      (segment) => segment.type === "reference" || segment.text.trim().length > 0,
+      (segment) => segment.type !== "text" || segment.text.trim().length > 0,
     ),
     segments,
     text: draftTextFromSegments(segments),
@@ -451,6 +452,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     [...document.querySelectorAll(selector)].map((node) => node.textContent ?? "");
   const composerMetricEntries = [
     "attachment-add",
+    "composer-surface",
     "mode-select",
     "model-select",
     "thinking-level-select",
@@ -468,10 +470,12 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
         {
           top: rect.top,
           width: rect.width,
+          left: rect.left,
+          right: window.innerWidth - rect.right,
         },
       ] as const;
     })
-    .filter((entry): entry is readonly [string, { top: number; width: number }] => !!entry);
+    .filter((entry): entry is readonly [string, { top: number; width: number; left: number; right: number }] => !!entry);
   const composerControlMetrics = Object.fromEntries(composerMetricEntries);
   const composerBar = document.querySelector<HTMLElement>('[data-testid="composer-bar"]');
   const composerFooterPlanStatus =
@@ -1318,6 +1322,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
   const approvalAnswersRef = useRef(approvalAnswers);
   const composerRef = useRef<ComposerHandle | null>(null);
+  const receivedReferenceIdsRef = useRef(new Map<string, Set<string>>());
   const composerWorkRegistryRef = useRef(new ComposerWorkRegistry());
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
   const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
@@ -1576,7 +1581,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     const backendComposerDraft: ComposerDraft = {
       hasContent:
         backendDraft?.segments.some(
-          (segment) => segment.type === "reference" || segment.text.trim().length > 0,
+          (segment) => segment.type !== "text" || segment.text.trim().length > 0,
         ) === true || (backendDraft?.text.trim().length ?? 0) > 0,
       segments: backendDraft?.segments ?? [],
       text: backendDraft?.text ?? "",
@@ -1606,7 +1611,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         .filter(
           (reference) =>
             !localReferenceIds.has(referenceIdentity(reference))
-            && !previousHostReferenceIds.has(referenceIdentity(reference)),
+            && !previousHostReferenceIds.has(referenceIdentity(reference))
+            && (!reference.occurrenceId || !receivedReferenceIdsRef.current.get(sessionId)?.has(reference.occurrenceId)),
         );
       if (missingReferences.length > 0) {
         applyingBackendDraftRef.current = true;
@@ -1626,6 +1632,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       }
     }
 
+    const seenIds = receivedReferenceIdsRef.current.get(sessionId) ?? new Set<string>();
+    for (const segment of backendDraft?.segments ?? []) {
+      if (segment.type !== "text" && segment.occurrenceId) seenIds.add(segment.occurrenceId);
+    }
+    receivedReferenceIdsRef.current.set(sessionId, seenIds);
     const signature = composerDraftSignature(nextDraft);
     const applied = appliedComposerDraftRef.current;
     if (applied?.sessionId === sessionId && applied.signature === signature) {
@@ -1905,6 +1916,15 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             ? frame.content
             : null;
         if (insertions) {
+          const sessionId = insertions.sessionId ?? stateRef.current.activeSessionId;
+          if (!sessionId) return;
+          const seen = receivedReferenceIdsRef.current.get(sessionId) ?? new Set<string>();
+          insertions.references = insertions.references.filter((reference) => {
+            if (!reference.occurrenceId) return true;
+            if (seen.has(reference.occurrenceId)) return false;
+            seen.add(reference.occurrenceId); return true;
+          });
+          receivedReferenceIdsRef.current.set(sessionId, seen);
           if (composerRef.current && insertions.sessionId === stateRef.current.activeSessionId) {
             composerRef.current.insertReferences(insertions.references);
           } else {
@@ -2787,6 +2807,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         canInterrupt={canInterrupt}
         canPrompt={canPrompt}
         slashCommands={state.slashCommands}
+        instructionCatalog={activeSession?.instructionCatalog}
+        onSlashOpen={() => {
+          if (activeSession?.sessionId) postIntent(vscodeApi, "getInstructionCatalog", {sessionId:activeSession.sessionId});
+        }}
         commandPending={commandPending}
         contextSearchLoading={contextSearch.loading}
         contextSearchMatches={contextSearch.matches}

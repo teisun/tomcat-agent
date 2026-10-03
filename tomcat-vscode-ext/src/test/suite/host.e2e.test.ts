@@ -27,6 +27,7 @@ import {
   assertWebviewPlanToolUxFlow,
   assertWebviewReloadReplayFlow,
   assertWebviewSelectionReferenceFlow,
+  assertWebviewInstructionInvocationFlow,
   assertWebviewSessionTitleFlow,
   assertWebviewSessionSwitchRestoreFlow,
   assertWebviewStickyHistoryFlow,
@@ -60,6 +61,23 @@ suite("Tomcat host E2E", () => {
       await assertWebviewBootstrapRetryRecoveryFlow(api);
     },
   );
+
+  test("preserves an instruction invocation chip across draft reload, send and history", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewInstructionInvocationFlow(api);
+  });
+
+  test("lays out the webview composer without VS Code's default body padding", async () => {
+    const api = await getTomcatExtensionApi();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    const snapshot = await api.__testing.captureWebviewDom();
+    const surface = snapshot.composerControlMetrics["composer-surface"];
+    const first = snapshot.composerControlMetrics["attachment-add"];
+    assert.ok(surface && first, "expected measured composer controls");
+    assert.ok(Math.abs(surface.left-10)<=1 && Math.abs(surface.right-10)<=1, JSON.stringify(surface));
+    assert.ok(Math.abs(first.left-15)<=1, JSON.stringify(first));
+  });
 
   test("interrupts an executing plan and resumes it in Chat", async () => {
     const api = await getTomcatExtensionApi();
@@ -197,7 +215,7 @@ suite("Tomcat host E2E", () => {
     await assertWebviewSelectionReferenceFlow(api);
   });
 
-  test("deduplicates dropped file references in the webview composer", async () => {
+  test("keeps repeated dropped file references in the webview composer", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewFileDropReferenceFlow(api);
   });

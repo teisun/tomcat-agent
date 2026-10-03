@@ -49,6 +49,7 @@ function hashText(value: string): string {
 }
 
 export function referenceIdentity(reference: WebviewReference): string {
+  if (reference.occurrenceId) return reference.occurrenceId;
   const parts: Array<number | string> = [
     reference.kind,
     reference.path,

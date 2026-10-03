@@ -241,6 +241,23 @@ describe("ContextSearchService", () => {
     service.dispose();
   });
 
+  it("does not clear a create invalidation that arrives during findFiles", async () => {
+    __testing.registerFile("/workspace/src/one.ts", "one");
+    const service = new ContextSearchService();
+    let finish!: (files: vscode.Uri[]) => void;
+    const staleListing = new Promise<vscode.Uri[]>((resolve) => { finish = resolve; });
+    const find = vi.spyOn(vscode.workspace, "findFiles").mockReturnValueOnce(staleListing);
+    try {
+      const searching = service.search({ query: "two" });
+      __testing.registerFile("/workspace/src/two.ts", "two");
+      finish([vscode.Uri.file("/workspace/src/one.ts")]);
+      const result = await searching;
+      expect(result.matches.map((match) => match.reference.path)).toContain("src/two.ts");
+      await service.search({ query: "two" });
+      expect(find).toHaveBeenCalledTimes(2);
+    } finally { find.mockRestore(); service.dispose(); }
+  });
+
   it("does not surface empty directories as candidates", async () => {
     __testing.registerDirectory("/workspace/empty");
     __testing.registerFile("/workspace/src/app.ts", "export const app = true;\n");

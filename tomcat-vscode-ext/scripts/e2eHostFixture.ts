@@ -1114,6 +1114,13 @@ function emitCustomPlanEvent(sessionId, type, extra = {}) {
   });
 }
 
+// A single controlled prompt fixture exercises host/GUI transport, not Rust discovery.
+function instructionCatalog() {
+  const relative = ".cursor/commands/host-review.md";
+  const target = path.join(process.env.TOMCAT_VSCODE_TEST_DEFAULT_CWD || process.cwd(), relative);
+  return fs.existsSync(target) ? [{id:"command:" + relative,kind:"command",name:"host-review",description:"Host invocation fixture",source:".cursor",path:relative}] : [];
+}
+
 function normalizeHistoryContent(text, segments) {
   if (!Array.isArray(segments) || segments.length === 0) {
     return text;
@@ -1122,6 +1129,12 @@ function normalizeHistoryContent(text, segments) {
     .map((segment) => {
       if (!segment || typeof segment !== "object") {
         return null;
+      }
+      if (segment.type === "instruction") {
+        const card = instructionCatalog().find(item => item.id === segment.resourceId);
+        if (!card) return null;
+        const target = path.join(process.env.TOMCAT_VSCODE_TEST_DEFAULT_CWD || process.cwd(), card.path);
+        return {type:"input_reference",ref_kind:card.kind,label:"/" + card.name,path:card.path,resource_id:card.id,text:fs.readFileSync(target,"utf8")};
       }
       if (segment.type === "text" && typeof segment.text === "string") {
         return {
@@ -2311,6 +2324,7 @@ function handleCommand(frame) {
                 "switch_session",
                 "list_sessions",
                 "get_state",
+                "get_instruction_catalog",
                 "list_checkpoints",
                 "close_session",
                 "interrupt",
@@ -2407,6 +2421,11 @@ function handleCommand(frame) {
         type: "response",
       });
       break;
+    case "get_instruction_catalog": {
+      const sessionId = frame.sessionId || activeSessionId;
+      send({id:frame.id,type:"response",success:true,sessionId,payload:{items:instructionCatalog()}});
+      break;
+    }
     case "get_state": {
       const sessionId = frame.sessionId || activeSessionId;
       const session = ensureSession(sessionId);

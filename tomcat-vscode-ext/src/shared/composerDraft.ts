@@ -33,6 +33,7 @@
  * they can immediately type into, and the bad file is still on disk to look at.
  */
 import * as vscode from "vscode";
+import { withOccurrence } from "./composerOccurrences";
 
 import type { WebviewMessageSegment } from "../ui/webview/protocol";
 
@@ -40,7 +41,7 @@ import type { WebviewMessageSegment } from "../ui/webview/protocol";
 export const DRAFT_WRITE_DEBOUNCE_MS = 400;
 
 /** Bumped only for changes that older builds cannot read. */
-const DRAFT_SCHEMA_VERSION = 2;
+const DRAFT_SCHEMA_VERSION = 3;
 
 /**
  * An attachment as the draft knows it: identity and metadata, never bytes.
@@ -144,6 +145,9 @@ function parseSegments(value: unknown): WebviewMessageSegment[] {
     if (entry.type === "text" && typeof entry.text === "string") {
       return [{ text: entry.text, type: "text" }];
     }
+    if (isRecord(entry) && entry.type === "instruction" && (entry.kind === "command" || entry.kind === "skill") && typeof entry.resourceId === "string" && typeof entry.label === "string") {
+      return [withOccurrence({type:"instruction",kind:entry.kind,resourceId:entry.resourceId,label:entry.label,path:typeof entry.path === "string" ? entry.path : undefined,occurrenceId:typeof entry.occurrenceId === "string" ? entry.occurrenceId : undefined})];
+    }
     if (
       entry.type === "reference" &&
       (entry.kind === "file" || entry.kind === "selection") &&
@@ -151,7 +155,8 @@ function parseSegments(value: unknown): WebviewMessageSegment[] {
       typeof entry.label === "string"
     ) {
       return [
-        {
+        withOccurrence({
+          occurrenceId: typeof entry.occurrenceId === "string" ? entry.occurrenceId : undefined,
           kind: entry.kind,
           label: entry.label,
           lineEnd: typeof entry.lineEnd === "number" ? entry.lineEnd : null,
@@ -159,7 +164,7 @@ function parseSegments(value: unknown): WebviewMessageSegment[] {
           path: entry.path,
           text: typeof entry.text === "string" ? entry.text : null,
           type: "reference",
-        },
+        }),
       ];
     }
     return [];
@@ -339,6 +344,7 @@ export class ComposerDraftStore {
         return this.currentDraft(sessionId);
       }
       this.drafts.set(sessionId, draft);
+      if (JSON.parse(raw).schemaVersion < DRAFT_SCHEMA_VERSION) this.scheduleWrite(sessionId);
       return draft;
     })();
     this.hydrations.set(sessionId, loading);

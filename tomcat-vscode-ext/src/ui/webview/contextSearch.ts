@@ -296,6 +296,7 @@ export class ContextSearchService implements vscode.Disposable {
   private cache: ContextSearchCache | null = null;
   private readonly directPathCache = new Map<string, PathResolution["kind"]>();
   private dirty = false;
+  private indexRevision = 0;
   private readonly watcher: vscode.FileSystemWatcher | null;
 
   constructor() {
@@ -399,21 +400,28 @@ export class ContextSearchService implements vscode.Disposable {
       return this.cache;
     }
 
-    const files = await vscode.workspace.findFiles("**/*", undefined, maxFiles, token);
-    const directories = deriveDirectories(files);
-    const cache: ContextSearchCache = {
-      candidates: [
-        ...files.map((uri) => buildCachedCandidate(uri, false)),
-        ...directories.map((uri) => buildCachedCandidate(uri, true)),
-      ],
-      maxFiles,
-      truncated: files.length >= maxFiles,
-    };
-    if (!token?.isCancellationRequested) {
-      this.cache = cache;
-      this.dirty = false;
+    // A create/delete during the async listing invalidates that snapshot. Rebuild
+    // once for this query; under ongoing churn keep the cache dirty, not immortal.
+    for (let pass = 0; ; pass += 1) {
+      const revision = this.indexRevision;
+      const files = await vscode.workspace.findFiles("**/*", undefined, maxFiles, token);
+      const directories = deriveDirectories(files);
+      const cache: ContextSearchCache = {
+        candidates: [
+          ...files.map((uri) => buildCachedCandidate(uri, false)),
+          ...directories.map((uri) => buildCachedCandidate(uri, true)),
+        ],
+        maxFiles,
+        truncated: files.length >= maxFiles,
+      };
+      const cancelled = token?.isCancellationRequested === true;
+      const current = revision === this.indexRevision;
+      if (!cancelled && current) {
+        this.cache = cache;
+        this.dirty = false;
+      }
+      if (cancelled || current || pass === 1) return cache;
     }
-    return cache;
   }
 
   private indexedPathKinds(): Map<string, PathResolution["kind"]> {
@@ -429,6 +437,7 @@ export class ContextSearchService implements vscode.Disposable {
   }
 
   private markDirty(): void {
+    this.indexRevision += 1;
     this.cache = null;
     this.directPathCache.clear();
     this.dirty = true;

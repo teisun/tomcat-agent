@@ -731,12 +731,13 @@ describe("webview provider integration", () => {
 
     expect(
       provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
-    ).toEqual([
+    ).toMatchObject([
       {
         kind: "file",
         label: "app.ts",
         path: "src/app.ts",
         type: "reference",
+        occurrenceId: expect.any(String),
       },
       {
         kind: "file",
@@ -883,7 +884,8 @@ describe("webview provider integration", () => {
       ?.composerDraft
       ?.segments
       .find((segment) => segment.type === "reference");
-    expect(searchReference).toEqual(droppedReference);
+    const { occurrenceId: _occurrence, ...droppedMetadata } = droppedReference!;
+    expect(searchReference).toEqual(droppedMetadata);
 
     const segments = [
       { text: "Inspect ", type: "text" as const },
@@ -944,12 +946,13 @@ describe("webview provider integration", () => {
 
     expect(
       provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
-    ).toEqual([
+    ).toMatchObject([
       {
         kind: "file",
         label: "app.ts",
         path: "src/app.ts",
         type: "reference",
+        occurrenceId: expect.any(String),
       },
       {
         kind: "file",

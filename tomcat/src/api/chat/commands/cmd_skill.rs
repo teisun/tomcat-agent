@@ -73,36 +73,28 @@ async fn run_use(ctx: &ChatContext, name: &str, intent: &str) -> ChatCommandOutc
     }
 
     let snapshot = ctx.skill_set_snapshot();
-    let skill = match snapshot.resolve_any(name) {
-        Some(skill) => skill.clone(),
-        None => {
-            let available = crate::core::skill::available_skill_names_csv(&snapshot);
-            let available = if available.is_empty() {
-                "<none>".to_string()
-            } else {
-                available
-            };
-            println!(
-                "[skill] 未知 skill `{name}`。当前可用技能: {available}。如已修改磁盘，请先执行 /skill reload。"
-            );
-            return ChatCommandOutcome::Handled;
-        }
-    };
+    if snapshot.resolve_any(name).is_none() {
+        let available = crate::core::skill::available_skill_names_csv(&snapshot);
+        let available = if available.is_empty() {
+            "<none>".to_string()
+        } else {
+            available
+        };
+        println!(
+            "[skill] 未知 skill `{name}`。当前可用技能: {available}。如已修改磁盘，请先执行 /skill reload。"
+        );
+        return ChatCommandOutcome::Handled;
+    }
 
-    match crate::core::skill::load_skill_payload(
-        ctx.global_services.primitive.as_ref(),
-        "__agent__",
-        &skill,
-        None,
-    )
-    .await
-    {
-        Ok(payload) => ChatCommandOutcome::Continue {
-            line: format!(
-                "User explicitly requested skill `{name}` for this turn. Treat the skill body below as required context for the current task.\n\n{payload}\n\nCurrent user intent:\n{intent}"
-            ),
-            echo_user: false,
-            history_line: Some(format!("/skill use {name} {intent}")),
+    match super::cmd_command::message(
+        ctx,
+        &format!("skill:{name}"),
+        crate::core::project_instructions::InstructionKind::Skill,
+        intent,
+    ) {
+        Ok(message) => ChatCommandOutcome::UserMessage {
+            message,
+            history_line: format!("/skill use {name} {intent}"),
         },
         Err(error) => {
             println!("[skill] 加载 `{name}` 失败: {error}");

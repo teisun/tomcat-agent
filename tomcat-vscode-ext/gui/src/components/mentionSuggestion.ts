@@ -7,6 +7,7 @@ import { PluginKey } from "@tiptap/pm/state";
 
 import type { ContextSearchMatch, WebviewReference } from "../types";
 import { isTriggerBoundary } from "./suggestionBoundary";
+import { withOccurrence } from "../../../src/shared/composerOccurrences";
 
 const MENTION_PLUGIN_KEY = new PluginKey("tomcat-context-search-mention");
 
@@ -33,14 +34,10 @@ function insertReferenceAtRange(
   options: Pick<CreateMentionSuggestionOptions, "editorHasReference" | "referenceNodeName">,
 ): void {
   const chain = editor.chain().focus().deleteRange(range);
-  if (options.editorHasReference(editor, match.reference)) {
-    chain.run();
-    return;
-  }
   chain
     .insertContent([
       {
-        attrs: match.reference,
+        attrs: withOccurrence({ ...match.reference, occurrenceId: undefined }),
         type: options.referenceNodeName,
       },
       {

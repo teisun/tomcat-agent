@@ -87,9 +87,13 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 {
   "tomcat.path": "/absolute/path/to/tomcat",
   "tomcat.session.defaultCwd": "/absolute/path/to/workspace",
-  "tomcat.serve.extraArgs": []
+  "tomcat.serve.extraArgs": [],
+  "tomcat.layout.controlsInset": 10,
+  "tomcat.layout.contentInset": 15
 }
 ```
+
+侧栏间距在 **VS Code 设置** 中搜索 `tomcat.layout`，可写入用户或工作区设置；修改后执行 **Developer: Reload Window（重新加载窗口）** 生效。数值是距离侧栏真实边缘的像素，范围 0–40：`controlsInset` 控制会话栏和输入框边框，`contentInset` 控制回复、卡片、Todo、附件条。内容线应大于控件线（例如 10/15 或 10/17），框内文字才与回复对齐；否则框内缩进按 0 处理。正文从一行自然增长，最高为 webview 高度的 30%，超过后内部滚动；附件保持在框外。
 
 按优先级从高到低：
 
@@ -116,8 +120,20 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 - `/reload` 同时重扫 Skill 和插件工具，不必重启会话。外部 CLI 或手工改资源后主动执行；不是配置热加载，也不是 MCP 重连。
 - `/install './带空格路径' agent` 与 `/uninstall 包名 agent` 自动同步资源。必须指定 `current-project`（`scope`）、`agent` 或 `global`；缺参数返回用法。
 - 卸载用 `tomcat packages` 列出的包名，不是工具名。手工放入、不在账本的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
-- 菜单在开头、空格后或换行后触发，路径/URL 内不触发；句中条目标注“仅在开头生效”。只有开头命令且纯文字才执行；附件、引用和未知命令仍发普通提示词。
+- 菜单在开头、空格后或换行后触发，路径/URL 内不触发；句中隐藏 Terminal 组。只有开头的共享管理命令且纯文字才本地执行；附件、引用和未知文字仍发普通提示词。
 - 等回包时禁用发送、压缩和 Build，不追加虚假用户消息。旧 Serve 没有命令表时保持原输入行为。
+
+### 项目 Commands、Skills 与 Rules
+
+```text
+/ 菜单 → Skills / Commands / Terminal
+Skills、Commands → 黄色调用标签 → 发送 → 后端保存正文快照
+Terminal → 斜杠文字 → Tomcat 本地管理操作
+```
+
+项目 `.cursor/commands/**/*.md`、`.agents/commands/**/*.md` 出现在 Commands 组；frontmatter 的 `description` 可选，有描述才显示第二行。同名不同来源分别显示。每组默认 3 项加 **Show N more**，4 项时直接全显示。黄色调用标签没有 ×：点击选中或将光标移到相邻位置，用 Backspace/Delete 删除；历史气泡使用同一标签。历史 retry 使用发送时的快照，恢复到输入框再发则读当前文件。普通文件、选区引用可以重复添加。
+
+两目录 `rules/` 下的 `.md`、`.mdc` 都只在布尔 `alwaysApply: true` 时生效，注入 **User Custom Instructions**，修改后下一用户轮次刷新；本期不支持 Cursor 的 globs、模型选择、规则专用手动触发。执行 `/reload` 可查看生效数量和跳过原因。运行时读取项目指令尊重 Deny、不弹工具路径确认，LLM 工具权限门禁保持不变。旧 CLI 仅显示 Terminal，恢复的调用标签会被拒绝发送而保留草稿。新版迁移旧草稿；旧运行时不能回放新 command/skill 类型的历史，需保留匹配版本。CLI 用法与详细边界见 [使用说明](../tomcat/docs/user-guide.md#project-commands-and-rules)。
 
 ## 故障排查
 

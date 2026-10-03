@@ -52,6 +52,8 @@ export interface IngestAttachmentInput {
   providerMimeType?: null | string;
   thumbBase64?: null | string;
 }
+export type InstructionKind = "command" | "skill";
+
 export type ListSessionsScope = "live" | "disk";
 
 export type Message = any;
@@ -128,6 +130,11 @@ export interface ServeCacheObservation {
   tailChangedCount: number;
 }
 export type ServeContentSegment = {
+  kind: InstructionKind;
+  label: string;
+  resourceId: string;
+  type: "instruction";
+} | {
   kind: ServeContextRefKind;
   label: string;
   lineEnd?: null | number;
@@ -402,6 +409,14 @@ export interface IngestAttachmentResponse {
   mimeType: string;
   providerSha?: null | string;
 }
+export interface InstructionCard {
+  description: string;
+  id: string;
+  kind: InstructionKind;
+  name: string;
+  path: string;
+  source: string;
+}
 export interface ListConnectorToolsPayload {
   attempt: number;
   configKey: string;
@@ -642,6 +657,10 @@ export type ServeCommand = {
   id?: null | string;
   sessionId?: null | string;
   type: "compact";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  type: "get_instruction_catalog";
 } | {
   id?: null | string;
   sessionId?: null | string;
