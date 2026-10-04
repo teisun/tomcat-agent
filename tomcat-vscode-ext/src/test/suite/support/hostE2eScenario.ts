@@ -123,27 +123,29 @@ async function waitForWebviewState<T>(
   );
 }
 
-async function waitForPreparedChange(
-  api: TomcatExtensionApi,
+function isDiffPreview(uri: vscode.Uri, sessionId: string, toolCallId: string): boolean {
+  const query = new URLSearchParams(uri.query);
+  return uri.scheme === "tomcat-diff" &&
+    query.get("sessionId") === sessionId && query.get("toolCallId") === toolCallId;
+}
+
+async function waitForDiffPreview(
+  sessionId: string,
   toolCallId: string,
-  predicate?: (
-    change: NonNullable<
-      ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>
-    >,
-  ) => boolean,
-  timeoutMs = 15_000,
-): Promise<
-  NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>
-> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const change = api.__testing.getPreparedChange(toolCallId);
-    if (change && (!predicate || predicate(change))) {
-      return change;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`Timed out waiting for prepared change ${toolCallId}`);
+  expected: readonly { before: string; after: string }[],
+): Promise<readonly vscode.TextDocument[]> {
+  let documents: vscode.TextDocument[] = [];
+  await waitFor(() => {
+    documents = vscode.workspace.textDocuments.filter((document) =>
+      !document.isClosed && isDiffPreview(document.uri, sessionId, toolCallId));
+    return expected.every((fragment, index) =>
+      (["original", "proposed"] as const).every((side) => documents.some((document) => {
+        const query = new URLSearchParams(document.uri.query);
+        return query.get("fragment") === String(index) && query.get("side") === side &&
+          stripTerminalNewline(document.getText()) === (side === "original" ? fragment.before : fragment.after);
+      })));
+  }, 20_000, `Timed out waiting for actual preview documents for ${sessionId}/${toolCallId}`);
+  return documents;
 }
 
 async function waitForSettingsPanelState<T>(
@@ -200,27 +202,13 @@ async function waitForSettingsPanelDom<T>(
   );
 }
 
-async function waitForVisiblePreparedDiffEditors(
+async function waitForVisibleDiffPreviewEditors(
+  sessionId: string,
   toolCallId: string,
-  timeoutMs = 15_000,
-): Promise<readonly vscode.TextEditor[]> {
-  const startedAt = Date.now();
-  const encodedToolCallId = encodeURIComponent(toolCallId);
-  while (Date.now() - startedAt < timeoutMs) {
-    const editors = vscode.window.visibleTextEditors.filter(
-      (editor) =>
-        editor.document.uri.scheme === "tomcat-diff" &&
-        editor.document.uri.path.split("/").filter(Boolean)[0] ===
-          encodedToolCallId,
-    );
-    if (editors.length >= 2) {
-      return editors;
-    }
-    await pause(100);
-  }
-  throw new Error(
-    `Timed out waiting for visible diff editors for ${toolCallId}`,
-  );
+): Promise<void> {
+  await waitFor(() => vscode.window.visibleTextEditors.filter((editor) =>
+    isDiffPreview(editor.document.uri, sessionId, toolCallId)).length >= 2,
+  20_000, `Timed out waiting for visible diff editors for ${toolCallId}`);
 }
 
 async function waitForWebviewBootstrapSettled(
@@ -520,29 +508,6 @@ function buildWebviewIntent(
 
 function stripTerminalNewline(value: string): string {
   return value.replace(/\r?\n$/u, "");
-}
-
-function assertPreparedChangeMatches(
-  change: NonNullable<
-    ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>
-  >,
-  displayPath: string,
-  expectedBefore: string,
-  expectedAfter: string,
-): void {
-  assert.equal(change.displayPath, displayPath);
-  assert.notEqual(
-    change.originalContent.length,
-    0,
-    "expected reconstructed original content",
-  );
-  assert.notEqual(
-    change.proposedContent.length,
-    0,
-    "expected reconstructed proposed content",
-  );
-  assert.equal(stripTerminalNewline(change.originalContent), expectedBefore);
-  assert.equal(stripTerminalNewline(change.proposedContent), expectedAfter);
 }
 
 function buildSettingsIntent(intent: SettingsIntent): SettingsIntent {
@@ -2446,20 +2411,13 @@ export async function assertWebviewDiffFlow(
   assert.doesNotMatch(snapshot.html, /Apply Edit/u);
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
-      data: { toolCallId: diffToolCallId },
+      data: { sessionId: activeSessionId, toolCallId: diffToolCallId },
       messageId: "webview-diff-open-intent",
       type: "openDiff",
     }),
   );
-  const preparedChange = await waitForPreparedChange(
-    api,
-    diffToolCallId,
-    (change) =>
-      stripTerminalNewline(change.originalContent) === "before" &&
-      stripTerminalNewline(change.proposedContent) === "after",
-  );
-  assertPreparedChangeMatches(preparedChange, editFile, "before", "after");
-  await waitForVisiblePreparedDiffEditors(diffToolCallId, 20_000);
+  await waitForDiffPreview(activeSessionId, diffToolCallId, [{ before: "before", after: "after" }]);
+  await waitForVisibleDiffPreviewEditors(activeSessionId, diffToolCallId);
   assert.equal(
     vscode.workspace
       .getConfiguration("diffEditor")
@@ -2540,12 +2498,6 @@ export async function assertWebviewEditDisplayReplayFlow(
     api,
     "webview-edit-display-replay-session",
   );
-  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
-  const fixtureDir = path.join(
-    workspaceDir,
-    "test-stuff",
-    "edit-display-replay",
-  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -2558,9 +2510,6 @@ export async function assertWebviewEditDisplayReplayFlow(
     }),
   );
   await waitForEvent(api, { sessionId, timeoutMs: 20_000, type: "agent_end" });
-  const fixtureRealDir = await fs.realpath(fixtureDir);
-  const singlePath = path.join(fixtureRealDir, "single.ts");
-  const batchSinglePath = path.join(fixtureRealDir, "batch-single.ts");
 
   const initial = await waitForWebviewDomSnapshot(
     api,
@@ -2586,27 +2535,15 @@ export async function assertWebviewEditDisplayReplayFlow(
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
-      data: { toolCallId: "tc-edit-display-single" },
+      data: { sessionId, toolCallId: "tc-edit-display-single" },
       messageId: "webview-edit-display-single-open-diff",
       type: "openDiff",
     }),
   );
-  const singlePreparedChange = await waitForPreparedChange(
-    api,
-    "tc-edit-display-single",
-    (change) =>
-      stripTerminalNewline(change.originalContent) ===
-        "export const mode = 'before';" &&
-      stripTerminalNewline(change.proposedContent) ===
-        "export const mode = 'after';",
-  );
-  assertPreparedChangeMatches(
-    singlePreparedChange,
-    singlePath,
-    "export const mode = 'before';",
-    "export const mode = 'after';",
-  );
-  await waitForVisiblePreparedDiffEditors("tc-edit-display-single", 20_000);
+  await waitForDiffPreview(sessionId, "tc-edit-display-single", [{
+    before: "export const mode = 'before';", after: "export const mode = 'after';",
+  }]);
+  await waitForVisibleDiffPreviewEditors(sessionId, "tc-edit-display-single");
 
   await api.__testing.reloadWebview();
   const reloaded = await waitForWebviewDomSnapshot(
@@ -2629,30 +2566,15 @@ export async function assertWebviewEditDisplayReplayFlow(
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
-      data: { toolCallId: "tc-edit-display-batch-single" },
+      data: { sessionId, toolCallId: "tc-edit-display-batch-single" },
       messageId: "webview-edit-display-batch-single-open-diff",
       type: "openDiff",
     }),
   );
-  const batchSinglePreparedChange = await waitForPreparedChange(
-    api,
-    "tc-edit-display-batch-single",
-    (change) =>
-      stripTerminalNewline(change.originalContent) ===
-        "export const batch = 'before';" &&
-      stripTerminalNewline(change.proposedContent) ===
-        "export const batch = 'after';",
-  );
-  assertPreparedChangeMatches(
-    batchSinglePreparedChange,
-    batchSinglePath,
-    "export const batch = 'before';",
-    "export const batch = 'after';",
-  );
-  await waitForVisiblePreparedDiffEditors(
-    "tc-edit-display-batch-single",
-    20_000,
-  );
+  await waitForDiffPreview(sessionId, "tc-edit-display-batch-single", [{
+    before: "export const batch = 'before';", after: "export const batch = 'after';",
+  }]);
+  await waitForVisibleDiffPreviewEditors(sessionId, "tc-edit-display-batch-single");
 
   await api.__testing.sendWebviewDomAction({
     index: 0,
@@ -2669,6 +2591,64 @@ export async function assertWebviewEditDisplayReplayFlow(
     20_000,
   );
   assert.match(expanded.html, /export const multi = 'after';/u);
+}
+
+export async function assertWebviewCompactDiffFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api, "compact-diff-session");
+  await api.__testing.sendWebviewIntent(buildWebviewIntent({
+    type: "prompt", messageId: "compact-diff-prompt", data: { sessionId, text: "compact diff preview" },
+  }));
+  await waitForEvent(api, { sessionId, type: "agent_end", timeoutMs: 20_000 });
+  const waitForCards = () => waitForWebviewDomSnapshot(api, snapshot =>
+    snapshot.activeSessionId === sessionId && (snapshot.html.match(/data-testid="tool-row-open-diff"/gu) ?? []).length === 2
+      ? snapshot : undefined);
+  await waitForCards();
+  const fragment = (line: number) => {
+    const before = Array.from({ length: 7 }, (_, i) => `const value${line - 3 + i} = 'before';`);
+    return { before: before.join("\n"), after: before.map((text, i) => i === 3 ? text.replace("before", "after") : text).join("\n") };
+  };
+  const driver = await WorkbenchFindDriver.connectFromEnvironment();
+  try {
+    // A real card click must carry its session and open the native page directly.
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "tool-row-open-diff", index: 0 });
+    await waitForDiffPreview(sessionId, "tc-compact-single", [fragment(236)]);
+    await vscode.commands.executeCommand("workbench.action.closeSidebar");
+    await driver.setViewport(1440, 1000);
+    const singleLabels = await driver.waitForMultiDiffEntries(1);
+    assert.match(singleLabels[0], /233-239/u);
+
+    await api.__testing.focusWebview();
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "tool-row-open-diff", index: 1 });
+    const documents = await waitForDiffPreview(sessionId, "tc-compact-multiple", [fragment(30), fragment(236)]);
+    const originalUris = documents.map(document => document.uri.toString()).sort();
+    const labels = await driver.waitForMultiDiffEntries(2);
+    assert.match(labels[0], /27-33/u);
+    assert.match(labels[1], /233-239/u);
+    const savedText = documents.map(document => document.getText());
+    for (const side of ["original", "modified"] as const) {
+      await driver.tryTypingInMultiDiff(side, "MUST_NOT_EDIT_HISTORY");
+      await pause(100);
+      assert.deepEqual(documents.map(document => document.getText()), savedText, `${side} must be read-only`);
+    }
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await captureWorkbenchArtifacts(transcriptVisualArtifactPath("compact-diff-expanded.png"));
+    }
+
+    const file = path.join(requireEnv(TEST_DEFAULT_CWD_ENV), "test-stuff", "compact-diff", "multiple.ts");
+    await fs.writeFile(file, "// disk has changed after the historical edit\n", "utf8");
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    await api.__testing.reloadWebview();
+    await waitForCards();
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "tool-row-open-diff", index: 1 });
+    const replay = await waitForDiffPreview(sessionId, "tc-compact-multiple", [fragment(30), fragment(236)]);
+    assert.deepEqual(replay.map(document => document.uri.toString()).sort(), originalUris);
+    await driver.waitForMultiDiffEntries(2);
+    assert.equal(await fs.readFile(file, "utf8"), "// disk has changed after the historical edit\n");
+  } finally {
+    driver.close();
+  }
 }
 
 export async function assertWebviewReviewProgressFlow(

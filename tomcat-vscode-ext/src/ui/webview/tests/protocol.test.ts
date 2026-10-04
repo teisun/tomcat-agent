@@ -257,6 +257,7 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          sessionId: "s1",
           toolCallId: "tool-1",
         },
         messageId: "open-diff-1",
@@ -272,6 +273,16 @@ describe("webview protocol helpers", () => {
         type: "resyncSessionView",
       }),
     ).toBe(true);
+  });
+
+  it.each([
+    { toolCallId: "tool-1" },
+    { sessionId: null, toolCallId: "tool-1" },
+    { sessionId: 1, toolCallId: "tool-1" },
+    { sessionId: "s1" },
+    { sessionId: "s1", toolCallId: null },
+  ])("rejects openDiff without an explicit session and tool identity: %j", (data) => {
+    expect(isWebviewIntent({ data, messageId: "open-diff-invalid", type: "openDiff" })).toBe(false);
   });
 
   it("strictly rejects malformed or oversized draft fork captures", () => {

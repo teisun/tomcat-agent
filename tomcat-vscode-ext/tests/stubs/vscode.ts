@@ -41,6 +41,12 @@ let lastDiffCommand:
       title?: string;
     }
   | undefined;
+let lastChangesCommand:
+  | {
+      title: string;
+      changes: [Uri, Uri, Uri][];
+    }
+  | undefined;
 let lastRevealRange:
   | {
       range: Range;
@@ -453,6 +459,13 @@ export const commands = {
       };
       return undefined as T;
     }
+    if (command === "vscode.changes") {
+      lastChangesCommand = {
+        title: args[0] as string,
+        changes: args[1] as [Uri, Uri, Uri][],
+      };
+      return undefined as T;
+    }
 
     const handler = commandHandlers.get(command);
     if (!handler) {
@@ -809,6 +822,9 @@ export const __testing = {
   get lastDiffCommand() {
     return lastDiffCommand;
   },
+  get lastChangesCommand() {
+    return lastChangesCommand;
+  },
   get lastRevealRange() {
     return lastRevealRange;
   },
@@ -841,6 +857,7 @@ export const __testing = {
     warningMessageHandler = undefined;
     openDialogHandler = undefined;
     lastDiffCommand = undefined;
+    lastChangesCommand = undefined;
     lastRevealRange = undefined;
     textDocuments.length = 0;
     window.activeTextEditor = undefined;

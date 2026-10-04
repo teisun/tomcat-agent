@@ -109,11 +109,11 @@ describe("DiffView", () => {
     render(<DiffView diff={undefined} />);
 
     expect(screen.getByTestId("diff-view-empty").textContent).toContain(
-      "diff 过大已截断，点击打开文件对比",
+      "未保存本次修改的 Diff",
     );
   });
 
-  it("explains that a truncated diff can be opened from the file", () => {
+  it("explains that truncated content cannot provide the historical comparison", () => {
     render(
       <DiffView
         diff={buildDiff([
@@ -124,7 +124,14 @@ describe("DiffView", () => {
     );
 
     expect(screen.getByTestId("diff-view-truncated").textContent).toContain(
-      "diff 过大已截断，点击打开文件对比",
+      "Diff 过大已截断，无法查看本次对比",
+    );
+  });
+
+  it("distinguishes a truncated missing payload from an unsaved diff", () => {
+    render(<DiffView truncated />);
+    expect(screen.getByTestId("diff-view-empty").textContent).toContain(
+      "Diff 过大已截断，无法查看本次对比",
     );
   });
 });

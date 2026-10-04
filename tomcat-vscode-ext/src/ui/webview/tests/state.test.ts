@@ -4606,7 +4606,7 @@ describe("openFile intent protocol", () => {
   it("accepts openDiff intent shape", () => {
     expect(
       isWebviewIntent({
-        data: { toolCallId: "tool-1" },
+        data: { sessionId: "s1", toolCallId: "tool-1" },
         messageId: "open-diff-1",
         type: "openDiff",
       }),

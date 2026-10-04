@@ -4,6 +4,7 @@ import type {
   ControlRequestFrame,
 } from "../../serveClient/protocol";
 import type {
+  FileDiffLine,
   ServeAttachment,
   ServeContentSegment,
   ServeEvent,
@@ -31,6 +32,7 @@ import type {
 } from "../../shared/imagePreviewProtocol";
 import { isSpeed, type Speed } from "../../shared/modelSpeed";
 import type { PathResolution } from "../../shared/pathResolution";
+export type { FileDiffLine } from "../../serveClient/wire";
 
 export type WebviewMessageSegment = ServeContentSegment & { occurrenceId?: string; path?: string };
 export type WebviewInstruction = Extract<WebviewMessageSegment, { type: "instruction" }>;
@@ -142,16 +144,6 @@ export interface WebviewTodo {
   content: string;
   id: string;
   status: "cancelled" | "completed" | "in_progress" | "pending";
-}
-
-export type FileDiffTag = "add" | "ctx" | "del" | "gap";
-
-export interface FileDiffLine {
-  newLine?: number | null;
-  oldLine?: number | null;
-  skippedLines?: number | null;
-  tag: FileDiffTag;
-  text: string;
 }
 
 export interface WebviewToolDisplayFile {
@@ -827,6 +819,7 @@ export type WebviewIntent =
       messageId: string;
       type: "openDiff";
       data: {
+        sessionId: string;
         toolCallId: string;
       };
     }
@@ -1232,7 +1225,11 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openLink":
       return isRecord(value.data) && isString(value.data.href);
     case "openDiff":
-      return isRecord(value.data) && isString(value.data.toolCallId);
+      return (
+        isRecord(value.data) &&
+        isString(value.data.sessionId) &&
+        isString(value.data.toolCallId)
+      );
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
     case "openModelSettings":

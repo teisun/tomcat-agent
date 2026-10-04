@@ -937,6 +937,47 @@ function buildGiantHistoryTools() {
   });
 }
 
+function buildCompactDiffTools() {
+  const fixtureDir = path.join(process.cwd(), "test-stuff", "compact-diff");
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  return [
+    { name: "single", changes: [235] },
+    { name: "multiple", changes: [29, 235] },
+  ].map(({ name, changes }) => {
+    const file = path.join(fixtureDir, name + ".ts");
+    const before = Array.from({ length: 300 }, (_, i) => "const value" + (i + 1) + " = 'before';");
+    const after = before.map((line, i) => changes.includes(i) ? line.replace("before", "after") : line);
+    const diff = [];
+    let skipped = 0;
+    const flushGap = () => {
+      if (skipped > 0) diff.push({ tag: "gap", text: skipped + " unmodified lines", skippedLines: skipped });
+      skipped = 0;
+    };
+    before.forEach((text, i) => {
+      if (!changes.some((changed) => Math.abs(changed - i) <= 3)) {
+        skipped += 1;
+        return;
+      }
+      flushGap();
+      if (changes.includes(i)) {
+        diff.push({ tag: "del", text, oldLine: i + 1, newLine: null });
+        diff.push({ tag: "add", text: after[i], oldLine: null, newLine: i + 1 });
+      } else {
+        diff.push({ tag: "ctx", text, oldLine: i + 1, newLine: i + 1 });
+      }
+    });
+    flushGap();
+    fs.writeFileSync(file, after.join("\\n") + "\\n", "utf8");
+    return {
+      toolCallId: "tc-compact-" + name,
+      toolName: "edit",
+      args: { path: file },
+      display: { kind: "file", file, diff, added: changes.length, removed: changes.length },
+      result: "已编辑: " + file,
+    };
+  });
+}
+
 function buildEditDisplayReplayTools() {
   const fixtureDir = path.join(process.cwd(), "test-stuff", "edit-display-replay");
   fs.mkdirSync(fixtureDir, { recursive: true });
@@ -1774,6 +1815,17 @@ function handlePrompt(frame) {
     for (const tool of giantTools) {
       recordHistoryToolResult(sessionId, tool);
     }
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("compact diff preview")) {
+    const tools = buildCompactDiffTools();
+    emitMessageDelta(sessionId, "I changed isolated lines in two 300-line files.");
+    for (const tool of tools) emitCompletedTool(sessionId, tool);
+    emitTurnEnd(sessionId, { message: {}, summaryTitle: "Compact diff preview", toolResults: [], turnIndex: 1 });
+    recordHistoryAssistantWithTools(sessionId, "I changed isolated lines in two 300-line files.", tools, "Compact diff preview");
+    for (const tool of tools) recordHistoryToolResult(sessionId, tool);
     finishTurn(sessionId, null);
     return;
   }

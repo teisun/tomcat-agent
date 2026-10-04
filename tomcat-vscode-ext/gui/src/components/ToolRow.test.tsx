@@ -94,7 +94,8 @@ describe("ToolRow", () => {
     expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
   });
 
-  it("opens the real file when a compact diff contains an omitted gap", () => {
+  it.each(["edit", "write", "hashline_edit"])("opens the saved diff when %s contains an omitted gap", (toolName) => {
+    const onOpenDiff = vi.fn();
     const onOpenFile = vi.fn();
     render(
       <ToolRow
@@ -106,16 +107,17 @@ describe("ToolRow", () => {
           ],
           diffStat: { added: 1, removed: 0 },
           display: { file: "/workspace/a.rs", kind: "file" },
-          toolName: "edit",
+          toolName,
         })}
-        onOpenDiff={vi.fn()}
+        onOpenDiff={onOpenDiff}
         onOpenFile={onOpenFile}
       />,
     );
 
-    expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
-    fireEvent.click(screen.getByTestId("tool-row-open-file"));
-    expect(onOpenFile).toHaveBeenCalledWith("/workspace/a.rs");
+    expect(screen.queryByTestId("tool-row-open-file")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-open-diff"));
+    expect(onOpenDiff).toHaveBeenCalledWith("tc-1");
+    expect(onOpenFile).not.toHaveBeenCalled();
   });
 
   it("offers the current file when the inline diff was truncated", () => {
@@ -135,8 +137,10 @@ describe("ToolRow", () => {
     );
 
     expect(screen.getByTestId("diff-view-truncated").textContent).toContain(
-      "diff 过大已截断，点击打开文件对比",
+      "Diff 过大已截断，无法查看本次对比",
     );
+    expect(screen.getByRole("button", { name: "打开当前文件" })).toBeTruthy();
+    expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
     fireEvent.click(screen.getByTestId("tool-row-open-file"));
     expect(onOpenFile).toHaveBeenCalledWith("/workspace/a.rs");
   });
@@ -165,6 +169,24 @@ describe("ToolRow", () => {
 
     expect(screen.getByTestId("diff-view-expired").textContent).toContain(
       "超过 7 天保留期",
+    );
+    expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
+  });
+
+  it.each([
+    { diffExpired: true, diff: [{ tag: "add" as const, text: "expired content" }] },
+    { diff: [{ tag: "ctx" as const, text: "unchanged context" }] },
+  ])("does not offer View diff for expired or unchanged saved content", (overrides) => {
+    render(
+      <ToolRow
+        item={buildTool({
+          ...overrides,
+          display: { file: "/workspace/a.rs", kind: "file" },
+          toolName: "edit",
+        })}
+        onOpenDiff={vi.fn()}
+        onOpenFile={vi.fn()}
+      />,
     );
     expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
   });

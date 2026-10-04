@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import { isDiffViewable } from "../../../src/shared/diffPresentation";
 
 import type {
   AskQuestionAnswer,
@@ -1414,10 +1415,7 @@ function ToolRowComponent({
   );
   const hasStructuredDiff = (item.diff?.length ?? 0) > 0;
   const fileDisplay = item.display?.kind === "file" ? item.display : undefined;
-  const hasReconstructableDiff =
-    hasStructuredDiff &&
-    item.diffTruncated !== true &&
-    !item.diff?.some((line) => line.tag === "gap");
+  const hasViewableDiff = isDiffViewable(item);
   const hasLargeDiffFallback =
     category === "edit" &&
     fileDisplay !== undefined &&
@@ -1448,7 +1446,7 @@ function ToolRowComponent({
     (hasStructuredDiff || hasLargeDiffFallback) &&
     Boolean(onOpenFile);
   const showOpenDiffButton =
-    hasReconstructableDiff && Boolean(item.toolCallId) && Boolean(onOpenDiff);
+    hasViewableDiff && Boolean(item.toolCallId) && Boolean(onOpenDiff);
   const showOpenFileButton = canOpenCurrentFile && !showOpenDiffButton;
 
   const disclosureHeader = (
@@ -1536,7 +1534,7 @@ function ToolRowComponent({
       ) : null}
       {showOpenFileButton ? (
         <button
-          aria-label="打开文件"
+          aria-label="打开当前文件"
           className="tc-tool-row__action-link"
           data-testid="tool-row-open-file"
           onClick={(event) => {
@@ -1547,7 +1545,7 @@ function ToolRowComponent({
           type="button"
         >
           <span aria-hidden="true" className="codicon codicon-go-to-file" />
-          <span>打开文件</span>
+          <span>打开当前文件</span>
         </button>
       ) : null}
     </div>

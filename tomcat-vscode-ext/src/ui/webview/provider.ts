@@ -50,10 +50,13 @@ import {
 } from "../../shared/draftForkProtocol";
 import type { PreviewSection } from "../../shared/imagePreviewProtocol";
 import {
+  createDiffPresentation,
+  isDiffViewable,
+} from "../../shared/diffPresentation";
+import {
   createHostFrameMessageId,
   isWebviewIntent,
   PendingMessageTracker,
-  type FileDiffLine,
   type HostEventFrameContent,
   type HostToWebviewFrame,
   type WebviewApprovalCard,
@@ -125,38 +128,6 @@ type WebviewMessageDelivery = {
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isMutationTool(toolName: string): boolean {
-  return toolName === "write" || toolName === "edit" || toolName === "hashline_edit";
-}
-
-function reconstructDiffPair(diff: FileDiffLine[]): { after: string; before: string } {
-  const before: string[] = [];
-  const after: string[] = [];
-  for (const line of diff) {
-    if (line.tag !== "add") {
-      before.push(line.text);
-    }
-    if (line.tag !== "del") {
-      after.push(line.text);
-    }
-  }
-  return {
-    after: after.join("\n"),
-    before: before.join("\n"),
-  };
-}
-
-function isReconstructableDiff(
-  diff: FileDiffLine[] | undefined,
-  truncated: boolean | undefined,
-): diff is FileDiffLine[] {
-  return (
-    truncated !== true &&
-    Boolean(diff?.length) &&
-    !diff?.some((line) => line.tag === "gap")
-  );
 }
 
 export interface TomcatWebviewProviderDeps {
@@ -1031,17 +1002,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private findToolCard(
+    sessionId: string,
     toolCallId: string,
-  ): { sessionId: string; tool: WebviewToolCard } | undefined {
-    for (const [sessionId, session] of Object.entries(this.peekState().sessionViews)) {
-      const tool = session.timeline.find(
-        (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
-      );
-      if (tool) {
-        return { sessionId, tool };
-      }
-    }
-    return undefined;
+  ): WebviewToolCard | undefined {
+    return this.peekState().sessionViews[sessionId]?.timeline.find(
+      (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+    );
   }
 
   async refreshModelCatalog(): Promise<void> {
@@ -2203,48 +2169,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       }
       case "openDiff": {
-        const toolInfo = this.findToolCard(intent.data.toolCallId);
-        const tool = toolInfo?.tool;
+        const { sessionId, toolCallId } = intent.data;
+        const tool = this.findToolCard(sessionId, toolCallId);
         const displayPath =
           tool?.display?.kind === "file"
             ? tool.display.file
             : typeof tool?.args?.path === "string"
               ? tool.args.path
               : null;
-        if (!tool || !displayPath) {
+        if (!tool || !displayPath || !isDiffViewable(tool)) {
+          await vscode.window.showWarningMessage("无法查看变更：这次修改没有可查看的 diff。");
           return;
         }
         try {
-          if (isReconstructableDiff(tool.diff, tool.diffTruncated)) {
-            const { after, before } = reconstructDiffPair(tool.diff);
-            await this.deps.ide.openReconstructedDiff(
-              intent.data.toolCallId,
-              displayPath,
-              before,
-              after,
-            );
-          } else {
-            await this.deps.ide.showFile(displayPath);
-            const sessionId = toolInfo?.sessionId ?? this.peekState().activeSessionId;
-            if (sessionId) {
-              this.stateStore.appendMessage(
-                sessionId,
-                "notice",
-                "diff 过大或上下文不完整，已打开当前文件。",
-              );
-              await this.postState();
-            }
-          }
+          await this.deps.ide.openDiffPreview(
+            sessionId,
+            toolCallId,
+            displayPath,
+            createDiffPresentation(tool.diff),
+          );
         } catch (error) {
-          const sessionId = this.peekState().activeSessionId;
-          if (sessionId) {
-            this.stateStore.appendMessage(
-              sessionId,
-              "error",
-              formatBridgeError(`open diff ${displayPath}`, error),
-            );
-            await this.postState();
-          }
+          await vscode.window.showErrorMessage(
+            formatBridgeError(`open diff ${displayPath}`, error),
+          );
         }
         return;
       }
@@ -2301,38 +2248,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
-    if (
-      event.type === "tool_execution_start" &&
-      isMutationTool(event.toolName) &&
-      typeof this.deps.ide.rememberToolStart === "function"
-    ) {
-      try {
-        await this.deps.ide.rememberToolStart(event.toolCallId, event.args);
-      } catch (error) {
-        console.warn("Tomcat webview failed to capture tool start snapshot", error);
-      }
-    }
-    if (
-      event.type === "tool_execution_end" &&
-      event.display?.kind === "file" &&
-      isMutationTool(event.toolName) &&
-      typeof this.deps.ide.rememberToolResult === "function"
-    ) {
-      try {
-        await this.deps.ide.rememberToolResult(
-          event.toolCallId,
-          event.display.file,
-          isReconstructableDiff(
-            event.display.diff ?? undefined,
-            event.display.diffTruncated ?? undefined,
-          )
-            ? reconstructDiffPair(event.display.diff!)
-            : undefined,
-        );
-      } catch (error) {
-        console.warn("Tomcat webview failed to capture tool result snapshot", error);
-      }
-    }
     if (
       event.type === "agent_end"
       && event.sessionId

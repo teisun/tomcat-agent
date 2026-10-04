@@ -13,7 +13,8 @@ import {
   parsePlanFrontmatter,
   readPlanMetadata,
 } from "../provider";
-import type { HostToWebviewFrame } from "../protocol";
+import type { FileDiffLine, HostToWebviewFrame, WebviewToolDisplayFile } from "../protocol";
+import type { WebviewStateStore } from "../state";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -1108,27 +1109,17 @@ describe("context search intent handling", () => {
 });
 
 describe("mutation diff stat injection", () => {
-  it("serializes mutation snapshot events so tool results cannot overtake tool starts", async () => {
+  it("serializes serve events while a plan preview refresh is pending", async () => {
     let emitEvent: ((event: Record<string, unknown>) => void) | undefined;
-    let releaseStart:
-      | ((value?: void | PromiseLike<void>) => void)
-      | null = null;
-    const rememberToolStart = vi.fn().mockImplementation(
-      async () =>
-        new Promise<void>((resolve) => {
-          releaseStart = resolve;
-        }),
-    );
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/app.ts",
+    let releaseRefresh!: () => void;
+    const refreshPending = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
     });
+    const refreshPlanPreview = vi.fn().mockReturnValue(refreshPending);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      ide: {
-        rememberToolResult,
-        rememberToolStart,
-      } as never,
+      ide: {} as never,
       initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: (listener: (event: Record<string, unknown>) => void) => {
@@ -1136,43 +1127,34 @@ describe("mutation diff stat injection", () => {
           return { dispose() {} };
         },
       } as never,
+      refreshPlanPreview,
       sessionRouter: {} as never,
     });
-
-    emitEvent?.({
+    const host = provider as unknown as { stateStore: WebviewStateStore; serveEventQueue: Promise<void> };
+    const applyEvent = vi.spyOn(host.stateStore, "applyEvent");
+    const toolEvent = {
       args: { path: "src/app.ts" },
       sessionId: "s1",
       toolCallId: "tool-edit-race",
       toolName: "edit",
       type: "tool_execution_start",
-    });
-    emitEvent?.({
-      display: { file: "src/app.ts", kind: "file" },
-      isError: false,
-      result: "updated file",
-      sessionId: "s1",
-      toolCallId: "tool-edit-race",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
+    };
 
-    await Promise.resolve();
-    expect(rememberToolStart).toHaveBeenCalledTimes(1);
-    expect(rememberToolResult).not.toHaveBeenCalled();
+    try {
+      emitEvent!({ type: "plan.update", sessionId: "s1", planId: "plan-1" });
+      await vi.waitFor(() => expect(refreshPlanPreview).toHaveBeenCalledTimes(1));
+      emitEvent!(toolEvent);
+      await Promise.resolve();
+      expect(applyEvent).not.toHaveBeenCalledWith(toolEvent);
 
-    if (!releaseStart) {
-      throw new Error("Expected queued tool-start release handle.");
+      releaseRefresh();
+      await host.serveEventQueue;
+      expect(applyEvent).toHaveBeenCalledWith(toolEvent);
+    } finally {
+      releaseRefresh();
+      await host.serveEventQueue;
+      provider.dispose();
     }
-    (releaseStart as (value?: void | PromiseLike<void>) => void)(undefined);
-    await vi.waitFor(() => {
-      expect(rememberToolResult).toHaveBeenCalledWith(
-        "tool-edit-race",
-        "src/app.ts",
-        undefined,
-      );
-    });
-
-    provider.dispose();
   });
 
   it("keeps an errored edit tool settled as complete+error through turn_end and agent_idle", async () => {
@@ -1621,267 +1603,242 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
-  it("routes openDiff intents into ide.openReconstructedDiff", async () => {
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/app.ts",
-    });
+  function createDiffProvider() {
+    const openDiffPreview = vi.fn().mockResolvedValue(undefined);
     const showFile = vi.fn().mockResolvedValue(undefined);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {
-        getPreparedChange: () => undefined,
-        openReconstructedDiff,
-        rememberToolResult,
+        openDiffPreview,
         showFile,
       } as never,
       initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
-      messenger: {
-        onEvent: () => ({ dispose() {} }),
-      } as never,
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
       sessionRouter: {} as never,
     });
-
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: {
-        added: 1,
-        diff: [
-          { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
-          { newLine: null, oldLine: 2, tag: "del", text: "old line" },
-          { newLine: 2, oldLine: null, tag: "add", text: "new line" },
-        ],
-        file: "src/app.ts",
-        kind: "file",
-        removed: 1,
-      },
+    const host = provider as unknown as {
+      handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      stateStore: WebviewStateStore;
+    };
+    const recordDiff = async (
+      display: WebviewToolDisplayFile,
+      sessionId = "s1",
+      toolCallId = "tool-edit-1",
+    ) => host.handleServeEvent({
+      display,
       isError: false,
       result: "updated file",
+      sessionId,
+      toolCallId,
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+    const openDiff = async (sessionId = "s1", toolCallId = "tool-edit-1") =>
+      provider.dispatchTestIntent({
+        data: { sessionId, toolCallId },
+        messageId: `open-diff-${sessionId}-${toolCallId}`,
+        type: "openDiff",
+      });
+    return {
+      host, openDiff, openDiffPreview, provider, recordDiff, showFile,
+    };
+  }
+
+  const fullDiff: FileDiffLine[] = [
+    { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
+    { newLine: null, oldLine: 2, tag: "del", text: "old line" },
+    { newLine: 2, oldLine: null, tag: "add", text: "new line" },
+  ];
+  const fullPresentation = {
+    kind: "full",
+    fragments: [{
+      before: "before\nold line\n",
+      after: "before\nnew line\n",
+      oldRange: { start: 1, end: 2 },
+      newRange: { start: 1, end: 2 },
+    }],
+  };
+
+  it("opens stored live diffs", async () => {
+    const test = createDiffProvider();
+    await test.host.handleServeEvent({
+      args: { path: "src/app.ts" },
       sessionId: "s1",
       toolCallId: "tool-edit-1",
       toolName: "edit",
-      type: "tool_execution_end",
-    });
-
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-edit-1" },
-      messageId: "intent-open-diff-1",
-      type: "openDiff",
-    });
-
-    expect(openReconstructedDiff).toHaveBeenCalledWith(
-      "tool-edit-1",
-      "src/app.ts",
-      "before\nold line",
-      "before\nnew line",
-    );
-    expect(showFile).not.toHaveBeenCalled();
-
-    provider.dispose();
-  });
-
-  it("reconstructs live diffs even when prepared changes already exist", async () => {
-    const getPreparedChange = vi.fn().mockReturnValue({
-      displayPath: "src/app.ts",
-      existedBefore: true,
-      hasStructuredDiff: true,
-    });
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/app.ts",
-    });
-    const rememberToolStart = vi.fn().mockResolvedValue(undefined);
-    const showFile = vi.fn().mockResolvedValue(undefined);
-    const provider = new TomcatWebviewViewProvider({
-      extensionUri: vscode.Uri.file("/workspace/extension"),
-      getDefaultCwd: () => "/workspace",
-      ide: {
-        getPreparedChange,
-        openReconstructedDiff,
-        rememberToolResult,
-        rememberToolStart,
-        showFile,
-      } as never,
-      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
-      messenger: {
-        onEvent: () => ({ dispose() {} }),
-      } as never,
-      sessionRouter: {} as never,
-    });
-
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      args: { path: "src/app.ts" },
-      sessionId: "s1",
-      toolCallId: "tool-edit-live",
-      toolName: "edit",
       type: "tool_execution_start",
     });
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: {
-        added: 1,
-        diff: [
-          { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
-          { newLine: null, oldLine: 2, tag: "del", text: "old line" },
-          { newLine: 2, oldLine: null, tag: "add", text: "new line" },
-        ],
-        file: "src/app.ts",
-        kind: "file",
-        removed: 1,
-      },
-      isError: false,
-      result: "updated file",
-      sessionId: "s1",
-      toolCallId: "tool-edit-live",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
+    await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
 
-    expect(rememberToolStart).toHaveBeenCalledWith("tool-edit-live", { path: "src/app.ts" });
-    expect(rememberToolResult).toHaveBeenCalledWith("tool-edit-live", "src/app.ts", {
-      after: "before\nnew line",
-      before: "before\nold line",
-    });
+    await test.openDiff();
 
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-edit-live" },
-      messageId: "intent-open-diff-live",
-      type: "openDiff",
-    });
-
-    expect(getPreparedChange).not.toHaveBeenCalled();
-    expect(openReconstructedDiff).toHaveBeenCalledWith(
-      "tool-edit-live",
-      "src/app.ts",
-      "before\nold line",
-      "before\nnew line",
+    expect(test.openDiffPreview).toHaveBeenCalledWith(
+      "s1", "tool-edit-1", "src/app.ts", fullPresentation,
     );
-    expect(showFile).not.toHaveBeenCalled();
-
-    provider.dispose();
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
   });
 
-  it("falls back to ide.showFile when openDiff has no structured diff", async () => {
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/huge.ts",
+  it("opens separated gap fragments", async () => {
+    const test = createDiffProvider();
+    await test.recordDiff({
+      file: "src/partial.ts",
+      kind: "file",
+      diff: [
+        ...fullDiff,
+        { tag: "gap", text: "90 unmodified lines" },
+        { newLine: 93, oldLine: 93, tag: "ctx", text: "after gap" },
+        { newLine: 94, oldLine: null, tag: "add", text: "added" },
+      ],
     });
-    const showFile = vi.fn().mockResolvedValue(undefined);
-    const provider = new TomcatWebviewViewProvider({
-      extensionUri: vscode.Uri.file("/workspace/extension"),
-      getDefaultCwd: () => "/workspace",
-      ide: {
-        getPreparedChange: () => undefined,
-        openReconstructedDiff,
-        rememberToolResult,
-        showFile,
-      } as never,
-      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
-      messenger: {
-        onEvent: () => ({ dispose() {} }),
-      } as never,
-      sessionRouter: {} as never,
-    });
+    await test.openDiff();
 
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: { added: 8, file: "src/huge.ts", kind: "file", removed: 2 },
-      isError: false,
-      result: "updated file",
-      sessionId: "s1",
-      toolCallId: "tool-edit-2",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
-
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-edit-2" },
-      messageId: "intent-open-diff-2",
-      type: "openDiff",
-    });
-
-    expect(showFile).toHaveBeenCalledWith("src/huge.ts");
-    expect(openReconstructedDiff).not.toHaveBeenCalled();
-    const session = provider.currentState().sessionViews.s1;
-    expect(
-      session.timeline.some(
-        (item) =>
-          item.type === "message" &&
-          item.kind === "notice" &&
-          item.text.includes("diff 过大或上下文不完整"),
-      ),
-    ).toBe(true);
-
-    provider.dispose();
-  });
-
-  it("opens the current file rather than fabricating a reconstructed diff with gaps", async () => {
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const showFile = vi.fn().mockResolvedValue(undefined);
-    const provider = new TomcatWebviewViewProvider({
-      extensionUri: vscode.Uri.file("/workspace/extension"),
-      getDefaultCwd: () => "/workspace",
-      ide: {
-        getPreparedChange: () => undefined,
-        openReconstructedDiff,
-        rememberToolResult: vi.fn().mockResolvedValue(undefined),
-        showFile,
-      } as never,
-      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
-      messenger: {
-        onEvent: () => ({ dispose() {} }),
-      } as never,
-      sessionRouter: {} as never,
-    });
-
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: {
-        added: 1,
-        diff: [
-          { newLine: 1, oldLine: 1, tag: "ctx", text: "before gap" },
-          { newLine: null, oldLine: null, tag: "gap", text: "90 unmodified lines" },
-          { newLine: 92, oldLine: null, tag: "add", text: "changed" },
+    expect(test.openDiffPreview).toHaveBeenCalledWith(
+      "s1", "tool-edit-1", "src/partial.ts", {
+        kind: "fragments",
+        fragments: [
+          fullPresentation.fragments[0],
+          {
+            before: "after gap\n",
+            after: "after gap\nadded\n",
+            oldRange: { start: 93, end: 93 },
+            newRange: { start: 93, end: 94 },
+          },
         ],
-        file: "src/partial.ts",
-        kind: "file",
-        removed: 0,
       },
-      isError: false,
-      result: "updated file",
-      sessionId: "s1",
-      toolCallId: "tool-partial",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
-
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-partial" },
-      messageId: "intent-open-diff-partial",
-      type: "openDiff",
-    });
-
-    expect(showFile).toHaveBeenCalledWith("src/partial.ts");
-    expect(openReconstructedDiff).not.toHaveBeenCalled();
-    provider.dispose();
+    );
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
   });
+
+  it.each([false, true])("isolates repeated tool IDs across sessions (gaps: %s)", async (hasGap) => {
+    const test = createDiffProvider();
+    const gap: FileDiffLine[] = hasGap ? [{ tag: "gap", text: "earlier lines" }] : [];
+    await test.recordDiff({ file: "src/first.ts", kind: "file", diff: [...gap, ...fullDiff] }, "s1");
+    await test.recordDiff({
+      file: "src/second.ts",
+      kind: "file",
+      diff: [...gap, { newLine: 5, tag: "add", text: "second session" }],
+    }, "s2");
+    test.host.stateStore.setActiveSession("s1");
+    await test.openDiff("s2");
+    await test.openDiff("s1");
+
+    expect(test.openDiffPreview).toHaveBeenNthCalledWith(1,
+      "s2", "tool-edit-1", "src/second.ts", {
+        kind: hasGap ? "fragments" : "full",
+        fragments: [{ before: "", after: "second session\n", newRange: { start: 5, end: 5 } }],
+      },
+    );
+    expect(test.openDiffPreview).toHaveBeenNthCalledWith(2,
+      "s1", "tool-edit-1", "src/first.ts", { ...fullPresentation, kind: hasGap ? "fragments" : "full" },
+    );
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it.each([
+    { display: { file: "src/app.ts", kind: "file" }, reason: "没有保存 diff" },
+    { display: { file: "src/app.ts", kind: "file", diff: fullDiff, expired: true }, reason: "已过期" },
+    { display: { file: "src/app.ts", kind: "file", diff: fullDiff, diffTruncated: true }, reason: "被截断" },
+    { display: { file: "src/app.ts", kind: "file", diff: [fullDiff[0]] }, reason: "没有实际增删" },
+  ] satisfies { display: WebviewToolDisplayFile; reason: string }[])(
+    "reports unavailable diff: $reason without changing the transcript or opening a file",
+    async ({ display }) => {
+      const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+      const test = createDiffProvider();
+      await test.recordDiff(display);
+      const timeline = structuredClone(test.provider.currentState().sessionViews.s1.timeline);
+      await test.openDiff();
+
+      expect(warning).toHaveBeenCalledWith("无法查看变更：这次修改没有可查看的 diff。");
+      expect(test.showFile).not.toHaveBeenCalled();
+      expect(test.openDiffPreview).not.toHaveBeenCalled();
+      expect(test.provider.currentState().sessionViews.s1.timeline).toEqual(timeline);
+      test.provider.dispose();
+    },
+  );
+
+  it.each([
+    ["s2", "tool-edit-1"],
+    ["s1", "missing-tool"],
+  ])("rejects a stale diff request for %s / %s without searching other sessions", async (sessionId, toolCallId) => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+    const test = createDiffProvider();
+    await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
+    await test.openDiff(sessionId, toolCallId);
+
+    expect(warning).toHaveBeenCalledWith("无法查看变更：这次修改没有可查看的 diff。");
+    expect(test.openDiffPreview).not.toHaveBeenCalled();
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it("reports a missing file path instead of silently ignoring the diff request", async () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+    const test = createDiffProvider();
+    await test.recordDiff({ file: "", kind: "file", diff: fullDiff });
+    await test.openDiff();
+    expect(warning).toHaveBeenCalledWith("无法查看变更：这次修改没有可查看的 diff。");
+    expect(test.openDiffPreview).not.toHaveBeenCalled();
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it("reports preview failures in a toast without changing the transcript", async () => {
+    const error = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    const test = createDiffProvider();
+    test.openDiffPreview.mockRejectedValue(new Error("editor failed"));
+    await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
+    const timeline = structuredClone(test.provider.currentState().sessionViews.s1.timeline);
+    await test.openDiff();
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Unable to open diff src/app.ts"));
+    expect(test.showFile).not.toHaveBeenCalled();
+    expect(test.provider.currentState().sessionViews.s1.timeline).toEqual(timeline);
+    test.provider.dispose();
+  });
+
+  it("previews rehydrated history from its stored data after the current file changes", async () => {
+    const test = createDiffProvider();
+    const history = {
+      sessionId: "s1",
+      messages: [{
+        id: "assistant-1",
+        type: "message",
+        message: {
+          role: "assistant",
+          tool_calls: [{
+            id: "tool-edit-1",
+            function: { name: "edit", arguments: '{"path":"src/app.ts"}' },
+          }],
+        },
+      }, {
+        id: "result-1",
+        type: "message",
+        message: {
+          role: "tool",
+          tool_call_id: "tool-edit-1",
+          content: "updated file",
+          tool_display: { file: "src/app.ts", kind: "file", diff: fullDiff },
+        },
+      }],
+    };
+    test.host.stateStore.hydrateHistory("s1", history);
+    await test.openDiff();
+    __testing.registerFile("/workspace/src/app.ts", "completely unrelated current content");
+    test.host.stateStore.hydrateHistory("s1", history);
+    await test.openDiff();
+
+    expect(test.openDiffPreview).toHaveBeenCalledTimes(2);
+    for (const call of test.openDiffPreview.mock.calls) {
+      expect(call).toEqual(["s1", "tool-edit-1", "src/app.ts", fullPresentation]);
+    }
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
 });
 
 describe("checkpoint intent handling", () => {

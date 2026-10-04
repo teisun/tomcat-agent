@@ -434,15 +434,6 @@ function buildProvider(options: BuildProviderOptions = {}) {
     extensionUri: vscode.Uri.file("/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {
-      applyPreparedEdit: async () => true,
-      openPreparedDiff: async () => undefined,
-      rememberToolResult: async () => ({
-        displayPath: "src/app.ts",
-        originalContent: "",
-        proposedContent: "",
-        toolCallId: "tool-1",
-      }),
-      rememberToolStart: async () => undefined,
       showFile: async () => undefined,
       ...options.ideOverrides,
     } as never,

@@ -158,7 +158,7 @@ export function DiffView({
   if (!diff) {
     return (
       <div className="tc-diff-view__empty" data-testid="diff-view-empty">
-        diff 过大已截断，点击打开文件对比。
+        {truncated ? "Diff 过大已截断，无法查看本次对比。" : "未保存本次修改的 Diff。"}
       </div>
     );
   }
@@ -201,7 +201,7 @@ export function DiffView({
       )}
       {truncated ? (
         <div className="tc-diff-view__empty" data-testid="diff-view-truncated">
-          diff 过大已截断，点击打开文件对比。
+          Diff 过大已截断，无法查看本次对比。
         </div>
       ) : null}
     </div>

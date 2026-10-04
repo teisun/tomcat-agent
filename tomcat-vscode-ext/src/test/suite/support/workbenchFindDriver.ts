@@ -534,6 +534,35 @@ export class WorkbenchFindDriver {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
+  async waitForMultiDiffEntries(count: number): Promise<string[]> {
+    return waitFor(
+      () => this.evaluate<string[]>(`(() => {
+        const editor = [...document.querySelectorAll('.multiDiffEditor')].find(node => node.getBoundingClientRect().height > 0);
+        if (!editor) return [];
+        return [...editor.querySelectorAll('.multiDiffEntry')].filter(node => node.getBoundingClientRect().height > 0)
+          .map(node => node.querySelector('.header')?.textContent || '');
+      })()`),
+      (labels) => labels.length === count,
+      `Expected ${count} native diff entries`,
+    );
+  }
+
+  async tryTypingInMultiDiff(side: "original" | "modified", text: string): Promise<void> {
+    const point = await this.evaluate<{ x: number; y: number } | null>(`(() => {
+      const editor = [...document.querySelectorAll('.multiDiffEditor')].find(node => node.getBoundingClientRect().height > 0);
+      const lines = editor?.querySelector('.multiDiffEntry .editor.${side} .view-lines');
+      if (!lines) return null;
+      const rect = lines.getBoundingClientRect();
+      return { x: rect.x + 30, y: rect.y + 10 };
+    })()`);
+    if (!point) throw new Error(`Native diff has no ${side} text editor`);
+    await this.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "left", clickCount: 1 });
+    await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", clickCount: 1 });
+    const focused = await this.evaluate<boolean>(`!!document.activeElement?.closest('.multiDiffEntry .editor.${side}')`);
+    if (!focused) throw new Error(`Native diff ${side} text editor did not receive focus`);
+    await this.cdp.send("Input.insertText", { text });
+  }
+
   async captureScreenshot(): Promise<string> {
     const result = await this.cdp.send("Page.captureScreenshot", {
       format: "png",

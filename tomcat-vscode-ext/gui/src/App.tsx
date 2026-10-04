@@ -2295,11 +2295,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   const handleOpenDiff = useCallback(
     (toolCallId: string) => {
+      if (!activeSession?.sessionId) return;
       postIntent(vscodeApi, "openDiff", {
+        sessionId: activeSession.sessionId,
         toolCallId,
       });
     },
-    [vscodeApi],
+    [activeSession?.sessionId, vscodeApi],
   );
   const handleOpenPlanFile = useCallback(
     (path: string) => {

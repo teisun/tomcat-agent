@@ -11,6 +11,7 @@ import {
   assertWebviewBootstrapDegradedFlow,
   assertWebviewBootstrapRetryRecoveryFlow,
   assertWebviewDiffFlow,
+  assertWebviewCompactDiffFlow,
   assertWebviewEditDisplayReplayFlow,
   assertWebviewReviewProgressFlow,
   assertWebviewAtMentionDirectoryAndWarningFlow,
@@ -123,6 +124,12 @@ suite("Tomcat host E2E", () => {
   test("replays single-file and multi-file edit cards after a webview reload", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewEditDisplayReplayFlow(api);
+  });
+
+  test("opens compact edit fragments together as read-only diffs", async function () {
+    this.timeout(90_000);
+    const api = await getTomcatExtensionApi();
+    await assertWebviewCompactDiffFlow(api);
   });
 
   test("shows running review progress and settles into pass/fail rows", async () => {

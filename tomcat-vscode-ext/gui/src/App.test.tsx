@@ -530,6 +530,37 @@ function mockScrollableTranscriptUsers({
 }
 
 describe("Tomcat webview App", () => {
+  it("routes View diff using the displayed session when tool call IDs repeat", async () => {
+    const { postMessage } = mount();
+    for (const activeSessionId of ["s1", "s2"] as const) {
+      const snapshot = approvalDraftSnapshot(activeSessionId);
+      for (const sessionId of ["s1", "s2"] as const) {
+        snapshot.sessionViews[sessionId].timeline = [{
+          id: "tool-shared-id",
+          toolCallId: "shared-call",
+          toolName: "edit",
+          type: "tool",
+          status: "complete",
+          isError: false,
+          display: { kind: "file", file: `/workspace/${sessionId}.ts` },
+          diff: [
+            { tag: "gap", text: "omitted" },
+            { tag: "del", text: `old ${sessionId}`, oldLine: 25 },
+            { tag: "add", text: `new ${sessionId}`, newLine: 25 },
+          ],
+        }];
+      }
+      await emitState({ channel: "state", content: snapshot, messageId: `diff-${activeSessionId}` });
+      postMessage.mockClear();
+      fireEvent.click(screen.getByTestId("tool-row-open-diff"));
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: "openDiff",
+        data: { sessionId: activeSessionId, toolCallId: "shared-call" },
+      }));
+      expect(postMessage.mock.calls.some(([message]) => message.type === "openFile")).toBe(false);
+    }
+  });
+
   it("shows a loading state while serve is connecting", async () => {
     mount();
 

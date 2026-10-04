@@ -164,36 +164,47 @@ React render timeline / composer / plan strip
 
 ### 3.1 文件改动数据流：一份核心 diff，双路消费
 
-> 专业：本轮没有把 diff 计算留在 VSCode 扩展侧“事后读盘猜”，而是让 Rust 核心在 `write/edit/hashline_edit` 当下直接产出 `ToolDisplay::File { added, removed, diff? }`。这样 transcript 内联彩色 diff 和原生 `vscode.diff` 都共享同一份权威事实源。
+> 专业：Rust 核心在 `write/edit/hashline_edit` 当下直接产出 `ToolDisplay::File { added, removed, diff? }`。transcript 内联彩色 diff 和原生对比页共享这份已保存的事实源；扩展不事后读盘补齐历史，也不从当前 Git 状态重算这次修改。
 >
 > 说人话：谁真正同时知道“改前”和“改后”？只有核心。所以 diff 真相从核心来，前端只负责画和打开。
 >
 > 这轮又往前收了一步：`tool_display` 现在会跟着 transcript 一起持久化，reload / 切会话回来时，`state.ts` 不再靠“重新读盘猜有没有 diff 卡片”，而是直接复用 live 阶段同一套 `ToolDisplay` 归并逻辑。单文件与“批量但只改 1 个文件”都收敛成 `File` rich card；真多文件才走 `Files` 列表卡。
 
 ```text
-Rust core write/edit/hashline
-  ├─ line_diff_stat(old,new) -> added / removed
-  ├─ build_line_diff(old,new) -> FileDiffLine[]
-  └─ ToolDisplay::File { file, added, removed, diff? }
-                │
-                ▼
-wire.d.ts / protocol.ts / state.ts
-  └─ tool.diffStat + tool.diff
-                │
-                ├─ ToolRow(edit/write) -> DisclosureCard + DiffView
-                │     └─ transcript 内联彩色 diff（preview 首变更锚定 / expand 50vh）
-                │
-                └─ openDiff intent
-                      └─ provider.ts reconstruct before(ctx+del) / after(ctx+add)
-                            └─ VsCodeIde.openReconstructedDiff()
-                                  └─ vscode.diff(tomcat-diff://left, tomcat-diff://right)
+Rust core -> ToolDisplay::File -> 持久化 / state.ts
+                                  |
+                                  +--> ToolRow / DiffView：内联预览
+                                  |
+                 [View diff] ------+
+                      | openDiff { sessionId, toolCallId }
+                      v
+               指定会话的工具记录
+                      | isDiffViewable()
+                 +----+---------------------+
+                 | 可查看                   | 不可查看
+                 v                          v
+        createDiffPresentation()       通用提示，不打开当前文件
+        ctx -> 两侧；del -> 左；add -> 右；gap -> 分片
+                 |
+                 v
+        VsCodeIde.openDiffPreview() -> 只读虚拟文档缓存
+                 |
+                 +--> 完整数据：vscode.diff
+                 +--> 含 gap：vscode.changes，一页展示全部独立片段
 ```
 
 补充约束：
 
-- `diff` 是可选字段：大文件超阈值时核心只发 `added/removed`，不发 `diff`；
-- 这时 transcript 仍显示 `+N/-M` 徽章，但 `DiffView` 退化为“文件过大，仅显示统计”，`View diff` 按钮隐藏；
-- 宿主不再自己重算 diff；`tomcat-diff://` 虚拟文档也不再把 `toolCallId` 塞进 URI authority（会被 VS Code 小写化），而是编码进 path 段作为稳定键，所以不会再出现“点 `View diff` 后左右都空白”的大小写竞态。
+- GUI 与宿主共用 [`src/shared/diffPresentation.ts`](../../../src/shared/diffPresentation.ts) 的 `isDiffViewable()`：有真实增删、未过期、未发生预算截断即可查看；省略未修改上下文的 `gap` 不代表变更不可用。`268e9ee0`（2026-09-05）引入上下文压缩后，旧按钮把“不能重建完整文件”误当成“不能查看变更”，此处明确拆开这两个条件。
+- `openDiff` 必须携带渲染卡片所属的 `sessionId` 与 `toolCallId`；宿主只查指定会话，避免不同会话复用工具调用 ID 时打开错误记录。
+- `createDiffPresentation()` 按 `gap` 拆分，保留已有上下文、忽略无增删的组。每段独立计算左右对比；正文不插入省略提示，不拼接远隔片段。原始行号范围取自保存的 `oldLine/newLine`，某侧行号不完整时省略该侧标签，不从部分编号推导整段范围；旧记录没有 `skippedLines` 也可查看。
+- 预览表达的是已存逻辑行：每个逻辑行统一以 LF 终止，空的行数组保持空文本，从而区分“新增／删除一个空行”和“没有行”。原文件的 EOF 换行元数据没有保存，不推测也不承诺逐字节恢复。
+- 完整和片段数据统一走 `openDiffPreview()`。含 `gap` 时一次 `vscode.changes` 打开全部片段，直接在原生页面滚动、展开／折叠，不弹选择框；最低支持版本 VS Code 1.104.0 可用。
+- 两条路径共用 `tomcat-diff://` 的只读 `TextDocumentContentProvider` 和唯一的 `previewContents` Map，随 IDE provider 销毁清理。URI query 只有 `sessionId/toolCallId/fragment/side`，保留身份大小写；左右 path 相同，仅作文件标签，片段标签含序号、已确认的原始行号范围并保留扩展名。
+- 已知限制：片段模式重复点击会多开页签。VS Code 每次为多文件对比页生成新的 `multiDiffSource`，公开的 `vscode.changes` 不接受页签身份参数；本实现不使用内部命令。推翻条件：VS Code 公开身份参数后，改用它复用页签。
+- `FileDiffLine` 直接使用生成的 [`src/serveClient/wire.d.ts`](../../../src/serveClient/wire.d.ts)，宿主协议与 GUI 只做类型再导出，不另写 diff 行类型。
+- 片段标签会改变虚拟资源的 basename；依赖精确文件名识别语言的无扩展名文件（如 `Makefile`）可能显示为纯文本。这里不维护额外的语言映射，保留原生文件扩展名识别。
+- `diff` 可缺失，也可能带 `diffTruncated` 或 `diffExpired`。卡片保留统计、准确显示不可用原因，并将现有文件入口标为“打开当前文件”；收到不可用的 `openDiff` 请求时宿主统一提示「无法查看变更：这次修改没有可查看的 diff。」，不悄悄转为打开文件。文件名始终打开当前文件。
 
 ---
 
@@ -401,9 +412,9 @@ ToolRow
    - diff 徽章与逐行 diff 都来自核心 `ToolDisplay::File.added/removed/diff`，经 [`src/serveClient/wire.d.ts`](../../../src/serveClient/wire.d.ts) → [`src/ui/webview/state.ts`](../../../src/ui/webview/state.ts) 直达 GUI。
    - `display` 不再是 live-only 临时态：history hydration 也读同一份 `tool_display`。因此“纯单文件”和“批量单文件”reload 后仍是可点 diff 的单卡；只有真多文件 batch 才退成列表卡。
    - 有 `diff` 时，`ToolRow` 会装配 `DisclosureCard(body=DiffView)`：折叠态不是看“文件尾部 5 行”，而是围绕**第一处真实改动**取迷你预览；展开态看完整结构化 diff（最大半屏、高度内滚动）。
-   - `toolCallId + diff` 同时存在时，卡片右上角显示 `View diff` 图标按钮；点击发 `openDiff` intent。
-   - 宿主 [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts) 会按 `ctx+del` 重建 before、按 `ctx+add` 重建 after，再通过 [`src/ide/VsCodeIde.ts`](../../../src/ide/VsCodeIde.ts) 复用既有 `tomcat-diff://` + `vscode.diff` 原生链路打开 diff 编辑器；虚拟文档键现编码进 URI path，规避 authority 被小写化后的空白 diff。
-   - 大文件拿不到 `diff` 时，仍保留 `+N/-M` 徽章，但 `DiffView` 只显示 fallback 提示，`View diff` 自动隐藏。
+   - 工具调用 ID 存在且共享可查看判断通过时，卡片右上角显示 `View diff`；点击发携带 `{ sessionId, toolCallId }` 的 `openDiff`，含 `gap` 的正常修改同样可查看。
+   - 宿主按 §3.1 将保存内容投影为只读预览：完整数据走 `vscode.diff`，含省略区域走 `vscode.changes` 同页独立片段；只有保存内容的只读预览缓存，不读取当前文件补历史。
+   - 缺失、截断或过期数据不显示 `View diff`，保留统计和准确的原因提示；备用操作明确写作“打开当前文件”，不暗示它能恢复历史对比。
 
 2. **command**（抄 Cursor 的终端观感，见 §5.3.1）
    - `bash / shell / execute_command` 作为 standalone action 行常驻。
@@ -502,11 +513,12 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 | 文件 | 覆盖点 |
 |------|--------|
 | [`gui/src/useAutoScroll.test.tsx`](../../../gui/src/useAutoScroll.test.tsx) | 贴底跟随、上滑暂停、session 切换与 user message 重置 |
-| [`gui/src/App.test.tsx`](../../../gui/src/App.test.tsx) | composer/DOM snapshot 埋点接线、跳底箭头按钮、上一轮进行态收尾，以及“reveal 到顶 → 超一屏切回当前 sticky”整链路 |
+| [`gui/src/App.test.tsx`](../../../gui/src/App.test.tsx) | composer/DOM snapshot 埋点接线、跳底箭头按钮、上一轮进行态收尾、“reveal 到顶 → 超一屏切回当前 sticky”整链路，以及相同工具调用 ID 的 `openDiff` 随渲染会话准确路由 |
 | [`gui/src/App.sessionFrames.test.tsx`](../../../gui/src/App.sessionFrames.test.tsx) | `sessionPatch` 真正落到 transcript、`seq` 跳号触发 `resyncSessionView`、resync 后继续收补丁 |
 | [`gui/src/components/DisclosureCard.test.tsx`](../../../gui/src/components/DisclosureCard.test.tsx) | 折叠/展开外壳、preview/body 切换 |
-| [`gui/src/components/DiffView.test.tsx`](../../../gui/src/components/DiffView.test.tsx) | 行号列、加删底色、长 context 折叠、大文件 fallback |
-| [`gui/src/components/ToolRow.test.tsx`](../../../gui/src/components/ToolRow.test.tsx) | edit diff 徽章 + View diff 按钮、command disclosure、answer/context 渲染语义、read 图标去重 |
+| [`gui/src/components/DiffView.test.tsx`](../../../gui/src/components/DiffView.test.tsx) | 行号列、加删底色、长 context 折叠，区分缺失与截断提示 |
+| [`gui/src/components/ToolRow.test.tsx`](../../../gui/src/components/ToolRow.test.tsx) | edit diff 徽章、edit/write/hashline_edit 含 gap 仍显示 View diff、不可用时明确打开当前文件，以及 command disclosure、answer/context 渲染语义、read 图标去重 |
+| [`src/shared/tests/diffPresentation.test.ts`](../../../src/shared/tests/diffPresentation.test.ts) | 可查看条件、首尾及多段 gap、纯增删、缺省行号、旧省略标记与远隔重复代码的独立分片 |
 | [`gui/src/components/TranscriptView.partition.test.ts`](../../../gui/src/components/TranscriptView.partition.test.ts) | assistant-response 冲刷算法（context/action 交错边界） |
 | [`gui/src/components/TranscriptView.test.tsx`](../../../gui/src/components/TranscriptView.test.tsx) | 单 context 工具直出、action/context 分层、旧轮 thinking 不被新一轮 busy 连坐成 streaming |
 | [`gui/src/components/markdown/ChatMarkdown.test.tsx`](../../../gui/src/components/markdown/ChatMarkdown.test.tsx) | assistant 正文 markdown 富渲染：标题/普通段落、代码卡片（bare / 路径头）、inline path、copy、普通 `<a>`、sanitize、未闭合围栏；**流式过程中代码块同步出现 `code.hljs`、mermaid 仍异步；追加尾块只重算新块（按块 memo）** |
@@ -514,10 +526,10 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 | [`gui/src/components/ThinkingGroup.test.tsx`](../../../gui/src/components/ThinkingGroup.test.tsx) | thinking-only 残组不复用 `summaryTitle` |
 | [`gui/src/stateReconcile.test.ts`](../../../gui/src/stateReconcile.test.ts) / [`gui/src/statePatch.test.ts`](../../../gui/src/statePatch.test.ts) | 全量 `state` / 单会话 `sessionView` / 热路径 `sessionPatch` 三条 UI 合并路径的引用复用与失败回退 |
 | [`src/ui/webview/tests/dual_channel.test.ts`](../../../src/ui/webview/tests/dual_channel.test.ts) | thinking 在 assistant 前、历史 `role:tool` → 工具卡、历史/实时去重 |
-| [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后从 `display.added/removed/diff` 注入 `diffStat/tool.diff`、errored tool 收敛为 `complete+error`，以及 `openDiff -> ide.openReconstructedDiff` 路由 |
+| [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后注入 `diffStat/tool.diff`、errored tool 收敛为 `complete+error`，以及 `openDiff -> ide.openDiffPreview` 的会话隔离、分片投影和不可用提示 |
 | [`src/ui/webview/tests/stateBroadcaster.test.ts`](../../../src/ui/webview/tests/stateBroadcaster.test.ts) / [`src/ui/webview/tests/provider_broadcast.test.ts`](../../../src/ui/webview/tests/provider_broadcast.test.ts) | 攒发调度器的合并/覆盖/seq 递增，以及 provider 在 streaming 下真正发 `sessionPatch`、在 turn 边界强刷 `sessionView` |
 | [`src/ui/webview/tests/state.test.ts`](../../../src/ui/webview/tests/state.test.ts) | `agent_idle` 收敛残留 `running/streaming` 工具卡，并保留 `summary/isError` |
-| [`src/ide/tests/diff_apply_edit.test.ts`](../../../src/ide/tests/diff_apply_edit.test.ts) | `openReconstructedDiff()` 复用原生虚拟文档 diff 链路 |
+| [`src/ide/tests/vscode_ide.test.ts`](../../../src/ide/tests/vscode_ide.test.ts) | `openDiffPreview()` 的完整／片段原生命令、稳定且隔离的只读 URI、片段标签与正文 |
 | [`src/ui/planPreview/tests/planDocument.test.ts`](../../../src/ui/planPreview/tests/planDocument.test.ts) | `.plan.md` 解析：四态 todos、缺 frontmatter、`name`/`goal` 回退、`bodyMarkdown` 剥离 `## Todos Board`、CRLF；**`bodyLineMap` 源码行映射（frontmatter 偏移 / 无 frontmatter / board 剪除后非线性 / CRLF）** |
 | [`src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts`](../../../src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts) | 编辑器 Provider 纯逻辑：`buildState`（buildModel 回退 / canBuild 派生 / init 失败降级 / 帧含 toolbarStyle、**默认 hybrid**）、`handleIntent`（ready/openLink/setBuildModel/build/**addSelectionToChat 含/不含行号**）、`classifyPlanLink`；活动面板机账（伪造 panel 驱动 `runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo` / `onDidChangeActivePlan` / 失焦清理 / **`requestCaptureSelection` 发 `captureSelectionForChat` 事件、无焦点 no-op**）；**`refreshFromServeEvent(planId,pathHint)` 从磁盘重读而非旧缓冲，并支持 canonical path hint 命中** |
 | [`tests/contextReferences.test.ts`](../../../tests/contextReferences.test.ts) | `buildSelectionReferenceFromParts`（多行/单行 label、无行号回落文件名、空文本 null、截断）+ `buildSelectionReference` 薄封装复用 |

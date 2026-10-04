@@ -122,7 +122,6 @@ export interface ObservedEventFilter {
 
 export interface TomcatExtensionApi {
   __testing: {
-    applyPreparedEdit(toolCallId: string): Promise<boolean>;
     captureSettingsDom(): Promise<SettingsDomSnapshot>;
     captureImagePreviewDom(): Promise<ImagePreviewDomSnapshot>;
     captureWebviewDom(): Promise<{
@@ -229,14 +228,6 @@ export interface TomcatExtensionApi {
       TomcatWebviewViewProvider["getObservedWebviewErrors"]
     >;
     getPromptHistory(): PromptRecord[];
-    getPreparedChange(toolCallId: string):
-      | {
-      displayPath: string;
-      originalContent: string;
-      proposedContent: string;
-      toolCallId: string;
-        }
-      | undefined;
     getResolvedExecutable(): ResolvedTomcatExecutable;
     getLastContextSearchIntent(): Extract<
       WebviewIntent,
@@ -261,7 +252,6 @@ export interface TomcatExtensionApi {
     listSessions(
       scope?: Parameters<SessionRouter["listSessions"]>[0],
     ): Promise<Awaited<ReturnType<SessionRouter["listSessions"]>>>;
-    openPreparedDiff(toolCallId: string): Promise<void>;
     reloadWebview(): Promise<void>;
     restartServe(): Promise<void>;
     sendSettingsDomAction(action: {
@@ -1450,7 +1440,6 @@ export async function activate(
 
   const api: TomcatExtensionApi = {
     __testing: {
-      applyPreparedEdit: (toolCallId) => ide.applyPreparedEdit(toolCallId),
       captureImagePreviewDom: async () => {
         const panel = ImagePreviewPanel.getCurrent();
         if (!panel?.isVisible) {
@@ -1500,18 +1489,6 @@ export async function activate(
       getObservedWebviewErrors: () =>
         webviewProvider.getObservedWebviewErrors(),
       getPromptHistory: () => [...promptHistory],
-      getPreparedChange: (toolCallId) => {
-        const change = ide.getPreparedChange(toolCallId);
-        if (!change) {
-          return undefined;
-        }
-        return {
-          displayPath: change.displayPath,
-          originalContent: change.originalContent,
-          proposedContent: change.proposedContent,
-          toolCallId: change.toolCallId,
-        };
-      },
       getResolvedExecutable: () => resolvedExecutable,
       getLastContextSearchIntent: () =>
         webviewProvider.getLastContextSearchIntent(),
@@ -1570,7 +1547,6 @@ export async function activate(
         await ensureInitialized();
         return sessionRouter.listSessions(scope);
       },
-      openPreparedDiff: (toolCallId) => ide.openPreparedDiff(toolCallId),
       reloadWebview: async () => {
         webviewProvider.resetForTestReload();
         await webviewProvider.dispatchTestIntent({

@@ -5,9 +5,10 @@ import type {
   DraftForkResult,
 } from "../../src/shared/draftForkProtocol";
 import type { PathResolution } from "../../src/shared/pathResolution";
-import type { SharedSlashCommand } from "../../src/serveClient/wire";
+import type { FileDiffLine, SharedSlashCommand } from "../../src/serveClient/wire";
 
 export type { PathResolution } from "../../src/shared/pathResolution";
+export type { FileDiffLine } from "../../src/serveClient/wire";
 
 export type WebviewReferenceKind = "selection" | "file";
 
@@ -114,16 +115,6 @@ export interface WebviewTodo {
   content: string;
   id: string;
   status: "cancelled" | "completed" | "in_progress" | "pending";
-}
-
-export type FileDiffTag = "add" | "ctx" | "del" | "gap";
-
-export interface FileDiffLine {
-  newLine?: number | null;
-  oldLine?: number | null;
-  skippedLines?: number | null;
-  tag: FileDiffTag;
-  text: string;
 }
 
 export interface WebviewToolDisplayFile {
@@ -761,6 +752,7 @@ export type WebviewIntent =
       messageId: string;
       type: "openDiff";
       data: {
+        sessionId: string;
         toolCallId: string;
       };
     }

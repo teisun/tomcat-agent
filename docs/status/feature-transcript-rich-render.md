@@ -2,13 +2,18 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-04 02:22 +0800 |
+| Updated | 2026-10-04 10:02 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | VS Code 15px/25px layout defaults and flat read rows; project Commands/Rules and composer/menu interactions; preserved interaction contracts and delivery evidence |
+| Scope | Session-scoped saved View diff and native read-only fragments; remove dead prepared-edit cache; CLI/extension patch bump; prior branch deliveries retained |
 | Cov% | - |
 
 ### DONE
+
+- Fixed View diff to use saved contents from the card's own session, including compact diffs split at gaps; full files use public `vscode.diff`, fragments use one public `vscode.changes` page, and unavailable records never silently open the current file.
+- Removed the unconsumed prepared-edit cache, per-edit snapshot IO and three old test hooks; retained one read-only preview cache, generated wire diff types and a shared type guard. Incomplete source-range logic is unchanged; labels omit unavailable sides instead of inventing positions.
+- Renamed and trimmed IDE tests, preserved event-queue serialization through the actual subscription, removed VS Code folding assertions, and synchronized architecture documentation with the accepted boundaries.
+- Applied this request's one-time script patch bump: CLI `0.1.65 -> 0.1.66`, extension `0.1.79 -> 0.1.80`, bundled CLI metadata `0.1.65 -> 0.1.66`; only the five version mirrors changed, with no dependency or private GUI version changes.
 
 - Added project Commands/Rules discovery from `.agents` and `.cursor`; `.md`/`.mdc` rules auto-apply only with boolean `alwaysApply: true`, with hard-Deny/budget diagnostics surfaced through `/reload`.
 - Kept command/skill invocations as semantic references: chip selection freezes the body when sending/queueing, while retry reuses the stored snapshot; no path guessing, asynchronous preparation phase or new resource database.
@@ -73,6 +78,9 @@
 
 ### INTERFACE
 
+- `openDiff` requires `{ sessionId, toolCallId }`; the host only looks up the named session. `tomcat-diff` query contains `sessionId/toolCallId/fragment/side`, while path is a display label; only `previewContents` supplies historical text.
+- `isDiffViewable(tool)` narrows saved diff lines without changing button eligibility; `FileDiffLine` is imported/re-exported from generated wire types. `applyPreparedEdit/getPreparedChange/openPreparedDiff` are removed from the extension's test-only API; no internal VS Code command or compatibility layer is added.
+
 - `get_instruction_catalog` is the shared capability for project command/skill catalog and explicit instruction segments; Serve reads authoritative bodies and snapshots them, rejects instruction-bearing steer, and never executes a plain `/name` by guessing.
 - `ContextRefKind` includes Command/Skill; archival/provider projections share one snapshot. Draft schema 3 holds occurrence IDs; Serve/history retain ordered duplicate parts without those IDs. Keep a matching runtime for new history replay.
 - `tomcat.layout.controlsInset` / `contentInset` are integer VS Code settings (0–40, default15/25) applied on Reload Window; explicit10/15,4/24 and0 settings are retained. Only editor body is height-budgeted, with attachments/Todo/questions outside it.
@@ -95,7 +103,7 @@
 - Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata now declares CLI `0.1.65`, VS Code extension `0.1.79`, and bundled CLI pin `0.1.65`; this metadata-only bump does not build artifacts or replace any installed CLI/extension process.
+- Release metadata now declares CLI `0.1.66`, VS Code extension `0.1.80`, and bundled CLI pin `0.1.66`; the bump itself does not install or replace any process. The user requests a separate post-commit `cargo build --release` and pure VSIX packaging, without installation or publication.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
@@ -108,6 +116,9 @@
 - Settings reads connector state from local Serve snapshots and polls while visible; it fetches a tool catalog only for a connected source and validates config key, generation, and attempt before applying it.
 
 ### BLOCKED
+
+- Fragment previews still open another tab when clicked again: public `vscode.changes` has no stable tab identity argument. Revisit when VS Code exposes one; native folding and internal editor commands are outside this change.
+- At commit time the new `0.1.66` release CLI and pure `0.1.80` VSIX have not yet been built; build/package are explicitly subsequent steps. No test rerun, coverage measurement, installation, restart, push or publication is requested.
 
 - The commands delivery's web_search timeout remains unresolved, suspected system-proxy related, without an unmodified-code baseline; it is not proven pre-existing. The old invocation DOM timeout did not recur in the final three complete host runs, but its cause remains unconfirmed.
 - Remediation host sequences first reproduced empty `@` file/directory results; original failed logs are retained alongside the deterministic index regression and final 3×8/8 evidence, not rewritten as all-green initial commands.
@@ -132,6 +143,10 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- View diff implementation acceptance before this version/commit request passed extension/GUI lint (`1791078752195-2laujo`), wire consistency (`1791078752253-uq3dc9`), 612 extension and 681 GUI unit tests plus 57 provider integration tests (`1791078752340-65wf6g`), and all three selected real-host E2E scenarios with automatic build on VS Code 1.139.0 (`1791078790652-2ce6if`). These are earlier results, not test reruns after the version bump.
+- Full/fragment PNGs, ARIA trees and capture-time buffered console reports were read in `.agents/shots/view-diff-cleanup/gui-qmdVk1/`; source ranges, native read-only response and saved-history replay were checked. Console fault extraction was empty (`1791078968791-qj6bzj`); VS Code feature/sandbox warnings and non-failing React/Canvas/Vite/host warnings remain recorded, not hidden.
+- This bump/commit request runs no tests or coverage. Pre/post version checks passed, and the five-file diff contains only intended version fields; commit-time checks cover all three Git regions, whitespace, branch status and what/why message format. Cov% remains unmeasured (`-`). Release build and pure package outcomes will be reported after commit, not claimed in advance.
 
 - Latest layout/read implementation acceptance, before this commit request, passed GUI97 plus two final focused streaming-success cases (combined99), layout/provider75 and manifest9 cases, with extension/GUI lint. Tasks `1791050271254-qlwfrg` and `1791050801238-qugloe`; the initial fixture-only lint errors in `1791050106805-a1iw0l` were fixed, not relabeled as a passing original run.
 - The production-App/simulated-host browser matrix passed123 PNG/ARIA/console/geometry groups across nine layout/menu viewports and three representative read/control viewports (`1791050500282-az8qsr`); all capture consoles/default geometry were checked (`1791050801377-elv4zn`). A separate real VS Code host layout target passed1/1 (`1791050500320-6xxmot`). Simulated file-link checks prove an `openFile` intent, not an actual editor opening.
