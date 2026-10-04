@@ -6,6 +6,9 @@
 
 mod common;
 
+#[path = "support/custom_rules_cache_probe.rs"]
+mod custom_rules_cache_probe;
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
@@ -27,14 +30,18 @@ fn stable_prefix() -> String {
         .repeat(180)
 }
 
-fn main_agent_prompt_and_tools() -> (String, Vec<serde_json::Value>) {
-    let context = WorkspaceContext {
+fn main_agent_context() -> WorkspaceContext {
+    WorkspaceContext {
         agent_workspace_dir: "/tmp/tomcat-cache-probe/workspace".to_string(),
         agent_definition_dir: "/tmp/tomcat-cache-probe/agent".to_string(),
         agent_plans_dir: "~/.tomcat/plans".to_string(),
         agent_trail_dir: "/tmp/tomcat-cache-probe/agent-trail".to_string(),
         tool_lines: None,
-    };
+    }
+}
+
+fn main_agent_prompt_and_tools() -> (String, Vec<serde_json::Value>) {
+    let context = main_agent_context();
     let tool_surface = ToolSurface::from_plugin_tools(false, &[]);
     let snapshot = SystemPromptSnapshot::new(&context, &tool_surface, None, None, 400_000, "");
     (

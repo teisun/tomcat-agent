@@ -2,13 +2,16 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-04 10:02 +0800 |
+| Updated | 2026-10-04 11:05 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Session-scoped saved View diff and native read-only fragments; remove dead prepared-edit cache; CLI/extension patch bump; prior branch deliveries retained |
+| Scope | Custom-rule prompt-cache diagnostics and three-route evidence; saved View diff delivery; prior branch interfaces and risks retained |
 | Cov% | - |
 
 ### DONE
+
+- Added a bounded ignored custom-rule cache probe using production rule discovery/rendering and prompt snapshots, reusing existing provider/credential/usage helpers instead of copying the full probe suite. Temporary rules preserve the project's rendered bytes; returned model tools are never executed.
+- Measured rules-off/rules-on/changed-rule sequences on DeepSeek Flash and both configured GPT-5.6 Terra gateways, with 11 requests per route, deterministic shared histories, stable prompt hashes and explicit missing-usage failures. Preserved all 33 rows and limitations in `tomcat/docs/reports/user-custom-instructions-cache-acceptance.md`, including fcodex's zero hit and input-count jumps.
 
 - Fixed View diff to use saved contents from the card's own session, including compact diffs split at gaps; full files use public `vscode.diff`, fragments use one public `vscode.changes` page, and unavailable records never silently open the current file.
 - Removed the unconsumed prepared-edit cache, per-edit snapshot IO and three old test hooks; retained one read-only preview cache, generated wire diff types and a shared type guard. Incomplete source-range logic is unchanged; labels omit unavailable sides instead of inventing positions.
@@ -78,6 +81,8 @@
 
 ### INTERFACE
 
+- This cache-probe commit changes no production API, system section order, version or user configuration. `custom_rules_cache_probe::project_rules_cache_ab` is an opt-in paid `#[ignore]` test selected by the existing `TOMCAT_E2E_CACHE_PROBE_MODEL`; each run sends exactly 11 requests when successful, with a 120-second per-request bound and no tool execution.
+
 - `openDiff` requires `{ sessionId, toolCallId }`; the host only looks up the named session. `tomcat-diff` query contains `sessionId/toolCallId/fragment/side`, while path is a display label; only `previewContents` supplies historical text.
 - `isDiffViewable(tool)` narrows saved diff lines without changing button eligibility; `FileDiffLine` is imported/re-exported from generated wire types. `applyPreparedEdit/getPreparedChange/openPreparedDiff` are removed from the extension's test-only API; no internal VS Code command or compatibility layer is added.
 
@@ -117,8 +122,11 @@
 
 ### BLOCKED
 
+- fcodex/GPT-5.6 Terra reported one zero-cache round after a rule change and non-monotonic input-token usage despite stable phase hashes. The experiment did not audit final HTTP payloads, raw upstream usage or backend identities; route, billing and client causes remain unassigned. Short probes do not establish a gateway SLA or full CLI/Serve long-session behavior.
+- Strict targeted Clippy was blocked by unchanged `src/api/chat/commands/parse.rs:91` (`large_enum_variant`); the later run allowing only that lint passed. Keep the original failure, not a claim that the strict gate passed.
+
 - Fragment previews still open another tab when clicked again: public `vscode.changes` has no stable tab identity argument. Revisit when VS Code exposes one; native folding and internal editor commands are outside this change.
-- At commit time the new `0.1.66` release CLI and pure `0.1.80` VSIX have not yet been built; build/package are explicitly subsequent steps. No test rerun, coverage measurement, installation, restart, push or publication is requested.
+- The preceding View diff delivery built CLI `0.1.66` and pure extension `0.1.80` after commit `aa648fe9`; neither was installed or published. This test/report-only commit does not rebuild or replace those artifacts.
 
 - The commands delivery's web_search timeout remains unresolved, suspected system-proxy related, without an unmodified-code baseline; it is not proven pre-existing. The old invocation DOM timeout did not recur in the final three complete host runs, but its cause remains unconfirmed.
 - Remediation host sequences first reproduced empty `@` file/directory results; original failed logs are retained alongside the deterministic index regression and final 3×8/8 evidence, not rewritten as all-green initial commands.
@@ -143,6 +151,11 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- Before this commit request, the new deterministic rule/snapshot check and existing snapshot contract each passed one test (`1791081269369-u6kqsb`, `1791081572928-idssec`). The three paid probes completed 11 requests each (`1791081549874-inwo3i`, `1791082726308-a9n8o3`, `1791082726351-63wbm9`); warm rules-on token-weighted hit rates were DeepSeek98.72%, fcodex90.25%, idatatlas92.12%. Probe completion is not a cache-stability threshold pass.
+- Original counts, per-phase hashes and summaries were independently recomputed; the 22 GPT rows in the report matched their logs (`1791082898955-q41ms0`, `1791083002261-m24x4o`). Formatting passed; strict Clippy failed as recorded above (`1791081930793-y0n6ay`) and the known-lint-scoped follow-up passed (`1791082060025-qdv476`).
+- This commit request explicitly runs no tests, live model calls, builds or coverage. Checks are limited to all Git regions, diff/scope, whitespace, status metadata and the what/why commit message. Cov% remains `-`; the report's trailing blank line is corrected without changing measurement data.
+- The earlier release build completed in 11m54s (`1791079451200-elg7gr`); pure VSIX packaging and archive/current-output checks passed (`1791080189338-mnf0tc`, `1791080476977-2ssjbr`):229 entries,1,651,932 bytes,no bundled CLI,SHA-256 `29a8507052a4de780169d5ba97a709f875101938e824e820394f94f49ea33ffb`. These are prior delivery results, not builds for this commit.
 
 - View diff implementation acceptance before this version/commit request passed extension/GUI lint (`1791078752195-2laujo`), wire consistency (`1791078752253-uq3dc9`), 612 extension and 681 GUI unit tests plus 57 provider integration tests (`1791078752340-65wf6g`), and all three selected real-host E2E scenarios with automatic build on VS Code 1.139.0 (`1791078790652-2ce6if`). These are earlier results, not test reruns after the version bump.
 - Full/fragment PNGs, ARIA trees and capture-time buffered console reports were read in `.agents/shots/view-diff-cleanup/gui-qmdVk1/`; source ranges, native read-only response and saved-history replay were checked. Console fault extraction was empty (`1791078968791-qj6bzj`); VS Code feature/sandbox warnings and non-failing React/Canvas/Vite/host warnings remain recorded, not hidden.
