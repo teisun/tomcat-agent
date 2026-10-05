@@ -16,6 +16,7 @@ pub mod event_pump;
 mod fanout_event_bus;
 pub mod ndjson;
 pub mod registry;
+mod rewind_and_resend;
 pub mod schema;
 mod session_job;
 mod slash;
@@ -177,6 +178,13 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
         return;
     };
     manager.discard_legacy_draft_dir();
+    if let Ok(dir) = resolve_sessions_dir(&state.cfg) {
+        crate::core::checkpoint::file_baselines::prune(
+            &dir,
+            state.cfg.checkpoint.retention_days,
+            std::time::SystemTime::now(),
+        );
+    }
     let mut live = match manager.run_incremental_attachment_housekeeping() {
         Ok(mark) => {
             if mark.compacted_displays > 0 {
@@ -563,6 +571,50 @@ impl Drop for TurnStateLease {
             context_budget_chars: self.context_budget_chars,
         });
     }
+}
+
+/// Cancel a foreground turn and wait for its actual exit. Unlike shutdown, a timeout
+/// retains the handle and must never abort a writer then report the session as stopped.
+pub(super) async fn cancel_and_wait(
+    state: &ServeState,
+    slot: &Arc<SessionSlot>,
+) -> Result<(), &'static str> {
+    if slot.is_command_job_running() {
+        return Err("busy");
+    }
+    if slot.is_turn_running() {
+        state
+            .ask_question
+            .cancel_live_session(&slot.session_id, "rewind");
+        state
+            .confirmation
+            .cancel_live_session(&slot.session_id, "rewind");
+        slot.ctx.session_runtime.cancel_token.lock().cancel();
+        slot.ctx.agent_registry.cascade_abort(&slot.session_id);
+    }
+    let handle = slot.run_task.lock().take();
+    if let Some(mut handle) = handle {
+        if tokio::time::timeout(SESSION_SHUTDOWN_TIMEOUT, &mut handle)
+            .await
+            .is_err()
+        {
+            let mut running = slot.run_task.lock();
+            if slot.is_busy() {
+                *running = Some(handle);
+            }
+            return Err("stop_timeout");
+        }
+    }
+    if slot.is_busy() {
+        return Err("stop_timeout");
+    }
+    if !drain_checkpoint_record_tasks(&slot.ctx, SESSION_SHUTDOWN_TIMEOUT).await {
+        return Err("stop_timeout");
+    }
+    if let Some(turn) = slot.turn_state.lock().as_mut() {
+        turn.context_state.preheat.abort();
+    }
+    Ok(())
 }
 
 pub(crate) async fn cleanup_session_slot(

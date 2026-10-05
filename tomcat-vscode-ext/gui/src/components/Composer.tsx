@@ -455,7 +455,10 @@ function sameDraft(left: ComposerDraft, right: ComposerDraft): boolean {
   );
 }
 
-interface ComposerProps {
+export interface ComposerProps {
+  instanceId?: string;
+  initialDraft?: ComposerDraft;
+  onCancelEdit?(): void;
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
@@ -498,6 +501,9 @@ interface ComposerProps {
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
+  instanceId = "",
+  initialDraft,
+  onCancelEdit,
   availableModelDetails,
   availableModelReasoningLevels,
   availableModels,
@@ -537,6 +543,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onSubmit,
   planState,
 }, ref) {
+  const testId = (name: string) => instanceId ? `${instanceId}-${name}` : name;
   const planStatus = formatPlanStatus(planState);
   const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
@@ -669,7 +676,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       attributes: {
         "aria-label": "Tomcat prompt",
         class: "tc-composer__editor",
-        "data-testid": "composer-input",
+        "data-testid": testId("composer-input"),
       },
       handleDOMEvents: {
         compositionend: () => {
@@ -784,7 +791,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         return true;
       },
     },
-    content: {
+    content: initialDraft ? createComposerDocument(initialDraft.segments.length ? initialDraft.segments : [{ type: "text", text: initialDraft.text }]) : {
       content: [
         {
           type: "paragraph",
@@ -814,7 +821,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     const handleTestSetComposerValue = (event: Event) => {
       const detail = (event as CustomEvent<{ testId?: string; value?: string | null }>).detail;
-      if (detail?.testId && detail.testId !== "composer-input") {
+      if ((detail?.testId ?? "composer-input") !== testId("composer-input")) {
         return;
       }
       const nextValue = detail?.value ?? "";
@@ -842,6 +849,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     editor.setEditable(canPrompt);
+    if (!canPrompt) {
+      mentionSuggestion.close();
+      slashSuggestion.close();
+      setModeMenuOpen(false);
+    }
   }, [canPrompt, editor]);
 
   useEffect(() => {
@@ -1065,10 +1077,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const hasNotice = Boolean(warningNotice || dragNotice || planNotice || commandPending);
 
   return (
-    <section className="tc-composer" aria-label="prompt" data-testid="composer">
+    <section className="tc-composer" aria-label="prompt" data-testid={testId("composer")} onKeyDown={(event) => {
+      if (event.key === "Escape" && !event.defaultPrevented && !event.nativeEvent.isComposing && !mentionOpen && !slashState && !modeMenuOpen && !event.currentTarget.querySelector('[aria-expanded="true"]')) {
+        event.preventDefault(); onCancelEdit?.();
+      }
+    }}>
       <div
         className={`tc-composer__surface${dropActive ? " tc-composer__surface--drop-active" : ""}`}
-        data-testid="composer-surface"
+        data-testid={testId("composer-surface")}
         onDragEnd={handleDragEnd}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -1076,10 +1092,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         onDrop={handleDrop}
       >
         {hasNotice ? (
-          <div className="tc-composer__notices" role="status" aria-live="polite" data-testid="composer-notices">
-            {commandPending && <span className="tc-notice tc-notice--info" data-testid="composer-notice-command">命令处理中，请稍候…</span>}
+          <div className="tc-composer__notices" role="status" aria-live="polite" data-testid={testId("composer-notices")}>
+            {commandPending && <span className="tc-notice tc-notice--info" data-testid={testId("composer-notice-command")}>命令处理中，请稍候…</span>}
             {warningNotice ? (
-              <span className="tc-notice tc-notice--warning" data-testid="composer-notice-capability">
+              <span className="tc-notice tc-notice--warning" data-testid={testId("composer-notice-capability")}>
                 {warningNotice.text}
               </span>
             ) : (
@@ -1088,7 +1104,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   <span
                     aria-hidden="true"
                     className={`tc-notice tc-notice--${dragNotice.tone} tc-notice--left`}
-                    data-testid="composer-notice-drag"
+                    data-testid={testId("composer-notice-drag")}
                   >
                     {dragNotice.tone === "info" ? (
                       <>
@@ -1100,7 +1116,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   </span>
                 ) : null}
                 {planNotice ? (
-                  <span className="tc-notice tc-notice--plan tc-notice--right" data-testid="composer-notice-plan">
+                  <span className="tc-notice tc-notice--plan tc-notice--right" data-testid={testId("composer-notice-plan")}>
                     {planNotice.text}
                   </span>
                 ) : null}
@@ -1121,11 +1137,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         />
         <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "", instructionCatalog, slashState?.leading ?? true)} query={slashState?.query ?? ""} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
         <EditorContent editor={editor} />
-        <div className="tc-composer__bar" data-testid="composer-bar">
+        <div className="tc-composer__bar" data-testid={testId("composer-bar")}>
           <button
             aria-label="添加文件/文件夹/图片"
             className="tc-icon-button"
-            data-testid="attachment-add"
+            data-testid={testId("attachment-add")}
             disabled={!canPrompt}
             onClick={handlePickContext}
             title="添加文件/文件夹/图片"
@@ -1146,7 +1162,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               aria-expanded={modeMenuOpen}
               aria-label="Tomcat chat mode"
               className="tc-topbar__trigger tc-topbar__trigger--compact"
-              data-testid="mode-select"
+              data-testid={testId("mode-select")}
               disabled={!canOpenModeMenu}
               onClick={() => {
                 setModeMenuOpen((value) => !value);
@@ -1159,14 +1175,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </span>
             </button>
             {modeMenuOpen ? (
-              <div className="tc-session-dropdown tc-composer-dropdown" data-testid="mode-dropdown">
+              <div className="tc-session-dropdown tc-composer-dropdown" data-testid={testId("mode-dropdown")}>
                 {MODE_OPTIONS.map((option) => {
                   const isActive = option.value === modeValue;
                   return (
                     <button
                       aria-current={isActive ? "true" : undefined}
                       className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
-                      data-testid="mode-option"
+                      data-testid={testId("mode-option")}
                       key={option.value}
                       onClick={() => handleModePick(option.value)}
                       type="button"
@@ -1188,7 +1204,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               className="tc-composer-model-picker"
               disabled={!canPrompt}
               // The VS Code host E2E harness still drives this compatibility trigger.
-              legacyThinkingTriggerTestId="thinking-level-select"
+              legacyThinkingTriggerTestId={testId("thinking-level-select")}
+              testId={testId("model-select")}
+              dropdownTestId={testId("model-dropdown")}
+              optionTestId={testId("model-option")}
               models={pickerModels}
               onOpenModelSettings={onOpenModelSettings}
               onSelectContextWindow={(selectedModelId, contextWindow) => {
@@ -1211,14 +1230,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           </div>
 
-          <span className="tc-composer__context" data-testid="context-ratio">
+          <span className="tc-composer__context" data-testid={testId("context-ratio")}>
             {contextLabel}
           </span>
 
           <button
             aria-label={busy ? (stopping ? "Stopping…" : "Stop") : "Send prompt"}
             className="tc-send-button"
-            data-testid={busy ? "stop-button" : "send-button"}
+            data-testid={testId(busy ? "stop-button" : "send-button")}
             disabled={busy ? !canInterrupt || stopping : !draft.hasContent || !canPrompt}
             onClick={
               busy
@@ -1234,7 +1253,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             {busy && stopping ? (
               "Stopping…"
             ) : busy ? (
-              <span aria-hidden="true" className="tc-stop-square" data-testid="stop-glyph" />
+              <span aria-hidden="true" className="tc-stop-square" data-testid={testId("stop-glyph")} />
             ) : (
               "↑"
             )}

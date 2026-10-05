@@ -70,7 +70,9 @@ export interface WebviewDomAction {
   widthPx?: number | null;
 }
 
+import type { MessageEditIntent, MessageEditEvent } from "../../shared/messageEditProtocol";
 export interface WebviewMessageBlock {
+  rewindEligible?: boolean;
   abandoned?: boolean;
   assistantMessageId?: string;
   detailText?: string | null;
@@ -319,6 +321,7 @@ export interface WebviewApprovalCard {
  * at the same source is how eleven thumbnails came to decode eleven full-size bitmaps.
  */
 export interface WebviewAttachmentView {
+  providerSha?: string | null;
   /** sha256 of the original bytes; the backend's name for this attachment. */
   blobSha: string;
   /** Original byte count, for display only. */
@@ -419,6 +422,7 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  rewindSupported?: boolean;
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModelDetails?: Record<string, WebviewModelInfo>;
@@ -462,6 +466,7 @@ export type WebviewSessionPatchOp =
     };
 
 export type HostEventFrameContent =
+  | MessageEditEvent
   | ControlRequestFrame
   | ServeEvent
   | {
@@ -582,6 +587,7 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | MessageEditIntent
   | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {
       messageId: string;
@@ -643,6 +649,7 @@ export type WebviewIntent =
       messageId: string;
       type: "pickContext";
       data?: {
+        target?: "edit";
         operationId?: string;
         sessionId?: string | null;
       };
@@ -713,6 +720,7 @@ export type WebviewIntent =
        */
       type: "attachFiles";
       data: {
+        target?: "edit";
         operationId?: string;
         sessionId: string;
         files: AttachmentCandidate[];
@@ -827,6 +835,7 @@ export type WebviewIntent =
       messageId: string;
       type: "resolveDrop";
       data: {
+        target?: "edit";
         operationId?: string;
         sessionId?: string | null;
         uris: string[];
@@ -1148,6 +1157,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     return false;
   }
 
+  if (isRecord(value.data) && value.data.target !== undefined &&
+      (value.data.target !== "edit" || !isString(value.data.operationId) || !value.data.operationId)) return false;
+
   switch (value.type) {
     case "ready":
     case "listSessions":
@@ -1311,6 +1323,14 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "showWarningMessage":
       return isRecord(value.data) && isString(value.data.message);
+    case "previewRewind":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.messageId);
+    case "rewindAndResend":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.messageId)
+        && (value.data.files === "keep" || value.data.files === "revert") && isString(value.data.text)
+        && Array.isArray(value.data.segments) && value.data.segments.every(isWebviewMessageSegmentShape) && Array.isArray(value.data.attachments)
+        && value.data.attachments.every((a) => isRecord(a) && isString(a.blobSha) && /^[0-9a-f]{64}$/.test(a.blobSha)
+          && (a.kind === "image" || a.kind === "file") && isString(a.filename) && isString(a.mimeType));
     case "listCheckpoints":
       return isRecord(value.data) && isString(value.data.sessionId);
     case "restoreCheckpoint":

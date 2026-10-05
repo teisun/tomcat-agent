@@ -16,6 +16,27 @@ use super::mocks::temp_sessions_dir;
 use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 #[test]
+fn delete_session_discards_only_its_file_baselines() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(temp.path().to_path_buf());
+    let first = manager.new_current_session(None).unwrap();
+    let second = manager.new_current_session(None).unwrap();
+    let first_dir = crate::core::checkpoint::file_baselines::session_dir(
+        &manager.transcript_path(&first.session_id),
+    );
+    let second_dir = crate::core::checkpoint::file_baselines::session_dir(
+        &manager.transcript_path(&second.session_id),
+    );
+    for dir in [&first_dir, &second_dir] {
+        std::fs::create_dir_all(dir.join("u")).unwrap();
+        std::fs::write(dir.join("u/baselines.jsonl"), "fixture").unwrap();
+    }
+    manager.delete_session(&first.session_id).unwrap();
+    assert!(!first_dir.exists());
+    assert!(second_dir.join("u/baselines.jsonl").exists());
+}
+
+#[test]
 fn create_session_and_list() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

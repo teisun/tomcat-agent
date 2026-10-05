@@ -371,6 +371,7 @@ fn collect_skips_non_message() {
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         }),
         TranscriptEntry::Message(MessageEntry {
             id: Some("2".into()),

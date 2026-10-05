@@ -325,6 +325,7 @@ fn append_completed_summary_text(
     append_entry(
         &state.transcript_path,
         &TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+            superseded: false,
             id: Some(format!("{marker_id}:text")),
             parent_id: Some(marker_id.to_string()),
             timestamp: chrono::Utc::now().to_rfc3339(),

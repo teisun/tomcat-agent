@@ -25,6 +25,7 @@ mod event_pump_test;
 mod instruction_prompt_test;
 mod ndjson_test;
 mod registry_test;
+mod rewind_and_resend_test;
 mod schema_test;
 mod session_job_test;
 mod stdin_test;

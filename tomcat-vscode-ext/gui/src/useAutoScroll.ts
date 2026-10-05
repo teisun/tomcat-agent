@@ -49,6 +49,7 @@ export function selectActiveStickyUserId(
 }
 
 type UseAutoScrollOptions = {
+  paused?: boolean;
   containerRef: RefObject<HTMLElement | null>;
   contentRef: RefObject<HTMLElement | null>;
   contentKey: string;
@@ -118,6 +119,7 @@ function currentStickyUserMetrics(
 }
 
 export function useAutoScroll({
+  paused = false,
   containerRef,
   contentRef,
   contentKey,
@@ -133,6 +135,8 @@ export function useAutoScroll({
   const autoScrollRef = useRef<{ top: number; time: number } | null>(null);
   const bottomSpacerHeightRef = useRef(0);
   const modeRef = useRef<ScrollMode>("followBottom");
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
   const pendingScrollActionRef = useRef<PendingScrollAction | null>(null);
   const previousOldestItemKeyRef = useRef<string | null>(oldestItemKey);
   const previousScrollHeightRef = useRef(0);
@@ -190,6 +194,7 @@ export function useAutoScroll({
   };
 
   const setScrollTop = (element: HTMLElement, top: number) => {
+    if (pausedRef.current) return;
     const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
     const nextTop = Math.max(0, Math.min(top, maxTop));
     if (Math.abs(element.scrollTop - nextTop) < 1) {
@@ -308,6 +313,7 @@ export function useAutoScroll({
   };
 
   const updateAutoScrollLayout = () => {
+    if (pausedRef.current) { updateStickyPromptState(); return; }
     if (Date.now() < skipAutoLayoutUntilRef.current) {
       updateStickyPromptState();
       return;

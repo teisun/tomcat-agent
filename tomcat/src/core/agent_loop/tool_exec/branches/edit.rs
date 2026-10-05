@@ -32,12 +32,16 @@ pub(in super::super) async fn handle_edit(
     let heading_notice = heading_replacement_notice(&edits);
     let feedback_edits = edits.clone();
 
+    let baseline = ctx.file_baselines.and_then(|b| b.prepare(path));
     match ctx
         .primitive
         .edit_file_with_cancel(path, edits, ctx.cancel, AGENT_PLUGIN_ID)
         .await
     {
         Ok(result) if result.applied => {
+            if let Some(baseline) = baseline {
+                baseline.commit();
+            }
             if let Some(state) = ctx.read_file_state {
                 refresh_read_stamp(state, path, ctx.tool_call_id);
             }
@@ -480,12 +484,16 @@ async fn edit_batch(
         }
         let heading_notice = heading_replacement_notice(&file.edits);
         let feedback_edits = file.edits.clone();
+        let baseline = ctx.file_baselines.and_then(|b| b.prepare(&file.path));
         match ctx
             .primitive
             .edit_file_with_cancel(&file.path, file.edits, ctx.cancel, AGENT_PLUGIN_ID)
             .await
         {
             Ok(result) if result.applied => {
+                if let Some(baseline) = baseline {
+                    baseline.commit();
+                }
                 if let Some(state) = ctx.read_file_state {
                     refresh_read_stamp(state, &file.path, ctx.tool_call_id);
                 }

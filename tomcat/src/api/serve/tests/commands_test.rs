@@ -3804,6 +3804,7 @@ async fn serve_get_messages_returns_boundary_entries_without_truncation() {
                 estimated_tokens_saved: None,
                 error: None,
                 attempts: None,
+                superseded: false,
             },
         ),
     )
@@ -4126,6 +4127,91 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
         all_agent_ends, 2,
         "expected one failed + one recovered terminal event: {recovered:?}"
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_retry_and_resume_with_queued_signal_keep_empty_reply_protection() {
+    for resume in [false, true] {
+        let _key = install_test_api_key();
+        let hidden = || {
+            vec![
+                Ok(StreamEvent::Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 33,
+                    total_tokens: Some(133),
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: Some(27),
+                    text_tokens: Some(6),
+                }),
+                Ok(StreamEvent::FinishReason {
+                    reason: "stop".into(),
+                }),
+            ]
+        };
+        let (state, buffer, _temp, slot, requests) =
+            build_initialized_state_with_recorded_streams((0..4).map(|_| hidden()).collect()).await;
+        let session = &slot.ctx.session_runtime.session;
+        let id = session
+            .append_message(serde_json::json!({"role":"user","content":"real pending work"}))
+            .unwrap();
+        if resume {
+            session.append_message(serde_json::json!({"role":"assistant","tool_calls":[{"id":"read-pending","type":"function","function":{"name":"read","arguments":"{}"}}]})).unwrap();
+            session.append_message(serde_json::json!({"role":"tool","tool_call_id":"read-pending","content":"completed tool result"})).unwrap();
+        }
+        rehydrate_slot_context_state(&slot).unwrap();
+        let mut signal = crate::core::llm::ChatMessage::user("queued background notification");
+        signal.kind = crate::core::llm::MessageKind::Signal;
+        slot.ctx.session_runtime.follow_up_queue.lock().push(signal);
+        let command = if resume {
+            ServeCommand::Resume {
+                id: Some("resume-signal".into()),
+                session_id: Some(slot.session_id.clone()),
+            }
+        } else {
+            ServeCommand::Retry {
+                id: Some("retry-signal".into()),
+                session_id: Some(slot.session_id.clone()),
+                message_id: id,
+            }
+        };
+        handle_command(state, command).await.unwrap();
+        let frames = tokio::time::timeout(
+            Duration::from_secs(15),
+            wait_for_line(&buffer, |v| v["type"] == "agent_idle"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            frames.iter().any(|v| v["type"] == "agent_end"
+                && v["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("没有可见回答"))),
+            "{frames:?}"
+        );
+        let captured = requests.0.lock();
+        assert_eq!(captured.len(), 4);
+        assert!(captured[0]
+            .messages
+            .iter()
+            .any(|m| m.text_content() == Some("real pending work")));
+        assert!(captured[0]
+            .messages
+            .iter()
+            .any(|m| m.kind == crate::core::llm::MessageKind::Signal));
+        if resume {
+            assert!(captured[0]
+                .messages
+                .iter()
+                .any(|m| m.role == crate::core::llm::ChatMessageRole::Tool));
+        }
+        drop(captured);
+        let transcript =
+            std::fs::read_to_string(session.transcript_path(&slot.session_id)).unwrap();
+        assert!(transcript.contains("hidden_output"));
+        assert!(transcript.contains("auto_retry_start"));
+    }
 }
 
 #[tokio::test]

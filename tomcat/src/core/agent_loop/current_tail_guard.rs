@@ -801,6 +801,7 @@ async fn build_collapse_summary_artifacts(
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     let summary_message = apply_collapse_summary(
         messages,

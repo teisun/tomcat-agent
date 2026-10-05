@@ -127,9 +127,24 @@ pub(super) async fn write_file_impl(
     if let Some(err) = url_like_fs_miss(path) {
         return Err(err);
     }
-    let (path_buf, scope, grant) = executor
-        .gate_check_path(PrimitiveOperation::Write, path, plugin_id)
-        .await?;
+    let Some(checked_path) = super::helpers::until_cancelled(
+        cancel,
+        executor.gate_check_path(PrimitiveOperation::Write, path, plugin_id),
+    )
+    .await
+    else {
+        return Ok(WriteFileResult {
+            path: path.to_string(),
+            written: false,
+            bytes_written: 0,
+            diff_hint: None,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        });
+    };
+    let (path_buf, scope, grant) = checked_path?;
     let path_str = path_buf.to_string_lossy().to_string();
 
     // T2-P0-016 PR-C 二道防线：tool_exec 已先做 `exists && !overwrite` 早退，
@@ -171,9 +186,24 @@ pub(super) async fn write_file_impl(
     let original_for_secrets = original.as_deref().unwrap_or("");
     if let Some(hits) = scan_new_content_for_secrets(original_for_secrets, final_text) {
         let preview = crate::core::security::secrets::format_preview(&hits);
-        let approved = executor
-            .require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id)
-            .await?;
+        let Some(confirmation) = super::helpers::until_cancelled(
+            cancel,
+            executor.require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id),
+        )
+        .await
+        else {
+            return Ok(WriteFileResult {
+                path: path_str,
+                written: false,
+                bytes_written: 0,
+                diff_hint: None,
+                added: None,
+                removed: None,
+                diff: None,
+                diff_truncated: false,
+            });
+        };
+        let approved = confirmation?;
         if !approved {
             executor.audit.record_primitive(PrimitiveAuditEntry {
                 operation: AuditPrimitiveOp::Write,
@@ -279,9 +309,22 @@ pub(super) async fn edit_file_impl(
     if let Some(err) = url_like_fs_miss(path) {
         return Err(err);
     }
-    let (path_buf, scope, grant) = executor
-        .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
-        .await?;
+    let Some(checked_path) = super::helpers::until_cancelled(
+        cancel,
+        executor.gate_check_path(PrimitiveOperation::Edit, path, plugin_id),
+    )
+    .await
+    else {
+        return Ok(EditFileResult {
+            path: path.to_string(),
+            applied: false,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        });
+    };
+    let (path_buf, scope, grant) = checked_path?;
     let path_str = path_buf.to_string_lossy().to_string();
 
     // T2-P0-017 PR-D：行号路径（dispatcher / extension）保留，LLM 主路径走 `apply_string_edits`。
@@ -327,9 +370,22 @@ pub(super) async fn edit_file_impl(
     // 用户拒 → 返回 SecretsRejected，磁盘字节级未变；用户允 → 继续写盘。
     if let Some(hits) = scan_new_content_for_secrets(&original, &new_content) {
         let preview = crate::core::security::secrets::format_preview(&hits);
-        let approved = executor
-            .require_user_confirmation(PrimitiveOperation::Edit, &preview, plugin_id)
-            .await?;
+        let Some(confirmation) = super::helpers::until_cancelled(
+            cancel,
+            executor.require_user_confirmation(PrimitiveOperation::Edit, &preview, plugin_id),
+        )
+        .await
+        else {
+            return Ok(EditFileResult {
+                path: path_str,
+                applied: false,
+                added: None,
+                removed: None,
+                diff: None,
+                diff_truncated: false,
+            });
+        };
+        let approved = confirmation?;
         if !approved {
             executor.audit.record_primitive(PrimitiveAuditEntry {
                 operation: AuditPrimitiveOp::Edit,

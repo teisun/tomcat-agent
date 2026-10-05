@@ -11,11 +11,15 @@ pub(in super::super) async fn handle_hashline_edit(
     if let Some(state) = ctx.read_file_state {
         check_mutation_stamp(state, path, "edit")?;
     }
+    let baseline = ctx.file_baselines.and_then(|b| b.prepare(path));
     ctx.primitive
         .hashline_edit_with_cancel(path, segments, ctx.cancel, AGENT_PLUGIN_ID)
         .await
         .map(|r| {
             if r.applied {
+                if let Some(baseline) = baseline {
+                    baseline.commit();
+                }
                 if let Some(state) = ctx.read_file_state {
                     refresh_read_stamp(state, path, ctx.tool_call_id);
                 }

@@ -449,6 +449,7 @@ impl Preheat {
                 estimated_tokens_saved: None,
                 error: None,
                 attempts: None,
+                superseded: false,
             });
             if let Err(error) = append_entry(transcript_path, &marker) {
                 warn!(

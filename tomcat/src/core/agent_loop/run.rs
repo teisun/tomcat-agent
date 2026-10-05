@@ -73,7 +73,7 @@ use tracing::warn;
 
 use super::error_classifier::{handle_overflow_retry, handle_unsupported_multimodal_retry};
 use super::reasoning_loop::run_reasoning_loop;
-use super::steering_injection::inject_steering_messages;
+use super::steering_injection::{inject_follow_up_messages, inject_steering_messages};
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
 
 /// 自动无人执行可遇到短暂限流/网络抖动；上限 30 秒既尊重服务端恢复窗口，
@@ -211,6 +211,7 @@ impl AgentLoop {
 
     async fn run_inner(&mut self, messages: &mut Vec<ChatMessage>) -> AgentRunOutcome {
         self.completion_guard_injections = 0;
+        self.silent_reply_allowed = false;
         if self.cancel_token.is_cancelled() {
             // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted
             // 避免 chat_loop 误把"取消信号"传染给下一回合的正常输入。
@@ -253,7 +254,9 @@ impl AgentLoop {
                         return AgentRunOutcome::Completed(result);
                     }
 
-                    if self.follow_up_queue.lock().is_empty() {
+                    if self.steering_queue.lock().is_empty()
+                        && self.follow_up_queue.lock().is_empty()
+                    {
                         self.hand_back_unfinished_plan("run_ended_while_executing")
                             .await;
                         self.emit_event(AgentEvent::AgentEnd {
@@ -262,16 +265,20 @@ impl AgentLoop {
                         });
                         return AgentRunOutcome::Completed(result);
                     }
-                    let drained: Vec<_> = self.follow_up_queue.lock().drain(..).collect();
                     self.emit_event(AgentEvent::AgentEnd {
                         messages: vec![],
                         error: None,
                     });
-                    for msg in drained {
-                        if let Err(err) = self.push_message(messages, msg) {
-                            return AgentRunOutcome::Failed(err);
-                        }
+                    let batch_start = messages.len();
+                    if let Err(err) = inject_steering_messages(self, messages)
+                        .and_then(|_| inject_follow_up_messages(self, messages))
+                    {
+                        return AgentRunOutcome::Failed(err);
                     }
+                    self.silent_reply_allowed = messages.len() > batch_start
+                        && messages[batch_start..]
+                            .iter()
+                            .all(|m| m.kind == crate::core::llm::MessageKind::Signal);
                     continue;
                 }
                 Err(LoopError::Aborted {
@@ -518,24 +525,9 @@ impl AgentLoop {
                 }
             }
 
-            // 正常的 stream/tool await 会在内部优雅地处理取消，以便保留 partial
-            // assistant 与已完成的 tool result。此处是结构性兜底：后续新增的
-            // 非流式 await（例如 collapse 摘要）即使遗漏了 cancel race，也不能
-            // 让整个 turn 等到该操作自然结束。
-            let reasoning_result = {
-                let cancel = self.cancel_token.clone();
-                tokio::select! {
-                    biased;
-                    result = run_reasoning_loop(self, messages, attempt, max_attempts) => Some(result),
-                    _ = cancel.cancelled() => None,
-                }
-            };
-            let reasoning_result = reasoning_result.unwrap_or_else(|| {
-                Err(LoopError::Aborted {
-                    partial_text: String::new(),
-                    partial_messages: messages[self.start_idx..].to_vec(),
-                })
-            });
+            // Stream/tool cancellation is owned by their commit-aware boundaries. Racing
+            // the entire reasoning future here could drop a native writer after it started.
+            let reasoning_result = run_reasoning_loop(self, messages, attempt, max_attempts).await;
 
             match reasoning_result {
                 Ok(text) => {

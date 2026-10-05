@@ -156,6 +156,124 @@ impl ConfigBackend for DisplayConfigBackend {
 }
 
 #[tokio::test]
+async fn native_write_display_baseline_registration_matrix() {
+    use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+    use crate::core::tools::primitive::compute_line_hash;
+    for name in ["write", "edit", "hashline_edit", "batch_edit"] {
+        for decision in ["allow", "deny", "cancel"] {
+            let temp = tempfile::tempdir().unwrap();
+            let cwd = temp.path().canonicalize().unwrap();
+            let path = cwd.join("a.txt");
+            std::fs::write(&path, "original\n").unwrap();
+            let transcript = cwd.join("s.jsonl");
+            let tracker = crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+                &transcript,
+                "u",
+                cwd.clone(),
+            )
+            .unwrap();
+            let gate = DefaultPermissionGate::new(
+                GateConfig {
+                    agent_definition_dir: if decision == "deny" {
+                        std::path::PathBuf::from("/nonexistent_pi_workspace")
+                    } else {
+                        cwd.clone()
+                    },
+                    workspace_roots: vec![],
+                    agent_trail_readonly_dirs: vec![],
+                    user_path_rules: vec![],
+                    user_bash_forbidden: vec![],
+                    user_bash_approval: vec![],
+                    auto_confirm: false,
+                },
+                SessionGrants::new(),
+            )
+            .into_arc();
+            let confirm: Arc<dyn crate::core::UserConfirmationProvider> = if decision == "deny" {
+                Arc::new(crate::core::DenyAllConfirmation)
+            } else {
+                Arc::new(crate::core::AllowAllConfirmation)
+            };
+            let primitive: Arc<dyn PrimitiveExecutor> =
+                Arc::new(crate::core::DefaultPrimitiveExecutor::new(
+                    crate::infra::PrimitiveConfig::default(),
+                    confirm,
+                    Arc::new(crate::infra::TracingAuditRecorder),
+                    gate,
+                ));
+            let cancel = tokio_util::sync::CancellationToken::new();
+            if decision == "cancel" {
+                cancel.cancel();
+            }
+            let ctx = ToolExecCtx {
+                primitive: &primitive,
+                session_id: "baseline-test",
+                tool_call_id: "call",
+                config_backend: &None,
+                package_install_backend: &None,
+                bash_task_registry: &None,
+                read_file_state: None,
+                openai_files_runtime: None,
+                web_fetch_runtime: None,
+                web_search_runtime: None,
+                todos_runtime: None,
+                plan_runtime: None,
+                skill_set: None,
+                connector_registry: None,
+                plugin_engine_config: None,
+                subagent_type: SubagentType::User,
+                expose_skills_to_reviewer: false,
+                cancel: &cancel,
+                event_emitter: None,
+                completion_routes: None,
+                file_baselines: Some(&tracker),
+            };
+            let edits = json!([{"old_content":"original","new_content":"new"}]);
+            let args = match name {
+                "write" => json!({"path":path,"content":"new\n","overwrite":true}),
+                "edit" => json!({"path":path,"edits":edits}),
+                "batch_edit" => json!({"files":[{"path":path,"edits":edits}]}),
+                _ => {
+                    json!({"path":path,"edits":[{"op":"replace","pos":format!("1#{}",compute_line_hash("original")),"lines":"new\n"}]})
+                }
+            };
+            let manifest = crate::core::checkpoint::file_baselines::session_dir(&transcript)
+                .join("u/baselines.jsonl");
+            for iteration in 0..if decision == "allow" { 2 } else { 1 } {
+                std::fs::write(&path, "original\n").unwrap();
+                let mut display = None;
+                let result = match name {
+                    "write" => branches::write::handle_write(&ctx, &args, &mut display).await,
+                    "hashline_edit" => {
+                        branches::hashline_edit::handle_hashline_edit(&ctx, &args, &mut display)
+                            .await
+                    }
+                    _ => branches::edit::handle_edit(&ctx, &args, &mut display).await,
+                };
+                if decision == "allow" {
+                    assert!(result.is_ok(), "{name}: {result:?}");
+                    assert!(display.is_some());
+                    let rows = std::fs::read_to_string(&manifest).unwrap();
+                    assert_eq!(rows.lines().count(), 1, "{name} iteration {iteration}");
+                    let row: serde_json::Value = serde_json::from_str(rows.trim()).unwrap();
+                    let backup = manifest
+                        .parent()
+                        .unwrap()
+                        .join(row["backup"].as_str().unwrap());
+                    assert_eq!(std::fs::read_to_string(backup).unwrap(), "original\n");
+                } else {
+                    assert!(
+                        !manifest.exists(),
+                        "{name}/{decision} must not publish baseline"
+                    );
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn write_success_populates_file_display() {
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
     let tc = ToolCallInfo {

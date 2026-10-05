@@ -156,6 +156,7 @@ struct ToolExecCtx<'a> {
     cancel: &'a tokio_util::sync::CancellationToken,
     event_emitter: Option<&'a ScopedEventEmitter>,
     completion_routes: Option<&'a BackgroundCompletionRoutes>,
+    file_baselines: Option<&'a Arc<crate::core::checkpoint::file_baselines::TurnFileBaselines>>,
 }
 
 /// 执行单次 tool call 并返回兼容旧测试的 `(输出文本, is_error)`。
@@ -307,6 +308,7 @@ pub(super) async fn execute_tool_full_with_policy(
         tc,
         event_emitter,
         completion_routes,
+        None,
     )
     .await
 }
@@ -335,6 +337,7 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
     tc: &ToolCallInfo,
     event_emitter: Option<&ScopedEventEmitter>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
+    file_baselines: Option<&Arc<crate::core::checkpoint::file_baselines::TurnFileBaselines>>,
 ) -> ToolExecOutcome {
     let mut display = None;
     let ctx = ToolExecCtx {
@@ -358,6 +361,7 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
         cancel,
         event_emitter,
         completion_routes,
+        file_baselines,
     };
     let (model_text, is_error, follow_up_parts) =
         execute_tool_tuple_full(&ctx, tc, &mut display).await;

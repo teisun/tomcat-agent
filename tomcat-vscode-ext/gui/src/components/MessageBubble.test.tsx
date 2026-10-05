@@ -4,6 +4,32 @@ import { describe, expect, it, vi } from "vitest";
 import { MessageBubble } from "./MessageBubble";
 
 describe("MessageBubble", () => {
+  it.each(["Single line", "First line\nSecond line"])("keeps the file-revert edit affordance clickable for %j", (text) => {
+    const onEdit = vi.fn();
+    const item = {id:"editable",kind:"user" as const,type:"message" as const,text,rewindEligible:true};
+    render(<MessageBubble item={item} onEdit={onEdit} hasFileWrites />);
+    const button = screen.getByRole("button", {name:"Edit message"});
+    expect(button.className).toContain("tc-message__edit-trigger--revert");
+    expect(button.querySelector(".codicon-discard")).not.toBeNull();
+    expect(screen.getByTestId("message-block").getAttribute("data-has-writes")).toBe("true");
+    fireEvent.click(button);
+    expect(onEdit).toHaveBeenCalledExactlyOnceWith(item);
+    expect(screen.getByTestId("message-text").textContent).toBe(text);
+  });
+
+  it("retains a focusable edit entry without reserving revert-icon space", () => {
+    const onEdit = vi.fn();
+    const item = { id: "no-write", kind: "user" as const, type: "message" as const, text: "No writes", rewindEligible: true };
+    render(<MessageBubble item={item} onEdit={onEdit} />);
+    expect(screen.getByTestId("message-block").getAttribute("data-has-writes")).toBe("false");
+    const button = screen.getByRole("button", { name: "Edit message" });
+    expect(button.tabIndex).toBe(0);
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(screen.getByTestId("message-text"));
+    expect(onEdit).toHaveBeenCalledExactlyOnceWith(item);
+  });
+
   it("renders user message as right pill without header", () => {
     render(
       <MessageBubble

@@ -2,6 +2,18 @@
 
 > 目标：把“provider 在流里送回来的终局错误为什么会直接判死一整轮、这次为什么不是 PDF 本身不合法、以及为什么我们的修法必须比别人多一层自愈”一次讲清楚。
 
+## 内部通知的正常空终态
+
+```text
+主动 Stopped → UI 保留终态，不再进入模型 follow-up
+正常收尾 + 实际取出的整批均为 Signal → 只许可下一次接受的响应静默
+新提问 / Retry / Resume / 工具轮中途的通知 → 默认空答保护
+```
+
+`AgentLoop::silent_reply_allowed` 仅在 `run_inner` 正常完成、completion guard 放行且未耗尽工具轮预算后，从实际注入的新批次产生。入口清零；自动重试同一批输入时保留；任何响应一被接受就清零，后续工具结果与 Nudge 不继承许可。只有正常 `stop/end_turn`、无正文、无工具或畸形调用、未截断且无终局错误时可豁免 hidden/thinking-only 判定；仍走原 finalize 保留用量、continuity、持久化、completion guard 和 TurnEnd。
+
+不从历史最后一条 assistant 或 `start_idx` 推断完成责任：压缩可将未完成真人任务折入摘要；Retry/Resume 在 run 入口追加通知前已经复制/恢复真人工作，尾部仅见 Signal 不能证明无需回答。CLI 空闲 auto_drain 入口本期不授权，静默仍可能重试报错；出现该类反馈时才在可信注入点扩展授权，不增加持久回执或改回历史猜测。若未来 Signal 要求行动，需结构化子类型限定许可；普通用户 reasoning-only 的保护不随本修复放宽。
+
 ## 1. 说人话版
 
 这次表面现象很吓人：

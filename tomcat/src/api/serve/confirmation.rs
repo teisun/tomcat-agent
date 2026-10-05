@@ -40,6 +40,20 @@ pub struct ServeConfirmationBridge {
     pending: Arc<DashMap<String, PendingConfirmation>>,
 }
 
+struct ConfirmationWaitGuard {
+    bridge: ServeConfirmationBridge,
+    request_id: String,
+}
+
+impl Drop for ConfirmationWaitGuard {
+    fn drop(&mut self) {
+        if let Some((_, pending)) = self.bridge.pending.remove(&self.request_id) {
+            self.bridge
+                .send_cancel(&self.request_id, &pending.session_id, "cancelled");
+        }
+    }
+}
+
 impl ServeConfirmationBridge {
     pub fn new(writer: WriterHandle) -> Self {
         Self {
@@ -78,6 +92,10 @@ impl ServeConfirmationBridge {
                 response: sender,
             },
         );
+        let _wait_guard = ConfirmationWaitGuard {
+            bridge: self.clone(),
+            request_id: request_id.clone(),
+        };
         let payload = serde_json::to_value(ConfirmationRequest {
             request_id: request_id.clone(),
             operation: format!("{operation:?}"),
@@ -90,15 +108,12 @@ impl ServeConfirmationBridge {
         .map_err(|error| {
             AppError::Config(format!("serialize confirmation request failed: {error}"))
         })?;
-        if let Err(error) = self.writer.send(OutFrame::Control(ControlFrame::request(
+        self.writer.send(OutFrame::Control(ControlFrame::request(
             request_id.clone(),
             "confirmation",
             Some(session_id.to_string()),
             payload,
-        ))) {
-            self.pending.remove(&request_id);
-            return Err(error);
-        }
+        )))?;
         receiver
             .await
             .map_err(|_| AppError::Permission("确认宿主已断开；本次操作未执行".to_string()))
@@ -162,6 +177,14 @@ impl ServeConfirmationBridge {
         Ok(true)
     }
 
+    fn send_cancel(&self, request_id: &str, session_id: &str, reason: &str) {
+        let _ = self.writer.send(OutFrame::Control(ControlFrame::cancel(
+            request_id.to_string(),
+            Some(session_id.to_string()),
+            serde_json::json!({ "reason": reason }),
+        )));
+    }
+
     pub fn cancel_live_session(&self, session_id: &str, reason: &str) -> usize {
         let request_ids = self
             .pending
@@ -170,12 +193,8 @@ impl ServeConfirmationBridge {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for request_id in &request_ids {
-            let _ = self.writer.send(OutFrame::Control(ControlFrame::cancel(
-                request_id.clone(),
-                Some(session_id.to_string()),
-                serde_json::json!({ "reason": reason }),
-            )));
             if let Some((_, pending)) = self.pending.remove(request_id) {
+                self.send_cancel(request_id, session_id, reason);
                 let _ = pending.response.send(ConfirmDecision::Deny);
             }
         }

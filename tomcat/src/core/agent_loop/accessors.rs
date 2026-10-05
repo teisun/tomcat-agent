@@ -56,6 +56,7 @@ impl AgentLoop {
             primitive,
             emitter,
             session_manager: None,
+            file_baselines: None,
             config_backend: None,
             package_install_backend: None,
             bash_task_registry: None,
@@ -76,6 +77,7 @@ impl AgentLoop {
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             completion_guard_injections: 0,
+            silent_reply_allowed: false,
         }
     }
 
@@ -229,6 +231,7 @@ impl AgentLoop {
             primitive,
             emitter,
             session_manager: None,
+            file_baselines: None,
             config_backend: None,
             package_install_backend: None,
             bash_task_registry: None,
@@ -249,6 +252,7 @@ impl AgentLoop {
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             completion_guard_injections: 0,
+            silent_reply_allowed: false,
         }
     }
 

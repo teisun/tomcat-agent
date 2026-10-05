@@ -392,6 +392,76 @@ async fn serve_background_task_finish_routes_event_and_queues_follow_up_for_same
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_background_stop_keeps_ui_terminal_without_model_follow_up() {
+    let _key = install_test_api_key();
+    let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let registry = &slot.ctx.session_runtime.bash_task_registry;
+    let ticket = registry.spawn("sleep 30".into(), None).await.unwrap();
+    registry.stop(&ticket.task_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let routed = read_ndjson_lines(&buffer)
+                .iter()
+                .any(|line| line["type"] == wire::WIRE_BACKGROUND_TASK_FINISHED);
+            let processed = slot
+                .ctx
+                .session_runtime
+                .delivered_completion
+                .lock()
+                .contains(&ticket.task_id);
+            if routed && processed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let lines = read_ndjson_lines(&buffer);
+    assert!(lines
+        .iter()
+        .any(|line| line["type"] == wire::WIRE_BACKGROUND_TASK_FINISHED
+            && line["exitCode"] == -1
+            && line["sessionId"] == slot.session_id));
+    assert!(slot.ctx.session_runtime.follow_up_queue.lock().is_empty());
+    assert!(!slot.is_busy());
+    assert!(!lines.iter().any(|line| line["type"] == "agent_start"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_background_nonzero_finish_still_delivers_once() {
+    let _key = install_test_api_key();
+    let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let ticket = slot
+        .ctx
+        .session_runtime
+        .bash_task_registry
+        .spawn("exit 7".into(), None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while slot.ctx.session_runtime.follow_up_queue.lock().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let queue = slot.ctx.session_runtime.follow_up_queue.lock();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].kind, crate::core::llm::MessageKind::Signal);
+        assert!(queue[0].text_content().unwrap().contains("exit_code=\"7\""));
+    }
+    assert!(wait_for_lines(&buffer, 1)
+        .await
+        .iter()
+        .any(|line| line["taskId"] == ticket.task_id && line["exitCode"] == 7));
+    assert!(!slot.is_busy());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_cleanup_aborts_background_task_subscribers() {
     let _api_key = install_test_api_key();
     let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;

@@ -4773,6 +4773,100 @@ export async function assertWebviewSessionTitleFlow(
   );
 }
 
+export async function assertInlineUserMessageEditFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const driver = await WorkbenchFindDriver.connectFromEnvironment();
+  await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+  await driver.setViewport(1000, 900);
+  try {
+  const artifacts = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
+  if (artifacts) await fs.mkdir(artifacts, {recursive:true});
+  const capture = async (name: string) => {
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1" && artifacts) {
+      await captureWorkbenchArtifacts(path.join(artifacts, `${name}.png`));
+    }
+  };
+  const first = await createFreshWebviewSession(api, "inline-no-write-session");
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:"inline original"});
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"send-button"});
+  await waitForWebviewState(api,(s)=>!s.sessionViews[first]?.busy && s.sessionViews[first]?.timeline.some((i)=>i.type==="message"&&i.kind==="assistant") ? true:undefined);
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:"preserved bottom draft"});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes("preserved bottom draft")?s:undefined);
+  await capture("00-bubble-no-write");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-user-message",index:0});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-composer-input"')?s:undefined);
+  await capture("01-inline-no-write");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-model-select"});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-model-dropdown"')?s:undefined);
+  await capture("01b-inline-model-menu");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-model-select"});
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"edit-composer-input",value:" edited"});
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-send-button"});
+  await waitForWebviewState(api,(s)=>s.sessionViews[first]?.timeline.some((i)=>i.type==="message"&&i.kind==="user"&&i.text.includes("edited"))?true:undefined);
+  const afterKeep=await waitForWebviewDomSnapshot(api,(s)=>!s.html.includes('data-testid="inline-message-editor"')?s:undefined);
+  assert.ok(!afterKeep.html.includes('data-testid="edit-confirm-dialog"'));
+  assert.ok(afterKeep.html.includes("preserved bottom draft"),"editing must not consume the main draft");
+  await capture("02-inline-kept");
+
+  const second=await createFreshWebviewSession(api,"inline-write-session");
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:"inline edit file fixture"});
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"send-button"});
+  await waitForWebviewState(api,(s)=>s.sessionViews[second]?.busy && s.sessionViews[second]?.timeline.some((i)=>i.type==="tool"&&i.display?.kind==="file")?true:undefined);
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes("tc-message__edit-trigger--revert") && !s.html.includes('data-testid="inline-message-editor"')?s:undefined);
+  await capture("02b-bubble-with-writes");
+  const oldIds = new Set(api.__testing.getWebviewState().sessionViews[second].timeline.map((item) => item.id));
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:"preserved running bottom draft"});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes("preserved running bottom draft")?s:undefined);
+  await waitForWebviewState(api, (s) => s.sessionViews[second]?.composerDraft?.text.includes("preserved running bottom draft") ? true : undefined);
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-user-message",index:0});
+  const runningEdit = await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-composer-input"')?s:undefined);
+  assert.ok(/<button[^>]*data-testid="stop-button"(?![^>]*disabled)[^>]*>/.test(runningEdit.html), "Stop must remain enabled while editing");
+  const bottomDraftBeforeRevert = structuredClone(api.__testing.getWebviewState().sessionViews[second].composerDraft);
+  await driver.setViewport(448, 844);
+  await capture("03-inline-running-narrow");
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"edit-composer-input",value:" edited"});
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-send-button"});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-confirm-dialog"')?s:undefined);
+  await capture("04-inline-confirm");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-confirm-cancel"});
+  const cancelled=await waitForWebviewDomSnapshot(api,(s)=>!s.html.includes('data-testid="edit-confirm-dialog"')?s:undefined);
+  assert.ok(cancelled.html.includes('data-testid="edit-composer-input"'));
+  assert.equal(api.__testing.getWebviewState().sessionViews[second]?.busy,true,"Cancel must not interrupt");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-send-button"});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-confirm-dialog"')?s:undefined);
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-confirm-revert"});
+  await waitForWebviewState(api,(s)=>!s.sessionViews[second]?.busy && s.sessionViews[second]?.timeline.some((i)=>i.type==="message"&&i.kind==="user"&&i.text.includes("edited"))?true:undefined);
+  await waitForWebviewDomSnapshot(api,(s)=>!s.html.includes('data-testid="inline-message-editor"')?s:undefined);
+  await driver.setViewport(1000, 900);
+  await capture("05-inline-reverted");
+  const reverted = api.__testing.getWebviewState().sessionViews[second];
+  assert.ok(reverted.timeline.every((item) => !oldIds.has(item.id)), "Revert must remove the old user, tool cards and assistant replies");
+  assert.ok(!reverted.timeline.some((item) => item.type === "message" && item.text.includes("Tomcat turn interrupted")), "old interruption notice must not remain");
+  assert.deepEqual(reverted.composerDraft, bottomDraftBeforeRevert, "Revert must preserve the bottom draft");
+  const legacy=await createFreshWebviewSession(api,"inline-missing-baseline");
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:"inline edit file fixture no baseline\n第二行：检查回退箭头固定在气泡右下角"});
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"send-button"});
+  await waitForWebviewState(api,(s)=>s.sessionViews[legacy]?.timeline.some((i)=>i.type==="tool"&&i.display?.kind==="file")?true:undefined);
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes("tc-message__edit-trigger--revert") && s.html.includes("第二行")?s:undefined);
+  await driver.setViewport(448, 844);
+  await capture("05b-bubble-multiline-narrow");
+  await driver.setViewport(1000, 900);
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-user-message",index:0});
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-composer-input"')?s:undefined);
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-send-button"});
+  await waitForWebviewDomSnapshot(api,(s)=>/<button[^>]*data-testid="edit-confirm-revert"[^>]*disabled/.test(s.html)?s:undefined);
+  await capture("06-inline-revert-unavailable");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-confirm-cancel"});
+  await api.__testing.sendWebviewDomAction({kind:"pressKeyOnTestId",testId:"edit-composer-input",value:"Escape"});
+  await api.__testing.sendWebviewIntent({type:"interrupt",messageId:"cleanup-inline",data:{sessionId:legacy}});
+  } finally {
+    await driver.setViewport(1200, 900);
+    await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    driver.close();
+  }
+}
+
 function transcriptVisualArtifactPath(filename: string): string {
   const dir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR || "/tmp";
   return path.join(dir, filename);

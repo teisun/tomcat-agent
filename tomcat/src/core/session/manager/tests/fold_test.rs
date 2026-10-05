@@ -44,6 +44,7 @@ fn make_boundary_entry(ts: &str, summary: &str) -> TranscriptEntry {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     })
 }
 
@@ -63,11 +64,13 @@ fn make_marker_entry(id: &str, ts: &str) -> TranscriptEntry {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     })
 }
 
 fn make_summary_body(id: &str, summary: &str, ts: &str) -> TranscriptEntry {
     TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+        superseded: false,
         id: Some(format!("{id}:text")),
         parent_id: Some(id.to_string()),
         timestamp: ts.to_string(),
@@ -83,6 +86,38 @@ fn message_entry(id: &str, role: &str, content: &str, ts: &str) -> TranscriptEnt
         timestamp: ts.to_string(),
         message: serde_json::json!({"role":role,"content":content}),
     })
+}
+
+#[test]
+fn rewind_and_resend_fold_ignores_superseded_boundaries_and_bodies() {
+    let ts = "2026-10-04T10:00:00Z";
+    let mut marker = make_marker_entry("discarded", ts);
+    if let TranscriptEntry::BranchSummary(ref mut entry) = marker {
+        entry.superseded = true;
+    }
+    let entries = vec![
+        message_entry("keep", "user", "retained", ts),
+        marker,
+        make_summary_body("discarded", "MUST NOT REPLAY", ts),
+        message_entry("new", "user", "replacement", ts),
+    ];
+    let folded = fold_entries_to_messages(&entries, 0);
+    assert_eq!(
+        folded
+            .messages
+            .iter()
+            .filter_map(ChatMessage::text_content)
+            .collect::<Vec<_>>(),
+        ["retained", "replacement"]
+    );
+    assert_eq!(
+        compute_fold_start(
+            &entries,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+            10
+        ),
+        0
+    );
 }
 
 #[test]

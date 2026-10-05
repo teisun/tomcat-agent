@@ -3,6 +3,8 @@ import { useEffect, useRef } from "react";
 export type ConfirmationAction = {
   id: string;
   label: string;
+  disabled?: boolean;
+  reason?: string;
   shortcut?: string;
   tone?: "ghost" | "secondary" | "primary";
 };
@@ -35,11 +37,16 @@ export function ConfirmationDialog({
   const titleId = ariaLabelledBy ?? `${testId}-title`;
 
   useEffect(() => {
-    primaryButtonRef.current?.focus();
+    const previous = document.activeElement as HTMLElement | null;
+    const primary = primaryButtonRef.current;
+    if (primary && !primary.disabled) primary.focus();
+    else dialogRef.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
   }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -107,7 +114,9 @@ export function ConfirmationDialog({
               className={`tc-confirm-dialog__button tc-confirm-dialog__button--${action.tone ?? "secondary"}`}
               data-testid={`${testId}-${action.id}`}
               key={action.id}
-              onClick={() => onAction(action.id)}
+              disabled={action.disabled}
+              title={action.reason}
+              onClick={() => { if (!action.disabled) onAction(action.id); }}
               ref={action.id === primaryActionId ? primaryButtonRef : undefined}
               type="button"
             >

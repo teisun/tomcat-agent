@@ -1855,6 +1855,67 @@ describe("checkpoint intent handling", () => {
     });
   }
 
+  it("bridges rewindAndResend without touching the main draft and requests replacement history", async () => {
+    const request = vi.fn().mockResolvedValue({success:true,sessionId:"s1",payload:{accepted:true}});
+    const provider = new TomcatWebviewViewProvider({extensionUri:vscode.Uri.file("/workspace/extension"),getDefaultCwd:()=>"/workspace",ide:{} as never,
+      initialize:async()=>({sessionId:"s1",capabilities:["rewind_and_resend"]} as never),messenger:{onEvent:()=>({dispose(){}}),request} as never,sessionRouter:{} as never});
+    vi.spyOn(provider as any,"ensureInitialized").mockResolvedValue({capabilities:["rewind_and_resend"]});
+    const history=vi.spyOn(provider as any,"refreshSessionHistory").mockResolvedValue(undefined);
+    vi.spyOn(provider as any,"refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(provider as any,"refreshCheckpoints").mockResolvedValue(undefined);
+    vi.spyOn(provider as any,"postState").mockResolvedValue(undefined);
+    const events=vi.spyOn(provider as any,"postEvent").mockResolvedValue(undefined);
+    const draft=vi.spyOn((provider as any).draftStore,"update");
+    await (provider as any).handleIntent({type:"rewindAndResend",messageId:"request",data:{sessionId:"s1",messageId:"old",files:"keep",text:"new",segments:[{type:"text",text:"new"}],attachments:[]}});
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({type:"rewind_and_resend",sessionId:"s1",messageId:"old",files:"keep",message:expect.objectContaining({text:"new"})}));
+    expect(history).toHaveBeenCalledWith("s1",expect.objectContaining({strict:true,replace:expect.any(Set)}));
+    expect(draft).not.toHaveBeenCalled();
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({type:"rewindAndResendResult",requestId:"request",success:true}));
+    provider.dispose();
+  });
+
+  it.each([true, false])("keeps rewind failures visible at the correct scope (committed=%s)", async (committed) => {
+    const provider = createCheckpointProvider();
+    const host = provider as any;
+    host.stateStore.hydrateHistory("s1", { sessionId: "s1", messages: [
+      { type: "message", id: "old", message: { role: "user", content: "old question" } },
+    ] });
+    host.deps.messenger.request = vi.fn().mockResolvedValue({
+      success: false, sessionId: "s1", error: committed ? "runtime refresh failed" : "revert_unavailable",
+      payload: committed ? { committed: true } : { revertReason: "no_baselines" },
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ capabilities: ["rewind_and_resend"] });
+    const history = vi.spyOn(host, "refreshSessionHistory").mockImplementation(async () => {
+      host.stateStore.replaceHistory("s1", { sessionId: "s1", messages: [
+        { type: "message", id: "new", message: { role: "user", content: "new question" } },
+      ] }, new Set(["old"]));
+    });
+    vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(host, "refreshCheckpoints").mockResolvedValue(undefined);
+    const snapshots: unknown[] = [];
+    vi.spyOn(host, "postState").mockImplementation(async () => {
+      snapshots.push(structuredClone(provider.currentState().sessionViews.s1.timeline));
+    });
+    const events = vi.spyOn(host, "postEvent").mockResolvedValue(undefined);
+    await host.handleIntent({ type: "rewindAndResend", messageId: "edit-result", data: {
+      sessionId: "s1", messageId: "old", files: "keep", text: "new question",
+      segments: [{ type: "text", text: "new question" }], attachments: [],
+    } });
+    if (committed) {
+      expect(history).toHaveBeenCalled();
+      expect(snapshots.at(-1)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "user", text: "new question" }),
+        expect.objectContaining({ kind: "error", text: expect.stringContaining("runtime refresh failed") }),
+      ]));
+      expect(provider.currentState().sessionViews.s1.timeline.some((item) => item.id === "old")).toBe(false);
+    } else {
+      expect(history).not.toHaveBeenCalled();
+      expect(provider.currentState().sessionViews.s1.timeline.some((item) => item.type === "message" && item.kind === "error")).toBe(false);
+    }
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "rewindAndResendResult", success: false }));
+    provider.dispose();
+  });
+
   it("dispatches restoreCheckpoint with revertFiles and refreshes state in order", async () => {
     const restoreCheckpoint = vi.fn().mockResolvedValue({
       checkpointId: "ck-1",

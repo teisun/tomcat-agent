@@ -321,6 +321,11 @@ fn is_user_turn_start(entry: &TranscriptEntry) -> bool {
     match entry {
         TranscriptEntry::Message(me) => {
             me.message.get("role").and_then(|v| v.as_str()) == Some("user")
+                && me
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
                 && MessageKind::from_persisted(
                     me.message.get("kind").and_then(serde_json::Value::as_str),
                 )
@@ -383,7 +388,9 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
     index.last_entry_id = parse_entry_id(entry);
 
     match entry {
-        TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true) => {
+        TranscriptEntry::BranchSummary(summary)
+            if !summary.superseded && summary.is_boundary == Some(true) =>
+        {
             match (&summary.id, &summary.summary) {
                 (_, Some(_)) => index.latest_boundary = Some(anchor.clone()),
                 (Some(id), None) => {
@@ -394,7 +401,7 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
                 (None, None) => {}
             }
         }
-        TranscriptEntry::BranchSummaryText(body) => {
+        TranscriptEntry::BranchSummaryText(body) if !body.superseded => {
             if let Some(marker) = index.pending_boundary_markers.remove(&body.for_id) {
                 index.latest_boundary = Some(marker);
             }

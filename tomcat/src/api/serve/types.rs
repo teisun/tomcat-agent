@@ -105,6 +105,33 @@ impl ServeMessageParams {
     }
 }
 
+/// File policy for a historical user-message replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindFiles {
+    Keep,
+    Revert,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindMessage {
+    pub text: String,
+    #[serde(flatten)]
+    pub params: ServeMessageParams,
+}
+
+pub use crate::core::checkpoint::file_baselines::RevertReason;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRewindResponse {
+    pub revert_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert_reason: Option<RevertReason>,
+    pub revert_paths: Vec<String>,
+}
+
 /// 新会话的运行模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -328,6 +355,22 @@ pub enum ServeCommand {
         id: Option<String>,
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RewindAndResend {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        session_id: String,
+        message_id: String,
+        files: RewindFiles,
+        message: RewindMessage,
+    },
+    #[serde(rename_all = "camelCase")]
+    PreviewRewind {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        session_id: String,
+        message_id: String,
     },
     /// 复制指定失败输入为新的活 user message，然后重新开一轮。
     #[serde(rename_all = "camelCase")]
@@ -787,6 +830,8 @@ impl ServeCommand {
             | Self::FollowUp { id, .. }
             | Self::Resume { id, .. }
             | Self::Retry { id, .. }
+            | Self::RewindAndResend { id, .. }
+            | Self::PreviewRewind { id, .. }
             | Self::GetState { id, .. }
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
@@ -859,6 +904,8 @@ impl ServeCommand {
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
             Self::SwitchSession { session_id, .. }
+            | Self::RewindAndResend { session_id, .. }
+            | Self::PreviewRewind { session_id, .. }
             | Self::RetainAttachmentLeases { session_id, .. }
             | Self::DiscardDetachedSession { session_id, .. } => Some(session_id.as_str()),
             Self::NewSession { .. }
@@ -907,6 +954,8 @@ impl ServeCommand {
             Self::FollowUp { .. } => "follow_up",
             Self::Resume { .. } => "resume",
             Self::Retry { .. } => "retry",
+            Self::RewindAndResend { .. } => "rewind_and_resend",
+            Self::PreviewRewind { .. } => "preview_rewind",
             Self::GetState { .. } => "get_state",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",

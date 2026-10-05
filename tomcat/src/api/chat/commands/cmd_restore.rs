@@ -328,6 +328,9 @@ fn finalize_restore_transcript(
         .map_err(|err| err.to_string())?;
     ctx.session_runtime
         .session
+        .cleanup_superseded_file_baselines();
+    ctx.session_runtime
+        .session
         .append_custom_entry(json!({
             "customType": "checkpoint.restore",
             "checkpointId": meta.id.to_string(),

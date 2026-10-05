@@ -44,6 +44,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "follow_up",
                             "resume",
                             "retry",
+                            "rewind_and_resend",
                             "get_state",
                             "compact",
                             "run_slash_command",

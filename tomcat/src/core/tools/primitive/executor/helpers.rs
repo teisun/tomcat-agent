@@ -8,6 +8,18 @@ use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
 use std::path::PathBuf;
 
+/// Cancellation only races pre-commit waits, never a running disk commit.
+pub(super) async fn until_cancelled<T>(
+    cancel: &tokio_util::sync::CancellationToken,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        result = future => Some(result),
+    }
+}
+
 pub(super) fn op_summary(op: PrimitiveOperation) -> &'static str {
     match op {
         PrimitiveOperation::Read => "读取",

@@ -44,7 +44,9 @@ export interface WebviewDomAction {
   widthPx?: number | null;
 }
 
+import type { MessageEditIntent } from "../../src/shared/messageEditProtocol";
 export interface WebviewMessageBlock {
+  rewindEligible?: boolean;
   /** A durable failed input superseded by a copy-forward retry. */
   abandoned?: boolean;
   assistantMessageId?: string;
@@ -314,6 +316,7 @@ export interface WebviewApprovalCard {
 
 /** An image the webview may render, identified by hash instead of carrying bytes. */
 export interface WebviewAttachmentView {
+  providerSha?: string | null;
   /** sha256 of the original bytes; the backend's name for this attachment. */
   blobSha: string;
   /** Original byte count, for display only. */
@@ -405,6 +408,7 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  rewindSupported?: boolean;
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModelDetails?: Record<string, WebviewModelInfo>;
@@ -529,6 +533,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | MessageEditIntent
   | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {
       messageId: string;
@@ -598,6 +603,7 @@ export type WebviewIntent =
       messageId: string;
       type: "pickContext";
       data?: {
+        target?: "edit";
         operationId?: string;
         sessionId?: string | null;
       };
@@ -654,6 +660,7 @@ export type WebviewIntent =
        */
       type: "attachFiles";
       data: {
+        target?: "edit";
         files: AttachmentCandidate[];
         operationId?: string;
         sessionId: string;
@@ -760,6 +767,7 @@ export type WebviewIntent =
       messageId: string;
       type: "resolveDrop";
       data: {
+        target?: "edit";
         operationId?: string;
         sessionId?: string | null;
         uris: string[];

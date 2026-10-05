@@ -52,6 +52,8 @@ export interface IngestAttachmentInput {
   providerMimeType?: null | string;
   thumbBase64?: null | string;
 }
+export type InstructionKind = "command" | "skill";
+
 export type ListSessionsScope = "live" | "disk";
 
 export type Message = any;
@@ -107,6 +109,16 @@ export interface RetainAttachmentLeaseRef {
 export interface RetainAttachmentLeasesParams {
   attachments: RetainAttachmentLeaseRef[];
 }
+export type RevertReason = "no_baselines" | "expired" | "git_head_moved";
+
+export type RewindFiles = "keep" | "revert";
+
+export interface RewindMessage {
+  attachments?: ServeAttachment[];
+  segments?: ServeContentSegment[];
+  text: string;
+  userMessageId?: null | string;
+}
 export interface ServeAttachment {
   blobSha?: null | string;
   fileId?: null | string;
@@ -128,6 +140,11 @@ export interface ServeCacheObservation {
   tailChangedCount: number;
 }
 export type ServeContentSegment = {
+  kind: InstructionKind;
+  label: string;
+  resourceId: string;
+  type: "instruction";
+} | {
   kind: ServeContextRefKind;
   label: string;
   lineEnd?: null | number;
@@ -402,6 +419,14 @@ export interface IngestAttachmentResponse {
   mimeType: string;
   providerSha?: null | string;
 }
+export interface InstructionCard {
+  description: string;
+  id: string;
+  kind: InstructionKind;
+  name: string;
+  path: string;
+  source: string;
+}
 export interface ListConnectorToolsPayload {
   attempt: number;
   configKey: string;
@@ -420,6 +445,11 @@ export interface ModelKeyStatus {
 }
 export type OutFrame = ControlFrame | ResponseFrame | ServeEvent;
 
+export interface PreviewRewindResponse {
+  revertAvailable: boolean;
+  revertPaths: string[];
+  revertReason?: RevertReason | null;
+}
 export interface ProjectTrustPayload {
   error?: null | string;
   projectRoot: string;
@@ -543,11 +573,23 @@ export type ServeCommand = {
   type: "set_provider_key";
   value: string;
 } | {
+  files: RewindFiles;
+  id?: null | string;
+  message: RewindMessage;
+  messageId: string;
+  sessionId: string;
+  type: "rewind_and_resend";
+} | {
   id?: null | string;
   level: string;
   model: string;
   sessionId?: null | string;
   type: "set_thinking_level";
+} | {
+  id?: null | string;
+  messageId: string;
+  sessionId: string;
+  type: "preview_rewind";
 } | {
   id?: null | string;
   messageId: string;
@@ -642,6 +684,10 @@ export type ServeCommand = {
   id?: null | string;
   sessionId?: null | string;
   type: "compact";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  type: "get_instruction_catalog";
 } | {
   id?: null | string;
   sessionId?: null | string;

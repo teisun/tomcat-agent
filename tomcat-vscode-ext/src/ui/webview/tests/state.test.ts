@@ -12,6 +12,19 @@ import {
   WebviewStateStore,
 } from "../state";
 
+describe("editable attachment history", () => {
+  it.each([
+    [{type:"input_image_ref",blob_sha:"a".repeat(64),mime_type:"image/png"},{blobSha:"a".repeat(64),unavailable:true}],
+    [{type:"input_image",blobSha:"a".repeat(64),providerSha:"b".repeat(64),mimeType:"image/svg+xml",filename:"icon.svg"},{providerSha:"b".repeat(64),filename:"icon.svg"}],
+    [{type:"input_image_ref",blobSha:"a".repeat(64),blob_sha:"a".repeat(64),providerSha:"b".repeat(64),mime_type:"image/svg+xml",filename:"icon.svg"},{providerSha:"b".repeat(64),filename:"icon.svg"}],
+  ])("preserves missing-blob and provider-rendition metadata: %j", (part, expected) => {
+    const store=new WebviewStateStore();
+    store.setActiveSession("edit-session");
+    store.hydrateHistory("edit-session",{sessionId:"edit-session",upToSeq:null,messages:[{type:"message",id:"user",message:{role:"user",rewindEligible:true,content:[{type:"input_text",text:"edit image"},part]}}]});
+    expect(store.snapshot().sessionViews["edit-session"].timeline.find((item)=>item.type==="message")).toMatchObject({rewindEligible:true,attachments:[expected]});
+  });
+});
+
 describe("instruction history mapping", () => {
   it("keeps command/skill identity but never pushes their body into webview state", () => {
     const store = new WebviewStateStore();

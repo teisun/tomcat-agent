@@ -257,6 +257,23 @@ pub(crate) async fn handle_command(
     }
 
     match command {
+        ServeCommand::RewindAndResend {
+            id,
+            session_id,
+            message_id,
+            files,
+            message,
+        } => {
+            super::rewind_and_resend::run(state, id, session_id, message_id, files, message)
+                .await?;
+        }
+        ServeCommand::PreviewRewind {
+            id,
+            session_id,
+            message_id,
+        } => {
+            super::rewind_and_resend::preview(state, id, session_id, message_id).await?;
+        }
         ServeCommand::Prompt {
             id,
             session_id,
@@ -581,6 +598,14 @@ pub(crate) async fn handle_command(
                 AppError::Config(format!("encode get_messages cursor failed: {error}"))
             })?;
             let mut page = page;
+            let queued = queued_input_ids(&slot);
+            for entry in &mut page.entries {
+                if let TranscriptEntry::Message(entry) = entry {
+                    let eligible = entry.id.as_ref().is_some_and(|id| !queued.contains(id))
+                        && crate::SessionManager::is_rewind_candidate(entry);
+                    entry.message["rewindEligible"] = json!(eligible);
+                }
+            }
             attach_page_tool_displays(
                 &slot.ctx.session_runtime.session,
                 &slot.session_id,
@@ -2733,7 +2758,9 @@ fn emit_estimated_context_metrics_snapshot(slot: &Arc<super::registry::SessionSl
 /// `/compact`、`/restore` 与 pending-question 结算都会改变逻辑消息链；只改 JSONL 会让
 /// 下一轮仍发送旧内存副本。调用方保证期间没有模型轮次在运行；后台命令会持有忙标记，
 /// 空闲同步入口也可调用，故可安全读取并替换 turn state。
-fn rehydrate_slot_context_state(slot: &Arc<super::registry::SessionSlot>) -> Result<(), AppError> {
+pub(super) fn rehydrate_slot_context_state(
+    slot: &Arc<super::registry::SessionSlot>,
+) -> Result<(), AppError> {
     let system_text = slot
         .turn_state
         .lock()
@@ -2994,7 +3021,7 @@ fn persist_turn_input_message(
 ///
 /// 释放租约就是「零拷贝提升」的全部动作 —— 字节原地不动，只是不再被当作待清理的草稿字节。
 /// 失败只记日志：租约没释放的后果是 GC 晚一轮回收，不影响用户，不值得让发送失败。
-fn release_attachment_leases(
+pub(super) fn release_attachment_leases(
     slot: &Arc<super::registry::SessionSlot>,
     params: &ServeMessageParams,
 ) {
@@ -3149,6 +3176,8 @@ fn materialize_page_image_refs(
                 Ok(Some(bytes)) => {
                     object.insert("type".to_string(), json!("input_image"));
                     object.remove("blob_sha");
+                    object.remove("provider_sha");
+                    object.remove("filename");
                     object.insert(
                         "image_b64".to_string(),
                         json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
@@ -3199,6 +3228,9 @@ fn dereference_page_attachments(
                 if store.exists(&sha) {
                     object.insert("blobSha".to_string(), json!(sha));
                     object.insert("hasThumb".to_string(), json!(store.has_thumbnail(&sha)));
+                    if let Some(provider_sha) = object.remove("provider_sha") {
+                        object.insert("providerSha".to_string(), provider_sha);
+                    }
                 } else {
                     tracing::warn!(
                         "serve: transcript image reference points at missing blob {sha}"
@@ -3339,8 +3371,18 @@ fn resolve_attachment_part(
                 "invalid_attachment: unknown attachment blob {blob_sha}; call ingest_attachment first"
             ));
         }
-        return ChatMessageContentPart::image_blob_ref(blob_sha, declared_mime, None)
-            .map_err(|error| format!("invalid_attachment: {error}"));
+        let mut part = ChatMessageContentPart::image_blob_ref(blob_sha, declared_mime, None)
+            .map_err(|error| format!("invalid_attachment: {error}"))?;
+        if let ChatMessageContentPart::InputImageRef {
+            provider_sha,
+            filename,
+            ..
+        } = &mut part
+        {
+            *provider_sha = attachment.provider_sha.clone();
+            *filename = attachment.filename.clone();
+        }
+        return Ok(part);
     }
 
     // ── 取字节 ──
@@ -3394,7 +3436,7 @@ fn resolved_image_mime(
             .as_deref()
             .is_some_and(|provider| Some(provider) != attachment.blob_sha.as_deref());
     if overridden {
-        "image/png".to_string()
+        crate::core::llm::IMAGE_PROVIDER_RENDITION_MIME.to_string()
     } else {
         declared
     }
@@ -3409,6 +3451,17 @@ fn send_error(
     state.writer.send(OutFrame::Response(ResponseFrame::error(
         id, session_id, error,
     )))
+}
+
+pub(super) fn queued_input_ids(slot: &super::registry::SessionSlot) -> HashSet<String> {
+    slot.ctx
+        .session_runtime
+        .follow_up_queue
+        .lock()
+        .iter()
+        .chain(slot.ctx.session_runtime.steering_queue.lock().iter())
+        .filter_map(|message| message.msg_id.clone())
+        .collect()
 }
 
 fn is_config_error(error: &AppError, expected: &str) -> bool {

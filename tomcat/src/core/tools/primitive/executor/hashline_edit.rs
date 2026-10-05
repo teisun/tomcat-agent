@@ -112,9 +112,22 @@ pub async fn hashline_edit_impl(
     if let Some(err) = url_like_fs_miss(path) {
         return Err(err);
     }
-    let (path_buf, scope, grant) = executor
-        .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
-        .await?;
+    let Some(checked_path) = super::helpers::until_cancelled(
+        cancel,
+        executor.gate_check_path(PrimitiveOperation::Edit, path, plugin_id),
+    )
+    .await
+    else {
+        return Ok(EditFileResult {
+            path: path.to_string(),
+            applied: false,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        });
+    };
+    let (path_buf, scope, grant) = checked_path?;
     let path_str = path_buf.to_string_lossy().to_string();
     let path_for_edit = path_buf.clone();
     let user_path = path.to_string();

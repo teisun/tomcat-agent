@@ -29,6 +29,7 @@ pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;
 mod types;
+pub(crate) use types::IMAGE_PROVIDER_RENDITION_MIME;
 
 pub use admin::{
     list_model_views, list_model_views_with_prefs, list_provider_keys, remove_user_model,

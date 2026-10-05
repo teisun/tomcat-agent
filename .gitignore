@@ -38,6 +38,10 @@ build/
 node_modules/
 test-stuff/
 .agents/shots/
+.agents/scripts/
+.agents/acceptance/
+.agents/replays/
+__pycache__/
 tomcat-vscode-ext/.build-artifacts.json
 tomcat/assets/cache/
 

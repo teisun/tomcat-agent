@@ -311,6 +311,7 @@ function filterSupersededHistoryEntries(entries: unknown[]): unknown[] {
   const filtered: unknown[] = [];
   let inSupersededSpan = false;
   for (const entry of entries) {
+    if (isRecord(entry) && entry.superseded === true) continue;
     if (isSupersededMessageEntry(entry)) {
       if (isTurnFailedMessageEntry(entry)) {
         // Retry is append-only: retain the original failed input as an
@@ -936,9 +937,8 @@ function attachmentFilename(index: number, mimeType: string): string {
  * push re-sent the whole transcript's worth of base64 and pinned another copy of it on
  * the JavaScript heap.
  *
- * A part with no `blobSha` is skipped rather than guessed at. That happens only if
- * something asked for inline mode by mistake, and quietly reviving the base64 path
- * would hide the mistake instead of surfacing it.
+ * A missing canonical `input_image_ref` stays an unavailable attachment, never
+ * silently disappears while refilling an edit draft. Inline bytes are never copied.
  */
 function extractAttachments(
   content: unknown,
@@ -960,7 +960,9 @@ function extractAttachments(
     ) {
       continue;
     }
-    if (typeof entry.blobSha !== "string" || !/^[0-9a-f]{64}$/.test(entry.blobSha)) {
+    const missingRef = entry.type === "input_image_ref" && entry.blobSha === undefined;
+    const blobSha = missingRef ? entry.blob_sha : entry.blobSha;
+    if (typeof blobSha !== "string" || !/^[0-9a-f]{64}$/.test(blobSha)) {
       continue;
     }
     const kind = entry.type === "input_file" || entry.type === "file" ? "file" : "image";
@@ -973,7 +975,9 @@ function extractAttachments(
             ? "application/pdf"
             : "image/png";
     attachments.push({
-      blobSha: entry.blobSha,
+      blobSha,
+      ...(missingRef ? {unavailable:true} : {}),
+      ...(typeof entry.providerSha === "string" ? {providerSha:entry.providerSha} : {}),
       bytes: typeof entry.bytes === "number" ? entry.bytes : undefined,
       filename:
         typeof entry.filename === "string"
@@ -1847,6 +1851,7 @@ function applyHistoryEntry(
       const segments = contentToMessageSegments(entry.message.content);
       const attachments = extractAttachments(entry.message.content, id);
       const block: WebviewMessageBlock = {
+        ...(typeof entry.message.rewindEligible === "boolean" ? {rewindEligible:entry.message.rewindEligible} : {}),
         ...(entry.message.superseded === true && entry.message.turn_failed === true
           ? { abandoned: true }
           : {}),
@@ -2860,6 +2865,15 @@ export class WebviewStateStore {
     );
   }
 
+  replaceHistory(sessionId: string, history: SessionHistoryPayload, obsoleteIds: ReadonlySet<string>): void {
+    const runtime = this.ensureRuntime(sessionId);
+    const session = this.ensureSession(sessionId);
+    runtime.historyEntries = [];
+    runtime.localUserMessageIds.clear();
+    session.timeline = session.timeline.filter((item) => !obsoleteIds.has(item.id));
+    this.appendLatestHistory(sessionId, history);
+  }
+
   hydrateHistory(sessionId: string, history: SessionHistoryPayload): void {
     this.appendLatestHistory(sessionId, history);
   }
@@ -3049,6 +3063,7 @@ export class WebviewStateStore {
       return;
     }
     delete message.deliveryState;
+    message.rewindEligible = message.submitKind === "prompt";
     delete message.deliveryError;
     delete message.deliveryErrorDetail;
     delete message.retryable;

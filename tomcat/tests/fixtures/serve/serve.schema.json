@@ -131,6 +131,70 @@
         }
       },
       {
+        "type": "object",
+        "required": [
+          "files",
+          "message",
+          "messageId",
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "files": {
+            "$ref": "#/definitions/RewindFiles"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "$ref": "#/definitions/RewindMessage"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "rewind_and_resend"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "messageId",
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "preview_rewind"
+            ]
+          }
+        }
+      },
+      {
         "description": "复制指定失败输入为新的活 user message，然后重新开一轮。",
         "type": "object",
         "required": [
@@ -249,6 +313,32 @@
             "type": "string",
             "enum": [
               "restore_checkpoint"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_instruction_catalog"
             ]
           }
         }
@@ -1549,6 +1639,13 @@
           }
         }
       },
+      "InstructionKind": {
+        "type": "string",
+        "enum": [
+          "command",
+          "skill"
+        ]
+      },
       "ListSessionsScope": {
         "description": "`list_sessions` 的可选枚举范围。",
         "type": "string",
@@ -1724,6 +1821,44 @@
           }
         }
       },
+      "RewindFiles": {
+        "description": "File policy for a historical user-message replacement.",
+        "type": "string",
+        "enum": [
+          "keep",
+          "revert"
+        ]
+      },
+      "RewindMessage": {
+        "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeAttachment"
+            }
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeContentSegment"
+            }
+          },
+          "text": {
+            "type": "string"
+          },
+          "userMessageId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ServeAttachment": {
         "description": "多模态消息中的单个附件描述。\n\n**这里只有引用，没有字节。** 字节在粘贴那一刻就已经通过 `ingest_attachment` 交给后端了， 发送时只说「用那份哈希对应的字节」。这让打字与发送两条路径的载荷都与图片大小无关。\n\n`blob_sha` 与 `file_id` 二选一：前者是本机 ingest 过的字节，后者是已上传到 provider 的文件。",
         "type": "object",
@@ -1778,6 +1913,32 @@
       },
       "ServeContentSegment": {
         "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "label",
+              "resourceId",
+              "type"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/definitions/InstructionKind"
+              },
+              "label": {
+                "type": "string"
+              },
+              "resourceId": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "instruction"
+                ]
+              }
+            }
+          },
           {
             "type": "object",
             "required": [
@@ -6743,6 +6904,46 @@
       }
     }
   },
+  "preview_rewind_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "PreviewRewindResponse",
+    "type": "object",
+    "required": [
+      "revertAvailable",
+      "revertPaths"
+    ],
+    "properties": {
+      "revertAvailable": {
+        "type": "boolean"
+      },
+      "revertPaths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "revertReason": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/RevertReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "definitions": {
+      "RevertReason": {
+        "type": "string",
+        "enum": [
+          "no_baselines",
+          "expired",
+          "git_head_moved"
+        ]
+      }
+    }
+  },
   "shared_slash_command": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "SharedSlashCommand",
@@ -6778,6 +6979,48 @@
       },
       "text": {
         "type": "string"
+      }
+    }
+  },
+  "instruction_card": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "InstructionCard",
+    "type": "object",
+    "required": [
+      "description",
+      "id",
+      "kind",
+      "name",
+      "path",
+      "source"
+    ],
+    "properties": {
+      "description": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "kind": {
+        "$ref": "#/definitions/InstructionKind"
+      },
+      "name": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "source": {
+        "type": "string"
+      }
+    },
+    "definitions": {
+      "InstructionKind": {
+        "type": "string",
+        "enum": [
+          "command",
+          "skill"
+        ]
       }
     }
   }

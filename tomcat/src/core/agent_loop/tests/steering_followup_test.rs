@@ -334,6 +334,89 @@ async fn run_follow_up_drains_at_tool_batch_boundary_before_next_llm_request() {
 }
 
 #[tokio::test]
+async fn text_only_finalize_consumes_steering_and_follow_up_in_order_with_ids() {
+    use crate::infra::event_bus::EventBus;
+    use crate::infra::{wire, EventContext};
+    let temp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(temp.path().into());
+    manager
+        .create_session(manager.current_session_key(), None)
+        .unwrap();
+    let llm = Arc::new(RecordingMockLlmProvider::new(vec![
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "first answer".into(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "next answer".into(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }),
+        ],
+    ]));
+    let steering = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let follow = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::user(
+        "follow-up",
+    )]));
+    let bus = Arc::new(DefaultEventBus::new());
+    let queue = steering.clone();
+    let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    bus.on(
+        wire::WIRE_MESSAGE_END,
+        Box::new(move |_: EventContext| {
+            if ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                queue.lock().push(ChatMessage::steering("late steering"));
+            }
+            Ok(())
+        }),
+    );
+    let mut agent = AgentLoop::new(
+        test_binding(llm.clone(), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        bus,
+        AgentLoopConfig {
+            message_append_sink: Some(Arc::new(manager.clone())),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    )
+    .with_shared_steering_queue(steering.clone())
+    .with_shared_follow_up_queue(follow.clone());
+    let result = agent
+        .run(vec![ChatMessage::user("question")])
+        .await
+        .unwrap();
+    let requests = llm.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let tail = &requests[1].messages;
+    let steer = tail
+        .iter()
+        .position(|m| m.text_content() == Some("late steering"))
+        .unwrap();
+    let follow_index = tail
+        .iter()
+        .position(|m| m.text_content() == Some("follow-up"))
+        .unwrap();
+    assert!(steer < follow_index);
+    assert!(tail[steer].msg_id.is_some() && tail[follow_index].msg_id.is_some());
+    assert_eq!(
+        result
+            .new_messages
+            .iter()
+            .filter(|m| m.text_content() == Some("late steering"))
+            .count(),
+        1
+    );
+    assert!(steering.lock().is_empty() && follow.lock().is_empty());
+}
+
+#[tokio::test]
 async fn run_follow_up_does_not_bypass_max_tool_rounds() {
     let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ToolCallDelta {

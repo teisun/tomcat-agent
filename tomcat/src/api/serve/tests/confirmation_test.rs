@@ -26,6 +26,41 @@ async fn confirmation_request_id(
 }
 
 #[tokio::test]
+async fn serve_confirmation_dropped_wait_retracts_request_and_rejects_late_reply() {
+    let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
+    let bridge = ServeConfirmationBridge::new(writer);
+    let provider = bridge.provider_for_session("drop-session");
+    let request = tokio::spawn(async move {
+        provider
+            .confirm(PrimitiveOperation::Write, "write", "p1")
+            .await
+    });
+    let request_id = confirmation_request_id(&buffer).await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    for _ in 0..50 {
+        if read_ndjson_lines(&buffer)
+            .iter()
+            .any(|line| line["type"] == "control_cancel" && line["requestId"] == request_id)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(read_ndjson_lines(&buffer)
+        .iter()
+        .any(|line| { line["type"] == "control_cancel" && line["requestId"] == request_id }));
+    assert!(!bridge
+        .handle_control_response(&ControlFrame::response(
+            request_id,
+            Some("drop-session".into()),
+            serde_json::json!({"decision":"allow_once"}),
+        ))
+        .unwrap());
+    assert_eq!(bridge.cancel_live_session("drop-session", "cleanup"), 0);
+}
+
+#[tokio::test]
 async fn serve_confirmation_rejects_wrong_session_and_round_trips_scoped_decision() {
     let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
     let bridge = ServeConfirmationBridge::new(writer);
@@ -65,6 +100,9 @@ async fn serve_confirmation_rejects_wrong_session_and_round_trips_scoped_decisio
             root: PathBuf::from("/tmp/source")
         }
     );
+    assert!(!read_ndjson_lines(&buffer)
+        .iter()
+        .any(|line| line["type"] == "control_cancel"));
 }
 
 #[tokio::test]

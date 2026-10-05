@@ -38,6 +38,7 @@ fn legacy_branch_summary_entry_without_error_attempts_deserializes() {
 #[test]
 fn successful_branch_summary_serializes_without_error_or_attempts_fields() {
     let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        superseded: false,
         id: Some("ok_id".to_string()),
         parent_id: None,
         timestamp: "2026-04-26T00:00:00.000Z".to_string(),
@@ -71,6 +72,7 @@ fn successful_branch_summary_serializes_without_error_or_attempts_fields() {
 #[test]
 fn failure_branch_summary_serializes_with_error_attempts_and_round_trips() {
     let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        superseded: false,
         id: Some("fail_id".to_string()),
         parent_id: None,
         timestamp: "2026-04-26T00:00:01.000Z".to_string(),

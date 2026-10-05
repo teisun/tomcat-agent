@@ -321,6 +321,8 @@ pub struct AgentLoop {
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) emitter: ScopedEventEmitter,
     pub(super) session_manager: Option<crate::core::session::manager::SessionManager>,
+    pub(super) file_baselines:
+        Option<Arc<crate::core::checkpoint::file_baselines::TurnFileBaselines>>,
     /// 可选 `config_get` / `config_set` 后端（plan §6 / PR-7）。
     ///
     /// 注入路径：`ChatContext::from_config` 在创建 `AgentLoop` 前构造
@@ -388,6 +390,8 @@ pub struct AgentLoop {
     /// completion guard 连续注入次数。模型一旦重新调用工具就归零；
     /// 触顶后停止注入并交还用户，避免在同一个坎上无限打转。
     pub(super) completion_guard_injections: u32,
+    /// Granted only to the next accepted response after a completed turn drains pure Signals.
+    pub(super) silent_reply_allowed: bool,
 }
 
 pub(super) fn unix_ts_ms() -> i64 {

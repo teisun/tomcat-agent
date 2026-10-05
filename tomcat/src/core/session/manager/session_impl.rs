@@ -128,9 +128,11 @@ fn is_blob_sha(value: &str) -> bool {
 fn collect_blob_shas(value: &serde_json::Value, shas: &mut HashSet<String>) {
     match value {
         serde_json::Value::Object(object) => {
-            if let Some(sha) = object.get("blob_sha").and_then(serde_json::Value::as_str) {
-                if is_blob_sha(sha) {
-                    shas.insert(sha.to_string());
+            for key in ["blob_sha", "provider_sha"] {
+                if let Some(sha) = object.get(key).and_then(serde_json::Value::as_str) {
+                    if is_blob_sha(sha) {
+                        shas.insert(sha.to_string());
+                    }
                 }
             }
             for value in object.values() {
@@ -1083,6 +1085,7 @@ impl SessionManager {
             Ok(entry)
         })?;
         let path = self.transcript_path(&entry.session_id);
+        crate::core::checkpoint::file_baselines::discard_session(&path);
         let sidecar_path = user_message_sidecar_path(&path);
         let tool_display_sidecar_path = tool_display_sidecar_path(&path);
         let _ = std::fs::remove_file(&path);
@@ -1415,6 +1418,144 @@ impl SessionManager {
             .map(|(id, settled)| (id, settled > 0))
     }
 
+    pub fn is_rewind_candidate(entry: &MessageEntry) -> bool {
+        entry
+            .message
+            .get("superseded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+            && serde_json::from_value::<crate::core::llm::ChatMessage>(entry.message.clone())
+                .is_ok_and(|m| {
+                    m.role == crate::core::llm::ChatMessageRole::User
+                        && m.kind == crate::core::llm::MessageKind::Normal
+                })
+    }
+
+    /// Read the live suffix without mutating it. Queue membership is checked by Serve.
+    pub fn rewind_target(&self, message_id: &str) -> Result<(MessageEntry, Vec<String>), AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("rewind_target_stale".into()))?;
+        let lines = crate::core::session::transcript::transcript_lines(&path)?;
+        Self::rewind_target_in_lines(&lines, message_id).map(|(_, entry, turns)| (entry, turns))
+    }
+
+    fn rewind_target_in_lines(
+        lines: &[String],
+        message_id: &str,
+    ) -> Result<(usize, MessageEntry, Vec<String>), AppError> {
+        let index = crate::core::session::transcript::message_line_index(lines, message_id)?;
+        let TranscriptEntry::Message(entry) = serde_json::from_str(&lines[index])? else {
+            unreachable!()
+        };
+        if entry
+            .message
+            .get("superseded")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return Err(AppError::Config("rewind_target_stale".into()));
+        }
+        if !Self::is_rewind_candidate(&entry) {
+            return Err(AppError::Config("rewind_target_ineligible".into()));
+        }
+        // A usable cut must not strand a tool declaration in the retained prefix.
+        // Check before stop/file restoration, not only during the final JSONL commit.
+        let prefix: Vec<TranscriptEntry> = lines[1..index]
+            .iter()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        if validate_append_message(
+            &entry.message,
+            &collect_recent_chat_messages_from_tail(&prefix),
+        )
+        .is_err()
+        {
+            return Err(AppError::Config("rewind_target_ineligible".into()));
+        }
+        let turns = lines[index..]
+            .iter()
+            .filter_map(|line| match serde_json::from_str::<TranscriptEntry>(line) {
+                Ok(TranscriptEntry::Message(e))
+                    if e.message.get("role").and_then(serde_json::Value::as_str)
+                        == Some("user")
+                        && e.message
+                            .get("superseded")
+                            .and_then(serde_json::Value::as_bool)
+                            != Some(true) =>
+                {
+                    e.id
+                }
+                _ => None,
+            })
+            .collect();
+        Ok((index, entry, turns))
+    }
+
+    /// Like Retry, but permits an earlier live input and supplies new content.
+    /// Validation and the complete supersede+append commit share one file lock/write.
+    pub fn rewind_user_message(
+        &self,
+        message_id: &str,
+        message: serde_json::Value,
+    ) -> Result<String, AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("rewind_target_stale".into()))?;
+        self.with_transcript_lock(&path, || {
+            let lines = crate::core::session::transcript::transcript_lines(&path)?;
+            let (index, _, turns) = Self::rewind_target_in_lines(&lines, message_id)?;
+            let prefix: Vec<TranscriptEntry> = lines[1..index]
+                .iter()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            validate_append_message(&message, &collect_recent_chat_messages_from_tail(&prefix))
+                .map_err(|reason| {
+                    AppError::Config(format!("rewind_target_ineligible: {reason}"))
+                })?;
+            let id = generate_entry_id();
+            let entry = TranscriptEntry::Message(MessageEntry {
+                id: Some(id.clone()),
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                message,
+            });
+            crate::core::session::transcript::replace_user_message_suffix(
+                &path, lines, index, &entry,
+            )?;
+            crate::core::checkpoint::file_baselines::discard_turns(&path, &turns);
+            Ok(id)
+        })
+    }
+
+    pub fn cleanup_superseded_file_baselines(&self) {
+        let Ok(Some(path)) = self.current_transcript_path() else {
+            return;
+        };
+        let Ok(lines) = crate::core::session::transcript::transcript_lines(&path) else {
+            return;
+        };
+        let turns = lines
+            .iter()
+            .skip(1)
+            .filter_map(|line| serde_json::from_str::<TranscriptEntry>(line).ok())
+            .filter_map(|e| match e {
+                TranscriptEntry::Message(m)
+                    if m.message.get("role").and_then(serde_json::Value::as_str)
+                        == Some("user")
+                        && m.message
+                            .get("superseded")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true) =>
+                {
+                    m.id
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        crate::core::checkpoint::file_baselines::discard_turns(&path, &turns);
+    }
+
     /// Retry 的 copy-forward：保留失败的旧 user message，追加一条内容相同的新 user message。
     ///
     /// 这不是“撤销失败章”。失败记录必须留在 transcript 中，供 UI 和诊断还原真实历史；
@@ -1447,8 +1588,11 @@ impl SessionManager {
             mark_user_message_entry_superseded_by_id(&path, message_id)?;
             message_object.remove("superseded");
             message_object.remove("turn_failed");
-            self.append_message_while_locked(&path, message, true, None)
-                .map(|(id, _)| id)
+            let id = self
+                .append_message_while_locked(&path, message, true, None)
+                .map(|(id, _)| id)?;
+            self.cleanup_superseded_file_baselines();
+            Ok(id)
         })
     }
 
@@ -1634,6 +1778,7 @@ impl SessionManager {
                 estimated_tokens_saved: None,
                 error: None,
                 attempts: None,
+                superseded: false,
             });
             append_entry(&path, &entry)
         })
@@ -1666,6 +1811,7 @@ impl SessionManager {
                 estimated_tokens_saved: None,
                 error: None,
                 attempts: None,
+                superseded: false,
             });
             append_entry(&path, &entry)
         })
@@ -1701,6 +1847,7 @@ impl SessionManager {
                 estimated_tokens_saved: None,
                 error: None,
                 attempts: None,
+                superseded: false,
             });
             append_entry(&path, &entry)
         })

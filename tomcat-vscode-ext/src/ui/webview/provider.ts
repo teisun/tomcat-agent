@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isPreviewRewindResponse, rewindErrorDetail } from "../../shared/messageEditProtocol";
 import { layoutInsetStyle } from "./layoutInsets";
 import { withOccurrence } from "../../shared/composerOccurrences";
 import * as fs from "node:fs";
@@ -998,7 +999,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.projectCurrentDraft(sessionId, session),
       ]),
     );
-    return { ...snapshot, sessionViews };
+    return { ...snapshot, sessionViews, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend") };
   }
 
   private findToolCard(
@@ -1046,6 +1047,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async ingestPickedUris(
     sessionId: string,
     uris: readonly vscode.Uri[],
+    editOperationId?: string,
   ): Promise<void> {
     const resolved: ResolvedPickedUri[] = [];
     const errors: string[] = [];
@@ -1067,6 +1069,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
     }
 
+    if (editOperationId) {
+      const accepted = await this.ingestUploads(sessionId, uploads, errors, "edit");
+      await this.postEvent({ type: "editContextResult", sessionId, operationId: editOperationId,
+        attachments: accepted.map((a) => this.toPendingView(a, false)), references,
+        error: errors.length ? errors.join("; ") : undefined });
+      return;
+    }
     const { accepted, insertedReferences } = await this.draftCoordinator.run(
       sessionId,
       async () => {
@@ -1095,6 +1104,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     uploads: AttachmentUpload[],
     errors: string[],
+    target?: "edit",
   ): Promise<DraftAttachmentRef[]> {
     if (uploads.length === 0) return [];
     const references: DraftAttachmentRef[] = [];
@@ -1111,7 +1121,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         errors.push(`${upload.filename ?? "attachment"}: ${outcome.error}`);
       }
     }
-    if (references.length > 0) {
+    if (references.length > 0 && target !== "edit") {
       await this.saveAttachmentsToDraft(sessionId, references);
       await this.postState();
     }
@@ -1367,6 +1377,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return {
       blobSha: attachment.blobSha,
       bytes: attachment.bytes,
+      providerSha: attachment.providerSha,
       filename: attachment.filename,
       fullUri: uris?.fullUri ?? null,
       hasThumb: Boolean(attachment.hasThumb),
@@ -1731,7 +1742,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               // Ignore malformed drop payload entries; the editor keeps the rest.
             }
           }
-          await this.ingestPickedUris(sessionId, uris);
+          await this.ingestPickedUris(sessionId, uris, intent.data.target === "edit" ? intent.data.operationId : undefined);
           await this.postComposerWorkResult(intent.data.operationId, sessionId);
         } catch (error) {
           await this.postComposerWorkResult(intent.data.operationId, sessionId, error);
@@ -1764,7 +1775,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           sessionId = resolvedSessionId;
           const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
           if (picks?.length) {
-            await this.ingestPickedUris(sessionId, picks);
+            await this.ingestPickedUris(sessionId, picks, intent.data?.target === "edit" ? intent.data.operationId : undefined);
           }
           await this.postComposerWorkResult(intent.data?.operationId, sessionId);
         } catch (error) {
@@ -1840,8 +1851,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
 
           const accepted = await this.draftCoordinator.run(sessionId, () =>
-            this.ingestUploads(sessionId, uploads, errors),
+            this.ingestUploads(sessionId, uploads, errors, intent.data.target),
           );
+          if (intent.data.target === "edit") {
+            await this.postEvent({ type: "editContextResult", operationId: operationId!, sessionId,
+              attachments: accepted.map((a) => this.toPendingView(a, false)), references: [],
+              error: errors.length ? errors.join("; ") : undefined });
+            await this.postComposerWorkResult(operationId, sessionId);
+            return;
+          }
           await this.postEvent({
             items: accepted.map((reference) => ({
               filename: reference.filename,
@@ -1908,6 +1926,70 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           const detail = error instanceof Error ? error.message : String(error);
           console.error("[Tomcat webview] interrupt request failed", error);
           await vscode.window.showErrorMessage(`Unable to stop Tomcat: ${detail}`);
+        }
+        return;
+      }
+      case "previewRewind":
+      case "rewindAndResend": {
+        const { sessionId, messageId } = intent.data;
+        const resultType = intent.type === "previewRewind" ? "previewRewindResult" : "rewindAndResendResult";
+        try {
+          const initialized = await this.ensureInitialized();
+          if (!hasServeCapability(initialized, "rewind_and_resend")) throw new Error("当前 CLI 不支持历史编辑，请更新 CLI。");
+          const obsoleteIds = new Set(this.peekState().sessionViews[sessionId]?.timeline.map((item) => item.id) ?? []);
+          const response = intent.type === "previewRewind"
+            ? await this.deps.messenger.request({ type: "preview_rewind", sessionId, messageId })
+            : await this.deps.messenger.request({
+                type: "rewind_and_resend",
+                sessionId,
+                messageId,
+                files: intent.data.files,
+                message: {
+                  text: intent.data.text,
+                  segments: intent.data.segments.map(({ occurrenceId: _id, ...segment }) => segment),
+                  attachments: intent.data.attachments.map((a) => ({
+                    kind: a.kind,
+                    blobSha: a.blobSha,
+                    filename: a.filename,
+                    mimeType: a.mimeType,
+                    providerSha: a.providerSha,
+                  })),
+                },
+              });
+          if (response.sessionId && response.sessionId !== sessionId) throw new Error("编辑结果的会话不匹配。");
+          const committed = !response.success && response.payload !== null && typeof response.payload === "object"
+            && "committed" in response.payload && response.payload.committed === true;
+          if (intent.type === "rewindAndResend" && (response.success || response.error === "rewind_target_stale" || committed)) {
+            await this.refreshSessionHistory(sessionId, { strict: true, replace: obsoleteIds });
+            await this.refreshSessionState(sessionId, { trustBusy: true });
+            await this.refreshCheckpoints(sessionId);
+            if (committed) {
+              this.stateStore.appendMessage(
+                sessionId,
+                "error",
+                `历史已更新，但新一轮没有启动：${rewindErrorDetail(response.error, response.payload) ?? response.error ?? "未知错误"}`,
+              );
+            }
+            await this.postState();
+          }
+          const preview = intent.type === "previewRewind" && isPreviewRewindResponse(response.payload) ? response.payload : undefined;
+          await this.postEvent({
+            type: resultType,
+            requestId: intent.messageId,
+            sessionId,
+            success: response.success && (intent.type !== "previewRewind" || !!preview),
+            errorDetail: rewindErrorDetail(response.error, response.payload),
+            error: response.error ?? (intent.type === "previewRewind" && !preview ? "无法读取恢复信息" : undefined),
+            preview,
+          });
+        } catch (error) {
+          await this.postEvent({
+            type: resultType,
+            requestId: intent.messageId,
+            sessionId,
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
         return;
       }
@@ -2926,7 +3008,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async refreshSessionHistory(
     sessionId: string,
-    options: { strict?: boolean } = {},
+    options: { strict?: boolean; replace?: ReadonlySet<string> } = {},
   ): Promise<void> {
     if (typeof this.deps.sessionRouter.getMessages !== "function") {
       return;
@@ -2950,7 +3032,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!history || history.sessionId !== sessionId) {
       return;
     }
-    this.stateStore.hydrateHistory(sessionId, history);
+    if (options.replace) this.stateStore.replaceHistory(sessionId, history, options.replace);
+    else this.stateStore.hydrateHistory(sessionId, history);
     await this.syncImagePreviewPanel(sessionId);
   }
 
@@ -3166,6 +3249,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return {
       blobSha: attachment.blobSha,
       bytes: attachment.bytes,
+      providerSha: attachment.providerSha,
       filename: attachment.filename,
       fullUri: uris?.fullUri ?? null,
       hasThumb: Boolean(attachment.hasThumb),

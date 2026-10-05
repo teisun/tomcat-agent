@@ -46,6 +46,7 @@ mod preheat_provider_routing_test;
 mod request_shape_test;
 mod run_basic_test;
 mod session_envelope_test;
+mod signal_completion_test;
 mod steering_followup_test;
 mod stream_handler_test;
 mod submodules_test;

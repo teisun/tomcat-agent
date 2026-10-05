@@ -262,6 +262,8 @@ pub struct ThinkingTraceEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchSummaryEntry {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
     pub id: Option<String>,
     pub parent_id: Option<String>,
     pub timestamp: String,
@@ -306,6 +308,8 @@ pub struct BranchSummaryEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchSummaryTextEntry {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
     pub id: Option<String>,
     pub parent_id: Option<String>,
     pub timestamp: String,
@@ -729,64 +733,96 @@ pub fn insert_entry_after_message_id(
     Ok(())
 }
 
-/// 将锚点 message **之后**的所有 message 行标记为 `message.superseded=true`。
-///
-/// 非 message 行保持原样；锚点本身不改写。若锚点不存在返回错误。
+/// Supersede later messages and compactions whose marker is after the anchor.
+/// A late body for a retained prefix marker remains live. Audit rows are retained.
 pub fn mark_message_entries_after_anchor_superseded(
     path: &Path,
     anchor_message_id: &str,
 ) -> Result<usize, AppError> {
-    let f = std::fs::File::open(path).map_err(AppError::Io)?;
-    let reader = BufReader::new(f);
-    let lines: Vec<String> = reader
+    let mut lines = transcript_lines(path)?;
+    let anchor = message_line_index(&lines, anchor_message_id)?;
+    let changed = supersede_lines_from(&mut lines, anchor + 1)?;
+    write_jsonl_lines_atomically(path, &lines)?;
+    // Boundary/turn-start semantics changed even though the physical row count did not.
+    // Invalidate the derived index rather than blessing its stale boundary fingerprint.
+    let _ = remove_resume_index(path);
+    Ok(changed)
+}
+
+pub(crate) fn transcript_lines(path: &Path) -> Result<Vec<String>, AppError> {
+    let lines = BufReader::new(std::fs::File::open(path).map_err(AppError::Io)?)
         .lines()
-        .map(|r| r.map_err(AppError::Io))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::Io)?;
     if lines.is_empty() {
         return Err(AppError::Config("transcript 文件为空".to_string()));
     }
+    Ok(lines)
+}
 
-    let mut found_anchor = false;
-    let mut changed = 0usize;
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    out.push(lines[0].clone());
+pub(crate) fn message_line_index(lines: &[String], message_id: &str) -> Result<usize, AppError> {
+    lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(
+            |(index, line)| match serde_json::from_str::<TranscriptEntry>(line) {
+                Ok(TranscriptEntry::Message(entry)) if entry.id.as_deref() == Some(message_id) => {
+                    Some(index)
+                }
+                _ => None,
+            },
+        )
+        .ok_or_else(|| AppError::Config("rewind_target_stale".to_string()))
+}
 
-    for line in lines.into_iter().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            out.push(line);
+fn supersede_lines_from(lines: &mut [String], start: usize) -> Result<usize, AppError> {
+    let markers: std::collections::HashSet<String> = lines
+        .iter()
+        .skip(start)
+        .filter_map(|line| match serde_json::from_str::<TranscriptEntry>(line) {
+            Ok(TranscriptEntry::BranchSummary(entry)) => entry.id,
+            _ => None,
+        })
+        .collect();
+    let mut changed = 0;
+    for (index, line) in lines.iter_mut().enumerate().skip(1) {
+        let Ok(mut entry) = serde_json::from_str::<TranscriptEntry>(line) else {
             continue;
-        }
-        match serde_json::from_str::<TranscriptEntry>(trimmed) {
-            Ok(TranscriptEntry::Message(mut me)) => {
-                if me.id.as_deref() == Some(anchor_message_id) {
-                    found_anchor = true;
-                    out.push(line);
-                    continue;
+        };
+        match &mut entry {
+            TranscriptEntry::Message(message) if index >= start => {
+                if let Some(object) = message.message.as_object_mut() {
+                    object.insert("superseded".to_string(), serde_json::json!(true));
+                    // Edited-away failed inputs must disappear, not render as abandoned retries.
+                    object.remove("turn_failed");
                 }
-                if found_anchor {
-                    if let Some(message_obj) = me.message.as_object_mut() {
-                        message_obj.insert("superseded".to_string(), serde_json::json!(true));
-                    }
-                    changed += 1;
-                    out.push(serde_json::to_string(&TranscriptEntry::Message(me))?);
-                } else {
-                    out.push(line);
-                }
+                changed += 1;
             }
-            _ => out.push(line),
+            TranscriptEntry::BranchSummary(marker) if index >= start => marker.superseded = true,
+            TranscriptEntry::BranchSummaryText(body) if markers.contains(&body.for_id) => {
+                body.superseded = true
+            }
+            _ => continue,
         }
+        *line = serde_json::to_string(&entry)?;
     }
-
-    if !found_anchor {
-        return Err(AppError::Config(format!(
-            "transcript: anchor message id {anchor_message_id:?} not found for supersede"
-        )));
-    }
-
-    write_jsonl_lines_atomically(path, &out)?;
-    let _ = refresh_resume_index_after_nonstructural_rewrite(path);
     Ok(changed)
+}
+
+/// Caller holds the transcript lock and has validated the target and replacement chain.
+/// One atomic rewrite prevents a failed append from leaving the old input unusable.
+pub(crate) fn replace_user_message_suffix(
+    path: &Path,
+    mut lines: Vec<String>,
+    anchor: usize,
+    replacement: &TranscriptEntry,
+) -> Result<(), AppError> {
+    supersede_lines_from(&mut lines, anchor)?;
+    lines.push(serde_json::to_string(replacement)?);
+    write_jsonl_lines_atomically(path, &lines)?;
+    let _ = remove_resume_index(path);
+    Ok(())
 }
 
 /// 将指定 `tool_call_id` 的 tool result 行标记为 `message.superseded=true`。

@@ -1,3 +1,4 @@
+pub mod file_baselines;
 pub mod noop;
 pub mod resume;
 pub mod shadow_git;

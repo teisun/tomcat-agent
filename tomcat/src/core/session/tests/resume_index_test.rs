@@ -81,6 +81,7 @@ fn sidecar_records_latest_boundary_and_plan_event() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     super::super::transcript::append_entry(&transcript_path, &boundary).unwrap();
     mgr.append_custom_entry(serde_json::json!({
@@ -120,6 +121,7 @@ fn marker_becomes_a_resume_boundary_only_after_its_linked_body_arrives() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     super::super::transcript::append_entry(&transcript_path, &marker).unwrap();
     let pending = load_or_rebuild_resume_index(&transcript_path)
@@ -131,6 +133,7 @@ fn marker_becomes_a_resume_boundary_only_after_its_linked_body_arrives() {
     super::super::transcript::append_entry(
         &transcript_path,
         &TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+            superseded: false,
             id: Some("marker_1:text".to_string()),
             parent_id: Some("marker_1".to_string()),
             timestamp: "2026-09-10T00:00:01.000Z".to_string(),
@@ -387,6 +390,7 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     insert_entry_after_message_id(&transcript_path, &anchor_id, &inserted).unwrap();
     let changed = rewrite_message_text_entries_by_id(
@@ -398,36 +402,15 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
     )
     .unwrap();
     assert_eq!(changed, 1);
-    let sidecar_path = resume_index_path(&transcript_path);
-    let before: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+    let _ = take_last_inline_rebuild_stats_for_tests();
     mark_message_entries_after_anchor_superseded(&transcript_path, &anchor_id).unwrap();
-    let after: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
-    let mut before_stable = before.clone();
-    let mut after_stable = after.clone();
-    for field in ["transcript_size", "transcript_mtime_ms"] {
-        before_stable.as_object_mut().unwrap().remove(field);
-        after_stable.as_object_mut().unwrap().remove(field);
-    }
-    assert_eq!(
-        after_stable, before_stable,
-        "a metadata-only supersede must preserve every structural sidecar field"
+    assert!(
+        !resume_index_path(&transcript_path).exists(),
+        "an invalidated boundary cannot keep a fresh-looking index"
     );
-    let inline_stats = take_last_inline_rebuild_stats_for_tests()
-        .expect("rewrite path should record inline rebuild stats");
-    assert_eq!(
-        inline_stats.bytes_scanned, 0,
-        "supersede must not reread the transcript to rebuild its sidecar"
-    );
-    assert_eq!(
-        inline_stats.entries_scanned, 0,
-        "supersede must not deserialize every transcript entry to rebuild its sidecar"
-    );
-
     let load = load_or_rebuild_resume_index(&transcript_path).unwrap();
-    assert_eq!(load.source, ResumeIndexSource::Existing);
-    assert!(load.index.latest_boundary.is_some());
+    assert_eq!(load.source, ResumeIndexSource::Rebuilt);
+    assert!(load.index.latest_boundary.is_none());
     assert_eq!(load.index.total_entries, 3);
 }
 

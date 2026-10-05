@@ -361,6 +361,11 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
 pub(super) fn is_user_message(entry: &TranscriptEntry) -> bool {
     if let TranscriptEntry::Message(me) = entry {
         me.message.get("role").and_then(|r| r.as_str()) == Some("user")
+            && me
+                .message
+                .get("superseded")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
             && !MessageKind::from_persisted(
                 me.message.get("kind").and_then(serde_json::Value::as_str),
             )
@@ -430,7 +435,7 @@ pub(super) fn compute_fold_start(
 }
 
 fn branch_summary_pending_from_entry(ce: &BranchSummaryEntry) -> Option<CompactionResult> {
-    if ce.is_boundary != Some(false) {
+    if ce.superseded || ce.is_boundary != Some(false) {
         return None;
     }
     Some(CompactionResult {
@@ -453,7 +458,7 @@ fn branch_summary_texts(entries: &[TranscriptEntry]) -> HashMap<&str, &str> {
     entries
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::BranchSummaryText(body) => {
+            TranscriptEntry::BranchSummaryText(body) if !body.superseded => {
                 Some((body.for_id.as_str(), body.summary.as_str()))
             }
             _ => None,
@@ -465,7 +470,8 @@ fn is_completed_boundary(entry: &TranscriptEntry, bodies: &HashMap<&str, &str>) 
     let TranscriptEntry::BranchSummary(summary) = entry else {
         return false;
     };
-    summary.is_boundary == Some(true)
+    !summary.superseded
+        && summary.is_boundary == Some(true)
         && (summary.summary.is_some()
             || summary
                 .id
@@ -479,6 +485,7 @@ fn has_unfulfilled_preheat_marker(entries: &[TranscriptEntry], marker_id: &str) 
             entry,
             TranscriptEntry::BranchSummary(marker)
                 if marker.id.as_deref() == Some(marker_id)
+                    && !marker.superseded
                     && marker.is_boundary == Some(true)
                     && marker.summary.is_none()
         )
@@ -487,7 +494,7 @@ fn has_unfulfilled_preheat_marker(entries: &[TranscriptEntry], marker_id: &str) 
 
 fn has_summary_body(entries: &[TranscriptEntry], marker_id: &str) -> bool {
     entries.iter().any(|entry| {
-        matches!(entry, TranscriptEntry::BranchSummaryText(body) if body.for_id == marker_id)
+        matches!(entry, TranscriptEntry::BranchSummaryText(body) if !body.superseded && body.for_id == marker_id)
     })
 }
 
@@ -619,20 +626,31 @@ fn materialize_image_refs(
                 blob_sha,
                 mime_type,
                 detail,
+                provider_sha,
+                ..
             } = part
             else {
                 continue;
             };
-            let bytes = store.get(blob_sha)?.ok_or_else(|| {
+            let sha = provider_sha.as_deref().unwrap_or(blob_sha);
+            let resolved_mime = if provider_sha
+                .as_deref()
+                .is_some_and(|sha| sha != blob_sha.as_str())
+            {
+                crate::core::llm::IMAGE_PROVIDER_RENDITION_MIME
+            } else {
+                mime_type.as_str()
+            };
+            let bytes = store.get(sha)?.ok_or_else(|| {
                 AppError::Config(format!(
-                    "session image blob {blob_sha} is missing; restore it before resuming"
+                    "session image blob {sha} is missing; restore it before resuming"
                 ))
             })?;
             let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-            let mut resolved = if mime_type.eq_ignore_ascii_case("image/svg+xml") {
+            let mut resolved = if resolved_mime.eq_ignore_ascii_case("image/svg+xml") {
                 ChatMessageContentPart::validated_svg_base64_for_transcript(encoded)?
             } else {
-                ChatMessageContentPart::image_base64_data(mime_type.clone(), encoded)?
+                ChatMessageContentPart::image_base64_data(resolved_mime, encoded)?
             };
             if let ChatMessageContentPart::InputImage {
                 detail: resolved_detail,
@@ -679,6 +697,9 @@ pub(super) fn fold_entries_to_messages(
     for entry in entries {
         match entry {
             TranscriptEntry::BranchSummary(ce) => {
+                if ce.superseded {
+                    continue;
+                }
                 // is_boundary=false → preheat record: skip during reload
                 if ce.is_boundary == Some(false) {
                     if let Some(r) = branch_summary_pending_from_entry(ce) {

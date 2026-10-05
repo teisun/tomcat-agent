@@ -239,6 +239,141 @@ async fn write_file_success() {
     let _ = std::fs::remove_dir(&dir);
 }
 
+struct WaitingWriteConfirmation(Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl crate::core::UserConfirmationProvider for WaitingWriteConfirmation {
+    async fn confirm(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, AppError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn native_write_confirmation_waits_cancel_without_touching_disk() {
+    for (tool, secret_wait) in [
+        ("write", false),
+        ("edit", false),
+        ("hashline_edit", false),
+        ("write", true),
+        ("edit", true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let path = dir.join("target.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let executor = Arc::new(DefaultPrimitiveExecutor::new(
+            PrimitiveConfig {
+                auto_confirm: false,
+                ..PrimitiveConfig::default()
+            },
+            Arc::new(WaitingWriteConfirmation(entered.clone())),
+            Arc::new(TracingAuditRecorder),
+            make_gate(if secret_wait {
+                &dir
+            } else {
+                Path::new("/nonexistent_pi_workspace")
+            }),
+        ));
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let owned_path = path.to_string_lossy().into_owned();
+        let new_text = if secret_wait {
+            "sk-ABCDEFGHIJKLMNOPQRSTUV"
+        } else {
+            "new"
+        };
+        let task = tokio::spawn(async move {
+            match tool {
+                "write" => executor
+                    .write_file_with_cancel(&owned_path, new_text, true, &child_cancel, "p1")
+                    .await
+                    .map(|r| r.written),
+                "edit" => executor
+                    .edit_file_with_cancel(
+                        &owned_path,
+                        vec![EditOperation {
+                            operation_type: EditOperationType::Replace,
+                            start_line: None,
+                            end_line: None,
+                            new_content: new_text.into(),
+                            old_content: Some("old".into()),
+                        }],
+                        &child_cancel,
+                        "p1",
+                    )
+                    .await
+                    .map(|r| r.applied),
+                _ => executor
+                    .hashline_edit_with_cancel(&owned_path, vec![], &child_cancel, "p1")
+                    .await
+                    .map(|r| r.applied),
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{tool} secret_wait={secret_wait} did not reach confirmation")
+            });
+        cancel.cancel();
+        let written = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !written,
+            "{tool} must not commit when confirmation is cancelled"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+        assert!(!path.with_extension("bak").exists());
+    }
+}
+
+#[tokio::test]
+async fn native_write_pre_cancel_never_registers_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("target.txt");
+    std::fs::write(&path, "old").unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let executor = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(WaitingWriteConfirmation(entered.clone())),
+        Arc::new(TracingAuditRecorder),
+        make_gate(Path::new("/nonexistent_pi_workspace")),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(
+        !executor
+            .write_file_with_cancel(path.to_str().unwrap(), "new", true, &cancel, "p1")
+            .await
+            .unwrap()
+            .written
+    );
+    assert!(
+        !executor
+            .edit_file_with_cancel(path.to_str().unwrap(), vec![], &cancel, "p1")
+            .await
+            .unwrap()
+            .applied
+    );
+    assert!(
+        !executor
+            .hashline_edit_with_cancel(path.to_str().unwrap(), vec![], &cancel, "p1")
+            .await
+            .unwrap()
+            .applied
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), entered.notified())
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "old");
+}
+
 #[tokio::test]
 async fn write_file_with_cancel_skips_disk_write() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -1,0 +1,45 @@
+.tc-message--user[data-editable="true"] { position: relative; cursor: pointer; }
+.tc-message--user[data-editable="true"][data-has-writes="true"] { padding-right: 34px; }
+.tc-message__edit-trigger {
+  position: absolute;
+  right: 6px;
+  bottom: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.tc-message__edit-trigger--revert, .tc-message__edit-trigger:focus-visible { opacity: 1; }
+.tc-message__edit-trigger:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+.tc-inline-editor { width: 100%; min-width: 0; margin: 8px 0; }
+.tc-inline-editor .tc-composer { margin: 0; }
+.tc-inline-editor .tc-composer__surface { margin: 0; }
+.tc-inline-editor__status { color: var(--vscode-descriptionForeground); font-size: 12px; padding: 4px 8px; }
+.tc-confirm-dialog__button:disabled {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-disabledForeground);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Transcript overflow must not clip the shared composer menus. Their dimensions
+   and theme stay unchanged; only the inline instance gets viewport positioning. */
+.tc-inline-editor .tc-session-dropdown {
+  position: fixed;
+  z-index: 1000;
+  left: var(--inline-menu-left);
+  right: auto;
+  top: var(--inline-menu-top);
+  bottom: var(--inline-menu-bottom);
+  width: var(--inline-menu-width);
+  max-height: var(--inline-menu-height);
+  overflow-y: auto;
+}

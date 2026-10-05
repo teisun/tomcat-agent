@@ -22,6 +22,21 @@ agent/chat 进入主循环前，启动顺序新增一条 plan 恢复挂接：
 
 ---
 
+## 正常收尾的输入消费与后台信号
+
+```text
+text-only/合法静默 finalize 成功
+  → 工具预算耗尽：结束，队列留给下一轮
+  → steering / follow-up：按此顺序用统一记账、持久化助手消费
+  → 非空纯 Signal 新批次：一次性静默许可；其他批次：默认保护
+```
+
+`run_inner` 收尾同时检查两种队列，复用 `inject_steering_messages/inject_follow_up_messages` 保留 msg_id、append 与上下文记账；错误/取消不作为正常收尾续跑。新追加批次是授权的事实来源，压缩不改变已作出的许可。Stopped 的模型通知在 completion subscriber 被过滤，独立的 UI 生命周期通道照常更新；Serve 空闲自然通知仅排队、不启动模型。
+
+**仍存在的风险（本期延期）**：`run_inner` 最后一次查队列之后，经过 chat 监听注销、上下文停车与收尾持久化，直到 Serve `mark_idle` 之前，仍可能接受一条 `queued:true` 的真实输入，却暂时没有消费者，需等下一次输入。admission 与 idle 未在同一临界区，此次不宣称已消除。后续单独设计防丢唤醒，并先用确定性 barrier 固定时序；Signal 空闲不唤醒、中断、维护 busy 的优先级应保留。
+
+原生写入的 commit-aware 停止由 primitive/dispatcher 边界负责，Attempt Loop 不取消丢弃整个 reasoning future；非写盘 compaction 请求在自身边界响应取消。已开始写盘的工具要等真正提交结果及备份登记完成，才能报告停止并恢复文件。
+
 ## 13.1 概述与设计目标
 
 Agent Loop 是 Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（Steering/FollowUp/Abort）、容错重试（Compaction/Backoff）的完整生命周期。本设计与 pi-mono、openclaw 对齐，采用三层嵌套循环，并明确与插件事件系统的发布时机对应关系。

@@ -1216,6 +1216,7 @@ function recordHistoryMessage(sessionId, role, content, forcedId = null) {
     message: {
       content,
       role,
+      rewindEligible: role === "user",
     },
     type: "message",
   });
@@ -1533,6 +1534,18 @@ function handlePrompt(frame) {
   if (!frame.resume) {
     recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
     emitSessionTitleUpdated(sessionId, normalizedUserContent);
+  }
+  if (text.includes("inline edit file fixture") && !text.includes("edited")) {
+    session.inlineBaseline = fs.existsSync(editFilePath) ? fs.readFileSync(editFilePath, "utf8") : null;
+    if (text.includes("no baseline")) delete session.inlineBaseline;
+    fs.writeFileSync(editFilePath, "inline AI modification", "utf8");
+    const tool = {toolCallId:"inline-write",toolName:"write",args:{path:editFilePath},result:"written",display:{kind:"file",file:editFilePath,added:1,removed:0}};
+    recordHistoryAssistantWithTools(sessionId,"",[tool],"Edited one file");
+    recordHistoryToolResult(sessionId,tool);
+    send({type:"tool_execution_start",sessionId,toolCallId:tool.toolCallId,toolName:"write",args:tool.args});
+    send({type:"tool_execution_end",sessionId,toolCallId:tool.toolCallId,toolName:"write",result:"written",display:tool.display,isError:false});
+    pendingInterrupt = setTimeout(() => { pendingInterrupt=null; finishTurn(sessionId,null); }, 60000);
+    return;
   }
   if (text.includes("waterline pending second request")) {
     emitEstimatedContextMetrics(sessionId, 0.53);
@@ -2367,6 +2380,7 @@ function handleCommand(frame) {
               attachmentRoot: ATTACHMENT_ROOT,
               capabilities: [
                 "prompt",
+                "rewind_and_resend",
                 "ask_question",
                 "ingest_attachment",
                 "retain_attachment_leases",
@@ -2891,6 +2905,28 @@ function handleCommand(frame) {
     case "cache_attachment_thumbnail":
       handleCacheAttachmentThumbnail(frame);
       break;
+    case "preview_rewind": {
+      const session = ensureSession(frame.sessionId);
+      send({type:"response",id:frame.id,sessionId:frame.sessionId,success:true,payload:{
+        revertAvailable: session.inlineBaseline !== undefined,
+        ...(session.inlineBaseline === undefined ? {revertReason:"no_baselines"} : {}),
+        revertPaths:session.inlineBaseline !== undefined ? [editFilePath] : []}});
+      break;
+    }
+    case "rewind_and_resend": {
+      const session = ensureSession(frame.sessionId);
+      const index = session.history.findIndex((entry)=>entry.id===frame.messageId && entry.message?.role==="user" && !entry.message.superseded);
+      if(index<0) { send({type:"response",id:frame.id,sessionId:frame.sessionId,success:false,error:"rewind_target_stale"}); break; }
+      if(pendingInterrupt) { clearTimeout(pendingInterrupt); pendingInterrupt=null; }
+      if(session.busy) finishTurn(frame.sessionId,"interrupted");
+      if(frame.files==="revert") {
+        if(session.inlineBaseline===null) { if(fs.existsSync(editFilePath)) fs.unlinkSync(editFilePath); }
+        else if(session.inlineBaseline!==undefined) fs.writeFileSync(editFilePath,session.inlineBaseline,"utf8");
+      }
+      for(const entry of session.history.slice(index)) { if(entry.message) { entry.message.superseded=true; entry.message.rewindEligible=false; delete entry.message.turn_failed; } }
+      handlePrompt({...frame,type:"prompt",text:frame.message.text,params:frame.message});
+      break;
+    }
     case "prompt":
     case "follow_up":
       handlePrompt(frame);

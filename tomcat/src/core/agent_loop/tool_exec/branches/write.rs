@@ -23,6 +23,7 @@ pub(in super::super) async fn handle_write(
             check_mutation_stamp(state, path, "write")?;
         }
     }
+    let baseline = ctx.file_baselines.and_then(|b| b.prepare(path));
     let result = ctx
         .primitive
         .write_file_with_cancel(path, content, overwrite, ctx.cancel, AGENT_PLUGIN_ID)
@@ -33,6 +34,9 @@ pub(in super::super) async fn handle_write(
                 state.invalidate(&resolved);
             }
             if r.written {
+                if let Some(baseline) = baseline {
+                    baseline.commit();
+                }
                 *display_out = Some(ToolDisplay::File {
                     file: r.path.clone(),
                     added: r.added,

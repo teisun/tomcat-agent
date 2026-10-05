@@ -14,9 +14,10 @@ import {
   type ApprovalAnswerState,
 } from "./components/ApprovalCard";
 import { AttachmentChips } from "./components/AttachmentChips";
-import { AttachmentStrip } from "./components/AttachmentStrip";
-import { injectCheckpointMarkers } from "./components/checkpointMarkers";
-import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
+import { ComposerSurface, type ComposerSurfaceProps } from "./components/ComposerSurface";
+import { InlineMessageEditor } from "./components/InlineMessageEditor";
+import { messageIdsWithWritesAfter, injectCheckpointMarkers } from "./components/checkpointMarkers";
+import { type ComposerDraft, type ComposerHandle } from "./components/Composer";
 import { matchSlashCommand } from "./slashMenu";
 import { ImageLightbox, type ZoomedImage } from "./components/ImageLightbox";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
@@ -1290,6 +1291,8 @@ function submitPrompt(
 
 export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
+  const [editingMessage, setEditingMessage] = useState<WebviewMessageBlock | null>(null);
+  useEffect(() => { setEditingMessage(null); }, [state.activeSessionId]);
   const [questionAnnouncement, setQuestionAnnouncement] = useState("");
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, ApprovalAnswerState>>(
     () => readPersistedApprovalAnswers(vscodeApi.getState?.()),
@@ -1366,6 +1369,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         : undefined,
     [state.activeSessionId, state.sessionViews],
   );
+  useEffect(() => {
+    // Host installs the authoritative history before its command result. The old
+    // row (and editor) can disappear first; do not leave the bottom composer locked.
+    if (editingMessage && activeSession && !activeSession.timeline.some((item) => item.id === editingMessage.id)) {
+      setEditingMessage(null);
+    }
+  }, [activeSession, editingMessage]);
   const activePendingApprovals = useMemo(
     () => activeSession?.timeline.filter(
       (item): item is WebviewApprovalCard =>
@@ -1485,6 +1495,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       (item) => item.type === "approval" && !item.resolved && item.live,
     ).length ?? 0;
   const activeTimeline = activeSession?.timeline ?? [];
+  const messagesWithWrites = useMemo(() => messageIdsWithWritesAfter(activeSession?.timeline ?? []), [activeSession?.timeline]);
   const oldestTimelineItemId = activeTimeline[0]?.id ?? null;
   const bootstrapFillRef = useRef<{ requestCount: number; sessionId: string | null }>({
     requestCount: 0,
@@ -1522,6 +1533,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     scrollToLatest,
     userHasScrolled,
   } = useAutoScroll({
+    paused: !!editingMessage,
     containerRef: streamRef,
     contentRef: transcriptRef,
     contentKey: streamContentKey,
@@ -2573,6 +2585,85 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     postIntent(vscodeApi, "newSession");
   };
 
+  const handleEditUserMessage = useCallback((message: WebviewMessageBlock) => {
+    flushComposerDraft();
+    composerRef.current?.closeMention();
+    setEditingMessage(message);
+  }, [flushComposerDraft]);
+
+  const composerProps: ComposerSurfaceProps = {
+    availableModelDetails: state.availableModelDetails,
+    availableModelReasoningLevels: state.availableModelReasoningLevels,
+    availableModels: state.availableModels,
+    busy: !!activeSession?.busy,
+    canInterrupt,
+    canPrompt: canPrompt && !editingMessage,
+    slashCommands: state.slashCommands,
+    instructionCatalog: activeSession?.instructionCatalog,
+    onSlashOpen: () => { if (activeSession) postIntent(vscodeApi, "getInstructionCatalog", {sessionId:activeSession.sessionId}); },
+    commandPending,
+    contextSearchLoading: contextSearch.loading,
+    contextSearchMatches: contextSearch.matches,
+    contextSearchQuery: contextSearch.query,
+    contextSearchTruncated: contextSearch.truncated,
+    contextWindowValue: activeSessionContextWindow,
+    contextLabel: buildContextLabel(activeSession?.contextRatio),
+    modelCapabilities: activeModelCapabilities,
+    modeValue: currentModeValue(activeSession?.agentMode),
+    modelValue: activeSession?.model ?? "",
+    thinkingLevelValue: activeSession?.thinkingLevel ?? "",
+    onContextSearchClose: handleContextSearchClose,
+    onContextSearchOpen: handleContextSearchOpen,
+    onContextSearchQueryChange: handleContextSearchQueryChange,
+    onPickContext: () => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (!sessionId) return;
+      const ticket = composerWorkRegistryRef.current.begin(sessionId, "picker");
+      postIntent(vscodeApi, "pickContext", { operationId: ticket.operationId, sessionId });
+    },
+    onContextWindowChange: handleSetContextWindow,
+    onDraftChange: (draft) => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (applyingBackendDraftRef.current || !sessionId) return;
+      localComposerDraftsRef.current.set(sessionId, draft);
+      localDraftRevisionsRef.current.set(sessionId, (localDraftRevisionsRef.current.get(sessionId) ?? 0) + 1);
+      scheduleComposerDraftSync(sessionId, draft);
+    },
+    onModeChange: handleModeChange,
+    onModelChange: (modelId) => { if (activeSession && modelId) postIntent(vscodeApi, "setModel", {modelId, sessionId:activeSession.sessionId}); },
+    onOpenModelSettings: modelAdminSupported ? () => postIntent(vscodeApi, "openModelSettings", {route:"models"}) : undefined,
+    onThinkingLevelChange: handleSetThinkingLevel,
+    onSpeedChange: handleSetSpeed,
+    onPrepareAttachments: (work) => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (!sessionId) return;
+      const ticket = composerWorkRegistryRef.current.begin(sessionId, "paste");
+      void work.then((files) => postIntent(vscodeApi, "attachFiles", {files, operationId:ticket.operationId, sessionId}))
+        .catch(() => composerWorkRegistryRef.current.complete(ticket.operationId));
+    },
+    onResolveDrop: (uris) => {
+      const sessionId = stateRef.current.activeSessionId;
+      if (!sessionId) return;
+      const ticket = composerWorkRegistryRef.current.begin(sessionId, "drop");
+      postIntent(vscodeApi, "resolveDrop", { operationId:ticket.operationId, sessionId, uris });
+    },
+    onInterrupt: () => { if (activeSession) postIntent(vscodeApi, "interrupt", {sessionId:activeSession.sessionId}); },
+    onSubmit: () => {
+      flushComposerDraft();
+      submitPrompt(vscodeApi, composerRef.current, activeSession?.sessionId, canPrompt && !editingMessage, (pending) => {
+        pendingComposerSubmissionRef.current = {...pending, revision: pending.sessionId ? localDraftRevisionsRef.current.get(pending.sessionId) ?? 0 : 0};
+      }, state.slashCommands?.map((c) => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0);
+    },
+    planState: activeSession?.activePlan?.state,
+    attachments: activeSession?.pendingAttachments ?? [],
+    onOpenAttachment: (attachment) => {
+      if (attachment.kind === "image") postIntent(vscodeApi, "openImagePreview", {attachmentId:attachment.id, sessionId:activeSession?.sessionId ?? ""});
+      else if (attachment.path) handleOpenFile(attachment.path);
+    },
+    onRemoveAttachment: (attachmentId) => postIntent(vscodeApi, "removeDraftAttachment", {attachmentId, sessionId:activeSession?.sessionId ?? ""}),
+    feedback: imageAttachmentFeedback,
+  };
+
   return (
     <main className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
@@ -2649,6 +2740,20 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession.historyLoading ||
             activeSession.hasMoreHistory ? (
               <TranscriptView
+                onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending
+                  ? handleEditUserMessage : undefined}
+                renderUserEditor={(message) => editingMessage?.id === message.id ? (
+                  <InlineMessageEditor
+                    key={`${activeSession.sessionId}:${message.id}`}
+                    message={editingMessage}
+                    sessionId={activeSession.sessionId}
+                    composerProps={composerProps}
+                    vscodeApi={vscodeApi}
+                    hasWrites={messagesWithWrites.has(message.id)}
+                    busy={!!activeSession.busy}
+                    onClose={() => setEditingMessage(null)}
+                  />
+                ) : null}
                 approvalAnswers={approvalAnswers}
                 availableModelDetails={state.availableModelDetails}
                 availableModels={state.availableModels}
@@ -2749,47 +2854,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         );
       })() : null}
 
-      <AttachmentStrip
-        attachments={activeSession?.pendingAttachments ?? []}
-        onOpen={(attachment) => {
-          if (attachment.kind === "image") {
-            postIntent(vscodeApi, "openImagePreview", {
-              attachmentId: attachment.id,
-              sessionId: activeSession?.sessionId ?? "",
-            });
-            return;
-          }
-          if (attachment.path) {
-            handleOpenFile(attachment.path);
-          }
-        }}
-        onRemove={(attachmentId) =>
-          postIntent(vscodeApi, "removeDraftAttachment", {
-            attachmentId,
-            sessionId: activeSession?.sessionId ?? "",
-          })
-        }
-      />
-      {imageAttachmentFeedback ? (
-        <div
-          className={
-            imageAttachmentFeedback.hasErrors
-              ? "tc-attachment-feedback tc-attachment-feedback--error"
-              : // Success is announced but not shown: the images are already visible in
-                // the strip above, so a banner saying so is redundant on screen while
-                // still being the only signal a screen reader user gets.
-                "tc-visually-hidden"
-          }
-          data-testid={
-            imageAttachmentFeedback.hasErrors
-              ? "attachment-feedback-error"
-              : "attachment-feedback-announcement"
-          }
-          role="status"
-        >
-          {imageAttachmentFeedback.message}
-        </div>
-      ) : null}
 
       {pendingRestoreDialog ? (
         <RestoreConfirmDialog
@@ -2801,128 +2865,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       ) : null}
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
-      <Composer
-        availableModelDetails={state.availableModelDetails}
-        availableModelReasoningLevels={state.availableModelReasoningLevels}
-        availableModels={state.availableModels}
-        busy={!!activeSession?.busy}
-        canInterrupt={canInterrupt}
-        canPrompt={canPrompt}
-        slashCommands={state.slashCommands}
-        instructionCatalog={activeSession?.instructionCatalog}
-        onSlashOpen={() => {
-          if (activeSession?.sessionId) postIntent(vscodeApi, "getInstructionCatalog", {sessionId:activeSession.sessionId});
-        }}
-        commandPending={commandPending}
-        contextSearchLoading={contextSearch.loading}
-        contextSearchMatches={contextSearch.matches}
-        contextSearchQuery={contextSearch.query}
-        contextSearchTruncated={contextSearch.truncated}
-        contextWindowValue={activeSessionContextWindow}
-        contextLabel={buildContextLabel(activeSession?.contextRatio)}
-        modelCapabilities={activeModelCapabilities}
-        modeValue={currentModeValue(activeSession?.agentMode)}
-        modelValue={activeSession?.model ?? ""}
-        thinkingLevelValue={activeSession?.thinkingLevel ?? ""}
-        ref={composerRef}
-        onContextSearchClose={handleContextSearchClose}
-        onContextSearchOpen={handleContextSearchOpen}
-        onContextSearchQueryChange={handleContextSearchQueryChange}
-        onPickContext={() => {
-          const sessionId = stateRef.current.activeSessionId;
-          if (!sessionId) return;
-          const ticket = composerWorkRegistryRef.current.begin(sessionId, "picker");
-          postIntent(vscodeApi, "pickContext", {
-            operationId: ticket.operationId,
-            sessionId,
-          });
-        }}
-        onContextWindowChange={handleSetContextWindow}
-        onDraftChange={(draft) => {
-          const sessionId = stateRef.current.activeSessionId;
-          if (applyingBackendDraftRef.current || !sessionId) {
-            return;
-          }
-          localComposerDraftsRef.current.set(sessionId, draft);
-          localDraftRevisionsRef.current.set(
-            sessionId,
-            (localDraftRevisionsRef.current.get(sessionId) ?? 0) + 1,
-          );
-          scheduleComposerDraftSync(sessionId, draft);
-        }}
-        onModeChange={handleModeChange}
-        onModelChange={(modelId) => {
-          if (!activeSession || !modelId) {
-            return;
-          }
-          postIntent(vscodeApi, "setModel", {
-            modelId,
-            sessionId: activeSession.sessionId,
-          });
-        }}
-        onOpenModelSettings={modelAdminSupported
-          ? () => {
-              postIntent(vscodeApi, "openModelSettings", {
-                route: "models",
-              });
-            }
-          : undefined}
-        onThinkingLevelChange={handleSetThinkingLevel}
-        onSpeedChange={handleSetSpeed}
-        onPrepareAttachments={(work) => {
-          const sessionId = stateRef.current.activeSessionId;
-          if (!sessionId) return;
-          const ticket = composerWorkRegistryRef.current.begin(sessionId, "paste");
-          void work.then((files) => {
-            postIntent(vscodeApi, "attachFiles", {
-              files,
-              operationId: ticket.operationId,
-              sessionId,
-            });
-          }).catch(() => {
-            // Composer restores text fallback; no host work was started.
-            composerWorkRegistryRef.current.complete(ticket.operationId);
-          });
-        }}
-        onResolveDrop={(uris) => {
-          const sessionId = stateRef.current.activeSessionId;
-          if (!sessionId) return;
-          const ticket = composerWorkRegistryRef.current.begin(sessionId, "drop");
-          postIntent(vscodeApi, "resolveDrop", {
-            operationId: ticket.operationId,
-            sessionId,
-            uris,
-          });
-        }}
-        onInterrupt={() => {
-          if (!activeSession?.sessionId) {
-            return;
-          }
-          postIntent(vscodeApi, "interrupt", {
-            sessionId: activeSession.sessionId,
-          });
-        }}
-        onSubmit={() => {
-          flushComposerDraft();
-          submitPrompt(
-            vscodeApi,
-            composerRef.current,
-            activeSession?.sessionId,
-            canPrompt,
-            (pending) => {
-              pendingComposerSubmissionRef.current = {
-                ...pending,
-                revision: pending.sessionId
-                  ? (localDraftRevisionsRef.current.get(pending.sessionId) ?? 0)
-                  : 0,
-              };
-            },
-            state.slashCommands?.map((command) => command.name) ?? [],
-            (activeSession?.pendingAttachments.length ?? 0) > 0,
-          );
-        }}
-        planState={activeSession?.activePlan?.state}
-      />
+      <ComposerSurface {...composerProps} ref={composerRef} />
     </main>
   );
 }

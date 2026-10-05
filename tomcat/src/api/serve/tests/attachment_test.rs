@@ -454,7 +454,7 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
     // SVG 的显示与「发给模型」是两条路：历史里留原始 SVG，模型收到 webview 转出的 PNG。
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot, requests) =
-        build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
+        build_initialized_state_with_recorded_streams(vec![ok_stream(), ok_stream()]).await;
 
     let svg = design_tool_svg();
     let png = png_bytes();
@@ -489,7 +489,7 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
                     filename: Some("icon.svg".to_string()),
                     mime_type: Some("image/svg+xml".to_string()),
                     blob_sha: Some(blob_sha.clone()),
-                    provider_sha: Some(provider_sha),
+                    provider_sha: Some(provider_sha.clone()),
                     file_id: None,
                 }],
                 user_message_id: Some("svg-msg".to_string()),
@@ -504,29 +504,30 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
     })
     .await;
 
-    let captured = requests.0.lock();
-    assert!(
-        !captured.is_empty(),
-        "provider should receive the image request; frames={:?}",
-        read_ndjson_lines(&buffer)
-    );
-    let user_message = latest_persisted_user_message(&captured[0]);
-    let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
-        panic!("expected parts");
-    };
-    let image = parts
-        .iter()
-        .find_map(|part| match part {
-            ChatMessageContentPart::InputImage {
-                source: ImageSource::Inline(inline),
-                ..
-            } => Some(inline),
-            _ => None,
-        })
-        .expect("input_image part");
-    assert_eq!(image.mime_type, "image/png", "模型必须收到 PNG，不是 SVG");
-    assert_eq!(image.data, b64(&png));
-    drop(captured);
+    {
+        let captured = requests.0.lock();
+        assert!(
+            !captured.is_empty(),
+            "provider should receive the image request; frames={:?}",
+            read_ndjson_lines(&buffer)
+        );
+        let user_message = latest_persisted_user_message(&captured[0]);
+        let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
+            panic!("expected parts");
+        };
+        let image = parts
+            .iter()
+            .find_map(|part| match part {
+                ChatMessageContentPart::InputImage {
+                    source: ImageSource::Inline(inline),
+                    ..
+                } => Some(inline),
+                _ => None,
+            })
+            .expect("input_image part");
+        assert_eq!(image.mime_type, "image/png", "模型必须收到 PNG，不是 SVG");
+        assert_eq!(image.data, b64(&png));
+    }
 
     let transcript = std::fs::read_to_string(
         slot.ctx
@@ -545,6 +546,115 @@ async fn prompt_with_provider_sha_sends_png_but_archives_svg() {
         transcript.contains("image/svg+xml"),
         "transcript 的 MIME 也应保持 SVG"
     );
+    assert!(!transcript.contains("submitted_attachments"));
+    assert!(transcript.contains(&format!("\"provider_sha\":\"{provider_sha}\"")));
+    let live = slot
+        .ctx
+        .session_runtime
+        .session
+        .collect_live_blob_shas()
+        .unwrap();
+    assert!(
+        live.shas.contains(&provider_sha),
+        "provider PNG must remain GC-live"
+    );
+    // This is a rendition test, not the checkpoint timeout test. The shared mock
+    // fixture points at the real repository, so let its asynchronous snapshot settle.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while slot.is_busy() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        crate::api::chat::drain_checkpoint_record_tasks(&slot.ctx, Duration::from_secs(30)).await
+    );
+    let history = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "svg-edit-history",
+        AttachmentMode::Reference,
+    )
+    .await;
+    let serialized = history.to_string();
+    assert!(
+        serialized.contains(&provider_sha),
+        "editable history retains the PNG rendition reference"
+    );
+    assert!(serialized.contains("icon.svg"));
+    assert!(!serialized.contains("provider_sha"));
+    assert!(serialized.contains("providerSha"));
+    let inline_history =
+        get_messages_payload(&state, &buffer, &slot, "svg-inline", AttachmentMode::Inline).await;
+    let inline_user = inline_history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "svg-msg")
+        .unwrap();
+    let inline_image = inline_user["message"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["type"] == "input_image")
+        .unwrap();
+    for field in ["provider_sha", "filename", "blob_sha"] {
+        assert!(
+            inline_image.get(field).is_none(),
+            "{field} leaked into Inline"
+        );
+    }
+    assert!(
+        !serialized.contains("submitted_attachments"),
+        "internal archival metadata is not a wire field"
+    );
+    handle_command(
+        state.clone(),
+        ServeCommand::RewindAndResend {
+            id: Some("svg-edit".into()),
+            session_id: slot.session_id.clone(),
+            message_id: "svg-msg".into(),
+            files: RewindFiles::Keep,
+            message: RewindMessage {
+                text: "edited icon question".into(),
+                params: ServeMessageParams {
+                    attachments: vec![ServeAttachment {
+                        kind: ServeAttachmentKind::Image,
+                        filename: Some("icon.svg".into()),
+                        mime_type: Some("image/svg+xml".into()),
+                        blob_sha: Some(blob_sha),
+                        provider_sha: Some(provider_sha),
+                        file_id: None,
+                    }],
+                    ..ServeMessageParams::default()
+                },
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let edit_frames = wait_for_line(&buffer, |frame| frame["id"] == "svg-edit").await;
+    let edit_response = edit_frames
+        .iter()
+        .find(|frame| frame["id"] == "svg-edit")
+        .unwrap();
+    assert_eq!(edit_response["success"], true, "{edit_response:?}");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while slot.is_busy() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let captured = requests.0.lock();
+    let edited = latest_persisted_user_message(captured.last().unwrap());
+    assert!(captured.len() >= 2, "editing must actually issue a second provider request; frames={:?}",
+        read_ndjson_lines(&buffer).into_iter().filter(|f| f["id"] == "svg-edit" || (f["type"] == "agent_end" && !f["error"].is_null())).collect::<Vec<_>>());
+    assert!(edited.content.as_ref().is_some_and(|content| matches!(content, ChatMessageContent::Parts(parts)
+        if parts.iter().any(|part| matches!(part, ChatMessageContentPart::InputImage { source: ImageSource::Inline(image), .. }
+            if image.mime_type == "image/png" && image.data == b64(&png))))));
 }
 
 // ── 伪造哈希 ──────────────────────────────────────────────────────────

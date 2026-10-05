@@ -2,6 +2,7 @@ import * as assert from "node:assert/strict";
 
 import {
   assertPlanPreviewCustomEditorFlow,
+  assertInlineUserMessageEditFlow,
   assertWebviewCompletedPlanStaysInChat,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewCompactControlFlow,
@@ -41,6 +42,10 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  test("inline user-message edit keeps the main draft and reverts a running turn", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertInlineUserMessageEditFlow(api);
+  });
   const bootstrapFailureScenario =
     process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES === "1";
   const bootstrapRetryScenario =

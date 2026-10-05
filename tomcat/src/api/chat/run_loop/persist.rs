@@ -53,33 +53,29 @@ pub(crate) fn schedule_checkpoint_prune(ctx: &ChatContext) {
 /// This is only called while a session is being closed. A bounded wait preserves
 /// the interactive hot path but prevents a clean process exit from aborting the
 /// final turn's rollback checkpoint.
-pub(crate) async fn drain_checkpoint_record_tasks(ctx: &ChatContext, timeout: Duration) {
+pub(crate) async fn drain_checkpoint_record_tasks(ctx: &ChatContext, timeout: Duration) -> bool {
     let tasks = {
         let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
         std::mem::take(&mut *pending)
     };
-    if tasks.is_empty() {
-        return;
-    }
-
     let deadline = Instant::now() + timeout;
-    for mut task in tasks {
+    let mut tasks = tasks.into_iter();
+    while let Some(mut task) = tasks.next() {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            tracing::warn!("checkpoint writes did not finish before session shutdown timeout");
-            return;
-        }
         match tokio::time::timeout(remaining, &mut task).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(error = %error, "checkpoint write task failed during session shutdown");
-            }
+            Ok(Err(error)) => tracing::warn!(%error, "checkpoint task failed"),
             Err(_) => {
-                tracing::warn!("checkpoint writes did not finish before session shutdown timeout");
-                return;
+                // Keep unfinished writers reachable: a retry must wait for them too.
+                let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
+                pending.push(task);
+                pending.extend(tasks);
+                tracing::warn!("checkpoint writes did not finish before timeout");
+                return false;
             }
         }
     }
+    true
 }
 
 pub(crate) fn persist_turn_result(

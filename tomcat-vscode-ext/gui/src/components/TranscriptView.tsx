@@ -1,4 +1,4 @@
-import { Fragment, type RefObject, useMemo } from "react";
+import { Fragment, type RefObject, type ReactNode, useMemo } from "react";
 
 import type {
   AskQuestionResult,
@@ -17,7 +17,7 @@ import {
 } from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
-import { injectCheckpointMarkers } from "./checkpointMarkers";
+import { messageIdsWithWritesAfter, injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
 import type { Speed } from "../../../src/shared/modelSpeed";
 import type { ModelPickerModel } from "./ModelPicker";
@@ -115,6 +115,8 @@ export function partitionAssistantResponseGroup(
 }
 
 export function TranscriptView({
+  renderUserEditor,
+  onEditUserMessage,
   approvalAnswers = {},
   availableModelDetails,
   availableModels = [],
@@ -151,6 +153,8 @@ export function TranscriptView({
   mediaRoots,
   transcriptRef,
 }: {
+  renderUserEditor?(message: Extract<WebviewTimelineItem, {type:"message"}>): ReactNode;
+  onEditUserMessage?(message: Extract<WebviewTimelineItem, {type:"message"}>): void;
   approvalAnswers?: Record<string, ApprovalAnswerState>;
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels?: string[];
@@ -191,6 +195,7 @@ export function TranscriptView({
   mediaRoots?: WebviewMediaRoot[];
   transcriptRef?: RefObject<HTMLElement | null>;
 }) {
+  const messagesWithWrites = useMemo(() => messageIdsWithWritesAfter(timeline), [timeline]);
   const renderedTimeline = useMemo(
     () => injectCheckpointMarkers(timeline, checkpoints),
     [checkpoints, timeline],
@@ -261,9 +266,15 @@ export function TranscriptView({
         case "boundary":
           return <BoundaryBlock item={item} key={item.id} />;
         case "message":
+          if (item.kind === "user") {
+            const editor = renderUserEditor?.(item);
+            if (editor) return <Fragment key={item.id}>{editor}</Fragment>;
+          }
           return (
             <MessageBubble
               item={item}
+              onEdit={item.kind === "user" && item.rewindEligible ? onEditUserMessage : undefined}
+              hasFileWrites={item.kind === "user" ? messagesWithWrites.has(item.id) : undefined}
               key={item.id}
               mediaRoots={mediaRoots}
               onOpenFile={onOpenFile}

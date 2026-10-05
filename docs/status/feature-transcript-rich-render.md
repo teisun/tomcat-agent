@@ -2,13 +2,21 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-04 11:05 +0800 |
+| Updated | 2026-10-05 08:38 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Custom-rule prompt-cache diagnostics and three-route evidence; saved View diff delivery; prior branch interfaces and risks retained |
+| Scope | Inline user-message editing and safe resend; signal-only completion; artifact isolation; CLI/extension patch bump and local commit |
 | Cov% | - |
 
 ### DONE
+
+- Added in-place editing of sent user messages through the shared Composer, with Keep/Revert confirmation, superseded history instead of deletion, and independent bottom-draft/attachment ownership; no branching, epoch or idempotency framework.
+- Joined native disk commits before rewind, made pre-commit confirmation waits cancellable and retracted dropped Serve confirmations, retained queued inputs on failed edits, and surfaced committed failures in the session timeline.
+- Stored image provider renditions and filenames in typed content parts, kept SVG originals and PNG model payloads distinct, preserved JPEG MIME for equal hashes, and shared eligibility/cwd/write-evidence predicates across their consumers.
+- Suppressed Stopped model notifications without removing UI terminal events; consumed late steering/follow-up through the existing helpers and allowed one silent response only after a completed turn consumes a pure Signal batch. Real input, Retry/Resume and tool work retain empty-reply protection.
+- Kept Stop usable during historical editing, restored body-required send behavior, clarified conditional restore copy and removed no-write bubble padding; covered native barriers, failure paths, attachment round trips and real-host cancellation/draft boundaries.
+- Archived one-off diagnostics and reports under ignored `.agents/scripts`, `acceptance` and `replays`, retained maintained code/tests/docs in their normal locations, and added two concise verify-skill artifact/delivery instructions.
+- Applied this request's one-time repository-script patch bump: CLI `0.1.66 -> 0.1.67`, extension `0.1.80 -> 0.1.81`, bundled CLI `0.1.66 -> 0.1.67`; the five version mirrors changed only their intended fields, not dependencies or the private GUI version.
 
 - Added a bounded ignored custom-rule cache probe using production rule discovery/rendering and prompt snapshots, reusing existing provider/credential/usage helpers instead of copying the full probe suite. Temporary rules preserve the project's rendered bytes; returned model tools are never executed.
 - Measured rules-off/rules-on/changed-rule sequences on DeepSeek Flash and both configured GPT-5.6 Terra gateways, with 11 requests per route, deterministic shared histories, stable prompt hashes and explicit missing-usage failures. Preserved all 33 rows and limitations in `tomcat/docs/reports/user-custom-instructions-cache-acceptance.md`, including fcodex's zero hit and input-count jumps.
@@ -81,7 +89,11 @@
 
 ### INTERFACE
 
-- This cache-probe commit changes no production API, system section order, version or user configuration. `custom_rules_cache_probe::project_rules_cache_ab` is an opt-in paid `#[ignore]` test selected by the existing `TOMCAT_E2E_CACHE_PROBE_MODEL`; each run sends exactly 11 requests when successful, with a 120-second per-request bound and no tool execution.
+- Serve advertises `rewind_and_resend` and accepts read-only `preview_rewind` plus ordered `rewind_and_resend {sessionId,messageId,files,message}`. Old clients do not expose the edit action; history replacement is authoritative and committed failures carry `committed:true`.
+- Native first-write baselines remain separate from ShadowGit, gated by retention, available backups and Git HEAD. Historical image parts have optional `provider_sha/filename`; Reference projection exposes `providerSha`, while Inline retains its legacy shape.
+- `silent_reply_allowed` is run-local, granted only from the actually consumed signal-only finish batch and consumed by the next accepted response; it is not persisted and changes no entry signature or public wire protocol.
+
+- The earlier cache-probe change did not alter production APIs, system section order or user configuration. `custom_rules_cache_probe::project_rules_cache_ab` remains an opt-in paid `#[ignore]` test selected by the existing `TOMCAT_E2E_CACHE_PROBE_MODEL`; each run sends exactly 11 requests when successful, with a 120-second per-request bound and no tool execution.
 
 - `openDiff` requires `{ sessionId, toolCallId }`; the host only looks up the named session. `tomcat-diff` query contains `sessionId/toolCallId/fragment/side`, while path is a display label; only `previewContents` supplies historical text.
 - `isDiffViewable(tool)` narrows saved diff lines without changing button eligibility; `FileDiffLine` is imported/re-exported from generated wire types. `applyPreparedEdit/getPreparedChange/openPreparedDiff` are removed from the extension's test-only API; no internal VS Code command or compatibility layer is added.
@@ -108,7 +120,7 @@
 - Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata now declares CLI `0.1.66`, VS Code extension `0.1.80`, and bundled CLI pin `0.1.66`; the bump itself does not install or replace any process. The user requests a separate post-commit `cargo build --release` and pure VSIX packaging, without installation or publication.
+- Release metadata now declares CLI `0.1.67`, VS Code extension `0.1.81`, and bundled CLI pin `0.1.67`. This request performs a local commit only: no new tests, builds, packaging, installation, restart or push; updated version metadata is not a rebuilt artifact.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
@@ -121,6 +133,10 @@
 - Settings reads connector state from local Serve snapshots and polls while visible; it fetches a tool catalog only for a connected source and validates config key, generation, and attempt before applying it.
 
 ### BLOCKED
+
+- Latest implementation acceptance was not all-green: Rust lib had 3044 passes / 1 hosted-web-search timeout / 3 ignored; default integration had 358/363 parallel and 34/35 serial passes. The MCP timeout passed a focused rerun; hosted-search/skill timeouts remain unassigned, and an unchanged Responses gateway fixture emits Chat Completions SSE. Strict Clippy still needs the previously recorded `large_enum_variant` exception; do not relabel these gates as passed.
+- Serve finish-to-idle admission can still leave a queued input without a consumer; CLI idle Signal turns are not granted silent completion. Pre-confirmation baseline sampling and overwriting later manual edits remain boundaries; A14 uncommitted-backup cleanup was explicitly cancelled by the user.
+- Earlier eight checkpoint CLI cases blocked by nested-agent protection still require an external-agent rerun. This commit does not disable protection or expand scope to repair unrelated gate failures.
 
 - fcodex/GPT-5.6 Terra reported one zero-cache round after a rule change and non-monotonic input-token usage despite stable phase hashes. The experiment did not audit final HTTP payloads, raw upstream usage or backend identities; route, billing and client causes remain unassigned. Short probes do not establish a gateway SLA or full CLI/Serve long-session behavior.
 - Strict targeted Clippy was blocked by unchanged `src/api/chat/commands/parse.rs:91` (`large_enum_variant`); the later run allowing only that lint passed. Keep the original failure, not a claim that the strict gate passed.
@@ -151,6 +167,10 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- Before this bump/commit request, extension lint and all 621 host / 713 GUI tests passed (`1791139938134-6vf0iz`); real VS Code inline-edit E2E passed with desktop/narrow PNG, ARIA and zero capture-scope console errors (`1791139176819-ih8g2c`). These are earlier implementation results, not reruns or tests of rebuilt `0.1.67` / `0.1.81` artifacts.
+- The final MIME correction passed 39 hydration and 21 attachment tests plus all-targets Clippy with only the existing lint exception (`1791142294246-q1hcz9`); final real Serve resend passed 3/3 (`1791142984791-e8x7ca`). The original full gate failures remain in BLOCKED; ignored local details are in `.agents/acceptance/inline-remediation.acceptance.md`.
+- This request explicitly skips tests, compilation, packaging and coverage. Pre/post repository version checks passed; commit-time verification is limited to allowed version fields, all Git regions, whitespace, status metadata and the what/why message. Cov% remains unmeasured (`-`); no push or daily-environment replacement is authorized.
 
 - Before this commit request, the new deterministic rule/snapshot check and existing snapshot contract each passed one test (`1791081269369-u6kqsb`, `1791081572928-idssec`). The three paid probes completed 11 requests each (`1791081549874-inwo3i`, `1791082726308-a9n8o3`, `1791082726351-63wbm9`); warm rules-on token-weighted hit rates were DeepSeek98.72%, fcodex90.25%, idatatlas92.12%. Probe completion is not a cache-stability threshold pass.
 - Original counts, per-phase hashes and summaries were independently recomputed; the 22 GPT rows in the report matched their logs (`1791082898955-q41ms0`, `1791083002261-m24x4o`). Formatting passed; strict Clippy failed as recorded above (`1791081930793-y0n6ay`) and the known-lint-scoped follow-up passed (`1791082060025-qdv476`).

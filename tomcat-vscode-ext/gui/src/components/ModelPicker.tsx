@@ -93,6 +93,10 @@ export function ModelPicker({
   const optionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const closeConfigTimer = useRef<number | null>(null);
 
+  useEffect(() => {
+    if (disabled) { setOpen(false); setConfigModelId(null); }
+  }, [disabled]);
+
   const visibleModels = useMemo(() => filterModels(models, query), [models, query]);
   const selectedModel =
     models.find((model) => model.id === selectedModelId) ?? null;

@@ -99,6 +99,14 @@ fn verify_assets_default_to_agents_shots_and_document_custom_configuration() {
     assert!(skill.contains("<workspace>/<project_resource_dir>/shots"));
     assert!(shot.contains("path.resolve(\".agents\", \"shots\")"));
     assert!(!shot.contains("path.resolve(\".tomcat\", \"shots\")"));
+    let delivery = skill
+        .find("## Artifacts and delivery")
+        .expect("delivery guidance");
+    assert!(delivery > skill.find("## UI acceptance").unwrap());
+    assert!(skill[delivery..].contains("<project_resource_dir>/scripts"));
+    assert!(skill[delivery..].contains("acceptance"));
+    assert!(skill[delivery..].contains("![what it shows](/absolute/path.png)"));
+    assert!(skill[delivery..].contains("Code, tests, fixtures"));
 }
 
 #[test]

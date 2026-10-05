@@ -22,6 +22,8 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
 const NOOP_OPEN_FILE = () => undefined;
 
 type MessageBubbleProps = {
+  onEdit?(item: WebviewMessageBlock): void;
+  hasFileWrites?: boolean;
   item: WebviewMessageBlock;
   mediaRoots?: WebviewMediaRoot[];
   onOpenFile?: (path: string, line?: number) => void;
@@ -35,6 +37,8 @@ type MessageBubbleProps = {
 };
 
 function MessageBubbleComponent({
+  onEdit,
+  hasFileWrites,
   item,
   mediaRoots,
   onOpenFile,
@@ -99,7 +103,25 @@ function MessageBubbleComponent({
       data-message-id={item.id}
       data-message-kind={item.kind}
       data-testid="message-block"
+      onClick={(event) => {
+        if (!onEdit || window.getSelection()?.toString() || (event.target as Element).closest('button,a,[role="button"]')) return;
+        onEdit(item);
+      }}
+      data-editable={!!onEdit}
+      data-has-writes={!!hasFileWrites}
     >
+      {onEdit ? (
+        <button
+          type="button"
+          className={`tc-message__edit-trigger${hasFileWrites ? " tc-message__edit-trigger--revert" : ""}`}
+          data-testid="edit-user-message"
+          aria-label="Edit message"
+          title="Edit message"
+          onClick={() => onEdit(item)}
+        >
+          <span aria-hidden="true" className={`codicon ${hasFileWrites ? "codicon-discard" : "codicon-edit"}`} />
+        </button>
+      ) : null}
       {showHeader ? (
         <div className="tc-message__header">
           <strong>{MESSAGE_LABELS[item.kind]}</strong>
@@ -246,6 +268,8 @@ function MessageBubbleComponent({
 function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): boolean {
   return (
     prev.mediaRoots === next.mediaRoots &&
+    prev.onEdit === next.onEdit &&
+    prev.hasFileWrites === next.hasFileWrites &&
     prev.item === next.item &&
     prev.onOpenFile === next.onOpenFile &&
     prev.onOpenImagePreview === next.onOpenImagePreview &&

@@ -78,6 +78,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   serve_ask_question_tests
   serve_robustness_tests
   serve_stdio_e2e
+  serve_rewind_and_resend
 )
 
 # 真 LLM E2E（需当前 Responses target 对应 key；默认是 idatatlas Terra）。

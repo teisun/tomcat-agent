@@ -25,6 +25,94 @@ use crate::core::session::resume_index::{
     ResumeEntryKind, ResumeIndex,
 };
 
+#[test]
+fn hydrate_typed_provider_rendition_and_original_references() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, ImageSource};
+    use base64::Engine as _;
+    for with_provider in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(temp.path().to_path_buf());
+        manager
+            .create_session(manager.current_session_key(), None)
+            .unwrap();
+        let source = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>";
+        let source_sha = manager.attachment_store().put(source).unwrap();
+        let png = base64::engine::general_purpose::STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+        ).unwrap();
+        let png_sha = manager.attachment_store().put(&png).unwrap();
+        let mut part = serde_json::json!({"type":"input_image_ref","blob_sha":source_sha,"mime_type":"image/svg+xml","filename":"icon.svg","detail":"high"});
+        if with_provider {
+            part["provider_sha"] = serde_json::json!(png_sha);
+        }
+        manager
+            .append_message(serde_json::json!({"role":"user","content":[part]}))
+            .unwrap();
+        let restarted = SessionManager::new(temp.path().to_path_buf());
+        let state = init_context_state(&restarted, &ContextConfig::default(), "sys").unwrap();
+        let Some(ChatMessageContent::Parts(parts)) = &state.messages[0].content else {
+            panic!("parts")
+        };
+        let ChatMessageContentPart::InputImage {
+            source: ImageSource::Inline(image),
+            detail,
+        } = &parts[0]
+        else {
+            panic!("materialized image")
+        };
+        assert_eq!(
+            image.mime_type,
+            if with_provider {
+                "image/png"
+            } else {
+                "image/svg+xml"
+            }
+        );
+        assert_eq!(
+            image.data,
+            base64::engine::general_purpose::STANDARD.encode(if with_provider {
+                png.as_slice()
+            } else {
+                source.as_slice()
+            })
+        );
+        assert_eq!(detail.as_deref(), Some("high"));
+    }
+}
+
+#[test]
+fn hydrate_provider_sha_equal_to_original_preserves_jpeg_mime() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, ImageSource};
+    let temp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(temp.path().to_path_buf());
+    manager
+        .create_session(manager.current_session_key(), None)
+        .unwrap();
+    // Pixel decoding belongs to ingest; hydration only resolves the stored rendition.
+    let sha = manager
+        .attachment_store()
+        .put(b"already ingested JPEG bytes")
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({"role":"user","content":[{
+            "type":"input_image_ref","blob_sha":sha,"provider_sha":sha,"mime_type":"image/jpeg"
+        }]}))
+        .unwrap();
+    let restarted = SessionManager::new(temp.path().to_path_buf());
+    let state = init_context_state(&restarted, &ContextConfig::default(), "sys").unwrap();
+    let Some(ChatMessageContent::Parts(parts)) = &state.messages[0].content else {
+        panic!("parts")
+    };
+    let ChatMessageContentPart::InputImage {
+        source: ImageSource::Inline(image),
+        ..
+    } = &parts[0]
+    else {
+        panic!("inline image")
+    };
+    assert_eq!(image.mime_type, "image/jpeg");
+}
+
 fn tool_call_json(id: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
@@ -214,6 +302,7 @@ fn matching_preheat_cache_restores_completed_summary_without_calling_an_llm() {
             estimated_tokens_saved: Some(90),
             error: None,
             attempts: None,
+            superseded: false,
         }),
     )
     .unwrap();
@@ -275,6 +364,7 @@ fn applied_preheat_body_makes_matching_cache_ineligible_for_restore() {
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         }),
     )
     .unwrap();
@@ -282,6 +372,7 @@ fn applied_preheat_body_makes_matching_cache_ineligible_for_restore() {
         &path,
         &TranscriptEntry::BranchSummaryText(
             crate::core::session::transcript::BranchSummaryTextEntry {
+                superseded: false,
                 id: Some(format!("{marker_id}:text")),
                 parent_id: Some(marker_id.clone()),
                 timestamp: Utc::now().to_rfc3339(),
@@ -347,6 +438,7 @@ fn mismatched_preheat_cache_is_ignored() {
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         }),
     )
     .unwrap();
@@ -1288,6 +1380,7 @@ fn init_context_state_boundary_discards_prior() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     crate::core::session::transcript::append_entry(&path, &boundary_entry).unwrap();
 

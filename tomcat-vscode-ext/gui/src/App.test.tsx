@@ -42,6 +42,86 @@ function mount(initialState?: unknown) {
   };
 }
 
+describe("inline user-message editing in App", () => {
+  it("does not expose editing for a read-only foreign session", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.ownedByThisFrontend = false;
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"foreign",kind:"user",text:"read-only prompt",rewindEligible:true}];
+    await emitState({channel:"state",content:snapshot,messageId:"foreign-state"});
+    fireEvent.click(screen.getByText("read-only prompt"));
+    expect(screen.queryByTestId("edit-user-message")).toBeNull();
+    expect(screen.queryByTestId("inline-message-editor")).toBeNull();
+  });
+  it("unlocks the main composer when history arrives before the resend result", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"old",kind:"user",text:"old editable",rewindEligible:true}];
+    await emitState({channel:"state",content:snapshot,messageId:"before-edit"});
+    fireEvent.click(screen.getByText("old editable"));
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"new",kind:"user",text:"replacement",rewindEligible:true}];
+    await emitState({channel:"state",content:snapshot,messageId:"after-edit"});
+    expect(screen.queryByTestId("inline-message-editor")).toBeNull();
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+  });
+  it("keeps Stop usable while an old message is being edited", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.busy = true;
+    snapshot.sessionViews.s1.timeline = [{ type: "message", id: "old", kind: "user", text: "old editable", rewindEligible: true }];
+    await emitState({ channel: "state", content: snapshot, messageId: "busy-edit" });
+    fireEvent.click(screen.getByText("old editable"));
+    const stop = screen.getByTestId("stop-button");
+    expect((stop as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(stop);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "interrupt", data: { sessionId: "s1" } }));
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("old editable");
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
+  });
+
+  it("cancels the first edit when another user bubble is opened", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.timeline = [
+      { type: "message", id: "first", kind: "user", text: "First editable", rewindEligible: true },
+      { type: "message", id: "second", kind: "user", text: "Second editable", rewindEligible: true },
+    ];
+    await emitState({channel:"state",content:snapshot,messageId:"switch-edit"});
+    fireEvent.click(screen.getByText("First editable"));
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("First editable");
+    const second = screen.getByText("Second editable");
+    fireEvent(second, new MouseEvent("pointerdown", {bubbles:true,button:0}));
+    fireEvent.click(second);
+    expect(screen.getAllByTestId("inline-message-editor")).toHaveLength(1);
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("Second editable");
+  });
+
+  it("opens a historical composer without consuming the bottom draft", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"editable",kind:"user",text:"Old request",rewindEligible:true}];
+    snapshot.sessionViews.s1.composerDraft = {text:"Unsent main draft",segments:[{type:"text",text:"Unsent main draft"}]};
+    await emitState({channel:"state",content:snapshot,messageId:"edit-state"});
+    fireEvent.click(screen.getByText("Old request"));
+    expect(screen.getByTestId("inline-message-editor")).toBeTruthy();
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("Old request");
+    expect(screen.getByTestId("composer-input").textContent).toBe("Unsent main draft");
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    const before = postMessage.mock.calls.length;
+    await act(async () => document.body.dispatchEvent(new MouseEvent("pointerdown",{bubbles:true,button:0})));
+    expect(screen.queryByTestId("inline-message-editor")).toBeNull();
+    expect(screen.getByTestId("composer-input").textContent).toBe("Unsent main draft");
+    expect(postMessage.mock.calls.slice(before)).toEqual([]);
+  });
+});
+
 describe("shared slash submission and command waiting", () => {
   const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:name}));
   const ready = async (session:Partial<WebviewSessionSnapshot> = {}, slashCommands = commands) => {
@@ -74,6 +154,13 @@ describe("shared slash submission and command waiting", () => {
     fireEvent.click(screen.getByTestId("send-button"));
     expect(second.postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
     expect(second.postMessage.mock.calls.some(([message]) => message.type === "runSlashCommand")).toBe(false);
+  });
+  it("does not send an attachment-only draft through the shared composer", async () => {
+    const {postMessage}=mount();
+    await ready({pendingAttachments:[{id:"image",label:"image.png",blobSha:"a".repeat(64),filename:"image.png",kind:"image",mimeType:"image/png",bytes:10}]});
+    expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
   });
   it("preserves attachment prompts and disables send, compact and Build for metadata-only pending", async () => {
     const {postMessage} = mount();

@@ -55,6 +55,7 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     insert_entry_after_message_id(&path, "mid_anchor", &c).unwrap();
 
@@ -134,6 +135,29 @@ fn mark_message_entries_after_anchor_superseded_marks_only_later_messages() {
             other => panic!("unexpected non-message entry: {other:?}"),
         }
     }
+}
+
+#[test]
+fn rewind_and_resend_supersedes_compaction_by_marker_not_body_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rewind.jsonl");
+    let rows = [
+        serde_json::json!({"type":"session","id":"s","timestamp":"t"}),
+        serde_json::json!({"type":"branch_summary","id":"before","timestamp":"t","isBoundary":true}),
+        serde_json::json!({"type":"message","id":"target","timestamp":"t","message":{"role":"user","content":"old"}}),
+        serde_json::json!({"type":"branch_summary","id":"after","timestamp":"t","isBoundary":true}),
+        serde_json::json!({"type":"branch_summary_text","forId":"before","timestamp":"t","summary":"keep"}),
+        serde_json::json!({"type":"branch_summary_text","forId":"after","timestamp":"t","summary":"discard"}),
+    ];
+    for row in rows {
+        append_line(&path, &row.to_string()).unwrap();
+    }
+    mark_message_entries_after_anchor_superseded(&path, "target").unwrap();
+    let entries = read_entries_tail(&path, 20).unwrap();
+    assert!(matches!(&entries[0], TranscriptEntry::BranchSummary(e) if !e.superseded));
+    assert!(matches!(&entries[2], TranscriptEntry::BranchSummary(e) if e.superseded));
+    assert!(matches!(&entries[3], TranscriptEntry::BranchSummaryText(e) if !e.superseded));
+    assert!(matches!(&entries[4], TranscriptEntry::BranchSummaryText(e) if e.superseded));
 }
 
 #[test]

@@ -32,6 +32,215 @@ use crate::infra::{DefaultEventBus, EventContext};
 
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
 
+struct CommitBarrierPrimitive {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::tools::primitive::PrimitiveExecutor for CommitBarrierPrimitive {
+    async fn read_file(&self, path: &str, p: &str) -> Result<String, AppError> {
+        MockPrimitiveExecutor.read_file(path, p).await
+    }
+    async fn list_dir(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+        Ok(vec![])
+    }
+    async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+        _: bool,
+        _: &str,
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        std::fs::write(path, content)?;
+        Ok(crate::core::tools::primitive::WriteFileResult {
+            path: path.into(),
+            written: true,
+            bytes_written: content.len() as u64,
+            diff_hint: None,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        })
+    }
+    async fn edit_file(
+        &self,
+        _: &str,
+        _: Vec<crate::core::tools::primitive::EditOperation>,
+        _: &str,
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        unreachable!()
+    }
+    async fn execute_bash(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        unreachable!()
+    }
+    async fn require_user_confirmation(
+        &self,
+        _: crate::core::tools::primitive::PrimitiveOperation,
+        _: &str,
+        _: &str,
+    ) -> Result<bool, AppError> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn native_write_interrupt_waits_for_commit_and_registers_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("new.txt");
+    let transcript = temp.path().join("session.jsonl");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("write-1".into()),
+            name: Some("write".into()),
+            arguments_delta: Some(
+                serde_json::json!({"path":path,"content":"committed"}).to_string(),
+            ),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(CommitBarrierPrimitive {
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig::default(),
+        cancel.clone(),
+    );
+    agent.file_baselines = crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+        &transcript,
+        "u1",
+        temp.path().to_path_buf(),
+    );
+    let mut user = ChatMessage::user("write a file");
+    user.msg_id = Some("u1".into());
+    let task = tokio::spawn(async move { agent.run(vec![user]).await });
+    entered.notified().await;
+    cancel.cancel();
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "a committing writer must be joined, not dropped"
+    );
+    assert!(!path.exists());
+    release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "committed");
+    let manifest = crate::core::checkpoint::file_baselines::session_dir(&transcript)
+        .join("u1/baselines.jsonl");
+    assert_eq!(
+        std::fs::read_to_string(manifest).unwrap().lines().count(),
+        1
+    );
+}
+
+struct InterruptWriteConfirmation(Arc<tokio::sync::Notify>);
+#[async_trait::async_trait]
+impl crate::core::UserConfirmationProvider for InterruptWriteConfirmation {
+    async fn confirm(
+        &self,
+        _: crate::core::tools::primitive::PrimitiveOperation,
+        _: &str,
+        _: &str,
+    ) -> Result<bool, AppError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn native_write_interrupt_cancels_confirmation_without_registering_baseline() {
+    use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("new.txt");
+    let transcript = temp.path().join("session.jsonl");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: PathBuf::from("/nonexistent_pi_workspace"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let primitive = crate::core::DefaultPrimitiveExecutor::new(
+        crate::infra::PrimitiveConfig::default(),
+        Arc::new(InterruptWriteConfirmation(entered.clone())),
+        Arc::new(crate::infra::TracingAuditRecorder),
+        gate,
+    );
+    let cancel = CancellationToken::new();
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("write-1".into()),
+            name: Some("write".into()),
+            arguments_delta: Some(serde_json::json!({"path":path,"content":"new"}).to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(primitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig::default(),
+        cancel.clone(),
+    );
+    agent.file_baselines = crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+        &transcript,
+        "u1",
+        temp.path().to_path_buf(),
+    );
+    let mut user = ChatMessage::user("write a file");
+    user.msg_id = Some("u1".into());
+    let task = tokio::spawn(async move { agent.run(vec![user]).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted());
+    assert!(!path.exists());
+    let manifest = crate::core::checkpoint::file_baselines::session_dir(&transcript)
+        .join("u1/baselines.jsonl");
+    assert!(!manifest.exists());
+}
+
 fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
     let recent = messages
         .iter()

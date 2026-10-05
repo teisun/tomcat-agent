@@ -177,6 +177,9 @@ impl ContextReference {
     }
 }
 
+/// Webview SVG rasterization produces PNG; shared by first send and hydration.
+pub(crate) const IMAGE_PROVIDER_RENDITION_MIME: &str = "image/png";
+
 /// 单条 content part：文本 / 引用 / 图片 / 文件 四态枚举，wire 由 provider 适配层翻译。
 ///
 /// 设计原则：把「inline base64」与「已知 file_id 引用」拆成 sum type，让非法状态
@@ -218,6 +221,10 @@ pub enum ChatMessageContentPart {
         mime_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_sha: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
     },
     /// 文件（PDF / markdown 等）：inline base64 或已知 file_id（二选一）。
     InputFile {
@@ -512,6 +519,8 @@ impl ChatMessageContentPart {
             blob_sha,
             mime_type,
             detail,
+            provider_sha: None,
+            filename: None,
         })
     }
 

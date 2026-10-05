@@ -295,6 +295,10 @@ pub(super) async fn run_tool_calls(
     .await
 }
 
+fn commits_on_disk(name: &str) -> bool {
+    matches!(name, "write" | "edit" | "hashline_edit")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tool_calls_with_usage(
     agent: &mut AgentLoop,
@@ -310,6 +314,27 @@ pub(super) async fn run_tool_calls_with_usage(
     continuity: Option<ContinuityMetadata>,
     usage: Option<TokenUsage>,
 ) -> Result<DispatchOutcome, LoopError> {
+    if let Some(user_id) = messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m.role == crate::core::llm::ChatMessageRole::User
+                && m.kind == crate::core::llm::MessageKind::Normal
+        })
+        .and_then(|m| m.msg_id.as_deref())
+    {
+        if agent
+            .file_baselines
+            .as_ref()
+            .is_none_or(|b| b.message_id != user_id)
+        {
+            agent.file_baselines = agent.session_manager.as_ref().and_then(|s| {
+                let path = s.current_transcript_path().ok()??;
+                let cwd = crate::core::checkpoint::file_baselines::session_cwd(&path)?;
+                crate::core::checkpoint::file_baselines::TurnFileBaselines::new(&path, user_id, cwd)
+            });
+        }
+    }
     let persisted_arguments: Vec<String> = tool_calls
         .iter()
         .map(tool_exec::persisted_tool_call_arguments)
@@ -479,14 +504,21 @@ pub(super) async fn run_tool_calls_with_usage(
                         tc,
                         Some(&agent.emitter),
                         agent.completion_routes.as_ref(),
+                        agent.file_baselines.as_ref(),
                     );
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            emit_interrupted_tool_events(agent, tc, args.clone());
-                            return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                    if commits_on_disk(tc.name.as_str()) {
+                        // Native writes observe cancellation at their commit boundary. Do not
+                        // drop a spawn_blocking writer while claiming the turn has stopped.
+                        exec.await
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => {
+                                emit_interrupted_tool_events(agent, tc, args.clone());
+                                return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                            }
+                            out = exec => out,
                         }
-                        out = exec => out,
                     }
                 }
                 Err(err) => tool_exec::ToolExecOutcome::err(err.to_string()),
@@ -518,14 +550,19 @@ pub(super) async fn run_tool_calls_with_usage(
                 tc,
                 Some(&agent.emitter),
                 agent.completion_routes.as_ref(),
+                agent.file_baselines.as_ref(),
             );
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    emit_interrupted_tool_events(agent, tc, args.clone());
-                    return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+            if commits_on_disk(tc.name.as_str()) {
+                exec.await
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        emit_interrupted_tool_events(agent, tc, args.clone());
+                        return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                    }
+                    out = exec => out,
                 }
-                out = exec => out,
             }
         };
         let model_text = outcome.model_text;

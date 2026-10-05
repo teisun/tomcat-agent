@@ -796,6 +796,7 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         }),
     )
     .unwrap();
@@ -889,6 +890,7 @@ fn check_after_reply_stale_apply_keeps_history_and_preheat_idle() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     append_entry(&path, &branch).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);

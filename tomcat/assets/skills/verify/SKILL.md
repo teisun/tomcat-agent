@@ -126,3 +126,8 @@ For a user-visible web, frontend, or VS Code webview change, verify the rendered
 For a known fixed interaction sequence, encode it in a deterministic headless script. When the next interaction depends on what the previous page state looks like, discover configured Playwright tools through the deferred connector path: `tool_search(source="playwright")` → `tool_describe(names=[...])` → `tool_call(name="mcp__playwright__...", arguments={...})`. Retain screenshots and structural evidence from that interaction loop. Never assume Playwright is configured: if the source search is empty or reports an error, report that fact.
 
 For a visual screenshot that must return to the model through Playwright MCP, call `tool_call(name="mcp__playwright__browser_take_screenshot", arguments={...})` **without** `filename` and without `fullPage=true`. Current `@playwright/mcp` intentionally saves a filename/full-page capture to disk and returns only a Markdown file link; it omits the image content needed for the model vision loop. Use the default viewport screenshot for visual judgement.
+
+## Artifacts and delivery
+
+- Put temporary helper scripts, reports, and replay captures under `<project_resource_dir>/scripts`, `acceptance`, and `replays` (resolved as in UI acceptance). Code, tests, fixtures, and docs the project keeps maintaining stay in their normal locations.
+- If acceptance produced screenshots, embed the representative PNGs in the final reply with `![what it shows](/absolute/path.png)` instead of only listing their paths.

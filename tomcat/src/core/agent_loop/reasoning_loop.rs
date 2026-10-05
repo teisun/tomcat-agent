@@ -84,6 +84,10 @@ pub(crate) fn cache_key_for(agent: &AgentLoop) -> Option<String> {
     family.key_for(&agent.config.session_id)
 }
 
+fn is_normal_stop_finish_reason(reason: Option<&str>) -> bool {
+    matches!(reason.map(str::trim), Some("stop" | "end_turn"))
+}
+
 fn is_output_truncation_finish_reason(reason: Option<&str>) -> bool {
     matches!(
         reason.map(str::trim),
@@ -180,9 +184,20 @@ pub(super) async fn run_reasoning_loop(
         if agent.cancel_token.is_cancelled() {
             return Err(agent.make_aborted(messages, final_text));
         }
-        current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
-            .await
-            .map_err(LoopError::Fatal)?;
+        // Compaction is cancellable; unlike a tool disk commit it has not begun a
+        // native mutation that must be joined before a rewind can touch files.
+        let reduced = {
+            let cancel = agent.cancel_token.clone();
+            tokio::select! {
+                biased;
+                result = current_tail_guard::maybe_reduce_before_next_llm(agent, messages) => Some(result),
+                _ = cancel.cancelled() => None,
+            }
+        };
+        match reduced {
+            Some(result) => result.map_err(LoopError::Fatal)?,
+            None => return Err(agent.make_aborted(messages, final_text)),
+        }
         validate_request_shape(messages)?;
 
         if let Some(ref mut ctx_state) = agent.context_state {
@@ -417,7 +432,16 @@ pub(super) async fn run_reasoning_loop(
             .as_ref()
             .and_then(|continuation| continuation.provider_refs.as_ref())
             .and_then(|refs| refs.openai_response_id.as_deref());
-        let empty_turn_failure = tool_calls.is_empty()
+        let silent_signal_reply = agent.silent_reply_allowed
+            && tool_calls.is_empty()
+            && !has_malformed_tool_call
+            && has_no_visible_output
+            && !output_truncated
+            && error_code.is_none()
+            && error_message.is_none()
+            && is_normal_stop_finish_reason(finish_reason.as_deref());
+        let empty_turn_failure = !silent_signal_reply
+            && tool_calls.is_empty()
             && (has_malformed_tool_call
                 || thinking_only_or_truncated
                 || (has_no_visible_output && (output_truncated || has_hidden_output)));
@@ -493,6 +517,8 @@ pub(super) async fn run_reasoning_loop(
                 message,
             )));
         }
+
+        agent.silent_reply_allowed = false;
 
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。
