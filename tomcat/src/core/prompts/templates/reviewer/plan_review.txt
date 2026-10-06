@@ -7,6 +7,7 @@ constraints, and any artifact paths). Treat that brief as the source of truth.
 
 Operating principles:
 - Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.
+- Keep the design elegant while strictly avoiding over-design.
 - Explain problems and technical solutions in a way that is easy to read and understand:
     - Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
     - When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.
@@ -34,14 +35,29 @@ Workflow:
    the architecture actually hold up, is the solution as simple and elegant as the
    problem allows, and does the stated verification really prove the claim rather than
    only proving that code exists? Report gaps as `concern`.
-   - Flag over-design as a `concern` when a structure, abstraction, dependency,
-     protocol, configuration option, or state branch exists for a scenario outside
-     the requested change or impact radius and deleting it would leave the current
-     acceptance checks green. Strong signals include locks or versioning for a
-     single-user local flow, layers around one implementation, new storage or
-     protocols where existing mechanisms suffice, and user-invisible state
-     branches. Require evidence for a claimed necessity; use prior art when it
-     materially changes the decision.
+   - Flag over-design as a `concern`. Over-design, in functionality or in tests,
+     includes but is not limited to:
+     - a design for a scenario outside the requested change or its impact, whose
+       removal would not fail any acceptance case derived from the user's requirements;
+     - locks or versioning for a single-user local workflow, extra layers of
+       abstraction for a single implementation, new storage or protocols when
+       existing mechanisms suffice, and state branches with no user-visible effect;
+     - not reusing existing code or infrastructure when reuse is possible;
+     - functionality or tests that TDD reasoning shows go beyond the requirements:
+       first derive the acceptance cases from the user's requirements and the
+       change's impact, then keep only the functionality needed to pass them and
+       only the tests needed to verify them;
+     - redundant safety checks: once the user confirms an action, they have
+       accepted the consequences the confirmation describes. Do not add code that
+       re-checks for those consequences before running and blocks the action; if a
+       consequence matters, state it in the confirmation instead. Add a check only
+       for a risk the user has not been told about and has not accepted. For
+       example, if the confirmation says later edits will be overwritten, do not
+       check for later edits before overwriting.
+     Prefer deleting over-designed items and their related content with `edit`;
+     any addition you propose must name the concrete failure it prevents. Require
+     evidence for a claimed necessity; use prior art when it materially changes
+     the decision.
    - For a coding plan, check for one final `kind=Acceptance` todo and a
      human-readable acceptance section. Missing items are `concern`s, not gates.
      Flag an acceptance kind on an intermediate milestone (it must be `work`) and

@@ -2,13 +2,18 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-06 09:11 +0800 |
+| Updated | 2026-10-06 23:06 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Latest-editing-turn Files and stable Todos/Composer dock; manifest-only selection, target-save refresh and readable failures; CLI/extension patch bump; local commit |
+| Scope | Planner/reviewer anti-over-design rules for functionality and tests; requirement-derived acceptance, reuse/TDD, confirmed consequences and deletion passes; user-accepted revision and local commit |
 | Cov% | - |
 
 ### DONE
+
+- Added the anti-over-design principle to Planner design standards and its dedicated Avoid over-design chapter; moved existing design/plan-structure sections ahead of verification without replacing their wording or behavior contract.
+- Applied the same functionality/test criteria to plan review: derive acceptance from user requirements and impact, reuse existing mechanisms, reason through TDD, and prefer deletion over invented safeguards or layers. Review brief now explicitly includes over-design.
+- Retained Opus's accepted refinement: confirmation describes consequences the user accepts; do not block again for those same consequences, while undisclosed/unaccepted risks still warrant checks. Planner deletion passes cover the first draft, every revision and additions after automatic review returns.
+- Added one prompt contract test and made two existing Plan structure extractors independent of the next section's name, preserving their complete-content and shared-wording assertions; no runtime code, configuration, extra review round, eval framework, dependencies or release versions changed.
 
 - Added Files for the last actual native editing turn, retaining the source through questions, replacing the whole list on the next real write, and keeping an undone source empty without reviving older turns; file-only restore preserves chat and uses explicit turn/path identity.
 - Relocated Todos/Files into the stable B footer after pending answers and before Composer, with 4px corners/gap, flat tabs, per-file counts/diff/undo and subset Undo All; retained input/attachment identity and the original tool-card fragment diff behavior.
@@ -97,6 +102,9 @@
 
 ### INTERFACE
 
+- Prompt contracts only: Planner now orders Design standards / Avoid over-design / Plan structure / Verification hints; plan reviewer flags over-design in both functionality and tests and requires evidence for proposed additions. Tool catalogs, wire protocol and permission enforcement are unchanged.
+- Templates remain compile-time embedded via `include_str!`; the latest Opus refinement requires a rebuilt CLI and new process to take effect. This commit request does not rebuild, install or restart it.
+
 - Optional Serve capability `session_files` adds `get_session_files`, `get_session_file_baseline` and `restore_session_files`; actions bind sessionId/sourceTurnId/path, never client-provided backup bytes. Missing capability hides Files without querying an old CLI.
 - Files selection reads manifest metadata only; list/restore still read the transcript header cwd for HEAD checks. Selected manifests retain strict validation; root/no-source and same-source empty views are distinct. Existing history rewrite paths continue cleaning superseded directories.
 - Host save matching uses active-session Files paths; focus, expansion, native tool completion, turn/checkpoint and restore triggers remain. Known action codes map to English while unknown bridge failures keep existing formatting; GUI ownership and wire error codes do not change in remediation.
@@ -146,6 +154,8 @@
 
 ### BLOCKED
 
+- The earlier agent-run two-demand model replay was blocked by nested-agent protection and was not reported as passing. The user now states that the Opus revision has been accepted; this commit records that confirmation, without inventing a replay comparison, test/coverage result or full-gate pass for the latest refinement.
+
 - Files mtime ordering assumes current-turn ownership and unchanged manifest timestamps. Existing directory cleanup is best-effort and not transactional with history writes: cleanup failure/crash residue can still leave a superseded candidate; migration, external touch/clock rollback or future old-turn writes require reevaluating sequence/invalidation. Successful cleanup tests are not failure-recovery proof.
 - Earlier Files broad gates were not all-green: strict Clippy hit the unchanged large enum; seven of eight lib HTTP failures passed localhost-proxy-isolated reruns, one web_search mock still failed; after the new schema fixture was fixed, six unchanged integration network/legacy skill-XML assertions remained. Preserve those failed aggregate outcomes; focused remediation passes below do not turn them into green full gates.
 - The user cancelled development-VSIX packaging. UI acceptance packages used test Serve fixtures, not a daily-use real-CLI release. This local commit neither creates a usable release package nor installs/publishes one; generated screenshots/reports/profiles remain ignored artifacts.
@@ -183,6 +193,9 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- User confirmed acceptance of the Opus anti-over-design revision before requesting this commit. No tests, model replay, build, coverage measurement, packaging, installation or push run during this request; checks cover all Git regions, staged scope/whitespace, status metadata and what/why message only. Cov% remains unmeasured (`-`).
+- Earlier prompt/reviewer checks passed 67 cases and fmt (`1791261076289-e7y2i8`); the later design-standards principle addition passed two focused regressions plus static position/whitespace checks (`1791262247752-qcf2hk`). These predate the latest confirmation/delete-pass wording and are historical evidence, not new verification of that refinement.
 
 - Before this commit request, Files implementation merged still-valid coverage of 632 extension and 724 GUI unit cases, 157 extension integration cases including the new real Serve closure, actual VS Code full-file diff/dirty interactions, final verify:vsix and 12 App/CSS scenarios. Original broad failures remain in BLOCKED; evidence details are retained in ignored `.agents/acceptance/session-files.md`.
 - Latest Files remediation, before this commit request, passed checkpoint15 (`1791246831466-idgx8b`), Serve Files3 plus Rust fmt (`1791247359508-i59kq8`), provider27 plus extension TypeScript (`1791247104904-i9llng`), and current real CLI build/five-turn Serve integration1 (`1791247582992-adt5xi`); whitespace passed (`1791247583032-uc1ly7`). History checks use production bottom-layer APIs/checkpoint-style finalization, not a complete checkpoint-store/CLI/UI E2E. GUI layout was unchanged and screenshots were not rerun for remediation.

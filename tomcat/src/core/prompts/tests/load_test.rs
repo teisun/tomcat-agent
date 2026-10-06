@@ -15,6 +15,24 @@ fn planner_prompt_mentions_create_plan_and_ask_question() {
 }
 
 #[test]
+fn plan_prompts_carry_anti_over_design_rules() {
+    let planner = load(PromptKey::PlannerReminder);
+    let reviewer = load(PromptKey::ReviewerPlan);
+    for (name, text) in [("planner", planner), ("plan reviewer", reviewer)] {
+        for rule in [
+            "Keep the design elegant while strictly avoiding over-design.",
+            "in functionality or in tests",
+            "acceptance case derived from the user's requirements",
+        ] {
+            assert!(text.contains(rule), "{name} must contain {rule:?}");
+        }
+    }
+    assert!(planner.contains("## Avoid over-design"));
+    assert!(reviewer.contains("TDD"));
+    assert!(load(PromptKey::ReviewerPlanBrief).contains("over-design"));
+}
+
+#[test]
 fn executor_prompt_renders_plan_id() {
     let rendered = render(
         PromptKey::ExecutorReminderFmt,
@@ -164,8 +182,8 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         .split_once("## Plan structure\n\n")
         .expect("planner should have a Plan structure section")
         .1
-        .split_once("\n\n## Design and explanation standards")
-        .expect("Plan structure should end before Design standards")
+        .split_once("\n\n## ")
+        .expect("Plan structure should end before the next section")
         .0;
 
     let expected = r#"- Explain problems and technical solutions in a way that is easy to read and understand:
@@ -588,8 +606,8 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         .split_once("## Plan structure\n\n")
         .expect("planner should have a Plan structure section")
         .1
-        .split_once("\n\n## Design and explanation standards")
-        .expect("Plan structure should end before Design standards")
+        .split_once("\n\n## ")
+        .expect("Plan structure should end before the next section")
         .0;
     let reviewer_section = reviewer_plan
         .split_once("- Explain problems and technical solutions")

@@ -3,7 +3,7 @@ Artifact paths (use these first; do not guess alternate locations):
 - Exact plan file path: `{plan_path}`
 {workspace_hint}Scope:
 - Inspect frontmatter `goal`, `todos[]`, and the markdown body.
-- Flag risks (unclear acceptance criteria, missing dependencies, oversized todos).
+- Flag risks (unclear acceptance criteria, missing dependencies, oversized todos) and over-design (apply the over-design rule).
 - For a coding plan, check for one final `kind=Acceptance` todo and a
   human-readable acceptance section. Report a missing item as `concern`; report
   an acceptance kind on a milestone or more than one acceptance todo as
