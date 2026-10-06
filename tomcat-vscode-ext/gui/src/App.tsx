@@ -23,7 +23,7 @@ import { ImageLightbox, type ZoomedImage } from "./components/ImageLightbox";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
-import { TodoListWidget } from "./components/TodoListWidget";
+import { SessionDock } from "./components/SessionDock";
 import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
 import type { Speed } from "../../src/shared/modelSpeed";
@@ -542,10 +542,11 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   const transcriptGroups = document.querySelectorAll<HTMLElement>(
     '[data-testid="thinking-group"]',
   );
-  const todoWidget = document.querySelector<HTMLElement>('[data-testid="todo-widget"]');
+  const todoWidget = document.querySelector<HTMLElement>('[data-testid="session-dock"][data-todo-available="true"]');
   const todoWidgetList = document.querySelector<HTMLElement>('[data-testid="todo-widget-list"]');
   const todoWidgetTitle =
-    document.querySelector<HTMLElement>('[data-testid="todo-widget-title"]')?.textContent ?? null;
+    document.querySelector<HTMLElement>('[data-testid="todo-widget-title"]')?.textContent
+    ?? document.querySelector<HTMLElement>('#dock-tab-todos')?.textContent ?? null;
   const groupFoldTitles = [
     ...document.querySelectorAll<HTMLElement>('[data-testid="thinking-group-title"]'),
   ].map((node) => node.textContent ?? "");
@@ -2818,13 +2819,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ) : null}
       </div>
 
-      <TodoListWidget
-        busy={!!activeSession?.busy}
-        planState={activeSession?.activePlan?.state}
-        planTodos={activeSession?.planTodos ?? []}
-        sessionTodos={activeSession?.sessionTodos ?? []}
-      />
-
       {activeSession && activePendingApproval ? (() => {
         const ownerSessionId = activePendingApproval.sessionId ?? activeSession.sessionId;
         const answerState = approvalAnswers[
@@ -2865,7 +2859,22 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       ) : null}
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
-      <ComposerSurface {...composerProps} ref={composerRef} />
+      <div className="tc-footer" data-testid="composer-footer">
+        <SessionDock
+          key={activeSession?.sessionId ?? "empty"}
+          sessionId={activeSession?.sessionId ?? ""}
+          busy={!!activeSession?.busy}
+          commandPending={commandPending}
+          planState={activeSession?.activePlan?.state}
+          planTodos={activeSession?.planTodos ?? []}
+          sessionTodos={activeSession?.sessionTodos ?? []}
+          files={state.sessionFilesSupported ? activeSession?.sessionFiles : undefined}
+          onIntent={(intent) => vscodeApi.postMessage(intent)}
+        />
+        <div className="tc-footer__composer" data-testid="composer-area">
+          <ComposerSurface {...composerProps} ref={composerRef} />
+        </div>
+      </div>
     </main>
   );
 }

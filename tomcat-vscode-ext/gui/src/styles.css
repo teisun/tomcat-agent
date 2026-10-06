@@ -5,6 +5,7 @@
   --tc-field-label-height: 26px;
   --tc-controls-inset: 15px;
   --tc-content-inset: 25px;
+  --tc-dock-radius: 4px;
   --tc-invocation-fg: #F1B567;
 }
 
@@ -104,7 +105,8 @@ input:focus-visible {
   background: var(--vscode-sideBar-background, var(--vscode-editor-background, #181818));
   border: 1px solid color-mix(in srgb, var(--tc-question-accent) 45%, var(--vscode-panel-border, #555));
   display: flex;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  /* Keep questions reachable; the shell scrolls instead of crushing this panel. */
   /* Page content grows naturally up to the existing compact height budget. */
   max-height: min(30vh, 20rem);
   min-height: 0;
@@ -4036,6 +4038,41 @@ span.tc-attachment-strip__file-chip {
   display: inline-block;
 }
 
+.tc-footer { display: flex; flex-direction: column; flex: 0 0 auto; gap: 4px; min-width: 0; }
+.tc-footer__composer { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tc-footer__composer > .tc-attachment-strip { margin-top: 0; }
+.tc-session-dock { border: 1px solid var(--vscode-panel-border, rgba(127,127,127,.22)); border-radius: var(--tc-dock-radius); margin-inline: calc(var(--tc-controls-inset) - var(--tc-content-inset)); min-width: 0; overflow: hidden; }
+.tc-session-dock__header { display: flex; align-items: stretch; padding-inline: 4px; min-height: 28px; }
+.tc-session-dock__chevron, .tc-session-dock__toggle, .tc-session-dock__tab { background: transparent; border: none; font-size: 12px; cursor: pointer; color: inherit; }
+.tc-session-dock__chevron { flex: 0 0 24px; padding: 0; }
+.tc-session-dock__toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; padding: 3px 8px; text-align: left; }
+.tc-session-dock__title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+.tc-session-dock__tabs { display: flex; gap: 16px; min-width: 0; }
+.tc-session-dock__tab { border-bottom: 2px solid transparent; padding: 5px 0 3px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.tc-session-dock__tab[aria-selected="true"] { border-bottom-color: var(--vscode-focusBorder); color: var(--vscode-foreground); font-weight: 600; }
+.tc-session-dock__tab:hover { color: var(--vscode-foreground); }
+.tc-session-dock .tc-todo-widget__list { padding: 3px 8px 5px; }
+.tc-session-files__toolbar { display: flex; justify-content: flex-end; padding: 2px 8px 4px; }
+.tc-session-files__toolbar button { border: none; background: transparent; font-size: 12px; cursor: pointer; padding: 2px 0; }
+.tc-session-files__toolbar button:disabled { opacity: .45; cursor: default; }
+.tc-session-files__list { max-height: min(138px,20vh); overflow: auto; padding: 0 4px 4px; }
+.tc-session-files__row { display: flex; align-items: center; min-width: 0; border-radius: 2px; }
+.tc-session-files__row:hover, .tc-session-files__row:focus-within { background: var(--vscode-list-hoverBackground, rgba(127,127,127,.12)); }
+.tc-session-files__file { display: flex; align-items: center; flex: 1 1 auto; gap: 6px; min-width: 0; background: transparent; border: none; padding: 4px; font-size: 12px; cursor: pointer; text-align: left; }
+.tc-session-files__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-session-files__name--deleted { text-decoration: line-through; }
+.tc-session-files__directory { min-width: 0; color: var(--vscode-descriptionForeground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-session-files__stats { display: flex; flex: 0 0 auto; gap: 3px; margin-left: auto; font-variant-numeric: tabular-nums; }
+.tc-session-files__added { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-charts-green)); }
+.tc-session-files__removed { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
+.tc-session-files__undo-slot { display: flex; flex: 0 0 24px; }
+.tc-session-files__undo { opacity: 0; background: transparent; border: none; padding: 3px; display: flex; align-items: center; justify-content: center; width: 24px; cursor: pointer; }
+.tc-session-files__row:hover .tc-session-files__undo, .tc-session-files__row:focus-within .tc-session-files__undo { opacity: 1; }
+.tc-session-files__undo:disabled { cursor: default; color: var(--vscode-disabledForeground); }
+.tc-session-files__error, .tc-session-dock__error { padding: 6px 8px; font-size: 12px; overflow-wrap: anywhere; }
+.tc-session-dock__error button { background: transparent; border: none; color: var(--vscode-textLink-foreground); cursor: pointer; }
+@media (hover: none) { .tc-session-files__undo { opacity: 1; } }
+
 .tc-todo-widget {
   border-bottom: none;
   border-radius: 12px 12px 0 0;
@@ -4119,7 +4156,7 @@ span.tc-attachment-strip__file-chip {
   gap: 2px;
   list-style: none;
   margin: 0;
-  max-height: 138px;
+  max-height: min(138px, 20vh);
   overflow: auto;
   padding: 0;
 }
@@ -4203,7 +4240,7 @@ span.tc-attachment-strip__file-chip {
 
 .tc-composer__surface {
   --tc-composer-pad: max(0px, calc(var(--tc-content-inset) - var(--tc-controls-inset) - 1px));
-  border-radius: 4px;
+  border-radius: var(--tc-dock-radius);
   display: flex;
   flex-direction: column;
   gap: 10px;

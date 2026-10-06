@@ -197,6 +197,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     planTodos: fixture.planTodos ?? [],
     sessionId: fixture.sessionId,
     sessionTodos: fixture.sessionTodos ?? [],
+    sessionFiles: fixture.sessionFiles,
     thinkingLevel: fixture.thinkingLevel,
     timeline: fixture.timeline,
   };
@@ -2061,7 +2062,17 @@ describe("Tomcat webview App", () => {
     ).toBe(true);
   });
 
-  it("places the pending panel after todos without remounting or clearing the composer", async () => {
+  it("reports real docked Todos to the DOM capture bridge after removing the old widget shell", async () => {
+    const {postMessage}=mount();
+    const snapshot=approvalDraftSnapshot("s1");
+    snapshot.sessionViews.s1.busy=true;
+    snapshot.sessionViews.s1.sessionTodos=[{id:"todo",content:"Check files",status:"in_progress"}];
+    await emitState({channel:"state",content:snapshot,messageId:"dock-metrics"});
+    await emitState({channel:"event",content:{type:"__test.capture_dom"},messageId:"capture-dock"});
+    expect(postMessage.mock.calls.some(([message]) => message.type==="__test.dom_snapshot" && message.data.todoWidgetVisible===true && message.data.todoWidgetTitle==="Check files (1/1)")).toBe(true);
+  });
+
+  it("places the pending panel before the dock without remounting or clearing the composer", async () => {
     mount();
     const pending = approvalDraftSnapshot("s1");
     pending.sessionViews.s1.busy = true;
@@ -2085,10 +2096,12 @@ describe("Tomcat webview App", () => {
     await emitState({ channel: "state", content: pending, messageId: "show-question" });
     expect(document.querySelector(".tc-shell--question-pending")).toBeTruthy();
     const panel = screen.getByTestId("pending-question-panel");
-    const todo = screen.getByTestId("todo-widget");
-    expect(todo.parentElement).toBe(panel.parentElement);
-    expect(todo.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(panel.parentElement).toBe(screen.getByTestId("composer").parentElement);
+    const dock = screen.getByTestId("session-dock");
+    const footer = screen.getByTestId("composer-footer");
+    expect(dock.parentElement).toBe(footer);
+    expect(footer.parentElement).toBe(panel.parentElement);
+    expect(panel.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getByTestId("composer").parentElement).toBe(screen.getByTestId("composer-area"));
     expect(screen.getByTestId("composer-input")).toBe(editor);
     expect(editor.textContent).toBe("Keep this draft");
 

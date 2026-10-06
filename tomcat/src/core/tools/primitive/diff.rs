@@ -4,8 +4,8 @@ use super::{DiffTag, FileDiffLine};
 
 /// Guard the quadratic LCS calculation itself. This is intentionally looser than the
 /// render budget below: a medium-sized file still gets a useful compact diff.
-const MAX_DIFF_INPUT_LINES: usize = 8_000;
-const MAX_DIFF_INPUT_BYTES: usize = 1_500_000;
+pub(crate) const MAX_DIFF_INPUT_LINES: usize = 8_000;
+pub(crate) const MAX_DIFF_INPUT_BYTES: usize = 1_500_000;
 /// `ToolDisplay` is persisted and sent over stdio, so its budget must be much smaller
 /// than the source file. Three context lines on either side are enough to orient a reader.
 const DIFF_CONTEXT_LINES: usize = 3;

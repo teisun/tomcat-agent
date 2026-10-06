@@ -6,6 +6,10 @@ import type {
   ResponseFrame,
   SlashReply,
   RetainAttachmentLeaseRef,
+  SessionFile,
+  SessionFilesResponse,
+  SessionFileBaselineResponse,
+  SessionFilesRestoreResponse,
 } from "./wire";
 
 export interface SessionSummary {
@@ -346,6 +350,50 @@ export class SessionRouter {
       sessionId: payload.sessionId,
       upToSeq: typeof payload.upToSeq === "string" ? payload.upToSeq : null,
     };
+  }
+
+  private filePayload(response: ResponseFrame, sessionId: string): Record<string, unknown> {
+    if (!response.success) {
+      const payload = isRecord(response.payload) ? response.payload : {};
+      throw new Error([response.error ?? "File operation failed", payload.path, payload.reason].filter(Boolean).join(": "));
+    }
+    if (!isRecord(response.payload) || response.payload.sessionId !== sessionId || response.sessionId !== sessionId) {
+      throw new Error("Tomcat file response sessionId mismatch");
+    }
+    return response.payload;
+  }
+
+  async getSessionFiles(sessionId: string): Promise<SessionFilesResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "get_session_files", sessionId }), sessionId);
+    if (!(payload.sourceTurnId === null || typeof payload.sourceTurnId === "string") || !Array.isArray(payload.files)) {
+      throw new Error("Invalid Tomcat file changes response");
+    }
+    const files: SessionFile[] = payload.files.map((entry: unknown) => {
+      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.restorable !== "boolean"
+        || !["added", "modified", "deleted"].includes(String(entry.status))
+        || (entry.blockedReason !== undefined && !["head_moved", "backup_missing", "not_regular_file"].includes(String(entry.blockedReason)))
+        || [entry.added, entry.removed].some((n) => n !== undefined && n !== null && (typeof n !== "number" || !Number.isInteger(n) || n < 0))) {
+        throw new Error("Invalid Tomcat file changes entry");
+      }
+      return entry as unknown as SessionFile;
+    });
+    return { sessionId, sourceTurnId: payload.sourceTurnId, files };
+  }
+
+  async getSessionFileBaseline(sessionId: string, sourceTurnId: string, path: string): Promise<SessionFileBaselineResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "get_session_file_baseline", sessionId, sourceTurnId, path }), sessionId);
+    if (payload.sourceTurnId !== sourceTurnId || payload.path !== path || typeof payload.existed !== "boolean" || typeof payload.text !== "string") {
+      throw new Error("Invalid Tomcat file baseline response");
+    }
+    return { sessionId, sourceTurnId, path, existed: payload.existed, text: payload.text };
+  }
+
+  async restoreSessionFiles(sessionId: string, sourceTurnId: string, paths: string[]): Promise<SessionFilesRestoreResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "restore_session_files", sessionId, sourceTurnId, paths }), sessionId);
+    if (payload.sourceTurnId !== sourceTurnId || !Array.isArray(payload.restored) || !payload.restored.every((p) => typeof p === "string" && paths.includes(p))) {
+      throw new Error("Invalid Tomcat file restore response");
+    }
+    return { sessionId, sourceTurnId, restored: payload.restored as string[] };
   }
 
   async listCheckpoints(sessionId: string): Promise<SessionCheckpointListPayload> {

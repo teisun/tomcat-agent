@@ -1,6 +1,7 @@
 pub mod file_baselines;
 pub mod noop;
 pub mod resume;
+pub mod session_files;
 pub mod shadow_git;
 pub mod store;
 pub mod types;

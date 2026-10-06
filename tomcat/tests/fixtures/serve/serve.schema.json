@@ -195,6 +195,97 @@
         }
       },
       {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_session_files"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "path",
+          "sessionId",
+          "sourceTurnId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_session_file_baseline"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "paths",
+          "sessionId",
+          "sourceTurnId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "restore_session_files"
+            ]
+          }
+        }
+      },
+      {
         "description": "复制指定失败输入为新的活 user message，然后重新开一轮。",
         "type": "object",
         "required": [
@@ -6941,6 +7032,148 @@
           "expired",
           "git_head_moved"
         ]
+      }
+    }
+  },
+  "session_files_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFilesResponse",
+    "type": "object",
+    "required": [
+      "files",
+      "sessionId"
+    ],
+    "properties": {
+      "files": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/SessionFile"
+        }
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "definitions": {
+      "SessionFile": {
+        "type": "object",
+        "required": [
+          "path",
+          "restorable",
+          "status"
+        ],
+        "properties": {
+          "added": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "blockedReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/SessionFileBlockedReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "removed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "restorable": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/definitions/SessionFileStatus"
+          }
+        }
+      },
+      "SessionFileBlockedReason": {
+        "type": "string",
+        "enum": [
+          "head_moved",
+          "backup_missing",
+          "not_regular_file"
+        ]
+      },
+      "SessionFileStatus": {
+        "type": "string",
+        "enum": [
+          "added",
+          "modified",
+          "deleted"
+        ]
+      }
+    }
+  },
+  "session_file_baseline_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFileBaselineResponse",
+    "type": "object",
+    "required": [
+      "existed",
+      "path",
+      "sessionId",
+      "sourceTurnId",
+      "text"
+    ],
+    "properties": {
+      "existed": {
+        "type": "boolean"
+      },
+      "path": {
+        "type": "string"
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      }
+    }
+  },
+  "session_files_restore_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFilesRestoreResponse",
+    "type": "object",
+    "required": [
+      "restored",
+      "sessionId",
+      "sourceTurnId"
+    ],
+    "properties": {
+      "restored": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": "string"
       }
     }
   },

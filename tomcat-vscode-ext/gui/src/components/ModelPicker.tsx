@@ -83,6 +83,7 @@ export function ModelPicker({
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [primaryPosition, setPrimaryPosition] = useState<{ left: number; top: number } | null>(null);
   const [configModelId, setConfigModelId] = useState<string | null>(null);
   const [configPosition, setConfigPosition] = useState<ConfigPopoverPosition | null>(null);
   const [hoveredModelId, setHoveredModelId] = useState<string | null>(null);
@@ -117,6 +118,27 @@ export function ModelPicker({
       selectedOption.scrollIntoView({ block: "nearest" });
     }
   }, [open, selectedModelId]);
+
+  // A narrow sidebar can wrap the trigger onto the next row. Anchor to the
+  // viewport rather than assuming the menu's CSS width fits after that offset.
+  useLayoutEffect(() => {
+    if (!open) { setPrimaryPosition(null); return; }
+    const updatePosition = () => {
+      const root = rootRef.current;
+      const popover = primaryPopoverRef.current;
+      if (!root || !popover) return;
+      const anchor = root.getBoundingClientRect();
+      const menu = popover.getBoundingClientRect();
+      const top = placement === "above" ? anchor.top - menu.height - 6 : anchor.bottom + 6;
+      setPrimaryPosition({
+        left: clamp(anchor.left, 8, window.innerWidth - menu.width - 8),
+        top: clamp(top, 8, window.innerHeight - menu.height - 8),
+      });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    return () => window.removeEventListener("resize", updatePosition);
+  }, [open, placement, visibleModels]);
 
   const clearCloseTimer = () => {
     if (closeConfigTimer.current !== null) {
@@ -307,6 +329,7 @@ export function ModelPicker({
           className={`tc-session-dropdown tc-model-picker-dropdown tc-model-picker-dropdown--${placement}`}
           data-testid={dropdownTestId}
           ref={primaryPopoverRef}
+          style={{ position: "fixed", bottom: "auto", top: primaryPosition?.top ?? 0, left: primaryPosition?.left ?? 0, visibility: primaryPosition ? undefined : "hidden", maxHeight: "calc(100vh - 16px)", overflowY: "auto" }}
         >
           <input
             aria-label="Search models"

@@ -83,6 +83,18 @@ When Tomcat asks a clarification question:
 - switching sessions or reloading the webview keeps your unsubmitted selection;
 - answering, skipping the whole request, interrupting, or losing the host connection produces a distinct history card. A VS Code window / Extension Host restart is an irrecoverable disconnect, while a webview-only reload keeps the live question pending.
 
+## Files and task progress
+
+The compact **Todos / Files** dock sits above the composer, below any pending question.
+
+- **Files** shows the most recent user turn that actually changed a file. Asking follow-up questions keeps that list; the next turn's first successful file change replaces it rather than accumulating earlier turns.
+- Click a file to open one complete VS Code diff: the left side is its first pre-edit backup in that turn (read-only), and the right side is the real, editable file. Multiple edits in the same turn are combined. Existing tool-card diff previews are unchanged.
+- Hover or focus a row to reveal **×**. **Undo All** is on the first detail row and restores the restorable subset; confirmation states how many files will be skipped. These actions restore entire files (or delete files newly created in that turn), **overwrite later saved edits, and keep your chat**.
+- Unsaved target documents and the current foreground AI/maintenance job block restore. Background Bash and other sessions/worktrees are not stopped or waited for. Git HEAD changes disable restore, not preview.
+- Only native write/edit/hashline-edit backups are tracked. Shell/MCP-only changes are not discovered. Backups use the existing retention and historical cleanup rules; older CLIs without the `session_files` capability simply omit Files.
+
+See [session-file-changes](docs/architecture/session-file-changes.md) for scope and implementation details.
+
 ## Optional settings
 
 Most users do **not** need to configure anything manually.

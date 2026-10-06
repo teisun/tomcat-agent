@@ -396,8 +396,9 @@ async fn rewind_command_barrier_restores_only_after_join_and_starts_once() {
     let baseline =
         crate::core::checkpoint::file_baselines::TurnFileBaselines::new(&transcript, &target, cwd)
             .unwrap();
-    baseline.prepare(file.to_str().unwrap()).unwrap().commit();
+    let pending = baseline.prepare(file.to_str().unwrap()).unwrap();
     std::fs::write(&file, "AI change").unwrap();
+    pending.commit();
     let before = std::fs::read(&transcript).unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel();
     slot.mark_busy();
@@ -474,9 +475,13 @@ async fn rewind_partial_restore_failure_keeps_history_and_can_retry() {
         crate::core::checkpoint::file_baselines::session_cwd(&transcript).unwrap(),
     )
     .unwrap();
-    tracker.prepare(a.to_str().unwrap()).unwrap().commit();
-    tracker.prepare(b.to_str().unwrap()).unwrap().commit();
+    let a_pending = tracker.prepare(a.to_str().unwrap()).unwrap();
+    let b_pending = tracker.prepare(b.to_str().unwrap()).unwrap();
     std::fs::write(&a, "AI change").unwrap();
+    std::fs::write(&b, "created").unwrap();
+    a_pending.commit();
+    b_pending.commit();
+    std::fs::remove_file(&b).unwrap();
     std::fs::create_dir(&b).unwrap();
     let before = std::fs::read(&transcript).unwrap();
     let make = |id: &str| ServeCommand::RewindAndResend {

@@ -132,6 +132,7 @@ export function reconcileSessionSnapshot(
   const activePlan = reconcileValue(previous?.activePlan, next.activePlan);
   const composerDraft = reconcileValue(previous?.composerDraft, next.composerDraft);
   const instructionCatalog = reconcileValue(previous?.instructionCatalog, next.instructionCatalog);
+  const sessionFiles = reconcileValue(previous?.sessionFiles, next.sessionFiles);
   if (
     previous &&
     previous.busy === next.busy &&
@@ -146,6 +147,7 @@ export function reconcileSessionSnapshot(
     previous.sessionId === next.sessionId &&
     previous.timeline === timeline &&
     previous.checkpoints === checkpoints &&
+    previous.sessionFiles === sessionFiles &&
     previous.planTodos === planTodos &&
     previous.sessionTodos === sessionTodos &&
     previous.pendingAttachments === pendingAttachments &&
@@ -158,6 +160,7 @@ export function reconcileSessionSnapshot(
   return {
     ...next,
     checkpoints,
+    sessionFiles,
     composerDraft,
     instructionCatalog,
     pendingAttachments,
@@ -213,6 +216,8 @@ export function reconcileStateSnapshot(
     previous.connectionStatus === next.connectionStatus &&
     previous.mediaRoots === mediaRoots &&
     previous.modelAdminSupported === next.modelAdminSupported &&
+    previous.sessionFilesSupported === next.sessionFilesSupported &&
+    previous.rewindSupported === next.rewindSupported &&
     previous.slashCommands === slashCommands &&
     previous.ready === next.ready &&
     previous.sessions === sessions &&

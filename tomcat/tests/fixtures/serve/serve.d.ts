@@ -342,6 +342,18 @@ export type ServeTurnEvent = {
   type: "turn.summary_updated";
 };
 
+export interface SessionFile {
+  added?: null | number;
+  blockedReason?: SessionFileBlockedReason | null;
+  path: string;
+  removed?: null | number;
+  restorable: boolean;
+  status: SessionFileStatus;
+}
+export type SessionFileBlockedReason = "head_moved" | "backup_missing" | "not_regular_file";
+
+export type SessionFileStatus = "added" | "modified" | "deleted";
+
 export type SetPlanModeAction = "enter" | "exit" | "build";
 
 export type Speed = "standard" | "fast" | "ultrafast";
@@ -649,7 +661,19 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   path: string;
+  sessionId: string;
+  sourceTurnId: string;
+  type: "get_session_file_baseline";
+} | {
+  id?: null | string;
+  path: string;
   type: "get_project_trust";
+} | {
+  id?: null | string;
+  paths: string[];
+  sessionId: string;
+  sourceTurnId: string;
+  type: "restore_session_files";
 } | {
   id?: null | string;
   projectRoot: string;
@@ -662,6 +686,10 @@ export type ServeCommand = {
   id?: null | string;
   sessionId: string;
   type: "discard_detached_session";
+} | {
+  id?: null | string;
+  sessionId: string;
+  type: "get_session_files";
 } | {
   id?: null | string;
   sessionId: string;
@@ -728,6 +756,23 @@ export type ServeCommand = {
   type: "control_response";
 };
 
+export interface SessionFileBaselineResponse {
+  existed: boolean;
+  path: string;
+  sessionId: string;
+  sourceTurnId: string;
+  text: string;
+}
+export interface SessionFilesResponse {
+  files: SessionFile[];
+  sessionId: string;
+  sourceTurnId?: null | string;
+}
+export interface SessionFilesRestoreResponse {
+  restored: string[];
+  sessionId: string;
+  sourceTurnId: string;
+}
 export interface SetConnectorToolEnabledResponse {
   configKey: string;
   configSaved: boolean;

@@ -245,6 +245,31 @@ describe("ModelPicker", () => {
     ).toBeTruthy();
   });
 
+  it("clamps the primary menu after a wrapped narrow-sidebar trigger and on resize", () => {
+    const width = window.innerWidth, height = window.innerHeight;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function(this: HTMLElement) {
+      return this.classList.contains("tc-model-picker-dropdown")
+        ? viewportRect(0, 0, 265, 198)
+        : viewportRect(31, 739, 50, 34);
+    });
+    try {
+      Object.defineProperty(window, "innerWidth", {configurable:true, value:289});
+      Object.defineProperty(window, "innerHeight", {configurable:true, value:800});
+      renderPicker(); fireEvent.click(screen.getByTestId("model-select"));
+      const menu = screen.getByTestId("model-dropdown");
+      expect(menu.style.position).toBe("fixed");
+      expect(menu.style.left).toBe("16px");
+      expect(menu.style.top).toBe("535px");
+      Object.defineProperty(window, "innerHeight", {configurable:true, value:320});
+      fireEvent(window, new Event("resize"));
+      expect(menu.style.top).toBe("114px");
+    } finally {
+      rect.mockRestore();
+      Object.defineProperty(window, "innerWidth", {configurable:true, value:width});
+      Object.defineProperty(window, "innerHeight", {configurable:true, value:height});
+    }
+  });
+
   it("portals the configuration beside its source row, centers it vertically, clamps it, and closes on scroll", () => {
     const originalInnerWidth = window.innerWidth;
     const originalInnerHeight = window.innerHeight;

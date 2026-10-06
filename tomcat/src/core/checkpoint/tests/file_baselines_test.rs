@@ -16,8 +16,10 @@ fn file_baseline_session_cwd_comes_only_from_header() {
     assert!(capture.is_none());
 }
 
-fn capture(tracker: &std::sync::Arc<TurnFileBaselines>, path: &Path) {
-    if let Some(pending) = tracker.prepare(path.to_str().unwrap()) {
+fn capture(tracker: &std::sync::Arc<TurnFileBaselines>, path: &Path, after: &[u8]) {
+    let pending = tracker.prepare(path.to_str().unwrap());
+    fs::write(path, after).unwrap();
+    if let Some(pending) = pending {
         pending.commit();
     }
 }
@@ -32,14 +34,11 @@ fn file_baseline_first_write_per_turn_and_restore_earliest_suffix() {
     fs::write(&a, b"original").unwrap();
     fs::write(&untouched, b"leave me").unwrap();
     let first = TurnFileBaselines::new(&transcript, "u1", dir.path().into()).unwrap();
-    capture(&first, &a);
-    fs::write(&a, b"first edit").unwrap();
+    capture(&first, &a, b"first edit");
     assert!(first.prepare(a.to_str().unwrap()).is_none());
-    capture(&first, &b);
-    fs::write(&b, b"created").unwrap();
+    capture(&first, &b, b"created");
     let second = TurnFileBaselines::new(&transcript, "u2", dir.path().into()).unwrap();
-    capture(&second, &a);
-    fs::write(&a, b"manual edit after AI").unwrap();
+    capture(&second, &a, b"manual edit after AI");
     let now = chrono::Utc::now();
     let files = preview(
         &transcript,
@@ -83,7 +82,7 @@ fn file_baseline_declined_write_does_not_publish_and_missing_backup_skips() {
         ),
         Err(RevertReason::NoBaselines)
     ));
-    capture(&tracker, &a);
+    capture(&tracker, &a, b"changed");
     let manifest = fs::read_to_string(session_dir(&transcript).join("u/baselines.jsonl")).unwrap();
     let row: serde_json::Value = serde_json::from_str(manifest.trim()).unwrap();
     fs::remove_file(
@@ -114,7 +113,7 @@ fn file_baseline_expiration_and_large_file() {
     let file = dir.path().join("large.bin");
     fs::write(&file, vec![9u8; 20 * 1024 * 1024]).unwrap();
     let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
-    capture(&tracker, &file);
+    capture(&tracker, &file, &[8u8]);
     let now = chrono::Utc::now();
     let old = now - chrono::Duration::days(7);
     assert!(matches!(
@@ -140,16 +139,19 @@ fn file_baseline_expiration_and_large_file() {
 }
 
 #[test]
-fn file_baseline_relative_new_file_uses_session_cwd() {
+fn file_baseline_relative_path_matches_write_tool_cwd() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("s.jsonl");
     let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
-    let filename = format!("new-{}.txt", uuid::Uuid::new_v4());
-    tracker
-        .prepare(&filename)
-        .expect("new relative files need an absence baseline")
-        .commit();
-    fs::write(dir.path().join(&filename), b"created").unwrap();
+    let scratch = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let filename = scratch
+        .path()
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap()
+        .join("new.txt");
+    let pending = tracker.prepare(filename.to_str().unwrap()).unwrap();
+    fs::write(&filename, b"created").unwrap();
+    pending.commit();
     let now = chrono::Utc::now();
     preview(
         &transcript,
@@ -162,7 +164,7 @@ fn file_baseline_relative_new_file_uses_session_cwd() {
     .unwrap()
     .restore()
     .unwrap();
-    assert!(!dir.path().join(filename).exists());
+    assert!(!filename.exists());
 }
 
 #[test]
@@ -195,8 +197,7 @@ fn file_baseline_git_head_change_disables_restore_without_mutating_files() {
     let file = dir.path().join("file.txt");
     fs::write(&file, b"before").unwrap();
     let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
-    capture(&tracker, &file);
-    fs::write(&file, b"later").unwrap();
+    capture(&tracker, &file, b"later");
     let now = chrono::Utc::now();
     assert!(preview(
         &transcript,
@@ -265,8 +266,7 @@ fn file_baseline_git_branch_reset_and_late_repository_boundaries() {
         let file = dir.path().join("file.txt");
         fs::write(&file, "original").unwrap();
         let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
-        capture(&tracker, &file);
-        fs::write(&file, "AI change").unwrap();
+        capture(&tracker, &file, b"AI change");
         let now = chrono::Utc::now();
         let check = || {
             preview(
@@ -312,9 +312,9 @@ fn file_baseline_prune_and_partial_failure_are_retryable() {
     let second = dir.path().join("b.txt");
     fs::write(&first, b"before").unwrap();
     let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
-    capture(&tracker, &first);
-    capture(&tracker, &second);
-    fs::write(&first, b"after").unwrap();
+    capture(&tracker, &first, b"after");
+    capture(&tracker, &second, b"created");
+    fs::remove_file(&second).unwrap();
     fs::create_dir(&second).unwrap(); // Never recursively delete a substituted directory.
     let now = chrono::Utc::now();
     let files = preview(
@@ -339,6 +339,48 @@ fn file_baseline_prune_and_partial_failure_are_retryable() {
         std::time::SystemTime::now() + std::time::Duration::from_secs(8 * 86400),
     );
     assert!(!session_dir(&transcript).join("u").exists());
+}
+
+#[test]
+fn file_baseline_noop_releases_capture_and_later_change_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("s.jsonl");
+    let file = dir.path().join("a.txt");
+    fs::write(&file, "before").unwrap();
+    let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
+    tracker.prepare(file.to_str().unwrap()).unwrap().commit();
+    assert!(!session_dir(&transcript).join("u/baselines.jsonl").exists());
+    capture(&tracker, &file, b"after");
+    assert!(session_dir(&transcript).join("u/baselines.jsonl").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn file_baseline_restore_keeps_exec_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("s.jsonl");
+    let file = dir.path().join("script.sh");
+    fs::write(&file, "original").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
+    capture(&tracker, &file, b"changed");
+    let now = chrono::Utc::now();
+    preview(
+        &transcript,
+        &["u".into()],
+        &now.to_rfc3339(),
+        dir.path(),
+        7,
+        now,
+    )
+    .unwrap()
+    .restore()
+    .unwrap();
+    assert_eq!(
+        fs::metadata(file).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
 }
 
 #[test]

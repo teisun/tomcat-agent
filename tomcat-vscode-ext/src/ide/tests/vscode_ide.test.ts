@@ -18,6 +18,35 @@ const __testing = (
   }
 ).__testing;
 
+describe("VsCodeIde session file diff", () => {
+  beforeEach(() => __testing.reset());
+  it("opens one complete file with editable real right side and isolates turns", async () => {
+    const ide = new VsCodeIde();
+    __testing.registerFile("/workspace/a.ts", "current\n");
+    const execute = vi.spyOn(vscode.commands, "executeCommand");
+    await ide.openSessionFileDiff("s", "u1", "/workspace/a.ts", "A\n");
+    const first = __testing.lastDiffCommand!;
+    expect(first.modified.scheme).toBe("file");
+    expect((await vscode.workspace.openTextDocument(first.original)).getText()).toBe("A\n");
+    await ide.openSessionFileDiff("s", "u4", "/workspace/a.ts", "B\n");
+    const second = __testing.lastDiffCommand!;
+    expect(second.original.toString()).not.toBe(first.original.toString());
+    expect((await vscode.workspace.openTextDocument(first.original)).getText()).toBe("A\n");
+    expect((await vscode.workspace.openTextDocument(second.original)).getText()).toBe("B\n");
+    expect(execute.mock.calls.filter((args) => args[0] === "vscode.diff")).toHaveLength(2);
+    expect(execute.mock.calls.some((args) => args[0] === "vscode.changes")).toBe(false);
+    execute.mockRestore(); ide.dispose();
+  });
+  it("uses an empty virtual right side for deleted files", async () => {
+    const ide = new VsCodeIde();
+    vi.spyOn(vscode.workspace.fs, "stat").mockRejectedValueOnce(Object.assign(new vscode.FileSystemError("Deleted"), { code: "FileNotFound" }));
+    await ide.openSessionFileDiff("s", "u", "/workspace/deleted.ts", "before");
+    expect(__testing.lastDiffCommand!.modified.scheme).toBe("tomcat-diff");
+    expect((await vscode.workspace.openTextDocument(__testing.lastDiffCommand!.modified)).getText()).toBe("");
+    ide.dispose();
+  });
+});
+
 describe("VsCodeIde files", () => {
   beforeEach(() => {
     __testing.reset();

@@ -48,6 +48,58 @@ async function waitFor(
 type CaptureRegion = "editor" | "sidebar" | "window";
 
 
+export async function assertSessionFilesDockFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api,"session-files-new");
+  async function prompt(text: string, userMessageId: string) {
+    api.__testing.clearObservedEvents();
+    const done = waitForEvent(api,{type:"agent_idle",sessionId});
+    await api.__testing.sendWebviewIntent({messageId:userMessageId,type:"prompt",data:{sessionId,text,userMessageId}});
+    await done;
+  }
+  await prompt("session files dock edit","files-u1");
+  const initial = await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.files.length ? state.sessionViews[sessionId].sessionFiles : undefined);
+  assert.equal(initial.sourceTurnId,"files-u1");
+  const filePath = initial.files[0].path;
+  const firstAfter = await fs.readFile(filePath,"utf8");
+  const driver = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  try {
+    await driver.click("files-toggle");
+    await driver.hover("session-file-diff");
+    assert.equal(await driver.evaluate<string>(`getComputedStyle(document.querySelector('[data-testid="undo-file"]')).opacity`),"1");
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("session-files-dock.png"));
+    await driver.click("session-file-diff");
+    await waitFor(()=>vscode.window.tabGroups.all.some(group=>group.tabs.some(tab=>tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.fsPath===filePath)),15000,"File row must open native diff");
+    await waitFor(()=>vscode.workspace.textDocuments.some(document=>document.uri.scheme==="tomcat-diff" && new URLSearchParams(document.uri.query).get("sourceTurnId")==="files-u1" && document.getText()==="first line\noriginal line\n"),15000,"Complete original document must finish resolving");
+    let originals = vscode.workspace.textDocuments.filter(document=>document.uri.scheme==="tomcat-diff" && new URLSearchParams(document.uri.query).get("sourceTurnId")==="files-u1");
+    assert.ok(originals.some(document=>document.getText()==="first line\noriginal line\n"),"Left side is the full original");
+    const oldOriginal = originals[0];
+    assert.ok(!oldOriginal.isDirty);
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("session-files-native-diff-before-undo.png"));
+    await prompt("session files dock question","files-u2");
+    assert.equal(api.__testing.getWebviewState().sessionViews[sessionId].sessionFiles?.sourceTurnId,"files-u1");
+    await prompt("session files dock edit again","files-u4");
+    await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.sourceTurnId==="files-u4" ? true : undefined);
+    await waitForWebviewDomSnapshot(api,snapshot=>snapshot.html.includes('data-source-turn="files-u4"') ? true : undefined);
+    await driver.click("session-file-diff");
+    await waitFor(()=>vscode.workspace.textDocuments.some(document=>document.uri.scheme==="tomcat-diff" && new URLSearchParams(document.uri.query).get("sourceTurnId")==="files-u4" && document.getText()===firstAfter));
+    assert.equal(oldOriginal.getText(),"first line\noriginal line\n","Opening another turn doesn't rewrite old original");
+    const document=await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+    const edit=new vscode.WorkspaceEdit();edit.insert(document.uri,new vscode.Position(0,0),"unsaved user edit\n");
+    assert.ok(await vscode.workspace.applyEdit(edit));assert.equal(document.isDirty,true);
+    const diskBefore=await fs.readFile(filePath,"utf8");
+    await driver.hover("session-file-diff");await driver.click("undo-file");await driver.click("undo-files-undo");
+    await waitForWebviewDomSnapshot(api,snapshot=>snapshot.html.includes("Save or revert unsaved changes") ? true : undefined);
+    assert.equal(document.isDirty,true);assert.equal(await fs.readFile(filePath,"utf8"),diskBefore,"Dirty buffer prevented disk restore");
+    await document.save();
+    await driver.hover("session-file-diff");await driver.click("undo-file");await driver.click("undo-files-undo");
+    await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.sourceTurnId==="files-u4" && state.sessionViews[sessionId].sessionFiles?.files.length===0 ? true : undefined);
+    assert.equal(await fs.readFile(filePath,"utf8"),firstAfter,"Restores u4 original, not session-start original");
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("session-files-native-diff.png"));
+  } finally { driver.close(); }
+}
+
 export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
   const extension =
     vscode.extensions.getExtension<TomcatExtensionApi>(EXTENSION_ID);

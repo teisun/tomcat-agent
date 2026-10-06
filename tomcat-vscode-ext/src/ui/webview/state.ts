@@ -2834,6 +2834,11 @@ export class WebviewStateStore {
     }
   }
 
+  setSessionFiles(sessionId: string, value: NonNullable<WebviewSessionSnapshot["sessionFiles"]>): void {
+    const session = this.state.sessionViews[sessionId];
+    if (session) session.sessionFiles = { ...value, files: value.files.map((file) => ({ ...file })) };
+  }
+
   setCheckpoints(
     sessionId: string,
     checkpoints: SessionCheckpointPayload[],

@@ -94,6 +94,23 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     }
   }
 
+  async openSessionFileDiff(sessionId: string, sourceTurnId: string, filePath: string, before: string): Promise<void> {
+    const fileName = path.basename(filePath);
+    const original = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${fileName}`, query: new URLSearchParams({ sessionId, sourceTurnId, path: filePath, side: "baseline" }).toString() });
+    this.previewContents.set(original.toString(), before);
+    let modified = vscode.Uri.file(filePath);
+    try {
+      const stat = await vscode.workspace.fs.stat(modified);
+      if (stat.type & vscode.FileType.Directory) throw new Error("The changed path is a directory.");
+    } catch (error) {
+      if (!(error instanceof vscode.FileSystemError) || error.code !== "FileNotFound") throw error;
+      modified = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${fileName}`, query: new URLSearchParams({ sessionId, sourceTurnId, path: filePath, side: "missing" }).toString() });
+      this.previewContents.set(modified.toString(), "");
+    }
+    await this.ensureSideBySideDiffRendering();
+    await vscode.commands.executeCommand("vscode.diff", original, modified, `${fileName}: Before this editing turn ↔ Current`, { preview: false });
+  }
+
   async showFile(displayPath: string, line?: number): Promise<void> {
     const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
     let stat: vscode.FileStat;

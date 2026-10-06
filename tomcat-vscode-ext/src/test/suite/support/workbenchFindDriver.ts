@@ -288,7 +288,7 @@ export class SettingsFrameDriver {
     private readonly assets: string[],
   ) {}
 
-  static async connectFromEnvironment(): Promise<SettingsFrameDriver> {
+  static async connectFromEnvironment(rootSelector = ".tc-settings-shell"): Promise<SettingsFrameDriver> {
     const port = Number(process.env[CDP_PORT_ENV]);
     if (!Number.isInteger(port) || port <= 0) throw new Error(`${CDP_PORT_ENV} is required`);
     const found = await waitFor(async () => {
@@ -311,7 +311,7 @@ export class SettingsFrameDriver {
               if (!context.auxData?.isDefault || !context.auxData.frameId) continue;
               const result = await client.send("Runtime.evaluate", {
                 contextId: context.id, returnByValue: true,
-                expression: `(() => { const assets = [...document.scripts].map(script => script.src).filter(Boolean); return document.title === 'Tomcat Settings' && document.querySelector('.tc-settings-shell') && assets.some(src => /\\/settings(?:-[^/]+)?\\.js(?:[?#]|$)/.test(src)) ? { assets } : null; })()`,
+                expression: `(() => { const assets = [...document.scripts].map(script => script.src).filter(Boolean); return document.querySelector(${JSON.stringify(rootSelector)}) && assets.length ? { assets } : null; })()`,
               }) as { result?: { value?: { assets: string[] } }; exceptionDetails?: unknown };
               if (!result.exceptionDetails && result.result?.value) {
                 retained = selected = true;
@@ -378,6 +378,13 @@ export class SettingsFrameDriver {
     await this.frame.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
   }
 
+
+  async click(testId: string): Promise<void> {
+    const point = await this.evaluate<{x:number;y:number}>(`(() => { const node = document.querySelector('[data-testid="${testId}"]'); if (!node || node.disabled) throw new Error('Button unavailable'); const r=node.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+    await this.frame.send("Input.dispatchMouseEvent",{type:"mouseMoved",x:point.x,y:point.y});
+    await this.frame.send("Input.dispatchMouseEvent",{type:"mousePressed",x:point.x,y:point.y,button:"left",clickCount:1});
+    await this.frame.send("Input.dispatchMouseEvent",{type:"mouseReleased",x:point.x,y:point.y,button:"left",clickCount:1});
+  }
 
   async capture(targetPath: string): Promise<SettingsDomEvidence> {
     const dom = await this.snapshot();

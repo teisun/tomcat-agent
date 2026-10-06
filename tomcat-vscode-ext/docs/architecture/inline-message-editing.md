@@ -18,6 +18,8 @@
 ## 文件恢复边界
 `<sessions_dir>/file-baselines/<session_id>/<user_message_id>/baselines.jsonl` 记录 `{path,backup,git_head}`。backup 为路径 SHA256 命名的改前原始字节文件，null 表示原来不存在。每轮首次原生 write/edit/hashline_edit 成功写入留一份；备份失败不阻止写入。只保留成功写入的清单，拒绝/失败工具不产生可回滚路径。
 
+Files 与消息 Revert 共用这些按轮改前备份，但只展示最近一个实际修改过文件的有效轮次；纯问答保留，下一改动轮首次成功修改后整份切换。Files 的 ×／Undo All 只恢复请求指定轮次和路径，不改写聊天或重发模型。成功但无字节／存在性变化的首次写入不发布记录，之后真正修改仍能捕获。相对路径与实际写工具同源；恢复保留备份原权限。现有 `discard_turns` 和整轮 `prune` 保留，Build/Signal/Nudge 的写入归最近 Normal 用户消息，不新增 owner 机制。完整契约见 [session-file-changes](session-file-changes.md)。
+
 恢复选中消息及后续有效轮次里每个路径最早的备份；AI 新建文件逐一删除，不用递归删除工作区。保留期复用 checkpoint.retention_days，HEAD 不同或无备份时禁用 Revert。个别备份缺失跳过。后续人工/终端修改若发生在同一路径会被覆盖，不做内容冲突检查；从未由原生写工具触及的路径不动。后台 Bash 不自动停止。ShadowGit/分隔条 restore 保持原用途，不作为缺备份的替代。
 
 ## 历史与失败

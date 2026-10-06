@@ -15,6 +15,7 @@ pub use bash_task::{
     BashTaskOutputChunk, BashTaskOutputEvent, BashTaskRegistry, BashTaskStatus, BashTaskTicket,
     ResolvedCwd,
 };
+pub(crate) use diff::{line_diff_stat, MAX_DIFF_INPUT_BYTES, MAX_DIFF_INPUT_LINES};
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
 #[cfg(test)]

@@ -44,6 +44,7 @@ export interface WebviewDomAction {
   widthPx?: number | null;
 }
 
+import type { SessionFileIntent, SessionFilesView } from "../../src/shared/sessionFiles";
 import type { MessageEditIntent } from "../../src/shared/messageEditProtocol";
 export interface WebviewMessageBlock {
   rewindEligible?: boolean;
@@ -352,6 +353,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../src/serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;
   agentMode: WebviewAgentMode;
@@ -408,6 +410,7 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
@@ -533,6 +536,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | SessionFileIntent
   | MessageEditIntent
   | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {

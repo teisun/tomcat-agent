@@ -131,6 +131,11 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function sessionFileIdentity(value: string): string {
+  try { return fs.realpathSync.native(value); }
+  catch { return path.resolve(value); }
+}
+
 export interface TomcatWebviewProviderDeps {
   /**
    * Where to keep composer drafts.
@@ -494,6 +499,23 @@ function formatBridgeError(action: string, error: unknown): string {
   return `Unable to ${action}: ${message}`;
 }
 
+function sessionFileErrorText(error: unknown, label: string, action: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  switch (message) {
+    case "binary": return `${label} is a binary file, so there is no text diff.`;
+    case "too_large": return `${label} is too large to compare.`;
+    case "unavailable": return `The original copy of ${label} is missing.`;
+    case "unknown_path": return "This editing turn is no longer available. Files has been refreshed.";
+    case "head_moved": return "Git HEAD changed since this backup. View the diff only.";
+    case "not_regular_file": return `${label} is not a regular file and cannot be undone.`;
+    case "busy": return "Stop Tomcat or wait for it to finish to undo.";
+  }
+  if (message.startsWith("restore_failed: ")) {
+    return `Couldn't undo ${message.slice("restore_failed: ".length)}. The list shows what's left.`;
+  }
+  return formatBridgeError(action, error);
+}
+
 function displayDeliveryError(error: string): string {
   if (error.trim().toLowerCase() === "busy") {
     return "上一条请求仍在处理中。请等待完成，或先停止当前任务后再试。";
@@ -579,6 +601,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     message: string;
     stack?: string;
   }> = [];
+  private readonly fileRefreshes = new Map<string, { dirty: boolean; promise: Promise<void> }>();
+  private readonly fileSubscriptions: vscode.Disposable[] = [];
+  private fileGeneration = 0;
+  private readonly closedFileSessions = new Set<string>();
+  private disposed = false;
   private initialized?: InitializeResult;
   private isReady = false;
   private serveConnectionStatus: ServeConnectionStatus = "connecting";
@@ -603,6 +630,25 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         new ComposerDraftStore(vscode.Uri.joinPath(deps.extensionUri, ".drafts"));
     this.sessionPool = new TomcatSessionPool(deps.sessionRouter);
     this.stateStore = new WebviewStateStore();
+    if (typeof vscode.workspace.onDidSaveTextDocument === "function") {
+      this.fileSubscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
+        if (document.uri.scheme !== "file") return;
+        const state = this.peekState();
+        const sessionId = state.activeSessionId;
+        const files = sessionId ? state.sessionViews[sessionId]?.sessionFiles?.files : undefined;
+        if (!sessionId || !files?.length) return;
+        const saved = sessionFileIdentity(document.uri.fsPath);
+        if (files.some((file) => sessionFileIdentity(file.path) === saved)) {
+          void this.refreshSessionFiles(sessionId);
+        }
+      }));
+    }
+    if (typeof vscode.window.onDidChangeWindowState === "function") {
+      this.fileSubscriptions.push(vscode.window.onDidChangeWindowState((event) => {
+        const sessionId = this.peekState().activeSessionId;
+        if (event.focused && sessionId) void this.refreshSessionFiles(sessionId);
+      }));
+    }
     this.stateBroadcaster = new StateBroadcaster({
       delayMs: 16,
       flush: (plan) => this.flushStateBroadcastPlan(plan),
@@ -688,6 +734,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * so a recycled ID cannot point to stale transcript or model state.
    */
   async refreshAfterServeRestart(): Promise<void> {
+    this.fileGeneration += 1;
+    this.fileRefreshes.clear();
+    this.closedFileSessions.clear();
     this.initialized = undefined;
     this.stateStore.resetForReload();
     this.stateStore.setConnectionStatus(this.serveConnectionStatus);
@@ -725,6 +774,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.fileGeneration += 1;
+    this.fileSubscriptions.forEach((subscription) => subscription.dispose());
     this.contextSearchTokenSource?.cancel();
     this.contextSearchTokenSource?.dispose();
     this.contextSearch.dispose();
@@ -999,7 +1051,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.projectCurrentDraft(sessionId, session),
       ]),
     );
-    return { ...snapshot, sessionViews, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend") };
+    return { ...snapshot, sessionViews, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend"), sessionFilesSupported: !!this.initialized && hasServeCapability(this.initialized, "session_files") };
   }
 
   private findToolCard(
@@ -1622,6 +1674,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.switchSessionView(intent.data.sessionId);
         return;
       case "closeSession": {
+        this.closedFileSessions.add(intent.data.sessionId);
         const closed = await this.sessionPool.release(intent.data.sessionId);
         if (closed) {
           await this.refreshSessions();
@@ -2250,6 +2303,59 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       }
+      case "refreshSessionFiles":
+        await this.refreshSessionFiles(intent.data.sessionId);
+        return;
+      case "openSessionFileDiff": {
+        const { sessionId, sourceTurnId, path: filePath } = intent.data;
+        if (!this.initialized || !hasServeCapability(this.initialized, "session_files") || this.closedFileSessions.has(sessionId)) return;
+        try {
+          const baseline = await this.deps.sessionRouter.getSessionFileBaseline(sessionId, sourceTurnId, filePath);
+          await this.deps.ide.openSessionFileDiff(sessionId, sourceTurnId, filePath, baseline.text);
+        } catch (error) {
+          void vscode.window.showWarningMessage(sessionFileErrorText(error, path.basename(filePath), `open diff ${filePath}`));
+          void this.refreshSessionFiles(sessionId);
+        }
+        return;
+      }
+      case "restoreSessionFiles": {
+        const { sessionId, sourceTurnId, paths, requestId } = intent.data;
+        const session = this.peekState().sessionViews[sessionId];
+        let success = false;
+        let detail: string | undefined;
+        const generation = this.fileGeneration;
+        const initialized = this.initialized;
+        if (!initialized || !hasServeCapability(initialized, "session_files") || !session || this.closedFileSessions.has(sessionId)) return;
+        if (session.busy || session.commandPending) {
+          await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success: false, error: "Stop Tomcat or wait for it to finish to undo." });
+          return;
+        }
+        const targets = new Set(paths.map(sessionFileIdentity));
+        const dirty = (vscode.workspace.textDocuments ?? []).find((document) => document.uri.scheme === "file" && document.isDirty && targets.has(sessionFileIdentity(document.uri.fsPath)));
+        if (dirty) {
+          detail = `Save or revert unsaved changes in ${path.basename(dirty.uri.fsPath)}, then try again.`;
+          void vscode.window.showWarningMessage(detail);
+          await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success: false, error: detail });
+          return;
+        }
+        this.stateStore.setCommandPending(sessionId, true);
+        await this.postSessionView(sessionId);
+        try {
+          await this.deps.sessionRouter.restoreSessionFiles(sessionId, sourceTurnId, paths);
+          success = true;
+        } catch (error) {
+          detail = sessionFileErrorText(error, paths.length === 1 ? path.basename(paths[0]) : "the selected files", "undo file changes");
+          void vscode.window.showWarningMessage(detail);
+        } finally {
+          if (!this.disposed && generation === this.fileGeneration && initialized === this.initialized && !this.closedFileSessions.has(sessionId)) {
+            this.stateStore.setCommandPending(sessionId, false);
+            await this.refreshSessionFiles(sessionId);
+            await this.postSessionView(sessionId);
+            await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success, error: detail });
+          }
+        }
+        return;
+      }
       case "openDiff": {
         const { sessionId, toolCallId } = intent.data;
         const tool = this.findToolCard(sessionId, toolCallId);
@@ -2330,6 +2436,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
+    if (event.type === "tool_execution_end" && event.sessionId && ["write", "edit", "hashline_edit"].includes(event.toolName)) {
+      void this.refreshSessionFiles(event.sessionId);
+    }
     if (
       event.type === "agent_end"
       && event.sessionId
@@ -3037,10 +3146,37 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.syncImagePreviewPanel(sessionId);
   }
 
+  private refreshSessionFiles(sessionId: string): Promise<void> {
+    if (this.disposed || this.closedFileSessions.has(sessionId) || !this.initialized || !hasServeCapability(this.initialized, "session_files") || !this.peekState().sessionViews[sessionId]) return Promise.resolve();
+    const existing = this.fileRefreshes.get(sessionId);
+    if (existing) { existing.dirty = true; return existing.promise; }
+    const generation = this.fileGeneration;
+    const initialized = this.initialized;
+    const entry = { dirty: false, promise: Promise.resolve() };
+    entry.promise = (async () => {
+      do {
+        entry.dirty = false;
+        try {
+          const result = await this.deps.sessionRouter.getSessionFiles(sessionId);
+          if (this.disposed || this.closedFileSessions.has(sessionId) || generation !== this.fileGeneration || initialized !== this.initialized || !this.peekState().sessionViews[sessionId]) return;
+          this.stateStore.setSessionFiles(sessionId, { sourceTurnId: result.sourceTurnId ?? null, files: result.files.map((file) => ({ ...file, displayPath: vscode.workspace.asRelativePath?.(file.path, false) ?? file.path })) });
+        } catch (error) {
+          if (this.disposed || this.closedFileSessions.has(sessionId) || generation !== this.fileGeneration || !this.peekState().sessionViews[sessionId]) return;
+          const prior = this.peekState().sessionViews[sessionId].sessionFiles;
+          this.stateStore.setSessionFiles(sessionId, { sourceTurnId: prior?.sourceTurnId ?? null, files: prior?.files ?? [], error: error instanceof Error ? error.message : String(error) });
+        }
+        await this.postSessionView(sessionId);
+      } while (entry.dirty && generation === this.fileGeneration && !this.disposed);
+    })().finally(() => { if (this.fileRefreshes.get(sessionId) === entry) this.fileRefreshes.delete(sessionId); });
+    this.fileRefreshes.set(sessionId, entry);
+    return entry.promise;
+  }
+
   private async refreshCheckpoints(
     sessionId: string,
     options: { strict?: boolean } = {},
   ): Promise<void> {
+    void this.refreshSessionFiles(sessionId);
     if (typeof this.deps.sessionRouter.listCheckpoints !== "function") {
       return;
     }
@@ -3803,6 +3939,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async switchSessionView(sessionId: string): Promise<void> {
+    this.closedFileSessions.delete(sessionId);
     await this.ensureInitialized();
     await this.sessionPool.switchTo(sessionId);
     await this.refreshSessionState(sessionId, { trustBusy: true });

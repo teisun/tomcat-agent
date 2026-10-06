@@ -2,13 +2,21 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-10-05 08:38 +0800 |
+| Updated | 2026-10-06 09:11 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Inline user-message editing and safe resend; signal-only completion; artifact isolation; CLI/extension patch bump and local commit |
+| Scope | Latest-editing-turn Files and stable Todos/Composer dock; manifest-only selection, target-save refresh and readable failures; CLI/extension patch bump; local commit |
 | Cov% | - |
 
 ### DONE
+
+- Added Files for the last actual native editing turn, retaining the source through questions, replacing the whole list on the next real write, and keeping an undone source empty without reviving older turns; file-only restore preserves chat and uses explicit turn/path identity.
+- Relocated Todos/Files into the stable B footer after pending answers and before Composer, with 4px corners/gap, flat tabs, per-file counts/diff/undo and subset Undo All; retained input/attachment identity and the original tool-card fragment diff behavior.
+- Reused native backups, HEAD/dirty/busy/path protections and session jobs; no new snapshot store, global lock, prepare ticket, filesystem watcher, Review/Accept or redo mechanism.
+- Removed transcript-body and old-manifest parsing from Files source selection: only stat nonempty regular manifests and select the maximum (mtime, id); corrupt old manifests do not block the current turn, and a corrupt latest manifest errors instead of falling back.
+- Restricted save-driven refresh to active-session cached targets using the shared realpath/fallback identity, translated Files action failures into readable English, and kept notification dismissal out of refresh/result completion.
+- Covered mixed-ID/timestamp selection, real history copy-forward/rewind/checkpoint-style cleanup, source-preserving question turns, full-file diff/edit/dirty behavior and narrow/short-window regressions; updated architecture and generated Serve fixtures.
+- Applied the separately requested one-time script patch bump: CLI `0.1.67 -> 0.1.68`, extension `0.1.81 -> 0.1.82`, bundled CLI `0.1.67 -> 0.1.68`; dependency and private GUI versions are unchanged. This commit does not bump again.
 
 - Added in-place editing of sent user messages through the shared Composer, with Keep/Revert confirmation, superseded history instead of deletion, and independent bottom-draft/attachment ownership; no branching, epoch or idempotency framework.
 - Joined native disk commits before rewind, made pre-commit confirmation waits cancellable and retracted dropped Serve confirmations, retained queued inputs on failed edits, and surfaced committed failures in the session timeline.
@@ -89,6 +97,10 @@
 
 ### INTERFACE
 
+- Optional Serve capability `session_files` adds `get_session_files`, `get_session_file_baseline` and `restore_session_files`; actions bind sessionId/sourceTurnId/path, never client-provided backup bytes. Missing capability hides Files without querying an old CLI.
+- Files selection reads manifest metadata only; list/restore still read the transcript header cwd for HEAD checks. Selected manifests retain strict validation; root/no-source and same-source empty views are distinct. Existing history rewrite paths continue cleaning superseded directories.
+- Host save matching uses active-session Files paths; focus, expansion, native tool completion, turn/checkpoint and restore triggers remain. Known action codes map to English while unknown bridge failures keep existing formatting; GUI ownership and wire error codes do not change in remediation.
+
 - Serve advertises `rewind_and_resend` and accepts read-only `preview_rewind` plus ordered `rewind_and_resend {sessionId,messageId,files,message}`. Old clients do not expose the edit action; history replacement is authoritative and committed failures carry `committed:true`.
 - Native first-write baselines remain separate from ShadowGit, gated by retention, available backups and Git HEAD. Historical image parts have optional `provider_sha/filename`; Reference projection exposes `providerSha`, while Inline retains its legacy shape.
 - `silent_reply_allowed` is run-local, granted only from the actually consumed signal-only finish batch and consumed by the next accepted response; it is not persisted and changes no entry signature or public wire protocol.
@@ -120,7 +132,7 @@
 - Command-pending state disables Send, Compact, and Build until the maintenance reply; terminal restore shares durable-context rehydration with Compact and Serve.
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata now declares CLI `0.1.67`, VS Code extension `0.1.81`, and bundled CLI pin `0.1.67`. This request performs a local commit only: no new tests, builds, packaging, installation, restart or push; updated version metadata is not a rebuilt artifact.
+- Release metadata now declares CLI `0.1.68`, VS Code extension `0.1.82`, and bundled CLI pin `0.1.68`. This request performs a local commit only: no new tests, builds, packaging, installation, restart or push; updated version metadata is not a rebuilt artifact.
 - Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
@@ -133,6 +145,10 @@
 - Settings reads connector state from local Serve snapshots and polls while visible; it fetches a tool catalog only for a connected source and validates config key, generation, and attempt before applying it.
 
 ### BLOCKED
+
+- Files mtime ordering assumes current-turn ownership and unchanged manifest timestamps. Existing directory cleanup is best-effort and not transactional with history writes: cleanup failure/crash residue can still leave a superseded candidate; migration, external touch/clock rollback or future old-turn writes require reevaluating sequence/invalidation. Successful cleanup tests are not failure-recovery proof.
+- Earlier Files broad gates were not all-green: strict Clippy hit the unchanged large enum; seven of eight lib HTTP failures passed localhost-proxy-isolated reruns, one web_search mock still failed; after the new schema fixture was fixed, six unchanged integration network/legacy skill-XML assertions remained. Preserve those failed aggregate outcomes; focused remediation passes below do not turn them into green full gates.
+- The user cancelled development-VSIX packaging. UI acceptance packages used test Serve fixtures, not a daily-use real-CLI release. This local commit neither creates a usable release package nor installs/publishes one; generated screenshots/reports/profiles remain ignored artifacts.
 
 - Latest implementation acceptance was not all-green: Rust lib had 3044 passes / 1 hosted-web-search timeout / 3 ignored; default integration had 358/363 parallel and 34/35 serial passes. The MCP timeout passed a focused rerun; hosted-search/skill timeouts remain unassigned, and an unchanged Responses gateway fixture emits Chat Completions SSE. Strict Clippy still needs the previously recorded `large_enum_variant` exception; do not relabel these gates as passed.
 - Serve finish-to-idle admission can still leave a queued input without a consumer; CLI idle Signal turns are not granted silent completion. Pre-confirmation baseline sampling and overwriting later manual edits remain boundaries; A14 uncommitted-backup cleanup was explicitly cancelled by the user.
@@ -167,6 +183,10 @@
 - A legacy orphan HTTP fixture process was observed during acceptance but could not be attributed to the current run and was intentionally not terminated; current controlled fixture processes were verified to exit.
 
 ### VERIFICATION
+
+- Before this commit request, Files implementation merged still-valid coverage of 632 extension and 724 GUI unit cases, 157 extension integration cases including the new real Serve closure, actual VS Code full-file diff/dirty interactions, final verify:vsix and 12 App/CSS scenarios. Original broad failures remain in BLOCKED; evidence details are retained in ignored `.agents/acceptance/session-files.md`.
+- Latest Files remediation, before this commit request, passed checkpoint15 (`1791246831466-idgx8b`), Serve Files3 plus Rust fmt (`1791247359508-i59kq8`), provider27 plus extension TypeScript (`1791247104904-i9llng`), and current real CLI build/five-turn Serve integration1 (`1791247582992-adt5xi`); whitespace passed (`1791247583032-uc1ly7`). History checks use production bottom-layer APIs/checkpoint-style finalization, not a complete checkpoint-store/CLI/UI E2E. GUI layout was unchanged and screenshots were not rerun for remediation.
+- This commit request explicitly runs no tests, builds, packaging or coverage. Validation is limited to staged/unstaged/untracked scope, whitespace, release mirror consistency, this status and the what/why message. Cov% remains `-`; local commit only, no push. These prior acceptance results are not new runs for this commit.
 
 - Before this bump/commit request, extension lint and all 621 host / 713 GUI tests passed (`1791139938134-6vf0iz`); real VS Code inline-edit E2E passed with desktop/narrow PNG, ARIA and zero capture-scope console errors (`1791139176819-ih8g2c`). These are earlier implementation results, not reruns or tests of rebuilt `0.1.67` / `0.1.81` artifacts.
 - The final MIME correction passed 39 hydration and 21 attachment tests plus all-targets Clippy with only the existing lint exception (`1791142294246-q1hcz9`); final real Serve resend passed 3/3 (`1791142984791-e8x7ca`). The original full gate failures remain in BLOCKED; ignored local details are in `.agents/acceptance/inline-remediation.acceptance.md`.

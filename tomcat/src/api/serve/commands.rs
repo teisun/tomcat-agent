@@ -633,6 +633,25 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::GetSessionFiles { id, session_id } => {
+            super::session_files::read(state, id, session_id, None).await?;
+        }
+        ServeCommand::GetSessionFileBaseline {
+            id,
+            session_id,
+            source_turn_id,
+            path,
+        } => {
+            super::session_files::read(state, id, session_id, Some((source_turn_id, path))).await?;
+        }
+        ServeCommand::RestoreSessionFiles {
+            id,
+            session_id,
+            source_turn_id,
+            paths,
+        } => {
+            super::session_files::restore(state, id, session_id, source_turn_id, paths).await?;
+        }
         ServeCommand::ListCheckpoints { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {

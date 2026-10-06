@@ -372,6 +372,25 @@ pub enum ServeCommand {
         session_id: String,
         message_id: String,
     },
+    #[serde(rename_all = "camelCase")]
+    GetSessionFiles {
+        id: Option<String>,
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    GetSessionFileBaseline {
+        id: Option<String>,
+        session_id: String,
+        source_turn_id: String,
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    RestoreSessionFiles {
+        id: Option<String>,
+        session_id: String,
+        source_turn_id: String,
+        paths: Vec<String>,
+    },
     /// 复制指定失败输入为新的活 user message，然后重新开一轮。
     #[serde(rename_all = "camelCase")]
     Retry {
@@ -832,6 +851,9 @@ impl ServeCommand {
             | Self::Retry { id, .. }
             | Self::RewindAndResend { id, .. }
             | Self::PreviewRewind { id, .. }
+            | Self::GetSessionFiles { id, .. }
+            | Self::GetSessionFileBaseline { id, .. }
+            | Self::RestoreSessionFiles { id, .. }
             | Self::GetState { id, .. }
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
@@ -906,6 +928,9 @@ impl ServeCommand {
             Self::SwitchSession { session_id, .. }
             | Self::RewindAndResend { session_id, .. }
             | Self::PreviewRewind { session_id, .. }
+            | Self::GetSessionFiles { session_id, .. }
+            | Self::GetSessionFileBaseline { session_id, .. }
+            | Self::RestoreSessionFiles { session_id, .. }
             | Self::RetainAttachmentLeases { session_id, .. }
             | Self::DiscardDetachedSession { session_id, .. } => Some(session_id.as_str()),
             Self::NewSession { .. }
@@ -956,6 +981,9 @@ impl ServeCommand {
             Self::Retry { .. } => "retry",
             Self::RewindAndResend { .. } => "rewind_and_resend",
             Self::PreviewRewind { .. } => "preview_rewind",
+            Self::GetSessionFiles { .. } => "get_session_files",
+            Self::GetSessionFileBaseline { .. } => "get_session_file_baseline",
+            Self::RestoreSessionFiles { .. } => "restore_session_files",
             Self::GetState { .. } => "get_state",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",

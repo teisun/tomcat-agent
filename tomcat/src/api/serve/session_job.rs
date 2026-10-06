@@ -21,6 +21,20 @@ pub(super) fn spawn_session_job<F>(
 where
     F: Future<Output = Result<Value, String>> + Send + 'static,
 {
+    spawn_session_job_with_payload(state, slot, id, async move {
+        job.await.map_err(|error| (error, Value::Null))
+    })
+}
+
+pub(super) fn spawn_session_job_with_payload<F>(
+    state: Arc<ServeState>,
+    slot: Arc<SessionSlot>,
+    id: Option<String>,
+    job: F,
+) -> Result<(), AppError>
+where
+    F: Future<Output = Result<Value, (String, Value)>> + Send + 'static,
+{
     if !slot.mark_busy() {
         return state.writer.send(OutFrame::Response(ResponseFrame::error(
             id,
@@ -46,7 +60,12 @@ where
             Ok(Ok(payload)) => {
                 ResponseFrame::ok(id, Some(task_slot.session_id.clone()), Some(payload))
             }
-            Ok(Err(error)) => ResponseFrame::error(id, Some(task_slot.session_id.clone()), error),
+            Ok(Err((error, payload))) => ResponseFrame::error_with_payload(
+                id,
+                Some(task_slot.session_id.clone()),
+                error,
+                payload,
+            ),
             Err(_) => ResponseFrame::error(
                 id,
                 Some(task_slot.session_id.clone()),

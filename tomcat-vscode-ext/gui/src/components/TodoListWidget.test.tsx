@@ -1,12 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { TodoListWidget } from "./TodoListWidget";
+import { SessionDock as TodoListWidget } from "./SessionDock";
 
 describe("TodoListWidget", () => {
   it("renders a collapsed current task title and expands into the todo list", () => {
     render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy
         planState="executing"
         planTodos={[
@@ -34,7 +34,7 @@ describe("TodoListWidget", () => {
 
   it("stays hidden without todo data", () => {
     const { container } = render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy
         planState={null}
         planTodos={[]}
@@ -47,7 +47,7 @@ describe("TodoListWidget", () => {
 
   it("stays hidden when the plan is completed", () => {
     const { container } = render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy
         planState="completed"
         planTodos={[{ content: "All done", id: "1", status: "completed" }]}
@@ -60,7 +60,7 @@ describe("TodoListWidget", () => {
 
   it("stays hidden when the session is idle", () => {
     const { container } = render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy={false}
         planState="planning"
         planTodos={[{ content: "Plan", id: "1", status: "pending" }]}

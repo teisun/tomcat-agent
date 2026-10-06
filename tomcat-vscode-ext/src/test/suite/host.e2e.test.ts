@@ -3,6 +3,7 @@ import * as assert from "node:assert/strict";
 import {
   assertPlanPreviewCustomEditorFlow,
   assertInlineUserMessageEditFlow,
+  assertSessionFilesDockFlow,
   assertWebviewCompletedPlanStaysInChat,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewCompactControlFlow,
@@ -42,6 +43,10 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  test("session files dock: native complete diff, question retention and dirty protection", async function () {
+    this.timeout(90_000);
+    await assertSessionFilesDockFlow(await getTomcatExtensionApi());
+  });
   test("inline user-message edit keeps the main draft and reverts a running turn", async () => {
     const api = await getTomcatExtensionApi();
     await assertInlineUserMessageEditFlow(api);

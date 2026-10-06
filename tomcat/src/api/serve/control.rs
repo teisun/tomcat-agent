@@ -45,6 +45,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "resume",
                             "retry",
                             "rewind_and_resend",
+                            "session_files",
                             "get_state",
                             "compact",
                             "run_slash_command",

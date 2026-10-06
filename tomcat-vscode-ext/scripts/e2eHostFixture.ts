@@ -1535,6 +1535,17 @@ function handlePrompt(frame) {
     recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
     emitSessionTitleUpdated(sessionId, normalizedUserContent);
   }
+  if (text === "session files dock edit" || text === "session files dock edit again") {
+    const target = path.join(path.dirname(editFilePath), "session-files.ts");
+    const before = fs.existsSync(target) ? fs.readFileSync(target,"utf8") : "first line\\noriginal line\\n";
+    const after = text.endsWith("again") ? "second change\\nmore content\\n" : "first line\\nmodified line\\nnew line\\n";
+    fs.writeFileSync(target, after, "utf8");
+    session.sessionFiles = { sourceTurnId: userMessageId || session.history.filter(row => row.message?.role === "user").at(-1).id, entries: [{path:target,before}] };
+    const tool = {toolCallId:"session-files-write",toolName:"write",args:{path:target},result:"written",display:{kind:"file",file:target,added:2,removed:1}};
+    recordHistoryAssistantWithTools(sessionId,"",[tool],"Updated file");recordHistoryToolResult(sessionId,tool);
+    send({type:"tool_execution_end",sessionId,toolCallId:tool.toolCallId,toolName:"write",result:"written",display:tool.display,isError:false});
+    recordHistoryMessage(sessionId,"assistant","Files ready");emitMessageDelta(sessionId,"Files ready");finishTurn(sessionId,null);return;
+  }
   if (text.includes("inline edit file fixture") && !text.includes("edited")) {
     session.inlineBaseline = fs.existsSync(editFilePath) ? fs.readFileSync(editFilePath, "utf8") : null;
     if (text.includes("no baseline")) delete session.inlineBaseline;
@@ -2381,6 +2392,7 @@ function handleCommand(frame) {
               capabilities: [
                 "prompt",
                 "rewind_and_resend",
+                "session_files",
                 "ask_question",
                 "ingest_attachment",
                 "retain_attachment_leases",
@@ -2519,6 +2531,24 @@ function handleCommand(frame) {
         type: "response",
       });
       break;
+    }
+    case "get_session_files": {
+      const session = ensureSession(frame.sessionId);
+      const view = session.sessionFiles;
+      const files = view ? view.entries.filter(entry => !fs.existsSync(entry.path) || fs.readFileSync(entry.path,"utf8") !== entry.before).map(entry => ({path:entry.path,status:fs.existsSync(entry.path)?"modified":"deleted",added:2,removed:1,restorable:true})) : [];
+      send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:view?.sourceTurnId || null,files}});break;
+    }
+    case "get_session_file_baseline": {
+      const view = ensureSession(frame.sessionId).sessionFiles;
+      const entry = view?.sourceTurnId === frame.sourceTurnId ? view.entries.find(entry=>entry.path===frame.path) : null;
+      send({id:frame.id,type:"response",success:!!entry,sessionId:frame.sessionId,error:entry?undefined:"unknown_path",payload:entry?{sessionId:frame.sessionId,sourceTurnId:frame.sourceTurnId,path:entry.path,existed:true,text:entry.before}:undefined});break;
+    }
+    case "restore_session_files": {
+      const session = ensureSession(frame.sessionId), view = session.sessionFiles;
+      const entries = view?.sourceTurnId === frame.sourceTurnId ? (frame.paths || []).map(target=>view.entries.find(entry=>entry.path===target)) : [];
+      if(session.busy || !entries.length || entries.some(entry=>!entry)) {send({id:frame.id,type:"response",success:false,sessionId:frame.sessionId,error:session.busy?"busy":"unknown_path"});break;}
+      for(const entry of entries) fs.writeFileSync(entry.path,entry.before,"utf8");
+      send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:frame.sourceTurnId,restored:frame.paths}});break;
     }
     case "list_checkpoints": {
       const sessionId = frame.sessionId || activeSessionId;

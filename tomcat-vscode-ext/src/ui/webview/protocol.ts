@@ -70,6 +70,7 @@ export interface WebviewDomAction {
   widthPx?: number | null;
 }
 
+import type { SessionFileIntent, SessionFilesResult, SessionFilesView } from "../../shared/sessionFiles";
 import type { MessageEditIntent, MessageEditEvent } from "../../shared/messageEditProtocol";
 export interface WebviewMessageBlock {
   rewindEligible?: boolean;
@@ -365,6 +366,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;
   agentMode: WebviewAgentMode;
@@ -422,6 +424,7 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
@@ -466,6 +469,7 @@ export type WebviewSessionPatchOp =
     };
 
 export type HostEventFrameContent =
+  | SessionFilesResult
   | MessageEditEvent
   | ControlRequestFrame
   | ServeEvent
@@ -587,6 +591,7 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | SessionFileIntent
   | MessageEditIntent
   | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {
@@ -1236,6 +1241,14 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "openLink":
       return isRecord(value.data) && isString(value.data.href);
+    case "refreshSessionFiles":
+      return isRecord(value.data) && isString(value.data.sessionId);
+    case "openSessionFileDiff":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.sourceTurnId) && isString(value.data.path);
+    case "restoreSessionFiles":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.sourceTurnId)
+        && isString(value.data.requestId) && Array.isArray(value.data.paths) && value.data.paths.length > 0
+        && value.data.paths.every(isString);
     case "openDiff":
       return (
         isRecord(value.data) &&

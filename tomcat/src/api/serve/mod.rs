@@ -18,6 +18,7 @@ pub mod ndjson;
 pub mod registry;
 mod rewind_and_resend;
 pub mod schema;
+mod session_files;
 mod session_job;
 mod slash;
 pub mod stdin;

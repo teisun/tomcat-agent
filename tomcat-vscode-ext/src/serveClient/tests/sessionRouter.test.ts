@@ -2,6 +2,30 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SessionRouter } from "../sessionRouter";
 
+describe("SessionRouter session files", () => {
+  const payload = {sessionId:"s",sourceTurnId:"u",files:[{path:"/a",status:"modified",added:1,removed:1,restorable:true}]};
+  it("validates list identity and entries rather than silently dropping invalid files", async () => {
+    const messenger={request:vi.fn().mockResolvedValue({sessionId:"s",success:true,payload})};
+    const router=new SessionRouter(messenger as never,()=>undefined);
+    await expect(router.getSessionFiles("s")).resolves.toEqual(payload);
+    expect(messenger.request).toHaveBeenCalledWith({type:"get_session_files",sessionId:"s"});
+    messenger.request.mockResolvedValueOnce({success:true,sessionId:"other",payload});
+    await expect(router.getSessionFiles("s")).rejects.toThrow("mismatch");
+    messenger.request.mockResolvedValueOnce({success:true,sessionId:"s",payload:{...payload,files:[{...payload.files[0],added:-1}]}});
+    await expect(router.getSessionFiles("s")).rejects.toThrow("entry");
+  });
+  it("binds baseline and restore payloads to the exact turn/path", async () => {
+    const messenger={request:vi.fn().mockResolvedValue({sessionId:"s",success:true,payload:{sessionId:"s",sourceTurnId:"u",path:"/a",existed:true,text:"before"}})};
+    const router=new SessionRouter(messenger as never,()=>undefined);
+    expect((await router.getSessionFileBaseline("s","u","/a")).text).toBe("before");
+    expect(messenger.request).toHaveBeenCalledWith({type:"get_session_file_baseline",sessionId:"s",sourceTurnId:"u",path:"/a"});
+    messenger.request.mockResolvedValueOnce({sessionId:"s",success:true,payload:{sessionId:"s",sourceTurnId:"wrong",restored:["/a"]}});
+    await expect(router.restoreSessionFiles("s","u",["/a"])).rejects.toThrow("Invalid");
+    messenger.request.mockResolvedValueOnce({sessionId:"s",success:false,error:"restore_failed",payload:{path:"/a",reason:"disk full"}});
+    await expect(router.restoreSessionFiles("s","u",["/a"])).rejects.toThrow("restore_failed: /a: disk full");
+  });
+});
+
 describe("SessionRouter shared slash commands", () => {
   it("sends original text and session identity with a ten-minute wait", async () => {
     const messenger = {request:vi.fn().mockResolvedValue({success:true, payload:{ok:true, text:"done"}})};

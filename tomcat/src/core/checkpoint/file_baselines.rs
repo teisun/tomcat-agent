@@ -22,13 +22,13 @@ pub enum RevertReason {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Baseline {
-    path: PathBuf,
-    backup: Option<String>,
-    git_head: Option<String>,
+pub(crate) struct Baseline {
+    pub(crate) path: PathBuf,
+    pub(crate) backup: Option<String>,
+    pub(crate) git_head: Option<String>,
 }
 
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id != "."
         && id != ".."
@@ -109,7 +109,7 @@ impl TurnFileBaselines {
         let path = if path.is_absolute() {
             path
         } else {
-            self.cwd.join(path)
+            std::env::current_dir().ok()?.join(path)
         };
         // Resolve existing parent aliases once (macOS /var and /tmp are symlinks).
         // Store the actual location, then reject any *new* symlink at restore time.
@@ -166,6 +166,20 @@ pub struct PendingBaseline {
 }
 impl PendingBaseline {
     pub fn commit(mut self) {
+        // A successful no-op must not replace the last editing turn in Files.
+        let unchanged = match &self.row.backup {
+            Some(name) => files_equal(&self.owner.directory.join(name), &self.row.path),
+            None => match fs::symlink_metadata(&self.row.path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                Ok(_) => Ok(false),
+                Err(e) => Err(e),
+            },
+        };
+        match unchanged {
+            Ok(true) => return, // Drop releases seen so a later real edit can capture again.
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "cannot compare baseline after write"),
+        }
         // Keep seen even if persisting fails: never capture an already modified file later.
         self.committed = true;
         let result = (|| -> Result<(), AppError> {
@@ -190,10 +204,55 @@ impl Drop for PendingBaseline {
     }
 }
 
+/// Compare bytes without loading oversized/binary files into memory.
+pub(crate) fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
+    use std::io::{BufReader, Read};
+    let mut left = BufReader::new(fs::File::open(left)?);
+    let mut right = BufReader::new(fs::File::open(right)?);
+    if left.get_ref().metadata()?.len() != right.get_ref().metadata()?.len() {
+        return Ok(false);
+    }
+    let mut a = [0u8; 8192];
+    let mut b = [0u8; 8192];
+    loop {
+        let n = left.read(&mut a)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        right.read_exact(&mut b[..n])?;
+        if a[..n] != b[..n] {
+            return Ok(false);
+        }
+    }
+}
+
+pub(crate) fn require_regular_path(path: &Path) -> Result<(), AppError> {
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(AppError::Config(
+                    "refusing to restore through a symlink".into(),
+                ));
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() => Err(AppError::Config("not_regular_file".into())),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 pub struct RestoreFiles {
     files: BTreeMap<PathBuf, Option<PathBuf>>,
 }
 impl RestoreFiles {
+    pub(crate) fn selected(files: BTreeMap<PathBuf, Option<PathBuf>>) -> Self {
+        Self { files }
+    }
+
     pub fn paths(&self) -> Vec<String> {
         self.files
             .keys()
@@ -214,7 +273,11 @@ impl RestoreFiles {
                 }
                 match backup {
                     Some(backup) => match fs::read(backup) {
-                        Ok(bytes) => write_file_atomic(path, &bytes),
+                        Ok(bytes) => {
+                            write_file_atomic(path, &bytes)?;
+                            fs::set_permissions(path, fs::metadata(backup)?.permissions())?;
+                            Ok(())
+                        }
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                         Err(e) => Err(e.into()),
                     },
