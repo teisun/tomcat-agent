@@ -30,6 +30,8 @@ let buildPromise: Promise<void> | undefined;
 export type ScriptedPart = {
   body: string;
   delayMs?: number;
+  /** A deterministic barrier for tests that must submit/stop before the next safe point. */
+  waitFor?: Promise<void>;
 };
 
 export type ScriptedResponse = {
@@ -258,6 +260,7 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     });
 
     for (const part of scripted.parts) {
+      if (part.waitFor) await part.waitFor;
       if (part.delayMs && part.delayMs > 0) {
         await delay(part.delayMs, undefined, { signal: abort.signal });
       }

@@ -380,7 +380,8 @@ export class SettingsFrameDriver {
 
 
   async click(testId: string): Promise<void> {
-    const point = await this.evaluate<{x:number;y:number}>(`(() => { const node = document.querySelector('[data-testid="${testId}"]'); if (!node || node.disabled) throw new Error('Button unavailable'); const r=node.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+    const point = await waitFor(() => this.evaluate<{x:number;y:number} | null>(`(() => { const node = document.querySelector('[data-testid="${testId}"]'); if (!node || node.disabled) return null; node.scrollIntoView({block:'nearest',inline:'nearest'}); const r=node.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? {x:r.x+r.width/2,y:r.y+r.height/2} : null; })()`), value => value !== null, `Rendered enabled button unavailable: ${testId}`, 15_000);
+    if (!point) throw new Error(`Button unavailable: ${testId}`);
     await this.frame.send("Input.dispatchMouseEvent",{type:"mouseMoved",x:point.x,y:point.y});
     await this.frame.send("Input.dispatchMouseEvent",{type:"mousePressed",x:point.x,y:point.y,button:"left",clickCount:1});
     await this.frame.send("Input.dispatchMouseEvent",{type:"mouseReleased",x:point.x,y:point.y,button:"left",clickCount:1});

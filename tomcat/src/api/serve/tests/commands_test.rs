@@ -3147,7 +3147,7 @@ async fn serve_prompt_duplicate_user_message_id_falls_back_to_generated_entry_id
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_steer_ignores_attachments() {
+async fn serve_steer_preserves_attachments() {
     let _api_key = install_test_api_key();
     let stream = vec![Ok(StreamEvent::FinishReason {
         reason: "stop".to_string(),
@@ -3192,7 +3192,7 @@ async fn serve_steer_ignores_attachments() {
         .expect("steering message");
     assert!(matches!(
         &steering_message.content,
-        Some(ChatMessageContent::Text(text)) if text == "just steer"
+        Some(ChatMessageContent::Parts(parts)) if parts.iter().any(|p| matches!(p, ChatMessageContentPart::InputImage { .. }))
     ));
     assert_eq!(steering_message.msg_id.as_deref(), Some("steer-fixed-id"));
     drop(captured);
@@ -3201,7 +3201,7 @@ async fn serve_steer_ignores_attachments() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_busy_steer_queues_and_persists_requested_user_message_id() {
+async fn serve_busy_steer_defers_archival_until_consumption() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
     slot.busy.store(true, Ordering::SeqCst);
@@ -3233,12 +3233,228 @@ async fn serve_busy_steer_queues_and_persists_requested_user_message_id() {
 
     let queue = slot.ctx.session_runtime.steering_queue.lock();
     assert_eq!(queue.len(), 1, "expected one queued steering message");
-    assert_eq!(queue[0].msg_id.as_deref(), Some("steer-busy-fixed-id"));
+    assert!(
+        queue[0].msg_id.is_none(),
+        "queued input is not archived yet"
+    );
     drop(queue);
     assert_eq!(
         count_message_entries_with_id(&slot, "steer-busy-fixed-id"),
-        1
+        0
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn strict_steer_rejects_idle_and_closed_inbox_without_archival() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    for closed_busy in [false, true] {
+        slot.busy.store(closed_busy, Ordering::SeqCst);
+        slot.ctx
+            .session_runtime
+            .steering_queue
+            .lock()
+            .close_and_clear();
+        let id = format!("strict-{closed_busy}");
+        handle_command(
+            state.clone(),
+            ServeCommand::Steer {
+                id: Some(id.clone()),
+                session_id: Some(slot.session_id.clone()),
+                text: "too late".into(),
+                params: ServeMessageParams {
+                    only_if_running: Some(true),
+                    user_message_id: Some(id.clone()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let frames = wait_for_line(&buffer, |f| f["id"] == id).await;
+        assert_eq!(
+            frames.iter().find(|f| f["id"] == id).unwrap()["error"],
+            "not_running"
+        );
+        assert_eq!(count_message_entries_with_id(&slot, &id), 0);
+        assert!(slot.ctx.session_runtime.steering_queue.lock().is_empty());
+    }
+    slot.mark_idle();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn live_steering_consumed_precedes_idle_and_stop_or_failure_discards_it() {
+    let _api_key = install_test_api_key();
+    for outcome in ["completed", "interrupted", "failed"] {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (next_tx, next_rx) = mpsc::unbounded_channel();
+        next_tx
+            .send(Ok(StreamEvent::ContentDelta {
+                delta: "steered".into(),
+            }))
+            .unwrap();
+        next_tx
+            .send(Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }))
+            .unwrap();
+        drop(next_tx);
+        let (state, buffer, _temp, slot) = build_initialized_state_with_provider(
+            temp,
+            cfg,
+            Arc::new(ChannelMockLlm::new(vec![rx, next_rx])),
+        )
+        .await;
+        handle_command(
+            state.clone(),
+            ServeCommand::Prompt {
+                id: Some("start".into()),
+                session_id: Some(slot.session_id.clone()),
+                text: "task".into(),
+                params: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        tx.send(Ok(StreamEvent::ContentDelta {
+            delta: "waiting".into(),
+        }))
+        .unwrap();
+        wait_for_line(&buffer, |f| f["type"] == "message_update").await;
+        handle_command(
+            state.clone(),
+            ServeCommand::Steer {
+                id: Some("insert".into()),
+                session_id: Some(slot.session_id.clone()),
+                text: "supplement".into(),
+                params: ServeMessageParams {
+                    only_if_running: Some(true),
+                    user_message_id: Some("live-steer".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        wait_for_line(&buffer, |f| f["id"] == "insert").await;
+        assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 0);
+        match outcome {
+            "completed" => {
+                tx.send(Ok(StreamEvent::FinishReason {
+                    reason: "stop".into(),
+                }))
+                .unwrap();
+            }
+            "interrupted" => {
+                handle_command(
+                    state.clone(),
+                    ServeCommand::Interrupt {
+                        id: Some("stop".into()),
+                        session_id: Some(slot.session_id.clone()),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            _ => {
+                tx.send(Err(crate::infra::error::llm_http_status_error(
+                    "mock", 401, "denied",
+                )))
+                .unwrap();
+            }
+        }
+        drop(tx);
+        let frames = wait_for_line(&buffer, |f| f["type"] == "agent_idle").await;
+        let idle = frames
+            .iter()
+            .position(|f| f["type"] == "agent_idle")
+            .unwrap();
+        assert_eq!(frames[idle]["outcome"], outcome);
+        assert!(slot.ctx.session_runtime.steering_queue.lock().is_empty());
+        assert!(!slot.ctx.session_runtime.steering_queue.lock().is_open());
+        let consumed = frames.iter().position(|f| f["type"] == "steering_consumed");
+        if outcome == "completed" {
+            assert!(consumed.unwrap() < idle);
+            assert_eq!(frames[consumed.unwrap()]["userMessageIds"][0], "live-steer");
+            assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 1);
+        } else {
+            assert!(consumed.is_none());
+            assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 0);
+        }
+        cleanup_session_slot(&state, &slot, true, "test_finished")
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn prompt_config_validates_before_mode_change_and_applies_in_one_submission() {
+    use crate::core::session::manager::AgentMode;
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "done".into(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        }),
+    ];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![stream]).await;
+    handle_command(
+        state.clone(),
+        ServeCommand::Prompt {
+            id: Some("invalid".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "task".into(),
+            params: ServeMessageParams {
+                model: Some("missing-model".into()),
+                agent_mode: Some(AgentMode::Plan),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let frames = wait_for_line(&buffer, |f| f["id"] == "invalid").await;
+    assert_eq!(
+        frames.iter().find(|f| f["id"] == "invalid").unwrap()["success"],
+        false
+    );
+    assert_eq!(
+        slot.ctx.session_runtime.plan_runtime.mode(),
+        AgentMode::Chat
+    );
+    assert!(requests.0.lock().is_empty());
+    handle_command(
+        state.clone(),
+        ServeCommand::Prompt {
+            id: Some("valid".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "task".into(),
+            params: ServeMessageParams {
+                model: Some("gpt-5.4".into()),
+                agent_mode: Some(AgentMode::Plan),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |f| f["type"] == "agent_idle").await;
+    assert_eq!(
+        slot.ctx.session_runtime.plan_runtime.mode(),
+        AgentMode::Plan
+    );
+    assert_eq!(requests.0.lock()[0].model, "gpt-5.4");
+    cleanup_session_slot(&state, &slot, true, "test_finished")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

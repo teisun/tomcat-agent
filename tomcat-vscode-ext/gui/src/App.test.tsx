@@ -42,6 +42,137 @@ function mount(initialState?: unknown) {
   };
 }
 
+describe("busy input and local queue acknowledgement", () => {
+  it.each(["cancel", "save"] as const)("restores the correct normal action after %s for empty/nonempty drafts and busy/idle tasks", async action => {
+    for (const busy of [true, false]) for (const text of ["", "keep this draft"]) {
+      const { postMessage, unmount } = mount();
+      const sessionId = "s1";
+      const snapshot = approvalDraftSnapshot(sessionId); snapshot.messageQueueSupported = true;
+      const session = snapshot.sessionViews[sessionId];
+      Object.assign(session, { busy: true, timeline: [], pendingAttachments: [] });
+      session.messageQueue = { paused: true, editingId: null, items: [{ userMessageId: "q", text: "queued", segments: [], attachments: [], status: "queued" }] };
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-before" });
+      if (text) await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => text } }); });
+      const editor = screen.getByTestId("composer-input");
+      session.messageQueue = { ...session.messageQueue, editingId: "q" };
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-edit" });
+      session.busy = busy;
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-task-state" });
+      expect(screen.queryByTestId("queue-edit-stop-button")).toBeNull();
+      expect(screen.getByTestId("queue-edit-send-button").getAttribute("aria-label")).toBe("Save queued message");
+      fireEvent.click(screen.getByTestId(action === "save" ? "queue-edit-send-button" : "queue-edit-cancel"));
+      session.messageQueue = { ...session.messageQueue, editingId: null };
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-after" });
+      expect(screen.getByTestId("composer-input")).toBe(editor);
+      expect(editor.textContent).toBe(text); expect(document.activeElement).toBe(editor);
+      const stop = busy && !text;
+      expect(screen.queryByTestId(stop ? "send-button" : "stop-button")).toBeNull();
+      expect(screen.getByTestId(stop ? "stop-button" : "send-button")).toHaveProperty("disabled", !busy && !text);
+      expect(postMessage.mock.calls.some(([m]) => ["prompt", "interrupt", "rewindAndResend"].includes(m.type))).toBe(false);
+      unmount();
+    }
+  });
+
+  it.each(["cancel", "save"] as const)("queue composer %s restores the same main editor and its draft/attachments", async action => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true;
+    const session = snapshot.sessionViews.s1;
+    Object.assign(session, { timeline: [], busy: true, composerConfig: { agentMode: "plan", model: "gpt-5.4" } });
+    session.pendingAttachments = [{ id: "main-file", kind: "file", filename: "main.pdf", label: "main.pdf", mimeType: "application/pdf", blobSha: "a".repeat(64) }];
+    session.messageQueue = { paused: true, editingId: null, items: [{ userMessageId: "q1", text: "queued original", segments: [], attachments: [], status: "queued" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-initial" });
+    const main = screen.getByTestId("composer-input");
+    await act(async () => { fireEvent.paste(main, { clipboardData: { getData: () => "unsent main draft" } }); });
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    session.messageQueue = { ...session.messageQueue, editingId: "q1" };
+    await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-edit" });
+    expect(screen.getByTestId("queue-editor").closest('[data-testid="composer-area"]')).toBeTruthy();
+    expect(screen.getByTestId("queue-editor").closest('[data-testid="queue-row"]')).toBeNull();
+    expect(screen.getByTestId("main-composer-draft")).toHaveProperty("hidden", true);
+    expect(main.textContent).toBe("unsent main draft");
+    expect(screen.getByTestId("main-composer-draft").querySelector('[aria-label="main.pdf"]')).toBeTruthy();
+    expect(screen.getByTestId("queue-edit-model-select")).toBeTruthy();
+    await act(async () => { fireEvent.paste(screen.getByTestId("queue-edit-composer-input"), { clipboardData: { getData: () => " changed" } }); });
+    fireEvent.click(screen.getByTestId(action === "save" ? "queue-edit-send-button" : "queue-edit-cancel"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "queueAction", data: expect.objectContaining({ action, userMessageId: "q1" }) }));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt" || message.type === "steer")).toBe(false);
+    session.messageQueue = { ...session.messageQueue, editingId: null };
+    await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-closed" });
+    expect(screen.getByTestId("main-composer-draft")).toHaveProperty("hidden", false);
+    expect(screen.getByTestId("composer-input")).toBe(main);
+    expect(main.textContent).toBe("unsent main draft"); expect(document.activeElement).toBe(main);
+  });
+
+  it("unlocks input, switches the sole button with content, uses next config and ignores double submit", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true;
+    Object.assign(snapshot.sessionViews.s1, { busy: true, timeline: [], composerConfig: { agentMode: "plan", model: "gpt-5.4" } });
+    await emitState({ channel: "state", content: snapshot, messageId: "busy-queue" });
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("stop-button")).toBeTruthy();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "follow-up" } }); });
+    expect(screen.queryByTestId("stop-button")).toBeNull();
+    expect(screen.getByTestId("send-button").getAttribute("aria-label")).toBe("Queue message");
+    fireEvent.click(screen.getByTestId("send-button")); fireEvent.click(screen.getByTestId("send-button"));
+    const submits = postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "prompt");
+    expect(submits).toHaveLength(1);
+    snapshot.sessionViews.s1.messageQueue = { paused: false, editingId: null, items: [{ userMessageId: submits[0].data.userMessageId, text: "follow-up", segments: [], attachments: [], status: "queued" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "queued-ack" });
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+    expect(screen.getByTestId("messages-dock")).toBeTruthy();
+    expect(screen.queryByTestId("send-button")).toBeNull();
+    expect(screen.getByTestId("stop-button")).toBeTruthy();
+  });
+  it("keeps only a disabled Send while attachment work is pending and never auto-submits on completion", async () => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true; snapshot.sessionViews.s1.busy = true;
+    await emitState({ channel: "state", content: snapshot, messageId: "cutoff" });
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "frozen" } }); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    const prior = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "pickContext").data.operationId;
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(screen.queryByTestId("stop-button")).toBeNull();
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => " newer" } }); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    const later = postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "pickContext").at(-1).data.operationId;
+    expect(later).not.toBe(prior);
+    await emitState({ channel: "event", messageId: "prepared-prior", content: { type: "composerWorkResult", sessionId: "s1", operationId: prior, success: true, attachmentIds: ["prior-image"] } });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("composer-input").textContent).toContain("newer");
+    await emitState({ channel: "event", messageId: "prepared-later", content: { type: "composerWorkResult", sessionId: "s1", operationId: later, success: true, attachmentIds: ["later-image"] } });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("send-button"));
+    const sent = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "prompt");
+    expect(sent.data.text).toBe("frozen newer");
+    expect(postMessage.mock.calls.filter(([m]) => m.type === "prompt")).toHaveLength(1);
+  });
+  it("preparation failures preserve input and do not silently send only the text", async () => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true; snapshot.sessionViews.s1.busy = true;
+    await emitState({ channel: "state", content: snapshot, messageId: "prepare-fail" });
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "keep input" } }); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    const operationId = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "pickContext").data.operationId;
+    fireEvent.click(screen.getByTestId("send-button"));
+    await emitState({ channel: "event", messageId: "failed-work", content: { type: "composerWorkResult", sessionId: "s1", operationId, success: false, error: "missing image" } });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("composer-input").textContent).toBe("keep input");
+  });
+  it("a late local queue acknowledgement never clears newer input", async () => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true; snapshot.sessionViews.s1.busy = true;
+    await emitState({ channel: "state", content: snapshot, messageId: "typing-queue" });
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "old" } }); });
+    fireEvent.click(screen.getByTestId("send-button"));
+    const submit = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "prompt");
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => " newer" } }); });
+    snapshot.sessionViews.s1.messageQueue = { paused: false, editingId: null, items: [{ userMessageId: submit.data.userMessageId, text: "old", segments: [], attachments: [], status: "queued" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "late-queue-ack" });
+    expect(screen.getByTestId("composer-input").textContent).toContain("newer");
+  });
+});
+
 describe("inline user-message editing in App", () => {
   it("does not expose editing for a read-only foreign session", async () => {
     mount();
@@ -188,6 +319,8 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     commandPending: fixture.commandPending,
     checkpoints: fixture.checkpoints,
     composerDraft: fixture.composerDraft,
+    messageQueue: fixture.messageQueue,
+    composerConfig: fixture.composerConfig,
     contextRatio: fixture.contextRatio,
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,
@@ -2101,7 +2234,7 @@ describe("Tomcat webview App", () => {
     expect(dock.parentElement).toBe(footer);
     expect(footer.parentElement).toBe(panel.parentElement);
     expect(panel.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-    expect(screen.getByTestId("composer").parentElement).toBe(screen.getByTestId("composer-area"));
+    expect(screen.getByTestId("composer").closest('[data-testid="composer-area"]')).toBe(screen.getByTestId("composer-area"));
     expect(screen.getByTestId("composer-input")).toBe(editor);
     expect(editor.textContent).toBe("Keep this draft");
 

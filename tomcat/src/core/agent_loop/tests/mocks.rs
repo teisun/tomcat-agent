@@ -368,7 +368,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
 /// 第一次 `read_file` 时向共享的 steering_queue 推入 Steering，用于测试
 /// "工具执行后 steering 注入即刻跳过剩余工具"分支（tool_dispatcher 的核心契约）。
 pub(super) struct SteerableMockPrimitive {
-    pub(super) steering_queue: Arc<parking_lot::Mutex<Vec<ChatMessage>>>,
+    pub(super) steering_queue: Arc<parking_lot::Mutex<crate::core::agent_loop::SteeringInbox>>,
     pub(super) read_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 

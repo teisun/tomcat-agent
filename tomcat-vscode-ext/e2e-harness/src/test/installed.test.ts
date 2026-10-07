@@ -4,6 +4,9 @@ import * as vscode from "vscode";
 
 const repoRoot = path.resolve(__dirname, "../../../");
 type HostE2eHelper = {
+  assertMessageQueueDocksFlow(api: unknown): Promise<void>;
+  assertPlanPreviewTablesFlow(api: unknown): Promise<void>;
+  assertSessionFilesDockFlow(api: unknown): Promise<void>;
   assertWebviewPlanModeSwitchFlow(api: unknown): Promise<void>;
   assertWebviewAnswerCardFlow(api: unknown): Promise<void>;
   assertWebviewQuestionDisconnectFlow(api: unknown): Promise<void>;
@@ -271,6 +274,19 @@ suite("Installed Tomcat extension", () => {
       "a slow but healthy handshake must not be treated as a startup crash",
     );
     await captureStartupCheckpoint("slow-handshake-ready");
+  });
+
+  test("message queue docks in the installed webview", async function () {
+    this.timeout(180_000);
+    await hostE2e.assertMessageQueueDocksFlow(await hostE2e.getTomcatExtensionApi());
+  });
+  test("plan preview tables in the installed webview", async function () {
+    this.timeout(120_000);
+    await hostE2e.assertPlanPreviewTablesFlow(await hostE2e.getTomcatExtensionApi());
+  });
+  test("session files dock in the installed webview", async function () {
+    this.timeout(90_000);
+    await hostE2e.assertSessionFilesDockFlow(await hostE2e.getTomcatExtensionApi());
   });
 
   test("switches an executing plan back to chat in the webview", async () => {

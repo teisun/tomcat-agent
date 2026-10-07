@@ -57,6 +57,12 @@ fn serve_dts_includes_user_message_id_on_message_params() {
     assert!(dts.contains("export interface ServeMessageParams {"));
     assert!(dts.contains("segments?: ServeContentSegment[];"));
     assert!(dts.contains("userMessageId?: null | string;"));
+    assert!(dts.contains("onlyIfRunning?:"));
+    assert!(dts.contains("agentMode?:"));
+    assert!(dts.contains("model?:"));
+    assert!(dts.contains("type: \"steering_consumed\";"));
+    assert!(dts.contains("userMessageIds: string[];"));
+    assert!(dts.contains("outcome: AgentIdleOutcome;"));
 }
 
 #[test]
@@ -204,7 +210,9 @@ fn serve_emitted_event_validates_against_generated_schema() {
         .expect("agent_end sample"),
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
-            event: AgentEvent::AgentIdle,
+            event: AgentEvent::AgentIdle {
+                outcome: crate::infra::events::AgentIdleOutcome::Completed,
+            },
         })
         .expect("agent_idle sample"),
         serde_json::to_value(WireEvent {

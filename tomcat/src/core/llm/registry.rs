@@ -20,6 +20,24 @@ use crate::infra::error::AppError;
 use super::auth::Credential;
 use super::catalog::ModelEntry;
 use super::provider::LlmProvider;
+use tokio::sync::Semaphore;
+
+/// Connection resources shared by models on one route within one resolver.
+/// Model capabilities and learned compatibility stay in the model's provider.
+pub(crate) struct ProviderRoute {
+    pub client: reqwest::Client,
+    pub semaphore: Option<Arc<Semaphore>>,
+}
+
+impl ProviderRoute {
+    pub fn new(runtime: &LlmRuntimeConfig) -> Result<Self, AppError> {
+        Ok(Self {
+            client: super::http_client::build_http_client(runtime, None)?,
+            semaphore: (runtime.max_concurrent_requests > 0)
+                .then(|| Arc::new(Semaphore::new(runtime.max_concurrent_requests as usize))),
+        })
+    }
+}
 
 #[path = "openai.rs"]
 mod openai;
@@ -35,8 +53,12 @@ use anthropic::AnthropicProvider;
 use openai::OpenAiProvider;
 use openai_responses::OpenAiResponsesProvider;
 
-type ProviderCtor =
-    fn(&ModelEntry, &LlmRuntimeConfig, &Credential) -> Result<Arc<dyn LlmProvider>, AppError>;
+type ProviderCtor = fn(
+    &ModelEntry,
+    &LlmRuntimeConfig,
+    &Credential,
+    &ProviderRoute,
+) -> Result<Arc<dyn LlmProvider>, AppError>;
 
 /// 已注册 Provider 列表；新增条目即扩展，无需改其他位置。
 const PROVIDERS: &[(&str, ProviderCtor)] = &[
@@ -49,17 +71,21 @@ fn build_openai_completions(
     entry: &ModelEntry,
     runtime: &LlmRuntimeConfig,
     credential: &Credential,
+    route: &ProviderRoute,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
-    Ok(Arc::new(OpenAiProvider::new(entry, runtime, credential)?))
+    Ok(Arc::new(OpenAiProvider::with_route(
+        entry, runtime, credential, route,
+    )?))
 }
 
 fn build_openai_responses(
     entry: &ModelEntry,
     runtime: &LlmRuntimeConfig,
     credential: &Credential,
+    route: &ProviderRoute,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
-    Ok(Arc::new(OpenAiResponsesProvider::new(
-        entry, runtime, credential,
+    Ok(Arc::new(OpenAiResponsesProvider::with_route(
+        entry, runtime, credential, route,
     )?))
 }
 
@@ -67,21 +93,23 @@ fn build_anthropic_messages(
     entry: &ModelEntry,
     runtime: &LlmRuntimeConfig,
     credential: &Credential,
+    route: &ProviderRoute,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
-    Ok(Arc::new(AnthropicProvider::new(
-        entry, runtime, credential,
+    Ok(Arc::new(AnthropicProvider::with_route(
+        entry, runtime, credential, route,
     )?))
 }
 
 /// 按 `entry.api` 字符串查表构造 [`Arc<dyn LlmProvider>`]；未知 id 返回 [`AppError::Config`]
 /// 并列出当前已注册的 id 集合，便于用户排查 `models.toml` 中的 `api = ?`。
-pub fn build_provider(
+pub(crate) fn build_provider_with_route(
     entry: &ModelEntry,
     runtime: &LlmRuntimeConfig,
     credential: &Credential,
+    route: &ProviderRoute,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
     match PROVIDERS.iter().find(|(id, _)| *id == entry.api) {
-        Some((_, ctor)) => ctor(entry, runtime, credential),
+        Some((_, ctor)) => ctor(entry, runtime, credential, route),
         None => Err(AppError::Config(format!(
             "未知模型 `{}` 的 api = {:?}; 已注册: {:?}",
             entry.id,
@@ -89,6 +117,14 @@ pub fn build_provider(
             PROVIDERS.iter().map(|(id, _)| *id).collect::<Vec<_>>()
         ))),
     }
+}
+
+pub fn build_provider(
+    entry: &ModelEntry,
+    runtime: &LlmRuntimeConfig,
+    credential: &Credential,
+) -> Result<Arc<dyn LlmProvider>, AppError> {
+    build_provider_with_route(entry, runtime, credential, &ProviderRoute::new(runtime)?)
 }
 
 /// 已注册的 wire api id 集合（供测试与文档/工具引用，避免在外部硬编码）。

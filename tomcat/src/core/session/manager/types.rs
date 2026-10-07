@@ -210,7 +210,9 @@ impl PlanEventRef {
 ///
 /// 计划文件的 `planning` / `pending` / `executing` / `completed` 生命周期不属于会话
 /// 模式；它由计划文件 frontmatter 的 `state` 表达。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMode {
     /// `exec` 是 v2 sidecar 里已经落盘的旧值。它在新模型里等价于 Chat：

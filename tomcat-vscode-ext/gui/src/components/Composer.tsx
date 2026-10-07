@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type ReactNode,
 } from "react";
 
 import { Node as TiptapNode, type JSONContent } from "@tiptap/core";
@@ -456,9 +457,18 @@ function sameDraft(left: ComposerDraft, right: ComposerDraft): boolean {
 }
 
 export interface ComposerProps {
+  /** Optional presentation only; all compose locations keep the same surface. */
+  header?: ReactNode;
+  beforeEditor?: ReactNode;
   instanceId?: string;
   initialDraft?: ComposerDraft;
   onCancelEdit?(): void;
+  allowBusyInput?: boolean;
+  submitAriaLabel?: string;
+  hideDragHint?: boolean;
+  submitDisabled?: boolean;
+  hasAttachments?: boolean;
+  attachmentsPending?: boolean;
   availableModelDetails?: Record<string, ModelPickerModel>;
   availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
@@ -502,12 +512,20 @@ export interface ComposerProps {
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
   instanceId = "",
+  header,
+  beforeEditor,
   initialDraft,
   onCancelEdit,
   availableModelDetails,
   availableModelReasoningLevels,
   availableModels,
   busy = false,
+  allowBusyInput = false,
+  submitAriaLabel,
+  hideDragHint = false,
+  submitDisabled = false,
+  hasAttachments = false,
+  attachmentsPending = false,
   slashCommands = [],
   instructionCatalog = [],
   onSlashOpen,
@@ -593,12 +611,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onQueryChange: onContextSearchQueryChange,
   };
   const latestHandlersRef = useRef({
-    canPrompt,
+    canPrompt: canPrompt && (!busy || allowBusyInput) && !submitDisabled && !attachmentsPending,
     onDraftChange,
     onSubmit,
   });
   latestHandlersRef.current = {
-    canPrompt,
+    canPrompt: canPrompt && (!busy || allowBusyInput) && !submitDisabled && !attachmentsPending,
     onDraftChange,
     onSubmit,
   };
@@ -708,7 +726,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             !event.shiftKey &&
             !isComposingRef.current &&
             !event.isComposing &&
-            latestHandlersRef.current.canPrompt
+            latestHandlersRef.current.canPrompt &&
+            draftRef.current.hasContent
           ) {
             event.preventDefault();
             latestHandlersRef.current.onSubmit();
@@ -1054,7 +1073,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         tone: "warning",
       }
     : null;
-  const dragNotice: ComposerNotice | null = !warningNotice && canPrompt
+  const dragNotice: ComposerNotice | null = !hideDragHint && !warningNotice && canPrompt
     ? dropActive
       ? {
           id: "drag",
@@ -1075,6 +1094,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     : null;
   const hasNotice = Boolean(warningNotice || dragNotice || planNotice || commandPending);
+  // Content presence selects the action; validation only enables/disables Send.
+  // Keep the legacy Stop-only behavior when an older server cannot queue input.
+  const hasInput = draft.hasContent || hasAttachments || attachmentsPending;
+  const showStop = busy && (!allowBusyInput || !hasInput);
+  const submitName = submitAriaLabel ?? (busy ? "Queue message" : "Send prompt");
 
   return (
     <section className="tc-composer" aria-label="prompt" data-testid={testId("composer")} onKeyDown={(event) => {
@@ -1091,6 +1115,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >
+        {header ? <header className="tc-composer__header">{header}</header> : null}
+        <div className="tc-composer__body">
         {hasNotice ? (
           <div className="tc-composer__notices" role="status" aria-live="polite" data-testid={testId("composer-notices")}>
             {commandPending && <span className="tc-notice tc-notice--info" data-testid={testId("composer-notice-command")}>命令处理中，请稍候…</span>}
@@ -1124,6 +1150,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
           </div>
         ) : null}
+        {beforeEditor}
         <ContextSearchDropdown
           ref={contextSearchDropdownRef}
           loading={contextSearchLoading}
@@ -1235,12 +1262,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </span>
 
           <button
-            aria-label={busy ? (stopping ? "Stopping…" : "Stop") : "Send prompt"}
+            aria-label={showStop ? (stopping ? "Stopping…" : "Stop") : submitName}
+            title={showStop ? (stopping ? "正在停止…" : "停止当前任务") : submitAriaLabel ?? (busy ? "加入待发队列" : "发送消息")}
             className="tc-send-button"
-            data-testid={testId(busy ? "stop-button" : "send-button")}
-            disabled={busy ? !canInterrupt || stopping : !draft.hasContent || !canPrompt}
+            data-testid={testId(showStop ? "stop-button" : "send-button")}
+            disabled={showStop ? !canInterrupt || stopping : !draft.hasContent || !canPrompt || submitDisabled || attachmentsPending}
             onClick={
-              busy
+              showStop
                 ? () => {
                     if (stopping) return;
                     setStopping(true);
@@ -1250,14 +1278,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             }
             type="button"
           >
-            {busy && stopping ? (
+            {showStop && stopping ? (
               "Stopping…"
-            ) : busy ? (
+            ) : showStop ? (
               <span aria-hidden="true" className="tc-stop-square" data-testid={testId("stop-glyph")} />
             ) : (
               "↑"
             )}
           </button>
+        </div>
         </div>
       </div>
     </section>

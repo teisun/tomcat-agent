@@ -141,6 +141,7 @@ export interface TomcatExtensionApi {
       composerFooterPlanStatus: string | null;
       composerPlanStatusInBarCount: number;
       composerRowCount: number;
+      composerText?: string | null;
       ctxLabel: string | null;
       disabledTestIds: string[];
       expandedThinkingCount: number;

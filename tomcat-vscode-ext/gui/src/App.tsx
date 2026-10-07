@@ -24,6 +24,7 @@ import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { SessionDock } from "./components/SessionDock";
+import { MessageQueueDock, QueuedMessageEditor } from "./components/MessageQueueDock";
 import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
 import type { Speed } from "../../src/shared/modelSpeed";
@@ -370,13 +371,14 @@ function resolvePendingComposerSubmission(
   snapshot: WebviewStateSnapshot,
   pending: PendingComposerSubmission,
 ): {
-  message: WebviewMessageBlock;
+  message?: WebviewMessageBlock;
   sessionId: string;
 } | null {
   const candidateSessionIds = pending.sessionId
     ? [pending.sessionId]
     : Object.keys(snapshot.sessionViews);
   for (const sessionId of candidateSessionIds) {
+    if (snapshot.sessionViews[sessionId]?.messageQueue?.items.some(item => item.userMessageId === pending.messageId)) return { sessionId };
     const message = snapshot.sessionViews[sessionId]?.timeline.find(
       (item): item is WebviewMessageBlock =>
         item.type === "message" && item.kind === "user" && item.id === pending.messageId,
@@ -1263,8 +1265,9 @@ function submitPrompt(
   onSubmitted: (pending: PendingComposerSubmission) => void,
   slashNames: readonly string[],
   hasAttachments: boolean,
+  captured?: { draft: ComposerDraft; attachmentIds: string[] },
 ): void {
-  const draft = composer?.getDraft() ?? EMPTY_DRAFT;
+  const draft = captured?.draft ?? composer?.getDraft() ?? EMPTY_DRAFT;
   if (!canPrompt || !draft.hasContent) {
     return;
   }
@@ -1287,6 +1290,7 @@ function submitPrompt(
     segments: draft.segments,
     text: draft.text,
     userMessageId,
+    ...(captured ? { attachmentIds: captured.attachmentIds } : {}),
   });
 }
 
@@ -1328,8 +1332,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const composerRef = useRef<ComposerHandle | null>(null);
   const receivedReferenceIdsRef = useRef(new Map<string, Set<string>>());
   const composerWorkRegistryRef = useRef(new ComposerWorkRegistry());
+  const [, refreshComposerWork] = useState(0);
+  function beginComposerWork(sessionId: string, kind: "picker" | "paste" | "drop") {
+    const ticket = composerWorkRegistryRef.current.begin(sessionId, kind);
+    refreshComposerWork(value => value + 1);
+    return ticket;
+  }
+  function completeComposerWork(operationId: string) {
+    if (composerWorkRegistryRef.current.complete(operationId)) refreshComposerWork(value => value + 1);
+  }
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
-  const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
+  const pendingComposerSubmissionRef = useRef(new Map<string, PendingComposerSubmission>());
+  const preparingSubmissionsRef = useRef(new Map<string, { cutoff: number; ids: Set<string>; attachmentIds: Set<string>; references: WebviewReference[]; error?: string }>());
+  useEffect(() => () => { preparingSubmissionsRef.current.clear(); }, []);
   const pendingDraftSyncRef = useRef(new Map<string, ComposerDraft>());
   const draftSyncTimerRef = useRef(new Map<string, number>());
   /** What the host was last told, per session, so identical drafts are not resent. */
@@ -1518,12 +1533,22 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const commandPending = activeSession?.commandPending === true;
-  const canPrompt = state.ready && !activeSession?.busy && !commandPending && !draftForkFeedback.pending;
+  const queueEditingItem = state.messageQueueSupported ? activeSession?.messageQueue?.items.find(item => item.userMessageId === activeSession.messageQueue?.editingId && item.status === "queued") : undefined;
+  const previousQueueEditor = useRef<{ sessionId?: string; id?: string }>({});
+  useEffect(() => {
+    const previous = previousQueueEditor.current;
+    previousQueueEditor.current = { sessionId: activeSession?.sessionId, id: queueEditingItem?.userMessageId };
+    if (previous.id && !queueEditingItem && previous.sessionId === activeSession?.sessionId) {
+      document.querySelector<HTMLElement>('[data-testid="composer-input"]')?.focus();
+    }
+  }, [activeSession?.sessionId, queueEditingItem?.userMessageId]);
+  const canPrompt = state.ready && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
   const canInterrupt = state.ready;
   const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending;
   const modelAdminSupported = state.modelAdminSupported;
-  const activeModelCapabilities = activeSession?.model
-    ? state.availableModelCapabilities?.[activeSession.model]
+  const composerModelId = activeSession?.composerConfig?.model ?? activeSession?.model;
+  const activeModelCapabilities = composerModelId
+    ? state.availableModelCapabilities?.[composerModelId]
     : undefined;
   const activeSessionContextWindow = activeSession?.model
     ? state.availableModelDetails?.[activeSession.model]?.selectedContextWindow
@@ -1783,47 +1808,24 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [activeSession?.sessionId, contextSearch.open, contextSearch.query, vscodeApi]);
 
   useEffect(() => {
-    const pending = pendingComposerSubmissionRef.current;
-    if (!pending) {
-      return;
-    }
-    const resolved = resolvePendingComposerSubmission(state, pending);
-    if (!resolved || resolved.message.deliveryState === "pending") {
-      return;
-    }
-    pendingComposerSubmissionRef.current = null;
-    if (resolved.message.deliveryState === "failed") {
-      return;
-    }
-
-    // Confirmation can arrive while another session is on screen. Retire the submitted
-    // session's local cache first; otherwise a later switch would resurrect sent input.
-    const stored = localComposerDraftsRef.current.get(resolved.sessionId);
-    const isSubmittedRevisionCurrent =
-      (localDraftRevisionsRef.current.get(resolved.sessionId) ?? 0) === pending.revision;
-    if (stored && isSubmittedRevisionCurrent && draftsEqual(stored, pending.draft)) {
-      localComposerDraftsRef.current.delete(resolved.sessionId);
-      syncedDraftRef.current.delete(resolved.sessionId);
-      pendingDraftSyncRef.current.delete(resolved.sessionId);
-      const timer = draftSyncTimerRef.current.get(resolved.sessionId);
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-        draftSyncTimerRef.current.delete(resolved.sessionId);
+    for (const [id, pending] of pendingComposerSubmissionRef.current) {
+      const resolved = resolvePendingComposerSubmission(state, pending);
+      if (!resolved || resolved.message?.deliveryState === "pending") continue;
+      pendingComposerSubmissionRef.current.delete(id);
+      if (resolved.message?.deliveryState === "failed") continue;
+      const stored = localComposerDraftsRef.current.get(resolved.sessionId);
+      const current = (localDraftRevisionsRef.current.get(resolved.sessionId) ?? 0) === pending.revision;
+      if (stored && current && draftsEqual(stored, pending.draft)) {
+        localComposerDraftsRef.current.delete(resolved.sessionId);
+        syncedDraftRef.current.delete(resolved.sessionId);
+        pendingDraftSyncRef.current.delete(resolved.sessionId);
+        const timer = draftSyncTimerRef.current.get(resolved.sessionId);
+        if (timer !== undefined) { window.clearTimeout(timer); draftSyncTimerRef.current.delete(resolved.sessionId); }
       }
-    }
-
-    if (!isSubmittedRevisionCurrent || state.activeSessionId !== resolved.sessionId) {
-      return;
-    }
-    const composer = composerRef.current;
-    if (!composer || !draftsEqual(composer.getDraft(), pending.draft)) {
-      return;
-    }
-    applyingBackendDraftRef.current = true;
-    try {
-      composer.clear();
-    } finally {
-      applyingBackendDraftRef.current = false;
+      const composer = composerRef.current;
+      if (!current || state.activeSessionId !== resolved.sessionId || !composer || !draftsEqual(composer.getDraft(), pending.draft)) continue;
+      applyingBackendDraftRef.current = true;
+      try { composer.clear(); } finally { applyingBackendDraftRef.current = false; }
     }
   }, [state]);
 
@@ -1920,6 +1922,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         return;
       }
       if (frame.channel === "event") {
+        if (isRecord(frame.content) && frame.content.type === "composerSubmissionResult" && frame.content.accepted === false && typeof frame.content.userMessageId === "string") {
+          pendingComposerSubmissionRef.current.delete(frame.content.userMessageId);
+          return;
+        }
         const insertions = isInsertReferenceEvent(frame.content)
           ? {
               references: [frame.content.reference],
@@ -2070,7 +2076,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           "operationId" in frame.content &&
           typeof frame.content.operationId === "string"
         ) {
-          composerWorkRegistryRef.current.complete(frame.content.operationId);
+          for (const prep of preparingSubmissionsRef.current.values()) {
+            if (!prep.ids.has(frame.content.operationId)) continue;
+            if ("error" in frame.content && typeof frame.content.error === "string") prep.error = frame.content.error;
+            if ("attachmentIds" in frame.content && Array.isArray(frame.content.attachmentIds)) for (const id of frame.content.attachmentIds) if (typeof id === "string") prep.attachmentIds.add(id);
+            if ("references" in frame.content && Array.isArray(frame.content.references)) prep.references.push(...frame.content.references.filter(isWebviewReference));
+          }
+          completeComposerWork(frame.content.operationId);
           return;
         }
         if (
@@ -2326,7 +2338,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   );
   const handleRetryUserMessage = useCallback(
     (messageId: string) => {
-      if (!activeSession?.sessionId || !canPrompt) {
+      if (!activeSession?.sessionId || !canPrompt || activeSession.busy) {
         return;
       }
       postIntent(vscodeApi, "retryUserMessage", {
@@ -2334,11 +2346,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         sessionId: activeSession.sessionId,
       });
     },
-    [activeSession?.sessionId, canPrompt, vscodeApi],
+    [activeSession?.sessionId, activeSession?.busy, canPrompt, vscodeApi],
   );
   const handleRecoverErrorTurn = useCallback(
     (errorId: string, action: "resume" | "retry") => {
-      if (!activeSession?.sessionId || !canPrompt) {
+      if (!activeSession?.sessionId || !canPrompt || activeSession.busy) {
         return;
       }
       postIntent(vscodeApi, "recoverErrorTurn", {
@@ -2347,7 +2359,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         sessionId: activeSession.sessionId,
       });
     },
-    [activeSession?.sessionId, canPrompt, vscodeApi],
+    [activeSession?.sessionId, activeSession?.busy, canPrompt, vscodeApi],
   );
   const handleOpenImagePreview = useCallback(
     (imageId: string) => {
@@ -2598,6 +2610,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     availableModels: state.availableModels,
     busy: !!activeSession?.busy,
     canInterrupt,
+    allowBusyInput: !!state.messageQueueSupported,
+    attachmentsPending: !!activeSession && composerWorkRegistryRef.current.pendingCount(activeSession.sessionId) > 0,
     canPrompt: canPrompt && !editingMessage,
     slashCommands: state.slashCommands,
     instructionCatalog: activeSession?.instructionCatalog,
@@ -2607,19 +2621,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     contextSearchMatches: contextSearch.matches,
     contextSearchQuery: contextSearch.query,
     contextSearchTruncated: contextSearch.truncated,
-    contextWindowValue: activeSessionContextWindow,
+    contextWindowValue: composerModelId && composerModelId !== activeSession?.model ? state.availableModelDetails?.[composerModelId]?.selectedContextWindow : activeSessionContextWindow,
     contextLabel: buildContextLabel(activeSession?.contextRatio),
     modelCapabilities: activeModelCapabilities,
-    modeValue: currentModeValue(activeSession?.agentMode),
-    modelValue: activeSession?.model ?? "",
-    thinkingLevelValue: activeSession?.thinkingLevel ?? "",
+    modeValue: currentModeValue(activeSession?.composerConfig?.agentMode ?? activeSession?.agentMode),
+    modelValue: activeSession?.composerConfig?.model ?? activeSession?.model ?? "",
+    thinkingLevelValue: composerModelId && composerModelId !== activeSession?.model ? state.availableModelDetails?.[composerModelId]?.selectedReasoningLevel ?? "" : activeSession?.thinkingLevel ?? "",
     onContextSearchClose: handleContextSearchClose,
     onContextSearchOpen: handleContextSearchOpen,
     onContextSearchQueryChange: handleContextSearchQueryChange,
     onPickContext: () => {
       const sessionId = stateRef.current.activeSessionId;
       if (!sessionId) return;
-      const ticket = composerWorkRegistryRef.current.begin(sessionId, "picker");
+      const ticket = beginComposerWork(sessionId, "picker");
       postIntent(vscodeApi, "pickContext", { operationId: ticket.operationId, sessionId });
     },
     onContextWindowChange: handleSetContextWindow,
@@ -2638,22 +2652,45 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     onPrepareAttachments: (work) => {
       const sessionId = stateRef.current.activeSessionId;
       if (!sessionId) return;
-      const ticket = composerWorkRegistryRef.current.begin(sessionId, "paste");
+      const ticket = beginComposerWork(sessionId, "paste");
       void work.then((files) => postIntent(vscodeApi, "attachFiles", {files, operationId:ticket.operationId, sessionId}))
-        .catch(() => composerWorkRegistryRef.current.complete(ticket.operationId));
+        .catch(error => {
+          const prep = preparingSubmissionsRef.current.get(sessionId);
+          if (prep?.ids.has(ticket.operationId)) prep.error = error instanceof Error ? error.message : String(error);
+          completeComposerWork(ticket.operationId);
+        });
     },
     onResolveDrop: (uris) => {
       const sessionId = stateRef.current.activeSessionId;
       if (!sessionId) return;
-      const ticket = composerWorkRegistryRef.current.begin(sessionId, "drop");
+      const ticket = beginComposerWork(sessionId, "drop");
       postIntent(vscodeApi, "resolveDrop", { operationId:ticket.operationId, sessionId, uris });
     },
     onInterrupt: () => { if (activeSession) postIntent(vscodeApi, "interrupt", {sessionId:activeSession.sessionId}); },
     onSubmit: () => {
+      const sessionId = activeSession?.sessionId;
+      if (!canPrompt || editingMessage || queueEditingItem || (sessionId && preparingSubmissionsRef.current.has(sessionId)) || [...pendingComposerSubmissionRef.current.values()].some(pending => pending.sessionId === sessionId)) return;
+      const clicked = composerRef.current?.getDraft() ?? EMPTY_DRAFT;
       flushComposerDraft();
-      submitPrompt(vscodeApi, composerRef.current, activeSession?.sessionId, canPrompt && !editingMessage, (pending) => {
-        pendingComposerSubmissionRef.current = {...pending, revision: pending.sessionId ? localDraftRevisionsRef.current.get(pending.sessionId) ?? 0 : 0};
-      }, state.slashCommands?.map((c) => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0);
+      const submit = (captured?: { draft: ComposerDraft; attachmentIds: string[] }) => submitPrompt(vscodeApi, composerRef.current, sessionId, true, pending => {
+        pendingComposerSubmissionRef.current.set(pending.messageId, { ...pending, revision: sessionId ? localDraftRevisionsRef.current.get(sessionId) ?? 0 : 0 });
+      }, state.slashCommands?.map(c => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0, captured);
+      const cutoff = sessionId ? composerWorkRegistryRef.current.cutoff(sessionId) : 0;
+      const ids = sessionId ? composerWorkRegistryRef.current.pendingIds(sessionId, cutoff) : [];
+      if (!state.messageQueueSupported || !sessionId || !ids.length) { submit(); return; }
+      const prep = { cutoff, ids: new Set(ids), attachmentIds: new Set(activeSession.pendingAttachments.map(a => a.id)), references: [] as WebviewReference[], error: undefined as string | undefined };
+      preparingSubmissionsRef.current.set(sessionId, prep);
+      void composerWorkRegistryRef.current.waitForCutoff(sessionId, cutoff).then(() => {
+        if (preparingSubmissionsRef.current.get(sessionId) !== prep) return;
+        preparingSubmissionsRef.current.delete(sessionId);
+        if (prep.error || composerWorkRegistryRef.current.pendingIds(sessionId, cutoff).length) {
+          setImageAttachmentFeedback({ hasErrors: true, message: prep.error ?? "附件或引用尚未准备完成，请完成后重新发送。", seq: ++attachmentFeedbackSeqRef.current });
+          return;
+        }
+        const segments = [...clicked.segments];
+        for (const reference of prep.references) segments.push(reference, { type: "text", text: " " });
+        submit({ draft: { segments, text: draftTextFromSegments(segments), hasContent: clicked.hasContent || !!prep.attachmentIds.size || !!prep.references.length }, attachmentIds: [...prep.attachmentIds] });
+      });
     },
     planState: activeSession?.activePlan?.state,
     attachments: activeSession?.pendingAttachments ?? [],
@@ -2741,7 +2778,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession.historyLoading ||
             activeSession.hasMoreHistory ? (
               <TranscriptView
-                onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending
+                onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending && !queueEditingItem
                   ? handleEditUserMessage : undefined}
                 renderUserEditor={(message) => editingMessage?.id === message.id ? (
                   <InlineMessageEditor
@@ -2868,11 +2905,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           planState={activeSession?.activePlan?.state}
           planTodos={activeSession?.planTodos ?? []}
           sessionTodos={activeSession?.sessionTodos ?? []}
+          messages={state.messageQueueSupported && activeSession?.messageQueue?.items.length ? <MessageQueueDock sessionId={activeSession.sessionId} queue={activeSession.messageQueue} busy={activeSession.busy} composerProps={composerProps} vscodeApi={vscodeApi} /> : undefined}
           files={state.sessionFilesSupported ? activeSession?.sessionFiles : undefined}
           onIntent={(intent) => vscodeApi.postMessage(intent)}
         />
         <div className="tc-footer__composer" data-testid="composer-area">
-          <ComposerSurface {...composerProps} ref={composerRef} />
+          <div className="tc-main-composer" hidden={!!queueEditingItem} data-testid="main-composer-draft">
+            <ComposerSurface {...composerProps} canPrompt={composerProps.canPrompt && !queueEditingItem} ref={composerRef} />
+          </div>
+          {queueEditingItem && activeSession ? <QueuedMessageEditor
+            key={`${activeSession.sessionId}:${queueEditingItem.userMessageId}`}
+            item={queueEditingItem} sessionId={activeSession.sessionId} composerProps={composerProps} vscodeApi={vscodeApi}
+            action={(action, data) => postIntent(vscodeApi, "queueAction", { ...data, sessionId: activeSession.sessionId, userMessageId: queueEditingItem.userMessageId, action })}
+          /> : null}
         </div>
       </div>
     </main>

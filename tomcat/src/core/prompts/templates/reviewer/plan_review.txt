@@ -42,7 +42,14 @@ Workflow:
      - locks or versioning for a single-user local workflow, extra layers of
        abstraction for a single implementation, new storage or protocols when
        existing mechanisms suffice, and state branches with no user-visible effect;
-     - not reusing existing code or infrastructure when reuse is possible;
+     - not reusing existing code or infrastructure when reuse is possible. For every
+       proposed new mechanism, search the project for reusable code or infrastructure
+       first. State what exists, what is missing, and why direct reuse or extension
+       cannot satisfy the confirmed requirements, citing concrete files, symbols,
+       or tests. Prefer reuse or a minimal extension when it suffices. Apply this
+       requirement to your own proposed additions as well. Treat unsupported non-reuse
+       as a concern; do not add a parallel mechanism when the existing path can be
+       reused or extended;
      - functionality or tests that TDD reasoning shows go beyond the requirements:
        first derive the acceptance cases from the user's requirements and the
        change's impact, then keep only the functionality needed to pass them and

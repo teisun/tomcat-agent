@@ -77,6 +77,7 @@ import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
 import { HostDraftCoordinator } from "./hostDraftCoordinator";
+import { MessageQueue, type ComposerConfig, type QueueContent } from "./messageQueue";
 import { buildFileReference } from "./contextReferences";
 import { TomcatSessionPool } from "./sessionPool";
 import {
@@ -559,6 +560,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    */
   private readonly draftStore: ComposerDraftStore;
   private readonly draftCoordinator = new HostDraftCoordinator();
+  private readonly messageQueue: MessageQueue;
   private readonly pendingDraftForks = new Map<string, PendingDraftForkOperation>();
   private readonly pendingDraftForkBySource = new Map<string, PendingDraftForkOperation>();
   /**
@@ -630,6 +632,25 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         new ComposerDraftStore(vscode.Uri.joinPath(deps.extensionUri, ".drafts"));
     this.sessionPool = new TomcatSessionPool(deps.sessionRouter);
     this.stateStore = new WebviewStateStore();
+    this.messageQueue = new MessageQueue({
+      conditions: (sessionId) => {
+        const session = this.peekState().sessionViews[sessionId];
+        return { busy: !!session?.busy, commandPending: !!session?.commandPending,
+          enabled: this.messageQueueEnabled && !this.disposed && !!session && !this.closedFileSessions.has(sessionId)
+            && !["failed", "reconnecting"].includes(this.serveConnectionStatus) };
+      },
+      send: (sessionId, kind, content, config) => this.sendQueueInput(sessionId, kind, content, config),
+      changed: (sessionId) => { void this.broadcastSession(sessionId, { force: true }); },
+      confirmed: (sessionId, content, kind) => {
+        this.stateStore.appendLocalUserMessage(sessionId, content.text, {
+          attachments: content.attachments.map(a => this.toAttachmentView(a)),
+          messageId: content.userMessageId, segments: content.segments, submitKind: kind,
+        });
+        this.stateStore.markLocalUserMessageConfirmed(sessionId, content.userMessageId);
+      },
+      failed: (sessionId, error) => { this.stateStore.appendMessage(sessionId, "error", displayDeliveryError(error)); },
+      interrupt: (sessionId) => { void this.deps.messenger.request({ type: "interrupt", sessionId }).catch(error => console.error("Tomcat interrupt failed", error)); },
+    });
     if (typeof vscode.workspace.onDidSaveTextDocument === "function") {
       this.fileSubscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
         if (document.uri.scheme !== "file") return;
@@ -734,6 +755,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * so a recycled ID cannot point to stale transcript or model state.
    */
   async refreshAfterServeRestart(): Promise<void> {
+    this.messageQueue.reset();
     this.fileGeneration += 1;
     this.fileRefreshes.clear();
     this.closedFileSessions.clear();
@@ -850,6 +872,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    */
   async setServeConnectionState(status: ServeConnectionStatus): Promise<void> {
     this.serveConnectionStatus = status;
+    if (status === "reconnecting" || status === "failed") this.messageQueue.reset();
     // `initialize()` can resolve before its supervisor notification has been delivered. If
     // bootstrap then fails, that delayed `ready` notification must not erase the user-visible
     // degraded state. A reconnecting/failed notification still clears it, and a successful
@@ -999,7 +1022,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   currentState() {
-    return this.decorateStateSnapshot(this.stateStore.snapshot());
+    return this.projectCurrentDrafts(this.decorateStateSnapshot(this.stateStore.snapshot()));
   }
 
   clearObservedWebviewErrors(): void {
@@ -1029,6 +1052,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     session: WebviewStateSnapshot["sessionViews"][string],
   ): WebviewStateSnapshot["sessionViews"][string] {
+    if (this.messageQueueEnabled) {
+      const queue = this.messageQueue.view(sessionId);
+      session = { ...session, busy: session.busy || this.messageQueue.isRunning(sessionId),
+        composerConfig: this.composerConfig(sessionId),
+        messageQueue: { paused: queue.paused, editingId: queue.editingId,
+          items: queue.items.map(item => {
+            const missing = new Set(this.markMissingAttachments(item.attachments).missing.map(a => a.id));
+            return { ...item, attachments: item.attachments.map(attachment => this.toPendingView(attachment, missing.has(attachment.id))) };
+          }),
+        },
+      };
+    }
     if (!this.draftStore.trackedSessions().includes(sessionId)) {
       return session;
     }
@@ -1051,7 +1086,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.projectCurrentDraft(sessionId, session),
       ]),
     );
-    return { ...snapshot, sessionViews, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend"), sessionFilesSupported: !!this.initialized && hasServeCapability(this.initialized, "session_files") };
+    return { ...snapshot, sessionViews, messageQueueSupported: this.messageQueueEnabled, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend"), sessionFilesSupported: !!this.initialized && hasServeCapability(this.initialized, "session_files") };
   }
 
   private findToolCard(
@@ -1100,7 +1135,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     uris: readonly vscode.Uri[],
     editOperationId?: string,
-  ): Promise<void> {
+  ): Promise<{ attachmentIds: string[]; references: WebviewReference[]; error?: string } | undefined> {
     const resolved: ResolvedPickedUri[] = [];
     const errors: string[] = [];
     for (const uri of uris) {
@@ -1144,6 +1179,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     // frame, it cannot be superseded by updates from another session.
     await this.postSessionView(sessionId);
     await this.reportAttachmentOutcome(accepted, errors);
+    return { attachmentIds: accepted.map(a => a.id), references: insertedReferences, error: errors.length ? errors.join("; ") : undefined };
   }
 
   /**
@@ -1301,6 +1337,62 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     } catch (error) {
       console.warn(`Tomcat could not refresh instructions for ${sessionId}`, error);
     }
+  }
+
+  private get messageQueueEnabled(): boolean { return !!this.initialized && hasServeCapability(this.initialized, "message_queue"); }
+
+  private composerConfig(sessionId: string): ComposerConfig {
+    const session = this.peekState().sessionViews[sessionId];
+    return this.messageQueue.config(sessionId, { agentMode: session?.agentMode === "plan" ? "plan" : "chat", model: session?.model ?? "" });
+  }
+
+  /** Shared wire construction, with no active-session or draft side effects. */
+  private sendQueueInput(sessionId: string, kind: UserSubmitKind, content: QueueContent, config?: ComposerConfig) {
+    const nextConfig = config ?? this.composerConfig(sessionId);
+    return this.deps.messenger.request({
+      type: kind, sessionId, text: content.text,
+      params: {
+        userMessageId: content.userMessageId,
+        segments: content.segments.map(({ occurrenceId: _occurrence, ...wire }) => wire),
+        attachments: content.attachments.map(a => ({ blobSha: a.blobSha, providerSha: a.providerSha ?? null,
+          kind: a.kind, filename: a.filename, mimeType: a.mimeType })),
+        ...(kind === "steer" ? { onlyIfRunning: true } : {
+          agentMode: nextConfig.agentMode, ...(nextConfig.model ? { model: nextConfig.model } : {}),
+        }),
+      },
+    });
+  }
+
+  private async submitQueuedComposer(sessionId: string, intent: Extract<WebviewIntent, { type: "prompt" | "steer" }>): Promise<void> {
+    const claimed = await this.draftCoordinator.run(sessionId, async () => {
+      const draft = this.draftStore.peek(sessionId);
+      const selectedIds = intent.data.attachmentIds ? new Set(intent.data.attachmentIds) : null;
+      const attachments = selectedIds ? draft.attachments.filter(a => selectedIds.has(a.id)) : [...draft.attachments];
+      if (selectedIds && attachments.length !== selectedIds.size) {
+        this.stateStore.appendMessage(sessionId, "error", "附件准备结果已失效，请重新添加后发送。");
+        return { queued: false, completion: Promise.resolve(false), revision: null, userMessageId: intent.data.userMessageId ?? randomUUID() };
+      }
+      // Never overwrite a newer draft with a snapshot frozen before asynchronous preparation.
+      const matchesDraft = draft.text === intent.data.text && JSON.stringify(draft.segments) === JSON.stringify(intent.data.segments ?? []) && attachments.length === draft.attachments.length;
+      const revision = matchesDraft ? this.draftStore.currentRevision(sessionId) : null;
+      const content: QueueContent = { userMessageId: intent.data.userMessageId ?? randomUUID(), text: intent.data.text,
+        segments: intent.data.segments ?? [], attachments };
+      const submission = this.messageQueue.submit(sessionId, content, this.composerConfig(sessionId));
+      if (submission.queued && revision !== null && await this.draftStore.discardIfRevision(sessionId, revision)) {
+        this.stateStore.clearPendingAttachments(sessionId);
+      }
+      return { ...submission, revision, userMessageId: content.userMessageId };
+    });
+    await this.postState();
+    const accepted = await claimed.completion;
+    if (!claimed.queued && accepted && claimed.revision !== null) {
+      await this.draftCoordinator.run(sessionId, async () => {
+        if (await this.draftStore.discardIfRevision(sessionId, claimed.revision!)) this.stateStore.clearPendingAttachments(sessionId);
+      });
+      await this.syncImagePreviewPanel(sessionId);
+    }
+    await this.postEvent({ type: "composerSubmissionResult", sessionId, userMessageId: claimed.userMessageId, accepted });
+    await this.postState();
   }
 
   private async sendUserMessage(
@@ -1608,6 +1700,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (webviewGeneration !== this.webviewGeneration) {
           return;
         }
+        this.messageQueue.cancelEditors();
         this.isReady = true;
         for (const waiter of [...this.readyWaiters]) {
           clearTimeout(waiter.timeout);
@@ -1674,9 +1767,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.switchSessionView(intent.data.sessionId);
         return;
       case "closeSession": {
+        this.messageQueue.pause(intent.data.sessionId);
         this.closedFileSessions.add(intent.data.sessionId);
         const closed = await this.sessionPool.release(intent.data.sessionId);
         if (closed) {
+          this.messageQueue.release(intent.data.sessionId);
           await this.refreshSessions();
           const fallback = this.sessionPool.pickDefaultSession(this.currentStateToSessionList());
           if (fallback) {
@@ -1694,9 +1789,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "prompt":
       case "steer": {
         await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        const sessionId = this.messageQueueEnabled
+          ? intent.data.sessionId ?? this.peekState().activeSessionId ?? await this.ensureWebviewSession(null)
+          : await this.ensureWebviewSession(intent.data.sessionId ?? null);
         if (!sessionId) {
           await this.postState();
+          return;
+        }
+        if (this.messageQueueEnabled && intent.type === "prompt") {
+          await this.submitQueuedComposer(sessionId, intent);
           return;
         }
         await this.sendUserMessage(
@@ -1708,6 +1809,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             messageId: intent.data.userMessageId,
           },
         );
+        return;
+      }
+      case "queueAction": {
+        if (!this.messageQueueEnabled) return;
+        const { sessionId, userMessageId, action } = intent.data;
+        await this.draftCoordinator.run(sessionId, async () => {
+          switch (action) {
+            case "send": this.messageQueue.sendNow(sessionId, userMessageId, this.composerConfig(sessionId)); break;
+            case "edit": this.messageQueue.edit(sessionId, userMessageId); break;
+            case "cancel": this.messageQueue.edit(sessionId, null); break;
+            case "delete": this.messageQueue.remove(sessionId, userMessageId); break;
+            case "save": this.messageQueue.save(sessionId, { userMessageId, text: intent.data.text!, segments: intent.data.segments!, attachments: intent.data.attachments! }); break;
+          }
+        });
+        await this.postSessionView(sessionId);
         return;
       }
       case "retryUserMessage": {
@@ -1795,8 +1911,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               // Ignore malformed drop payload entries; the editor keeps the rest.
             }
           }
-          await this.ingestPickedUris(sessionId, uris, intent.data.target === "edit" ? intent.data.operationId : undefined);
-          await this.postComposerWorkResult(intent.data.operationId, sessionId);
+          const prepared = await this.ingestPickedUris(sessionId, uris, intent.data.target === "edit" ? intent.data.operationId : undefined);
+          await this.postComposerWorkResult(intent.data.operationId, sessionId, prepared?.error, prepared);
         } catch (error) {
           await this.postComposerWorkResult(intent.data.operationId, sessionId, error);
           if (!intent.data.operationId) throw error;
@@ -1827,10 +1943,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           }
           sessionId = resolvedSessionId;
           const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
-          if (picks?.length) {
-            await this.ingestPickedUris(sessionId, picks, intent.data?.target === "edit" ? intent.data.operationId : undefined);
-          }
-          await this.postComposerWorkResult(intent.data?.operationId, sessionId);
+          const prepared = picks?.length ? await this.ingestPickedUris(sessionId, picks, intent.data?.target === "edit" ? intent.data.operationId : undefined) : undefined;
+          await this.postComposerWorkResult(intent.data?.operationId, sessionId, prepared?.error, prepared);
         } catch (error) {
           await this.postComposerWorkResult(intent.data?.operationId, sessionId, error);
           if (!intent.data?.operationId) throw error;
@@ -1924,7 +2038,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             type: "attachFilesResult",
           });
           await this.reportAttachmentOutcome(accepted, errors);
-          await this.postComposerWorkResult(operationId, sessionId);
+          await this.postComposerWorkResult(operationId, sessionId, accepted.length < files.length ? errors.join("; ") : undefined, { attachmentIds: accepted.map(a => a.id) });
         } catch (error) {
           await this.postComposerWorkResult(operationId, sessionId, error);
           if (!operationId) throw error;
@@ -1970,6 +2084,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
+        if (this.messageQueueEnabled) this.messageQueue.stop(sessionId);
         try {
           await this.deps.messenger.request({
             sessionId,
@@ -2111,6 +2226,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           }
         } finally {
           this.stateStore.setCommandPending(sessionId, false);
+          this.messageQueue.dispatch(sessionId);
           await this.postState();
         }
         return;
@@ -2121,6 +2237,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (!sessionId) {
           await this.postState();
           return;
+        }
+        if (this.messageQueueEnabled) {
+          this.messageQueue.setConfig(sessionId, { ...this.composerConfig(sessionId), model: intent.data.modelId });
+          if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) { await this.postState(); return; }
         }
         try {
           const response = await this.deps.messenger.sendSetModel(sessionId, intent.data.modelId);
@@ -2256,6 +2376,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.runPlanBuild(sessionId, intent.data.planId);
           return;
         }
+        if (this.messageQueueEnabled) {
+          this.messageQueue.setConfig(sessionId, { ...this.composerConfig(sessionId), agentMode: intent.data.action === "enter" ? "plan" : "chat" });
+          if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) { await this.postState(); return; }
+        }
         try {
           const response = await this.deps.messenger.sendSetPlanMode({
             action: intent.data.action,
@@ -2349,6 +2473,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         } finally {
           if (!this.disposed && generation === this.fileGeneration && initialized === this.initialized && !this.closedFileSessions.has(sessionId)) {
             this.stateStore.setCommandPending(sessionId, false);
+            this.messageQueue.dispatch(sessionId);
             await this.refreshSessionFiles(sessionId);
             await this.postSessionView(sessionId);
             await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success, error: detail });
@@ -2448,6 +2573,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.sessionsAwaitingErrorHistoryRefresh.add(event.sessionId);
     }
     const mutation = this.stateStore.applyEvent(event);
+    if (event.sessionId && this.messageQueueEnabled) {
+      if (event.type === "agent_start") this.messageQueue.start(event.sessionId);
+      if (event.type === "steering_consumed") this.messageQueue.consumed(event.sessionId, event.userMessageIds);
+      if (event.type === "agent_idle") this.messageQueue.idle(event.sessionId, event.outcome);
+    }
     await this.maybeAutoOpenPlanPreview(event);
     const previewRefresh = extractPlanPreviewRefreshArgs(event);
     if (previewRefresh && this.deps.refreshPlanPreview) {
@@ -2596,9 +2726,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     operationId: string | undefined,
     sessionId: string,
     error?: unknown,
+    prepared?: { attachmentIds?: string[]; references?: WebviewReference[] },
   ): Promise<void> {
     if (!operationId) return;
     await this.postEvent({
+      ...prepared,
       ...(error === undefined
         ? {}
         : { error: error instanceof Error ? error.message : String(error) }),
@@ -3939,6 +4071,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async switchSessionView(sessionId: string): Promise<void> {
+    const previous = this.peekState().activeSessionId;
+    if (previous && this.messageQueue.view(previous).editingId) this.messageQueue.pause(previous);
     this.closedFileSessions.delete(sessionId);
     await this.ensureInitialized();
     await this.sessionPool.switchTo(sessionId);

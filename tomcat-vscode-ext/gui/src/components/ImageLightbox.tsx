@@ -1,8 +1,30 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { typedBlobUrl } from "../attachments/imagePipeline";
 
 export interface ZoomedImage {
   alt: string;
   src: string;
+  mimeType?: string;
+}
+
+function LightboxImage({ image }: { image: ZoomedImage }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    if (image.mimeType !== "image/svg+xml") return;
+    let cancelled = false;
+    let ownedUrl: string | undefined;
+    void typedBlobUrl(image.src, image.mimeType).then(value => {
+      if (cancelled) { URL.revokeObjectURL(value); return; }
+      ownedUrl = value; setUrl(value);
+    }).catch(() => { if (!cancelled) setError(true); });
+    return () => { cancelled = true; if (ownedUrl) URL.revokeObjectURL(ownedUrl); };
+  }, [image.src, image.mimeType]);
+  if (error) return <div role="alert">Unable to load image preview.</div>;
+  const src = image.mimeType === "image/svg+xml" ? url : image.src;
+  if (!src) return <div role="status">Loading image…</div>;
+  return <img alt={image.alt} className="tc-image-lightbox__image" data-testid="image-lightbox-image"
+    src={src} onMouseDown={event => event.stopPropagation()} onError={() => setError(true)} />;
 }
 
 export function ImageLightbox({
@@ -88,15 +110,7 @@ export function ImageLightbox({
         >
           <span aria-hidden="true" className="codicon codicon-close" />
         </button>
-        <img
-          alt={image.alt}
-          className="tc-image-lightbox__image"
-          data-testid="image-lightbox-image"
-          onMouseDown={(event) => {
-            event.stopPropagation();
-          }}
-          src={image.src}
-        />
+        <LightboxImage key={image.src} image={image} />
       </section>
     </div>
   );

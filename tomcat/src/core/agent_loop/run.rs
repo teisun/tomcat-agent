@@ -202,9 +202,13 @@ impl AgentLoop {
                 .is_none_or(|state| state.messages.is_empty()),
             "ContextState.messages must be parked empty while AgentLoop owns the working list"
         );
+        if !self.steering_queue.lock().is_open() {
+            self.steering_queue.lock().open();
+        }
         let mut messages = initial_messages;
         self.start_idx = turn_start.min(messages.len());
         let outcome = self.run_inner(&mut messages).await;
+        self.steering_queue.lock().close_and_clear();
         self.park_messages(messages);
         outcome
     }
@@ -254,8 +258,8 @@ impl AgentLoop {
                         return AgentRunOutcome::Completed(result);
                     }
 
-                    if self.steering_queue.lock().is_empty()
-                        && self.follow_up_queue.lock().is_empty()
+                    if self.follow_up_queue.lock().is_empty()
+                        && self.steering_queue.lock().close_if_empty()
                     {
                         self.hand_back_unfinished_plan("run_ended_while_executing")
                             .await;

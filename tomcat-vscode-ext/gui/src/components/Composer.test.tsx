@@ -49,6 +49,10 @@ function renderComposer({
   slashCommands = [],
   instructionCatalog = [],
   busy = false,
+  allowBusyInput = false,
+  hasAttachments = false,
+  attachmentsPending = false,
+  submitDisabled = false,
   canInterrupt = true,
   canPrompt = true,
   contextLabel = "Ctx 42%",
@@ -84,6 +88,10 @@ function renderComposer({
   slashCommands?: SharedSlashCommand[];
   instructionCatalog?: import("../../../src/serveClient/wire").InstructionCard[];
   busy?: boolean;
+  allowBusyInput?: boolean;
+  hasAttachments?: boolean;
+  attachmentsPending?: boolean;
+  submitDisabled?: boolean;
   canInterrupt?: boolean;
   canPrompt?: boolean;
   contextLabel?: string;
@@ -137,6 +145,10 @@ function renderComposer({
       slashCommands={slashCommands}
       instructionCatalog={instructionCatalog}
       busy={busy}
+      allowBusyInput={allowBusyInput}
+      hasAttachments={hasAttachments}
+      attachmentsPending={attachmentsPending}
+      submitDisabled={submitDisabled}
       canInterrupt={canInterrupt}
       canPrompt={canPrompt}
       contextSearchLoading={contextSearchLoading}
@@ -179,6 +191,62 @@ function renderComposer({
     ref,
   };
 }
+
+describe("single primary action", () => {
+  it.each([
+    { busy: true, text: "", stop: true, disabled: false },
+    { busy: true, text: "  \n ", stop: true, disabled: false },
+    { busy: true, text: "next task", stop: false, disabled: false },
+    { busy: false, text: "", stop: false, disabled: true },
+    { busy: false, text: "next task", stop: false, disabled: false },
+    { busy: true, text: "", hasAttachments: true, stop: false, disabled: true },
+    { busy: true, text: "next task", submitDisabled: true, stop: false, disabled: true },
+    { busy: true, text: "", attachmentsPending: true, stop: false, disabled: true },
+    { busy: true, text: "next task", attachmentsPending: true, stop: false, disabled: true },
+    { busy: true, text: "next task", canPrompt: false, stop: false, disabled: true },
+    { busy: true, text: "", canInterrupt: false, stop: true, disabled: true },
+  ])("selects one action from busy/content, independently of validity: %j", async ({ text, stop, disabled, ...props }) => {
+    const onSubmit = vi.fn(), onInterrupt = vi.fn();
+    const { ref, container } = renderComposer({ ...props, allowBusyInput: true, onSubmit, onInterrupt });
+    await act(async () => { ref.current?.replaceDraft({ text, segments: [{ type: "text", text }], hasContent: !!text.trim() }); });
+    const button = screen.getByTestId(stop ? "stop-button" : "send-button");
+    expect(container.querySelectorAll(".tc-send-button")).toHaveLength(1);
+    expect(button).toHaveProperty("disabled", disabled);
+    expect(screen.queryByTestId(stop ? "send-button" : "stop-button")).toBeNull();
+    fireEvent.keyDown(screen.getByTestId("composer-input"), { key: "Enter" });
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledTimes(!stop && !disabled ? 1 : 0);
+    fireEvent.click(button);
+    expect(onInterrupt).toHaveBeenCalledTimes(stop && !disabled ? 1 : 0);
+    expect(onSubmit).toHaveBeenCalledTimes(!stop && !disabled ? 2 : 0);
+  });
+
+  it("switches Stop → Send → Stop without resetting stopping or binding Enter to Stop", async () => {
+    const onInterrupt = vi.fn(), onSubmit = vi.fn();
+    const { ref } = renderComposer({ busy: true, allowBusyInput: true, onInterrupt, onSubmit });
+    fireEvent.click(screen.getByTestId("stop-button"));
+    expect(screen.getByTestId("stop-button").textContent).toBe("Stopping…");
+    await act(async () => { ref.current?.replaceDraft({ text: "new", segments: [{ type: "text", text: "new" }], hasContent: true }); });
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    await act(async () => { ref.current?.clear(); });
+    expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", true);
+    fireEvent.keyDown(screen.getByTestId("composer-input"), { key: "Enter" });
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts reference and instruction atoms even when the plain text draft is empty", async () => {
+    const { ref } = renderComposer({ busy: true, allowBusyInput: true });
+    for (const segment of [
+      { type: "reference" as const, kind: "file" as const, label: "a.ts", path: "a.ts" },
+      { type: "instruction" as const, kind: "command" as const, label: "/review", resourceId: "command:.cursor/commands/review.md" },
+    ]) {
+      await act(async () => { ref.current?.replaceDraft({ text: "", segments: [segment], hasContent: true }); });
+      expect(screen.queryByTestId("stop-button")).toBeNull();
+      expect(screen.getByTestId("send-button")).toHaveProperty("disabled", false);
+    }
+  });
+});
 
 describe("resource slash menu", () => {
   const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:`${name} 说明`}));

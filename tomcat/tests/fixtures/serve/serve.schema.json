@@ -1567,6 +1567,24 @@
       }
     ],
     "definitions": {
+      "AgentMode": {
+        "description": "用户可见的会话模式。\n\n计划文件的 `planning` / `pending` / `executing` / `completed` 生命周期不属于会话 模式；它由计划文件 frontmatter 的 `state` 表达。",
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "plan"
+            ]
+          },
+          {
+            "description": "`exec` 是 v2 sidecar 里已经落盘的旧值。它在新模型里等价于 Chat： 执行中的事实由计划文件恢复，而不是一个第三会话模式。",
+            "type": "string",
+            "enum": [
+              "chat"
+            ]
+          }
+        ]
+      },
       "AttachmentMode": {
         "description": "历史消息里的图片附件以什么形态回给调用方。",
         "oneOf": [
@@ -1927,11 +1945,35 @@
           "text"
         ],
         "properties": {
+          "agentMode": {
+            "description": "Ordinary prompt selects execution configuration atomically with submission.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/AgentMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "attachments": {
             "type": "array",
             "items": {
               "$ref": "#/definitions/ServeAttachment"
             }
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "onlyIfRunning": {
+            "description": "Strict steering never implicitly starts an idle session.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "segments": {
             "type": "array",
@@ -2109,11 +2151,35 @@
         "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
         "type": "object",
         "properties": {
+          "agentMode": {
+            "description": "Ordinary prompt selects execution configuration atomically with submission.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/AgentMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "attachments": {
             "type": "array",
             "items": {
               "$ref": "#/definitions/ServeAttachment"
             }
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "onlyIfRunning": {
+            "description": "Strict steering never implicitly starts an idle session.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "segments": {
             "type": "array",
@@ -2332,14 +2398,40 @@
         "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
         "type": "object",
         "required": [
+          "outcome",
           "type"
         ],
         "properties": {
+          "outcome": {
+            "$ref": "#/definitions/AgentIdleOutcome"
+          },
           "type": {
             "type": "string",
             "enum": [
               "agent_idle"
             ]
+          }
+        }
+      },
+      {
+        "description": "Input was archived and appended at a safe point, not necessarily answered yet.",
+        "type": "object",
+        "required": [
+          "type",
+          "userMessageIds"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "steering_consumed"
+            ]
+          },
+          "userMessageIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -3265,6 +3357,14 @@
       }
     },
     "definitions": {
+      "AgentIdleOutcome": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "interrupted",
+          "failed"
+        ]
+      },
       "AssistantMessageEvent": {
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
@@ -3569,6 +3669,14 @@
       }
     ],
     "definitions": {
+      "AgentIdleOutcome": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "interrupted",
+          "failed"
+        ]
+      },
       "AssistantMessageEvent": {
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
@@ -5181,14 +5289,40 @@
             "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
             "type": "object",
             "required": [
+              "outcome",
               "type"
             ],
             "properties": {
+              "outcome": {
+                "$ref": "#/definitions/AgentIdleOutcome"
+              },
               "type": {
                 "type": "string",
                 "enum": [
                   "agent_idle"
                 ]
+              }
+            }
+          },
+          {
+            "description": "Input was archived and appended at a safe point, not necessarily answered yet.",
+            "type": "object",
+            "required": [
+              "type",
+              "userMessageIds"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "steering_consumed"
+                ]
+              },
+              "userMessageIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },

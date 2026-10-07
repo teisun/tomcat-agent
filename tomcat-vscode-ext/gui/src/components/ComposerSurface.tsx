@@ -14,10 +14,10 @@ export interface ComposerSurfaceProps extends ComposerProps {
 export const ComposerSurface = forwardRef<ComposerHandle, ComposerSurfaceProps>(function ComposerSurface({
   attachments, onOpenAttachment, onRemoveAttachment, feedback, ...composer
 }, ref) {
-  return <>
+  return <Composer {...composer} ref={ref} hasAttachments={attachments.length > 0}
+    submitDisabled={composer.submitDisabled || attachments.some(attachment => attachment.unavailable)} beforeEditor={<>
     <AttachmentStrip attachments={attachments} onOpen={onOpenAttachment} onRemove={composer.canPrompt ? onRemoveAttachment : undefined} readonly={!composer.canPrompt} />
     {feedback ? <div className={feedback.hasErrors ? "tc-attachment-feedback tc-attachment-feedback--error" : "tc-visually-hidden"}
       data-testid={feedback.hasErrors ? "attachment-feedback-error" : "attachment-feedback-announcement"} role="status">{feedback.message}</div> : null}
-    <Composer {...composer} ref={ref} />
-  </>;
+  </>} />;
 });

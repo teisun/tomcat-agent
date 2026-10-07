@@ -2219,7 +2219,8 @@ span.tc-attachment-strip__file-chip {
   padding: 0.1em 0 0.1em 12px;
 }
 
-.tc-chat-markdown table {
+.tc-chat-markdown table,
+.tc-plan-preview__body table {
   border-collapse: collapse;
   display: block;
   max-width: 100%;
@@ -2228,12 +2229,15 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-chat-markdown th,
-.tc-chat-markdown td {
+.tc-chat-markdown td,
+.tc-plan-preview__body th,
+.tc-plan-preview__body td {
   border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.24));
   padding: 6px 10px;
 }
 
-.tc-chat-markdown th {
+.tc-chat-markdown th,
+.tc-plan-preview__body th {
   background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.06));
   text-align: left;
 }
@@ -4040,12 +4044,43 @@ span.tc-attachment-strip__file-chip {
 
 .tc-footer { display: flex; flex-direction: column; flex: 0 0 auto; gap: 4px; min-width: 0; }
 .tc-footer__composer { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.tc-footer__composer > .tc-attachment-strip { margin-top: 0; }
 .tc-session-dock { border: 1px solid var(--vscode-panel-border, rgba(127,127,127,.22)); border-radius: var(--tc-dock-radius); margin-inline: calc(var(--tc-controls-inset) - var(--tc-content-inset)); min-width: 0; overflow: hidden; }
-.tc-session-dock__header { display: flex; align-items: stretch; padding-inline: 4px; min-height: 28px; }
+.tc-session-dock__header { display: flex; align-items: stretch; padding-inline: 4px; min-height: 24px; flex: 0 0 auto; }
+.tc-dock-stack { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; max-height: min(320px,40vh); overflow-x: hidden; overflow-y: auto; border: 1px solid var(--vscode-panel-border, rgba(127,127,127,.22)); border-radius: var(--tc-dock-radius); margin-inline: calc(var(--tc-controls-inset) - var(--tc-content-inset)); }
+.tc-dock-stack > .tc-session-dock { border: 0; border-bottom: 1px solid var(--vscode-panel-border, rgba(127,127,127,.22)); border-radius: 0; margin-inline: 0; }
+.tc-dock-stack > .tc-session-dock:last-child { border-bottom: 0; }
+.tc-footer:has(.tc-dock-stack) { flex: 0 1 auto; min-height: 0; }
+.tc-shell--question-pending > .tc-footer:has(.tc-dock-stack) { flex-shrink: 1; }
+.tc-footer__composer { flex: 0 0 auto; }
+.tc-dock-stack { min-height: 26px; }
+.tc-dock-stack:has(> .tc-dock-section:nth-of-type(2)) { min-height: 51px; }
+.tc-dock-stack:has(> .tc-dock-section:nth-of-type(3)) { min-height: 76px; }
+.tc-dock-section { display: flex; flex-direction: column; min-height: 24px; flex: 0 0 auto; }
+.tc-dock-section__content { min-height: 0; overflow: auto; }
+.tc-dock-section__content[hidden] { display: none; }
+.tc-message-queue { padding: 4px 8px; }
+.tc-message-queue__row { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; padding: 4px 0; }
+.tc-message-queue__status { flex: 0 0 16px; padding-top: 3px; }
+.tc-message-queue__body { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.tc-message-queue__actions { display: flex; flex: 0 0 auto; }
+.tc-message-queue__actions button { background: transparent; border: 0; color: inherit; min-width: 24px; min-height: 24px; cursor: pointer; padding: 2px; }
+.tc-message-queue__actions button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -2px; }
+.tc-main-composer:not([hidden]) { display: contents; }
+.tc-message-queue__row--editing { outline: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, #7777)); outline-offset: -1px; border-radius: 4px; }
+.tc-queue-editor { min-width: 0; }
+.tc-composer__header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px var(--tc-composer-pad); border-bottom: 1px solid var(--vscode-panel-border, #7777); font-size: 13px; font-weight: 500; }
+.tc-composer__header > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-composer__cancel { border: 0; background: transparent; color: var(--vscode-textLink-foreground); font-size: 12px; min-height: 24px; cursor: pointer; padding: 0; }
+.tc-composer__cancel:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+.tc-composer__body > .tc-attachment-strip { margin: 0; }
+
+.tc-dock-section__actions { display: flex; align-items: center; flex: 0 0 auto; }
+.tc-dock-section__actions button { min-height: 24px; border: 0; background: transparent; font-size: 12px; color: inherit; white-space: nowrap; padding: 0 4px; cursor: pointer; }
+.tc-dock-section__actions button:disabled { opacity: .45; cursor: default; }
+.tc-session-dock__toggle:focus-visible, .tc-dock-section__actions button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -2px; }
 .tc-session-dock__chevron, .tc-session-dock__toggle, .tc-session-dock__tab { background: transparent; border: none; font-size: 12px; cursor: pointer; color: inherit; }
 .tc-session-dock__chevron { flex: 0 0 24px; padding: 0; }
-.tc-session-dock__toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; padding: 3px 8px; text-align: left; }
+.tc-session-dock__toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 24px; padding: 0 8px; text-align: left; line-height: 16px; min-width: 0; }
 .tc-session-dock__title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
 .tc-session-dock__tabs { display: flex; gap: 16px; min-width: 0; }
 .tc-session-dock__tab { border-bottom: 2px solid transparent; padding: 5px 0 3px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
@@ -4243,9 +4278,15 @@ span.tc-attachment-strip__file-chip {
   border-radius: var(--tc-dock-radius);
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px var(--tc-composer-pad);
   position: relative;
+}
+
+.tc-composer__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px var(--tc-composer-pad);
 }
 
 .tc-composer__surface--drop-active {
@@ -4850,6 +4891,10 @@ span.tc-attachment-strip__file-chip {
   background: transparent;
   padding: 0;
 }
+
+.tc-plan-preview__body table { word-break: normal; }
+.tc-plan-preview__body th,
+.tc-plan-preview__body td { min-width: 8ch; }
 
 .tc-plan-preview__body blockquote {
   border-left: 3px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.3));

@@ -358,7 +358,7 @@ pub struct AgentLoop {
     /// 明确错误，纯 AgentLoop 单测不必装配插件运行时。
     pub(super) plugin_engine_config: Option<crate::ext::PluginEngineConfig>,
     pub(super) config: AgentLoopConfig,
-    pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
+    pub(super) steering_queue: Arc<Mutex<super::SteeringInbox>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]
     /// 注入 session 级共享 queue；不注入时保持原有"单次 AgentLoop 私有"语义。
     /// 一层 conversation loop 在每个 attempt 成功后 drain 此 queue 进入下一次

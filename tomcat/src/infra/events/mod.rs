@@ -396,6 +396,14 @@ impl<'a> ExtensionWireEnvelope<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentIdleOutcome {
+    Completed,
+    Interrupted,
+    Failed,
+}
+
 /// 宿主侧流式/UI 与生命周期事件，供前端或日志消费。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -414,7 +422,14 @@ pub enum AgentEvent {
     /// - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。
     ///
     /// 该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。
-    AgentIdle,
+    AgentIdle {
+        outcome: AgentIdleOutcome,
+    },
+    /// Input was archived and appended at a safe point, not necessarily answered yet.
+    SteeringConsumed {
+        #[serde(rename = "userMessageIds")]
+        user_message_ids: Vec<String>,
+    },
     TurnStart {
         #[serde(rename = "turnIndex")]
         turn_index: usize,

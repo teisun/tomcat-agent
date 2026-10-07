@@ -33,6 +33,85 @@ const __testing = (
   }
 ).__testing;
 
+describe("Host message queue integration", () => {
+  function setup() {
+    __testing.reset();
+    const request = vi.fn(async (_message: any) => ({ success: true }));
+    const setModel = vi.fn(), setMode = vi.fn();
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"), getDefaultCwd: () => "/workspace", ide: {} as never,
+      initialize: async () => ({ capabilities: ["message_queue"] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }), request, sendSetModel: setModel, sendSetPlanMode: setMode } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    host.initialized = { capabilities: ["message_queue"] };
+    host.stateStore.setActiveSession("s");
+    host.stateStore.applySessionState({ sessionId: "s", busy: true, model: "A", agentMode: "chat" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s");
+    vi.spyOn(host, "ensureWebviewSessionWithoutHistory").mockResolvedValue("s");
+    return { provider, host, request, setModel, setMode };
+  }
+  it("captures only selected attachments and does not overwrite a newer draft during delayed preparation", async () => {
+    const f = setup();
+    const photo = (id: string) => ({ id, blobSha: "a".repeat(64), bytes: 10, filename: `${id}.png`, kind: "image", mimeType: "image/png" });
+    f.host.draftStore.update("s", () => ({ text: "newer draft", segments: [{ type: "text", text: "newer draft" }], attachments: [photo("prior"), photo("later")] }));
+    await f.host.handleIntent({ type: "prompt", messageId: "frozen", data: { sessionId: "s", text: "frozen", segments: [{ type: "text", text: "frozen" }], attachmentIds: ["prior"], userMessageId: "frozen" } });
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items[0].attachments.map(a => a.id)).toEqual(["prior"]);
+    expect(f.host.draftStore.peek("s").text).toBe("newer draft");
+    expect(f.host.draftStore.peek("s").attachments.map((a: any) => a.id)).toEqual(["prior", "later"]);
+    f.provider.dispose();
+  });
+  it("busy submits remain content-only; picker edits do not send RPC; steer never carries next config", async () => {
+    const f = setup();
+    await f.host.handleIntent({ type: "prompt", messageId: "submit", data: { sessionId: "s", text: "X", userMessageId: "X" } });
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items[0].text).toBe("X");
+    expect(f.host.draftStore.peek("s").text).toBe("");
+    await f.host.handleIntent({ type: "setModel", messageId: "model", data: { sessionId: "s", modelId: "B" } });
+    await f.host.handleIntent({ type: "setPlanMode", messageId: "mode", data: { sessionId: "s", action: "enter" } });
+    expect(f.setModel).not.toHaveBeenCalled(); expect(f.setMode).not.toHaveBeenCalled();
+    expect(f.provider.currentState().sessionViews.s.composerConfig).toEqual({ model: "B", agentMode: "plan" });
+    await f.host.handleIntent({ type: "queueAction", messageId: "now", data: { sessionId: "s", userMessageId: "X", action: "send" } });
+    expect(f.request).toHaveBeenCalledWith(expect.objectContaining({ type: "steer", params: expect.objectContaining({ onlyIfRunning: true, userMessageId: "X" }) }));
+    expect(f.request.mock.calls[0][0].params).not.toHaveProperty("model");
+    expect(f.request.mock.calls[0][0].params).not.toHaveProperty("agentMode");
+    await f.host.handleServeEvent({ type: "steering_consumed", sessionId: "s", userMessageIds: ["X"] });
+    const state = f.provider.currentState().sessionViews.s;
+    expect(state.messageQueue?.items).toEqual([]);
+    expect(state.timeline.filter(item => item.type === "message" && item.id === "X")).toHaveLength(1);
+    f.provider.dispose();
+  });
+  it("Stop retains ordinary queue; idle Enter sends C before retained work without touching another session", async () => {
+    const f = setup();
+    for (const text of ["A", "B"]) await f.host.handleIntent({ type: "prompt", messageId: text, data: { sessionId: "s", text, userMessageId: text } });
+    await f.host.handleIntent({ type: "interrupt", messageId: "stop", data: { sessionId: "s" } });
+    await f.host.handleServeEvent({ type: "agent_idle", sessionId: "s", outcome: "interrupted" });
+    f.host.stateStore.setActiveSession("background");
+    await f.host.handleIntent({ type: "prompt", messageId: "C", data: { sessionId: "s", text: "C", userMessageId: "C" } });
+    expect(f.request.mock.calls.map(c => c[0].type)).toEqual(["interrupt", "prompt"]);
+    expect(f.request.mock.calls[1][0].text).toBe("C");
+    expect(f.provider.currentState().activeSessionId).toBe("background");
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items.map(item => item.text)).toEqual(["A", "B"]);
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.paused).toBe(false);
+    f.provider.dispose();
+  });
+  it("serve replacement clears every queue and leaves draft/history intact; Webview readiness alone does not clear", async () => {
+    const f = setup();
+    await f.host.handleIntent({ type: "prompt", messageId: "A", data: { sessionId: "s", text: "A", userMessageId: "A" } });
+    f.host.messageQueue.enqueue("background", { userMessageId: "B", text: "B", attachments: [], segments: [] });
+    f.host.draftStore.update("s", () => ({ text: "new draft", attachments: [], segments: [] }));
+    f.host.stateStore.appendMessage("s", "user", "history");
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items).toHaveLength(1);
+    await f.provider.setServeConnectionState("reconnecting");
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items).toEqual([]);
+    expect(f.host.messageQueue.view("background").items).toEqual([]);
+    expect(f.host.draftStore.peek("s").text).toBe("new draft");
+    expect(f.provider.currentState().sessionViews.s.timeline.some(item => item.type === "message" && item.text === "history")).toBe(true);
+    f.provider.dispose();
+  });
+});
+
 describe("plan metadata helpers", () => {
   const tempDirs: string[] = [];
 

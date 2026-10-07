@@ -1765,6 +1765,7 @@ describe("session state hydration", () => {
     store.applyEvent({
       sessionId: "s1",
       type: "agent_idle",
+      outcome: "completed",
     });
 
     const snapshot = store.snapshot();
@@ -1820,6 +1821,7 @@ describe("session state hydration", () => {
     store.applyEvent({
       sessionId: "s1",
       type: "agent_idle",
+      outcome: "completed",
     });
 
     const tool = store
@@ -1859,6 +1861,7 @@ describe("session state hydration", () => {
     store.applyEvent({
       sessionId: "s1",
       type: "agent_idle",
+      outcome: "completed",
     });
 
     const tool = store
@@ -1899,6 +1902,7 @@ describe("session state hydration", () => {
     store.applyEvent({
       sessionId: "s1",
       type: "agent_idle",
+      outcome: "completed",
     });
 
     const tool = store

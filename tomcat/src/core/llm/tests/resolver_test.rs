@@ -425,7 +425,7 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
 #[test]
 #[serial(env_lock)]
-fn provider_cache_reuses_arc_for_same_route() {
+fn provider_cache_isolates_models_and_reuses_same_model_and_route() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     std::fs::write(
@@ -455,12 +455,124 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
         .resolve(LlmScene::Main, Some("gpt-5.4-copy"))
         .unwrap();
     assert!(
-        Arc::ptr_eq(&default_call.provider_impl, &switched_call.provider_impl),
-        "same (api, base_url, key_source) should reuse provider instance"
+        !Arc::ptr_eq(&default_call.provider_impl, &switched_call.provider_impl),
+        "different catalog IDs must not share model-specific state"
     );
+    let again = resolver
+        .resolve(LlmScene::Main, Some("gpt-5.4-copy"))
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &again.provider_impl,
+        &switched_call.provider_impl
+    ));
+    let route_a = resolver.route_for_model(&default_call.catalog_id);
+    let route_b = resolver.route_for_model(&switched_call.catalog_id);
+    assert!(Arc::ptr_eq(&route_a, &route_b));
+    assert!(Arc::ptr_eq(
+        route_a.semaphore.as_ref().unwrap(),
+        route_b.semaphore.as_ref().unwrap()
+    ));
 
     unsafe {
         std::env::remove_var("OPENAI_API_KEY");
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn same_route_models_use_their_own_wire_format_and_vision_capabilities() {
+    use super::mocks::{MockHttpServer, ScriptedHttpResponse};
+    use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest};
+    for (api, format_a, format_b, field) in [
+        ("openai", "deepseek", "openai", "reasoning_effort"),
+        ("openai-responses", "deepseek", "openai", "reasoning"),
+        (
+            "anthropic-messages",
+            "anthropic-adaptive",
+            "anthropic",
+            "thinking",
+        ),
+    ] {
+        // A deliberate non-retryable response: we inspect serialization, not the remote model.
+        let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+            400,
+            r#"{"error":{"message":"fixture rejection"}}"#,
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[[models]]
+id = "route-a"
+model_name = "wire-a"
+api = "{api}"
+provider = "relay"
+api_key_env = "ROUTE_TEST_KEY"
+base_url = "{base}"
+thinking_format = "{format_a}"
+capabilities = {{ vision = false, files = false, reasoning = true, tools = true }}
+[[models]]
+id = "route-b"
+model_name = "wire-b"
+api = "{api}"
+provider = "relay"
+api_key_env = "ROUTE_TEST_KEY"
+base_url = "{base}"
+thinking_format = "{format_b}"
+capabilities = {{ vision = true, files = true, reasoning = true, tools = true }}
+"#,
+                base = server.base_url
+            ),
+        )
+        .unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.llm.default_model = "route-a".into();
+        cfg.llm.retry_count = 0;
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
+        std::env::set_var("ROUTE_TEST_KEY", "stub");
+        let a = resolver.resolve(LlmScene::Main, None).unwrap();
+        let b = resolver.resolve(LlmScene::Main, Some("route-b")).unwrap();
+        assert!(!Arc::ptr_eq(&a.provider_impl, &b.provider_impl));
+        let mut image_message = ChatMessage::user("look");
+        image_message.content = Some(ChatMessageContent::Parts(vec![serde_json::from_value::<
+            ChatMessageContentPart,
+        >(
+            serde_json::json!({
+            "type": "input_image", "mime_type": "image/png", "image_b64": "aGVsbG8="
+        })
+        )
+        .unwrap()]));
+        let request = ChatRequest {
+            messages: vec![image_message],
+            model: b.model.clone(),
+            thinking_level: Some(ThinkingLevel::High),
+            resolved_output_limit: Some(8192),
+            stream: Some(false),
+            ..Default::default()
+        };
+        assert!(b.provider_impl.chat(request).await.is_err());
+        let texts = server.request_texts();
+        assert_eq!(texts.len(), 1, "{api}");
+        let body: serde_json::Value =
+            serde_json::from_str(texts[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["model"], "wire-b", "{api}");
+        assert!(!body[field].is_null(), "{api}: {body}");
+        assert!(
+            texts[0].contains("aGVsbG8="),
+            "{api} stripped B's image using A's capabilities"
+        );
+        if api == "openai" {
+            assert!(body.get("thinking").is_none());
+        }
+        if api == "anthropic-messages" {
+            assert_eq!(body["thinking"]["type"], "enabled");
+        }
+        std::env::remove_var("ROUTE_TEST_KEY");
+        server.shutdown().await;
     }
 }
 

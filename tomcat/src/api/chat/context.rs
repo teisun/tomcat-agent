@@ -756,8 +756,8 @@ impl ChatContext {
 
         let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
             Arc::new(Mutex::new(Vec::new()));
-        let steering_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let steering_queue =
+            Arc::new(Mutex::new(crate::core::agent_loop::SteeringInbox::default()));
         let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let delivered_completion: Arc<

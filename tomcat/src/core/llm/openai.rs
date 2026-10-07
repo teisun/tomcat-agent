@@ -16,7 +16,6 @@ use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
-use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{
     plan_scoped, replay_requirement_for_profile, CaptureMode, ProviderCompatProfile, ReplayAction,
     ReplayDowngradeReport, ReplayWindow,
@@ -654,7 +653,7 @@ pub struct OpenAiProvider {
     catalog_model_id: String,
     default_model: String,
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
-    semaphore: Option<Semaphore>,
+    semaphore: Option<Arc<Semaphore>>,
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
@@ -694,10 +693,25 @@ where
 
 impl OpenAiProvider {
     /// 从模型条目 + 全局运行时配置构建。
+    #[cfg(test)]
     pub fn new(
         entry: &ModelEntry,
         runtime: &LlmRuntimeConfig,
         credential: &Credential,
+    ) -> Result<Self, AppError> {
+        Self::with_route(
+            entry,
+            runtime,
+            credential,
+            &super::ProviderRoute::new(runtime)?,
+        )
+    }
+
+    pub(super) fn with_route(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+        route: &super::ProviderRoute,
     ) -> Result<Self, AppError> {
         let base_url = entry
             .base_url
@@ -708,13 +722,8 @@ impl OpenAiProvider {
             .trim_end_matches('/')
             .to_string();
 
-        let client = build_http_client(runtime, None)?;
-
-        let semaphore = if runtime.max_concurrent_requests > 0 {
-            Some(Semaphore::new(runtime.max_concurrent_requests as usize))
-        } else {
-            None
-        };
+        let client = route.client.clone();
+        let semaphore = route.semaphore.clone();
 
         let api_base_fallback = runtime
             .api_base_fallback

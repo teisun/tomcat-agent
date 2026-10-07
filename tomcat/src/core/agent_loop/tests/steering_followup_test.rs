@@ -100,7 +100,9 @@ async fn run_steering_skips_remaining_tools() {
         }),
     ];
     let llm = Arc::new(MockLlmProvider::new(vec![stream_tools, stream_text]));
-    let steering_queue = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let steering_queue = Arc::new(parking_lot::Mutex::new(
+        crate::core::agent_loop::SteeringInbox::default(),
+    ));
     let read_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let primitive = Arc::new(SteerableMockPrimitive {
         steering_queue: Arc::clone(&steering_queue),
@@ -143,11 +145,13 @@ async fn steering_injected_at_turn_start_stays_in_tail() {
             }),
         ],
     ]));
-    let steering_queue = Arc::new(parking_lot::Mutex::new(vec![{
-        let mut steering = ChatMessage::steering("stop after this request");
-        steering.msg_id = Some("steering-tail".to_string());
-        steering
-    }]));
+    let steering_queue = Arc::new(parking_lot::Mutex::new(
+        crate::core::agent_loop::SteeringInbox::from(vec![{
+            let mut steering = ChatMessage::steering("stop after this request");
+            steering.msg_id = Some("steering-tail".to_string());
+            steering
+        }]),
+    ));
     let mut history = ChatMessage::user("large historical request ".repeat(400));
     history.msg_id = Some("history-user".to_string());
     let mut current_user = ChatMessage::user("current user request");
@@ -360,7 +364,9 @@ async fn text_only_finalize_consumes_steering_and_follow_up_in_order_with_ids() 
             }),
         ],
     ]));
-    let steering = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let steering = Arc::new(parking_lot::Mutex::new(
+        crate::core::agent_loop::SteeringInbox::default(),
+    ));
     let follow = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::user(
         "follow-up",
     )]));
@@ -468,6 +474,56 @@ async fn run_follow_up_does_not_bypass_max_tool_rounds() {
     );
 }
 
+#[test]
+fn rich_steering_promotes_attachment_leases_only_after_archival() {
+    use crate::core::agent_loop::SteeringInput;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().into());
+    mgr.create_session(mgr.current_session_key(), None).unwrap();
+    let session_id = mgr
+        .get_session(mgr.current_session_key())
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let store = mgr.attachment_store();
+    let sha = store.put(b"rich steering fixture").unwrap();
+    store.mark_pending(&session_id, &sha).unwrap();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: session_id.clone(),
+            message_append_sink: Some(Arc::new(mgr.clone())),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    )
+    .with_session_manager(mgr.clone());
+    agent.steering_queue.lock().push_if_open(SteeringInput {
+        archival: Some(ChatMessage::steering("attached")),
+        provider: ChatMessage::steering("attached"),
+        user_message_id: Some("rich-fixture".into()),
+        attachment_shas: vec![sha.clone()],
+    });
+    assert_eq!(store.list_pending(&session_id).unwrap(), vec![sha.clone()]);
+    let mut messages = vec![];
+    inject_steering_messages(&mut agent, &mut messages).unwrap();
+    assert!(store.list_pending(&session_id).unwrap().is_empty());
+    assert!(store.exists(&sha));
+    assert_eq!(messages[0].msg_id.as_deref(), Some("rich-fixture"));
+    let another_sha = store.put(b"unconsumed fixture").unwrap();
+    store.mark_pending(&session_id, &another_sha).unwrap();
+    agent.steering_queue.lock().push_if_open(SteeringInput {
+        archival: Some(ChatMessage::steering("not consumed")),
+        provider: ChatMessage::steering("not consumed"),
+        user_message_id: Some("discarded-fixture".into()),
+        attachment_shas: vec![another_sha.clone()],
+    });
+    agent.steering_queue.lock().close_and_clear();
+    assert_eq!(store.list_pending(&session_id).unwrap(), vec![another_sha]);
+}
+
 #[tokio::test]
 async fn inject_steering_messages_records_context_and_persists_msg_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -478,9 +534,9 @@ async fn inject_steering_messages_records_context_and_persists_msg_id() {
 
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let event_bus = Arc::new(DefaultEventBus::new());
-    let steering_queue = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::steering(
-        "stop now",
-    )]));
+    let steering_queue = Arc::new(parking_lot::Mutex::new(
+        crate::core::agent_loop::SteeringInbox::from(vec![ChatMessage::steering("stop now")]),
+    ));
     let mut loop_ = AgentLoop::new_with_steering_queue(
         test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),

@@ -41,6 +41,7 @@ pub(crate) async fn handle_control_or_interrupt(
                         "capabilities": [
                             "prompt",
                             "steer",
+                            "message_queue",
                             "follow_up",
                             "resume",
                             "retry",

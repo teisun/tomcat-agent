@@ -247,6 +247,7 @@ export function InlineMessageEditor({
         onSubmit={submit}
         onDraftChange={() => undefined}
         attachments={attachments}
+        attachmentsPending={workCount > 0}
         feedback={error ? { hasErrors: true, message: error } : null}
         onRemoveAttachment={(key) => setAttachments((old) => old.filter((a) => a.id !== key))}
         onOpenAttachment={(a) => {

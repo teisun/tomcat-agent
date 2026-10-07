@@ -16,6 +16,19 @@ vi.mock("mermaid", () => ({
 }));
 
 describe("MarkdownBody", () => {
+  it("keeps plan tables semantic and source-mapped with Chinese and long file links", () => {
+    const onOpenLink = vi.fn();
+    render(<MarkdownBody markdown={"| 项目 | 证据 |\n| --- | --- |\n| 复用 | [长文件](tomcat/src/core/agent_loop/steering_injection.rs:17) |"}
+      onOpenLink={onOpenLink} sourceLineMap={[40, 41, 42]} />);
+    const body = screen.getByTestId("plan-markdown-body");
+    expect(body.classList.contains("tc-plan-preview__body")).toBe(true);
+    const table = body.querySelector("table")!;
+    expect(table.getAttribute("data-source-line")).toBe("40");
+    expect(table.querySelectorAll("th")).toHaveLength(2);
+    expect(table.querySelectorAll("tbody td")).toHaveLength(2);
+    fireEvent.click(table.querySelector("a")!);
+    expect(onOpenLink).toHaveBeenCalledWith("tomcat/src/core/agent_loop/steering_injection.rs:17");
+  });
   it("renders headings, lists, inline code and bold from markdown", () => {
     render(
       <MarkdownBody

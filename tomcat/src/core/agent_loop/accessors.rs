@@ -67,7 +67,7 @@ impl AgentLoop {
             connector_registry: None,
             plugin_engine_config: None,
             config,
-            steering_queue: Arc::new(Mutex::new(Vec::new())),
+            steering_queue: Arc::new(Mutex::new(super::SteeringInbox::default())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,
             cancel_token,
@@ -187,7 +187,7 @@ impl AgentLoop {
 
     /// serve / host 模式：注入 session 级共享 `steering_queue`，允许连接外部在当前
     /// run 进行中把 steering 消息塞进下一次 attempt 的注入通道。
-    pub fn with_shared_steering_queue(mut self, queue: Arc<Mutex<Vec<ChatMessage>>>) -> Self {
+    pub fn with_shared_steering_queue(mut self, queue: Arc<Mutex<super::SteeringInbox>>) -> Self {
         self.steering_queue = queue;
         self
     }
@@ -218,7 +218,7 @@ impl AgentLoop {
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
         cancel_token: CancellationToken,
-        steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
+        steering_queue: Arc<Mutex<super::SteeringInbox>>,
     ) -> Self {
         let emitter = ScopedEventEmitter::new_optional(
             Arc::clone(&event_bus),

@@ -353,6 +353,8 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  messageQueue?: import("../../src/ui/webview/protocol").WebviewMessageQueue;
+  composerConfig?: { agentMode: "chat" | "plan"; model: string };
   sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../src/serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;
@@ -410,6 +412,7 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  messageQueueSupported?: boolean;
   sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
   activeSessionId: string | null;
@@ -488,6 +491,8 @@ export type HostToWebviewFrame =
             sessionId: string;
             success: boolean;
             type: "composerWorkResult";
+            attachmentIds?: string[];
+            references?: WebviewReference[];
           }
         | {
             accepted: boolean;
@@ -536,6 +541,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "queueAction" }>
   | SessionFileIntent
   | MessageEditIntent
   | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
@@ -601,6 +607,7 @@ export type WebviewIntent =
         sessionId?: string | null;
         text: string;
         userMessageId?: string;
+        attachmentIds?: string[];
       };
     }
   | {

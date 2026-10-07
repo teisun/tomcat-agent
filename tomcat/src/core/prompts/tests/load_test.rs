@@ -30,6 +30,21 @@ fn plan_prompts_carry_anti_over_design_rules() {
     assert!(planner.contains("## Avoid over-design"));
     assert!(reviewer.contains("TDD"));
     assert!(load(PromptKey::ReviewerPlanBrief).contains("over-design"));
+    for (name, text) in [("planner", planner), ("plan reviewer", reviewer)] {
+        let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for rule in [
+            "search the project for reusable code or infrastructure first",
+            "State what exists, what is missing, and why direct reuse or extension cannot satisfy the confirmed requirements",
+            "citing concrete files, symbols, or tests",
+            "Prefer reuse or a minimal extension when it suffices",
+        ] {
+            assert!(normalized.contains(rule), "{name} must contain {rule:?}");
+        }
+    }
+    let reviewer = reviewer.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(reviewer.contains("Apply this requirement to your own proposed additions as well"));
+    assert!(reviewer.contains("Treat unsupported non-reuse as a concern"));
+    assert!(reviewer.contains("Your output is advisory"));
 }
 
 #[test]

@@ -29,7 +29,7 @@ use crate::core::llm::{
     list_model_views_with_prefs, list_provider_keys, remove_user_model_with_config_path,
     set_provider_key, upsert_user_model, with_current_model_catalog, ChatMessage,
     ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference, LlmScene,
-    ProviderKeyInput, ThinkingLevel,
+    MessageKind, ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::security::project_trust::ProjectTrustStore;
@@ -296,6 +296,15 @@ pub(crate) async fn handle_command(
                         return Ok(());
                     }
                 };
+            if let Err(error) = apply_prompt_config(&slot, &params, &input_message) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
             let persisted = persist_turn_input_message(&slot, &archival_message, &params)?;
             input_message.msg_id = Some(persisted.row_id);
             if persisted.settled_pending_question && !slot.is_busy() {
@@ -319,31 +328,67 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
                 return Ok(());
             }
-            if params
-                .segments
-                .iter()
-                .any(|s| matches!(s, ServeContentSegment::Instruction { .. }))
-            {
-                send_error(
-                    &state,
-                    id,
-                    Some(slot.session_id.clone()),
-                    "steer 不支持 command/skill 调用；请使用 prompt 或 follow_up",
-                )?;
+            if !slot.is_busy() && params.only_if_running == Some(true) {
+                send_error(&state, id, Some(slot.session_id.clone()), "not_running")?;
                 return Ok(());
             }
-            let mut input_message = ChatMessage::steering(text);
-            let persisted = persist_turn_input_message(&slot, &input_message, &params)?;
-            input_message.msg_id = Some(persisted.row_id);
-            if persisted.settled_pending_question && !slot.is_busy() {
-                rehydrate_slot_context_state(&slot)?;
+            let (mut archival, mut input_message) = match build_turn_messages(&slot, text, &params)
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                    return Ok(());
+                }
+            };
+            archival.kind = MessageKind::Steering;
+            input_message.kind = MessageKind::Steering;
+            // Use the current session selection; Host does not SetModel during a run.
+            let entry = slot
+                .ctx
+                .session_runtime
+                .session
+                .get_session(slot.ctx.session_runtime.session.current_session_key())?;
+            let model_id = slot.ctx.effective_model(entry.as_ref());
+            let capability_check = slot
+                .ctx
+                .global_services
+                .model_catalog
+                .with_catalog(|catalog| {
+                    let model = catalog.lookup_explicit(&model_id)?;
+                    crate::core::llm::resolver::validate_capabilities(
+                        catalog,
+                        &slot.ctx.config.llm.default_model,
+                        crate::core::llm::LlmScene::Main,
+                        &model_id,
+                        &model.capabilities,
+                        std::slice::from_ref(&input_message),
+                    )
+                });
+            if let Err(error) = capability_check {
+                send_error(&state, id, Some(slot.session_id.clone()), error.to_string())?;
+                return Ok(());
             }
             if slot.is_busy() {
-                slot.ctx
-                    .session_runtime
-                    .steering_queue
-                    .lock()
-                    .push(input_message);
+                let user_message_id = normalized_user_message_id(&params)
+                    .map(str::to_string)
+                    .unwrap_or_else(crate::core::session::manager::generate_entry_id);
+                let accepted = slot.ctx.session_runtime.steering_queue.lock().push_if_open(
+                    crate::core::agent_loop::SteeringInput {
+                        archival: Some(archival),
+                        provider: input_message,
+                        user_message_id: Some(user_message_id),
+                        attachment_shas: params
+                            .attachments
+                            .iter()
+                            .flat_map(|a| [a.blob_sha.clone(), a.provider_sha.clone()])
+                            .flatten()
+                            .collect(),
+                    },
+                );
+                if !accepted {
+                    send_error(&state, id, Some(slot.session_id.clone()), "not_running")?;
+                    return Ok(());
+                }
                 state.writer.send(OutFrame::Response(ResponseFrame::ok(
                     id,
                     Some(slot.session_id.clone()),
@@ -351,6 +396,12 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
+            let persisted = persist_turn_input_message(&slot, &archival, &params)?;
+            input_message.msg_id = Some(persisted.row_id);
+            if persisted.settled_pending_question {
+                rehydrate_slot_context_state(&slot)?;
+            }
+            release_attachment_leases(&slot, &params);
             start_turn(state, slot, id, Some(input_message), TurnAck::Accepted).await?;
         }
         ServeCommand::FollowUp {
@@ -2612,6 +2663,55 @@ fn normalize_plan_runtime_error_code(error: &PlanRuntimeError) -> &'static str {
     }
 }
 
+/// Reuse the existing mode transition and model-selection operations in one command.
+/// Resolve and validate first, so unknown models or unsupported input do not change mode.
+fn apply_prompt_config(
+    slot: &Arc<super::registry::SessionSlot>,
+    params: &ServeMessageParams,
+    input: &ChatMessage,
+) -> Result<(), AppError> {
+    if params.model.is_none() && params.agent_mode.is_none() {
+        return Ok(());
+    }
+    let entry = slot.ctx.session_runtime.session.current_session_entry()?;
+    let current_model = slot.ctx.effective_model(entry.as_ref());
+    let model = params.model.as_deref().unwrap_or(&current_model).trim();
+    let resolved = slot
+        .ctx
+        .global_services
+        .llm_resolver
+        .resolve(LlmScene::Main, Some(model))?;
+    slot.ctx
+        .global_services
+        .model_catalog
+        .with_catalog(|catalog| {
+            crate::core::llm::resolver::validate_capabilities(
+                catalog,
+                &slot.ctx.config.llm.default_model,
+                LlmScene::Main,
+                &resolved.catalog_id,
+                &resolved.capabilities,
+                std::slice::from_ref(input),
+            )
+        })?;
+    let runtime = &slot.ctx.session_runtime.plan_runtime;
+    if let Some(mode) = params.agent_mode.filter(|m| *m != runtime.mode()) {
+        use crate::core::session::manager::AgentMode;
+        match mode {
+            AgentMode::Chat => runtime.exit_plan(),
+            AgentMode::Plan => runtime.enter_plan(),
+        }
+        .map_err(|error| AppError::Config(normalize_plan_runtime_error_code(&error).to_string()))?;
+    }
+    if model != current_model {
+        slot.ctx
+            .session_runtime
+            .session
+            .switch_current_model(None, Some(model))?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn start_turn(
     state: Arc<ServeState>,
     slot: Arc<super::registry::SessionSlot>,
@@ -2626,6 +2726,7 @@ pub(crate) async fn start_turn(
         return Ok(());
     }
     slot.reset_terminal_emitted();
+    slot.ctx.session_runtime.steering_queue.lock().open();
 
     let turn_token = tokio_util::sync::CancellationToken::new();
     {
@@ -2674,6 +2775,15 @@ pub(crate) async fn start_turn(
         ))
         .catch_unwind()
         .await;
+        let outcome = match &result {
+            Ok(Ok(crate::AgentRunOutcome::Completed(_))) => {
+                crate::infra::events::AgentIdleOutcome::Completed
+            }
+            Ok(Ok(crate::AgentRunOutcome::Interrupted(_))) => {
+                crate::infra::events::AgentIdleOutcome::Interrupted
+            }
+            _ => crate::infra::events::AgentIdleOutcome::Failed,
+        };
         match result {
             Ok(Ok(crate::AgentRunOutcome::Completed(_))) => {}
             Ok(Ok(crate::AgentRunOutcome::Interrupted(_))) => {
@@ -2713,12 +2823,18 @@ pub(crate) async fn start_turn(
                 );
             }
         }
+        slot_for_task
+            .ctx
+            .session_runtime
+            .steering_queue
+            .lock()
+            .close_and_clear();
         {
             let mut running = slot_for_task.run_task.lock();
             slot_for_task.mark_idle();
             *running = None;
         }
-        emit_agent_idle(&state_for_task, &slot_for_task);
+        emit_agent_idle(&state_for_task, &slot_for_task, outcome);
     });
     *running = Some(handle);
     Ok(())
@@ -2835,11 +2951,15 @@ fn emit_agent_end_once(
     let _ = state.writer.send(frame);
 }
 
-fn emit_agent_idle(state: &ServeState, slot: &super::registry::SessionSlot) {
+fn emit_agent_idle(
+    state: &ServeState,
+    slot: &super::registry::SessionSlot,
+    outcome: crate::infra::events::AgentIdleOutcome,
+) {
     let frame = OutFrame::Event(
         serde_json::to_value(WireEvent {
             session_id: Some(slot.session_id.clone()),
-            event: AgentEvent::AgentIdle,
+            event: AgentEvent::AgentIdle { outcome },
         })
         .expect("agent_idle wire event should serialize"),
     );
@@ -3478,7 +3598,6 @@ pub(super) fn queued_input_ids(slot: &super::registry::SessionSlot) -> HashSet<S
         .follow_up_queue
         .lock()
         .iter()
-        .chain(slot.ctx.session_runtime.steering_queue.lock().iter())
         .filter_map(|message| message.msg_id.clone())
         .collect()
 }

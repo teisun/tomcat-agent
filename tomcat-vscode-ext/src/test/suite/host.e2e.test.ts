@@ -2,8 +2,10 @@ import * as assert from "node:assert/strict";
 
 import {
   assertPlanPreviewCustomEditorFlow,
+  assertPlanPreviewTablesFlow,
   assertInlineUserMessageEditFlow,
   assertSessionFilesDockFlow,
+  assertMessageQueueDocksFlow,
   assertWebviewCompletedPlanStaysInChat,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewCompactControlFlow,
@@ -43,6 +45,15 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  test("message queue docks: busy input, independent editing and Stop retention", async function () {
+    this.timeout(180_000);
+    await assertMessageQueueDocksFlow(await getTomcatExtensionApi());
+  });
+  test("plan preview tables: visible grid, overflow and source mapping", async function () {
+    this.timeout(120_000);
+    await assertPlanPreviewTablesFlow(await getTomcatExtensionApi());
+  });
+
   test("session files dock: native complete diff, question retention and dirty protection", async function () {
     this.timeout(90_000);
     await assertSessionFilesDockFlow(await getTomcatExtensionApi());

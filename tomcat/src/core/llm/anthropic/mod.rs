@@ -11,7 +11,6 @@ use tracing::warn;
 
 use crate::core::llm::endpoint::build_path_aware_endpoint;
 use crate::core::llm::files_api::FilesApiAdapter;
-use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
 use crate::core::llm::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
@@ -75,12 +74,27 @@ pub(super) struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    #[cfg(test)]
     pub(super) fn new(
         entry: &ModelEntry,
         runtime: &LlmRuntimeConfig,
         credential: &Credential,
     ) -> Result<Self, AppError> {
-        let client = build_http_client(runtime, None)?;
+        Self::with_route(
+            entry,
+            runtime,
+            credential,
+            &super::ProviderRoute::new(runtime)?,
+        )
+    }
+
+    pub(super) fn with_route(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+        route: &super::ProviderRoute,
+    ) -> Result<Self, AppError> {
+        let client = route.client.clone();
         let base_url = entry
             .base_url
             .clone()
@@ -604,6 +618,10 @@ mod tests {
                 200,
                 r#"{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"still ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
             ),
+            ScriptedHttpResponse::json(
+                200,
+                r#"{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"text","text":"B keeps adaptive"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            ),
         ])
         .await;
         let entry = ModelEntry {
@@ -625,16 +643,20 @@ mod tests {
             thinking_format: Some("anthropic-adaptive".to_string()),
             supported_reasoning_levels: vec!["high".to_string()],
         };
-        let provider = AnthropicProvider::new(
-            &entry,
-            &LlmConfig::default().runtime(),
-            &Credential {
-                provider: "anthropic".to_string(),
-                env_name: "TEST_KEY".to_string(),
-                value: "stub".to_string(),
-            },
-        )
-        .expect("provider");
+        let runtime = LlmConfig::default().runtime();
+        let credential = Credential {
+            provider: "anthropic".to_string(),
+            env_name: "TEST_KEY".to_string(),
+            value: "stub".to_string(),
+        };
+        let route = super::super::ProviderRoute::new(&runtime).expect("shared route");
+        let provider = AnthropicProvider::with_route(&entry, &runtime, &credential, &route)
+            .expect("provider A");
+        let mut entry_b = entry.clone();
+        entry_b.id = "thinking-model-b".into();
+        entry_b.model_name = Some(entry_b.id.clone());
+        let provider_b = AnthropicProvider::with_route(&entry_b, &runtime, &credential, &route)
+            .expect("provider B on the same route");
         let request = ChatRequest {
             messages: vec![ChatMessage::user("hello")],
             model: entry.id.clone(),
@@ -661,17 +683,28 @@ mod tests {
             Some("ok")
         );
         provider
-            .chat(request)
+            .chat(request.clone())
             .await
             .expect("cached fallback request");
+        provider_b
+            .chat(ChatRequest {
+                model: entry_b.id,
+                ..request
+            })
+            .await
+            .expect("B request");
 
-        assert_eq!(server.request_count(), 3);
+        assert_eq!(server.request_count(), 4);
         let requests = server.request_texts();
         assert!(requests[0].contains(r#""type":"adaptive""#));
         assert!(requests[1].contains(r#""type":"enabled""#));
         assert!(
             requests[2].contains(r#""type":"enabled""#),
             "the succeeding fallback must be reused instead of repeating the rejected adaptive format"
+        );
+        assert!(
+            requests[3].contains(r#""type":"adaptive""#),
+            "A's learned fallback must not leak through the shared route to B"
         );
         server.shutdown().await;
     }

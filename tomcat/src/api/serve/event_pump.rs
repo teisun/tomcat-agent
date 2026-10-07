@@ -14,6 +14,7 @@ use super::writer::WriterHandle;
 pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_AGENT_START,
     wire::WIRE_AGENT_END,
+    "steering_consumed",
     wire::WIRE_TURN_START,
     wire::WIRE_TURN_END,
     wire::WIRE_MESSAGE_START,

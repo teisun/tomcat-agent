@@ -365,7 +365,22 @@ export interface WebviewComposerDraft {
   text: string;
 }
 
+export interface WebviewQueueItem {
+  userMessageId: string;
+  text: string;
+  segments: WebviewMessageSegment[];
+  attachments: WebviewPendingAttachment[];
+  status: "queued" | "prompt" | "steering";
+}
+export interface WebviewMessageQueue {
+  items: WebviewQueueItem[];
+  paused: boolean;
+  editingId: string | null;
+}
+
 export interface WebviewSessionSnapshot {
+  messageQueue?: WebviewMessageQueue;
+  composerConfig?: { agentMode: "chat" | "plan"; model: string };
   sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;
@@ -424,6 +439,7 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  messageQueueSupported?: boolean;
   sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
   activeSessionId: string | null;
@@ -469,6 +485,7 @@ export type WebviewSessionPatchOp =
     };
 
 export type HostEventFrameContent =
+  | { type: "composerSubmissionResult"; sessionId: string; userMessageId: string; accepted: boolean }
   | SessionFilesResult
   | MessageEditEvent
   | ControlRequestFrame
@@ -512,6 +529,8 @@ export type HostEventFrameContent =
       sessionId: string;
       success: boolean;
       type: "composerWorkResult";
+      attachmentIds?: string[];
+      references?: WebviewReference[];
     }
   | (DraftForkResult & { type: "draftForkResult" })
   | {
@@ -591,6 +610,12 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | { messageId: string; type: "queueAction"; data: {
+      sessionId: string; userMessageId: string;
+      action: "send" | "edit" | "cancel" | "delete" | "save";
+      text?: string; segments?: WebviewMessageSegment[];
+      attachments?: import("../../shared/composerDraft").DraftAttachmentRef[];
+    } }
   | SessionFileIntent
   | MessageEditIntent
   | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
@@ -648,6 +673,7 @@ export type WebviewIntent =
         sessionId?: string | null;
         text: string;
         userMessageId?: string;
+        attachmentIds?: string[];
       };
     }
   | {
@@ -942,6 +968,7 @@ export type WebviewIntent =
         composerFooterPlanStatus: string | null;
         composerPlanStatusInBarCount: number;
         composerRowCount: number;
+        composerText?: string | null;
         ctxLabel: string | null;
         disabledTestIds: string[];
         expandedThinkingCount: number;
@@ -1188,6 +1215,15 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
           (Array.isArray(value.data.segments) &&
             value.data.segments.every(isWebviewMessageSegmentShape)))
       );
+    case "queueAction":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.userMessageId)
+        && ["send", "edit", "cancel", "delete", "save"].includes(String(value.data.action))
+        && (value.data.action !== "save" || (isString(value.data.text)
+          && Array.isArray(value.data.segments) && value.data.segments.every(isWebviewMessageSegmentShape)
+          && Array.isArray(value.data.attachments) && value.data.attachments.every(a => isRecord(a)
+            && isString(a.id) && isString(a.blobSha) && /^[a-f0-9]{64}$/.test(a.blobSha)
+            && isString(a.filename) && isString(a.mimeType) && (a.kind === "image" || a.kind === "file")
+            && typeof a.bytes === "number")));
     case "interrupt":
       return value.data === undefined || isRecord(value.data);
     case "setModel":

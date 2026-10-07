@@ -224,6 +224,7 @@ const attachmentLeases = new Map();
 let sessionCounter = 1;
 let historyCounter = 1;
 let assistantMessageCounter = 1;
+const pendingSteering = new Map();
 let pendingApproval = null;
 let pendingInterrupt = null;
 let pendingPlanCompletion = null;
@@ -1383,6 +1384,8 @@ function emitEstimatedContextMetrics(sessionId, ratio) {
 function finishTurn(sessionId, error = null) {
   const session = touchSession(ensureSession(sessionId));
   clearPendingAssistantMessageId(sessionId);
+  if (error) pendingSteering.delete(sessionId);
+  else consumeSteering(sessionId);
   session.busy = false;
   send({
     error,
@@ -1393,6 +1396,7 @@ function finishTurn(sessionId, error = null) {
   send({
     sessionId,
     type: "agent_idle",
+    outcome: error === "interrupted" ? "interrupted" : error ? "failed" : "completed",
   });
 }
 
@@ -1492,6 +1496,30 @@ function handleCacheAttachmentThumbnail(frame) {
   });
 }
 
+function consumeSteering(sessionId) {
+  const entries = pendingSteering.get(sessionId) || [];
+  pendingSteering.delete(sessionId);
+  for (const frame of entries) {
+    const id = frame.params?.userMessageId || crypto.randomUUID();
+    recordHistoryMessage(sessionId, "user", normalizeHistoryContent(String(frame.text || ""), frame.params?.segments), id);
+    ensureSession(sessionId).history.at(-1).message.kind = "steering";
+    send({ type: "steering_consumed", sessionId, userMessageIds: [id] });
+  }
+}
+function handleSteer(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const session = ensureSession(sessionId);
+  if (!session.busy) {
+    if (frame.params?.onlyIfRunning) send({ type: "response", id: frame.id, sessionId, success: false, error: "not_running" });
+    else handlePrompt(frame);
+    return;
+  }
+  const entries = pendingSteering.get(sessionId) || [];
+  entries.push(frame); pendingSteering.set(sessionId, entries);
+  send({ type: "response", id: frame.id, sessionId, success: true, payload: { queued: true } });
+  if (session.queueHold !== "pending" && pendingApproval?.sessionId !== sessionId) consumeSteering(sessionId);
+}
+
 function handlePrompt(frame) {
   const sessionId = frame.sessionId || activeSessionId || createSession();
   const session = touchSession(ensureSession(sessionId));
@@ -1514,6 +1542,14 @@ function handlePrompt(frame) {
     success: true,
     type: "response",
   });
+  // A new user input settles an interrupted question in the real serve path.
+  // Do not restore the fixture's old live approval on a later process restart.
+  if (!frame.resume && pendingApproval?.sessionId === sessionId) {
+    pendingApproval = null;
+    persistPendingApproval();
+  }
+  if (typeof frame.params?.model === "string") session.model = frame.params.model;
+  if (["chat", "plan"].includes(frame.params?.agentMode)) session.agentMode = frame.params.agentMode;
   startTurn(sessionId);
 
   const text = String(frame.text || "");
@@ -1535,8 +1571,13 @@ function handlePrompt(frame) {
     recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
     emitSessionTitleUpdated(sessionId, normalizedUserContent);
   }
+  if (text.includes("message queue hold")) {
+    session.queueHold = text.includes("consume") ? "consume" : "pending";
+    emitMessageDelta(sessionId, "Queue acceptance fixture is waiting for Stop.");
+    return;
+  }
   if (text === "session files dock edit" || text === "session files dock edit again") {
-    const target = path.join(path.dirname(editFilePath), "session-files.ts");
+    const target = path.join(path.dirname(editFilePath), \`session-files-\${process.pid}-\${sessionId}.ts\`);
     const before = fs.existsSync(target) ? fs.readFileSync(target,"utf8") : "first line\\noriginal line\\n";
     const after = text.endsWith("again") ? "second change\\nmore content\\n" : "first line\\nmodified line\\nnew line\\n";
     fs.writeFileSync(target, after, "utf8");
@@ -2391,6 +2432,8 @@ function handleCommand(frame) {
               attachmentRoot: ATTACHMENT_ROOT,
               capabilities: [
                 "prompt",
+                "steer",
+                "message_queue",
                 "rewind_and_resend",
                 "session_files",
                 "ask_question",
@@ -2957,6 +3000,9 @@ function handleCommand(frame) {
       handlePrompt({...frame,type:"prompt",text:frame.message.text,params:frame.message});
       break;
     }
+    case "steer":
+      handleSteer(frame);
+      break;
     case "prompt":
     case "follow_up":
       handlePrompt(frame);

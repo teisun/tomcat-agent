@@ -112,6 +112,7 @@ async fn serve_initialize_control_request_sets_ready_state() {
     for expected in [
         "prompt",
         "steer",
+        "message_queue",
         "follow_up",
         "get_state",
         "set_plan_mode",

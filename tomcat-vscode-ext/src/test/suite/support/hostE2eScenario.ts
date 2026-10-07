@@ -48,6 +48,189 @@ async function waitFor(
 type CaptureRegion = "editor" | "sidebar" | "window";
 
 
+export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview(); await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api, "message-queue-docks");
+  const view = () => api.__testing.getWebviewState().sessionViews[sessionId];
+  async function prompt(text: string, userMessageId: string, idle = true) {
+    api.__testing.clearObservedEvents();
+    const complete = waitForEvent(api, { type: idle ? "agent_idle" : "agent_start", sessionId });
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: userMessageId, data: { sessionId, text, userMessageId } }); await complete;
+  }
+  await prompt("session files dock edit", "queue-files");
+  await prompt("answer card showcase", "queue-hold", false);
+  const driver = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const theme = vscode.workspace.getConfiguration("workbench").get<string>("colorTheme");
+  try {
+    await waitForWebviewDomSnapshot(api, snapshot => snapshot.activeSessionId === sessionId && snapshot.html.includes('contenteditable="true"') ? true : undefined);
+    await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "stop-button") && !snapshot.buttons.some(button => button.testId === "send-button"), "Busy empty composer shows only Stop");
+    for (const text of ["Queued X — 调整当前任务", "Queued Y — 后续工作"]) {
+      if (text.startsWith("Queued X")) {
+        await api.__testing.sendWebviewDomAction({ kind: "pasteClipboardFiles", testId: "composer-input", files: ["#6199e6", "#e5ac61"].map((color, index) => ({
+          filename: `queue-image-${index}.svg`, mimeType: "image/svg+xml",
+          dataBase64: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140"><rect width="240" height="140" fill="#20242b"/><rect x="18" y="20" width="204" height="34" rx="6" fill="${color}"/><rect x="18" y="70" width="90" height="50" rx="6" fill="${color}"/><rect x="132" y="70" width="90" height="50" rx="6" fill="#8794a5"/></svg>`).toString("base64"),
+        })) });
+        await waitForWebviewState(api, state => state.sessionViews[sessionId]?.pendingAttachments.length === 2 ? true : undefined);
+      }
+      await api.__testing.sendWebviewDomAction({ kind: "setInputValue", testId: "composer-input", value: text });
+      await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "send-button" && !button.disabled) && !snapshot.buttons.some(button => button.testId === "stop-button"), "Busy populated composer shows only Send");
+      if (text.startsWith("Queued X")) {
+        assert.equal(await driver.evaluate<boolean>(`!!document.querySelector('[data-testid="composer-surface"] .tc-attachment-strip')`), true);
+        assert.equal(await driver.evaluate<boolean>(`(() => {
+          const surface = document.querySelector('[data-testid="composer-surface"]');
+          const notice = surface.querySelector('.tc-composer__notices').getBoundingClientRect();
+          const attachments = surface.querySelector('.tc-attachment-strip').getBoundingClientRect();
+          const input = surface.querySelector('[data-testid="composer-input"]').getBoundingClientRect();
+          return notice.bottom <= attachments.top && attachments.bottom <= input.top;
+        })()`), true, "Tip/notice must appear above attachments, then the input");
+        if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await driver.capture(transcriptVisualArtifactPath("composer-normal-attachments-chat.png"));
+      }
+      await api.__testing.sendWebviewDomAction({ kind: "pressKeyOnTestId", testId: "composer-input", value: "Enter" });
+      await waitForWebviewState(api, state => state.sessionViews[sessionId]?.messageQueue?.items.some(item => item.text === text) && !state.sessionViews[sessionId]?.composerDraft?.text ? true : undefined);
+      await waitForWebviewDomSnapshot(api, snapshot => snapshot.composerText === "" ? true : undefined);
+    }
+    assert.equal(view().messageQueue?.items.length, 2);
+    await api.__testing.injectServeEvent({ type: "session.todos", sessionId, todos: [{ id: "a", content: "保留主草稿，检查消息队列", status: "in_progress" }, { id: "b", content: "验证独立 Dock", status: "pending" }] });
+    await driver.click("files-toggle"); await driver.click("todo-widget-toggle");
+    await api.__testing.sendWebviewDomAction({ kind: "setInputValue", testId: "composer-input", value: "Main draft must stay" });
+    await api.__testing.sendWebviewDomAction({ kind: "pasteClipboardFiles", testId: "composer-input", files: [{
+      filename: "main-draft.svg", mimeType: "image/svg+xml",
+      dataBase64: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140"><rect width="240" height="140" rx="8" fill="#26372d"/><path d="M20 105L70 65L115 90L170 35L220 55" fill="none" stroke="#79bd94" stroke-width="10"/></svg>').toString("base64"),
+    }] });
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.pendingAttachments.length === 1 ? true : undefined);
+    await driver.click("queue-edit");
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.messageQueue?.editingId ? true : undefined);
+    await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "queue-edit-send-button" && !button.disabled), "Queue editor must be rendered before entering text");
+    assert.equal(await driver.evaluate<boolean>(`!!document.querySelector('[data-testid="queue-editor"] [data-testid="queue-edit-model-select"]') && !!document.querySelector('[data-testid="composer-area"] [data-testid="queue-editor"]') && !document.querySelector('[data-testid="queue-row"] [data-testid="queue-editor"]')`), true);
+    await api.__testing.sendWebviewDomAction({ kind: "setInputValue", testId: "queue-edit-composer-input", value: " edited" });
+    await driver.click("queue-edit-send-button");
+    await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.messageQueue?.editingId && state.sessionViews[sessionId]?.messageQueue?.items[0].text.includes("edited") ? true : undefined);
+    assert.equal(view().pendingAttachments.length, 1, "Saving queued edits must preserve the main draft attachment");
+    assert.equal(await driver.evaluate<string>(`document.querySelector('[data-testid="composer-input"]').textContent`), "Main draft must stay");
+    const metrics = await driver.evaluate<{ order: string[]; heights: number[]; fonts: string[]; undo: { height: number; width: number }; send: boolean; stop: boolean }>(`(() => {
+      const docks = [...document.querySelectorAll('.tc-dock-stack > .tc-dock-section')];
+      const undo = document.querySelector('[data-testid="undo-all-files"]').getBoundingClientRect();
+      return { order: docks.map(node => node.dataset.testid), heights: docks.map(node => node.querySelector('.tc-session-dock__header').getBoundingClientRect().height), fonts: docks.map(node => getComputedStyle(node.querySelector('.tc-session-dock__toggle')).fontSize), undo: {height:undo.height,width:undo.width}, send:!!document.querySelector('[data-testid="send-button"]'),stop:!!document.querySelector('[data-testid="stop-button"]') };
+    })()`);
+    assert.deepEqual(metrics.order, ["messages-dock", "files-dock", "todos-dock"]);
+    assert.ok(metrics.heights.every(height => height >= 24 && height <= 26), JSON.stringify(metrics));
+    assert.ok(metrics.fonts.every(font => font === "12px")); assert.ok(metrics.undo.height >= 24 && metrics.undo.width >= 24);
+    assert.ok(metrics.send && !metrics.stop, "Nonempty busy composer must not also show Stop");
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      for (const [width, height, name] of [[1440, 900, "desktop"], [390, 844, "narrow"], [800, 500, "short"]] as const) {
+        await driver.setViewport(width, height);
+        if (name !== "desktop") await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+        for (const [themeName, suffix] of [["Default Dark Modern", "dark"], ["Default Light Modern", "light"]] as const) {
+          await vscode.workspace.getConfiguration("workbench").update("colorTheme", themeName, vscode.ConfigurationTarget.Global);
+          const target = transcriptVisualArtifactPath(`message-queue-${name}-${suffix}.png`);
+          await fs.mkdir(path.dirname(target), { recursive: true });
+          // The existing question layout permits shell scrolling in very short windows.
+          // Check actual reachability after scrolling, not whether every panel fits at once.
+          const bounds = await driver.evaluate<{ footer: number; height: number; actionReachable: boolean }>(`(() => {
+            const composer = document.querySelector('[data-testid="composer-area"]');
+            composer.scrollIntoView({block:'end'});
+            const button = composer.querySelector('.tc-send-button'), r = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+            return {footer:composer.getBoundingClientRect().bottom,height:innerHeight,actionReachable:button===hit||button.contains(hit)};
+          })()`);
+          assert.ok(bounds.footer <= bounds.height + 1 && bounds.actionReachable, JSON.stringify(bounds));
+          const reachable = await driver.evaluate<boolean>(`(() => {
+            const stack = document.querySelector('.tc-dock-stack');
+            const content = [...stack.querySelectorAll('.tc-dock-section__content:not([hidden])')];
+            if (!content.every(node => node.clientHeight > 0)) return false;
+            const button = stack.querySelector('[data-testid="queue-send"]');
+            button.scrollIntoView({block:'nearest'});
+            const r = button.getBoundingClientRect(), hit = document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+            const visible = hit === button || button.contains(hit);
+            stack.scrollTop = 0;
+            return visible;
+          })()`);
+          assert.ok(reachable, "Expanded Dock content must remain reachable in the shared scroll area");
+          await driver.evaluate(`document.querySelector('[data-testid="composer-area"]').scrollIntoView({block:'end'})`);
+          await captureWorkbenchArtifacts(target);
+          await driver.capture(target.replace(".png", "-chat.png"));
+        }
+        if (name !== "desktop") await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+      }
+      await driver.setViewport(390, 844);
+      await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+      await driver.waitForSnapshot(snapshot => snapshot.viewport.width >= 300, "Editor capture needs the actual narrow layout, not a stale 159px sash");
+      await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "queue-edit" });
+      await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "queue-edit-send-button" && !button.disabled), "Queue editor must be ready for visual capture");
+      const layouts = await driver.evaluate<{ normal: string; editing: string; unified: boolean; oneButton: boolean; controlsFit: boolean }>(`(() => {
+        const main = document.querySelector('[data-testid="composer-surface"]'), edit = document.querySelector('[data-testid="queue-edit-composer-surface"]');
+        const style = node => { const s=getComputedStyle(node); const b=getComputedStyle(node.querySelector('.tc-composer__body')); return [s.borderRadius,s.borderWidth,s.backgroundColor,b.padding,b.gap].join('|'); };
+        const controls=[...edit.querySelectorAll('.tc-composer__bar > button, [data-testid="queue-edit-model-select"], [data-testid="queue-edit-mode-select"], [data-testid="queue-edit-cancel"]')];
+        return {normal:style(main),editing:style(edit),unified:!!edit.querySelector('.tc-attachment-strip') && !!edit.querySelector('.tc-composer__header'),oneButton:edit.querySelectorAll('.tc-send-button').length===1 && !edit.querySelector('[data-testid="queue-edit-stop-button"]'),controlsFit:controls.every(node=>{const r=node.getBoundingClientRect();return r.x>=0&&r.right<=innerWidth+1&&r.y>=0&&r.bottom<=innerHeight+1;})};
+      })()`);
+      assert.equal(layouts.normal, layouts.editing, "Normal and edited composer share the same surface and body styles");
+      assert.ok(layouts.unified && layouts.oneButton && layouts.controlsFit, JSON.stringify(layouts));
+      for (const [themeName, suffix] of [["Default Dark Modern", "dark"], ["Default Light Modern", "light"]] as const) {
+        await vscode.workspace.getConfiguration("workbench").update("colorTheme", themeName, vscode.ConfigurationTarget.Global);
+        await driver.capture(transcriptVisualArtifactPath(`message-queue-editor-${suffix}-chat.png`));
+      }
+      await driver.evaluate(`document.querySelector('[data-testid="queue-editor"] [data-testid="attachment-thumb"]').click()`);
+      await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "image-lightbox-close"), "Queued editor image opens a large preview");
+      await driver.evaluate(`new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { clearInterval(check); reject(new Error('Queued SVG full-size preview did not decode')); }, 10000);
+        const check = setInterval(() => { const image = document.querySelector('[data-testid="image-lightbox-image"]'); if (image?.complete && image.naturalWidth > 0) { clearInterval(check); clearTimeout(timer); resolve(true); } }, 50);
+      })`);
+      await driver.capture(transcriptVisualArtifactPath("message-queue-editor-image-chat.png"));
+      await driver.click("image-lightbox-close");
+      await driver.click("queue-edit-cancel");
+      await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.messageQueue?.editingId ? true : undefined);
+    }
+    await waitForWebviewDomSnapshot(api, snapshot => !snapshot.html.includes('data-testid="queue-editor"') ? true : undefined);
+    await driver.click("queue-send");
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.messageQueue?.items.some(item => item.status === "steering") ? true : undefined);
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await vscode.workspace.getConfiguration("workbench").update("colorTheme", "Default Dark Modern", vscode.ConfigurationTarget.Global);
+      await waitForWebviewDomSnapshot(api, snapshot => snapshot.html.includes('aria-label="正在发送"') ? true : undefined);
+      const animation = await driver.evaluate<{ name: string; duration: string; before: string; after: string; actions: number }>(`(async () => {
+        const icon = document.querySelector('.tc-message-queue__status .tc-codicon-spin');
+        icon.scrollIntoView({block:'nearest'});
+        const style = getComputedStyle(icon);
+        const before = style.transform;
+        await new Promise(resolve => setTimeout(resolve, 150));
+        return {name:style.animationName,duration:style.animationDuration,before,after:getComputedStyle(icon).transform,actions:icon.closest('[data-testid="queue-row"]').querySelectorAll('.tc-message-queue__actions button').length};
+      })()`);
+      assert.notEqual(animation.name, "none");
+      assert.notEqual(animation.before, animation.after, "Sending icon must actually rotate, not just have a spinner class");
+      assert.equal(animation.actions, 0, "Sending row is read-only");
+      const target = transcriptVisualArtifactPath("message-queue-sending-chat.png");
+      await driver.capture(target);
+      await fs.writeFile(target.replace(".png", ".animation.json"), JSON.stringify(animation, null, 2));
+    }
+    // The generic contentEditable setInputValue action pastes at the caret;
+    // use Composer's existing replacement hook to actually clear its document.
+    await driver.evaluate(`window.dispatchEvent(new CustomEvent('tomcat:test:set-composer-value', {detail:{testId:'composer-input',value:''}}))`);
+    await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "send-button" && button.disabled) && !snapshot.buttons.some(button => button.testId === "stop-button"), "An attachment is still input even after clearing the text");
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "attachment-remove" });
+    await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.pendingAttachments.length ? true : undefined);
+    await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "stop-button" && !button.disabled) && !snapshot.buttons.some(button => button.testId === "send-button"), "Clearing the draft restores Stop as the sole action");
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await driver.capture(transcriptVisualArtifactPath("composer-busy-empty-stop-chat.png"));
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "stop-button" });
+    await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.busy && state.sessionViews[sessionId]?.messageQueue?.paused ? true : undefined);
+    assert.equal(view().messageQueue?.items.length, 1);
+    assert.ok(view().messageQueue?.items[0].text.includes("Queued Y"));
+    assert.equal(await driver.evaluate<string>(`document.querySelector('[data-testid="composer-input"]').textContent`), "");
+    await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "send-button" && button.disabled) && !snapshot.buttons.some(button => button.testId === "stop-button"), "Idle empty composer keeps a disabled Send");
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await driver.capture(transcriptVisualArtifactPath("composer-idle-empty-send-chat.png"));
+    const retained = view().messageQueue!.items[0].userMessageId;
+    await prompt("message queue hold C", "direct-C", false);
+    assert.equal(view().messageQueue?.items[0].userMessageId, retained);
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "new-D", data: { sessionId, text: "D", userMessageId: "new-D" } });
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.messageQueue?.items.length === 2 ? true : undefined);
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "stop-button" });
+    await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.busy ? true : undefined);
+    await api.__testing.restartServe(); await api.__testing.waitForWebviewReady();
+    assert.ok(Object.values(api.__testing.getWebviewState().sessionViews).every(session => !session.messageQueue?.items.length));
+  } finally {
+    if (theme) await vscode.workspace.getConfiguration("workbench").update("colorTheme", theme, vscode.ConfigurationTarget.Global);
+    await driver.setViewport(1440, 900); driver.close();
+  }
+}
+
 export async function assertSessionFilesDockFlow(api: TomcatExtensionApi): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
@@ -65,6 +248,11 @@ export async function assertSessionFilesDockFlow(api: TomcatExtensionApi): Promi
   const firstAfter = await fs.readFile(filePath,"utf8");
   const driver = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
   try {
+    const collapsedUndo = await driver.evaluate<{ height: number; expanded: string }>(`({height:document.querySelector('[data-testid="undo-all-files"]').getBoundingClientRect().height,expanded:document.querySelector('[data-testid="files-toggle"]').getAttribute('aria-expanded')})`);
+    assert.ok(collapsedUndo.height >= 24); assert.equal(collapsedUndo.expanded, "false");
+    await driver.click("undo-all-files");
+    assert.equal(await driver.evaluate<string>(`document.querySelector('[data-testid="files-toggle"]').getAttribute('aria-expanded')`), "false");
+    await driver.click("undo-files-cancel");
     await driver.click("files-toggle");
     await driver.hover("session-file-diff");
     assert.equal(await driver.evaluate<string>(`getComputedStyle(document.querySelector('[data-testid="undo-file"]')).opacity`),"1");
@@ -86,13 +274,17 @@ export async function assertSessionFilesDockFlow(api: TomcatExtensionApi): Promi
     await waitFor(()=>vscode.workspace.textDocuments.some(document=>document.uri.scheme==="tomcat-diff" && new URLSearchParams(document.uri.query).get("sourceTurnId")==="files-u4" && document.getText()===firstAfter));
     assert.equal(oldOriginal.getText(),"first line\noriginal line\n","Opening another turn doesn't rewrite old original");
     const document=await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+    // Native diff opened the live document before the fixture's second external write.
+    // Wait for VS Code's file watcher to reload it before creating the intentional dirty edit.
+    const currentDisk = await fs.readFile(filePath, "utf8");
+    await waitFor(() => document.getText() === currentDisk, 15_000, "Live diff document must reload the second write before dirty-buffer protection is tested");
     const edit=new vscode.WorkspaceEdit();edit.insert(document.uri,new vscode.Position(0,0),"unsaved user edit\n");
     assert.ok(await vscode.workspace.applyEdit(edit));assert.equal(document.isDirty,true);
     const diskBefore=await fs.readFile(filePath,"utf8");
     await driver.hover("session-file-diff");await driver.click("undo-file");await driver.click("undo-files-undo");
     await waitForWebviewDomSnapshot(api,snapshot=>snapshot.html.includes("Save or revert unsaved changes") ? true : undefined);
     assert.equal(document.isDirty,true);assert.equal(await fs.readFile(filePath,"utf8"),diskBefore,"Dirty buffer prevented disk restore");
-    await document.save();
+    assert.equal(await document.save(), true, "The intentional user edit must be saved before Undo becomes eligible again");
     await driver.hover("session-file-diff");await driver.click("undo-file");await driver.click("undo-files-undo");
     await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.sourceTurnId==="files-u4" && state.sessionViews[sessionId].sessionFiles?.files.length===0 ? true : undefined);
     assert.equal(await fs.readFile(filePath,"utf8"),firstAfter,"Restores u4 original, not session-start original");
@@ -165,6 +357,9 @@ async function waitForWebviewState<T>(
     sessionId,
     busy: session.busy,
     approvals: session.timeline.filter((item) => item.type === "approval"),
+    queue: session.messageQueue,
+    draft: session.composerDraft,
+    errors: session.timeline.filter(item => item.type === "message" && item.kind === "error"),
   }));
   throw new Error(
     `Timed out waiting for webview state to match the expected condition; last=${JSON.stringify({
@@ -1892,6 +2087,7 @@ export async function assertWebviewStreamingFlow(
   await api.__testing.injectServeEvent({
     sessionId,
     type: "agent_idle",
+    outcome: "completed",
   });
 }
 
@@ -2369,7 +2565,7 @@ export async function assertWebviewDiffFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-  const sessionId = await claimActiveWebviewSession(api, "webview-diff-claim");
+  const sessionId = await createFreshWebviewSession(api, "webview-diff-claim");
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -5928,6 +6124,52 @@ async function waitForActiveTextEditor(
  * via both entry points (right-click command + floating button), then regress the
  * native (A) toolbar style.
  */
+export async function assertPlanPreviewTablesFlow(api: TomcatExtensionApi): Promise<void> {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(workspaceRoot);
+  const directory = path.join(workspaceRoot, ".agents", "e2e", "plan-tables");
+  const planPath = path.join(directory, "tables.plan.md");
+  await fs.mkdir(directory, { recursive: true });
+  const headings = Array.from({ length: 12 }, (_, index) => `中文列 ${index + 1}`);
+  const row = headings.map((_, index) => index === 0 ? "可查找与选择的表格内容" : `long/path/to/source-${index}/filename-without-a-short-alias.ts:42`);
+  await fs.writeFile(planPath, `---\nplan_id: table-acceptance\nname: Plan preview tables\nstate: planning\ntodos: []\n---\n# Plan preview tables\n\n| ${headings.join(" | ")} |\n| ${headings.map(() => "---").join(" | ")} |\n| ${row.join(" | ")} |\n`, "utf8");
+  await vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(planPath), "tomcat.planPreview");
+  await waitForPlanPreviewDom(api, planPath, snapshot => snapshot.bodyHasContent);
+  const commands = await vscode.commands.getCommands(true);
+  for (const command of ["workbench.action.closeSidebar", "workbench.action.closeAuxiliaryBar"]) {
+    assert.ok(commands.includes(command), `Missing native layout command ${command}`);
+    await vscode.commands.executeCommand(command);
+  }
+  const driver = await SettingsFrameDriver.connectFromEnvironment(".tc-plan-preview__body");
+  const theme = vscode.workspace.getConfiguration("workbench").get<string>("colorTheme");
+  try {
+    for (const [width, height, label] of [[1440, 900, "desktop"], [390, 844, "narrow"]] as const) {
+      await driver.setViewport(width, height);
+      for (const [name, suffix] of [["Default Dark Modern", "dark"], ["Default Light Modern", "light"]] as const) {
+        await vscode.workspace.getConfiguration("workbench").update("colorTheme", name, vscode.ConfigurationTarget.Global);
+        const metric = await driver.evaluate<{ cells: Array<{ styles: string[]; widths: number[] }>; tableWidth: number; availableWidth: number; scrollWidth: number; sourceLine: string; }>(`(() => {
+          const table = document.querySelector('.tc-plan-preview__body table');
+          return { cells: [...table.querySelectorAll('th,td')].map(cell => { const s=getComputedStyle(cell); return {styles:[s.borderTopStyle,s.borderRightStyle,s.borderBottomStyle,s.borderLeftStyle],widths:[s.borderTopWidth,s.borderRightWidth,s.borderBottomWidth,s.borderLeftWidth].map(parseFloat)}; }), tableWidth:table.clientWidth, availableWidth:table.parentElement.clientWidth,scrollWidth:table.scrollWidth,sourceLine:table.dataset.sourceLine };
+        })()`);
+        assert.equal(metric.cells.length, 24);
+        assert.ok(metric.cells.every(cell => cell.styles.every(style => style === "solid") && cell.widths.every(value => value > 0)), JSON.stringify(metric));
+        assert.ok(metric.tableWidth <= metric.availableWidth + 1, JSON.stringify(metric));
+        assert.ok(metric.scrollWidth > metric.tableWidth, JSON.stringify(metric));
+        assert.ok(Number(metric.sourceLine) > 0);
+        if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+          const target = transcriptVisualArtifactPath(`plan-preview-tables-${label}-${suffix}.png`);
+          await fs.mkdir(path.dirname(target), { recursive: true }); await captureWorkbenchArtifacts(target);
+          await driver.capture(target.replace(".png", "-plan.png"));
+        }
+      }
+    }
+  } finally {
+    if (theme) await vscode.workspace.getConfiguration("workbench").update("colorTheme", theme, vscode.ConfigurationTarget.Global);
+    await driver.setViewport(1440, 900); driver.close();
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  }
+}
+
 export async function assertPlanPreviewCustomEditorFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {

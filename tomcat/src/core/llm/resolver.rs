@@ -13,7 +13,7 @@ use super::catalog::{
     SharedModelCatalog,
 };
 use super::provider::LlmProvider;
-use super::registry::build_provider;
+use super::registry::{build_provider_with_route, ProviderRoute};
 use super::thinking_policy::UNKNOWN_ANTHROPIC_MAX_OUTPUT_TOKENS;
 use super::thinking_policy::{resolve_anthropic_request, ThinkingFormat, ThinkingLevel};
 use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest};
@@ -346,11 +346,17 @@ impl CapabilityRequirements {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProviderCacheKey {
+struct RouteKey {
     api: String,
     base_url: Option<String>,
     key_source: String,
     key_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ModelKey {
+    route: RouteKey,
+    catalog_id: String,
     catalog_generation: u64,
 }
 
@@ -421,7 +427,8 @@ pub struct DefaultLlmResolver {
     config: RwLock<AppConfig>,
     catalog: SharedModelCatalog,
     auth: AuthStore,
-    provider_cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn LlmProvider>>>,
+    routes: Mutex<HashMap<RouteKey, Arc<ProviderRoute>>>,
+    providers: Mutex<HashMap<ModelKey, Arc<dyn LlmProvider>>>,
     model_prefs: Arc<crate::core::session::ModelPrefsStore>,
 }
 
@@ -435,7 +442,8 @@ impl DefaultLlmResolver {
             config: RwLock::new(config),
             catalog: catalog.into(),
             auth: AuthStore,
-            provider_cache: Mutex::new(HashMap::new()),
+            routes: Mutex::new(HashMap::new()),
+            providers: Mutex::new(HashMap::new()),
             model_prefs,
         }
     }
@@ -579,14 +587,40 @@ impl DefaultLlmResolver {
         self.config_snapshot().llm.runtime()
     }
 
-    fn provider_cache_key(&self, entry: &ModelEntry, credential: &Credential) -> ProviderCacheKey {
-        ProviderCacheKey {
+    fn route_key(&self, entry: &ModelEntry, credential: &Credential) -> RouteKey {
+        RouteKey {
             api: entry.api.clone(),
             base_url: self.effective_base_url(entry),
             key_source: credential.env_name.clone(),
             key_generation: credential_generation(&credential.env_name),
-            catalog_generation: self.catalog.generation(),
         }
+    }
+
+    fn resolve_route(
+        &self,
+        key: &RouteKey,
+        runtime: &LlmRuntimeConfig,
+    ) -> Result<Arc<ProviderRoute>, AppError> {
+        let mut routes = self.routes.lock();
+        if let Some(route) = routes.get(key) {
+            return Ok(route.clone());
+        }
+        let route = Arc::new(ProviderRoute::new(runtime)?);
+        routes.insert(key.clone(), route.clone());
+        Ok(route)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn route_for_model(&self, model: &str) -> Arc<ProviderRoute> {
+        let entry = self.lookup_entry(model).unwrap();
+        let credential = self
+            .credential_for(&entry, self.test_fallback_env().as_deref())
+            .unwrap();
+        self.routes
+            .lock()
+            .get(&self.route_key(&entry, &credential))
+            .unwrap()
+            .clone()
     }
 
     fn resolve_cached_provider(
@@ -594,18 +628,21 @@ impl DefaultLlmResolver {
         entry: &ModelEntry,
         credential: &Credential,
     ) -> Result<Arc<dyn LlmProvider>, AppError> {
-        let cache_key = self.provider_cache_key(entry, credential);
-        if let Some(existing) = self.provider_cache.lock().get(&cache_key).cloned() {
-            return Ok(existing);
+        let route_key = self.route_key(entry, credential);
+        let cache_key = ModelKey {
+            route: route_key.clone(),
+            catalog_id: entry.id.clone(),
+            catalog_generation: self.catalog.generation(),
+        };
+        let mut cache = self.providers.lock();
+        if let Some(existing) = cache.get(&cache_key) {
+            return Ok(existing.clone());
         }
-
         let runtime = self.runtime();
-        let provider = build_provider(entry, &runtime, credential)?;
-        let mut cache = self.provider_cache.lock();
-        Ok(cache
-            .entry(cache_key)
-            .or_insert_with(|| provider.clone())
-            .clone())
+        let route = self.resolve_route(&route_key, &runtime)?;
+        let provider = build_provider_with_route(entry, &runtime, credential, &route)?;
+        cache.insert(cache_key, provider.clone());
+        Ok(provider)
     }
 
     fn resolve_model_call(

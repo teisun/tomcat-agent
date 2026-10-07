@@ -98,7 +98,7 @@ pub struct SessionRuntime {
     pub session_grants: crate::core::permission::SessionGrants,
     pub bash_task_registry: Arc<BashTaskRegistry>,
     pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
-    pub steering_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
+    pub steering_queue: Arc<Mutex<crate::core::agent_loop::SteeringInbox>>,
     pub completion_routes: BackgroundCompletionRoutes,
     pub delivered_completion: Arc<Mutex<HashSet<BashTaskId>>>,
     pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,

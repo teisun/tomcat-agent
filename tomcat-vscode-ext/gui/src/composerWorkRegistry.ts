@@ -41,6 +41,10 @@ export class ComposerWorkRegistry {
   cutoff(sessionId: string): number {
     return this.nextSequenceBySession.get(sessionId) ?? 0;
   }
+  pendingIds(sessionId: string, cutoff: number): string[] {
+    return [...this.pendingByOperation.values()].filter(work => work.sessionId === sessionId && work.sequence <= cutoff).map(work => work.operationId);
+  }
+
 
   complete(operationId: string): boolean {
     const pending = this.pendingByOperation.get(operationId);
