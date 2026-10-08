@@ -77,7 +77,7 @@ import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
 import { HostDraftCoordinator } from "./hostDraftCoordinator";
-import { MessageQueue, type ComposerConfig, type QueueContent } from "./messageQueue";
+import { MessageQueue, type QueueContent } from "./messageQueue";
 import { buildFileReference } from "./contextReferences";
 import { TomcatSessionPool } from "./sessionPool";
 import {
@@ -639,7 +639,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           enabled: this.messageQueueEnabled && !this.disposed && !!session && !this.closedFileSessions.has(sessionId)
             && !["failed", "reconnecting"].includes(this.serveConnectionStatus) };
       },
-      send: (sessionId, kind, content, config) => this.sendQueueInput(sessionId, kind, content, config),
+      send: (sessionId, kind, content) => this.sendQueueInput(sessionId, kind, content),
       changed: (sessionId) => { void this.broadcastSession(sessionId, { force: true }); },
       confirmed: (sessionId, content, kind) => {
         this.stateStore.appendLocalUserMessage(sessionId, content.text, {
@@ -1055,7 +1055,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (this.messageQueueEnabled) {
       const queue = this.messageQueue.view(sessionId);
       session = { ...session, busy: session.busy || this.messageQueue.isRunning(sessionId),
-        composerConfig: this.composerConfig(sessionId),
         messageQueue: { paused: queue.paused, editingId: queue.editingId,
           items: queue.items.map(item => {
             const missing = new Set(this.markMissingAttachments(item.attachments).missing.map(a => a.id));
@@ -1341,14 +1340,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private get messageQueueEnabled(): boolean { return !!this.initialized && hasServeCapability(this.initialized, "message_queue"); }
 
-  private composerConfig(sessionId: string): ComposerConfig {
-    const session = this.peekState().sessionViews[sessionId];
-    return this.messageQueue.config(sessionId, { agentMode: session?.agentMode === "plan" ? "plan" : "chat", model: session?.model ?? "" });
-  }
-
   /** Shared wire construction, with no active-session or draft side effects. */
-  private sendQueueInput(sessionId: string, kind: UserSubmitKind, content: QueueContent, config?: ComposerConfig) {
-    const nextConfig = config ?? this.composerConfig(sessionId);
+  private sendQueueInput(sessionId: string, kind: UserSubmitKind, content: QueueContent) {
     return this.deps.messenger.request({
       type: kind, sessionId, text: content.text,
       params: {
@@ -1356,9 +1349,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         segments: content.segments.map(({ occurrenceId: _occurrence, ...wire }) => wire),
         attachments: content.attachments.map(a => ({ blobSha: a.blobSha, providerSha: a.providerSha ?? null,
           kind: a.kind, filename: a.filename, mimeType: a.mimeType })),
-        ...(kind === "steer" ? { onlyIfRunning: true } : {
-          agentMode: nextConfig.agentMode, ...(nextConfig.model ? { model: nextConfig.model } : {}),
-        }),
+        ...(kind === "steer" ? { onlyIfRunning: true } : {}),
       },
     });
   }
@@ -1377,7 +1368,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const revision = matchesDraft ? this.draftStore.currentRevision(sessionId) : null;
       const content: QueueContent = { userMessageId: intent.data.userMessageId ?? randomUUID(), text: intent.data.text,
         segments: intent.data.segments ?? [], attachments };
-      const submission = this.messageQueue.submit(sessionId, content, this.composerConfig(sessionId));
+      const submission = this.messageQueue.submit(sessionId, content);
       if (submission.queued && revision !== null && await this.draftStore.discardIfRevision(sessionId, revision)) {
         this.stateStore.clearPendingAttachments(sessionId);
       }
@@ -1816,7 +1807,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         const { sessionId, userMessageId, action } = intent.data;
         await this.draftCoordinator.run(sessionId, async () => {
           switch (action) {
-            case "send": this.messageQueue.sendNow(sessionId, userMessageId, this.composerConfig(sessionId)); break;
+            case "send": this.messageQueue.sendNow(sessionId, userMessageId); break;
             case "edit": this.messageQueue.edit(sessionId, userMessageId); break;
             case "cancel": this.messageQueue.edit(sessionId, null); break;
             case "delete": this.messageQueue.remove(sessionId, userMessageId); break;
@@ -2238,9 +2229,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
-        if (this.messageQueueEnabled) {
-          this.messageQueue.setConfig(sessionId, { ...this.composerConfig(sessionId), model: intent.data.modelId });
-          if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) { await this.postState(); return; }
+        if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) {
+          await this.postState();
+          return;
         }
         try {
           const response = await this.deps.messenger.sendSetModel(sessionId, intent.data.modelId);
@@ -2376,9 +2367,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.runPlanBuild(sessionId, intent.data.planId);
           return;
         }
-        if (this.messageQueueEnabled) {
-          this.messageQueue.setConfig(sessionId, { ...this.composerConfig(sessionId), agentMode: intent.data.action === "enter" ? "plan" : "chat" });
-          if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) { await this.postState(); return; }
+        if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) {
+          await this.postState();
+          return;
         }
         try {
           const response = await this.deps.messenger.sendSetPlanMode({

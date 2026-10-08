@@ -7,7 +7,6 @@ export interface QueueContent {
   segments: WebviewMessageSegment[];
   attachments: DraftAttachmentRef[];
 }
-export interface ComposerConfig { agentMode: "chat" | "plan"; model: string }
 export interface QueueItem extends QueueContent { status: "queued" | "prompt" | "steering" }
 interface Attempt { serial: number; kind: "prompt" | "steer"; stopAfterAck: boolean; pauseVersion: number }
 interface SessionQueue {
@@ -17,11 +16,10 @@ interface SessionQueue {
   editingId: string | null;
   inFlight?: Attempt;
   phase: "idle" | "starting" | "running";
-  nextConfig?: ComposerConfig;
 }
 interface Driver {
   conditions(sessionId: string): { busy: boolean; commandPending: boolean; enabled: boolean };
-  send(sessionId: string, kind: "prompt" | "steer", content: QueueContent, config?: ComposerConfig): Promise<{ success: boolean; error?: string | null }>;
+  send(sessionId: string, kind: "prompt" | "steer", content: QueueContent): Promise<{ success: boolean; error?: string | null }>;
   changed(sessionId: string): void;
   confirmed(sessionId: string, content: QueueContent, kind: "prompt" | "steer"): void;
   failed(sessionId: string, error: string): void;
@@ -38,16 +36,14 @@ export class MessageQueue {
     if (!value) { value = { items: [], paused: false, pauseVersion: 0, editingId: null, phase: "idle" }; this.sessions.set(id, value); }
     return value;
   }
-  config(id: string, fallback: ComposerConfig): ComposerConfig { return this.session(id).nextConfig ?? fallback; }
-  setConfig(id: string, config: ComposerConfig): void { this.session(id).nextConfig = { ...config }; this.driver.changed(id); }
-  view(id: string): { items: readonly QueueItem[]; paused: boolean; editingId: string | null; config?: ComposerConfig } {
+  view(id: string): { items: readonly QueueItem[]; paused: boolean; editingId: string | null } {
     const s = this.session(id);
-    return { items: s.items, paused: s.paused, editingId: s.editingId, config: s.nextConfig };
+    return { items: s.items, paused: s.paused, editingId: s.editingId };
   }
   hasInFlight(id: string): boolean { return !!this.session(id).inFlight; }
   isRunning(id: string): boolean { return this.session(id).phase !== "idle"; }
   private busy(id: string): boolean { return this.isRunning(id) || this.driver.conditions(id).busy; }
-  submit(id: string, content: QueueContent, config: ComposerConfig): { queued: boolean; completion: Promise<boolean> } {
+  submit(id: string, content: QueueContent): { queued: boolean; completion: Promise<boolean> } {
     const s = this.session(id);
     if (this.busy(id) || s.inFlight) {
       if (this.driver.conditions(id).busy && s.phase === "idle") s.phase = "running";
@@ -56,7 +52,7 @@ export class MessageQueue {
       this.dispatch(id);
       return { queued: true, completion: Promise.resolve(true) };
     }
-    return { queued: false, completion: this.send(id, "prompt", content, true, undefined, config) };
+    return { queued: false, completion: this.send(id, "prompt", content, true) };
   }
   enqueue(id: string, content: QueueContent): void {
     const s = this.session(id);
@@ -64,7 +60,7 @@ export class MessageQueue {
     s.items.push({ ...content, status: "queued" });
     this.driver.changed(id); this.dispatch(id);
   }
-  sendNow(id: string, itemId: string, config: ComposerConfig): void {
+  sendNow(id: string, itemId: string): void {
     const s = this.session(id);
     if (s.inFlight) return;
     const index = s.items.findIndex(item => item.userMessageId === itemId && item.status === "queued");
@@ -73,7 +69,7 @@ export class MessageQueue {
     s.items.unshift(item);
     const kind = this.busy(id) ? "steer" : "prompt";
     if (kind === "steer" && s.phase === "idle") s.phase = "running";
-    void this.send(id, kind, item, true, item, config);
+    void this.send(id, kind, item, true, item);
   }
   edit(id: string, itemId: string | null): void {
     const s = this.session(id);
@@ -142,13 +138,12 @@ export class MessageQueue {
     this.driver.changed(id); this.dispatch(id);
   }
   reset(): void { const ids = [...this.sessions.keys()]; this.sessions.clear(); for (const id of ids) this.driver.changed(id); }
-  discard(id: string): void { this.sessions.delete(id); this.driver.changed(id); }
   dispatch(id: string): void {
     const s = this.session(id), conditions = this.driver.conditions(id), item = s.items[0];
     if (!conditions.enabled || conditions.commandPending || this.busy(id) || s.paused || s.inFlight || !item || item.status !== "queued" || s.editingId === item.userMessageId) return;
-    void this.send(id, "prompt", item, false, item, s.nextConfig);
+    void this.send(id, "prompt", item, false, item);
   }
-  private async send(id: string, kind: "prompt" | "steer", content: QueueContent, explicit: boolean, item?: QueueItem, config?: ComposerConfig): Promise<boolean> {
+  private async send(id: string, kind: "prompt" | "steer", content: QueueContent, explicit: boolean, item?: QueueItem): Promise<boolean> {
     const s = this.session(id);
     const attempt: Attempt = { serial: ++this.serial, kind, stopAfterAck: false, pauseVersion: s.pauseVersion };
     if (kind === "prompt" && s.phase === "idle") s.phase = "starting";
@@ -157,7 +152,7 @@ export class MessageQueue {
     this.driver.changed(id);
     let accepted = false;
     try {
-      const response = await this.driver.send(id, kind, content, kind === "prompt" ? config : undefined);
+      const response = await this.driver.send(id, kind, content);
       if (this.sessions.get(id) !== s || s.inFlight?.serial !== attempt.serial) return false;
       if (!response.success) {
         if (item) item.status = "queued";

@@ -62,7 +62,7 @@ describe("Host message queue integration", () => {
     expect(f.host.draftStore.peek("s").attachments.map((a: any) => a.id)).toEqual(["prior", "later"]);
     f.provider.dispose();
   });
-  it("busy submits remain content-only; picker edits do not send RPC; steer never carries next config", async () => {
+  it("busy submits remain content-only; picker edits do not send RPC or override the session", async () => {
     const f = setup();
     await f.host.handleIntent({ type: "prompt", messageId: "submit", data: { sessionId: "s", text: "X", userMessageId: "X" } });
     expect(f.request).not.toHaveBeenCalled();
@@ -71,7 +71,8 @@ describe("Host message queue integration", () => {
     await f.host.handleIntent({ type: "setModel", messageId: "model", data: { sessionId: "s", modelId: "B" } });
     await f.host.handleIntent({ type: "setPlanMode", messageId: "mode", data: { sessionId: "s", action: "enter" } });
     expect(f.setModel).not.toHaveBeenCalled(); expect(f.setMode).not.toHaveBeenCalled();
-    expect(f.provider.currentState().sessionViews.s.composerConfig).toEqual({ model: "B", agentMode: "plan" });
+    expect(f.provider.currentState().sessionViews.s).toMatchObject({ model: "A", agentMode: "chat" });
+    expect(f.provider.currentState().sessionViews.s).not.toHaveProperty("composerConfig");
     await f.host.handleIntent({ type: "queueAction", messageId: "now", data: { sessionId: "s", userMessageId: "X", action: "send" } });
     expect(f.request).toHaveBeenCalledWith(expect.objectContaining({ type: "steer", params: expect.objectContaining({ onlyIfRunning: true, userMessageId: "X" }) }));
     expect(f.request.mock.calls[0][0].params).not.toHaveProperty("model");
@@ -80,6 +81,30 @@ describe("Host message queue integration", () => {
     const state = f.provider.currentState().sessionViews.s;
     expect(state.messageQueue?.items).toEqual([]);
     expect(state.timeline.filter(item => item.type === "message" && item.id === "X")).toHaveLength(1);
+    f.provider.dispose();
+  });
+  it.each([true, false])("idle pickers use RPC and retain authoritative state after model success=%s", async success => {
+    const f = setup();
+    const backend = { sessionId: "s", busy: false, model: "A", agentMode: "chat" };
+    f.host.stateStore.applySessionState(backend);
+    const refreshModels = vi.spyOn(f.host, "refreshModels").mockResolvedValue(undefined);
+    const refreshSession = vi.spyOn(f.host, "refreshSessionState").mockImplementation(async () => {
+      f.host.stateStore.applySessionState(backend);
+    });
+    f.setModel.mockImplementation(async (_sessionId, model) => {
+      if (success) backend.model = model;
+      return { success, error: success ? undefined : "model_not_found" };
+    });
+    f.setMode.mockImplementation(async () => { backend.agentMode = "plan"; return { success: true }; });
+    await f.host.handleIntent({ type: "setModel", messageId: "model", data: { sessionId: "s", modelId: "B" } });
+    expect(f.setModel).toHaveBeenCalledWith("s", "B");
+    expect(refreshModels).toHaveBeenCalledOnce();
+    expect(f.provider.currentState().sessionViews.s.model).toBe(success ? "B" : "A");
+    await f.host.handleIntent({ type: "setPlanMode", messageId: "mode", data: { sessionId: "s", action: "enter" } });
+    expect(f.setMode).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s", action: "enter" }));
+    expect(refreshSession).toHaveBeenCalledTimes(2);
+    expect(f.provider.currentState().sessionViews.s.agentMode).toBe("plan");
+    expect(f.provider.currentState().sessionViews.s).not.toHaveProperty("composerConfig");
     f.provider.dispose();
   });
   it("Stop retains ordinary queue; idle Enter sends C before retained work without touching another session", async () => {
@@ -91,6 +116,8 @@ describe("Host message queue integration", () => {
     await f.host.handleIntent({ type: "prompt", messageId: "C", data: { sessionId: "s", text: "C", userMessageId: "C" } });
     expect(f.request.mock.calls.map(c => c[0].type)).toEqual(["interrupt", "prompt"]);
     expect(f.request.mock.calls[1][0].text).toBe("C");
+    expect(f.request.mock.calls[1][0].params).not.toHaveProperty("model");
+    expect(f.request.mock.calls[1][0].params).not.toHaveProperty("agentMode");
     expect(f.provider.currentState().activeSessionId).toBe("background");
     expect(f.provider.currentState().sessionViews.s.messageQueue?.items.map(item => item.text)).toEqual(["A", "B"]);
     expect(f.provider.currentState().sessionViews.s.messageQueue?.paused).toBe(false);

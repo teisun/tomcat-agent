@@ -53,6 +53,7 @@ export function QueuedMessageEditor({ item, sessionId, composerProps, vscodeApi,
   return <section className="tc-queue-editor" data-testid="queue-editor" aria-label="Editing queued message">
     <ComposerSurface {...composerProps} ref={editor} initialDraft={initialDraft} instanceId="queue-edit"
       header={<><span>Editing queued message</span><button type="button" className="tc-composer__cancel" data-testid="queue-edit-cancel" onClick={() => action("cancel")}>Cancel</button></>}
+      canChangeConfig={composerProps.canChangeConfig ?? !composerProps.busy}
       hideDragHint submitAriaLabel="Save queued message" busy={false} canInterrupt={false} canPrompt={composerProps.canPrompt && !composerProps.commandPending}
       submitDisabled={working || attachments.some(a => a.unavailable)}
       attachmentsPending={working}

@@ -3,8 +3,6 @@
 
 export type AgentIdleOutcome = "completed" | "interrupted" | "failed";
 
-export type AgentMode = "chat" | "plan";
-
 export type AssistantMessageEvent = any;
 
 export type AttachmentMode = "inline" | "reference";
@@ -118,9 +116,7 @@ export type RevertReason = "no_baselines" | "expired" | "git_head_moved";
 export type RewindFiles = "keep" | "revert";
 
 export interface RewindMessage {
-  agentMode?: AgentMode | null;
   attachments?: ServeAttachment[];
-  model?: null | string;
   onlyIfRunning?: boolean | null;
   segments?: ServeContentSegment[];
   text: string;
@@ -174,9 +170,7 @@ export interface ServeFinding {
   severity: string;
 }
 export interface ServeMessageParams {
-  agentMode?: AgentMode | null;
   attachments?: ServeAttachment[];
-  model?: null | string;
   onlyIfRunning?: boolean | null;
   segments?: ServeContentSegment[];
   userMessageId?: null | string;

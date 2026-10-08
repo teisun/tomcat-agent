@@ -1546,7 +1546,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const canInterrupt = state.ready;
   const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending;
   const modelAdminSupported = state.modelAdminSupported;
-  const composerModelId = activeSession?.composerConfig?.model ?? activeSession?.model;
+  const composerModelId = activeSession?.model;
   const activeModelCapabilities = composerModelId
     ? state.availableModelCapabilities?.[composerModelId]
     : undefined;
@@ -2609,6 +2609,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     availableModelReasoningLevels: state.availableModelReasoningLevels,
     availableModels: state.availableModels,
     busy: !!activeSession?.busy,
+    canChangeConfig: !activeSession?.busy,
     canInterrupt,
     allowBusyInput: !!state.messageQueueSupported,
     attachmentsPending: !!activeSession && composerWorkRegistryRef.current.pendingCount(activeSession.sessionId) > 0,
@@ -2621,12 +2622,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     contextSearchMatches: contextSearch.matches,
     contextSearchQuery: contextSearch.query,
     contextSearchTruncated: contextSearch.truncated,
-    contextWindowValue: composerModelId && composerModelId !== activeSession?.model ? state.availableModelDetails?.[composerModelId]?.selectedContextWindow : activeSessionContextWindow,
+    contextWindowValue: activeSessionContextWindow,
     contextLabel: buildContextLabel(activeSession?.contextRatio),
     modelCapabilities: activeModelCapabilities,
-    modeValue: currentModeValue(activeSession?.composerConfig?.agentMode ?? activeSession?.agentMode),
-    modelValue: activeSession?.composerConfig?.model ?? activeSession?.model ?? "",
-    thinkingLevelValue: composerModelId && composerModelId !== activeSession?.model ? state.availableModelDetails?.[composerModelId]?.selectedReasoningLevel ?? "" : activeSession?.thinkingLevel ?? "",
+    modeValue: currentModeValue(activeSession?.agentMode),
+    modelValue: activeSession?.model ?? "",
+    thinkingLevelValue: activeSession?.thinkingLevel ?? "",
     onContextSearchClose: handleContextSearchClose,
     onContextSearchOpen: handleContextSearchOpen,
     onContextSearchQueryChange: handleContextSearchQueryChange,

@@ -380,7 +380,6 @@ export interface WebviewMessageQueue {
 
 export interface WebviewSessionSnapshot {
   messageQueue?: WebviewMessageQueue;
-  composerConfig?: { agentMode: "chat" | "plan"; model: string };
   sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;

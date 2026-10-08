@@ -33,6 +33,36 @@ async function reply(requestId:string, content:Record<string,unknown>) {
 }
 
 describe("inline user-message edit",()=>{
+  it("locks configuration to the running session without disabling the historical draft", async () => {
+    const onModeChange = vi.fn(), onModelChange = vi.fn();
+    const attached = { ...message, attachments: [{ id: "image", blobSha: "a".repeat(64), filename: "image.png", kind: "image" as const, mimeType: "image/png" }] };
+    const renderEditor = (busy: boolean) => <InlineMessageEditor message={attached} sessionId="session"
+      composerProps={{ ...props, onModeChange, onModelChange }} hasWrites={false} busy={busy}
+      vscodeApi={{ postMessage: vi.fn() }} onClose={vi.fn()} />;
+    const view = render(renderEditor(true));
+    const input = await screen.findByTestId("edit-composer-input");
+    expect(input).toHaveAttribute("contenteditable", "true");
+    expect(screen.getByTestId("edit-attachment-add")).not.toBeDisabled();
+    expect(screen.getByTestId("edit-mode-select")).toBeDisabled();
+    expect(screen.getByTestId("edit-model-select")).toBeDisabled();
+    expect(screen.getByTestId("edit-send-button")).not.toBeDisabled();
+    expect(screen.queryByTestId("edit-stop-button")).toBeNull();
+    fireEvent.click(screen.getByTestId("edit-mode-select"));
+    fireEvent.click(screen.getByTestId("edit-model-select"));
+    expect(onModeChange).not.toHaveBeenCalled(); expect(onModelChange).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.paste(input, { clipboardData: { getData: () => " amended" } }); });
+    const edited = input.textContent;
+    view.rerender(renderEditor(false));
+    expect(screen.getByTestId("edit-composer-input")).toBe(input);
+    expect(input.textContent).toBe(edited);
+    expect(screen.getByRole("list", { name: "Pending attachments" })).toBeInTheDocument();
+    expect(screen.getByTestId("edit-mode-select")).not.toBeDisabled();
+    expect(screen.getByTestId("edit-model-select")).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId("edit-mode-select"));
+    fireEvent.click(screen.getAllByTestId("edit-mode-option").find(option => option.textContent === "Plan")!);
+    expect(onModeChange).toHaveBeenCalledWith("plan");
+  });
+
   it("does not resend an attachment without text", async () => {
     const postMessage = vi.fn();
     render(<InlineMessageEditor

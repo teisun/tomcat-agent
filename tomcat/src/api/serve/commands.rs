@@ -296,15 +296,6 @@ pub(crate) async fn handle_command(
                         return Ok(());
                     }
                 };
-            if let Err(error) = apply_prompt_config(&slot, &params, &input_message) {
-                send_error(
-                    &state,
-                    id,
-                    Some(slot.session_id.clone()),
-                    render_error_message(&error),
-                )?;
-                return Ok(());
-            }
             let persisted = persist_turn_input_message(&slot, &archival_message, &params)?;
             input_message.msg_id = Some(persisted.row_id);
             if persisted.settled_pending_question && !slot.is_busy() {
@@ -368,7 +359,7 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, Some(slot.session_id.clone()), error.to_string())?;
                 return Ok(());
             }
-            if slot.is_busy() {
+            if slot.is_busy() || params.only_if_running == Some(true) {
                 let user_message_id = normalized_user_message_id(&params)
                     .map(str::to_string)
                     .unwrap_or_else(crate::core::session::manager::generate_entry_id);
@@ -2661,55 +2652,6 @@ fn normalize_plan_runtime_error_code(error: &PlanRuntimeError) -> &'static str {
         PlanRuntimeError::BuildPlanNotFound { .. }
         | PlanRuntimeError::BuildPlanPathNotFound { .. } => "plan_not_found",
     }
-}
-
-/// Reuse the existing mode transition and model-selection operations in one command.
-/// Resolve and validate first, so unknown models or unsupported input do not change mode.
-fn apply_prompt_config(
-    slot: &Arc<super::registry::SessionSlot>,
-    params: &ServeMessageParams,
-    input: &ChatMessage,
-) -> Result<(), AppError> {
-    if params.model.is_none() && params.agent_mode.is_none() {
-        return Ok(());
-    }
-    let entry = slot.ctx.session_runtime.session.current_session_entry()?;
-    let current_model = slot.ctx.effective_model(entry.as_ref());
-    let model = params.model.as_deref().unwrap_or(&current_model).trim();
-    let resolved = slot
-        .ctx
-        .global_services
-        .llm_resolver
-        .resolve(LlmScene::Main, Some(model))?;
-    slot.ctx
-        .global_services
-        .model_catalog
-        .with_catalog(|catalog| {
-            crate::core::llm::resolver::validate_capabilities(
-                catalog,
-                &slot.ctx.config.llm.default_model,
-                LlmScene::Main,
-                &resolved.catalog_id,
-                &resolved.capabilities,
-                std::slice::from_ref(input),
-            )
-        })?;
-    let runtime = &slot.ctx.session_runtime.plan_runtime;
-    if let Some(mode) = params.agent_mode.filter(|m| *m != runtime.mode()) {
-        use crate::core::session::manager::AgentMode;
-        match mode {
-            AgentMode::Chat => runtime.exit_plan(),
-            AgentMode::Plan => runtime.enter_plan(),
-        }
-        .map_err(|error| AppError::Config(normalize_plan_runtime_error_code(&error).to_string()))?;
-    }
-    if model != current_model {
-        slot.ctx
-            .session_runtime
-            .session
-            .switch_current_model(None, Some(model))?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn start_turn(

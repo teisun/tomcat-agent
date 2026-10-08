@@ -1,13 +1,12 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { initializeServe } from "../src/serveClient/initialize";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
-import { MessageQueue, type ComposerConfig, type QueueContent } from "../src/ui/webview/messageQueue";
+import { MessageQueue, type QueueContent } from "../src/ui/webview/messageQueue";
 import { createRealServeMessenger, ensureTomcatBinary, spawnScriptedOpenAiStreamServer, sseDelta, sseDone, sseFinish, waitForEvent, warmTomcatBinaryForSuite } from "./serveTestUtils";
 
 warmTomcatBinaryForSuite();
-const config: ComposerConfig = { agentMode: "chat", model: "gpt-5.4" };
 const content = (text: string): QueueContent => ({ text, userMessageId: text, segments: [], attachments: [] });
 function barrier() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; }
 function bridge(messenger: TomcatMessenger, sessionId: string) {
@@ -22,10 +21,9 @@ function bridge(messenger: TomcatMessenger, sessionId: string) {
     confirmed: (_session, input) => { confirmed.push(input.userMessageId); },
     failed: (_session, error) => { errors.push(error); },
     interrupt: id => { void messenger.request({ type: "interrupt", sessionId: id }); },
-    send: async (id, kind, input, next) => {
-      const selected = next ?? queue.config(id, config);
+    send: async (id, kind, input) => {
       const params = { userMessageId: input.userMessageId, segments: input.segments,
-        ...(kind === "steer" ? { onlyIfRunning: true } : { agentMode: selected.agentMode, model: selected.model }) };
+        ...(kind === "steer" ? { onlyIfRunning: true } : {}) };
       sent.push({ kind, id: input.userMessageId, params });
       try { return await messenger.request({ type: kind, sessionId: id, text: input.text, params }); }
       finally { if (kind === "steer") acceptedSteer.release(); }
@@ -44,7 +42,7 @@ const bodies = (raw: string[]) => raw.map(request => JSON.parse(request.split("\
 const lastUser = (body: any) => body.messages.filter((m: any) => m.role === "user").at(-1).content;
 
 describe("real serve message queue", () => {
-  it("steering keeps A; completed FIFO turns use B's own thinking format on the same route", async () => {
+  it("steering and completed FIFO retain the session model without prompt configuration", async () => {
     const gate = barrier();
     const server = await spawnScriptedOpenAiStreamServer([
       { parts: [sseDelta("held"), { ...sseFinish("stop"), waitFor: gate.promise }, sseDone()] },
@@ -53,35 +51,23 @@ describe("real serve message queue", () => {
     const runtime = await createRealServeMessenger(server.baseUrl);
     let owner: ReturnType<typeof bridge> | undefined;
     try {
-      await appendFile(path.join(runtime.fixture.homePath, ".tomcat", "models.toml"), `
-[[models]]
-id = "queue-B"
-model_name = "queue-B-wire"
-api = "openai"
-provider = "openai"
-api_key_env = "OPENAI_API_KEY"
-base_url = "${server.baseUrl}"
-thinking_format = "deepseek"
-supported_reasoning_levels = ["high"]
-context_window = 272000
-max_output_tokens = 32768
-capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
-`);
       const init = await initializeServe(runtime.messenger);
       expect(init.capabilities).toContain("message_queue"); const id = init.sessionId!;
       owner = bridge(runtime.messenger, id);
       const firstDelta = waitForEvent(runtime.messenger, e => e.type === "message_update" && e.sessionId === id);
-      expect(await owner.queue.submit(id, content("initial-task"), config).completion).toBe(true); await firstDelta;
-      owner.queue.submit(id, content("queued-A"), config); owner.queue.submit(id, content("queued-B"), config); owner.queue.submit(id, content("steer-X"), config);
-      owner.queue.setConfig(id, { agentMode: "plan", model: "queue-B" });
-      owner.queue.sendNow(id, "steer-X", owner.queue.config(id, config)); await owner.acceptedSteer.promise;
+      expect(await owner.queue.submit(id, content("initial-task")).completion).toBe(true); await firstDelta;
+      owner.queue.submit(id, content("queued-A")); owner.queue.submit(id, content("queued-B")); owner.queue.submit(id, content("steer-X"));
+      owner.queue.sendNow(id, "steer-X"); await owner.acceptedSteer.promise;
       expect(owner.sent.find(call => call.kind === "steer")!.params).toEqual({ userMessageId: "steer-X", segments: [], onlyIfRunning: true });
       const complete = waitForEvent(runtime.messenger, e => e.type === "agent_idle" && owner!.idleCount() === 3, 30000);
       gate.release(); await complete;
       const requests = bodies(server.capturedNonTitleRequests());
-      expect(requests.map(r => r.model)).toEqual(["gpt-5.4", "gpt-5.4", "queue-B-wire", "queue-B-wire"]);
+      expect(requests.map(r => r.model)).toEqual(Array(4).fill("gpt-5.4"));
       expect(JSON.stringify(requests[1].messages)).toContain("steer-X");
-      expect(requests[2].thinking.type).toBe("enabled"); expect(requests[3].thinking.type).toBe("enabled");
+      for (const call of owner.sent) {
+        expect(call.params).not.toHaveProperty("agentMode");
+        expect(call.params).not.toHaveProperty("model");
+      }
       expect(lastUser(requests[2])).toContain("queued-A"); expect(lastUser(requests[3])).toContain("queued-B");
       expect(owner.confirmed.filter(value => value === "steer-X")).toHaveLength(1);
       expect(owner.queue.view(id).items).toEqual([]);
@@ -99,9 +85,9 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true, 
     try {
       const init = await initializeServe(runtime.messenger); const id = init.sessionId!; owner = bridge(runtime.messenger, id);
       const started = waitForEvent(runtime.messenger, e => e.type === "message_update");
-      await owner.queue.submit(id, content("initial-task"), config).completion; await started;
-      for (const text of ["A", "B", "discarded-X"]) owner.queue.submit(id, content(text), config);
-      owner.queue.sendNow(id, "discarded-X", config); await owner.acceptedSteer.promise;
+      await owner.queue.submit(id, content("initial-task")).completion; await started;
+      for (const text of ["A", "B", "discarded-X"]) owner.queue.submit(id, content(text));
+      owner.queue.sendNow(id, "discarded-X"); await owner.acceptedSteer.promise;
       const stopped = waitForEvent(runtime.messenger, e => e.type === "agent_idle" && e.outcome === "interrupted");
       owner.queue.stop(id); expect((await runtime.messenger.request({ type: "interrupt", sessionId: id })).success).toBe(true); await stopped;
       firstGate.release();
@@ -110,9 +96,9 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true, 
       expect(JSON.stringify(history.payload)).not.toContain("discarded-X");
       expect(server.capturedNonTitleRequests()).toHaveLength(1);
       const cStarted = waitForEvent(runtime.messenger, e => e.type === "message_update");
-      const c = owner.queue.submit(id, content("C"), config); expect(c.queued).toBe(false); await c.completion; await cStarted;
+      const c = owner.queue.submit(id, content("C")); expect(c.queued).toBe(false); await c.completion; await cStarted;
       expect(owner.queue.view(id).items.map(item => item.text)).toEqual(["A", "B"]);
-      owner.queue.submit(id, content("D"), config);
+      owner.queue.submit(id, content("D"));
       const complete = waitForEvent(runtime.messenger, e => e.type === "agent_idle" && owner!.idleCount() === 5, 30000);
       cGate.release(); await complete;
       const requests = bodies(server.capturedNonTitleRequests());
@@ -180,8 +166,8 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true, 
     try {
       const init = await initializeServe(runtime.messenger); const id = init.sessionId!; owner = bridge(runtime.messenger, id);
       const started = waitForEvent(runtime.messenger, e => e.type === "message_update");
-      await owner.queue.submit(id, content("durable-initial"), config).completion; await started;
-      owner.queue.submit(id, content("never-replay-A"), config); owner.queue.enqueue("background", content("never-replay-B"));
+      await owner.queue.submit(id, content("durable-initial")).completion; await started;
+      owner.queue.submit(id, content("never-replay-A")); owner.queue.enqueue("background", content("never-replay-B"));
       owner.queue.reset(); owner.dispose(); await runtime.messenger.disposeAsync(); gate.release();
       expect(owner.queue.view(id).items).toEqual([]); expect(owner.queue.view("background").items).toEqual([]);
       replacement = new TomcatMessenger({ executable: await ensureTomcatBinary(), cwd: runtime.fixture.workspacePath, env: runtime.fixture.env, requestTimeoutMs: 10000 });

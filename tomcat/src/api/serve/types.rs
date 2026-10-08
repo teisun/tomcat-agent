@@ -100,11 +100,6 @@ pub struct ServeMessageParams {
     /// Strict steering never implicitly starts an idle session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only_if_running: Option<bool>,
-    /// Ordinary prompt selects execution configuration atomically with submission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_mode: Option<crate::core::session::manager::AgentMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
 }
 
 impl ServeMessageParams {
@@ -113,8 +108,6 @@ impl ServeMessageParams {
             && self.attachments.is_empty()
             && self.user_message_id.is_none()
             && self.only_if_running.is_none()
-            && self.agent_mode.is_none()
-            && self.model.is_none()
     }
 }
 

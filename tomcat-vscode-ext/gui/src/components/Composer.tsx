@@ -479,6 +479,8 @@ export interface ComposerProps {
   busy?: boolean;
   canInterrupt: boolean;
   canPrompt: boolean;
+  /** Real session configuration permission, independent of an editor's submit/Stop state. */
+  canChangeConfig?: boolean;
   contextSearchLoading: boolean;
   contextSearchMatches: ContextSearchMatch[];
   contextSearchQuery: string;
@@ -520,6 +522,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   availableModelReasoningLevels,
   availableModels,
   busy = false,
+  canChangeConfig: configAllowed = !busy,
   allowBusyInput = false,
   submitAriaLabel,
   hideDragHint = false,
@@ -562,6 +565,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   planState,
 }, ref) {
   const testId = (name: string) => instanceId ? `${instanceId}-${name}` : name;
+  const canChangeConfig = canPrompt && configAllowed;
+  const configHint = !configAllowed ? "任务运行中不能切换，结束后再改" : undefined;
   const planStatus = formatPlanStatus(planState);
   const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
@@ -908,7 +913,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [modeMenuOpen]);
 
-  const canOpenModeMenu = canPrompt;
+  useEffect(() => {
+    if (!canChangeConfig) setModeMenuOpen(false);
+  }, [canChangeConfig]);
   const pickerModels = useMemo(
     () =>
       buildPickerModels({
@@ -1183,6 +1190,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <div
             className="tc-field tc-field--compact tc-field--dropdown tc-field--mode"
             ref={modeMenuRef}
+            title={configHint}
           >
             <span>Mode</span>
             <button
@@ -1190,7 +1198,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               aria-label="Tomcat chat mode"
               className="tc-topbar__trigger tc-topbar__trigger--compact"
               data-testid={testId("mode-select")}
-              disabled={!canOpenModeMenu}
+              disabled={!canChangeConfig}
               onClick={() => {
                 setModeMenuOpen((value) => !value);
               }}
@@ -1225,11 +1233,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             |
           </span>
 
-          <div className="tc-field tc-field--compact tc-field--dropdown tc-field--model">
+          <div className="tc-field tc-field--compact tc-field--dropdown tc-field--model" title={configHint}>
             <span>Model</span>
             <ModelPicker
               className="tc-composer-model-picker"
-              disabled={!canPrompt}
+              disabled={!canChangeConfig}
               // The VS Code host E2E harness still drives this compatibility trigger.
               legacyThinkingTriggerTestId={testId("thinking-level-select")}
               testId={testId("model-select")}

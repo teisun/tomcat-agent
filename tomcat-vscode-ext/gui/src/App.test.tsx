@@ -76,7 +76,7 @@ describe("busy input and local queue acknowledgement", () => {
   it.each(["cancel", "save"] as const)("queue composer %s restores the same main editor and its draft/attachments", async action => {
     const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true;
     const session = snapshot.sessionViews.s1;
-    Object.assign(session, { timeline: [], busy: true, composerConfig: { agentMode: "plan", model: "gpt-5.4" } });
+    Object.assign(session, { timeline: [], busy: true, agentMode: "plan", model: "gpt-5.4" });
     session.pendingAttachments = [{ id: "main-file", kind: "file", filename: "main.pdf", label: "main.pdf", mimeType: "application/pdf", blobSha: "a".repeat(64) }];
     session.messageQueue = { paused: true, editingId: null, items: [{ userMessageId: "q1", text: "queued original", segments: [], attachments: [], status: "queued" }] };
     await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-initial" });
@@ -90,7 +90,10 @@ describe("busy input and local queue acknowledgement", () => {
     expect(screen.getByTestId("main-composer-draft")).toHaveProperty("hidden", true);
     expect(main.textContent).toBe("unsent main draft");
     expect(screen.getByTestId("main-composer-draft").querySelector('[aria-label="main.pdf"]')).toBeTruthy();
-    expect(screen.getByTestId("queue-edit-model-select")).toBeTruthy();
+    expect(screen.getByTestId("queue-edit-mode-select").textContent).toContain("Plan");
+    expect(screen.getByTestId("queue-edit-model-select").textContent).toContain("gpt-5.4");
+    expect(screen.getByTestId("queue-edit-mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("queue-edit-model-select")).toHaveProperty("disabled", true);
     await act(async () => { fireEvent.paste(screen.getByTestId("queue-edit-composer-input"), { clipboardData: { getData: () => " changed" } }); });
     fireEvent.click(screen.getByTestId(action === "save" ? "queue-edit-send-button" : "queue-edit-cancel"));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "queueAction", data: expect.objectContaining({ action, userMessageId: "q1" }) }));
@@ -102,13 +105,16 @@ describe("busy input and local queue acknowledgement", () => {
     expect(main.textContent).toBe("unsent main draft"); expect(document.activeElement).toBe(main);
   });
 
-  it("unlocks input, switches the sole button with content, uses next config and ignores double submit", async () => {
+  it("unlocks busy input but locks configuration to the session and ignores double submit", async () => {
     const { postMessage } = mount();
     const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true;
-    Object.assign(snapshot.sessionViews.s1, { busy: true, timeline: [], composerConfig: { agentMode: "plan", model: "gpt-5.4" } });
+    Object.assign(snapshot.sessionViews.s1, { busy: true, timeline: [], agentMode: "plan", model: "gpt-5.4" });
     await emitState({ channel: "state", content: snapshot, messageId: "busy-queue" });
     expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
-    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("model-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("mode-select").textContent).toContain("Plan");
+    expect(screen.getByTestId("model-select").textContent).toContain("gpt-5.4");
     expect(screen.getByTestId("stop-button")).toBeTruthy();
     await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "follow-up" } }); });
     expect(screen.queryByTestId("stop-button")).toBeNull();
@@ -208,11 +214,31 @@ describe("inline user-message editing in App", () => {
     fireEvent.click(screen.getByText("old editable"));
     const stop = screen.getByTestId("stop-button");
     expect((stop as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId("edit-mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("edit-model-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("edit-composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("edit-attachment-add")).toHaveProperty("disabled", false);
+    const editor = screen.getByTestId("edit-composer-input");
+    await act(async () => { fireEvent.paste(editor, { clipboardData: { getData: () => " amended" } }); });
+    const editedText = editor.textContent;
+    fireEvent(stop.firstElementChild ?? stop, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    expect(screen.getByTestId("edit-composer-input")).toBe(editor);
     fireEvent.click(stop);
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "interrupt", data: { sessionId: "s1" } }));
-    expect(screen.getByTestId("edit-composer-input").textContent).toBe("old editable");
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe(editedText);
     expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
     expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("edit-mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("edit-model-select")).toHaveProperty("disabled", true);
+    snapshot.sessionViews.s1.busy = false;
+    snapshot.sessionViews.s1.agentMode = "plan";
+    await emitState({ channel: "state", content: snapshot, messageId: "actually-stopped" });
+    expect(screen.getByTestId("edit-composer-input")).toBe(editor);
+    expect(editor.textContent).toBe(editedText);
+    expect(screen.getByTestId("edit-mode-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("edit-model-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("edit-mode-select").textContent).toContain("Plan");
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
   });
 
   it("cancels the first edit when another user bubble is opened", async () => {
@@ -320,7 +346,6 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     checkpoints: fixture.checkpoints,
     composerDraft: fixture.composerDraft,
     messageQueue: fixture.messageQueue,
-    composerConfig: fixture.composerConfig,
     contextRatio: fixture.contextRatio,
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,

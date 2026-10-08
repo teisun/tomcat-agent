@@ -354,7 +354,6 @@ export interface WebviewComposerDraft {
 
 export interface WebviewSessionSnapshot {
   messageQueue?: import("../../src/ui/webview/protocol").WebviewMessageQueue;
-  composerConfig?: { agentMode: "chat" | "plan"; model: string };
   sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../src/serveClient/wire").InstructionCard[];
   activePlan?: WebviewPlanFileRef | null;

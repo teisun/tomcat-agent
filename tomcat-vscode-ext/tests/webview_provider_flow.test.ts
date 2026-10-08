@@ -53,6 +53,7 @@ type MutableSessionState = {
 };
 
 type BuildProviderOptions = {
+  messageQueueSupported?: boolean;
   getMessagesImpl?: (
     sessionId?: string,
     params?: { cursor?: string | null; limit?: number },
@@ -252,10 +253,11 @@ class FakeMessenger {
   }
 }
 
-function initializeResult(): InitializeResult {
+function initializeResult(messageQueueSupported = false): InitializeResult {
   return {
     attachmentRoot: null,
     capabilities: [
+      ...(messageQueueSupported ? ["message_queue"] : []),
       "ask_question",
       "list_provider_keys",
       "prompt",
@@ -440,7 +442,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     // The host learns where attachment bytes live from the handshake, and uses it to grant
     // the webview read access. Without it every image resolves to nothing.
     initialize: async () => ({
-      ...initializeResult(),
+      ...initializeResult(options.messageQueueSupported),
       attachmentRoot: messenger.attachmentRoot,
     }),
     messenger: messenger as never,
@@ -2521,6 +2523,34 @@ describe("webview provider integration", () => {
           item.text === "session A live event",
       ),
     ).toBe(true);
+  });
+
+  it("keeps Chat after Build when busy input is queued and sent once on idle", async () => {
+    const { messenger, provider, sessionState } = buildProvider({ messageQueueSupported: true });
+    const sessionId = "session-1";
+    try {
+      await provider.dispatchTestIntent({ messageId: "ready-build-queue", type: "ready" });
+      await provider.dispatchTestIntent({ messageId: "enter-plan", type: "setPlanMode", data: { sessionId, action: "enter" } });
+      expect(provider.currentState().sessionViews[sessionId].agentMode).toBe("plan");
+      await provider.dispatchTestIntent({ messageId: "build-plan", type: "setPlanMode", data: { sessionId, action: "build", planId: "plan-1" } });
+      sessionState.busy = true;
+      messenger.emit({ type: "agent_start", sessionId });
+      await vi.waitFor(() => expect(provider.currentState().sessionViews[sessionId]).toMatchObject({ busy: true, agentMode: "chat" }));
+      await provider.dispatchTestIntent({ messageId: "queue-X", type: "prompt", data: { sessionId, text: "X", userMessageId: "X" } });
+      expect(provider.currentState().sessionViews[sessionId].messageQueue?.items.map(item => item.userMessageId)).toEqual(["X"]);
+      expect(messenger.requestCalls.filter(call => call.type === "prompt")).toHaveLength(0);
+      sessionState.busy = false;
+      messenger.emit({ type: "agent_idle", sessionId, outcome: "completed" });
+      await vi.waitFor(() => expect(provider.currentState().sessionViews[sessionId].messageQueue?.items).toEqual([]));
+      const prompts = messenger.requestCalls.filter(call => call.type === "prompt");
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toMatchObject({ text: "X", params: { userMessageId: "X" } });
+      expect(prompts[0].params).not.toHaveProperty("agentMode");
+      expect(prompts[0].params).not.toHaveProperty("model");
+      expect(sessionState.agentMode).toBe("chat");
+      expect(provider.currentState().sessionViews[sessionId].agentMode).toBe("chat");
+      expect(messenger.setPlanModeCalls.map(call => call.action)).toEqual(["enter", "build"]);
+    } finally { provider.dispose(); }
   });
 
   it("tracks enter, build, and exit plan state through provider intents", async () => {

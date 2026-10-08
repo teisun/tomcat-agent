@@ -58,8 +58,6 @@ fn serve_dts_includes_user_message_id_on_message_params() {
     assert!(dts.contains("segments?: ServeContentSegment[];"));
     assert!(dts.contains("userMessageId?: null | string;"));
     assert!(dts.contains("onlyIfRunning?:"));
-    assert!(dts.contains("agentMode?:"));
-    assert!(dts.contains("model?:"));
     assert!(dts.contains("type: \"steering_consumed\";"));
     assert!(dts.contains("userMessageIds: string[];"));
     assert!(dts.contains("outcome: AgentIdleOutcome;"));

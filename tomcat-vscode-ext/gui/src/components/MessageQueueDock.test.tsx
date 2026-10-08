@@ -75,9 +75,13 @@ it("paused row uses only content and necessary ARIA actions; steer row is read-o
 });
 it("composer editor keeps the screenshot header, shared config and arrow save without rewind", async () => {
   const postMessage = vi.fn(), action = vi.fn(), props = composerProps(); const q = queue();
-  render(<QueuedMessageEditor item={q.items[0]} sessionId="s" composerProps={props} vscodeApi={{ postMessage }} action={action} />);
+  const view = render(<QueuedMessageEditor item={q.items[0]} sessionId="s" composerProps={props} vscodeApi={{ postMessage }} action={action} />);
   expect(screen.getByRole("region", { name: "Editing queued message" })).toBeTruthy();
-  expect(screen.getByTestId("queue-edit-model-select")).toBeTruthy(); expect(screen.getByTestId("queue-edit-mode-select")).toBeTruthy();
+  expect(screen.getByTestId("queue-edit-model-select")).toHaveProperty("disabled", true);
+  expect(screen.getByTestId("queue-edit-mode-select")).toHaveProperty("disabled", true);
+  view.rerender(<QueuedMessageEditor item={q.items[0]} sessionId="s" composerProps={{ ...props, busy: false }} vscodeApi={{ postMessage }} action={action} />);
+  expect(screen.getByTestId("queue-edit-model-select")).toHaveProperty("disabled", false);
+  expect(screen.getByTestId("queue-edit-mode-select")).toHaveProperty("disabled", false);
   expect(screen.getByRole("button", { name: "Save queued message" }).textContent).toBe("↑");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save queued message" })); });
   expect(action).toHaveBeenCalledWith("save", expect.objectContaining({ text: "check isolation" }));

@@ -1567,24 +1567,6 @@
       }
     ],
     "definitions": {
-      "AgentMode": {
-        "description": "用户可见的会话模式。\n\n计划文件的 `planning` / `pending` / `executing` / `completed` 生命周期不属于会话 模式；它由计划文件 frontmatter 的 `state` 表达。",
-        "oneOf": [
-          {
-            "type": "string",
-            "enum": [
-              "plan"
-            ]
-          },
-          {
-            "description": "`exec` 是 v2 sidecar 里已经落盘的旧值。它在新模型里等价于 Chat： 执行中的事实由计划文件恢复，而不是一个第三会话模式。",
-            "type": "string",
-            "enum": [
-              "chat"
-            ]
-          }
-        ]
-      },
       "AttachmentMode": {
         "description": "历史消息里的图片附件以什么形态回给调用方。",
         "oneOf": [
@@ -1945,28 +1927,11 @@
           "text"
         ],
         "properties": {
-          "agentMode": {
-            "description": "Ordinary prompt selects execution configuration atomically with submission.",
-            "anyOf": [
-              {
-                "$ref": "#/definitions/AgentMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "attachments": {
             "type": "array",
             "items": {
               "$ref": "#/definitions/ServeAttachment"
             }
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "onlyIfRunning": {
             "description": "Strict steering never implicitly starts an idle session.",
@@ -2151,28 +2116,11 @@
         "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
         "type": "object",
         "properties": {
-          "agentMode": {
-            "description": "Ordinary prompt selects execution configuration atomically with submission.",
-            "anyOf": [
-              {
-                "$ref": "#/definitions/AgentMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "attachments": {
             "type": "array",
             "items": {
               "$ref": "#/definitions/ServeAttachment"
             }
-          },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "onlyIfRunning": {
             "description": "Strict steering never implicitly starts an idle session.",

@@ -177,6 +177,8 @@ export function InlineMessageEditor({
       inside.current = false;
       if (wasInside || protectedRef.current || event.button !== 0) return;
       const target = event.target as HTMLElement;
+      // Stopping the running task must not cancel the independent historical draft.
+      if (target instanceof Element && target.closest('[data-testid="stop-button"]')) return;
       // A scroll-bar press is scrolling, not cancellation.
       if (target instanceof HTMLElement && target.scrollHeight > target.clientHeight) {
         const rect = target.getBoundingClientRect();
@@ -240,6 +242,7 @@ export function InlineMessageEditor({
         instanceId="edit"
         initialDraft={initialDraft}
         busy={false}
+        canChangeConfig={composerProps.canChangeConfig ?? !busy}
         canInterrupt={false}
         commandPending={pending}
         canPrompt={!disabled && !composerProps.commandPending}

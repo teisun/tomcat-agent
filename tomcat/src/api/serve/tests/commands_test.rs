@@ -3279,6 +3279,13 @@ async fn strict_steer_rejects_idle_and_closed_inbox_without_archival() {
         );
         assert_eq!(count_message_entries_with_id(&slot, &id), 0);
         assert!(slot.ctx.session_runtime.steering_queue.lock().is_empty());
+        assert_eq!(
+            slot.is_busy(),
+            closed_busy,
+            "rejection must not start a task"
+        );
+        assert!(slot.run_task.lock().is_none());
+        assert!(frames.iter().all(|frame| frame["type"] != "agent_start"));
     }
     slot.mark_idle();
 }
@@ -3389,72 +3396,6 @@ async fn live_steering_consumed_precedes_idle_and_stop_or_failure_discards_it() 
             .await
             .unwrap();
     }
-}
-
-#[tokio::test]
-#[serial(env_lock)]
-async fn prompt_config_validates_before_mode_change_and_applies_in_one_submission() {
-    use crate::core::session::manager::AgentMode;
-    let _api_key = install_test_api_key();
-    let stream = vec![
-        Ok(StreamEvent::ContentDelta {
-            delta: "done".into(),
-        }),
-        Ok(StreamEvent::FinishReason {
-            reason: "stop".into(),
-        }),
-    ];
-    let (state, buffer, _temp, slot, requests) =
-        build_initialized_state_with_recorded_streams(vec![stream]).await;
-    handle_command(
-        state.clone(),
-        ServeCommand::Prompt {
-            id: Some("invalid".into()),
-            session_id: Some(slot.session_id.clone()),
-            text: "task".into(),
-            params: ServeMessageParams {
-                model: Some("missing-model".into()),
-                agent_mode: Some(AgentMode::Plan),
-                ..Default::default()
-            },
-        },
-    )
-    .await
-    .unwrap();
-    let frames = wait_for_line(&buffer, |f| f["id"] == "invalid").await;
-    assert_eq!(
-        frames.iter().find(|f| f["id"] == "invalid").unwrap()["success"],
-        false
-    );
-    assert_eq!(
-        slot.ctx.session_runtime.plan_runtime.mode(),
-        AgentMode::Chat
-    );
-    assert!(requests.0.lock().is_empty());
-    handle_command(
-        state.clone(),
-        ServeCommand::Prompt {
-            id: Some("valid".into()),
-            session_id: Some(slot.session_id.clone()),
-            text: "task".into(),
-            params: ServeMessageParams {
-                model: Some("gpt-5.4".into()),
-                agent_mode: Some(AgentMode::Plan),
-                ..Default::default()
-            },
-        },
-    )
-    .await
-    .unwrap();
-    wait_for_line(&buffer, |f| f["type"] == "agent_idle").await;
-    assert_eq!(
-        slot.ctx.session_runtime.plan_runtime.mode(),
-        AgentMode::Plan
-    );
-    assert_eq!(requests.0.lock()[0].model, "gpt-5.4");
-    cleanup_session_slot(&state, &slot, true, "test_finished")
-        .await
-        .unwrap();
 }
 
 #[tokio::test]

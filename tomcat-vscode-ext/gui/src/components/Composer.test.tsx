@@ -1,8 +1,8 @@
 import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createRef } from "react";
+import { cloneElement, createRef } from "react";
 import { beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 
-import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
+import { Composer, extractDropUris, type ComposerHandle, type ComposerProps } from "./Composer";
 import type { ModelPickerModel } from "./ModelPicker";
 import type { Speed } from "../../../src/shared/modelSpeed";
 import type { SharedSlashCommand } from "../../../src/serveClient/wire";
@@ -138,7 +138,7 @@ function renderComposer({
   onSpeedChange?: (modelId: string, speed: Speed) => void;
 } = {}) {
   const ref = createRef<ComposerHandle>();
-  const renderResult = render(
+  const element = (
     <Composer
       availableModelDetails={availableModelDetails}
       availableModels={availableModels}
@@ -179,10 +179,12 @@ function renderComposer({
       onSubmit={onSubmit}
       planState={planState}
       ref={ref}
-    />,
+    />
   );
+  const renderResult = render(element);
   return {
     ...renderResult,
+    rerenderWith: (props: Partial<ComposerProps>) => renderResult.rerender(cloneElement(element, props)),
     onAttachFiles,
     onDraftChange,
     onModeChange,
@@ -191,6 +193,47 @@ function renderComposer({
     ref,
   };
 }
+
+describe("configuration locking", () => {
+  it.each(["mode", "model"] as const)("closes the open %s menu on busy while keeping content editable", async menu => {
+    const onModeChange = vi.fn(), onModelChange = vi.fn(), onThinkingLevelChange = vi.fn(), onSpeedChange = vi.fn(), onPickContext = vi.fn();
+    const { ref, rerenderWith } = renderComposer({
+      allowBusyInput: true, onModeChange, onModelChange, onThinkingLevelChange, onSpeedChange, onPickContext,
+      availableModelDetails: { "gpt-5.4": { id: "gpt-5.4", supportedSpeeds: ["fast"], selectedSpeed: "standard" } },
+    });
+    await act(async () => { ref.current?.replaceDraft({ text: "keep draft", segments: [{ type: "text", text: "keep draft" }], hasContent: true }); });
+    fireEvent.click(screen.getByTestId(`${menu}-select`));
+    expect(screen.getByTestId(`${menu}-dropdown`)).toBeTruthy();
+    if (menu === "model") {
+      fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.4"]')!);
+      fireEvent.click(screen.getByTestId("model-edit-gpt-5.4"));
+      expect(screen.getByRole("button", { name: "Fast" })).toBeTruthy();
+    }
+    rerenderWith({ busy: true });
+    for (const id of ["mode-select", "model-select"]) {
+      expect(screen.getByTestId(id)).toHaveProperty("disabled", true);
+      expect(screen.getByTestId(id).closest(".tc-field")?.getAttribute("title")).toBe("任务运行中不能切换，结束后再改");
+    }
+    expect(screen.queryByTestId("mode-dropdown")).toBeNull();
+    expect(screen.queryByTestId("model-dropdown")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fast" })).toBeNull();
+    expect(screen.queryByTestId("thinking-level-option")).toBeNull();
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("attachment-add")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    expect(onPickContext).toHaveBeenCalledOnce();
+    for (const callback of [onModeChange, onModelChange, onThinkingLevelChange, onSpeedChange]) expect(callback).not.toHaveBeenCalled();
+    rerenderWith({ busy: false, canChangeConfig: false });
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("model-select")).toHaveProperty("disabled", true);
+    rerenderWith({ busy: false, canChangeConfig: true });
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("model-select")).toHaveProperty("disabled", false);
+    expect(screen.queryByTestId("mode-dropdown")).toBeNull();
+    expect(screen.queryByTestId("model-dropdown")).toBeNull();
+    expect(ref.current?.getDraft().text).toBe("keep draft");
+  });
+});
 
 describe("single primary action", () => {
   it.each([
