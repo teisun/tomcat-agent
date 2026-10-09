@@ -36,6 +36,7 @@
 - [`session-modes.md`](./session-modes.md)
 - [`session-storage.md`](./session-storage.md)
 - [`chat-resume-hydration.md`](./chat-resume-hydration.md)
+- [`session-files-and-keep.md`](./session-files-and-keep.md)：Files 面板与 Keep 的原理——写前存原件、按登记时间累计、Keep 只记时间点、git 提交即认可、回退时撤销之后的 Keep。
 - [`transcript-stable-id-and-stream-reconciliation.md`](./transcript-stable-id-and-stream-reconciliation.md)：assistant 稳定 `entry.id` 如何贯穿 streaming / transcript / history replay，并为 webview `upsert-by-id` 提供协议锚点。
 - [`context-management.md`](./context-management.md)
 - [`agent-loop.md`](./agent-loop.md)
