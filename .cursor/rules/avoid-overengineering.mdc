@@ -1,0 +1,90 @@
+---
+description: Prevent over-engineering by grounding mechanisms in current requirements, reusing complete workflows, and preserving safety and user-visible contracts.
+alwaysApply: true
+---
+
+# Avoid Over-Engineering
+
+Build the smallest coherent solution that satisfies the actual requirement and its necessary safety invariants. Optimize lifetime complexity, not line count. Simplicity is not permission to omit required behavior, hide failures, or weaken safety.
+
+```text
+Confirm the required behavior and boundaries
+  -> Inspect existing ownership, workflows, and contracts
+  -> Reuse what already satisfies the requirement
+  -> Add only the missing capability
+  -> Remove mechanisms without a present justification
+  -> Verify behavior, failure paths, and safety invariants
+```
+
+This rule complements the project's engineering standards. When present, also follow `.cursor/rules/engineering-standards.mdc` and the architectural-research requirements in `.cursor/rules/prior-art-before-architecture.mdc`; do not replace evidence with remembered industry practice.
+
+## 1. Do Not Invent Requirements
+
+- Separate explicitly requested behavior, necessary correctness/security guarantees, and optional enhancements before designing.
+- Do not turn a narrow feature into a platform. A language selector does not automatically require historical retranslation; a confirmation does not automatically require a new approval protocol.
+- Do not silently narrow the user's request to make implementation easier. State material UX, compatibility, persistence, and data-retention trade-offs; obtain agreement when they change requested behavior.
+- Define reliability promises: when changes take effect, what survives restart, and what a confirmed action may overwrite. Do not silently upgrade these promises or add repeated confirmations and global blocking for consequences the user explicitly accepted. This does not waive unrelated authorization, path isolation, or data-integrity checks.
+- Treat future needs as reasons to revisit a decision, not reasons to implement it now. Record a concrete trigger rather than building speculative extension points.
+
+## 2. Reuse Complete Workflows, Not Just Their Plumbing
+
+- Inspect the existing end-to-end path: UI, identity, routing, persistence, cancellation, recovery, and tests.
+- Prefer extending an existing workflow with its smallest missing capability over creating a parallel component, protocol, registry, or state machine on top of the same transport.
+- Before adding a preparation phase, retries, or rollback, trace the existing failure path and operation order. Prefer validation before side effects and existing lifecycle boundaries when they satisfy the contract; do not add coordination merely to repair intermediate states created by your own decomposition.
+- Keep an extension generic only when the behavior really is generic; do not introduce a general framework for one special case.
+- Preserve existing behavior outside the requested change. Do not redesign cancellation, opening behavior, navigation, or recovery merely because nearby code is being touched.
+- Reuse the project's UI conventions and interaction flow, but do not substitute a different requested interaction without acknowledging the change.
+
+## 3. Put Responsibilities Where They Belong
+
+- Place state with the layer that owns its lifecycle. Keep one authoritative source for each fact; avoid independently writable mirrors and the synchronization machinery they require.
+- Derive a fact only when existing data preserves its meaning across supported transformations. Do not infer task completion from mutable history just to avoid state; if derivation is unsound, record the smallest necessary fact where it occurs and keep its lifetime bounded.
+- A unified experience does not require one shared implementation, resource format, or storage location for everything.
+- Share code or data when the same semantics genuinely need to evolve together, not merely because two strings or structures look alike.
+- Keep business decisions based on stable IDs/codes, never translated display text.
+- For localization, consider producer-side rendering when a process has one effective language and historical text need not be retranslated. Use cross-process descriptors only when actual consumers require independent rendering; do not make translation keys a durable protocol by accident.
+
+## 4. Prefer Source Invariants Over Distributed Defenses
+
+- Identify what must never happen, then enforce it at the smallest responsible boundary instead of adding coordinated checks throughout the system.
+- Example: separating "create a transcript" from "append to an existing transcript" can prevent late appends from recreating deleted files. It does not, by itself, prove the entire deletion workflow safe.
+- Retain locks, authorization, validation, cancellation, and recovery mechanisms that protect demonstrated risks in the affected architecture. "Single-user" does not imply "single-process."
+- A check-before-write is not proof against races. Changes to lock ownership, lock-file cleanup, or writer lifetimes need interleaving/failure tests, including every relevant participant.
+- Distinguish mandatory data integrity from best-effort cleanup. Only tolerate residual data when that matches the agreed retention contract, and report partial failures honestly.
+
+## 5. Make New Mechanisms Earn Their Cost
+
+Before adding a dependency, generated artifact, protocol field, configuration switch, watcher, cache, migration, or abstraction, answer:
+
+1. Which current requirement or evidenced failure does it address?
+2. Why is the existing mechanism insufficient?
+3. What is the simpler alternative, and what specifically makes it inadequate?
+4. What maintenance, compatibility, packaging, and testing obligations does this add?
+
+Prefer compiler checks and existing tests over a new generation pipeline when they establish the same guarantee. Prefer a small, proven dependency over handwritten cross-platform machinery when it reduces total complexity; "zero dependencies" is not an absolute goal.
+
+Do not add CAS, transactions, heartbeats, ownership services, immutable snapshots, synchronization watchers, or policy matrices merely because they could be useful later. Conversely, do not reject them when a present requirement genuinely needs them.
+
+## 6. Perform a Deletion Pass Before Finalizing
+
+For each nontrivial addition, ask: **If this disappeared, which user requirement or independently justified safety check would fail?** If the only answer is a test invented to exercise the addition itself, reconsider the addition.
+
+Review the plan or diff for:
+
+- Duplicate authorities, parallel workflows, and state derivable from existing state.
+- Generated files and drift checks that ordinary imports/types could eliminate.
+- Extra configuration, fallback layers, and compatibility paths without supported consumers.
+- Historical rewriting, live synchronization, or new lifecycle semantics the user did not request.
+- Optimizations of a mechanism that should instead be removed or moved to its proper owner.
+
+Do not reintroduce a removed mechanism under a different name. Reopen the decision only with new requirements or evidence. When scope changes, remove downstream machinery whose justification depended on a superseded requirement.
+
+## 7. Keep Evidence and Delivery Proportional
+
+- For consequential decisions, record the requirement, source evidence, simpler alternative, chosen trade-off, and condition for reversal in the development plan itself. A small edit needs a short explanation, not a new architecture document.
+- Separate a review's diagnosis from its proposed fix and test expansion. Accept verified findings without automatically accepting a larger redesign; converting a plan's format or correcting documentation is not authorization to expand behavior.
+- Prove one vertical slice before a broad migration; use existing tests, runners, and acceptance harnesses instead of creating parallel infrastructure.
+- Test the actual risk boundary: failure handling, ownership, concurrency, compatibility, and user-visible behavior. State what each added test proves beyond existing type checks and coverage; do not expand unchanged behavior into a matrix solely for completeness. Mocks must exercise, not bypass, the behavior under test. Retain cross-layer regressions when the changed path needs them, even if a participating layer's code is unchanged. Fewer mechanisms must not mean weaker verification.
+- Do not make estimates, guarantees, or completion claims without evidence. A simpler design remains a proposal until implementation and relevant checks establish it works.
+
+**Final standard: fewer independent concepts and obligations, with the required behavior and safety intact.**

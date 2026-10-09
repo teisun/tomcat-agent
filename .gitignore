@@ -34,7 +34,9 @@ build/
 
 ### Cursor ###
 /.cursor/plans/
-/.cursor/rules/
+# Keep local rules ignored; version shared project rules explicitly.
+/.cursor/rules/*
+!/.cursor/rules/avoid-overengineering.mdc
 node_modules/
 test-stuff/
 .agents/shots/
