@@ -20,7 +20,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use serial_test::serial;
 
-use common::serve::{setup_serve_fixture, spawn_serve_child, ServeChild, ServeFixture};
+use common::serve::{setup_serve_fixture, spawn_serve_child_with_env, ServeChild, ServeFixture};
 use tomcat::{core::skill::materialize_builtin_skills, load_config_toml_file};
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
@@ -113,6 +113,7 @@ fn respond_fixture(mut stream: TcpStream, interactive_fixture: &str) {
 }
 
 struct RealLlmTarget {
+    api: String,
     api_key: String,
     base_url: String,
     model_id: String,
@@ -140,6 +141,7 @@ fn real_llm_target() -> RealLlmTarget {
         Ok("1"),
         "set TOMCAT_REAL_LLM_E2E=1 to acknowledge real-model cost"
     );
+    common::load_openai_test_env();
     let user_env_path = dirs::home_dir()
         .expect("locate the current user's home directory")
         .join(".tomcat/assets/.env");
@@ -147,6 +149,7 @@ fn real_llm_target() -> RealLlmTarget {
     let key_env = std::env::var("TOMCAT_REAL_LLM_E2E_KEY_ENV")
         .unwrap_or_else(|_| "TOMCAT_REAL_LLM_E2E_API_KEY".to_string());
     RealLlmTarget {
+        api: std::env::var("TOMCAT_REAL_LLM_E2E_API").unwrap_or_else(|_| "openai-responses".into()),
         api_key: std::env::var(&key_env)
             .unwrap_or_else(|_| panic!("set {key_env}, or add it to {}", user_env_path.display())),
         base_url: std::env::var("TOMCAT_REAL_LLM_E2E_BASE_URL")
@@ -162,12 +165,23 @@ fn configure_real_vision_agent(
     fixture: &ServeFixture,
     target: &RealLlmTarget,
     playwright_mcp: PlaywrightMcpMode,
+    bootstrap_browser: bool,
 ) {
     let config_path = fixture.home_path.join(".tomcat/tomcat.config.toml");
     let mut config = load_config_toml_file(&config_path).expect("load generated config");
     config.llm.default_model = target.model_id.clone();
     config.context.compaction_model = target.model_id.clone();
     config.llm.title_model = None;
+    // Only this throwaway fixture is trusted; never alter the real user's config.
+    config.workspace.workspace_roots = vec![
+        fixture.workspace.to_string_lossy().into_owned(),
+        fixture
+            .home_path
+            .join(".tomcat")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    config.primitive.auto_confirm = true;
     config.skills.enabled = true;
     config.connector.enabled = playwright_mcp != PlaywrightMcpMode::Disabled;
     // The opt-in browser fixture needs a longer start window; this is a
@@ -186,20 +200,22 @@ fn configure_real_vision_agent(
             r#"[[models]]
 id = "{model_id}"
 model_name = "{upstream_model}"
-api = "openai-responses"
-provider = "openai"
+api = "{api}"
+provider = "{provider}"
 base_url = "{base_url}"
 api_key_env = "TOMCAT_REAL_LLM_E2E_API_KEY"
 capabilities = {{ vision = true, files = false, tools = true, reasoning = true, web_search = false }}
 "#,
+            api = target.api,
+            provider = if target.api == "anthropic-messages" { "anthropic" } else { "openai" },
             model_id = target.model_id,
             upstream_model = target.upstream_model,
             base_url = target.base_url,
         ),
     )
     .expect("write real model config");
-    unsafe {
-        std::env::set_var("TOMCAT_REAL_LLM_E2E_API_KEY", &target.api_key);
+    if !bootstrap_browser {
+        return;
     }
 
     let skill_path = materialize_builtin_skills(&config).expect("materialize verify skill");
@@ -254,6 +270,229 @@ capabilities = {{ vision = true, files = false, tools = true, reasoning = true, 
     }
 }
 
+fn spawn_real_agent(fixture: &ServeFixture, target: &RealLlmTarget) -> ServeChild {
+    spawn_serve_child_with_env(
+        fixture,
+        &[("TOMCAT_REAL_LLM_E2E_API_KEY", target.api_key.as_str())],
+    )
+}
+
+fn response(child: &mut ServeChild, request: Value) -> Value {
+    let id = request["id"].as_str().unwrap().to_owned();
+    child.send_value(&request);
+    let frames = child.recv_until(Duration::from_secs(30), |f| {
+        f["id"].as_str() == Some(id.as_str())
+    });
+    let response = frames
+        .into_iter()
+        .find(|f| f["id"].as_str() == Some(id.as_str()))
+        .unwrap();
+    assert_eq!(response["success"], true, "request {id}: {response}");
+    response["payload"].clone()
+}
+
+fn assert_tool_media_identity(child: &mut ServeChild, session_id: &str, id: &str) -> Value {
+    let payload = response(
+        child,
+        json!({"type":"get_messages","id":id,"sessionId":session_id,"params":{"limit":128,"attachmentMode":"reference"}}),
+    );
+    assert!(
+        !payload.to_string().contains("image_b64"),
+        "history must be reference-only"
+    );
+    let rows = payload["messages"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .all(|entry| entry["message"]["kind"] != "tool_media"),
+        "new runs never persist synthetic users"
+    );
+    let media: Vec<_> = rows
+        .iter()
+        .filter(|entry| {
+            entry["message"]["role"] == "tool"
+                && entry["message"]["content"].as_array().is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|p| p["type"] == "input_image_ref" && p["blobSha"].as_str().is_some())
+                })
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !media.is_empty(),
+        "tool-owned image references missing from history"
+    );
+    assert!(
+        rows.iter()
+            .filter(|entry| entry["message"]["role"] == "user")
+            .all(|entry| !entry["message"]["content"]
+                .as_array()
+                .is_some_and(|parts| parts
+                    .iter()
+                    .any(|p| p["type"] == "input_image" || p["type"] == "input_image_ref"))),
+        "tools must not create a user image row"
+    );
+    json!(media)
+}
+
+fn save_files_evidence(name: &str, payload: &Value) {
+    eprintln!("[real-llm-files:{name}] {payload}");
+    if let Ok(dir) = std::env::var("TOMCAT_REAL_LLM_E2E_ARTIFACTS") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            std::path::Path::new(&dir).join(format!("{name}.json")),
+            serde_json::to_vec_pretty(payload).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires an opted-in real vision/tool model"]
+#[serial]
+fn e2e_5_real_llm_tool_media_does_not_steal_file_ownership() {
+    let target = real_llm_target();
+    let fixture = setup_serve_fixture(&target.base_url);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Disabled, false);
+    let photo = fixture.workspace.join("photo.png");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/llm_multimodal/sample_image.png"),
+        &photo,
+    )
+    .unwrap();
+    let before = fixture.workspace.join("before.txt");
+    let after = fixture.workspace.join("after.txt");
+    let mut child = spawn_real_agent(&fixture, &target);
+    let session = initialize(&mut child);
+    let frames = run_prompt(&mut child, &session, "media-owner", format!(
+        "Small fixture task, no plan needed. Use only native write/read tools. In this exact order: first write {} with the text BEFORE; then read the image {} using read, identify its animal visually; only after reading it, write {} with the animal's common English category in lowercase, not its breed or subtype. Do not use bash, do not modify other files, and do not guess without reading the image.", before.display(), photo.display(), after.display()));
+    let calls: Vec<_> = frames
+        .iter()
+        .filter(|f| f["type"] == "tool_execution_start")
+        .collect();
+    let find = |name: &str, file: &str| {
+        calls
+            .iter()
+            .position(|f| f["toolName"] == name && f.to_string().contains(file))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing {name} {file}; tools={:?}; answer={}",
+                    tool_names(&frames),
+                    rendered_agent_text(&frames)
+                )
+            })
+    };
+    assert!(find("write", "before.txt") < find("read", "photo.png"));
+    assert!(find("read", "photo.png") < find("write", "after.txt"));
+    let animal = std::fs::read_to_string(&after)
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        animal
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|word| word == "dog"),
+        "model saw: {animal}"
+    );
+    let media_rows = assert_tool_media_identity(&mut child, &session, "media-owner-history");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["type"] == "tool_execution_end"
+                && frame["media"].as_array().is_some_and(|m| !m.is_empty())),
+        "live tool completion must carry media refs"
+    );
+    let files = response(
+        &mut child,
+        json!({"type":"get_session_files","id":"media-owner-files","sessionId":session}),
+    );
+    assert_eq!(files["sourceTurnId"], "media-owner");
+    assert_eq!(files["files"].as_array().unwrap().len(), 2);
+    let config =
+        load_config_toml_file(&fixture.home_path.join(".tomcat/tomcat.config.toml")).unwrap();
+    let root = tomcat::resolve_sessions_dir(&config)
+        .unwrap()
+        .join("file-baselines")
+        .join(&session);
+    let owners: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(owners, vec!["media-owner"]);
+    save_files_evidence(
+        &format!("e2e-5-tool-owned-{}", target.api),
+        &json!({"api":target.api,"model":target.upstream_model,"files":files,"owners":owners,"animal":animal,"tools":tool_names(&frames),"mediaRows":media_rows}),
+    );
+}
+
+#[test]
+#[ignore = "requires an opted-in real tool model"]
+#[serial]
+fn e2e_6_real_llm_files_accumulate_across_continue_turns() {
+    let target = real_llm_target();
+    let fixture = setup_serve_fixture(&target.base_url);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Disabled, false);
+    let mut child = spawn_real_agent(&fixture, &target);
+    let session = initialize(&mut child);
+    let one = fixture.workspace.join("one.txt");
+    let two = fixture.workspace.join("two.txt");
+    run_prompt(&mut child, &session, "files-u1", format!("Use native write to create {} containing exactly one-v1. This is a tiny fixture task: do not make a plan, do not use bash, do not create other files.", one.display()));
+    assert_eq!(std::fs::read_to_string(&one).unwrap().trim(), "one-v1");
+    run_prompt(&mut child, &session, "files-u2", format!("Continue: use native write to create {} containing exactly two-v1. Do not change one.txt, use bash, or create other files.", two.display()));
+    assert_eq!(std::fs::read_to_string(&two).unwrap().trim(), "two-v1");
+    let before = response(
+        &mut child,
+        json!({"type":"get_session_files","id":"files-before-keep","sessionId":session}),
+    );
+    assert_eq!(before["sourceTurnId"], "files-u1");
+    let mut names: Vec<_> = before["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            std::path::Path::new(f["path"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["one.txt", "two.txt"]);
+    let original = std::fs::read_to_string(&one).unwrap();
+    let kept = response(
+        &mut child,
+        json!({"type":"keep_session_files","id":"files-keep","sessionId":session,"sourceTurnId":"files-u1"}),
+    );
+    let empty = response(
+        &mut child,
+        json!({"type":"get_session_files","id":"files-empty","sessionId":session}),
+    );
+    assert_eq!(empty["files"], json!([]));
+    assert_eq!(std::fs::read_to_string(&one).unwrap(), original);
+    run_prompt(&mut child, &session, "files-u3", format!("Use native read then write to change {} to exactly one-v2. Do not change two.txt or other files, and do not use bash.", one.display()));
+    assert_eq!(std::fs::read_to_string(&one).unwrap().trim(), "one-v2");
+    let after = response(
+        &mut child,
+        json!({"type":"get_session_files","id":"files-after-keep","sessionId":session}),
+    );
+    assert_eq!(after["sourceTurnId"], kept["sourceTurnId"]);
+    assert_eq!(after["files"].as_array().unwrap().len(), 1);
+    let path = after["files"][0]["path"].as_str().unwrap();
+    assert!(path.ends_with("one.txt"));
+    let base = response(
+        &mut child,
+        json!({"type":"get_session_file_baseline","id":"files-base","sessionId":session,"sourceTurnId":kept["sourceTurnId"],"path":path}),
+    );
+    assert_eq!(base["text"], original);
+    save_files_evidence(
+        "e2e-6-cumulative-keep",
+        &json!({"before":before,"kept":kept,"empty":empty,"after":after,"baseline":base}),
+    );
+}
+
 fn initialize(child: &mut ServeChild) -> String {
     child.send_value(&json!({
         "type": "control_request",
@@ -279,7 +518,7 @@ fn run_prompt(child: &mut ServeChild, session_id: &str, id: &str, prompt: String
         "id": id,
         "sessionId": session_id,
         "text": prompt,
-        "params": {}
+        "params": { "userMessageId": id }
     }));
     child.recv_until(TURN_TIMEOUT, |frame| {
         frame.get("type").and_then(Value::as_str) == Some("agent_idle")
@@ -392,14 +631,15 @@ fn screenshot_events(frames: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn wait_for_playwright_ready(child: &mut ServeChild) {
+fn wait_for_playwright_ready(child: &mut ServeChild, fixture: &ServeFixture) {
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let mut attempt = 0;
     let mut last_payload = String::from("<no list_connectors response>");
     while std::time::Instant::now() < deadline {
         attempt += 1;
         let id = format!("playwright-status-{attempt}");
-        child.send_value(&json!({ "type": "list_connectors", "id": id }));
+        child.send_value(&json!({ "type": "list_connectors", "id": id,
+            "context": { "workspaceRoot": fixture.workspace.canonicalize().unwrap() } }));
         let frames = child.recv_until(Duration::from_secs(15), |frame| {
             frame.get("id").and_then(Value::as_str) == Some(id.as_str())
         });
@@ -407,6 +647,10 @@ fn wait_for_playwright_ready(child: &mut ServeChild) {
             .iter()
             .find(|frame| frame.get("id").and_then(Value::as_str) == Some(id.as_str()))
             .expect("list_connectors response");
+        assert_eq!(
+            response["success"], true,
+            "connector status request rejected: {response}"
+        );
         last_payload = response["payload"].to_string();
         let ready = response["payload"]["connectors"]
             .as_array()
@@ -490,9 +734,9 @@ fn session_cache_read_tokens(child: &mut ServeChild, session_id: &str, id: &str)
 fn e2e_1_real_llm_completes_phase_1_ui_acceptance() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Disabled);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Disabled, true);
     let page = UiFixtureServer::start();
-    let mut child = spawn_serve_child(&fixture);
+    let mut child = spawn_real_agent(&fixture, &target);
     let session_id = initialize(&mut child);
     let work_dir = fixture.home_path.join(".tomcat");
     let frames = run_prompt(
@@ -529,9 +773,9 @@ fn e2e_1_real_llm_completes_phase_1_ui_acceptance() {
 fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headless);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headless, true);
     let page = UiFixtureServer::start();
-    let mut child = spawn_serve_child(&fixture);
+    let mut child = spawn_real_agent(&fixture, &target);
     let session_id = initialize(&mut child);
     let cold_start = run_prompt(
         &mut child,
@@ -548,7 +792,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
             .any(|name| name == "tool_search"),
         "cold-start prompt must exercise the stable discovery entry; frames={cold_start:?}"
     );
-    wait_for_playwright_ready(&mut child);
+    wait_for_playwright_ready(&mut child, &fixture);
     let frames = run_prompt(
         &mut child,
         &session_id,
@@ -566,7 +810,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
     assert_deferred_playwright_navigate_click_screenshot(&frames);
     assert!(
         session_contains_input_image(&mut child, &session_id, "phase2-messages"),
-        "MCP screenshot did not persist as an InputImage follow-up message; tools={:?}; screenshot_events={:?}; stderr={}",
+        "MCP screenshot did not persist as an tool-owned image; tools={:?}; screenshot_events={:?}; stderr={}",
         tool_names(&frames),
         screenshot_events(&frames),
         child.stderr(),
@@ -575,6 +819,7 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
         text.contains(&page.intermediate_token),
         "agent verdict: {text}"
     );
+    assert_tool_media_identity(&mut child, &session_id, "phase2-media-identity");
     let cache_reads = session_cache_read_tokens(&mut child, &session_id, "headed-mcp-cache");
     eprintln!("[real-llm-e2e] cache_read_tokens across turns: {cache_reads:?}");
     assert!(
@@ -596,9 +841,9 @@ fn e2e_2_real_llm_uses_phase_2_mcp_and_receives_a_screenshot() {
 fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headless);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headless, true);
     let page = UiFixtureServer::start();
-    let mut child = spawn_serve_child(&fixture);
+    let mut child = spawn_real_agent(&fixture, &target);
     let session_id = initialize(&mut child);
     let _warmup = run_prompt(
         &mut child,
@@ -606,7 +851,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
         "combined-warmup",
         "Reply with READY. Do not use any tools.".to_string(),
     );
-    wait_for_playwright_ready(&mut child);
+    wait_for_playwright_ready(&mut child, &fixture);
     let work_dir = fixture.home_path.join(".tomcat");
     let frames = run_prompt(
         &mut child,
@@ -630,7 +875,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
     assert_deferred_playwright_navigate_click_screenshot(&frames);
     assert!(
         session_contains_input_image(&mut child, &session_id, "combined-messages"),
-        "Phase 2 screenshot did not persist as an InputImage follow-up message; tools={:?}; screenshot_events={:?}; stderr={}",
+        "Phase 2 screenshot did not persist as an tool-owned image; tools={:?}; screenshot_events={:?}; stderr={}",
         tool_names(&frames),
         screenshot_events(&frames),
         child.stderr(),
@@ -647,7 +892,7 @@ fn e2e_3_real_llm_switches_from_phase_1_to_phase_2_when_interaction_is_required(
 fn e2e_4_real_llm_drives_a_headed_playwright_browser_through_deferred_tools() {
     let target = real_llm_target();
     let fixture = setup_serve_fixture(&target.base_url);
-    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headed);
+    configure_real_vision_agent(&fixture, &target, PlaywrightMcpMode::Headed, true);
     let mcp_config = std::fs::read_to_string(fixture.home_path.join(".tomcat/mcp.json"))
         .expect("read headed MCP config");
     assert!(
@@ -661,7 +906,7 @@ fn e2e_4_real_llm_drives_a_headed_playwright_browser_through_deferred_tools() {
     );
 
     let page = UiFixtureServer::start();
-    let mut child = spawn_serve_child(&fixture);
+    let mut child = spawn_real_agent(&fixture, &target);
     let session_id = initialize(&mut child);
     let _warmup = run_prompt(
         &mut child,
@@ -669,7 +914,7 @@ fn e2e_4_real_llm_drives_a_headed_playwright_browser_through_deferred_tools() {
         "headed-mcp-warmup",
         "Reply with READY. Do not use any tools.".to_string(),
     );
-    wait_for_playwright_ready(&mut child);
+    wait_for_playwright_ready(&mut child, &fixture);
     let frames = run_prompt(
         &mut child,
         &session_id,

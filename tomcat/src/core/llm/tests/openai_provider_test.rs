@@ -24,6 +24,76 @@ use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::events::ToolDisplay;
 use crate::infra::LlmConfig;
 
+#[test]
+fn tool_owned_media_chat_batch_splits_only_on_wire() {
+    let image = ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap();
+    let mut one = ChatMessage::tool("one", "");
+    one.content = Some(ChatMessageContent::Parts(vec![image.clone()]));
+    let mut two = ChatMessage::tool("two", "");
+    two.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("second"),
+        image,
+    ]));
+    let mut tail = ChatMessage::user("runtime");
+    tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("request"),
+        ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![
+                serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}}),
+                serde_json::json!({"id":"two","type":"function","function":{"name":"read","arguments":"{}"}}),
+            ],
+        ),
+        one,
+        tail,
+        two,
+        ChatMessage::assistant("done"),
+    ];
+    let before = serde_json::to_value(&messages).unwrap();
+    let wire = transport_messages(&messages, "gpt-4.1", false, None);
+    let tools = wire
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v["role"] == "tool")
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(tools, vec![3, 4]);
+    assert_eq!(wire[3]["content"], "[Media attached]");
+    assert_eq!(wire[4]["content"], "second");
+    assert_eq!(wire[5]["role"], "user");
+    assert_eq!(wire[5]["content"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        wire[5]["content"][0]["text"],
+        crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO
+    );
+    assert_eq!(
+        wire[5]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,aGVsbG8="
+    );
+    assert_eq!(wire[6]["role"], "assistant");
+    assert_eq!(serde_json::to_value(messages).unwrap(), before);
+}
+
+#[test]
+fn tool_media_openai_wire_equals_user_media() {
+    let parts = vec![ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap()];
+    assert_eq!(
+        transport_messages(
+            &[ChatMessage::tool_media(parts.clone())],
+            "gpt-4.1",
+            false,
+            None
+        ),
+        transport_messages(
+            &[ChatMessage::user_with_parts(parts)],
+            "gpt-4.1",
+            false,
+            None
+        )
+    );
+}
+
 fn deepseek_entry(api_key_env: &str) -> ModelEntry {
     ModelEntry {
         id: "deepseek-v4-pro".to_string(),

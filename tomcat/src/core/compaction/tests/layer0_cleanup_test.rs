@@ -25,6 +25,76 @@ fn build_turns(n: usize, tool_content: &str) -> Vec<ChatMessage> {
 }
 
 #[test]
+fn tool_owned_media_compaction_keeps_images_and_counts_only_real_turns() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let dir = tempfile::tempdir().unwrap();
+    let image = ChatMessageContentPart::image_file_id("retained").unwrap();
+    let mut messages = build_turns(8, &"x".repeat(60_000));
+    for msg in &mut messages {
+        if msg.role == ChatMessageRole::Tool {
+            msg.content = Some(ChatMessageContent::Parts(vec![
+                ChatMessageContentPart::text("x".repeat(60_000)),
+                image.clone(),
+            ]));
+        }
+    }
+    assert_eq!(
+        messages.iter().filter(|m| m.starts_logical_turn()).count(),
+        8
+    );
+    assert!(super::super::preheat::messages_to_text(&messages).contains("[ToolResult] xxx"));
+    let total = messages.iter().map(estimate_msg_chars).sum();
+    let mut state = make_state(total, total * 2, total / 2);
+    let end = messages.len();
+    let outcome = run_layer0_cleanup(
+        &mut state,
+        &mut messages,
+        &ContextConfig::default(),
+        dir.path(),
+        "media",
+        end,
+    );
+    assert!(outcome.persist_chars_freed > 0);
+    assert!(outcome.placeholder_chars_freed > 0);
+    for msg in messages.iter().filter(|m| m.role == ChatMessageRole::Tool) {
+        assert!(
+            matches!(&msg.content,Some(ChatMessageContent::Parts(p)) if p.last()==Some(&image))
+        );
+    }
+    assert!(messages[1].text_content().unwrap().len() < 60_000);
+}
+
+#[test]
+fn tool_owned_media_transcript_text_rewrite_preserves_reference() {
+    use crate::core::session::{
+        transcript::{rewrite_message_text_entries_by_id, MessageTextRewrite},
+        SessionManager,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let session = SessionManager::new(dir.path().to_path_buf());
+    session
+        .create_session(session.current_session_key(), None)
+        .unwrap();
+    session.append_message(serde_json::json!({"role":"assistant","tool_calls":[{"id":"one","type":"function","function":{"name":"read","arguments":"{}"}}]})).unwrap();
+    let sha = "a".repeat(64);
+    let id=session.append_message(serde_json::json!({"role":"tool","tool_call_id":"one","content":[{"type":"input_text","text":"large"},{"type":"input_image_ref","blob_sha":sha,"mime_type":"image/png"}]})).unwrap();
+    let path = session.current_transcript_path().unwrap().unwrap();
+    rewrite_message_text_entries_by_id(
+        &path,
+        &[MessageTextRewrite {
+            message_id: id,
+            new_content: "compact".into(),
+        }],
+    )
+    .unwrap();
+    let raw = std::fs::read_to_string(path).unwrap();
+    assert!(raw.contains("input_image_ref"));
+    assert!(raw.contains(&sha));
+    assert!(raw.contains("compact"));
+    assert!(!raw.contains("large"));
+}
+
+#[test]
 fn run_layer0_cleanup_persists_then_compacts() {
     let dir = tempfile::tempdir().unwrap();
     let big = "x".repeat(60_000);

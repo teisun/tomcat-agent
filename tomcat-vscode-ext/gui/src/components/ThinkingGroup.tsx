@@ -36,6 +36,7 @@ type ThinkingGroupProps = {
   mediaRoots?: WebviewMediaRoot[];
   onOpenFile(path: string, line?: number): void;
   onOpenDiff?(toolCallId: string): void;
+  onOpenImagePreview?(attachmentId: string): void;
   onZoomImage?(image: { alt: string; src: string }): void;
 };
 
@@ -46,6 +47,7 @@ function ThinkingGroupComponent({
   mediaRoots,
   onOpenFile,
   onOpenDiff,
+  onOpenImagePreview,
   onZoomImage,
 }: ThinkingGroupProps) {
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
@@ -114,6 +116,7 @@ function ThinkingGroupComponent({
                 item={tool}
                 key={tool.id}
                 onOpenDiff={onOpenDiff}
+                onOpenImagePreview={onOpenImagePreview}
                 onOpenFile={onOpenFile}
                 variant="grouped"
               />
@@ -139,6 +142,7 @@ function areThinkingGroupPropsEqual(prev: ThinkingGroupProps, next: ThinkingGrou
     prev.isStreaming === next.isStreaming &&
     prev.mediaRoots === next.mediaRoots &&
     prev.onOpenDiff === next.onOpenDiff &&
+    prev.onOpenImagePreview === next.onOpenImagePreview &&
     prev.onOpenFile === next.onOpenFile &&
     prev.onZoomImage === next.onZoomImage
   );

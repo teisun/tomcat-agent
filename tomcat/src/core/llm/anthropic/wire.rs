@@ -555,6 +555,23 @@ pub(super) struct ParsedAssistantContent {
     pub continuity: Option<ContinuityMetadata>,
 }
 
+fn flush_tool_media(
+    out: &mut Vec<Value>,
+    media: &mut Vec<ChatMessageContentPart>,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Option<usize> {
+    if media.is_empty() {
+        return None;
+    }
+    let message = ChatMessage::user_with_parts(std::mem::take(media));
+    push_role_message(
+        out,
+        "user",
+        user_content_blocks(&message, capabilities, files_adapter),
+    )
+}
+
 fn build_messages(
     messages: &[ChatMessage],
     target: &ProviderCompatProfile,
@@ -562,6 +579,26 @@ fn build_messages(
     capabilities: &Capabilities,
     files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> RenderedMessages {
+    build_messages_with_media_mode(
+        messages,
+        target,
+        continuity_enabled,
+        capabilities,
+        files_adapter,
+        crate::core::llm::tool_result_media::tool_result_media_mode("anthropic-messages"),
+    )
+}
+
+fn build_messages_with_media_mode(
+    messages: &[ChatMessage],
+    target: &ProviderCompatProfile,
+    continuity_enabled: bool,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+    mode: crate::core::llm::tool_result_media::ToolResultMediaMode,
+) -> RenderedMessages {
+    use crate::core::llm::tool_result_media::{media_parts, ToolResultMediaMode};
+    let mut deferred_media = Vec::new();
     let mut system_chunks = Vec::new();
     let mut out: Vec<Value> = Vec::new();
     let mut last_non_ephemeral_message = None;
@@ -574,6 +611,13 @@ fn build_messages(
     for original in messages {
         if is_ephemeral_tail(original) {
             continue;
+        }
+        if original.role != ChatMessageRole::Tool {
+            if let Some(index) =
+                flush_tool_media(&mut out, &mut deferred_media, capabilities, files_adapter)
+            {
+                last_non_ephemeral_message = Some(index);
+            }
         }
         let action = if continuity_enabled {
             plan(target, original)
@@ -661,20 +705,32 @@ fn build_messages(
             }
             ChatMessageRole::Tool => {
                 let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-                let text = flatten_message_text(&msg);
+                let text = crate::core::llm::tool_result_media::tool_result_text(&msg);
+                let content =
+                    if mode == ToolResultMediaMode::Native && media_parts(&msg).next().is_some() {
+                        Value::Array(user_content_blocks(&msg, capabilities, files_adapter))
+                    } else {
+                        deferred_media.extend(media_parts(&msg).cloned());
+                        Value::String(text)
+                    };
                 if let Some(out_idx) = push_role_message(
                     &mut out,
                     "user",
                     vec![json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": text,
+                        "content": content,
                     })],
                 ) {
                     last_non_ephemeral_message = Some(out_idx);
                 }
             }
         }
+    }
+    if let Some(index) =
+        flush_tool_media(&mut out, &mut deferred_media, capabilities, files_adapter)
+    {
+        last_non_ephemeral_message = Some(index);
     }
     // fcodex only reuses cache controls at completed message ends. Keeping
     // request-only runtime state as a system suffix leaves D on the newest
@@ -1137,6 +1193,116 @@ mod tests {
             &Capabilities::default(),
             None,
         )
+    }
+
+    #[test]
+    fn tool_owned_media_anthropic_native_split_batch_and_downgrade() {
+        use crate::core::llm::{tool_result_media::ToolResultMediaMode, ChatMessageContent};
+        let image = ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap();
+        let file =
+            ChatMessageContentPart::file_file_id("file-pdf", Some("notes.pdf".into())).unwrap();
+        let mut first = ChatMessage::tool("one", "");
+        first.content = Some(ChatMessageContent::Parts(vec![
+            ChatMessageContentPart::text("first"),
+            image.clone(),
+            file,
+        ]));
+        let mut second = ChatMessage::tool("two", "");
+        second.content = Some(ChatMessageContent::Parts(vec![
+            ChatMessageContentPart::text("second"),
+            image,
+        ]));
+        let messages = vec![
+            ChatMessage::user("request"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![
+                    json!({"id":"one","function":{"name":"read","arguments":"{}"}}),
+                    json!({"id":"two","function":{"name":"read","arguments":"{}"}}),
+                ],
+            ),
+            first,
+            second,
+        ];
+        let before = serde_json::to_value(&messages).unwrap();
+        let target = ProviderCompatProfile::anthropic_messages("claude-opus-4-6");
+        let caps = Capabilities {
+            vision: true,
+            files: true,
+            ..Default::default()
+        };
+        let adapter = StaticFilesAdapter { prefix: "" };
+        for mode in [ToolResultMediaMode::Native, ToolResultMediaMode::Split] {
+            let rendered = super::build_messages_with_media_mode(
+                &messages,
+                &target,
+                false,
+                &caps,
+                Some(&adapter),
+                mode,
+            );
+            let blocks = rendered.messages[2]["content"].as_array().unwrap();
+            assert_eq!(blocks[0]["tool_use_id"], "one");
+            assert_eq!(blocks[1]["tool_use_id"], "two");
+            if mode == ToolResultMediaMode::Native {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(blocks[0]["content"][0]["text"], "first");
+                assert_eq!(blocks[0]["content"][1]["type"], "image");
+                assert_eq!(blocks[0]["content"][2]["source"]["file_id"], "file-pdf");
+            } else {
+                assert_eq!(blocks[0]["content"], "first");
+                assert_eq!(blocks[1]["content"], "second");
+                assert_eq!(
+                    blocks
+                        .iter()
+                        .skip(2)
+                        .map(|p| p["type"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    vec!["image", "document", "image"]
+                );
+            }
+        }
+        let degraded = super::build_messages_with_media_mode(
+            &messages,
+            &target,
+            false,
+            &Capabilities::default(),
+            None,
+            ToolResultMediaMode::Native,
+        );
+        assert!(!serde_json::to_string(&degraded.messages)
+            .unwrap()
+            .contains("image/png"));
+        assert_eq!(serde_json::to_value(messages).unwrap(), before);
+    }
+
+    #[test]
+    fn tool_media_anthropic_wire_equals_user_media() {
+        let parts =
+            vec![ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap()];
+        let body = |message| {
+            build_request_body(
+                &ChatRequest {
+                    messages: vec![message],
+                    model: "claude-opus".into(),
+                    ..Default::default()
+                },
+                "claude-opus",
+                &ThinkingConfig::default(),
+                ThinkingFormat::AnthropicAdaptive,
+                true,
+                true,
+                &Capabilities {
+                    vision: true,
+                    ..Default::default()
+                },
+                None,
+            )
+        };
+        assert_eq!(
+            body(ChatMessage::tool_media(parts.clone())),
+            body(ChatMessage::user_with_parts(parts))
+        );
     }
 
     #[test]

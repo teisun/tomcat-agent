@@ -354,7 +354,7 @@ export interface SessionFile {
   restorable: boolean;
   status: SessionFileStatus;
 }
-export type SessionFileBlockedReason = "head_moved" | "backup_missing" | "not_regular_file";
+export type SessionFileBlockedReason = "backup_missing" | "not_regular_file";
 
 export type SessionFileStatus = "added" | "modified" | "deleted";
 
@@ -395,6 +395,13 @@ export interface ToolDisplayFileEntry {
   status?: ToolDisplayFileStatus | null;
 }
 export type ToolDisplayFileStatus = "applied" | "failed" | "skipped";
+
+export type ToolMediaRef = {
+  blobSha: string;
+  bytes: number;
+  mimeType: string;
+  type: "input_image_ref";
+};
 
 export type ToolOutput = any;
 
@@ -689,6 +696,11 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   sessionId: string;
+  sourceTurnId: string;
+  type: "keep_session_files";
+} | {
+  id?: null | string;
+  sessionId: string;
   type: "discard_detached_session";
 } | {
   id?: null | string;
@@ -766,6 +778,10 @@ export interface SessionFileBaselineResponse {
   sessionId: string;
   sourceTurnId: string;
   text: string;
+}
+export interface SessionFilesKeepResponse {
+  sessionId: string;
+  sourceTurnId: string;
 }
 export interface SessionFilesResponse {
   files: SessionFile[];
@@ -908,6 +924,7 @@ export type WireEvent = ({
 } | {
   display?: ToolDisplay | null;
   isError: boolean;
+  media?: ToolMediaRef[];
   result: ToolOutput;
   toolCallId: string;
   toolName: string;

@@ -46,6 +46,7 @@ pub(crate) struct ServeSchemaBundle {
     session_files_response: schemars::schema::RootSchema,
     session_file_baseline_response: schemars::schema::RootSchema,
     session_files_restore_response: schemars::schema::RootSchema,
+    session_files_keep_response: schemars::schema::RootSchema,
     shared_slash_command: schemars::schema::RootSchema,
     slash_reply: schemars::schema::RootSchema,
     instruction_card: schemars::schema::RootSchema,
@@ -90,6 +91,9 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         session_files_restore_response: schema_for!(
             crate::core::checkpoint::session_files::SessionFilesRestoreResponse
         ),
+        session_files_keep_response: schema_for!(
+            crate::core::checkpoint::session_files::SessionFilesKeepResponse
+        ),
         shared_slash_command: schema_for!(crate::api::chat::commands::SharedSlashCommand),
         slash_reply: schema_for!(crate::api::chat::commands::SlashReply),
         instruction_card: schema_for!(crate::core::project_instructions::InstructionCard),
@@ -131,6 +135,10 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         (
             "SessionFilesRestoreResponse",
             &bundle.session_files_restore_response,
+        ),
+        (
+            "SessionFilesKeepResponse",
+            &bundle.session_files_keep_response,
         ),
         ("SharedSlashCommand", &bundle.shared_slash_command),
         ("SlashReply", &bundle.slash_reply),

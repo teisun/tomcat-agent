@@ -15,7 +15,6 @@ function directoryLabel(file: SessionFileView, files: SessionFileView[]): string
 }
 export function blockedReason(file: SessionFileView, busy: boolean) {
   if (busy) return "Stop Tomcat or wait for it to finish to undo.";
-  if (file.blockedReason === "head_moved") return "Git HEAD changed since this backup. View the diff only.";
   if (file.blockedReason === "backup_missing") return "The original backup is missing. This file cannot be undone.";
   if (file.blockedReason === "not_regular_file") return "The path is not a regular file and cannot be undone.";
   return file.restorable ? "Undo this file" : "This file cannot be undone.";

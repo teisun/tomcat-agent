@@ -404,6 +404,19 @@ pub enum AgentIdleOutcome {
     Failed,
 }
 
+/// Reference-only tool media, shared by live events and history attachment views.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolMediaRef {
+    InputImageRef {
+        #[serde(rename = "blobSha")]
+        blob_sha: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        bytes: u64,
+    },
+}
+
 /// 宿主侧流式/UI 与生命周期事件，供前端或日志消费。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -514,6 +527,8 @@ pub enum AgentEvent {
         result: ToolOutput,
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<ToolDisplay>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<ToolMediaRef>,
         #[serde(rename = "isError")]
         is_error: bool,
     },

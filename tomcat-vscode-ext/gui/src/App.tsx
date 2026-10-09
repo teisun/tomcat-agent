@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { freshOccurrences } from "../../src/shared/composerOccurrences";
+import { nextThumbnailTarget } from "./attachments/thumbnailBackfill";
 
 import {
   blobToBase64,
@@ -1746,25 +1747,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     // One at a time, on purpose. Generating eleven at once means eleven simultaneous
     // decodes, which is the memory spike this is here to avoid; and each completed
     // thumbnail changes the snapshot anyway, so a batch would be interrupted mid-flight.
-    let next: { blobSha: string; fullUri: string; mimeType: string } | null = null;
-    const consider = (attachment: WebviewAttachmentView & { kind?: string }) => {
-      if (next || attachment.hasThumb || !attachment.fullUri) return;
-      if (attachment.kind === "file" || !attachment.mimeType.startsWith("image/")) return;
-      if (attemptedThumbnailsRef.current.has(attachment.blobSha)) return;
-      next = {
-        blobSha: attachment.blobSha,
-        fullUri: attachment.fullUri,
-        mimeType: attachment.mimeType,
-      };
-    };
-    for (const attachment of session.pendingAttachments) consider(attachment);
-    for (const item of session.timeline) {
-      if (item.type !== "message") continue;
-      for (const attachment of item.attachments ?? []) consider(attachment);
-    }
+    const next = nextThumbnailTarget(session, attemptedThumbnailsRef.current);
     if (!next) return;
 
-    const target = next as { blobSha: string; fullUri: string; mimeType: string };
+    const target = next;
     attemptedThumbnailsRef.current.add(target.blobSha);
     thumbnailWorkRef.current = true;
     void (async () => {

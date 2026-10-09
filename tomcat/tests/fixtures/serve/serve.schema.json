@@ -286,6 +286,34 @@
         }
       },
       {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "sourceTurnId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "keep_session_files"
+            ]
+          }
+        }
+      },
+      {
         "description": "复制指定失败输入为新的活 user message，然后重新开一轮。",
         "type": "object",
         "required": [
@@ -2681,6 +2709,12 @@
           "isError": {
             "type": "boolean"
           },
+          "media": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ToolMediaRef"
+            }
+          },
           "result": {
             "$ref": "#/definitions/ToolOutput"
           },
@@ -3593,6 +3627,39 @@
             "enum": [
               "skipped"
             ]
+          }
+        ]
+      },
+      "ToolMediaRef": {
+        "description": "Reference-only tool media, shared by live events and history attachment views.",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "blobSha",
+              "bytes",
+              "mimeType",
+              "type"
+            ],
+            "properties": {
+              "blobSha": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "input_image_ref"
+                ]
+              }
+            }
           }
         ]
       },
@@ -5183,6 +5250,39 @@
           }
         ]
       },
+      "ToolMediaRef": {
+        "description": "Reference-only tool media, shared by live events and history attachment views.",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "blobSha",
+              "bytes",
+              "mimeType",
+              "type"
+            ],
+            "properties": {
+              "blobSha": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "input_image_ref"
+                ]
+              }
+            }
+          }
+        ]
+      },
       "ToolOutput": {
         "description": "占位：工具输出。"
       },
@@ -5571,6 +5671,12 @@
               },
               "isError": {
                 "type": "boolean"
+              },
+              "media": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/ToolMediaRef"
+                }
               },
               "result": {
                 "$ref": "#/definitions/ToolOutput"
@@ -7191,7 +7297,6 @@
       "SessionFileBlockedReason": {
         "type": "string",
         "enum": [
-          "head_moved",
           "backup_missing",
           "not_regular_file"
         ]
@@ -7251,6 +7356,23 @@
           "type": "string"
         }
       },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": "string"
+      }
+    }
+  },
+  "session_files_keep_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFilesKeepResponse",
+    "type": "object",
+    "required": [
+      "sessionId",
+      "sourceTurnId"
+    ],
+    "properties": {
       "sessionId": {
         "type": "string"
       },

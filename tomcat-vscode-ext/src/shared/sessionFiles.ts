@@ -9,9 +9,10 @@ export interface SessionFilesView {
 export type SessionFileIntent =
   | { messageId: string; type: "refreshSessionFiles"; data: { sessionId: string } }
   | { messageId: string; type: "openSessionFileDiff"; data: { sessionId: string; sourceTurnId: string; path: string } }
+  | { messageId: string; type: "keepSessionFiles"; data: { sessionId: string; sourceTurnId: string; requestId: string } }
   | { messageId: string; type: "restoreSessionFiles"; data: { sessionId: string; sourceTurnId: string; paths: string[]; requestId: string } };
 export interface SessionFilesResult {
-  type: "restoreSessionFilesResult";
+  type: "restoreSessionFilesResult" | "keepSessionFilesResult";
   sessionId: string;
   sourceTurnId: string;
   requestId: string;

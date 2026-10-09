@@ -48,6 +48,82 @@ fn follow_up_parts_chars(parts: &[ChatMessageContentPart]) -> usize {
         .sum()
 }
 
+/// Keep provider bytes out of durable tool rows and UI frames. Subagents use the
+/// same agent-level repository, even when they only have a JSONL append sink.
+fn tool_messages_with_media(
+    agent: &AgentLoop,
+    id: &str,
+    text: &str,
+    parts: Vec<ChatMessageContentPart>,
+    display: Option<crate::infra::events::ToolDisplay>,
+) -> Result<
+    (
+        ChatMessage,
+        ChatMessage,
+        Vec<crate::infra::events::ToolMediaRef>,
+    ),
+    AppError,
+> {
+    use crate::core::llm::{ChatMessageContent, ImageSource};
+    use crate::core::session::attachments::AttachmentBlobStore;
+    use crate::infra::events::ToolMediaRef;
+    use base64::Engine as _;
+    let mut provider = ChatMessage::tool(id, text).with_tool_display(display.clone());
+    let mut archival = ChatMessage::tool(id, text).with_tool_display(display);
+    let mut media = Vec::new();
+    if parts.is_empty() {
+        return Ok((provider, archival, media));
+    }
+    let store = agent
+        .session_manager
+        .as_ref()
+        .map(|session| session.attachment_store())
+        .or_else(|| {
+            (!agent.config.agent_trail_dir.is_empty()).then(|| {
+                AttachmentBlobStore::new(
+                    &std::path::Path::new(&agent.config.agent_trail_dir).join("sessions"),
+                )
+            })
+        });
+    let mut saved = vec![ChatMessageContentPart::text(text)];
+    for part in &parts {
+        if let ChatMessageContentPart::InputImage {
+            source: ImageSource::Inline(image),
+            detail,
+        } = part
+        {
+            if let Some(store) = &store {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .map_err(|e| AppError::Config(format!("invalid tool image base64: {e}")))?;
+                let sha = store.put(&bytes)?;
+                saved.push(ChatMessageContentPart::image_blob_ref(
+                    sha.clone(),
+                    image.mime_type.clone(),
+                    detail.clone(),
+                )?);
+                media.push(ToolMediaRef::InputImageRef {
+                    blob_sha: sha,
+                    mime_type: image.mime_type.clone(),
+                    bytes: bytes.len() as u64,
+                });
+                continue;
+            }
+            if agent.config.message_append_sink.is_some() {
+                return Err(AppError::Config(
+                    "durable tool images require an attachment repository".into(),
+                ));
+            }
+        }
+        saved.push(part.clone());
+    }
+    let mut live = vec![ChatMessageContentPart::text(text)];
+    live.extend(parts);
+    provider.content = Some(ChatMessageContent::Parts(live));
+    archival.content = Some(ChatMessageContent::Parts(saved));
+    Ok((provider, archival, media))
+}
+
 const STEERED_TOOL_RESULT_TEXT: &str =
     "[Tool call skipped because a steering message superseded the remaining tool batch.]";
 
@@ -86,6 +162,7 @@ fn append_steered_tool_result(
         tool_name: tc.name.clone(),
         result: ToolOutput(serde_json::json!(STEERED_TOOL_RESULT_TEXT)),
         display: None,
+        media: Vec::new(),
         is_error: true,
     });
     if let Some(ref mut ctx_state) = agent.context_state {
@@ -217,6 +294,7 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
         tool_name: tc.name.clone(),
         result: ToolOutput(serde_json::json!(INTERRUPTED_TOOL_RESULT_TEXT)),
         display: None,
+        media: Vec::new(),
         is_error: true,
     });
 }
@@ -257,8 +335,8 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
 ///
 /// 每个 tool 执行完毕后检查 `steering_queue`；非空则通过
 /// `steered = true` 标记当前 batch；余下 tool_calls **不执行**，但先各自写入一个
-/// “skipped by steering” terminal tool result。等整个 tool batch 闭合后，才统一写入
-/// media follow-up 与 steering 消息。调用方随后 `continue` reasoning loop，让下一次
+/// “skipped by steering” terminal tool result。媒体随各自工具结果入列；
+/// 等整个 tool batch 闭合后才写入 steering。调用方随后 `continue` reasoning loop，让下一次
 /// LLM 请求携带 steering 消息。
 ///
 /// 这是不带 usage 的测试便利包装；生产路径统一调用
@@ -326,7 +404,7 @@ pub(super) async fn run_tool_calls_with_usage(
         if agent
             .file_baselines
             .as_ref()
-            .is_none_or(|b| b.message_id != user_id)
+            .is_none_or(|b| b.message_id != user_id || !b.keep_is_current())
         {
             agent.file_baselines = agent.session_manager.as_ref().and_then(|s| {
                 let path = s.current_transcript_path().ok()??;
@@ -398,10 +476,6 @@ pub(super) async fn run_tool_calls_with_usage(
 
     let mut tool_results: Vec<Message> = Vec::new();
     let mut steered = false;
-    // A user message is forbidden between tool results from one assistant tool-call batch.
-    // Keep media in provider order and append one user-with-parts message only after every
-    // requested call has a terminal tool result.
-    let mut deferred_follow_up_parts = Vec::new();
 
     // ── 3. block_tool_calls 短路 ──
     if agent.block_tool_calls {
@@ -450,9 +524,7 @@ pub(super) async fn run_tool_calls_with_usage(
 
         // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` 由
         // PrimitiveExecutor::execute_bash 内部兜底，保证子进程 / HTTP 连接被及时释放。
-        // PR-RJ T3-c：返回值新增 `follow_up_parts`——image / pdf 等需要在
-        // **下一条 user 消息** 注入 `Parts` 的场景由本调度器在 push tool 之后立刻
-        // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
+        // Attachments belong to this tool. Provider adapters project any wire-only carrier.
         let outcome = if let Some(registry) = agent.tool_registry.clone() {
             match registry.get_tool(tc.name.as_str()).await {
                 Ok(_) => {
@@ -569,6 +641,10 @@ pub(super) async fn run_tool_calls_with_usage(
         let is_error = outcome.is_error;
         let display = outcome.display;
         let follow_up_parts = outcome.follow_up_parts;
+        let media_chars = follow_up_parts_chars(&follow_up_parts);
+        let (mut tool_message, mut archival_message, media) =
+            tool_messages_with_media(agent, &tc.id, &model_text, follow_up_parts, display.clone())
+                .map_err(LoopError::Fatal)?;
 
         agent.emit_extension_event(ExtensionEvent::ToolResult {
             tool_name: tc.name.clone(),
@@ -586,6 +662,7 @@ pub(super) async fn run_tool_calls_with_usage(
             tool_name: tc.name.clone(),
             result: ToolOutput(serde_json::json!(model_text.clone())),
             display: display.clone(),
+            media,
             is_error,
         });
 
@@ -600,20 +677,19 @@ pub(super) async fn run_tool_calls_with_usage(
         );
 
         if let Some(ref mut ctx_state) = agent.context_state {
-            ctx_state.on_message_appended(model_text.len());
+            ctx_state.on_message_appended(model_text.len() + media_chars);
         }
 
         agent
-            .push_message(
-                messages,
-                ChatMessage::tool(&tc.id, &model_text).with_tool_display(display.clone()),
-            )
+            .persist_message_if_needed(&mut archival_message)
+            .map_err(LoopError::Fatal)?;
+        tool_message.msg_id = archival_message.msg_id;
+        agent
+            .push_message(messages, tool_message)
             .map_err(LoopError::Fatal)?;
         tool_results.push(Message(
             serde_json::json!({ "content": model_text.clone() }),
         ));
-
-        deferred_follow_up_parts.extend(follow_up_parts);
 
         // Steering may preempt remaining work, never the tool-result protocol. Close the
         // remaining calls with explicit skipped results, then inject steering after this loop.
@@ -624,18 +700,6 @@ pub(super) async fn run_tool_calls_with_usage(
             }
             break;
         }
-    }
-
-    if !deferred_follow_up_parts.is_empty() {
-        if let Some(ref mut ctx_state) = agent.context_state {
-            ctx_state.on_message_appended(follow_up_parts_chars(&deferred_follow_up_parts));
-        }
-        agent
-            .push_message(
-                messages,
-                ChatMessage::user_with_parts(deferred_follow_up_parts),
-            )
-            .map_err(LoopError::Fatal)?;
     }
 
     if steered {

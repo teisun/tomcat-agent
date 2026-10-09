@@ -268,11 +268,24 @@ export async function assertSessionFilesDockFlow(api: TomcatExtensionApi): Promi
     await prompt("session files dock question","files-u2");
     assert.equal(api.__testing.getWebviewState().sessionViews[sessionId].sessionFiles?.sourceTurnId,"files-u1");
     await prompt("session files dock edit again","files-u4");
-    await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.sourceTurnId==="files-u4" ? true : undefined);
-    await waitForWebviewDomSnapshot(api,snapshot=>snapshot.html.includes('data-source-turn="files-u4"') ? true : undefined);
+    assert.equal(api.__testing.getWebviewState().sessionViews[sessionId].sessionFiles?.sourceTurnId,"files-u1","Later editing turns retain the cumulative scope");
     await driver.click("session-file-diff");
-    await waitFor(()=>vscode.workspace.textDocuments.some(document=>document.uri.scheme==="tomcat-diff" && new URLSearchParams(document.uri.query).get("sourceTurnId")==="files-u4" && document.getText()===firstAfter));
-    assert.equal(oldOriginal.getText(),"first line\noriginal line\n","Opening another turn doesn't rewrite old original");
+    assert.equal(oldOriginal.getText(),"first line\noriginal line\n","Follow-up edits still compare against the first original");
+    const accepted = await fs.readFile(filePath,"utf8");
+    await driver.click("keep-all-files");
+    const keepSource = await waitForWebviewState(api,state => {
+      const files = state.sessionViews[sessionId]?.sessionFiles;
+      return files?.sourceTurnId?.startsWith("keep-") && files.files.length===0 ? files.sourceTurnId : undefined;
+    });
+    await waitForWebviewDomSnapshot(api,snapshot=>!snapshot.html.includes('data-testid="files-dock"') ? true : undefined);
+    assert.equal(await fs.readFile(filePath,"utf8"),accepted,"Keep never changes disk");
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("files-keep-all.png"));
+    await prompt("session files dock edit","files-u5");
+    await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.files.length===1 ? true : undefined);
+    await driver.click("files-toggle");
+    await driver.click("session-file-diff");
+    await waitFor(()=>vscode.workspace.textDocuments.some(document=>document.uri.scheme==="tomcat-diff" && new URLSearchParams(document.uri.query).get("sourceTurnId")===keepSource && document.getText()===accepted));
+    assert.equal(await fs.readFile(filePath,"utf8"),firstAfter);
     const document=await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     // Native diff opened the live document before the fixture's second external write.
     // Wait for VS Code's file watcher to reload it before creating the intentional dirty edit.
@@ -286,8 +299,8 @@ export async function assertSessionFilesDockFlow(api: TomcatExtensionApi): Promi
     assert.equal(document.isDirty,true);assert.equal(await fs.readFile(filePath,"utf8"),diskBefore,"Dirty buffer prevented disk restore");
     assert.equal(await document.save(), true, "The intentional user edit must be saved before Undo becomes eligible again");
     await driver.hover("session-file-diff");await driver.click("undo-file");await driver.click("undo-files-undo");
-    await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.sourceTurnId==="files-u4" && state.sessionViews[sessionId].sessionFiles?.files.length===0 ? true : undefined);
-    assert.equal(await fs.readFile(filePath,"utf8"),firstAfter,"Restores u4 original, not session-start original");
+    await waitForWebviewState(api,state=>state.sessionViews[sessionId]?.sessionFiles?.sourceTurnId===keepSource && state.sessionViews[sessionId].sessionFiles?.files.length===0 ? true : undefined);
+    assert.equal(await fs.readFile(filePath,"utf8"),accepted,"Undo stops at Keep, not the original session baseline");
     if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("session-files-native-diff.png"));
   } finally { driver.close(); }
 }
@@ -3367,6 +3380,49 @@ export async function assertWebviewCompactControlFlow(
   }
 }
 
+export async function assertWebviewToolImageThumbnailFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview(); await api.__testing.waitForWebviewReady();
+  const sessionId=await createFreshWebviewSession(api,"tool-image-session");
+  const idle=waitForEvent(api,{sessionId,type:"agent_idle"});
+  await api.__testing.sendWebviewIntent(buildWebviewIntent({type:"prompt",messageId:"tool-image-prompt",data:{sessionId,text:"tool image showcase"}}));
+  await idle;
+  const tool=await waitForWebviewState(api,state=>{
+    const item=state.sessionViews[sessionId]?.timeline.find(item=>item.type==="tool" && item.attachments?.[0]?.hasThumb);
+    return item?.type==="tool" ? item : undefined;
+  });
+  const imageId=tool.attachments![0].id;
+  const driver=await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  try {
+    await waitForWebviewDomSnapshot(api,s=>s.html.includes('data-testid="tool-row-media-badge"') ? true:undefined);
+    assert.equal(await driver.evaluate<number>(`document.querySelectorAll('.tc-tool-row .tc-attachment-strip').length`),0,"images start folded");
+    await driver.click("tool-row-toggle");
+    await waitForWebviewDomSnapshot(api,s=>s.html.includes('class="tc-attachment-strip__thumb"') ? true:undefined);
+    const source=await driver.evaluate<string>(`document.querySelector('.tc-tool-row .tc-attachment-strip img').getAttribute('src')`);
+    assert.ok(source.includes("thumbs"),"only a thumbnail is displayed");
+    if(process.env.TOMCAT_E2E_SCREENSHOT==="1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("tool-card-thumbnail.png"));
+    await driver.evaluate(`document.querySelector('.tc-tool-row .tc-attachment-strip button').click()`);
+    const preview=await SettingsFrameDriver.connectFromEnvironment('[data-testid="preview-stage"]');
+    try {
+      const deadline=Date.now()+20_000; let loaded=false;
+      while(Date.now()<deadline) { loaded=await preview.evaluate<boolean>(`Boolean(document.querySelector('[data-testid="preview-stage-image"]')?.naturalWidth)`); if(loaded) break; await pause(100); }
+      assert.ok(loaded,"preview actually decodes the original");
+      assert.ok(await preview.evaluate<boolean>(`document.querySelector('header')?.textContent?.includes('Tool images · read')`),"preview identifies the source tool");
+      if(process.env.TOMCAT_E2E_SCREENSHOT==="1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("tool-card-preview.png"));
+    } finally { preview.close(); }
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await api.__testing.reloadWebview(); await api.__testing.waitForWebviewReady();
+    const restored=await waitForWebviewState(api,state=>{
+      const item=state.sessionViews[sessionId]?.timeline.find(i=>i.type==="tool" && i.attachments?.[0]?.hasThumb);
+      return item?.type==="tool" ? item:undefined;
+    });
+    assert.equal(restored.attachments![0].id,imageId,"live/history image identity is stable");
+    const reopened=await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    try { await reopened.click("tool-row-toggle"); } finally { reopened.close(); }
+    await waitForWebviewDomSnapshot(api,s=>s.html.includes('class="tc-attachment-strip__thumb"') ? true:undefined);
+    if(process.env.TOMCAT_E2E_SCREENSHOT==="1") await captureWorkbenchArtifacts(transcriptVisualArtifactPath("tool-card-reloaded.png"));
+  } finally { driver.close(); }
+}
+
 export async function assertWebviewPersistedMessageKindFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -3419,6 +3475,11 @@ export async function assertWebviewPersistedMessageKindFlow(
     (snapshot.html.match(/class="tc-boundary"/gu) ?? []).length >= 2,
     "Nudge and Signal must not fall back to user bubbles after reload",
   );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await captureWorkbenchArtifacts(transcriptVisualArtifactPath("message-kinds-tool-media.png"));
+  }
+  assert.equal((snapshot.html.match(/data-kind="user"/gu) ?? []).length, 2,
+    "only the real prompt and Steering may render as user bubbles; tool_media must stay hidden");
 }
 
 export async function assertWebviewMultiSessionFlow(

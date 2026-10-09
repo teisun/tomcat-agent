@@ -1,13 +1,14 @@
-//! A derived view of the last editing turn. No additional snapshot store.
+//! A cumulative review view since the latest Keep All, independent of message ownership.
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::file_baselines::{self, Baseline, RestoreFiles};
+use super::file_baselines::{self, Baseline, RestoreFiles, RestoreSource, KEEP_PREFIX};
 use crate::core::tools::primitive::{line_diff_stat, MAX_DIFF_INPUT_BYTES, MAX_DIFF_INPUT_LINES};
 use crate::AppError;
 
@@ -22,7 +23,6 @@ pub enum SessionFileStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionFileBlockedReason {
-    HeadMoved,
     BackupMissing,
     NotRegularFile,
 }
@@ -67,6 +67,13 @@ pub struct SessionFilesRestoreResponse {
     pub restored: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFilesKeepResponse {
+    pub session_id: String,
+    pub source_turn_id: String,
+}
+
 fn error(code: &str) -> AppError {
     AppError::Config(code.into())
 }
@@ -92,45 +99,26 @@ fn turn_dir(transcript: &Path, source: &str) -> Result<PathBuf, AppError> {
     Ok(dir)
 }
 
-fn read_rows(dir: &Path) -> Result<Vec<Baseline>, AppError> {
-    let path = dir.join("baselines.jsonl");
-    if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
-        return Err(error("unknown_path"));
-    }
-    let text = fs::read_to_string(path)?;
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let row: Baseline = serde_json::from_str(line)?;
-        if !row.path.is_absolute()
-            || row
-                .backup
-                .as_ref()
-                .is_some_and(|b| b.len() != 64 || !b.bytes().all(|c| c.is_ascii_hexdigit()))
-        {
-            return Err(error("invalid_baseline"));
-        }
-        if seen.insert(row.path.clone()) {
-            out.push(row);
-        }
-    }
-    Ok(out)
-}
-
-/// Select by published manifest metadata, without reading chat or other manifests.
-/// Superseded turns are removed by the existing history rewrite paths.
-pub fn latest_editing_turn(transcript: &Path) -> Result<Option<String>, AppError> {
+/// A row's capture time is immutable even when its old owner becomes writable again.
+fn scope_rows(
+    transcript: &Path,
+    expected: Option<&str>,
+) -> Result<(Option<String>, Vec<(PathBuf, Baseline)>), AppError> {
+    let keep = file_baselines::latest_keep(transcript)?;
     let root = file_baselines::session_dir(transcript);
     let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    let mut latest: Option<(std::time::SystemTime, String)> = None;
-    for entry in entries {
+    let mut rows = Vec::new();
+    for entry in entries.into_iter().flatten() {
         let entry = entry?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        if !entry.file_type()?.is_dir() || !file_baselines::safe_id(&id) {
+        if !entry.file_type()?.is_dir()
+            || !file_baselines::safe_id(&id)
+            || id.starts_with(KEEP_PREFIX)
+        {
             continue;
         }
         let dir = turn_dir(transcript, &id)?;
@@ -142,13 +130,59 @@ pub fn latest_editing_turn(transcript: &Path) -> Result<Option<String>, AppError
         if !metadata.is_file() || metadata.len() == 0 {
             continue;
         }
-        let candidate = (metadata.modified()?, id);
-        latest = Some(match latest {
-            Some(previous) => previous.max(candidate),
-            None => candidate,
-        });
+        // Record timestamps win even if a copied manifest has an older mtime.
+        // Only an unreadable, definitively pre-Keep manifest may be ignored.
+        let captured = match file_baselines::read_rows(&dir) {
+            Ok(rows) => rows,
+            Err(AppError::Serialize(ref e))
+                if (e.is_syntax() || e.is_eof())
+                    && keep.as_ref().is_some_and(|(at, _)| {
+                        metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .is_some_and(|t| t.as_millis() < *at as u128)
+                    }) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e),
+        };
+        for row in captured {
+            if keep.as_ref().is_none_or(|(at, _)| row.at > *at) {
+                rows.push((dir.clone(), row));
+            }
+        }
     }
-    Ok(latest.map(|(_, id)| id))
+    rows.sort_by(|(a, ar), (b, br)| ar.at.cmp(&br.at).then_with(|| a.cmp(b)));
+    let source = keep.map(|(_, id)| id).or_else(|| {
+        rows.first()
+            .and_then(|(dir, _)| dir.file_name())
+            .map(|id| id.to_string_lossy().into_owned())
+    });
+    if expected.is_some_and(|id| source.as_deref() != Some(id)) {
+        return Err(error("unknown_path"));
+    }
+    let mut seen = HashSet::new();
+    rows.retain(|(_, row)| seen.insert(row.path.clone()));
+    Ok((source, rows))
+}
+
+/// Accept only a timestamp. Capture the next version lazily, before the next AI write.
+pub fn keep(
+    transcript: &Path,
+    session: &str,
+    source: &str,
+) -> Result<SessionFilesKeepResponse, AppError> {
+    scope_rows(transcript, Some(source))?;
+    let previous = file_baselines::latest_keep(transcript)?.map(|(at, _)| at);
+    let timestamp = file_baselines::timestamp_after(previous)?;
+    let id = format!("{KEEP_PREFIX}{timestamp}");
+    fs::create_dir(file_baselines::session_dir(transcript).join(&id))?;
+    Ok(SessionFilesKeepResponse {
+        session_id: session.into(),
+        source_turn_id: id,
+    })
 }
 
 fn backup_path(dir: &Path, row: &Baseline) -> Option<PathBuf> {
@@ -182,68 +216,260 @@ fn text(path: &Path) -> Result<String, AppError> {
     Ok(text)
 }
 
-pub fn list(transcript: &Path, session_id: &str) -> Result<SessionFilesResponse, AppError> {
-    let source = latest_editing_turn(transcript)?;
-    let mut files = Vec::new();
-    if let Some(ref source) = source {
-        let dir = turn_dir(transcript, source)?;
-        let head =
-            file_baselines::session_cwd(transcript).and_then(|cwd| file_baselines::git_head(&cwd));
-        for row in read_rows(&dir)? {
-            let backup = backup_path(&dir, &row);
-            let current_meta = fs::symlink_metadata(&row.path);
-            let exists = match &current_meta {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(e) => return Err(error(&format!("Cannot read {}: {e}", row.path.display()))),
-            };
-            let missing = backup.as_ref().is_some_and(|b| !backup_available(b));
-            let regular = file_baselines::require_regular_path(&row.path).is_ok();
-            if !missing && regular {
-                match backup.as_ref() {
-                    None if !exists => continue,
-                    Some(b) if exists && file_baselines::files_equal(b, &row.path)? => continue,
-                    _ => {}
-                }
+fn source_text(source: &RestoreSource) -> Result<String, AppError> {
+    match source {
+        RestoreSource::Absent => Ok(String::new()),
+        RestoreSource::Backup(path, _) if backup_available(path) => text(path),
+        RestoreSource::Backup(..) => Err(error("unavailable")),
+        RestoreSource::Content(bytes) => {
+            if bytes.len() > MAX_DIFF_INPUT_BYTES {
+                return Err(error("too_large"));
             }
-            let blocked = if missing {
-                Some(SessionFileBlockedReason::BackupMissing)
-            } else if !regular {
-                Some(SessionFileBlockedReason::NotRegularFile)
-            } else if row.git_head != head {
-                Some(SessionFileBlockedReason::HeadMoved)
-            } else {
-                None
-            };
-            let before = match backup.as_ref() {
-                Some(b) => text(b),
-                None => Ok(String::new()),
-            };
-            let after = if exists {
-                text(&row.path)
-            } else {
-                Ok(String::new())
-            };
-            let counts = before
-                .ok()
-                .zip(after.ok())
-                .filter(|(a, b)| a.len().saturating_add(b.len()) <= MAX_DIFF_INPUT_BYTES)
-                .map(|(a, b)| line_diff_stat(&a, &b));
-            files.push(SessionFile {
-                path: row.path.to_string_lossy().into_owned(),
-                status: if row.backup.is_none() {
-                    SessionFileStatus::Added
-                } else if !exists {
-                    SessionFileStatus::Deleted
-                } else {
-                    SessionFileStatus::Modified
-                },
-                added: counts.map(|c| c.0),
-                removed: counts.map(|c| c.1),
-                restorable: blocked.is_none(),
-                blocked_reason: blocked,
-            });
+            if bytes.contains(&0) {
+                return Err(error("binary"));
+            }
+            let value = std::str::from_utf8(bytes).map_err(|_| error("binary"))?;
+            if value.lines().count() > MAX_DIFF_INPUT_LINES {
+                return Err(error("too_large"));
+            }
+            Ok(value.into())
         }
+    }
+}
+
+fn source_available(source: &RestoreSource) -> bool {
+    !matches!(source, RestoreSource::Backup(path, _) if !backup_available(path))
+}
+
+fn source_matches(source: &RestoreSource, path: &Path, exists: bool) -> Result<bool, AppError> {
+    match source {
+        RestoreSource::Absent => Ok(!exists),
+        _ if !exists => Ok(false),
+        RestoreSource::Backup(backup, _) => Ok(file_baselines::files_equal(backup, path)?),
+        RestoreSource::Content(bytes) => {
+            let mut file = fs::File::open(path)?;
+            if file.metadata()?.len() != bytes.len() as u64 {
+                return Ok(false);
+            }
+            let mut offset = 0;
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = file.read(&mut chunk)?;
+                if n == 0 {
+                    return Ok(offset == bytes.len());
+                }
+                if bytes.get(offset..offset + n) != Some(&chunk[..n]) {
+                    return Ok(false);
+                }
+                offset += n;
+            }
+        }
+    }
+}
+
+fn git(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("--literal-pathspecs").arg("-C").arg(root);
+    command
+}
+
+/// Resolve committed versions once for all consumers. No durable Git bookkeeping.
+fn effective_baselines(
+    transcript: &Path,
+    rows: Vec<(PathBuf, Baseline)>,
+) -> Result<Vec<(PathBuf, RestoreSource)>, AppError> {
+    let mut result: Vec<_> = rows
+        .iter()
+        .map(|(dir, row)| {
+            (
+                row.path.clone(),
+                match backup_path(dir, row) {
+                    Some(path) => RestoreSource::Backup(path, row.permissions),
+                    None => RestoreSource::Absent,
+                },
+            )
+        })
+        .collect();
+    let Some(cwd) = file_baselines::session_cwd(transcript) else {
+        return Ok(result);
+    };
+    let Some(head) = file_baselines::git_head(&cwd) else {
+        return Ok(result);
+    };
+    if rows
+        .iter()
+        .all(|(_, row)| row.git_head.as_ref() == Some(&head))
+    {
+        return Ok(result);
+    }
+    let root = git(&cwd).args(["rev-parse", "--show-toplevel"]).output()?;
+    if !root.status.success() {
+        return Ok(result);
+    }
+    let root = PathBuf::from(
+        String::from_utf8(root.stdout)
+            .map_err(|_| error("invalid_git_path"))?
+            .trim_end_matches('\n'),
+    );
+    let root = root.canonicalize()?;
+    let mut groups: BTreeMap<Option<String>, Vec<(usize, String)>> = BTreeMap::new();
+    for (index, (_, row)) in rows.iter().enumerate() {
+        if row.git_head.as_ref() == Some(&head) {
+            continue;
+        }
+        let Some(relative) = row.path.strip_prefix(&root).ok().and_then(Path::to_str) else {
+            continue;
+        };
+        // cat-file's batch input is newline-delimited. Such paths retain their backups.
+        if relative.contains('\n') {
+            continue;
+        }
+        groups
+            .entry(row.git_head.clone())
+            .or_default()
+            .push((index, relative.replace(std::path::MAIN_SEPARATOR, "/")));
+    }
+    let mut committed = Vec::new();
+    for (old, paths) in groups {
+        let valid_oid = old
+            .as_ref()
+            .is_none_or(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        let output = if valid_oid {
+            let range = old
+                .as_ref()
+                .map(|old| format!("{old}...{head}"))
+                .unwrap_or_else(|| head.clone());
+            Some(
+                git(&root)
+                    .args(["log", "--format=", "--name-only", "-z", "--no-renames"])
+                    .arg(range)
+                    .arg("--")
+                    .args(paths.iter().map(|(_, path)| path))
+                    .output()?,
+            )
+        } else {
+            None
+        };
+        let missing_old = output.as_ref().is_none_or(|o| !o.status.success());
+        let changed: HashSet<Vec<u8>> = output
+            .as_ref()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                o.stdout
+                    .split(|b| *b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_vec())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (index, path) in paths {
+            if missing_old || changed.contains(path.as_bytes()) {
+                committed.push((index, path, missing_old));
+            }
+        }
+    }
+    if committed.is_empty() {
+        return Ok(result);
+    }
+    // Batch metadata is unfiltered and safely framed. Filtered output is read separately:
+    // Git's --batch --filters header reports the RAW blob size, not the filtered byte count.
+    let mut child = git(&root)
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| error("git_stdin_unavailable"))?;
+    let input = committed
+        .iter()
+        .map(|(_, path, _)| format!("{head}:{path}\n"))
+        .collect::<String>();
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output();
+    let written = writer
+        .join()
+        .map_err(|_| error("git_batch_writer_failed"))?;
+    let output = output?;
+    written?;
+    if !output.status.success() {
+        return Err(error("git_baseline_failed"));
+    }
+    let mut reader = std::io::Cursor::new(output.stdout);
+    for (index, path, missing_old) in committed {
+        let mut header = String::new();
+        reader.read_line(&mut header)?;
+        if header.ends_with(" missing\n") {
+            // Untracked/outside Git remains a normal backup, even if the old commit is gone.
+            if !missing_old {
+                result[index].1 = RestoreSource::Absent;
+            }
+            continue;
+        }
+        let fields: Vec<_> = header.split_whitespace().collect();
+        if fields.len() != 3 || fields[1] != "blob" {
+            return Err(error("invalid_git_baseline"));
+        }
+        let content = git(&root)
+            .args(["cat-file", "--filters"])
+            .arg(format!("{head}:{path}"))
+            .output()?;
+        if !content.status.success() {
+            return Err(error("git_baseline_failed"));
+        }
+        result[index].1 = RestoreSource::Content(content.stdout);
+    }
+    Ok(result)
+}
+
+pub fn list(transcript: &Path, session_id: &str) -> Result<SessionFilesResponse, AppError> {
+    let (source, rows) = scope_rows(transcript, None)?;
+    let mut files = Vec::new();
+    for (path, baseline) in effective_baselines(transcript, rows)? {
+        let exists = match fs::symlink_metadata(&path) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
+        let missing = !source_available(&baseline);
+        let regular = file_baselines::require_regular_path(&path).is_ok();
+        if !missing && regular && source_matches(&baseline, &path, exists)? {
+            continue;
+        }
+        let blocked = if missing {
+            Some(SessionFileBlockedReason::BackupMissing)
+        } else if !regular {
+            Some(SessionFileBlockedReason::NotRegularFile)
+        } else {
+            None
+        };
+        let before = source_text(&baseline);
+        let after = if exists {
+            text(&path)
+        } else {
+            Ok(String::new())
+        };
+        let counts = before
+            .ok()
+            .zip(after.ok())
+            .filter(|(a, b)| a.len().saturating_add(b.len()) <= MAX_DIFF_INPUT_BYTES)
+            .map(|(a, b)| line_diff_stat(&a, &b));
+        files.push(SessionFile {
+            path: path.to_string_lossy().into_owned(),
+            status: if matches!(baseline, RestoreSource::Absent) {
+                SessionFileStatus::Added
+            } else if !exists {
+                SessionFileStatus::Deleted
+            } else {
+                SessionFileStatus::Modified
+            },
+            added: counts.map(|c| c.0),
+            removed: counts.map(|c| c.1),
+            restorable: blocked.is_none(),
+            blocked_reason: blocked,
+        });
     }
     Ok(SessionFilesResponse {
         session_id: session_id.into(),
@@ -252,45 +478,31 @@ pub fn list(transcript: &Path, session_id: &str) -> Result<SessionFilesResponse,
     })
 }
 
-fn selected_row(
-    transcript: &Path,
-    source: &str,
-    path: &str,
-) -> Result<(PathBuf, Baseline), AppError> {
-    let dir = turn_dir(transcript, source)?;
-    let rows = read_rows(&dir).map_err(|e| match e {
-        AppError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => error("unknown_path"),
-        e => e,
-    })?;
-    let row = rows
-        .into_iter()
-        .find(|r| r.path == Path::new(path))
-        .ok_or_else(|| error("unknown_path"))?;
-    Ok((dir, row))
-}
-
 pub fn baseline(
     transcript: &Path,
     session: &str,
     source: &str,
     path: &str,
 ) -> Result<SessionFileBaselineResponse, AppError> {
-    let (dir, row) = selected_row(transcript, source, path)?;
-    let value = match backup_path(&dir, &row) {
-        Some(b) if backup_available(&b) => text(&b)?,
-        Some(_) => return Err(error("unavailable")),
-        None => String::new(),
-    };
+    let (_, rows) = scope_rows(transcript, Some(source))?;
+    let rows = rows
+        .into_iter()
+        .filter(|(_, r)| r.path == Path::new(path))
+        .collect();
+    let (path, value) = effective_baselines(transcript, rows)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| error("unknown_path"))?;
     Ok(SessionFileBaselineResponse {
         session_id: session.into(),
         source_turn_id: source.into(),
-        path: row.path.to_string_lossy().into_owned(),
-        existed: row.backup.is_some(),
-        text: value,
+        path: path.to_string_lossy().into_owned(),
+        existed: !matches!(value, RestoreSource::Absent),
+        text: source_text(&value)?,
     })
 }
 
-/// Preflight the exact confirmed subset, then reuse the file-only Revert kernel.
+/// Preflight every requested path before any disk write; rewind's separate HEAD gate is unchanged.
 pub fn restore(
     transcript: &Path,
     session: &str,
@@ -306,20 +518,22 @@ pub fn restore(
             serde_json::json!({}),
         )
     };
-    let head =
-        file_baselines::session_cwd(transcript).and_then(|cwd| file_baselines::git_head(&cwd));
+    let (_, rows) = scope_rows(transcript, Some(source)).map_err(map_error)?;
+    let requested: HashSet<_> = paths.iter().map(|p| Path::new(p)).collect();
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|(_, r)| requested.contains(r.path.as_path()))
+        .collect();
+    if rows.len() != requested.len() {
+        return Err(map_error(error("unknown_path")));
+    }
     let mut files = BTreeMap::new();
-    for path in paths {
-        let (dir, row) = selected_row(transcript, source, path).map_err(map_error)?;
-        if row.git_head != head {
-            return Err(("head_moved".into(), serde_json::json!({})));
+    for (path, baseline) in effective_baselines(transcript, rows).map_err(map_error)? {
+        file_baselines::require_regular_path(&path).map_err(map_error)?;
+        if !source_available(&baseline) {
+            return Err(map_error(error("unavailable")));
         }
-        file_baselines::require_regular_path(&row.path).map_err(map_error)?;
-        let backup = backup_path(&dir, &row);
-        if backup.as_ref().is_some_and(|b| !backup_available(b)) {
-            return Err(("unavailable".into(), serde_json::json!({})));
-        }
-        files.insert(row.path, backup);
+        files.insert(path, baseline);
     }
     let restore = RestoreFiles::selected(files);
     let restored = restore.paths();

@@ -113,6 +113,7 @@ fn verbatim_copies_user_text_exactly_and_skips_synthetic_messages() {
             steering.kind = MessageKind::Steering;
             steering
         },
+        ChatMessage::tool_media(vec![crate::core::llm::ChatMessageContentPart::text("tool output, not a request")]),
         ChatMessage::user("第二条：重入会话要能看到历史图片"),
     ];
 

@@ -3,6 +3,198 @@ use std::fs;
 use std::path::Path;
 
 #[test]
+fn prune_keeps_active_sessions_and_drops_idle_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now();
+    let old = now - std::time::Duration::from_secs(8 * 86400);
+    for id in ["active", "idle", "deleted"] {
+        let transcript = dir.path().join(format!("{id}.jsonl"));
+        for name in ["user-one", "keep-100"] {
+            let backup = session_dir(&transcript).join(name);
+            fs::create_dir_all(&backup).unwrap();
+            fs::File::open(&backup).unwrap().set_modified(old).unwrap();
+        }
+        if id != "deleted" {
+            fs::write(&transcript, "session").unwrap();
+            fs::File::open(&transcript)
+                .unwrap()
+                .set_modified(if id == "idle" { old } else { now })
+                .unwrap();
+        }
+    }
+    prune(dir.path(), 7, now);
+    assert!(session_dir(&dir.path().join("active.jsonl"))
+        .join("user-one")
+        .exists());
+    assert!(session_dir(&dir.path().join("active.jsonl"))
+        .join("keep-100")
+        .exists());
+    assert!(!session_dir(&dir.path().join("idle.jsonl")).exists());
+    assert!(!session_dir(&dir.path().join("deleted.jsonl")).exists());
+}
+
+#[test]
+fn discard_keeps_after_preserves_earlier_boundaries_and_message_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("s.jsonl");
+    let root = session_dir(&transcript);
+    for name in ["u1", "keep-100", "keep-200", "keep-invalid"] {
+        fs::create_dir_all(root.join(name)).unwrap();
+    }
+    fs::create_dir_all(root.join("keep-300")).unwrap();
+    fs::write(root.join("keep-300/baselines.jsonl"), "legacy snapshot").unwrap();
+    fs::create_dir_all(root.join("keep-+400")).unwrap();
+    assert_eq!(latest_keep(&transcript).unwrap().unwrap().0, 200);
+    discard_keeps_after(&transcript, 100);
+    assert!(root.join("keep-100").exists());
+    assert!(!root.join("keep-200").exists());
+    assert!(root.join("u1").exists());
+    assert!(root.join("keep-invalid").exists());
+    discard_keeps_after(&transcript, 99);
+    assert!(!root.join("keep-100").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("keep-300/baselines.jsonl")).unwrap(),
+        "legacy snapshot"
+    );
+    assert!(root.join("keep-+400").exists());
+}
+
+#[test]
+fn file_baseline_recapture_after_keep_preserves_original_for_rewind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let transcript = root.join("s.jsonl");
+    let path = root.join("a");
+    fs::write(&path, b"original").unwrap();
+    let first = TurnFileBaselines::new(&transcript, "u1", root.clone()).unwrap();
+    capture(&first, &path, b"accepted");
+    let keep = crate::core::checkpoint::session_files::keep(&transcript, "s", "u1").unwrap();
+    assert!(!first.keep_is_current());
+    let second = TurnFileBaselines::new(&transcript, "u1", root.clone()).unwrap();
+    assert!(second.keep_is_current());
+    capture(&second, &path, b"next cycle");
+    let owner = session_dir(&transcript).join("u1");
+    let rows = read_rows(&owner).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].at < rows[1].at);
+    assert_ne!(rows[0].backup, rows[1].backup);
+    assert_eq!(
+        fs::read(owner.join(rows[0].backup.as_ref().unwrap())).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        fs::read(owner.join(rows[1].backup.as_ref().unwrap())).unwrap(),
+        b"accepted"
+    );
+    assert_eq!(
+        crate::core::checkpoint::session_files::baseline(
+            &transcript,
+            "s",
+            &keep.source_turn_id,
+            path.to_str().unwrap()
+        )
+        .unwrap()
+        .text,
+        "accepted"
+    );
+    let now = chrono::Utc::now();
+    preview(
+        &transcript,
+        &["u1".into()],
+        &now.to_rfc3339(),
+        &root,
+        7,
+        now,
+    )
+    .unwrap()
+    .restore()
+    .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"original");
+    discard_keeps_after(&transcript, 0);
+    assert!(!second.keep_is_current());
+}
+
+#[test]
+fn file_baseline_legacy_rows_do_not_seed_tracker_or_rewind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let transcript = root.join("s.jsonl");
+    let path = root.join("a");
+    fs::write(&path, b"legacy work").unwrap();
+    let owner = session_dir(&transcript).join("u1");
+    fs::create_dir_all(&owner).unwrap();
+    fs::write(
+        owner.join("baselines.jsonl"),
+        serde_json::json!({"path":path,"backup":null,"git_head":"obsolete"}).to_string() + "\n",
+    )
+    .unwrap();
+    let now = chrono::Utc::now();
+    assert!(matches!(
+        preview(
+            &transcript,
+            &["u1".into()],
+            &now.to_rfc3339(),
+            &root,
+            7,
+            now
+        ),
+        Err(RevertReason::NoBaselines)
+    ));
+    let tracker = TurnFileBaselines::new(&transcript, "u1", root.clone()).unwrap();
+    capture(&tracker, &path, b"new work");
+    preview(
+        &transcript,
+        &["u1".into()],
+        &now.to_rfc3339(),
+        &root,
+        7,
+        now,
+    )
+    .unwrap()
+    .restore()
+    .unwrap();
+    assert_eq!(fs::read(path).unwrap(), b"legacy work");
+}
+
+#[cfg(unix)]
+#[test]
+fn file_baseline_content_dedup_preserves_per_path_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let transcript = root.join("s.jsonl");
+    let tracker = TurnFileBaselines::new(&transcript, "u1", root.clone()).unwrap();
+    for (name, mode) in [("a", 0o755), ("b", 0o644)] {
+        let path = root.join(name);
+        fs::write(&path, b"same original bytes").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        capture(&tracker, &path, b"changed");
+        fs::remove_file(path).unwrap();
+    }
+    let rows = read_rows(&session_dir(&transcript).join("u1")).unwrap();
+    assert_eq!(rows[0].backup, rows[1].backup);
+    let now = chrono::Utc::now();
+    preview(
+        &transcript,
+        &["u1".into()],
+        &now.to_rfc3339(),
+        &root,
+        7,
+        now,
+    )
+    .unwrap()
+    .restore()
+    .unwrap();
+    for (name, mode) in [("a", 0o755), ("b", 0o644)] {
+        assert_eq!(fs::read(root.join(name)).unwrap(), b"same original bytes");
+        assert_eq!(
+            fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+}
+
+#[test]
 fn file_baseline_session_cwd_comes_only_from_header() {
     let temp = tempfile::tempdir().unwrap();
     let manager = crate::SessionManager::new(temp.path().join("sessions"));
@@ -308,6 +500,7 @@ fn file_baseline_git_branch_reset_and_late_repository_boundaries() {
 fn file_baseline_prune_and_partial_failure_are_retryable() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("s.jsonl");
+    fs::write(&transcript, "active session").unwrap();
     let first = dir.path().join("a.txt");
     let second = dir.path().join("b.txt");
     fs::write(&first, b"before").unwrap();
@@ -388,8 +581,9 @@ fn file_baseline_backup_failure_does_not_panic_or_publish() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("s.jsonl");
     fs::write(dir.path().join("file-baselines"), b"not a directory").unwrap();
-    let tracker = TurnFileBaselines::new(&transcript, "u", dir.path().into()).unwrap();
-    assert!(tracker
-        .prepare(dir.path().join("file").to_str().unwrap())
-        .is_none());
+    if let Some(tracker) = TurnFileBaselines::new(&transcript, "u", dir.path().into()) {
+        assert!(tracker
+            .prepare(dir.path().join("file").to_str().unwrap())
+            .is_none());
+    }
 }

@@ -200,6 +200,19 @@ fn outbound_guard_detects_unpaired_tool_calls_but_accepts_paired_or_pending_resu
 }
 
 #[test]
+fn resume_tail_predicate_ignores_trailing_tool_media() {
+    let mut complete = vec![
+        transcript_message("user", mk_user("inspect")),
+        transcript_message("assistant", mk_assistant_tc(&["call-1"])),
+        transcript_message("tool", mk_tool("call-1")),
+        transcript_message("media", serde_json::json!({"role":"user","kind":"tool_media","content":[]})),
+    ];
+    assert!(has_complete_tail_tool_results(&complete));
+    complete.push(transcript_message("new-user", mk_user("new request")));
+    assert!(!has_complete_tail_tool_results(&complete));
+}
+
+#[test]
 fn resume_tail_predicate_requires_a_complete_active_tool_round() {
     let complete = vec![
         transcript_message("user", mk_user("inspect it")),

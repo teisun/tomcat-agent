@@ -28,6 +28,7 @@ pub mod speed;
 pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;
+pub(crate) mod tool_result_media;
 mod types;
 pub(crate) use types::IMAGE_PROVIDER_RENDITION_MIME;
 

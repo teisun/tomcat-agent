@@ -12,6 +12,39 @@ import {
   WebviewStateStore,
 } from "../state";
 
+describe("tool-owned attachment state", () => {
+  const sha = "a".repeat(64);
+  const media = {type:"input_image_ref" as const,blobSha:sha,mimeType:"image/png",bytes:1200};
+  const makeStore = () => { const store = new WebviewStateStore(); store.setActiveSession("s1");
+    store.setAttachmentUriResolver(a => ({fullUri:`resource:${a.blobSha}`,thumbUri:null})); return store; };
+  it("live and historical tools share attachment identity, URLs and thumbnail backfill", () => {
+    const live = makeStore();
+    live.applyEvent({type:"tool_execution_start",sessionId:"s1",toolCallId:"call",toolName:"read",args:{path:"photo.png"}});
+    const mutation=live.applyEvent({type:"tool_execution_end",sessionId:"s1",toolCallId:"call",toolName:"read",result:"[Image attached]",isError:false,media:[media]});
+    const tool = live.snapshot().sessionViews.s1.timeline.find(i=>i.type==="tool") as WebviewToolCard;
+    expect(tool.attachments?.[0]).toMatchObject({id:"tool:call:image:0",blobSha:sha,fullUri:`resource:${sha}`,thumbUri:null});
+    expect(JSON.stringify(mutation)).toContain(`resource:${sha}`);
+    const history=makeStore();
+    history.hydrateHistory("s1",{sessionId:"s1",upToSeq:null,messages:[
+      {type:"message",id:"assistant",message:{role:"assistant",tool_calls:[{id:"call",function:{name:"read",arguments:"{}"}}]}},
+      {type:"message",id:"different-row-id",message:{role:"tool",tool_call_id:"call",content:[{type:"input_text",text:"[Image attached]"},media]}}
+    ]});
+    const restored=history.snapshot().sessionViews.s1.timeline.find(i=>i.type==="tool") as WebviewToolCard;
+    expect(restored.attachments).toEqual(tool.attachments);
+    history.updateHistoryAttachments("s1",sha,{hasThumb:true,thumbUri:"thumb:ready"});
+    expect((history.snapshot().sessionViews.s1.timeline.find(i=>i.type==="tool") as WebviewToolCard).attachments?.[0]).toMatchObject({hasThumb:true,thumbUri:"thumb:ready"});
+  });
+  it("keeps image-only tool rows, missing refs, and never stores inline bytes", () => {
+    const store=makeStore();
+    store.hydrateHistory("s1",{sessionId:"s1",upToSeq:null,messages:[
+      {type:"message",id:"assistant",message:{role:"assistant",tool_calls:[{id:"call",function:{name:"read",arguments:"{}"}}]}},
+      {type:"message",id:"image-row",message:{role:"tool",tool_call_id:"call",content:[{...media,image_b64:"DO_NOT_COPY"}]}}
+    ]});
+    expect((store.snapshot().sessionViews.s1.timeline.find(i=>i.type==="tool") as WebviewToolCard).attachments).toHaveLength(1);
+    expect(JSON.stringify(store.snapshot())).not.toContain("DO_NOT_COPY");
+  });
+});
+
 describe("editable attachment history", () => {
   it.each([
     [{type:"input_image_ref",blob_sha:"a".repeat(64),mime_type:"image/png"},{blobSha:"a".repeat(64),unavailable:true}],
@@ -3890,6 +3923,46 @@ describe("checkpoint history replay", () => {
       recoveryAction: "retry",
       recoveryTargetUserMessageId: "user-1",
     });
+  });
+
+  it("renders genuine image-only user input while hiding tool media", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const content = [{ type: "input_image", image_b64: "AA==" }];
+    store.hydrateHistory("s1", { sessionId: "s1", messages: [
+      { type: "message", id: "real-image", message: { role: "user", content } },
+      { type: "message", id: "tool-image", message: { role: "user", kind: "tool_media", content } },
+    ] });
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline.find(item => item.id === "real-image")).toMatchObject({type:"message",kind:"user"});
+    expect(timeline.some(item => item.id === "tool-image")).toBe(false);
+  });
+
+  it("skips tool media when choosing the recovery target", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        { type: "message", id: "user-1", message: { role: "user", content: "inspect" } },
+        { type: "message", id: "assistant-1", message: {
+          role: "assistant", tool_calls: [{ id: "read-1", name: "read" }],
+        } },
+        { type: "message", id: "tool-1", message: {
+          role: "tool", tool_call_id: "read-1", content: "image returned",
+        } },
+        { type: "message", id: "tool-media", message: {
+          role: "user", kind: "tool_media", content: [{ type: "input_image", image_b64: "AA==" }],
+        } },
+        { type: "error", id: "error-1", summary: "stream ended", detail: "stream ended" },
+      ],
+      sessionId: "s1",
+    });
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    const error = timeline.find(item => item.id === "error-1");
+    expect(error).toMatchObject({ recoveryAction: "resume" });
+    // Resume continues the existing context; only Retry carries a user-message target.
+    expect(error).not.toHaveProperty("recoveryTargetUserMessageId");
+    expect(timeline.some(item => item.id === "tool-media")).toBe(false);
   });
 
   it("marks a failed turn with fully paired tool results as resumable", () => {

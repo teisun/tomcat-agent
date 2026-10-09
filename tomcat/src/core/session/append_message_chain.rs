@@ -126,6 +126,11 @@ pub(crate) fn find_dangling_tail_tool_call_ids(recent: &[Value]) -> Option<Vec<S
         .map(|calls| calls.into_iter().map(|call| call.id).collect())
 }
 
+fn is_tool_media(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("user")
+        && message.get("kind").and_then(Value::as_str) == Some("tool_media")
+}
+
 /// 当前 transcript 是否以一组完整、仍有效的 tool results 收尾。
 ///
 /// `Resume` 是“模型已拿到工具结果、只差继续作答”的专用入口，因此不能只看投影后的
@@ -137,7 +142,7 @@ pub(crate) fn has_complete_tail_tool_results(entries: &[TranscriptEntry]) -> boo
     let Some(TranscriptEntry::Message(last_raw_message)) = entries
         .iter()
         .rev()
-        .find(|entry| matches!(entry, TranscriptEntry::Message(_)))
+        .find(|entry| matches!(entry, TranscriptEntry::Message(m) if !is_tool_media(&m.message)))
     else {
         return false;
     };
@@ -153,7 +158,7 @@ pub(crate) fn has_complete_tail_tool_results(entries: &[TranscriptEntry]) -> boo
 
     let recent = collect_recent_chat_messages_from_tail(entries);
     let mut trailing_results_rev = Vec::new();
-    for message in recent.iter().rev() {
+    for message in recent.iter().rev().filter(|m| !is_tool_media(m)) {
         match message
             .get("role")
             .and_then(Value::as_str)

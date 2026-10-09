@@ -372,6 +372,30 @@ fn deepseek_v4_compatible_message() -> ChatMessage {
 }
 
 #[test]
+fn tool_owned_media_preserves_replay_window_without_reinterpreting_legacy_carriers() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let mut tool = ChatMessage::tool("image", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_file_id("image").unwrap(),
+    ]));
+    let messages = vec![
+        ChatMessage::user("inspect"),
+        deepseek_v4_compatible_message(),
+        tool,
+    ];
+    assert!(ReplayWindow::compute(&messages).contains(1));
+    assert!(!messages[2].starts_logical_turn());
+    let mut legacy = messages;
+    legacy.push(ChatMessage::tool_media(vec![
+        ChatMessageContentPart::image_file_id("legacy").unwrap(),
+    ]));
+    assert!(
+        !ReplayWindow::compute(&legacy).contains(1),
+        "historical carrier semantics remain compatible"
+    );
+}
+
+#[test]
 fn replay_window_strips_older_history_but_keeps_latest_assistant() {
     let target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
     let messages = vec![

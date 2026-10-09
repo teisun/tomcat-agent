@@ -13,7 +13,7 @@ const out=path.resolve(process.argv[outIndex+1]);await mkdir(out,{recursive:true
 process.env.PLAYWRIGHT_BROWSERS_PATH=resolveBrowserPath(verifyUrl.href);
 const {chromium}=createRequire(verifyUrl)("playwright");
 function fixture(scenario) {
-  const files=Array.from({length:scenario.long?120:4},(_,i)=>({path:`/workspace/src/file-${i}.ts`,displayPath:`src/file-${i}.ts`,status:"modified",added:i+2,removed:1,restorable:i!==2,blockedReason:i===2?"head_moved":undefined}));
+  const files=Array.from({length:scenario.long?120:4},(_,i)=>({path:`/workspace/src/file-${i}.ts`,displayPath:`src/file-${i}.ts`,status:"modified",added:i+2,removed:1,restorable:i!==2,blockedReason:i===2?"backup_missing":undefined}));
   const session={sessionId:"s1",ownedByThisFrontend:true,busy:!!scenario.busy,model:"gpt-5.4",agentMode:"chat",activePlan:null,planTodos:[],sessionTodos:scenario.busy?Array.from({length:20},(_,i)=>({id:`t${i}`,content:`Task ${i+1}`,status:i===0?"in_progress":"pending"})):[],pendingAttachments:[],composerDraft:{text:"Keep this draft\nSecond line",segments:[{type:"text",text:"Keep this draft\nSecond line"}]},sessionFiles:scenario.todos?undefined:scenario.empty?{sourceTurnId:null,files:[]}:scenario.error?{sourceTurnId:null,files:[],error:"Unavailable"}:{sourceTurnId:"u1",files},timeline:Array.from({length:40},(_,i)=>({id:`m${i}`,type:"message",kind:i%2?"assistant":"user",text:`History ${i}: ${"Conversation context. ".repeat(8)}`}))};
   if(scenario.question){session.pendingAttachments=[{id:"file",kind:"file",blobSha:"fixture",mimeType:"text/plain",filename:"README.md",label:"README.md",path:"/workspace/README.md"}];session.timeline.push({id:"approval",type:"approval",live:true,resolved:false,sessionId:"s1",request:{requestId:"r1",responseEvent:"answer",questions:[{id:"q",prompt:"Which approach should be used?",options:[{id:"a",label:"Keep the simpler option",recommended:true},{id:"b",label:"Choose the alternative"}]}]}});}
   return {activeSessionId:"s1",sessionFilesSupported:true,availableModels:["gpt-5.4"],ready:true,modelAdminSupported:false,mediaRoots:[],sessions:[{sessionId:"s1",title:"Files acceptance",ownedByThisFrontend:true,isCurrent:true,busy:session.busy},{sessionId:"s2",title:"Other session",ownedByThisFrontend:true,isCurrent:false,busy:false}],sessionViews:{s1:session,s2:{...session,sessionId:"s2",busy:false,sessionTodos:[],composerDraft:{text:"Other draft",segments:[{type:"text",text:"Other draft"}]},timeline:[],pendingAttachments:[]}}};
@@ -29,16 +29,16 @@ try {
   for(const scenario of scenarios){
     const page=await browser.newPage({viewport:{width:scenario.width,height:scenario.height}});page.setDefaultTimeout(15_000);
     const consoleEvents=[];page.on("console",msg=>consoleEvents.push({level:msg.type(),text:msg.text()}));page.on("pageerror",e=>consoleEvents.push({level:"error",text:e.message}));
-    await page.addInitScript(state=>{window.__state=state;window.__intents=[];let saved;let counter=0;window.__emit=()=>window.postMessage({channel:"state",content:window.__state,messageId:`fixture-${++counter}`},"*");window.acquireVsCodeApi=()=>({getState:()=>saved,setState:v=>{saved=v;},postMessage:intent=>{window.__intents.push(intent);if(intent.type==="ready")window.__emit();if(intent.type==="switchSession"){window.__state.activeSessionId=intent.data.sessionId;window.__emit();}if(intent.type==="syncComposerDraft"){window.__state.sessionViews[intent.data.sessionId].composerDraft={text:intent.data.text,segments:intent.data.segments};}if(intent.type==="restoreSessionFiles")setTimeout(()=>{const session=window.__state.sessionViews[intent.data.sessionId];session.sessionFiles.files=session.sessionFiles.files.filter(f=>!intent.data.paths.includes(f.path));window.__emit();window.postMessage({channel:"event",messageId:`result-${++counter}`,content:{type:"restoreSessionFilesResult",...intent.data,success:true}},"*");},30);}});},fixture(scenario));
+    await page.addInitScript(state=>{window.__state=state;window.__intents=[];let saved;let counter=0;window.__emit=()=>window.postMessage({channel:"state",content:window.__state,messageId:`fixture-${++counter}`},"*");window.acquireVsCodeApi=()=>({getState:()=>saved,setState:v=>{saved=v;},postMessage:intent=>{window.__intents.push(intent);if(intent.type==="ready")window.__emit();if(intent.type==="switchSession"){window.__state.activeSessionId=intent.data.sessionId;window.__emit();}if(intent.type==="syncComposerDraft"){window.__state.sessionViews[intent.data.sessionId].composerDraft={text:intent.data.text,segments:intent.data.segments};}if(intent.type==="keepSessionFiles")setTimeout(()=>{const session=window.__state.sessionViews[intent.data.sessionId];session.sessionFiles={sourceTurnId:"keep-1",files:[]};window.__emit();window.postMessage({channel:"event",messageId:`result-${++counter}`,content:{type:"keepSessionFilesResult",...intent.data,success:true}},"*");},30);if(intent.type==="restoreSessionFiles")setTimeout(()=>{const session=window.__state.sessionViews[intent.data.sessionId];session.sessionFiles.files=session.sessionFiles.files.filter(f=>!intent.data.paths.includes(f.path));window.__emit();window.postMessage({channel:"event",messageId:`result-${++counter}`,content:{type:"restoreSessionFilesResult",...intent.data,success:true}},"*");},30);}});},fixture(scenario));
     await page.goto(url);await page.addStyleTag({content:theme(scenario.light)});await page.evaluate(light=>document.body.classList.add("tc-chat-webview",light?"vscode-light":"vscode-dark"),!!scenario.light);
     await page.getByTestId("composer-input").waitFor();await page.evaluate(()=>document.fonts.ready);
     const capture=async suffix=>{const name=`${scenario.name}-${suffix}`;await page.screenshot({path:path.join(out,`${name}.png`)});await writeFile(path.join(out,`${name}.aria.txt`),await page.locator("body").ariaSnapshot());await writeFile(path.join(out,`${name}.console.json`),JSON.stringify(consoleEvents,null,2));};
     try{
       if(scenario.empty){assert.equal(await page.getByTestId("session-dock").count(),0);}
       else if(scenario.error){assert.equal(await page.getByText("Couldn't load file changes.",{exact:false}).count(),1);}
-      else if(scenario.todos){await page.getByTestId("todo-widget-toggle").click();assert.equal(await page.getByTestId("todo-widget-item").count(),20);}
+      else if(scenario.todos){await page.getByRole("button",{name:"Expand todos"}).click();assert.equal(await page.getByTestId("todo-widget-item").count(),20);}
       else {
-        if(scenario.busy)await page.getByRole("tab",{name:/Files/}).click();else await page.getByTestId("files-toggle").click();
+        await page.getByTestId("files-toggle").click();
         await page.getByTestId("session-files-list").waitFor();
         const row=page.getByTestId("session-file-row").first();const undo=row.getByTestId("undo-file");
         await page.mouse.move(0,0);await undo.evaluate(button=>button.blur());
@@ -46,6 +46,9 @@ try {
         await row.hover();assert.equal(await undo.evaluate(button=>getComputedStyle(button).opacity),"1");
         assert.notEqual(await row.evaluate(node=>getComputedStyle(node).backgroundColor),"rgba(0, 0, 0, 0)");
         assert.equal(await page.getByTestId("undo-all-files").isDisabled(),!!scenario.busy);
+        assert.equal(await page.getByTestId("keep-all-files").isDisabled(),!!scenario.busy);
+        const title=await page.getByTestId("files-title").boundingBox(),keep=await page.getByTestId("keep-all-files").boundingBox(),undoAll=await page.getByTestId("undo-all-files").boundingBox();
+        assert.ok(title.x+title.width<=keep.x+1 && keep.x+keep.width<=undoAll.x+1 && undoAll.x+undoAll.width<=scenario.width,"Files title and both actions must not overlap or overflow");
         if(!scenario.busy){
           await undo.click();await page.getByTestId("undo-files-dialog").waitFor();
           const actions=await page.evaluate(()=>window.__intents.filter(i=>i.type==="openSessionFileDiff" || i.type==="restoreSessionFiles"));assert.equal(actions.length,0,"Undo opens confirmation, not diff or mutation");
@@ -73,18 +76,17 @@ try {
       }
       await capture("expanded");results.push({scenario:scenario.name,geometry,passed:true});
       if(scenario.name==="busy-both"){
-        await page.getByRole("tab",{name:/Todos/}).click();
+        await page.getByRole("button",{name:"Expand todos"}).click();
         await page.evaluate(()=>{window.__state.sessionViews.s1.busy=false;window.__emit();});
         await page.getByTestId("session-files-list").waitFor();
         await page.evaluate(()=>{window.__state.sessionViews.s1.busy=true;window.__state.sessionViews.s1.sessionTodos=[{id:"next",content:"Answer follow-up",status:"in_progress"}];window.__emit();});
-        await page.getByRole("tab",{name:/Files/}).waitFor();
-        assert.equal(await page.getByRole("tab",{name:/Files/}).getAttribute("aria-selected"),"true");
+        assert.equal(await page.getByTestId("files-toggle").getAttribute("aria-expanded"),"true");
         assert.equal(await page.getByTestId("session-files-list").isVisible(),true);
-        await capture("after-todo-exit-and-question");results.push({scenario:"automatic-tab-fallback-persists",passed:true});
+        await capture("independent-todos-files");results.push({scenario:"independent-todos-files",passed:true});
       }
       if(scenario.name==="long-files"){
         await page.evaluate(()=>{window.__editor=document.querySelector('[data-testid="composer-input"]');window.__list=document.querySelector('[data-testid="session-files-list"]');window.__list.scrollTop=40;window.__state.sessionViews.s1.busy=true;window.__state.sessionViews.s1.sessionTodos=[{id:"t",content:"Answer question",status:"in_progress"}];window.__emit();});
-        await page.getByRole("tab",{name:/Files/}).waitFor();assert.equal(await page.getByRole("tab",{name:/Files/}).getAttribute("aria-selected"),"true");
+        await page.getByTestId("files-toggle").waitFor();assert.equal(await page.getByTestId("files-toggle").getAttribute("aria-expanded"),"true");
         assert.equal(await page.evaluate(()=>window.__editor===document.querySelector('[data-testid="composer-input"]') && window.__list===document.querySelector('[data-testid="session-files-list"]') && window.__list.scrollTop===40),true);
         await page.evaluate(()=>{window.__state.sessionViews.s1.busy=false;window.__emit();});
         await page.getByTestId("files-toggle").waitFor();
@@ -95,9 +97,15 @@ try {
         await page.getByTestId("files-toggle").click();
         await page.evaluate(()=>{window.__state.sessionViews.s1.sessionFiles={sourceTurnId:"u4",files:[{path:"/workspace/new.ts",status:"added",added:3,removed:0,restorable:true}]};window.__emit();});
         await page.getByText("new.ts",{exact:true}).waitFor();assert.equal(await page.getByTestId("session-file-row").count(),1);assert.equal(await page.getByTestId("session-files-list").evaluate(list=>list.scrollTop),0);
-        await page.getByTestId("undo-all-files").click();await page.getByRole("button",{name:/Undo File/}).click();await page.getByTestId("session-dock").waitFor({state:"detached"});
-        await page.evaluate(()=>window.__emit());assert.equal(await page.getByTestId("session-dock").count(),0);assert.equal(await page.evaluate(()=>window.__editor===document.querySelector('[data-testid="composer-input"]')),true);
+        await page.getByTestId("undo-all-files").click();await page.getByRole("button",{name:/Undo File/}).click();await page.getByTestId("files-dock").waitFor({state:"detached"});
+        await page.evaluate(()=>window.__emit());assert.equal(await page.getByTestId("files-dock").count(),0);assert.equal(await page.evaluate(()=>window.__editor===document.querySelector('[data-testid="composer-input"]')),true);
         await capture("undo-empty");results.push({scenario:"question-retention-switch-and-undo",passed:true});
+      }
+      if(["wide-files","narrow-files","narrow-light"].includes(scenario.name)) {
+        await page.getByTestId("keep-all-files").click();
+        assert.equal(await page.getByRole("dialog").count(),0,"Keep must not ask for confirmation");
+        await page.getByTestId("files-dock").waitFor({state:"detached"});
+        await capture("kept-empty");
       }
       assert.equal(consoleEvents.filter(e=>e.level==="error").length,0,JSON.stringify(consoleEvents));
     }catch(error){await capture("failed");throw error;}finally{await page.close();await writeFile(path.join(out,"geometry.json"),JSON.stringify(results,null,2));}

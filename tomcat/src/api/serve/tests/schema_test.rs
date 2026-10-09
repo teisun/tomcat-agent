@@ -152,6 +152,7 @@ fn serve_emitted_event_validates_against_generated_schema() {
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::ToolExecutionEnd {
+                media: Vec::new(),
                 tool_call_id: "call_1".to_string(),
                 tool_name: "ask_question".to_string(),
                 result: ToolOutput(json!({"cancelled": true})),
@@ -165,6 +166,7 @@ fn serve_emitted_event_validates_against_generated_schema() {
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::ToolExecutionEnd {
+                media: Vec::new(),
                 tool_call_id: "call_2".to_string(),
                 tool_name: "write".to_string(),
                 result: ToolOutput(json!({"path": "demo.txt"})),

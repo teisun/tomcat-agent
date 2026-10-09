@@ -16,8 +16,8 @@ export function SessionFilesDock({ sessionId, files, busy, onIntent }: {
   useEffect(() => {
     function receive(event: MessageEvent) {
       const result = event.data?.channel === "event" ? event.data.content : null;
-      if (result?.type !== "restoreSessionFilesResult" || result.sessionId !== sessionId || result.sourceTurnId !== sourceTurnId || result.requestId !== pending) return;
-      setPending(null); setError(result.success ? null : result.error ?? "Couldn't undo file changes.");
+      if (!result || !["restoreSessionFilesResult", "keepSessionFilesResult"].includes(result.type) || result.sessionId !== sessionId || result.sourceTurnId !== sourceTurnId || result.requestId !== pending) return;
+      setPending(null); setError(result.success ? null : result.error ?? "Couldn't update file changes.");
     }
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
@@ -27,6 +27,11 @@ export function SessionFilesDock({ sessionId, files, busy, onIntent }: {
   const eligible = rows.filter(file => file.restorable);
   const disabled = busy || !!pending;
   function refresh() { onIntent({ messageId: crypto.randomUUID(), type: "refreshSessionFiles", data: { sessionId } }); }
+  function keep() {
+    if (disabled || !rows.length || !sourceTurnId) return;
+    const requestId = crypto.randomUUID(); setPending(requestId); setError(null);
+    onIntent({ messageId: requestId, type: "keepSessionFiles", data: { sessionId, sourceTurnId, requestId } });
+  }
   function confirm() {
     if (!confirmation || disabled || !sourceTurnId) return;
     const requestId = crypto.randomUUID(); setPending(requestId); setError(null);
@@ -35,9 +40,10 @@ export function SessionFilesDock({ sessionId, files, busy, onIntent }: {
   }
   return <>
     <DockSection title={`${rows.length} Files`} label="files" testId="files-dock" toggleTestId="files-toggle" titleTestId="files-title"
-      tooltip={`Changes from the last editing turn${files?.error ? ` · Refresh failed: ${files.error}` : ""}`} onExpand={refresh}
-      actions={<button type="button" data-testid="undo-all-files" disabled={disabled || !eligible.length} title={disabled ? "Stop Tomcat or wait for it to finish to undo." : !eligible.length ? "No files can be undone." : "Undo restorable files in this editing turn"}
-        onClick={() => setConfirmation({ files: eligible, skipped: rows.length - eligible.length })}>Undo All</button>}>
+      tooltip={`Changes since the last Keep All (or session start). Committed changes count as kept.${files?.error ? ` · Refresh failed: ${files.error}` : ""}`} onExpand={refresh}
+      actions={<><button type="button" data-testid="keep-all-files" disabled={disabled || !rows.length || !sourceTurnId} title="Accept all current changes and start a new list. Files on disk are not changed." onClick={keep}>Keep All</button>
+        <button type="button" data-testid="undo-all-files" disabled={disabled || !eligible.length} title={disabled ? "Stop Tomcat or wait for it to finish to undo." : !eligible.length ? "No files can be undone." : "Undo restorable files changed since the last Keep All"}
+        onClick={() => setConfirmation({ files: eligible, skipped: rows.length - eligible.length })}>Undo All</button></>}>
       {sourceTurnId ? <SessionFilesList sessionId={sessionId} sourceTurnId={sourceTurnId} files={rows} busy={disabled} onIntent={onIntent} listRef={listRef}
         onUndo={file => setConfirmation({ files: [file], skipped: 0 })} /> : null}
     </DockSection>

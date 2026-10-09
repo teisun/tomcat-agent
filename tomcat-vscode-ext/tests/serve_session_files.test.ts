@@ -7,7 +7,7 @@ import { createRealServeMessenger, spawnScriptedOpenAiStreamServer, sseDelta, ss
 
 warmTomcatBinaryForSuite(300_000);
 describe("real Serve session files",()=>{
-  it("keeps files through questions, switches the editing turn and restores only that turn without chatting",async()=>{
+  it("accumulates turns, restores first baselines, and resets only on Keep without chatting",async()=>{
     const scripts:ScriptedResponse[]=[];
     const server=await spawnScriptedOpenAiStreamServer(scripts);
     const runtime=await createRealServeMessenger(server.baseUrl);
@@ -32,21 +32,33 @@ describe("real Serve session files",()=>{
       expect((await router.getSessionFiles(sessionId)).sourceTurnId).toBe("u1");
       await turn("u4","Make a second edit and create c.");
       const second=await router.getSessionFiles(sessionId);
-      expect(second.sourceTurnId).toBe("u4");expect(second.files.map(f=>path.basename(f.path)).sort()).toEqual(["b.txt","c.txt"]);
+      expect(second.sourceTurnId).toBe("u1");expect(second.files.map(f=>path.basename(f.path)).sort()).toEqual(["a.txt","b.txt","c.txt"]);
       const bPath=second.files.find(f=>path.basename(f.path)==="b.txt")!.path;
       const cPath=second.files.find(f=>path.basename(f.path)==="c.txt")!.path;
-      expect((await router.getSessionFileBaseline(sessionId,"u4",bPath)).text).toBe("B1\n");
+      expect((await router.getSessionFileBaseline(sessionId,"u1",bPath)).text).toBe("B0\n");
       const entries=await readdir(path.join(runtime.fixture.homePath,".tomcat"),{recursive:true});
       const transcript=entries.find(name=>name.endsWith(`${sessionId}.jsonl`));expect(transcript).toBeTruthy();
       const transcriptPath=path.join(runtime.fixture.homePath,".tomcat",transcript!);
       const before=await readFile(transcriptPath);const requests=server.capturedNonTitleRequests().length;
-      await router.restoreSessionFiles(sessionId,"u4",[bPath]);
-      expect(await readFile(b,"utf8")).toBe("B1\n");expect(await readFile(a,"utf8")).toBe("A1\n");
-      await router.restoreSessionFiles(sessionId,"u4",[cPath]);await expect(access(c)).rejects.toThrow();
+      await router.restoreSessionFiles(sessionId,"u1",[bPath]);
+      expect(await readFile(b,"utf8")).toBe("B0\n");expect(await readFile(a,"utf8")).toBe("A1\n");
+      await router.restoreSessionFiles(sessionId,"u1",[cPath]);await expect(access(c)).rejects.toThrow();
+      expect((await router.getSessionFiles(sessionId)).files.map(f=>path.basename(f.path))).toEqual(["a.txt"]);
+      const kept=await router.keepSessionFiles(sessionId,"u1");
+      expect(await readFile(a,"utf8")).toBe("A1\n");
       expect(await readFile(transcriptPath)).toEqual(before);expect(server.capturedNonTitleRequests()).toHaveLength(requests);
-      expect(await router.getSessionFiles(sessionId)).toMatchObject({sourceTurnId:"u4",files:[]});
+      expect(await router.getSessionFiles(sessionId)).toMatchObject({sourceTurnId:kept.sourceTurnId,files:[]});
       await turn("u5","Thanks, another question only.");
-      expect(await router.getSessionFiles(sessionId)).toMatchObject({sourceTurnId:"u4",files:[]});
+      expect(await router.getSessionFiles(sessionId)).toMatchObject({sourceTurnId:kept.sourceTurnId,files:[]});
+      await writeFile(b,"B manual after Keep\n");
+      expect(await router.getSessionFiles(sessionId)).toMatchObject({sourceTurnId:kept.sourceTurnId,files:[]});
+      scripts.push(tool("read6","read",{path:b}),tool("edit6","write",{path:b,content:"B3\n",overwrite:true}),done());
+      await turn("u6","Change b after Keep.");
+      expect((await router.getSessionFiles(sessionId)).files.map(f=>path.basename(f.path))).toEqual(["b.txt"]);
+      expect((await router.getSessionFileBaseline(sessionId,kept.sourceTurnId,bPath)).text).toBe("B manual after Keep\n");
+      await router.restoreSessionFiles(sessionId,kept.sourceTurnId,[bPath]);
+      expect(await readFile(b,"utf8")).toBe("B manual after Keep\n");
+      expect((await router.getSessionFiles(sessionId)).files).toEqual([]);
     }finally{await runtime.cleanup();await server.close();}
   },90_000);
 });

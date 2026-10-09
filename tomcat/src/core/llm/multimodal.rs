@@ -6,6 +6,30 @@ use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart};
 pub(crate) const UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER: &str = "[图片已省略：当前模型不支持图片输入]";
 pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str = "[文件已省略：当前模型不支持文件输入]";
 
+#[cfg(test)]
+mod tool_media_tests {
+    use super::*;
+    #[test]
+    fn tool_owned_media_nonvisual_downgrade_is_text_only_and_does_not_mutate_archive() {
+        let mut tool = ChatMessage::tool("one", "");
+        tool.content = Some(ChatMessageContent::Parts(vec![
+            ChatMessageContentPart::text("result"),
+            ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+        ]));
+        let input = vec![tool];
+        let before = serde_json::to_value(&input).unwrap();
+        let degraded = degrade_unsupported_multimodal(&input, &Capabilities::default());
+        assert!(degraded[0]
+            .first_text()
+            .unwrap()
+            .contains(UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER));
+        assert!(!serde_json::to_string(degraded.as_ref())
+            .unwrap()
+            .contains("image_b64"));
+        assert_eq!(serde_json::to_value(&input).unwrap(), before);
+    }
+}
+
 pub(crate) fn degrade_placeholder(part: &ChatMessageContentPart) -> String {
     match part {
         ChatMessageContentPart::InputImage { .. }

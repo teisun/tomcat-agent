@@ -696,6 +696,93 @@ fn restore_keeps_other_session_owned_paths_untouched() {
 
 #[test]
 #[serial(home_env_lock)]
+fn restore_core_discards_keeps_only_when_reverting_files() {
+    use crate::core::checkpoint::{file_baselines, session_files};
+    if !git_available() {
+        return;
+    }
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    for revert in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+        let _key = EnvGuard::set("TOMCAT_KEEP_CHECKPOINT_KEY", "stub");
+        let _cwd = CurrentDirGuard::set(workspace.path());
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+        cfg.llm.api_key_env = Some("TOMCAT_KEEP_CHECKPOINT_KEY".into());
+        let ctx = ChatContext::from_config(cfg).unwrap();
+        let session = &ctx.session_runtime.session;
+        let sid = session.current_session_id().unwrap().unwrap();
+        session
+            .append_message(json!({"role":"user","content":"before"}))
+            .unwrap();
+        let anchor = session
+            .append_message(json!({"role":"assistant","content":"checkpoint"}))
+            .unwrap();
+        let file = workspace.path().canonicalize().unwrap().join("a.txt");
+        std::fs::write(&file, "original").unwrap();
+        let checkpoint = ctx
+            .scope_services
+            .checkpoint_store
+            .record(CheckpointRecordRequest {
+                session_id: sid.clone(),
+                turn_id: "keep-checkpoint".into(),
+                kind: CheckpointKind::TurnEnd,
+                message_anchor: Some(anchor),
+                notes: Some(json!({"changedPaths":["a.txt"]})),
+            })
+            .unwrap();
+        let timestamp = ctx
+            .scope_services
+            .checkpoint_store
+            .show(&checkpoint)
+            .unwrap()
+            .unwrap()
+            .created_at;
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
+            .unwrap()
+            .timestamp_millis();
+        let owner = session
+            .append_message(json!({"role":"user","content":"change"}))
+            .unwrap();
+        let transcript = session.transcript_path(&sid);
+        let tracker =
+            file_baselines::TurnFileBaselines::new(&transcript, &owner, workspace.path().into())
+                .unwrap();
+        let pending = tracker.prepare(file.to_str().unwrap()).unwrap();
+        std::fs::write(&file, "accepted").unwrap();
+        pending.commit();
+        file_baselines::timestamp_after(Some(timestamp)).unwrap();
+        let kept = session_files::keep(&transcript, &sid, &owner).unwrap();
+        let root = file_baselines::session_dir(&transcript);
+        let keep_path = root.join(&kept.source_turn_id);
+        let next =
+            file_baselines::TurnFileBaselines::new(&transcript, &owner, workspace.path().into())
+                .unwrap();
+        let pending = next.prepare(file.to_str().unwrap()).unwrap();
+        std::fs::write(&file, "unaccepted").unwrap();
+        pending.commit();
+        restore_core(&ctx, checkpoint, revert, false).unwrap();
+        assert_eq!(keep_path.exists(), !revert);
+        assert!(
+            root.join(&owner).exists(),
+            "checkpoint rewrites retain per-message backups"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            if revert { "original" } else { "unaccepted" }
+        );
+        assert_eq!(
+            session_files::list(&transcript, &sid).unwrap().files.len(),
+            if revert { 0 } else { 1 }
+        );
+    }
+}
+
+#[test]
+#[serial(home_env_lock)]
 fn restore_core_without_reverting_files_truncates_transcript_only() {
     if !git_available() {
         return;

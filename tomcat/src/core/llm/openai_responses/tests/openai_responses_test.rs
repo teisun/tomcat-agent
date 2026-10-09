@@ -92,6 +92,78 @@ fn provider_with_stub_key() -> OpenAiResponsesProvider {
 }
 
 #[test]
+fn tool_owned_media_responses_native_split_preserves_anchor_and_file_id() {
+    use super::payload::build_responses_input_with_media_mode;
+    use crate::core::llm::{tool_result_media::ToolResultMediaMode, ChatMessageContent};
+    let mut first = ChatMessage::tool("one", "");
+    first.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("first"),
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+    ]));
+    let mut second = ChatMessage::tool("two", "");
+    second.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("second"),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("notes.pdf".into())).unwrap(),
+    ]));
+    let messages = vec![
+        ChatMessage::user("old request"),
+        ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![
+                json!({"id":"one","function":{"name":"read","arguments":"{}"}}),
+                json!({"id":"two","function":{"name":"read","arguments":"{}"}}),
+            ],
+        ),
+        first,
+        second,
+        { let mut tail = ChatMessage::user("current runtime"); tail.kind = MessageKind::EphemeralTail; tail },
+    ];
+    let before = serde_json::to_value(&messages).unwrap();
+    for mode in [ToolResultMediaMode::Native, ToolResultMediaMode::Split] {
+        let (instructions, input) =
+            build_responses_input_with_media_mode(&messages, &test_profile(), true, false, 2, mode);
+        assert!(instructions.unwrap().contains("current runtime"));
+        assert_eq!(input[0]["call_id"], "one");
+        assert_eq!(input[1]["call_id"], "two");
+        if mode == ToolResultMediaMode::Native {
+            assert_eq!(input.len(), 2);
+            assert_eq!(input[0]["output"][0]["text"], "first");
+            assert_eq!(
+                input[0]["output"][1]["image_url"],
+                "data:image/png;base64,aGVsbG8="
+            );
+            assert_eq!(input[0]["output"][2]["file_id"], "file-image");
+            assert_eq!(input[1]["output"][1]["file_id"], "file-pdf");
+        } else {
+            assert_eq!(input.len(), 3);
+            assert_eq!(input[0]["output"], "first");
+            assert_eq!(input[1]["output"], "second");
+            assert_eq!(input[2]["role"], "user");
+            assert_eq!(input[2]["content"][2]["file_id"], "file-image");
+            assert_eq!(input[2]["content"][3]["file_id"], "file-pdf");
+        }
+    }
+    assert_eq!(serde_json::to_value(messages).unwrap(), before);
+}
+
+#[test]
+fn tool_media_responses_wire_equals_user_media() {
+    let parts = vec![ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap()];
+    let request = |message| ChatRequest {
+        model: "gpt-5.4".into(),
+        messages: vec![message],
+        ..Default::default()
+    };
+    assert_eq!(
+        provider_with_stub_key()
+            .build_request_body(&request(ChatMessage::tool_media(parts.clone())), true),
+        provider_with_stub_key()
+            .build_request_body(&request(ChatMessage::user_with_parts(parts)), true)
+    );
+}
+
+#[test]
 fn responses_wire_omits_local_message_metadata() {
     let mut message = ChatMessage::assistant("wire-visible text");
     message.summary_title = Some("local summary".to_string());

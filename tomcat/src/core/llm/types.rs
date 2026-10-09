@@ -627,6 +627,9 @@ pub enum MessageKind {
     Signal,
     /// Synthetic user message written when the user starts or resumes a plan from the UI.
     PlanBuild,
+    /// Tool-returned media carried as user for transport compatibility, never genuine input.
+    /// Stage A preserves its existing replay/window boundary; new tool-owned media supersedes it later.
+    ToolMedia,
     /// Compaction summary replacing older messages; LLM sees `role: user`.
     CompactionSummary,
     /// Request-only runtime state appended after the persisted conversation.
@@ -645,6 +648,7 @@ impl MessageKind {
             Some("nudge") => Self::Nudge,
             Some("signal") => Self::Signal,
             Some("plan_build") => Self::PlanBuild,
+            Some("tool_media") => Self::ToolMedia,
             Some("compaction_summary") => Self::CompactionSummary,
             Some("ephemeral_tail") => Self::EphemeralTail,
             _ => Self::Normal,
@@ -656,7 +660,10 @@ impl MessageKind {
     }
 
     pub const fn is_replay_input(self) -> bool {
-        matches!(self, Self::Normal | Self::Signal | Self::PlanBuild)
+        matches!(
+            self,
+            Self::Normal | Self::Signal | Self::PlanBuild | Self::ToolMedia
+        )
     }
 }
 
@@ -851,6 +858,13 @@ impl ChatMessage {
             kind: MessageKind::Normal,
             timestamp: None,
         }
+    }
+
+    /// A transport carrier for media returned by tools, not a user-submitted attachment.
+    pub fn tool_media(parts: Vec<ChatMessageContentPart>) -> Self {
+        let mut message = Self::user_with_parts(parts);
+        message.kind = MessageKind::ToolMedia;
+        message
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
@@ -1059,15 +1073,42 @@ impl ChatMessage {
         cloned
     }
 
-    /// Replace the text content in-place (used by L0/L1 compaction on tool results).
+    /// Replace textual payload without dropping attachments from multipart tool results.
     pub fn set_text_content(&mut self, text: String) {
+        if self.role == ChatMessageRole::Tool {
+            if let Some(ChatMessageContent::Parts(parts)) = &mut self.content {
+                parts.retain(|part| !matches!(part, ChatMessageContentPart::InputText { .. }));
+                parts.insert(0, ChatMessageContentPart::text(text));
+                return;
+            }
+        }
         self.content = Some(ChatMessageContent::Text(text));
     }
 
-    /// Helper to extract text content (for backward compat).
+    /// Tool multipart results contain one textual payload followed by media.
+    /// Non-tool structured content retains its original first_text() contract.
     pub fn text_content(&self) -> Option<&str> {
         match &self.content {
             Some(ChatMessageContent::Text(s)) => Some(s),
+            Some(ChatMessageContent::Parts(parts)) if self.role == ChatMessageRole::Tool => {
+                parts.iter().find_map(|p| match p {
+                    ChatMessageContentPart::InputText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn text_content_mut(&mut self) -> Option<&mut String> {
+        match &mut self.content {
+            Some(ChatMessageContent::Text(text)) => Some(text),
+            Some(ChatMessageContent::Parts(parts)) if self.role == ChatMessageRole::Tool => {
+                parts.iter_mut().find_map(|p| match p {
+                    ChatMessageContentPart::InputText { text } => Some(text),
+                    _ => None,
+                })
+            }
             _ => None,
         }
     }

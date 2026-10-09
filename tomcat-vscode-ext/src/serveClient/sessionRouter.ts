@@ -10,6 +10,7 @@ import type {
   SessionFilesResponse,
   SessionFileBaselineResponse,
   SessionFilesRestoreResponse,
+  SessionFilesKeepResponse,
 } from "./wire";
 
 export interface SessionSummary {
@@ -371,7 +372,7 @@ export class SessionRouter {
     const files: SessionFile[] = payload.files.map((entry: unknown) => {
       if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.restorable !== "boolean"
         || !["added", "modified", "deleted"].includes(String(entry.status))
-        || (entry.blockedReason !== undefined && !["head_moved", "backup_missing", "not_regular_file"].includes(String(entry.blockedReason)))
+        || (entry.blockedReason !== undefined && !["backup_missing", "not_regular_file"].includes(String(entry.blockedReason)))
         || [entry.added, entry.removed].some((n) => n !== undefined && n !== null && (typeof n !== "number" || !Number.isInteger(n) || n < 0))) {
         throw new Error("Invalid Tomcat file changes entry");
       }
@@ -386,6 +387,14 @@ export class SessionRouter {
       throw new Error("Invalid Tomcat file baseline response");
     }
     return { sessionId, sourceTurnId, path, existed: payload.existed, text: payload.text };
+  }
+
+  async keepSessionFiles(sessionId: string, sourceTurnId: string): Promise<SessionFilesKeepResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "keep_session_files", sessionId, sourceTurnId }), sessionId);
+    if (typeof payload.sourceTurnId !== "string" || !payload.sourceTurnId.trim() || payload.sourceTurnId === sourceTurnId) {
+      throw new Error("Invalid Tomcat file keep response");
+    }
+    return { sessionId, sourceTurnId: payload.sourceTurnId };
   }
 
   async restoreSessionFiles(sessionId: string, sourceTurnId: string, paths: string[]): Promise<SessionFilesRestoreResponse> {

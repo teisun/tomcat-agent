@@ -25,6 +25,7 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
         args_preview: serde_json::json!({"path": "~/demo.txt"}),
     };
     let end = AgentEvent::ToolExecutionEnd {
+        media: Vec::new(),
         tool_call_id: "c1".into(),
         tool_name: "read".into(),
         result: ToolOutput(serde_json::json!({})),
@@ -68,6 +69,33 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
     assert_eq!(payload["display"]["file"].as_str(), Some("~/demo.txt"));
     assert_eq!(payload["display"]["added"].as_u64(), Some(10));
     assert_eq!(payload["display"]["removed"].as_u64(), Some(2));
+}
+
+#[test]
+fn tool_owned_media_event_is_reference_only_and_empty_is_omitted() {
+    let event = |media| AgentEvent::ToolExecutionEnd {
+        tool_call_id: "image".into(),
+        tool_name: "read".into(),
+        result: ToolOutput(serde_json::json!("[Image attached]")),
+        display: None,
+        is_error: false,
+        media,
+    };
+    assert!(serde_json::to_value(event(vec![]))
+        .unwrap()
+        .get("media")
+        .is_none());
+    let value = serde_json::to_value(event(vec![ToolMediaRef::InputImageRef {
+        blob_sha: "a".repeat(64),
+        mime_type: "image/png".into(),
+        bytes: 1200,
+    }]))
+    .unwrap();
+    assert_eq!(
+        value["media"][0],
+        serde_json::json!({"type":"input_image_ref","blobSha":"a".repeat(64),"mimeType":"image/png","bytes":1200})
+    );
+    assert!(!value.to_string().contains("image_b64"));
 }
 
 #[test]

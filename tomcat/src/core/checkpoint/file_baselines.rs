@@ -2,7 +2,7 @@
 //! Capture is best effort; only successful native writes publish a manifest row.
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -21,11 +21,137 @@ pub enum RevertReason {
     GitHeadMoved,
 }
 
+pub(crate) const KEEP_PREFIX: &str = "keep-";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Baseline {
     pub(crate) path: PathBuf,
     pub(crate) backup: Option<String>,
     pub(crate) git_head: Option<String>,
+    pub(crate) at: i64,
+    pub(crate) permissions: Option<BackupPermissions>,
+}
+
+// Permissions belong to each path, not to its deduplicated content.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct BackupPermissions {
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(not(unix))]
+    readonly: bool,
+}
+impl BackupPermissions {
+    fn capture(permissions: fs::Permissions) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            Self {
+                mode: permissions.mode(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                readonly: permissions.readonly(),
+            }
+        }
+    }
+    fn restore(self, path: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::Permissions::from_mode(self.mode)
+        };
+        #[cfg(not(unix))]
+        let permissions = {
+            let mut p = fs::metadata(path)?.permissions();
+            p.set_readonly(self.readonly);
+            p
+        };
+        fs::set_permissions(path, permissions)
+    }
+}
+
+pub(crate) fn valid_backup_name(name: &str) -> bool {
+    name.strip_prefix("sha256-")
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Keep is a timestamp-only, empty directory. Old snapshot directories are ignored.
+pub(crate) fn latest_keep(transcript: &Path) -> Result<Option<(i64, String)>, AppError> {
+    latest_keep_in(&session_dir(transcript))
+}
+fn latest_keep_in(root: &Path) -> Result<Option<(i64, String)>, AppError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut latest = None;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(at) = name
+            .strip_prefix(KEEP_PREFIX)
+            .and_then(|s| s.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        if at < 0
+            || name != format!("{KEEP_PREFIX}{at}")
+            || fs::read_dir(entry.path())?.next().is_some()
+        {
+            continue;
+        }
+        let candidate = (at, name);
+        if latest.as_ref().is_none_or(|old| &candidate > old) {
+            latest = Some(candidate);
+        }
+    }
+    Ok(latest)
+}
+
+/// Wait across a same-millisecond boundary, never invent a counter or wait out clock rollback.
+pub(crate) fn timestamp_after(after: Option<i64>) -> Result<i64, AppError> {
+    for _ in 0..100 {
+        let now = chrono::Utc::now().timestamp_millis();
+        match after {
+            Some(at) if now < at => break,
+            Some(at) if now == at => std::thread::sleep(Duration::from_millis(1)),
+            _ => return Ok(now),
+        }
+    }
+    Err(AppError::Config("baseline_clock_not_advanced".into()))
+}
+
+fn capture_content(path: &Path, directory: &Path) -> Result<String, AppError> {
+    let mut input = fs::File::open(path)?;
+    let mut copy = tempfile::NamedTempFile::new_in(directory)?;
+    let mut hash = Sha256::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = input.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&chunk[..n]);
+        copy.write_all(&chunk[..n])?;
+    }
+    let name = format!("sha256-{:x}", hash.finalize());
+    let target = directory.join(&name);
+    match copy.persist_noclobber(&target) {
+        Ok(_) => {}
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(&target)?.is_file() || !files_equal(e.file.path(), &target)? {
+                return Err(AppError::Config("invalid_baseline_content".into()));
+            }
+        }
+        Err(e) => return Err(e.error.into()),
+    }
+    Ok(name)
 }
 
 pub(crate) fn safe_id(id: &str) -> bool {
@@ -64,17 +190,40 @@ pub fn git_head(cwd: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+pub(crate) fn read_rows(dir: &Path) -> Result<Vec<Baseline>, AppError> {
+    let path = dir.join("baselines.jsonl");
+    if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
+        return Err(AppError::Config("invalid_baseline".into()));
+    }
+    let text = fs::read_to_string(path)?;
+    let mut rows = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        if value.is_object() && value.get("at").is_none() {
+            continue;
+        }
+        let row: Baseline = serde_json::from_value(value)?;
+        if row.at < 0
+            || !row.path.is_absolute()
+            || row
+                .backup
+                .as_ref()
+                .is_some_and(|name| !valid_backup_name(name))
+        {
+            return Err(AppError::Config("invalid_baseline".into()));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
 fn rows(dir: &Path) -> Vec<Baseline> {
-    fs::read_to_string(dir.join("baselines.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
+    read_rows(dir).unwrap_or_default()
 }
 
 pub struct TurnFileBaselines {
     pub message_id: String,
     directory: PathBuf,
+    keep_at: Option<i64>,
     cwd: PathBuf,
     state: Mutex<CaptureState>,
 }
@@ -86,20 +235,31 @@ struct CaptureState {
 
 impl TurnFileBaselines {
     pub fn new(transcript: &Path, message_id: &str, cwd: PathBuf) -> Option<Arc<Self>> {
-        if !safe_id(message_id) {
+        if !safe_id(message_id) || message_id.starts_with(KEEP_PREFIX) {
             return None;
         }
         let directory = session_dir(transcript).join(message_id);
-        let old = rows(&directory);
+        let keep_at = latest_keep(transcript).ok()?.map(|(at, _)| at);
+        let old: Vec<_> = rows(&directory)
+            .into_iter()
+            .filter(|row| keep_at.is_none_or(|at| row.at > at))
+            .collect();
         Some(Arc::new(Self {
             message_id: message_id.to_string(),
             directory,
+            keep_at,
             cwd,
             state: Mutex::new(CaptureState {
                 seen: old.iter().map(|r| r.path.clone()).collect(),
                 head: old.first().map(|r| r.git_head.clone()),
             }),
         }))
+    }
+
+    pub fn keep_is_current(&self) -> bool {
+        self.directory.parent().is_some_and(|root| {
+            latest_keep_in(root).is_ok_and(|keep| keep.map(|(at, _)| at) == self.keep_at)
+        })
     }
 
     /// Caller has completed the native tool's path/read-stamp checks. No file bytes
@@ -129,20 +289,22 @@ impl TurnFileBaselines {
             .clone();
         let result = (|| -> Result<Baseline, AppError> {
             fs::create_dir_all(&self.directory)?;
-            let backup = match fs::symlink_metadata(&path) {
-                Ok(meta) if meta.is_file() => {
-                    let name = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
-                    fs::copy(&path, self.directory.join(&name))?;
-                    Some(name)
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            let at = timestamp_after(self.keep_at)?;
+            let (backup, permissions) = match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_file() => (
+                    Some(capture_content(&path, &self.directory)?),
+                    Some(BackupPermissions::capture(meta.permissions())),
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
                 Ok(_) => return Err(AppError::Config("baseline requires a regular file".into())),
                 Err(error) => return Err(error.into()),
             };
             Ok(Baseline {
-                path,
+                path: path.clone(),
                 backup,
                 git_head: head,
+                at,
+                permissions,
             })
         })();
         match result {
@@ -152,6 +314,7 @@ impl TurnFileBaselines {
                 committed: false,
             }),
             Err(error) => {
+                state.seen.remove(&path);
                 tracing::warn!(%error, "file baseline capture failed; write may continue");
                 None
             }
@@ -245,11 +408,17 @@ pub(crate) fn require_regular_path(path: &Path) -> Result<(), AppError> {
     }
 }
 
+pub(crate) enum RestoreSource {
+    Backup(PathBuf, Option<BackupPermissions>),
+    Content(Vec<u8>),
+    Absent,
+}
+
 pub struct RestoreFiles {
-    files: BTreeMap<PathBuf, Option<PathBuf>>,
+    files: BTreeMap<PathBuf, RestoreSource>,
 }
 impl RestoreFiles {
-    pub(crate) fn selected(files: BTreeMap<PathBuf, Option<PathBuf>>) -> Self {
+    pub(crate) fn selected(files: BTreeMap<PathBuf, RestoreSource>) -> Self {
         Self { files }
     }
 
@@ -272,16 +441,19 @@ impl RestoreFiles {
                     }
                 }
                 match backup {
-                    Some(backup) => match fs::read(backup) {
+                    RestoreSource::Backup(backup, permissions) => match fs::read(backup) {
                         Ok(bytes) => {
                             write_file_atomic(path, &bytes)?;
-                            fs::set_permissions(path, fs::metadata(backup)?.permissions())?;
+                            if let Some(permissions) = permissions {
+                                permissions.restore(path)?;
+                            }
                             Ok(())
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                         Err(e) => Err(e.into()),
                     },
-                    None => match fs::remove_file(path) {
+                    RestoreSource::Content(bytes) => write_file_atomic(path, bytes),
+                    RestoreSource::Absent => match fs::remove_file(path) {
                         Ok(()) => Ok(()),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                         Err(e) => Err(e.into()),
@@ -323,14 +495,15 @@ pub fn preview(
                 continue;
             }
             let backup = match row.backup {
-                Some(name) if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                    Some(directory.join(name))
-                }
+                Some(name) if valid_backup_name(&name) => Some(directory.join(name)),
                 None => None,
                 _ => continue,
             };
             // Earliest baseline owns the path, even if its backing file is missing.
-            files.entry(row.path).or_insert(backup);
+            files.entry(row.path).or_insert_with(|| match backup {
+                Some(path) => RestoreSource::Backup(path, row.permissions),
+                None => RestoreSource::Absent,
+            });
         }
     }
     if files.is_empty() {
@@ -349,6 +522,31 @@ pub fn discard_session(transcript: &Path) {
     let _ = fs::remove_dir_all(session_dir(transcript));
 }
 
+/// A disk-restoring rewind also reverses later acceptance boundaries.
+pub fn discard_keeps_after(transcript: &Path, timestamp_ms: i64) {
+    let Ok(entries) = fs::read_dir(session_dir(transcript)) else {
+        return;
+    };
+    for entry in entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+    {
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .and_then(|s| s.strip_prefix(KEEP_PREFIX))
+            .and_then(|s| s.parse::<i64>().ok())
+            .is_some_and(|t| {
+                t >= 0 && t > timestamp_ms && name.to_string_lossy() == format!("{KEEP_PREFIX}{t}")
+            })
+        {
+            // A new Keep is empty. Never recursively remove legacy snapshots or unexpected data.
+            let _ = fs::remove_dir(entry.path());
+        }
+    }
+}
+
+/// Active sessions retain the complete review history. Only an idle/deleted session expires.
 pub fn prune(sessions_dir: &Path, retention_days: u32, now: SystemTime) {
     let Ok(sessions) = fs::read_dir(sessions_dir.join("file-baselines")) else {
         return;
@@ -358,22 +556,25 @@ pub fn prune(sessions_dir: &Path, retention_days: u32, now: SystemTime) {
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
     {
-        let Ok(turns) = fs::read_dir(session.path()) else {
+        let Some(id) = session
+            .file_name()
+            .to_str()
+            .filter(|s| safe_id(s))
+            .map(str::to_owned)
+        else {
             continue;
         };
-        for turn in turns
-            .flatten()
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        {
-            if turn
-                .metadata()
-                .and_then(|m| m.modified())
+        let expired = match fs::symlink_metadata(sessions_dir.join(format!("{id}.jsonl"))) {
+            Ok(meta) if meta.is_file() => meta
+                .modified()
                 .ok()
                 .and_then(|t| now.duration_since(t).ok())
-                .is_some_and(|age| age >= retention)
-            {
-                let _ = fs::remove_dir_all(turn.path());
-            }
+                .is_some_and(|age| age >= retention),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            _ => false, // I/O errors and unexpected path types are not proof of expiry.
+        };
+        if expired {
+            let _ = fs::remove_dir_all(session.path());
         }
     }
 }

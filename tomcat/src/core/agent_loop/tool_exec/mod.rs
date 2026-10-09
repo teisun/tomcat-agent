@@ -505,10 +505,8 @@ async fn execute_tool_tuple_full(
         }
     }
 
-    // PR-RJ T3-c：read 命中 image / pdf 时，要把 InputImage / InputFile part
-    // 注入「**下一条** user 消息」（OpenAI 的 `role: "tool"` 不接受非 text part），
-    // 由 [`crate::core::agent_loop::tool_dispatcher`] 在拿到 follow_up_parts 后
-    // 紧跟着 push 一条 `ChatMessage::user_with_parts(parts)`。其它工具一律 `vec![]`。
+    // read/MCP return media alongside text. The dispatcher owns each tool's Parts;
+    // provider adapters choose native tool-result media or a request-only split carrier.
     let mut follow_up_parts: Vec<crate::core::llm::ChatMessageContentPart> = Vec::new();
 
     // v2 deferred connector tools may produce an MCP image block. They therefore return the

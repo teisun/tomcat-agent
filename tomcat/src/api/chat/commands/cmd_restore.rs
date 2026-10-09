@@ -214,6 +214,17 @@ fn restore_core_with_paths(
                 return Err(format!("restore 已改盘，但 transcript 回滚失败：{err}"));
             }
         }
+        if !dry_run {
+            if let (Ok(Some(transcript)), Ok(timestamp)) = (
+                ctx.session_runtime.session.current_transcript_path(),
+                chrono::DateTime::parse_from_rfc3339(&meta.created_at),
+            ) {
+                crate::core::checkpoint::file_baselines::discard_keeps_after(
+                    &transcript,
+                    timestamp.timestamp_millis(),
+                );
+            }
+        }
         changed_paths_for_report(&report, &restore_plan.paths)
     } else {
         if dry_run {
@@ -326,9 +337,6 @@ fn finalize_restore_transcript(
         .session
         .mark_messages_after_anchor_superseded(anchor)
         .map_err(|err| err.to_string())?;
-    ctx.session_runtime
-        .session
-        .cleanup_superseded_file_baselines();
     ctx.session_runtime
         .session
         .append_custom_entry(json!({

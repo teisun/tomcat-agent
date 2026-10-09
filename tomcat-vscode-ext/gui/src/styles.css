@@ -3608,6 +3608,16 @@ span.tc-attachment-strip__file-chip {
   white-space: nowrap;
 }
 
+.tc-tool-row__media-badge {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: 12px;
+  gap: 3px;
+  white-space: nowrap;
+}
+
 .tc-tool-row__diff-badges {
   align-items: center;
   display: inline-flex;

@@ -108,7 +108,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
       this.previewContents.set(modified.toString(), "");
     }
     await this.ensureSideBySideDiffRendering();
-    await vscode.commands.executeCommand("vscode.diff", original, modified, `${fileName}: Before this editing turn ↔ Current`, { preview: false });
+    await vscode.commands.executeCommand("vscode.diff", original, modified, `${fileName}: Review baseline ↔ Current`, { preview: false });
   }
 
   async showFile(displayPath: string, line?: number): Promise<void> {

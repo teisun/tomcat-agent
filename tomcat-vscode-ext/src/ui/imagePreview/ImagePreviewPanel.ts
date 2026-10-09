@@ -255,6 +255,8 @@ export class ImagePreviewPanel {
   }
 
   private postStateToPanel(activeId: string, position: number, total: number, displayLabel: string): void {
+    const source = this.sections.find(section => section.pictures.some(picture => picture.id === activeId));
+    if (source?.label.startsWith("Tool images · ")) displayLabel = source.label;
     this.panel?.webview.postMessage({
       type: "preview.state",
       data: {

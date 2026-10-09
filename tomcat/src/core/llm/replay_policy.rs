@@ -83,6 +83,7 @@ struct ChatCompletionsContinuityRule {
     /// 逻辑厂商（用于 same-profile 比对与日志）。
     provider: &'static str,
     profile_id: &'static str,
+    preserve_history: bool,
 }
 
 /// 走 `reasoning_content` 续传的模型家族；不在表内的 chat-completions 模型默认不续传。
@@ -91,15 +92,32 @@ const CHAT_COMPLETIONS_CONTINUITY_RULES: &[ChatCompletionsContinuityRule] = &[
         family: "deepseek-v4",
         provider: "deepseek",
         profile_id: "deepseek.v4.reasoning_content",
+        preserve_history: false,
     },
     ChatCompletionsContinuityRule {
         family: "mimo-v2.5-pro",
         provider: "mimo",
         profile_id: "mimo.v2_5_pro.reasoning_content",
+        preserve_history: false,
+    },
+    ChatCompletionsContinuityRule {
+        family: "kimi-k3",
+        provider: "moonshot",
+        profile_id: "moonshot.k3.reasoning_content",
+        preserve_history: true,
     },
 ];
 
 impl ProviderCompatProfile {
+    /// K3 requires preserved thinking across real user turns as well as tool loops.
+    /// https://platform.kimi.ai/docs/guide/use-thinking-models
+    pub fn preserves_thinking_history(&self) -> bool {
+        self.api_family == "chat_completions"
+            && CHAT_COMPLETIONS_CONTINUITY_RULES
+                .iter()
+                .any(|rule| rule.family == self.model_family && rule.preserve_history)
+    }
+
     pub fn openai_responses(model: &str) -> Self {
         Self {
             profile_id: "openai.responses.default".to_string(),
@@ -199,7 +217,7 @@ pub fn plan_scoped(
     message: &ChatMessage,
     in_window: bool,
 ) -> ReplayAction {
-    if !in_window {
+    if !in_window && !target.preserves_thinking_history() {
         return ReplayAction::StripOpaque;
     }
     plan(target, message)

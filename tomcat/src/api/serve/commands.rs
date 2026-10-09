@@ -694,6 +694,13 @@ pub(crate) async fn handle_command(
         } => {
             super::session_files::restore(state, id, session_id, source_turn_id, paths).await?;
         }
+        ServeCommand::KeepSessionFiles {
+            id,
+            session_id,
+            source_turn_id,
+        } => {
+            super::session_files::keep(state, id, session_id, source_turn_id).await?;
+        }
         ServeCommand::ListCheckpoints { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {

@@ -255,6 +255,7 @@ export function TranscriptView({
           item={item}
           key={key}
           onOpenDiff={onOpenDiff}
+          onOpenImagePreview={onOpenImagePreview}
           onOpenFile={onOpenFile}
           onOpenPlanFile={onOpenPlanFile}
         />
@@ -377,6 +378,7 @@ export function TranscriptView({
                     item={segment.group.tools[0]}
                     key={`group-context-standalone-${segment.group.tools[0].id}`}
                     onOpenDiff={onOpenDiff}
+                    onOpenImagePreview={onOpenImagePreview}
                     onOpenFile={onOpenFile}
                   />
                 );
@@ -397,6 +399,7 @@ export function TranscriptView({
                   key={`group-context-${group.assistantMessageId}-${index}`}
                   mediaRoots={mediaRoots}
                   onOpenDiff={onOpenDiff}
+                  onOpenImagePreview={onOpenImagePreview}
                   onOpenFile={onOpenFile}
                   onZoomImage={onZoomImage}
                 />

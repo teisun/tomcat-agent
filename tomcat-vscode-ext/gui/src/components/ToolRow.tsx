@@ -10,6 +10,7 @@ import type {
   WebviewToolDisplayFileEntry,
 } from "../types";
 import { AnswerCard } from "./AnswerCard";
+import { AttachmentStrip } from "./AttachmentStrip";
 import { DiffView } from "./DiffView";
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 import { FileChip } from "./FileChip";
@@ -1328,6 +1329,7 @@ type ToolRowProps = {
   onOpenFile(path: string): void;
   onOpenDiff?(toolCallId: string): void;
   onOpenPlanFile?(path: string): void;
+  onOpenImagePreview?(attachmentId: string): void;
   variant?: "grouped" | "standalone";
 };
 
@@ -1336,6 +1338,7 @@ function ToolRowComponent({
   onOpenFile,
   onOpenDiff,
   onOpenPlanFile,
+  onOpenImagePreview,
   variant = "standalone",
 }: ToolRowProps) {
   const category = toolCategory(item.toolName);
@@ -1349,12 +1352,20 @@ function ToolRowComponent({
       : (item.liveOutput ?? item.summary);
   const boundedTerminalText = limitTerminalOutput(terminalText);
   const genericArgs = formatToolArgsForDisplay(item);
-  const contentVisible = readFiles
+  const imageAttachments = (item.attachments ?? []).filter(attachment => attachment.kind === "image");
+  const hasImages = imageAttachments.length > 0;
+  const mediaBadge = hasImages ? (
+    <span className="tc-tool-row__media-badge" data-testid="tool-row-media-badge" aria-label={`${imageAttachments.length} image(s)`}>
+      <span aria-hidden="true" className="codicon codicon-file-media" />{imageAttachments.length}
+    </span>
+  ) : null;
+  const mediaStrip = hasImages ? <AttachmentStrip readonly attachments={imageAttachments.map(attachment => ({...attachment,label:attachment.filename}))} onOpen={attachment => onOpenImagePreview?.(attachment.id)} /> : null;
+  const contentVisible = hasImages || (readFiles
     ? readFiles.files.length > 0
-    : hasMeaningfulContent(item) || Boolean(boundedTerminalText) || Boolean(genericArgs);
-  const alwaysVisibleBody = category === "answer" && contentVisible;
+    : hasMeaningfulContent(item) || Boolean(boundedTerminalText) || Boolean(genericArgs));
+  const alwaysVisibleBody = !hasImages && category === "answer" && contentVisible;
   const canToggle = contentVisible && !alwaysVisibleBody;
-  const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible) || Boolean(readFiles && hasFailedFileEntry);
+  const shouldExpandByDefault = !hasImages && (shouldShowBodyByDefault(item, contentVisible) || Boolean(readFiles && hasFailedFileEntry));
   const [collapsed, setCollapsed] = useState(!shouldExpandByDefault);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [userInteracted, setUserInteracted] = useState(false);
@@ -1515,6 +1526,7 @@ function ToolRowComponent({
             {renderDiffBadges(item)}
           </>
         )}
+        {mediaBadge}
       </span>
       {showOpenDiffButton ? (
         <button
@@ -1563,11 +1575,11 @@ function ToolRowComponent({
         {usesDisclosureCard ? (
           <DisclosureCard
             bodyTestId="tool-row-body"
-            defaultExpanded={shouldExpandByDefault || hasFailedFileEntry}
+            defaultExpanded={!hasImages && (shouldExpandByDefault || hasFailedFileEntry)}
             header={disclosureHeader}
             leadingIcon={disclosureLeadingIcon}
             preview={
-              filesDisplay ? null : category === "command" ? (
+              hasImages || filesDisplay ? null : category === "command" ? (
                 <TerminalOutput
                   command={fullCommandText(item)}
                   preview
@@ -1586,6 +1598,7 @@ function ToolRowComponent({
             statusVariant={disclosureStatusVariant}
             toggleTestId="tool-row-toggle"
           >
+            {mediaStrip}
             {filesDisplay ? (
               renderFileEntries(filesDisplay.files, onOpenFile)
             ) : category === "command" ? (
@@ -1633,6 +1646,7 @@ function ToolRowComponent({
                     ) : null}
                   </>
                 ) : renderFlatContent(item, onOpenFile, onOpenPlanFile, nowTick)}
+                {mediaBadge}
               </span>
               {canToggle ? (
                 <button
@@ -1656,6 +1670,7 @@ function ToolRowComponent({
             </div>
             {collapsed || !contentVisible ? null : (
               <div className="tc-tool-row__body" data-testid="tool-row-body">
+                {mediaStrip}
                 {readFiles ? renderFileEntries(readFiles.files, onOpenFile) : renderExpandedBody(item, genericArgs)}
               </div>
             )}
@@ -1672,6 +1687,7 @@ function areToolRowPropsEqual(prev: ToolRowProps, next: ToolRowProps): boolean {
     prev.onOpenDiff === next.onOpenDiff &&
     prev.onOpenFile === next.onOpenFile &&
     prev.onOpenPlanFile === next.onOpenPlanFile &&
+    prev.onOpenImagePreview === next.onOpenImagePreview &&
     prev.variant === next.variant
   );
 }

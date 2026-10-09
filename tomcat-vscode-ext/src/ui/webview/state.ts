@@ -359,6 +359,11 @@ function messageRole(entry: unknown): string | null {
     : null;
 }
 
+function isToolMediaEntry(entry: unknown): boolean {
+  return isRecord(entry) && entry.type === "message" && isRecord(entry.message)
+    && entry.message.role === "user" && entry.message.kind === "tool_media";
+}
+
 function systemNoteTitle(message: Record<string, unknown>): string | null {
   switch (message.kind) {
     case "nudge":
@@ -438,7 +443,7 @@ function buildErrorRecoveryActions(
       continue;
     }
     let userIndex = errorIndex - 1;
-    while (userIndex >= 0 && messageRole(entries[userIndex]) !== "user") {
+    while (userIndex >= 0 && (messageRole(entries[userIndex]) !== "user" || isToolMediaEntry(entries[userIndex]))) {
       userIndex -= 1;
     }
     if (userIndex < 0) {
@@ -996,6 +1001,14 @@ function extractAttachments(
     });
   }
   return attachments;
+}
+
+function extractToolAttachments(content: unknown, toolCallId: string): WebviewAttachmentView[] {
+  // Live media[] omits the text prefix present in historical content[]. Stable IDs
+  // therefore use image order within the call, never the raw part or row index.
+  const images = Array.isArray(content) ? content.filter(part => isRecord(part) &&
+    (part.type === "input_image_ref" || part.type === "input_image" || part.type === "image")) : [];
+  return extractAttachments(images, `tool:${toolCallId}`);
 }
 
 function extractThinkingText(
@@ -1835,6 +1848,7 @@ function applyHistoryEntry(
         } satisfies WebviewBoundaryBlock);
         return;
       }
+      if (entry.message.kind === "tool_media") return;
       const noteTitle = systemNoteTitle(entry.message);
       if (noteTitle) {
         session.timeline.push({
@@ -1895,13 +1909,13 @@ function applyHistoryEntry(
       return;
     }
     if (role === "tool") {
-      if (!text) {
-        return;
-      }
       const toolCallId = extractToolCallId(entry.message) ?? id;
+      const attachments = extractToolAttachments(entry.message.content, toolCallId);
+      const toolText = text ?? "";
+      if (!toolText && attachments.length === 0) return;
       const args = historyToolArgs.get(toolCallId);
       const toolName = historyToolNames.get(toolCallId) ?? "tool";
-      if (isPendingAskQuestionResult(toolName, text)) {
+      if (isPendingAskQuestionResult(toolName, toolText)) {
         const request = pendingApprovalRequest(session.sessionId, toolCallId, args);
         if (request) {
           upsertApproval(session, request, session.sessionId, false);
@@ -1911,8 +1925,8 @@ function applyHistoryEntry(
       if (toolName === "ask_question") {
         resolveApprovalByToolCallId(session, toolCallId);
       }
-      const planReference = derivePlanReference(toolName, args, text);
-      const planActivity = derivePlanActivity(toolName, text, args);
+      const planReference = derivePlanReference(toolName, args, toolText);
+      const planActivity = derivePlanActivity(toolName, toolText, args);
       const tool: WebviewToolCard = {
         args,
         assistantMessageId: toolCallToAssistant.get(toolCallId),
@@ -1922,7 +1936,8 @@ function applyHistoryEntry(
         planId: planReference.planId,
         planPath: planReference.planPath,
         status: "complete",
-        summary: text,
+        summary: toolText,
+        ...(attachments.length ? { attachments } : {}),
         toolCallId,
         toolName,
         type: "tool",
@@ -2827,7 +2842,7 @@ export class WebviewStateStore {
     patch: { hasThumb: boolean; thumbUri: string | null },
   ): void {
     for (const item of this.ensureSession(sessionId).timeline) {
-      if (item.type !== "message" || !item.attachments) continue;
+      if ((item.type !== "message" && item.type !== "tool") || !item.attachments) continue;
       item.attachments = item.attachments.map((attachment) =>
         attachment.blobSha === blobSha ? { ...attachment, ...patch } : attachment,
       );
@@ -3396,6 +3411,10 @@ export class WebviewStateStore {
         const activeAssistantId = runtime.activeAssistantId ?? undefined;
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         applyToolDisplay(tool, frame.display);
+        const attachments = extractToolAttachments(frame.media, frame.toolCallId);
+        if (attachments.length) tool.attachments = attachments.map(attachment => ({
+          ...attachment, ...this.attachmentUriResolver?.(attachment),
+        }));
         tool.isError = frame.isError;
         tool.status = toolResultWasInterrupted(frame.result)
           ? "interrupted"
@@ -3736,7 +3755,7 @@ export class WebviewStateStore {
     const resolve = this.attachmentUriResolver;
     if (!resolve) return;
     for (const item of session.timeline) {
-      if (item.type !== "message" || !item.attachments?.length) continue;
+      if ((item.type !== "message" && item.type !== "tool") || !item.attachments?.length) continue;
       item.attachments = item.attachments.map((attachment) => ({
         ...attachment,
         ...resolve(attachment),

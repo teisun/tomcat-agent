@@ -401,9 +401,9 @@ impl SessionManager {
             self.compact_tool_display_sidecars_with_ledger(Some(&mut ledger))?;
         let live_blob_references = self.collect_live_blob_shas_with_ledger(Some(&mut ledger))?;
         let current_session_ids = self
-            .session_transcript_paths()?
-            .iter()
-            .filter_map(|path| session_id_from_transcript_path(path).map(ToOwned::to_owned))
+            .attachment_transcripts()?
+            .into_iter()
+            .map(|(_, key)| key)
             .collect::<HashSet<_>>();
         ledger.prune_to(&current_session_ids);
         if ledger != original_ledger {
@@ -425,6 +425,41 @@ impl SessionManager {
         Ok(paths)
     }
 
+    /// GC includes child transcripts; display compaction remains scoped to main sessions.
+    /// Namespaced cache keys prevent a child and main session with the same stem colliding.
+    fn attachment_transcripts(&self) -> Result<Vec<(PathBuf, String)>, AppError> {
+        let mut paths = self
+            .session_transcript_paths()?
+            .into_iter()
+            .filter_map(|path| {
+                let key = session_id_from_transcript_path(&path)?.to_owned();
+                Some((path, key))
+            })
+            .collect::<Vec<_>>();
+        if let Some(parent) = self.sessions_dir.parent() {
+            match std::fs::read_dir(parent.join("subagent-sessions")) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry.map_err(AppError::Io)?;
+                        let path = entry.path();
+                        if entry.file_type().map_err(AppError::Io)?.is_file()
+                            && is_session_transcript_path(&path)
+                        {
+                            if let Some(id) = session_id_from_transcript_path(&path) {
+                                let key = format!("subagent/{id}");
+                                paths.push((path, key));
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(AppError::Io(e)),
+            }
+        }
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(paths)
+    }
+
     fn collect_live_blob_shas_with_ledger(
         &self,
         mut ledger: Option<&mut HousekeepingLedger>,
@@ -437,16 +472,13 @@ impl SessionManager {
             transcripts_scanned: 0,
         };
         live.refresh_pending_blob_shas(pending_shas);
-        for path in self.session_transcript_paths()? {
-            let Some(session_id) = session_id_from_transcript_path(&path) else {
-                continue;
-            };
+        for (path, session_id) in self.attachment_transcripts()? {
             let Some(fingerprint) = FileFingerprint::for_path(&path)? else {
                 continue;
             };
             let cached_shas = ledger.as_deref().and_then(|ledger| {
                 ledger
-                    .entry(session_id)
+                    .entry(&session_id)
                     .and_then(|entry| entry.transcript.as_ref())
                     .filter(|entry| entry.fingerprint == fingerprint)
                     .map(|entry| entry.blob_shas.clone())
@@ -490,13 +522,13 @@ impl SessionManager {
                 let mut blob_shas = transcript_shas.into_iter().collect::<Vec<_>>();
                 blob_shas.sort();
                 if let Some(ledger) = ledger.as_deref_mut() {
-                    ledger.entry_mut(session_id).transcript = Some(TranscriptLedgerEntry {
+                    ledger.entry_mut(&session_id).transcript = Some(TranscriptLedgerEntry {
                         fingerprint,
                         blob_shas,
                     });
                 }
             } else if let Some(ledger) = ledger.as_deref_mut() {
-                ledger.entry_mut(session_id).transcript = None;
+                ledger.entry_mut(&session_id).transcript = None;
             }
         }
         live.shas.extend(live.transcript_shas.iter().cloned());
@@ -1275,6 +1307,11 @@ impl SessionManager {
                     .get("role")
                     .and_then(serde_json::Value::as_str)
                     != Some("user")
+                    || message
+                        .message
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("tool_media")
                 {
                     return Ok(None);
                 }
@@ -1284,6 +1321,11 @@ impl SessionManager {
             }
 
             if saw_anchor
+                && message
+                    .message
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("tool_media")
                 && message
                     .message
                     .get("role")
@@ -1478,11 +1520,7 @@ impl SessionManager {
             .filter_map(|line| match serde_json::from_str::<TranscriptEntry>(line) {
                 Ok(TranscriptEntry::Message(e))
                     if e.message.get("role").and_then(serde_json::Value::as_str)
-                        == Some("user")
-                        && e.message
-                            .get("superseded")
-                            .and_then(serde_json::Value::as_bool)
-                            != Some(true) =>
+                        == Some("user") =>
                 {
                     e.id
                 }
@@ -1499,12 +1537,22 @@ impl SessionManager {
         message_id: &str,
         message: serde_json::Value,
     ) -> Result<String, AppError> {
+        self.rewind_user_message_with_files_restored(message_id, message, true)
+    }
+
+    /// Preserving disk must also preserve its review baselines and Keep boundaries.
+    pub fn rewind_user_message_with_files_restored(
+        &self,
+        message_id: &str,
+        message: serde_json::Value,
+        files_restored: bool,
+    ) -> Result<String, AppError> {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("rewind_target_stale".into()))?;
         self.with_transcript_lock(&path, || {
             let lines = crate::core::session::transcript::transcript_lines(&path)?;
-            let (index, _, turns) = Self::rewind_target_in_lines(&lines, message_id)?;
+            let (index, target, turns) = Self::rewind_target_in_lines(&lines, message_id)?;
             let prefix: Vec<TranscriptEntry> = lines[1..index]
                 .iter()
                 .filter_map(|l| serde_json::from_str(l).ok())
@@ -1523,37 +1571,17 @@ impl SessionManager {
             crate::core::session::transcript::replace_user_message_suffix(
                 &path, lines, index, &entry,
             )?;
-            crate::core::checkpoint::file_baselines::discard_turns(&path, &turns);
+            if files_restored {
+                crate::core::checkpoint::file_baselines::discard_turns(&path, &turns);
+                if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&target.timestamp) {
+                    crate::core::checkpoint::file_baselines::discard_keeps_after(
+                        &path,
+                        timestamp.timestamp_millis(),
+                    );
+                }
+            }
             Ok(id)
         })
-    }
-
-    pub fn cleanup_superseded_file_baselines(&self) {
-        let Ok(Some(path)) = self.current_transcript_path() else {
-            return;
-        };
-        let Ok(lines) = crate::core::session::transcript::transcript_lines(&path) else {
-            return;
-        };
-        let turns = lines
-            .iter()
-            .skip(1)
-            .filter_map(|line| serde_json::from_str::<TranscriptEntry>(line).ok())
-            .filter_map(|e| match e {
-                TranscriptEntry::Message(m)
-                    if m.message.get("role").and_then(serde_json::Value::as_str)
-                        == Some("user")
-                        && m.message
-                            .get("superseded")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true) =>
-                {
-                    m.id
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        crate::core::checkpoint::file_baselines::discard_turns(&path, &turns);
     }
 
     /// Retry 的 copy-forward：保留失败的旧 user message，追加一条内容相同的新 user message。
@@ -1591,7 +1619,6 @@ impl SessionManager {
             let id = self
                 .append_message_while_locked(&path, message, true, None)
                 .map(|(id, _)| id)?;
-            self.cleanup_superseded_file_baselines();
             Ok(id)
         })
     }

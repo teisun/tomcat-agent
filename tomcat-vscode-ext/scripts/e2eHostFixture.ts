@@ -680,6 +680,7 @@ function emitCompletedTool(sessionId, tool) {
     display: tool.display,
     isError: false,
     result: tool.result,
+    media: tool.media,
     sessionId,
     toolCallId: tool.toolCallId,
     toolName: tool.toolName,
@@ -1326,7 +1327,7 @@ function recordHistoryToolResult(sessionId, tool) {
   session.history.push({
     id: \`h-\${historyCounter++}\`,
     message: {
-      content: tool.result,
+      content: tool.media?.length ? [{type:"input_text",text:tool.result}, ...tool.media.map(image => ({type:"input_image_ref",blob_sha:image.blobSha,mime_type:image.mimeType}))] : tool.result,
       role: "tool",
       tool_display: tool.display,
       tool_call_id: tool.toolCallId,
@@ -1576,12 +1577,22 @@ function handlePrompt(frame) {
     emitMessageDelta(sessionId, "Queue acceptance fixture is waiting for Stop.");
     return;
   }
+  if (text === "tool image showcase") {
+    const bytes = fs.readFileSync(${JSON.stringify(path.resolve(__dirname, "../../tomcat/tests/fixtures/llm_multimodal/sample_image.png"))});
+    const blobSha = putBlob(bytes);
+    const tool = {toolCallId:"tool-image-" + historyCounter++,toolName:"read",args:{path:"photo.png"},result:"[Image attached]",media:[{type:"input_image_ref",blobSha,mimeType:"image/png",bytes:bytes.length}]};
+    recordHistoryAssistantWithTools(sessionId,"",[tool],"Inspect screenshot");
+    recordHistoryToolResult(sessionId,tool); emitCompletedTool(sessionId,tool);
+    recordHistoryMessage(sessionId,"assistant","The tool image is available in its card.");
+    emitMessageDelta(sessionId,"The tool image is available in its card."); finishTurn(sessionId,null); return;
+  }
   if (text === "session files dock edit" || text === "session files dock edit again") {
     const target = path.join(path.dirname(editFilePath), \`session-files-\${process.pid}-\${sessionId}.ts\`);
     const before = fs.existsSync(target) ? fs.readFileSync(target,"utf8") : "first line\\noriginal line\\n";
     const after = text.endsWith("again") ? "second change\\nmore content\\n" : "first line\\nmodified line\\nnew line\\n";
     fs.writeFileSync(target, after, "utf8");
-    session.sessionFiles = { sourceTurnId: userMessageId || session.history.filter(row => row.message?.role === "user").at(-1).id, entries: [{path:target,before}] };
+    if (!session.sessionFiles) session.sessionFiles = { sourceTurnId: userMessageId || session.history.filter(row => row.message?.role === "user").at(-1).id, entries: [] };
+    if (!session.sessionFiles.entries.some(entry => entry.path === target)) session.sessionFiles.entries.push({path:target,before});
     const tool = {toolCallId:"session-files-write",toolName:"write",args:{path:target},result:"written",display:{kind:"file",file:target,added:2,removed:1}};
     recordHistoryAssistantWithTools(sessionId,"",[tool],"Updated file");recordHistoryToolResult(sessionId,tool);
     send({type:"tool_execution_end",sessionId,toolCallId:tool.toolCallId,toolName:"write",result:"written",display:tool.display,isError:false});
@@ -1758,6 +1769,10 @@ function handlePrompt(frame) {
         type: "message",
       },
     );
+    const mediaTool = {toolCallId:"kind-tool-image",toolName:"read",args:{path:"photo.png"},result:"Image returned"};
+    recordHistoryAssistantWithTools(sessionId,"",[mediaTool],"Read image");
+    recordHistoryToolResult(sessionId,mediaTool);
+    session.history.push({ id:"kind-tool-media", type:"message", message:{role:"user",kind:"tool_media",content:[{type:"input_image",mime_type:"image/png",image_b64:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9p8qAAAAAASUVORK5CYII="}]} });
     emitMessageDelta(sessionId, "message kinds recorded");
     recordHistoryMessage(sessionId, "assistant", "message kinds recorded");
     emitContextMetrics(sessionId, 0.36);
@@ -2578,13 +2593,20 @@ function handleCommand(frame) {
     case "get_session_files": {
       const session = ensureSession(frame.sessionId);
       const view = session.sessionFiles;
-      const files = view ? view.entries.filter(entry => !fs.existsSync(entry.path) || fs.readFileSync(entry.path,"utf8") !== entry.before).map(entry => ({path:entry.path,status:fs.existsSync(entry.path)?"modified":"deleted",added:2,removed:1,restorable:true})) : [];
+      const files = view ? view.entries.filter(entry => (fs.existsSync(entry.path) ? fs.readFileSync(entry.path,"utf8") : null) !== entry.before).map(entry => ({path:entry.path,status:entry.before===null?"added":fs.existsSync(entry.path)?"modified":"deleted",added:2,removed:1,restorable:true})) : [];
       send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:view?.sourceTurnId || null,files}});break;
     }
     case "get_session_file_baseline": {
       const view = ensureSession(frame.sessionId).sessionFiles;
       const entry = view?.sourceTurnId === frame.sourceTurnId ? view.entries.find(entry=>entry.path===frame.path) : null;
       send({id:frame.id,type:"response",success:!!entry,sessionId:frame.sessionId,error:entry?undefined:"unknown_path",payload:entry?{sessionId:frame.sessionId,sourceTurnId:frame.sourceTurnId,path:entry.path,existed:true,text:entry.before}:undefined});break;
+    }
+    case "keep_session_files": {
+      const session = ensureSession(frame.sessionId), view = session.sessionFiles;
+      if(session.busy || !view || view.sourceTurnId !== frame.sourceTurnId) {send({id:frame.id,type:"response",success:false,sessionId:frame.sessionId,error:session.busy?"busy":"unknown_path"});break;}
+      view.sourceTurnId = "keep-" + Date.now() + "-" + crypto.randomUUID();
+      view.entries = [];
+      send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:view.sourceTurnId}});break;
     }
     case "restore_session_files": {
       const session = ensureSession(frame.sessionId), view = session.sessionFiles;
@@ -2632,7 +2654,14 @@ function handleCommand(frame) {
           ? Math.min(requestedCursor, session.history.length)
           : session.history.length;
       const start = Math.max(0, endExclusive - requestedLimit);
-      const messages = session.history.slice(start, endExclusive);
+      const messages = session.history.slice(start, endExclusive).map(entry => {
+        if (entry.message?.role !== "tool" || !Array.isArray(entry.message.content)) return entry;
+        return {...entry,message:{...entry.message,content:entry.message.content.map(part => {
+          if (part.type !== "input_image_ref") return part;
+          const blobSha=part.blob_sha || part.blobSha;
+          return {...part,blobSha,mimeType:part.mime_type || part.mimeType,bytes:fs.statSync(path.join(BLOBS_DIR,blobSha)).size,hasThumb:fs.existsSync(path.join(THUMBS_DIR,blobSha))};
+        })}};
+      });
       const hasMore = start > 0;
       if (debugGetMessages) {
         console.error(

@@ -400,7 +400,7 @@ impl ReadResult {
     /// 把 enum 摊平成一段适合 tool message 的字符串：
     ///
     /// - `Text` → `content`（已含行号 / 尾注）
-    /// - `Image` / `Pdf` → 占位句（真正 inline part 在 T3-c 注入下一条 user message）
+    /// - `Image` / `Pdf` → 占位句（真正的媒体 part 随对应 tool 消息返回）
     /// - `FileUnchanged` → 短句 stub（与 `read_state::FILE_UNCHANGED_STUB` 同源）
     ///
     /// 本方法是 T3-a 阶段的「兼容垫片」：T3-c 完成后 `tool_exec` 会按 variant
@@ -409,13 +409,13 @@ impl ReadResult {
         match self {
             ReadResult::Text(t) => t.content.clone(),
             ReadResult::Image(b) => format!(
-                "Image saved as next user input. See vision content for details (mime={}, path={}, bytes={}).",
+                "[Image attached]. See vision content for details (mime={}, path={}, bytes={}).",
                 b.mime,
                 b.path.display(),
                 b.original_size
             ),
             ReadResult::Pdf(b) => format!(
-                "PDF attached as next user input. See file content for details (filename={}, path={}, bytes={}).",
+                "[PDF attached]. See file content for details (filename={}, path={}, bytes={}).",
                 b.filename,
                 b.path.display(),
                 b.original_size

@@ -919,6 +919,40 @@ async fn get_messages_payload(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn tool_owned_media_history_reference_matches_live_shape_without_bytes() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, _requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
+    let session = &slot.ctx.session_runtime.session;
+    let bytes = png_bytes();
+    let sha = session.attachment_store().put(&bytes).unwrap();
+    session.append_message(serde_json::json!({"role":"assistant","tool_calls":[{"id":"tool-image","type":"function","function":{"name":"read","arguments":"{}"}}]})).unwrap();
+    session.append_message(serde_json::json!({"role":"tool","tool_call_id":"tool-image","content":[{"type":"input_text","text":"[Image attached]"},{"type":"input_image_ref","blob_sha":sha,"mime_type":"image/png"}],"tool_display":{"kind":"text","text":"image result"}})).unwrap();
+    let payload = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "gm-tool-media",
+        AttachmentMode::Reference,
+    )
+    .await;
+    assert!(!payload.to_string().contains("image_b64"));
+    assert!(!payload.to_string().contains(&b64(&bytes)));
+    let row = payload["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["message"]["tool_call_id"] == "tool-image")
+        .unwrap();
+    let part = &row["message"]["content"][1];
+    assert_eq!(part["type"], "input_image_ref");
+    assert_eq!(part["blobSha"], sha);
+    assert_eq!(part["hasThumb"], false);
+    assert_eq!(row["message"]["tool_display"]["text"], "image result");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn get_messages_defaults_to_inline_for_cli_compatibility() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot, _requests) =

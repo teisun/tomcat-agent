@@ -65,6 +65,7 @@ fn rebuild_keeps_only_active_normal_user_messages_with_original_json() {
         ("steer", "steering"),
         ("nudge", "nudge"),
         ("summary", "compaction_summary"),
+        ("media", "tool_media"),
     ] {
         append_message(
             &transcript,

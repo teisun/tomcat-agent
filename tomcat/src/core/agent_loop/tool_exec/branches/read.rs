@@ -324,154 +324,25 @@ async fn read_one(
             let mut follow_up_parts = Vec::new();
             match &result {
                 crate::core::tools::primitive::ReadResult::Image(b) => {
-                    let decision =
-                        crate::core::llm::openai_files::upload_decision_by_size(b.original_size);
-                    let mut uploaded = false;
-                    if let Some(runtime) = ctx.openai_files_runtime {
-                        if !matches!(
-                            decision,
-                            crate::core::llm::openai_files::UploadDecision::InlinePreferred
-                        ) {
-                            match runtime
-                                .resolve_or_upload_path(
-                                    &b.path,
-                                    &b.mime,
-                                    &b.filename,
-                                    crate::core::llm::openai_files::FilePurpose::Vision,
-                                )
-                                .await
-                            {
-                                Ok(meta) => {
-                                    match crate::core::llm::ChatMessageContentPart::image_file_id(
-                                        meta.id,
-                                    ) {
-                                        Ok(part) => {
-                                            follow_up_parts.push(part);
-                                            uploaded = true;
-                                        }
-                                        Err(e) => tracing::warn!(
-                                            error = %e,
-                                            path = %b.path.display(),
-                                            "read T3-c: upload succeeded but failed to build image_file_id part"
-                                        ),
-                                    }
-                                }
-                                Err(e) => {
-                                    if matches!(
-                                        decision,
-                                        crate::core::llm::openai_files::UploadDecision::UploadRequired
-                                    ) {
-                                        return Err(format!(
-                                            "Read attachment upload failed (required by policy): {}",
-                                            e
-                                        ));
-                                    }
-                                    tracing::warn!(
-                                        error = %e,
-                                        path = %b.path.display(),
-                                        "read T3-c: upload failed on preferred path; fallback to inline"
-                                    );
-                                }
-                            }
-                        }
-                    } else if matches!(
-                        decision,
-                        crate::core::llm::openai_files::UploadDecision::UploadRequired
-                    ) {
-                        return Err(
-                            "Read attachment requires Files API upload, but current provider/runtime does not support it; 请改用支持 Files API 的 provider 或缩小附件后走 inline".to_string(),
-                        );
-                    }
-
-                    if !uploaded {
-                        match crate::core::llm::ChatMessageContentPart::image_b64(
+                    follow_up_parts.push(
+                        crate::core::llm::ChatMessageContentPart::image_b64(
                             b.mime.clone(),
                             &b.path,
-                        ) {
-                            Ok(part) => follow_up_parts.push(part),
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                path = %b.path.display(),
-                                "read T3-c: failed to build InputImage part; falling back to text-only tool message"
-                            ),
-                        }
-                    }
+                        )
+                        .map_err(|error| {
+                            format!("Read image cannot be attached inline: {error}")
+                        })?,
+                    );
                 }
                 crate::core::tools::primitive::ReadResult::Pdf(b) => {
-                    let decision =
-                        crate::core::llm::openai_files::upload_decision_by_size(b.original_size);
-                    let mut uploaded = false;
-                    if let Some(runtime) = ctx.openai_files_runtime {
-                        if !matches!(
-                            decision,
-                            crate::core::llm::openai_files::UploadDecision::InlinePreferred
-                        ) {
-                            match runtime
-                                .resolve_or_upload_path(
-                                    &b.path,
-                                    &b.mime,
-                                    &b.filename,
-                                    crate::core::llm::openai_files::FilePurpose::UserData,
-                                )
-                                .await
-                            {
-                                Ok(meta) => {
-                                    match crate::core::llm::ChatMessageContentPart::file_file_id(
-                                        meta.id,
-                                        Some(b.filename.clone()),
-                                    ) {
-                                        Ok(part) => {
-                                            follow_up_parts.push(part);
-                                            uploaded = true;
-                                        }
-                                        Err(e) => tracing::warn!(
-                                            error = %e,
-                                            path = %b.path.display(),
-                                            "read T3-c: upload succeeded but failed to build file_file_id part"
-                                        ),
-                                    }
-                                }
-                                Err(e) => {
-                                    if matches!(
-                                        decision,
-                                        crate::core::llm::openai_files::UploadDecision::UploadRequired
-                                    ) {
-                                        return Err(format!(
-                                            "Read attachment upload failed (required by policy): {}",
-                                            e
-                                        ));
-                                    }
-                                    tracing::warn!(
-                                        error = %e,
-                                        path = %b.path.display(),
-                                        "read T3-c: upload failed on preferred path; fallback to inline"
-                                    );
-                                }
-                            }
-                        }
-                    } else if matches!(
-                        decision,
-                        crate::core::llm::openai_files::UploadDecision::UploadRequired
-                    ) {
-                        return Err(
-                            "Read attachment requires Files API upload, but current provider/runtime does not support it; 请改用支持 Files API 的 provider 或缩小附件后走 inline".to_string(),
-                        );
-                    }
-
-                    if !uploaded {
-                        match crate::core::llm::ChatMessageContentPart::file_b64(
+                    follow_up_parts.push(
+                        crate::core::llm::ChatMessageContentPart::file_b64(
                             b.filename.clone(),
                             b.mime.clone(),
                             &b.path,
-                        ) {
-                            Ok(part) => follow_up_parts.push(part),
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                path = %b.path.display(),
-                                "read T3-c: failed to build InputFile part; falling back to text-only tool message"
-                            ),
-                        }
-                    }
+                        )
+                        .map_err(|error| format!("Read file cannot be attached inline: {error}"))?,
+                    );
                 }
                 crate::core::tools::primitive::ReadResult::Text(_)
                 | crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => {}

@@ -87,11 +87,13 @@ When Tomcat asks a clarification question:
 
 The compact **Todos / Files** dock sits above the composer, below any pending question.
 
-- **Files** shows the most recent user turn that actually changed a file. Asking follow-up questions keeps that list; the next turn's first successful file change replaces it rather than accumulating earlier turns.
-- Click a file to open one complete VS Code diff: the left side is its first pre-edit backup in that turn (read-only), and the right side is the real, editable file. Multiple edits in the same turn are combined. Existing tool-card diff previews are unchanged.
-- Hover or focus a row to reveal **×**. **Undo All** is on the first detail row and restores the restorable subset; confirmation states how many files will be skipped. These actions restore entire files (or delete files newly created in that turn), **overwrite later saved edits, and keep your chat**.
-- Unsaved target documents and the current foreground AI/maintenance job block restore. Background Bash and other sessions/worktrees are not stopped or waited for. Git HEAD changes disable restore, not preview.
-- Only native write/edit/hashline-edit backups are tracked. Shell/MCP-only changes are not discovered. Backups use the existing retention and historical cleanup rules; older CLIs without the `session_files` capability simply omit Files.
+- **Files** accumulates files the agent changed since the last **Keep All** (or session start). Build, Resume, interruptions and follow-ups such as “continue” keep the list.
+- **Keep All** accepts the current list by recording a time boundary; it does not copy or modify workspace files. The next native AI write captures its own pre-edit backup. Manual-only changes after Keep do not enter the list; a manual edit made before the next AI write becomes that write's baseline.
+- Click a file to open one complete VS Code diff: the left side is the earliest pre-edit backup in the current Keep cycle, or the committed version when applicable; the right side is the real, editable file. Repeated AI edits are combined. Existing tool-card diff previews are unchanged.
+- Hover or focus a row to reveal **×**. **Undo All** restores the restorable subset; confirmation states how many files will be skipped. These actions restore entire files (or delete files newly created since the current baseline), **overwrite later saved edits, and keep your chat**.
+- Unsaved target documents and the current foreground AI/maintenance job block restore; Keep also requires an idle session. Background Bash and other sessions/worktrees are not stopped or waited for. Files you commit count as kept and leave the list; if they change again, the diff starts from the committed version. File-review Undo is no longer disabled just because HEAD moved; message rewind retains its separate Git safety check.
+- Only native write/edit/hashline-edit backups are tracked. Shell/MCP-only changes are not discovered. Backups are kept while the session is in use and removed after it has been idle for `retention_days`; chat-only rollback and Retry do not discard them.
+- Legacy file-backup records without the new `at` timestamp and old Keep snapshot directories are not recognized or migrated. Their old Files/backup-based undo history is unavailable; subsequent native AI writes create new records. Chat history and workspace files are not deleted. Use matching CLI and extension versions.
 
 See [session-file-changes](docs/architecture/session-file-changes.md) for scope and implementation details.
 

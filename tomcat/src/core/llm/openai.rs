@@ -414,6 +414,16 @@ fn promote_runtime_tail_to_system(messages: &mut Vec<Value>, runtime_tail: &str)
     system.insert("content".to_string(), Value::String(merged));
 }
 
+fn flush_tool_media(out: &mut Vec<Value>, media: &mut Vec<Value>) {
+    if media.is_empty() {
+        return;
+    }
+    let mut content =
+        vec![json!({"type":"text","text":crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO})];
+    content.append(media);
+    out.push(json!({"role":"user","content":content}));
+}
+
 fn transport_messages(
     messages: &[ChatMessage],
     model: &str,
@@ -421,6 +431,11 @@ fn transport_messages(
     files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Vec<Value> {
     let target = ProviderCompatProfile::chat_completions(model);
+    use crate::core::llm::tool_result_media::{
+        media_parts, tool_result_media_mode, tool_result_text, ToolResultMediaMode,
+    };
+    debug_assert_eq!(tool_result_media_mode("openai"), ToolResultMediaMode::Split);
+    let mut deferred_media = Vec::new();
     let runtime_tail = ephemeral_tail_texts(messages)
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -433,7 +448,10 @@ fn transport_messages(
         if is_ephemeral_tail(original) {
             continue;
         }
-        let in_window = window.contains(idx);
+        if original.role != ChatMessageRole::Tool {
+            flush_tool_media(&mut out, &mut deferred_media);
+        }
+        let in_window = window.contains(idx) || target.preserves_thinking_history();
         let action = if continuity_enabled {
             plan_scoped(&target, original, in_window)
         } else {
@@ -446,7 +464,7 @@ fn transport_messages(
                 report.record_stripped_old_history(original);
             }
         }
-        let value = match action {
+        let mut value = match action {
             ReplayAction::KeepOpaque => {
                 let message = original.without_completion_metadata();
                 let transport = transport_message_value(message, files_adapter);
@@ -475,8 +493,15 @@ fn transport_messages(
                 transport_message_value(original.without_completion_metadata(), files_adapter)
             }
         };
+        if original.role == ChatMessageRole::Tool && media_parts(original).next().is_some() {
+            deferred_media.extend(
+                media_parts(original).map(|p| part_to_completions_content(p, files_adapter)),
+            );
+            value["content"] = Value::String(tool_result_text(original));
+        }
         out.push(value);
     }
+    flush_tool_media(&mut out, &mut deferred_media);
     promote_runtime_tail_to_system(&mut out, &runtime_tail);
     if continuity_enabled {
         report.emit(&target);

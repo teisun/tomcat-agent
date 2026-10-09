@@ -4,18 +4,13 @@
 //! `tool_call`，还是 `tool_run_code`，都必须经过这一处：图片先抽成
 //! `InputImage`，文本才可能被后续路径截断。
 
-use base64::Engine;
-
-use crate::core::llm::{
-    openai_files::{upload_decision_by_size, FilePurpose, OpenAiFilesRuntime, UploadDecision},
-    ChatMessageContentPart,
-};
+use crate::core::llm::{openai_files::OpenAiFilesRuntime, ChatMessageContentPart};
 
 use super::ToolExecOutcome;
 
 pub(in crate::core::agent_loop) async fn extract_mcp_tool_result_media(
     result: &serde_json::Value,
-    files_runtime: Option<&std::sync::Arc<OpenAiFilesRuntime>>,
+    _files_runtime: Option<&std::sync::Arc<OpenAiFilesRuntime>>,
 ) -> ToolExecOutcome {
     let outer_content = result.get("content").unwrap_or(result);
     // Plugin tools historically return a string directly. MCP's CallToolResult
@@ -35,12 +30,10 @@ pub(in crate::core::agent_loop) async fn extract_mcp_tool_result_media(
                             text.push(value.to_string());
                         }
                     }
-                    Some("image") => match mcp_image_part(block, files_runtime).await {
+                    Some("image") => match mcp_image_part(block) {
                         Ok(part) => {
                             follow_up_parts.push(part);
-                            text.push(
-                                "[Image returned; see the following user message.]".to_string(),
-                            );
+                            text.push("[Image attached]".to_string());
                         }
                         Err(error) => text.push(format!("[MCP image omitted: {error}]")),
                     },
@@ -69,10 +62,7 @@ pub(in crate::core::agent_loop) async fn extract_mcp_tool_result_media(
     }
 }
 
-async fn mcp_image_part(
-    block: &serde_json::Value,
-    files_runtime: Option<&std::sync::Arc<OpenAiFilesRuntime>>,
-) -> Result<ChatMessageContentPart, String> {
+fn mcp_image_part(block: &serde_json::Value) -> Result<ChatMessageContentPart, String> {
     let mime_type = block
         .get("mimeType")
         .or_else(|| block.get("mime_type"))
@@ -82,39 +72,7 @@ async fn mcp_image_part(
         .get("data")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "image block is missing base64 data".to_string())?;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map_err(|error| format!("invalid base64: {error}"))?;
-    let decision = upload_decision_by_size(decoded.len() as u64);
-
-    if !matches!(decision, UploadDecision::InlinePreferred) {
-        if let Some(runtime) = files_runtime {
-            let file = tempfile::NamedTempFile::new()
-                .map_err(|error| format!("create temporary image: {error}"))?;
-            std::fs::write(file.path(), &decoded)
-                .map_err(|error| format!("write temporary image: {error}"))?;
-            match runtime
-                .resolve_or_upload_path(file.path(), mime_type, "mcp-image", FilePurpose::Vision)
-                .await
-            {
-                Ok(meta) => {
-                    return ChatMessageContentPart::image_file_id(meta.id)
-                        .map_err(|error| error.to_string());
-                }
-                Err(error) if matches!(decision, UploadDecision::UploadRequired) => {
-                    return Err(format!("Files API upload required but failed: {error}"));
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "MCP image upload preferred but failed; falling back to inline");
-                }
-            }
-        } else if matches!(decision, UploadDecision::UploadRequired) {
-            return Err(
-                "image is too large to inline and the current provider has no Files API runtime"
-                    .to_string(),
-            );
-        }
-    }
+    // Inline only in actual tool traffic. Files APIs remain available to explicit callers.
 
     ChatMessageContentPart::image_base64_data(mime_type, data).map_err(|error| error.to_string())
 }
@@ -126,6 +84,56 @@ mod tests {
 
     const TINY_PNG_B64: &str =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9p8qAAAAAASUVORK5CYII=";
+
+    #[derive(Debug)]
+    struct NeverUpload;
+    #[async_trait::async_trait]
+    impl crate::core::llm::files_api::FilesApiAdapter for NeverUpload {
+        async fn upload(
+            &self,
+            _: crate::core::llm::openai_files::FilePurpose,
+            _: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<crate::core::llm::openai_files::OpenAiFileMeta, crate::infra::AppError>
+        {
+            panic!("normal tool traffic must never upload");
+        }
+        async fn delete(&self, _: &str) -> Result<(), crate::infra::AppError> {
+            panic!("no upload means no delete");
+        }
+        fn expires_after_seconds(&self) -> u64 {
+            0
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_owned_media_mcp_inline_even_with_files_runtime_and_clear_oversize() {
+        use base64::Engine as _;
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = std::sync::Arc::new(
+            crate::core::llm::openai_files::OpenAiFilesRuntime::new_with_adapter(
+                std::sync::Arc::new(NeverUpload),
+                temp.path().join("files.json"),
+            ),
+        );
+        for size in [1024 * 1024 + 1, crate::core::llm::IMAGE_MAX_BYTES + 1] {
+            let data = base64::engine::general_purpose::STANDARD.encode(vec![0u8; size]);
+            let out=extract_mcp_tool_result_media(&serde_json::json!({"content":[{"type":"image","mimeType":"image/png","data":data}]}),Some(&runtime)).await;
+            if size <= crate::core::llm::IMAGE_MAX_BYTES {
+                assert!(matches!(
+                    &out.follow_up_parts[0],
+                    ChatMessageContentPart::InputImage {
+                        source: crate::core::llm::ImageSource::Inline(_),
+                        ..
+                    }
+                ));
+            } else {
+                assert!(out.follow_up_parts.is_empty());
+                assert!(out.model_text.contains("IMAGE_MAX_BYTES"));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn direct_mcp_error_result_preserves_is_error() {
@@ -210,9 +218,7 @@ mod tests {
             [ChatMessageContentPart::InputImage { .. }]
         ));
         assert!(outcome.model_text.contains("capture complete"));
-        assert!(outcome
-            .model_text
-            .contains("[Image returned; see the following user message.]"));
+        assert!(outcome.model_text.contains("[Image attached]"));
         assert!(outcome
             .model_text
             .contains("[Unsupported MCP content block 'resource':"));

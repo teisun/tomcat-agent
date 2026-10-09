@@ -987,8 +987,5 @@ fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
 }
 
 fn text_content_mut(msg: &mut ChatMessage) -> Option<&mut String> {
-    match msg.content.as_mut() {
-        Some(crate::core::llm::ChatMessageContent::Text(text)) => Some(text),
-        _ => None,
-    }
+    msg.text_content_mut()
 }

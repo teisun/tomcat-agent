@@ -374,7 +374,7 @@ async fn tool_exec_read_state_clear_resets_dedup() {
 // ─── PR-RJ T3-c：read 命中 image / pdf → follow_up_parts 注入下一条 user 消息 ──
 
 #[tokio::test]
-async fn tool_exec_image_result_injects_into_next_user_message_parts() {
+async fn tool_exec_image_result_returns_tool_parts() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let png_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -390,7 +390,7 @@ async fn tool_exec_image_result_injects_into_next_user_message_parts() {
         execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "image read should succeed");
     assert!(
-        msg.contains("Image saved as next user input"),
+        msg.contains("[Image attached]"),
         "tool message should be a placeholder, got: {:?}",
         msg
     );
@@ -412,7 +412,7 @@ async fn tool_exec_image_result_injects_into_next_user_message_parts() {
 }
 
 #[tokio::test]
-async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
+async fn tool_exec_pdf_result_returns_tool_parts() {
     use base64::Engine;
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
@@ -435,7 +435,7 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
         execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "pdf read should succeed");
     assert!(
-        msg.contains("PDF attached as next user input"),
+        msg.contains("[PDF attached]"),
         "tool message should be a placeholder, got: {:?}",
         msg
     );
@@ -453,11 +453,11 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
 }
 
 #[tokio::test]
-async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
+async fn tool_exec_pdf_over_inline_limit_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let pdf = dir_path.join("oversize.pdf");
-    write_fake_pdf(&pdf, 11 * 1024 * 1024);
+    write_fake_pdf(&pdf, crate::core::llm::FILE_MAX_BYTES + 1);
 
     let primitive = make_executor(&dir_path);
     let state = Arc::new(ReadFileState::new());
@@ -470,15 +470,15 @@ async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
         "without files runtime, oversize pdf must fail by policy"
     );
     assert!(
-        msg.contains("requires Files API upload"),
-        "should guide to Files upload path, got: {:?}",
+        msg.contains("大") || msg.contains("limit") || msg.contains("FILE_MAX_BYTES"),
+        "should clearly report the inline bound, got: {:?}",
         msg
     );
     assert!(follow_ups.is_empty());
 }
 
 #[tokio::test]
-async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
+async fn tool_exec_pdf_ignores_cached_file_id_and_stays_inline() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let pdf = dir_path.join("oversize.pdf");
@@ -534,16 +534,16 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
         "with runtime + cached file_id, oversize should succeed; msg={:?}",
         msg
     );
-    assert!(msg.contains("PDF attached as next user input"));
+    assert!(msg.contains("[PDF attached]"));
     assert_eq!(follow_ups.len(), 1);
     match &follow_ups[0] {
         crate::core::llm::ChatMessageContentPart::InputFile {
-            source: crate::core::llm::FileSource::Uploaded(uploaded),
+            source: crate::core::llm::FileSource::Inline(inline),
         } => {
-            assert_eq!(uploaded.file_id, "file-cached-pdf");
-            assert_eq!(uploaded.filename.as_deref(), Some("oversize.pdf"));
+            assert_eq!(inline.filename, "oversize.pdf");
+            assert!(!inline.data.is_empty());
         }
-        other => panic!("expected InputFile(file_id), got {:?}", other),
+        other => panic!("expected inline InputFile, got {:?}", other),
     }
 }
 

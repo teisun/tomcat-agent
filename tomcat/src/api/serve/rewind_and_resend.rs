@@ -153,7 +153,7 @@ pub(super) async fn run(
         .ctx
         .session_runtime
         .session
-        .rewind_user_message(&message_id, payload)
+        .rewind_user_message_with_files_restored(&message_id, payload, files == RewindFiles::Revert)
     {
         Ok(id) => id,
         Err(e) => return error(e.to_string(), json!({})),

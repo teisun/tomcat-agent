@@ -12,12 +12,13 @@ function fixture(supported = true) {
   const getSessionFiles = vi.fn().mockResolvedValue({ sessionId:"s1", sourceTurnId:"u1", files:[{path:"/workspace/a.ts", status:"modified", added:1, removed:1, restorable:true}] });
   const getSessionFileBaseline=vi.fn().mockResolvedValue({sessionId:"s1",sourceTurnId:"u1",path:"/workspace/a.ts",existed:true,text:"before"});
   const restoreSessionFiles=vi.fn().mockResolvedValue({sessionId:"s1",sourceTurnId:"u1",restored:["/workspace/a.ts"]});
+  const keepSessionFiles=vi.fn().mockResolvedValue({sessionId:"s1",sourceTurnId:"keep-1"});
   const openSessionFileDiff=vi.fn();
   const initialized={capabilities:supported?["session_files"]:[],protocolVersion:2,sessionId:"s1",serverVersion:"test",attachmentRoot:null};
-  const provider=new TomcatWebviewViewProvider({extensionUri:vscode.Uri.file("/extension"),getDefaultCwd:()=>"/workspace",ide:{openSessionFileDiff} as never,initialize:async()=>initialized,messenger:{onEvent:()=>({dispose(){}})} as never,sessionRouter:{getSessionFiles,getSessionFileBaseline,restoreSessionFiles} as never});
+  const provider=new TomcatWebviewViewProvider({extensionUri:vscode.Uri.file("/extension"),getDefaultCwd:()=>"/workspace",ide:{openSessionFileDiff} as never,initialize:async()=>initialized,messenger:{onEvent:()=>({dispose(){}})} as never,sessionRouter:{getSessionFiles,getSessionFileBaseline,restoreSessionFiles,keepSessionFiles} as never});
   const host=provider as any;
   host.initialized=initialized;host.stateStore.setActiveSession("s1");host.postSessionView=vi.fn();host.postState=vi.fn();host.postEvent=vi.fn();
-  return {provider,host,getSessionFiles,getSessionFileBaseline,restoreSessionFiles,openSessionFileDiff};
+  return {provider,host,getSessionFiles,getSessionFileBaseline,restoreSessionFiles,keepSessionFiles,openSessionFileDiff};
 }
 
 describe("session files host state",()=>{
@@ -54,6 +55,33 @@ describe("session files host state",()=>{
       expect(f.host.projectCurrentDrafts(f.provider.currentState()).sessionFilesSupported).toBe(true);
     }finally{f.provider.dispose();}
     const old=fixture(false);try {await old.host.refreshSessionFiles("s1");expect(old.getSessionFiles).not.toHaveBeenCalled();expect(old.host.projectCurrentDrafts(old.provider.currentState()).sessionFilesSupported).toBe(false);}finally{old.provider.dispose();}
+  });
+  it("keeps without restoring files and refreshes the new scope", async () => {
+    const f=fixture(); try {
+      f.getSessionFiles.mockResolvedValue({sessionId:"s1",sourceTurnId:"keep-1",files:[]});
+      await f.host.handleIntent({messageId:"keep",type:"keepSessionFiles",data:{sessionId:"s1",sourceTurnId:"u1",requestId:"keep"}});
+      expect(f.keepSessionFiles).toHaveBeenCalledExactlyOnceWith("s1","u1");
+      expect(f.restoreSessionFiles).not.toHaveBeenCalled();
+      expect(f.provider.currentState().sessionViews.s1.sessionFiles).toMatchObject({sourceTurnId:"keep-1",files:[]});
+      expect(f.host.postEvent).toHaveBeenCalledWith(expect.objectContaining({type:"keepSessionFilesResult",requestId:"keep",sourceTurnId:"u1",success:true}));
+      expect(f.provider.currentState().sessionViews.s1.commandPending).toBe(false);
+      expect(f.provider.currentState().sessionViews.s1.timeline).toEqual([]);
+    } finally { f.provider.dispose(); }
+  });
+  it("rejects Keep while busy and clears pending after a failed Keep", async () => {
+    const f=fixture(); try {
+      const intent={messageId:"keep",type:"keepSessionFiles",data:{sessionId:"s1",sourceTurnId:"u1",requestId:"keep"}};
+      f.host.stateStore.applySessionState({sessionId:"s1",busy:true});
+      await f.host.handleIntent(intent);
+      expect(f.keepSessionFiles).not.toHaveBeenCalled();
+      f.host.stateStore.applySessionState({sessionId:"s1",busy:false});
+      f.keepSessionFiles.mockRejectedValue(new Error("disk full"));
+      await f.host.handleIntent(intent);
+      expect(f.host.postEvent).toHaveBeenLastCalledWith(expect.objectContaining({type:"keepSessionFilesResult",success:false,error:expect.stringContaining("disk full")}));
+      expect(f.provider.currentState().sessionViews.s1.commandPending).toBe(false);
+      expect(isWebviewIntent(intent)).toBe(true);
+      expect(isWebviewIntent({...intent,data:{sessionId:"s1"}})).toBe(false);
+    } finally { f.provider.dispose(); }
   });
   it("opens the selected turn's baseline and returns file-only restore results", async () => {
     const f=fixture();try {
@@ -135,8 +163,7 @@ describe("session files host state",()=>{
     ["binary", "a.ts is a binary file, so there is no text diff."],
     ["too_large", "a.ts is too large to compare."],
     ["unavailable", "The original copy of a.ts is missing."],
-    ["unknown_path", "This editing turn is no longer available. Files has been refreshed."],
-    ["head_moved", "Git HEAD changed since this backup. View the diff only."],
+    ["unknown_path", "This change list is out of date. Files has been refreshed."],
     ["not_regular_file", "a.ts is not a regular file and cannot be undone."],
     ["Timed out waiting for response", "Unable to open diff /workspace/a.ts: Tomcat bridge is not responding. Restart Tomcat and try again."],
     ["tomcat serve exited", "Unable to open diff /workspace/a.ts: Tomcat serve exited. Restart Tomcat and try again."],
@@ -153,9 +180,8 @@ describe("session files host state",()=>{
     }finally{warning.mockRestore();f.provider.dispose();}
   });
   it.each([
-    ["head_moved", "Git HEAD changed since this backup. View the diff only."],
     ["unavailable", "The original copy of a.ts is missing."],
-    ["unknown_path", "This editing turn is no longer available. Files has been refreshed."],
+    ["unknown_path", "This change list is out of date. Files has been refreshed."],
     ["not_regular_file", "a.ts is not a regular file and cannot be undone."],
     ["busy", "Stop Tomcat or wait for it to finish to undo."],
     ["restore_failed: /workspace/a.ts: Permission denied: read-only", "Couldn't undo /workspace/a.ts: Permission denied: read-only. The list shows what's left."],

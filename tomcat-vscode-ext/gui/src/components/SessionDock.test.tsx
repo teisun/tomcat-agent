@@ -11,6 +11,9 @@ describe("SessionDock independent stack", () => {
     view.rerender(<SessionDock {...props({ files })} />);
     expect(screen.queryByRole("tablist")).toBeNull(); expect(screen.queryByRole("list")).toBeNull();
     expect(screen.getByRole("button", { name: "Undo All" })).toBeTruthy();
+    expect(screen.getByTestId("keep-all-files")).toBeTruthy();
+    expect(screen.getByTestId("undo-all-files").getAttribute("title")).toBe("Undo restorable files changed since the last Keep All");
+    expect(screen.getByRole("button", {name:"Expand files"}).getAttribute("title")).toContain("Committed changes count as kept.");
     fireEvent.click(screen.getByRole("button", { name: "Expand files" }));
     expect(screen.getByRole("list")).toBeTruthy();
   });

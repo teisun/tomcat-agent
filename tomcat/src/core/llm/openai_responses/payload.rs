@@ -172,6 +172,18 @@ pub(super) fn infer_terminal_metadata(
 /// - `Assistant` 带 `tool_calls` → 文本部分单独发一条 message item，每个 tool_call 翻成
 ///   `{ type: "function_call", call_id, name, arguments }`；
 /// - `Tool` → `{ type: "function_call_output", call_id: tool_call_id, output: text }`。
+// Flush only at a closed tool-batch boundary; never insert a carrier between results.
+fn flush_tool_media(input: &mut Vec<Value>, media: &mut Vec<Value>) {
+    if media.is_empty() {
+        return;
+    }
+    let mut content = vec![
+        json!({"type":"input_text","text":crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO}),
+    ];
+    content.append(media);
+    input.push(json!({"type":"message","role":"user","content":content}));
+}
+
 pub(super) fn build_responses_input(
     messages: &[ChatMessage],
     target: &ProviderCompatProfile,
@@ -179,6 +191,26 @@ pub(super) fn build_responses_input(
     explicit_replay: bool,
     input_start: usize,
 ) -> (Option<String>, Vec<Value>) {
+    build_responses_input_with_media_mode(
+        messages,
+        target,
+        continuity_enabled,
+        explicit_replay,
+        input_start,
+        crate::core::llm::tool_result_media::tool_result_media_mode("openai-responses"),
+    )
+}
+
+pub(super) fn build_responses_input_with_media_mode(
+    messages: &[ChatMessage],
+    target: &ProviderCompatProfile,
+    continuity_enabled: bool,
+    explicit_replay: bool,
+    input_start: usize,
+    mode: crate::core::llm::tool_result_media::ToolResultMediaMode,
+) -> (Option<String>, Vec<Value>) {
+    use crate::core::llm::tool_result_media::{media_parts, ToolResultMediaMode};
+    let mut deferred_media = Vec::new();
     let mut instructions = messages.first().and_then(|message| {
         matches!(message.role, ChatMessageRole::System)
             .then(|| extract_text(&message.content).unwrap_or_default())
@@ -215,6 +247,9 @@ pub(super) fn build_responses_input(
         if index < input_start {
             continue;
         }
+        if original.role != ChatMessageRole::Tool {
+            flush_tool_media(&mut input, &mut deferred_media);
+        }
         let action = if continuity_enabled {
             plan(target, original)
         } else {
@@ -229,9 +264,8 @@ pub(super) fn build_responses_input(
                 original.without_completion_metadata()
             }
         };
-        // System / Assistant / Tool 角色出现非 text part 时 warn 一次并丢弃非文本部分
-        // （仅 User 角色透传多模态 part；见 §3.3 角色规则）。
-        if !matches!(msg.role, ChatMessageRole::User) {
+        // User and Tool both carry media; other roles retain the existing text-only rule.
+        if !matches!(msg.role, ChatMessageRole::User | ChatMessageRole::Tool) {
             if let Some(ChatMessageContent::Parts(parts)) = &msg.content {
                 warn_drop_non_text_parts(msg.role.clone(), parts);
             }
@@ -305,7 +339,18 @@ pub(super) fn build_responses_input(
             }
             ChatMessageRole::Tool => {
                 let call_id = msg.tool_call_id.clone().unwrap_or_default();
-                let output = extract_text(&msg.content).unwrap_or_default();
+                let output =
+                    if mode == ToolResultMediaMode::Native && media_parts(&msg).next().is_some() {
+                        match &msg.content {
+                            Some(ChatMessageContent::Parts(parts)) => {
+                                Value::Array(parts.iter().map(part_to_responses_value).collect())
+                            }
+                            _ => unreachable!("media has parts"),
+                        }
+                    } else {
+                        deferred_media.extend(media_parts(&msg).map(part_to_responses_value));
+                        Value::String(crate::core::llm::tool_result_media::tool_result_text(&msg))
+                    };
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -315,6 +360,7 @@ pub(super) fn build_responses_input(
         }
     }
 
+    flush_tool_media(&mut input, &mut deferred_media);
     if continuity_enabled {
         report.emit(target);
     }

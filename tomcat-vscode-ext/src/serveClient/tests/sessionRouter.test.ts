@@ -14,6 +14,20 @@ describe("SessionRouter session files", () => {
     messenger.request.mockResolvedValueOnce({success:true,sessionId:"s",payload:{...payload,files:[{...payload.files[0],added:-1}]}});
     await expect(router.getSessionFiles("s")).rejects.toThrow("entry");
   });
+  it("keeps against the current source and validates the new source and session", async () => {
+    const messenger = { request: vi.fn().mockResolvedValue({ sessionId: "s", success: true, payload: { sessionId: "s", sourceTurnId: "keep-1" } }) };
+    const router = new SessionRouter(messenger as never, () => undefined);
+    await expect(router.keepSessionFiles("s", "u")).resolves.toEqual({ sessionId: "s", sourceTurnId: "keep-1" });
+    expect(messenger.request).toHaveBeenCalledWith({ type: "keep_session_files", sessionId: "s", sourceTurnId: "u" });
+    for (const sourceTurnId of [null, "", "u"]) {
+      messenger.request.mockResolvedValueOnce({ sessionId: "s", success: true, payload: { sessionId: "s", sourceTurnId } });
+      await expect(router.keepSessionFiles("s", "u")).rejects.toThrow("Invalid");
+    }
+    messenger.request.mockResolvedValueOnce({ sessionId: "other", success: true, payload: { sessionId: "s", sourceTurnId: "keep-2" } });
+    await expect(router.keepSessionFiles("s", "u")).rejects.toThrow("mismatch");
+    messenger.request.mockResolvedValueOnce({ sessionId: "s", success: true, payload: { ...payload, files: [{ ...payload.files[0], blockedReason: "head_moved" }] } });
+    await expect(router.getSessionFiles("s")).rejects.toThrow("entry");
+  });
   it("binds baseline and restore payloads to the exact turn/path", async () => {
     const messenger={request:vi.fn().mockResolvedValue({sessionId:"s",success:true,payload:{sessionId:"s",sourceTurnId:"u",path:"/a",existed:true,text:"before"}})};
     const router=new SessionRouter(messenger as never,()=>undefined);

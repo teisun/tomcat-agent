@@ -4,6 +4,34 @@ import { SessionFilesDock } from "./SessionFilesDock";
 import type { SessionFileView } from "../../../src/shared/sessionFiles";
 const rows: SessionFileView[] = [{ path: "/src/app.ts", status: "modified", restorable: true }, { path: "/logo.png", status: "added", restorable: true }, { path: "/skip", status: "modified", restorable: false }];
 afterEach(cleanup);
+it("Keep All precedes Undo All, skips confirmation, and correlates pending results", () => {
+  const onIntent = vi.fn();
+  const view = render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
+  const keep = screen.getByTestId("keep-all-files");
+  expect(keep.compareDocumentPosition(screen.getByTestId("undo-all-files")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(keep);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  const intent = onIntent.mock.calls[0][0];
+  expect(intent).toMatchObject({ type: "keepSessionFiles", data: { sessionId: "s", sourceTurnId: "u" } });
+  expect(keep).toHaveProperty("disabled", true);
+  expect(screen.getByTestId("undo-all-files")).toHaveProperty("disabled", true);
+  fireEvent(window, new MessageEvent("message", { data: { channel: "event", content: { type: "keepSessionFilesResult", ...intent.data, success: false, error: "disk full" } } }));
+  expect(screen.getByRole("alert").textContent).toBe("disk full");
+  expect(keep).toHaveProperty("disabled", false);
+  fireEvent.click(keep);
+  view.rerender(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "keep-1", files: [] }} busy={false} onIntent={onIntent} />);
+  expect(screen.queryByTestId("files-dock")).toBeNull();
+});
+it("Keep is disabled when busy or empty, but does not require restorable paths", () => {
+  const onIntent = vi.fn();
+  const files = { sourceTurnId: "u", files: [rows[2]] };
+  const view = render(<SessionFilesDock sessionId="s" files={files} busy onIntent={onIntent} />);
+  expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", true);
+  view.rerender(<SessionFilesDock sessionId="s" files={files} busy={false} onIntent={onIntent} />);
+  expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", false);
+  view.rerender(<SessionFilesDock sessionId="s" files={{sourceTurnId:"u",files:[],error:"failed"}} busy={false} onIntent={onIntent} />);
+  expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", true);
+});
 it("collapsed Undo All cancels without mutation and confirms only eligible exact paths", () => {
   const onIntent = vi.fn(); render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
   fireEvent.click(screen.getByRole("button", { name: "Undo All" })); expect(screen.getByRole("button", { name: "Expand files" })).toBeTruthy();

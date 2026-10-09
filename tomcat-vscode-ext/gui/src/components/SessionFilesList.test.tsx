@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionFilesList } from "./SessionFilesList";
 import type { SessionFileView } from "../../../src/shared/sessionFiles";
-const files: SessionFileView[] = [{ path: "/src/app.ts", displayPath: "src/app.ts", status: "modified", added: 12, removed: 3, restorable: true }, { path: "/tests/app.ts", status: "modified", added: 2, removed: 0, restorable: false, blockedReason: "head_moved" }];
+const files: SessionFileView[] = [{ path: "/src/app.ts", displayPath: "src/app.ts", status: "modified", added: 12, removed: 3, restorable: true }, { path: "/tests/app.ts", status: "modified", added: 2, removed: 0, restorable: false, blockedReason: "backup_missing" }];
 afterEach(cleanup);
 it("preserves file formatting and separates diff and undo callbacks", () => {
   const onIntent = vi.fn(), onUndo = vi.fn();

@@ -1077,7 +1077,18 @@ pub fn rewrite_message_text_entries_by_id(
                 if let Some(message_id) = me.id.as_deref() {
                     if let Some(new_content) = rewrite_map.get(message_id) {
                         if let Some(obj) = me.message.as_object_mut() {
-                            obj.insert("content".to_string(), serde_json::json!(new_content));
+                            if let Some(parts) = obj
+                                .get_mut("content")
+                                .and_then(serde_json::Value::as_array_mut)
+                            {
+                                parts.retain(|part| part["type"] != "input_text");
+                                parts.insert(
+                                    0,
+                                    serde_json::json!({"type":"input_text","text":new_content}),
+                                );
+                            } else {
+                                obj.insert("content".to_string(), serde_json::json!(new_content));
+                            }
                             changed += 1;
                             Some(serde_json::to_string(&TranscriptEntry::Message(me))?)
                         } else {

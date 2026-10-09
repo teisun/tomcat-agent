@@ -23,6 +23,118 @@ async fn wait_for_line(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn rewind_only_reverses_keep_when_disk_returns_before_it() {
+    use crate::core::checkpoint::{file_baselines, session_files};
+    let _key = install_test_api_key();
+    for (files, target_before_keep) in [
+        (RewindFiles::Revert, true),
+        (RewindFiles::Revert, false),
+        (RewindFiles::Keep, true),
+    ] {
+        let (state, buffer, temp, slot) =
+            build_initialized_state_with_streams(vec![vec![Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            })]])
+            .await;
+        let session = &slot.ctx.session_runtime.session;
+        let first = session
+            .append_message(json!({"role":"user","content":"change a"}))
+            .unwrap();
+        let transcript = session.transcript_path(&slot.session_id);
+        let cwd = file_baselines::session_cwd(&transcript).unwrap();
+        let a = temp.path().canonicalize().unwrap().join("a");
+        std::fs::write(&a, "original").unwrap();
+        let tracker =
+            file_baselines::TurnFileBaselines::new(&transcript, &first, cwd.clone()).unwrap();
+        let pending = tracker.prepare(a.to_str().unwrap()).unwrap();
+        std::fs::write(&a, "accepted").unwrap();
+        pending.commit();
+        let first_at = chrono::DateTime::parse_from_rfc3339(
+            &session.rewind_target(&first).unwrap().0.timestamp,
+        )
+        .unwrap()
+        .timestamp_millis();
+        file_baselines::timestamp_after(Some(first_at)).unwrap();
+        let kept = session_files::keep(&transcript, &slot.session_id, &first).unwrap();
+        let target = if target_before_keep {
+            first.clone()
+        } else {
+            let kept_at = kept
+                .source_turn_id
+                .strip_prefix("keep-")
+                .unwrap()
+                .parse::<i64>()
+                .unwrap();
+            file_baselines::timestamp_after(Some(kept_at)).unwrap();
+            let target = session
+                .append_message(json!({"role":"user","content":"change b"}))
+                .unwrap();
+            let b = temp.path().canonicalize().unwrap().join("b");
+            let tracker =
+                file_baselines::TurnFileBaselines::new(&transcript, &target, cwd).unwrap();
+            let pending = tracker.prepare(b.to_str().unwrap()).unwrap();
+            std::fs::write(b, "created").unwrap();
+            pending.commit();
+            target
+        };
+        let timestamp = chrono::DateTime::parse_from_rfc3339(
+            &session.rewind_target(&target).unwrap().0.timestamp,
+        )
+        .unwrap()
+        .timestamp_millis();
+        let root = file_baselines::session_dir(&transcript);
+        let keep_dir = root.join(&kept.source_turn_id);
+        let kept_at = kept
+            .source_turn_id
+            .strip_prefix("keep-")
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        assert_eq!(timestamp < kept_at, target_before_keep);
+        handle_command(
+            state,
+            ServeCommand::RewindAndResend {
+                id: Some("rewind-keep".into()),
+                session_id: slot.session_id.clone(),
+                message_id: target,
+                files,
+                message: RewindMessage {
+                    text: "replacement".into(),
+                    params: Default::default(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let frames = wait_for_line(&buffer, |v| v["type"] == "agent_idle").await;
+        assert!(
+            frames
+                .iter()
+                .any(|v| v["id"] == "rewind-keep" && v["success"] == true),
+            "{frames:?}"
+        );
+        let reverted_before = files == RewindFiles::Revert && target_before_keep;
+        assert_eq!(keep_dir.exists(), !reverted_before);
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            if reverted_before {
+                "original"
+            } else {
+                "accepted"
+            }
+        );
+        assert!(session_files::list(&transcript, &slot.session_id)
+            .unwrap()
+            .files
+            .is_empty());
+        if files == RewindFiles::Keep {
+            assert!(root.join(&first).exists());
+        }
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn rewind_and_resend_keeps_prefix_once_and_rejects_duplicate() {
     let _key = install_test_api_key();
     let (state, buffer, _temp, slot, requests) =
@@ -162,6 +274,58 @@ async fn failed_revert_retains_queued_follow_up_until_successful_keep_supersedes
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn tool_media_rejects_retry_and_rewind_but_does_not_block_real_retry_or_remove_keep() {
+    let _key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let session = &slot.ctx.session_runtime.session;
+    let user = session
+        .append_message(json!({"role":"user","content":"real input"}))
+        .unwrap();
+    let carrier = session
+        .append_message(json!({"role":"user","kind":"tool_media","content":[]}))
+        .unwrap();
+    let transcript = session.transcript_path(&slot.session_id);
+    let keep = crate::core::checkpoint::file_baselines::session_dir(&transcript).join("keep-100");
+    std::fs::create_dir_all(&keep).unwrap();
+    handle_command(
+        state.clone(),
+        ServeCommand::Retry {
+            id: Some("media-retry".into()),
+            session_id: Some(slot.session_id.clone()),
+            message_id: carrier.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(wait_for_line(&buffer, |v| v["id"] == "media-retry")
+        .await
+        .iter()
+        .any(|v| v["error"] == "retry_target_stale"));
+    handle_command(
+        state,
+        ServeCommand::RewindAndResend {
+            id: Some("media-rewind".into()),
+            session_id: slot.session_id.clone(),
+            message_id: carrier,
+            files: RewindFiles::Keep,
+            message: RewindMessage {
+                text: "replacement".into(),
+                params: Default::default(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(wait_for_line(&buffer, |v| v["id"] == "media-rewind")
+        .await
+        .iter()
+        .any(|v| v["error"] == "rewind_target_ineligible"));
+    assert!(session.copy_user_message_forward(&user).is_ok());
+    assert!(keep.exists(), "Retry never reverts acceptance or disk");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn rewind_eligibility_matches_preview_for_all_message_kinds_and_queues() {
     let _key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
@@ -172,6 +336,7 @@ async fn rewind_eligibility_matches_preview_for_all_message_kinds_and_queues() {
         ("normal", false, true),
         ("steering", false, false),
         ("signal", false, false),
+        ("tool_media", false, false),
         ("normal", true, false),
     ] {
         let id = session

@@ -10,6 +10,7 @@ import {
   assertWebviewPlanModeSwitchFlow,
   assertWebviewCompactControlFlow,
   assertWebviewPersistedMessageKindFlow,
+  assertWebviewToolImageThumbnailFlow,
   assertWebviewAnswerCardFlow,
   assertWebviewAddModelsFlow,
   assertWebviewBootstrapDegradedFlow,
@@ -45,6 +46,10 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  test("tool images: thumbnail, original preview and reload", async function () {
+    this.timeout(120_000);
+    await assertWebviewToolImageThumbnailFlow(await getTomcatExtensionApi());
+  });
   test("message queue docks: busy input, independent editing and Stop retention", async function () {
     this.timeout(180_000);
     await assertMessageQueueDocksFlow(await getTomcatExtensionApi());

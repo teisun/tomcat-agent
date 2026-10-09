@@ -18,6 +18,21 @@ use crate::core::llm::openai_files::OpenAiFilesClient;
 use crate::infra::events::ToolDisplay;
 
 #[test]
+fn tool_media_kind_roundtrips_without_claiming_user_input() {
+    let parts = vec![ChatMessageContentPart::image_file_id("file-test").unwrap()];
+    let media = ChatMessage::tool_media(parts.clone());
+    assert_eq!(media.kind, MessageKind::ToolMedia);
+    assert!(!media.kind.is_normal());
+    assert!(media.kind.is_replay_input());
+    assert!(media.starts_logical_turn(), "stage A preserves existing transport windows");
+    let persisted = serde_json::to_value(&media).unwrap();
+    assert_eq!(persisted["kind"], "tool_media");
+    assert_eq!(serde_json::from_value::<ChatMessage>(persisted).unwrap().kind, MessageKind::ToolMedia);
+    assert_eq!(MessageKind::from_persisted(Some("tool_media")), MessageKind::ToolMedia);
+    assert_eq!(ChatMessage::user_with_parts(parts).kind, MessageKind::Normal);
+}
+
+#[test]
 fn chat_message_constructors() {
     let u = ChatMessage::user("hello");
     assert!(matches!(u.role, ChatMessageRole::User));

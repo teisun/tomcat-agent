@@ -188,6 +188,7 @@ export interface WebviewPlanActivity {
 }
 
 export interface WebviewToolCard {
+  attachments?: WebviewAttachmentView[];
   args?: Record<string, unknown>;
   assistantMessageId?: string;
   backgroundExitCode?: number;

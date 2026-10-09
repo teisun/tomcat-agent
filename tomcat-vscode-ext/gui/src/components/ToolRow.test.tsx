@@ -30,6 +30,25 @@ describe("ToolRow", () => {
     vi.useRealTimers();
   });
 
+  it.each(["read", "bash"])("%s image card is collapsed, placeholder-only before thumbnail, and opens preview", (toolName) => {
+    const onOpenImagePreview=vi.fn();
+    const image={id:"tool:call:image:0",blobSha:"a".repeat(64),filename:"photo.png",kind:"image" as const,mimeType:"image/png",fullUri:"full:original",thumbUri:null};
+    const item=buildTool({toolName,attachments:[image],isError:true});
+    const {container,rerender}=render(<ToolRow item={item} onOpenFile={vi.fn()} onOpenImagePreview={onOpenImagePreview}/>);
+    expect(screen.getByTestId("tool-row-media-badge").getAttribute("aria-label")).toBe("1 image(s)");
+    expect(screen.queryByRole("list",{name:"Attached images"})).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByRole("list",{name:"Attached images"})).toBeTruthy();
+    expect(container.querySelector("img")).toBeNull();
+    const withThumb=buildTool({...item,attachments:[{...image,hasThumb:true,thumbUri:"thumb:ready"}]});
+    rerender(<ToolRow item={withThumb} onOpenFile={vi.fn()} onOpenImagePreview={onOpenImagePreview}/>);
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("thumb:ready");
+    fireEvent.click(container.querySelector("img")!.closest("button")!);
+    expect(onOpenImagePreview).toHaveBeenCalledWith(image.id);
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(container.querySelector("img")).toBeNull();
+  });
+
   it("read row renders FileChip and opens file on click", () => {
     const onOpenFile = vi.fn();
     render(

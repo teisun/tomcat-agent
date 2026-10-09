@@ -576,6 +576,69 @@ fn test_openai_chunk_deepseek_tool_turn_without_reasoning_does_not_emit_snapshot
 }
 
 #[test]
+fn tool_owned_media_split_keeps_deepseek_reasoning_before_wire_user() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let assistant=ChatMessage::assistant_with_tool_calls(None,vec![serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}})])
+        .with_reasoning_state(None,Some(ReasoningContinuation {
+            source_provider:"deepseek".into(),source_api:"chat_completions".into(),source_model:"deepseek-v4-pro".into(),
+            format:ReasoningFormat::DeepseekReasoningContent,opaque_payload:serde_json::json!({"reasoning_content":"inspect pixels"}),fallback_text:None,provider_refs:None,
+        }),Some(ContinuityMetadata {had_tool_call:true,replay_requirement:ReplayRequirement::SameProfileRequired}));
+    let mut tool = ChatMessage::tool("one", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+    ]));
+    let wire = transport_messages(
+        &[ChatMessage::user("look"), assistant, tool],
+        "deepseek-v4-pro",
+        true,
+        None,
+    );
+    assert_eq!(wire[1]["reasoning_content"], "inspect pixels");
+    assert_eq!(wire[2]["role"], "tool");
+    assert_eq!(wire[3]["role"], "user");
+    assert_eq!(wire[3]["content"][1]["type"], "image_url");
+}
+
+#[test]
+fn tool_owned_media_kimi_preserves_same_profile_thinking_across_real_and_wire_users() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let mut assistant = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![
+            serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}}),
+        ],
+    );
+    assistant.reasoning_continuation = Some(ReasoningContinuation {
+        source_provider: "moonshot".into(),
+        source_api: "chat_completions".into(),
+        source_model: "kimi-k3".into(),
+        format: ReasoningFormat::DeepseekReasoningContent,
+        opaque_payload: serde_json::json!({"reasoning_content":"inspect pixels"}),
+        fallback_text: None,
+        provider_refs: None,
+    });
+    let mut tool = ChatMessage::tool("one", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+    ]));
+    let messages = vec![
+        ChatMessage::user("look"),
+        assistant,
+        tool,
+        ChatMessage::user("continue"),
+    ];
+    let wire = transport_messages(&messages, "kimi-k3", true, None);
+    assert_eq!(wire[1]["reasoning_content"], "inspect pixels");
+    assert_eq!(wire[3]["content"][1]["type"], "image_url");
+    assert_eq!(wire[4]["content"], "continue");
+    let other = transport_messages(&messages, "deepseek-v4-pro", true, None);
+    assert!(
+        other[1].get("reasoning_content").is_none(),
+        "never replay Kimi thinking into another model profile"
+    );
+}
+
+#[test]
 fn deepseek_tool_turn_replays_reasoning_content() {
     let message = ChatMessage::assistant_with_tool_calls(
         None,

@@ -248,10 +248,17 @@ impl Drop for ServeChild {
 }
 
 pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
+    spawn_serve_child_with_env(fx, &[])
+}
+
+/// Explicit opt-in credentials/config for a disposable integration-test child.
+/// The default helper still strips every inherited real API key.
+pub fn spawn_serve_child_with_env(fx: &ServeFixture, extra_env: &[(&str, &str)]) -> ServeChild {
     let mut child = isolated_serve_command(&fx.home_path)
         .env("OPENAI_API_KEY", "dummy-key")
         .env("MOONSHOT_API_KEY", "dummy-key")
         .env("ANTHROPIC_API_KEY", "dummy-key")
+        .envs(extra_env.iter().copied())
         .env("RUST_LOG", "tomcat=debug,info")
         .current_dir(&fx.workspace)
         .args(["serve", "--stdio"])

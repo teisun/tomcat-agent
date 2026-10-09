@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tracing::info;
 
-use crate::core::llm::{ChatMessageContent, ChatMessageRole};
+use crate::core::llm::ChatMessageRole;
 use crate::core::session::manager::ContextState;
 use crate::infra::config::ContextConfig;
 
@@ -189,12 +189,10 @@ pub fn layer0_persist_large_results(
             continue;
         }
 
-        let content = match &mut msg.content {
-            Some(ChatMessageContent::Text(s)) => s,
-            _ => continue,
-        };
-
         let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
+        let Some(content) = msg.text_content_mut() else {
+            continue;
+        };
         if let Some((result, freed)) =
             persist_tool_result_text(content, &tool_call_id, work_dir, session_id, single_max)
         {
@@ -256,9 +254,8 @@ pub fn compact_tool_results(
             continue;
         }
 
-        let content = match &mut msg.content {
-            Some(ChatMessageContent::Text(s)) => s,
-            _ => continue,
+        let Some(content) = msg.text_content_mut() else {
+            continue;
         };
 
         if content.len() <= threshold {

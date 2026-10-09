@@ -228,6 +228,7 @@ export interface WebviewPlanActivity {
 }
 
 export interface WebviewToolCard {
+  attachments?: WebviewAttachmentView[];
   args?: Record<string, unknown>;
   assistantMessageId?: string;
   backgroundExitCode?: number;
@@ -1280,6 +1281,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       return isRecord(value.data) && isString(value.data.sessionId);
     case "openSessionFileDiff":
       return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.sourceTurnId) && isString(value.data.path);
+    case "keepSessionFiles":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.sourceTurnId)
+        && isString(value.data.requestId);
     case "restoreSessionFiles":
       return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.sourceTurnId)
         && isString(value.data.requestId) && Array.isArray(value.data.paths) && value.data.paths.length > 0

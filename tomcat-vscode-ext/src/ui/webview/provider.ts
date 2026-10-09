@@ -50,6 +50,7 @@ import {
   type DraftForkCapture,
 } from "../../shared/draftForkProtocol";
 import type { PreviewSection } from "../../shared/imagePreviewProtocol";
+import { imagePreviewSections as buildImagePreviewSections } from "./imagePreviewSections";
 import {
   createDiffPresentation,
   isDiffViewable,
@@ -506,10 +507,9 @@ function sessionFileErrorText(error: unknown, label: string, action: string): st
     case "binary": return `${label} is a binary file, so there is no text diff.`;
     case "too_large": return `${label} is too large to compare.`;
     case "unavailable": return `The original copy of ${label} is missing.`;
-    case "unknown_path": return "This editing turn is no longer available. Files has been refreshed.";
-    case "head_moved": return "Git HEAD changed since this backup. View the diff only.";
+    case "unknown_path": return "This change list is out of date. Files has been refreshed.";
     case "not_regular_file": return `${label} is not a regular file and cannot be undone.`;
-    case "busy": return "Stop Tomcat or wait for it to finish to undo.";
+    case "busy": return `Stop Tomcat or wait for it to finish to ${action === "keep file changes" ? "keep" : "undo"}.`;
   }
   if (message.startsWith("restore_failed: ")) {
     return `Couldn't undo ${message.slice("restore_failed: ".length)}. The list shows what's left.`;
@@ -2433,8 +2433,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       }
+      case "keepSessionFiles":
       case "restoreSessionFiles": {
-        const { sessionId, sourceTurnId, paths, requestId } = intent.data;
+        const { sessionId, sourceTurnId, requestId } = intent.data;
+        const keeping = intent.type === "keepSessionFiles";
+        const paths = intent.type === "restoreSessionFiles" ? intent.data.paths : [];
+        const resultType = keeping ? "keepSessionFilesResult" : "restoreSessionFilesResult";
         const session = this.peekState().sessionViews[sessionId];
         let success = false;
         let detail: string | undefined;
@@ -2442,7 +2446,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         const initialized = this.initialized;
         if (!initialized || !hasServeCapability(initialized, "session_files") || !session || this.closedFileSessions.has(sessionId)) return;
         if (session.busy || session.commandPending) {
-          await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success: false, error: "Stop Tomcat or wait for it to finish to undo." });
+          await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: `Stop Tomcat or wait for it to finish to ${keeping ? "keep" : "undo"}.` });
           return;
         }
         const targets = new Set(paths.map(sessionFileIdentity));
@@ -2450,16 +2454,17 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (dirty) {
           detail = `Save or revert unsaved changes in ${path.basename(dirty.uri.fsPath)}, then try again.`;
           void vscode.window.showWarningMessage(detail);
-          await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success: false, error: detail });
+          await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: detail });
           return;
         }
         this.stateStore.setCommandPending(sessionId, true);
         await this.postSessionView(sessionId);
         try {
-          await this.deps.sessionRouter.restoreSessionFiles(sessionId, sourceTurnId, paths);
+          if (keeping) await this.deps.sessionRouter.keepSessionFiles(sessionId, sourceTurnId);
+          else await this.deps.sessionRouter.restoreSessionFiles(sessionId, sourceTurnId, paths);
           success = true;
         } catch (error) {
-          detail = sessionFileErrorText(error, paths.length === 1 ? path.basename(paths[0]) : "the selected files", "undo file changes");
+          detail = sessionFileErrorText(error, paths.length === 1 ? path.basename(paths[0]) : "the selected files", keeping ? "keep file changes" : "undo file changes");
           void vscode.window.showWarningMessage(detail);
         } finally {
           if (!this.disposed && generation === this.fileGeneration && initialized === this.initialized && !this.closedFileSessions.has(sessionId)) {
@@ -2467,7 +2472,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.messageQueue.dispatch(sessionId);
             await this.refreshSessionFiles(sessionId);
             await this.postSessionView(sessionId);
-            await this.postEvent({ type: "restoreSessionFilesResult", sessionId, sourceTurnId, requestId, success, error: detail });
+            await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success, error: detail });
           }
         }
         return;
@@ -3632,47 +3637,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * one large bitmap and decoding all of them.
    */
   private imagePreviewSections(sessionId: string): PreviewSection[] {
-    const session = this.peekState().sessionViews[sessionId];
-    if (!session) return [];
-
-    const toPicture = (attachment: WebviewAttachmentView) => ({
-      filename: attachment.filename,
-      fullUri: attachment.fullUri ?? "",
-      id: attachment.id,
-      mimeType: attachment.mimeType,
-      thumbUri: attachment.thumbUri ?? attachment.fullUri ?? "",
-    });
-
-    const pendingPictures = (session.pendingAttachments ?? [])
-      .filter(
-        (attachment) =>
-          attachment.kind === "image" && !attachment.unavailable && attachment.fullUri,
-      )
-      .map(toPicture);
-    const pendingIds = new Set(pendingPictures.map((picture) => picture.id));
-
-    const historySections = session.timeline.flatMap((item, messageIndex) => {
-      if (item.type !== "message" || item.kind !== "user" || !item.attachments?.length) {
-        return [];
-      }
-      const pictures = item.attachments
-        .filter(
-          (attachment) =>
-            attachment.kind === "image" &&
-            !pendingIds.has(attachment.id) &&
-            !attachment.unavailable &&
-            attachment.fullUri,
-        )
-        .map(toPicture);
-      return pictures.length > 0
-        ? [{ label: `Sent images ${messageIndex + 1}`, pictures }]
-        : [];
-    });
-
-    return [
-      ...(pendingPictures.length > 0 ? [{ label: "Pending", pictures: pendingPictures }] : []),
-      ...historySections,
-    ];
+    return buildImagePreviewSections(this.peekState().sessionViews[sessionId]);
   }
 
   private async syncImagePreviewPanel(sessionId: string): Promise<void> {

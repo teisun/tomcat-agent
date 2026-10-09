@@ -77,6 +77,48 @@ fn discard_legacy_draft_dir_is_a_no_op_when_there_is_nothing_to_discard() {
 }
 
 #[test]
+fn tool_owned_media_gc_keeps_subagent_only_refs_and_namespaces_cached_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("sessions");
+    let children = temp.path().join("subagent-sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&children).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let main = mgr.attachment_store().put(b"main").unwrap();
+    let child = mgr.attachment_store().put(b"child").unwrap();
+    write_transcript_references(&dir, "same", std::slice::from_ref(&main));
+    write_transcript_references(&children, "same", std::slice::from_ref(&child));
+    for sha in [&main, &child] {
+        std::fs::File::open(mgr.attachment_store().blobs_dir().join(sha))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+    let first = mgr.run_incremental_attachment_housekeeping().unwrap();
+    assert_eq!(first.live_blob_references.transcripts_scanned, 2);
+    assert!(first.live_blob_references.shas.contains(&child));
+    assert!(first.live_blob_references.shas.contains(&main));
+    let second = mgr.run_incremental_attachment_housekeeping().unwrap();
+    assert_eq!(second.live_blob_references.transcripts_scanned, 0);
+    assert_eq!(
+        first.live_blob_references.shas,
+        second.live_blob_references.shas
+    );
+    mgr.attachment_store()
+        .sweep_orphan_blobs(&second.live_blob_references.shas, std::time::Duration::ZERO)
+        .unwrap();
+    assert!(mgr.attachment_store().exists(&child));
+    std::fs::remove_file(children.join("same.jsonl")).unwrap();
+    let last = mgr.run_incremental_attachment_housekeeping().unwrap();
+    assert!(!last.live_blob_references.shas.contains(&child));
+    assert!(last.live_blob_references.shas.contains(&main));
+    let ledger: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(".housekeeping.json")).unwrap()).unwrap();
+    assert!(ledger["sessions"].get("subagent/same").is_none());
+    assert!(ledger["sessions"].get("same").is_some());
+}
+
+#[test]
 fn collect_live_blob_shas_scans_each_transcript_once_and_ignores_sidecars() {
     let dir = fresh_dir();
     let mgr = SessionManager::new(dir.clone());

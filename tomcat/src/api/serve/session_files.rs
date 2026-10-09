@@ -51,6 +51,28 @@ pub(super) async fn read(
     Ok(())
 }
 
+pub(super) async fn keep(
+    state: Arc<ServeState>,
+    id: Option<String>,
+    session_id: String,
+    source: String,
+) -> Result<(), AppError> {
+    let Some(slot) = resolve_slot_or_error(&state, id.clone(), Some(session_id.clone())).await?
+    else {
+        return Ok(());
+    };
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&session_id);
+    spawn_session_job_with_payload(state, slot, id, async move {
+        let result = session_files::keep(&transcript, &session_id, &source)
+            .map_err(|e| (code(e), serde_json::Value::Null))?;
+        serde_json::to_value(result).map_err(|e| (e.to_string(), serde_json::Value::Null))
+    })
+}
+
 pub(super) async fn restore(
     state: Arc<ServeState>,
     id: Option<String>,
