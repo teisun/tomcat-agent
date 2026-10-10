@@ -211,6 +211,8 @@ export const zhCN = {
   "tool.images.other": "{count} 张图片",
   "tool.interruptedWrite": "写入已中断",
   "tool.interruptedEdit": "编辑已中断",
+  "tool.failedWrite": "写入失败",
+  "tool.failedEdit": "编辑失败",
   "tool.interruptedCommand": "命令已中断",
   "tool.interruptedQuestion": "提问已中断",
   "tool.interruptedNamed": "{name} 已中断",

@@ -447,6 +447,7 @@
   "agentLoop.thinkingExhausted": "This turn produced only thinking, without an answer. Automatic retries: {count}. Use Resume to retry, or switch models and retry.",
   "agentLoop.thinkingRetry": "This turn produced only thinking, without an answer. Retrying automatically.",
   "agentLoop.attachmentsDegraded": "This endpoint rejected the turn's attachments; sent as plain text instead",
+  "agentLoop.compactionFallback": "Compaction model {model} failed; compacting with the current model {fallback} instead. Reason: {reason}",
   "agentLoop.discarded.one": " (discarded incomplete output: {count} character)",
   "agentLoop.discarded.other": " (discarded incomplete output: {count} characters)",
   "agentLoop.toolImageBase64": "Invalid tool image base64: {detail}",

@@ -1514,12 +1514,7 @@ impl SessionManager {
         let turns = lines[index..]
             .iter()
             .filter_map(|line| match serde_json::from_str::<TranscriptEntry>(line) {
-                Ok(TranscriptEntry::Message(e))
-                    if e.message.get("role").and_then(serde_json::Value::as_str)
-                        == Some("user") =>
-                {
-                    e.id
-                }
+                Ok(TranscriptEntry::Message(e)) => e.id,
                 _ => None,
             })
             .collect();

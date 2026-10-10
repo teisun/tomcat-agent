@@ -89,7 +89,11 @@ export class MessageQueue {
     if (s.editingId === itemId) s.editingId = null;
     this.driver.changed(id); this.dispatch(id);
   }
-  start(id: string): void { this.session(id).phase = "running"; }
+  start(id: string): void {
+    const s = this.session(id), external = s.phase !== "starting";
+    s.phase = "running";
+    if (external && s.paused) { s.paused = false; this.driver.changed(id); }
+  }
   stop(id: string): void {
     const s = this.session(id);
     s.paused = true; s.pauseVersion++;

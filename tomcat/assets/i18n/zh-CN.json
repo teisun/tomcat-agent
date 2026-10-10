@@ -447,6 +447,7 @@
   "agentLoop.thinkingExhausted": "本轮只产生了思考、没有产生回答。已自动重试 {count} 次；请使用 Resume 重试，或换一个模型后重试。",
   "agentLoop.thinkingRetry": "本轮只产生了思考、没有产生回答。正在自动重试。",
   "agentLoop.attachmentsDegraded": "本轮附件未被当前端点接受，已按纯文本发送",
+  "agentLoop.compactionFallback": "压缩模型 {model} 调用失败，本次改用当前模型 {fallback} 压缩上下文。原因：{reason}",
   "agentLoop.discarded.one": "（已丢弃 {count} 字未完成输出）",
   "agentLoop.discarded.other": "（已丢弃 {count} 字未完成输出）",
   "agentLoop.toolImageBase64": "工具图片 base64 无效：{detail}",

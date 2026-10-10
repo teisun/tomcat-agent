@@ -393,27 +393,6 @@ pub(super) async fn run_tool_calls_with_usage(
     continuity: Option<ContinuityMetadata>,
     usage: Option<TokenUsage>,
 ) -> Result<DispatchOutcome, LoopError> {
-    if let Some(user_id) = messages
-        .iter()
-        .rev()
-        .find(|m| {
-            m.role == crate::core::llm::ChatMessageRole::User
-                && m.kind == crate::core::llm::MessageKind::Normal
-        })
-        .and_then(|m| m.msg_id.as_deref())
-    {
-        if agent
-            .file_baselines
-            .as_ref()
-            .is_none_or(|b| b.message_id != user_id || !b.keep_is_current())
-        {
-            agent.file_baselines = agent.session_manager.as_ref().and_then(|s| {
-                let path = s.current_transcript_path().ok()??;
-                let cwd = crate::core::checkpoint::file_baselines::session_cwd(&path)?;
-                crate::core::checkpoint::file_baselines::TurnFileBaselines::new(&path, user_id, cwd)
-            });
-        }
-    }
     let persisted_arguments: Vec<String> = tool_calls
         .iter()
         .map(tool_exec::persisted_tool_call_arguments)
@@ -474,6 +453,33 @@ pub(super) async fn run_tool_calls_with_usage(
                 .map_err(LoopError::Fatal)?,
         )
     };
+
+    // 须在 assistant 落盘之后：整段压缩后内存只剩摘要，本批 assistant 是唯一可回退的归属。
+    let owner_id = messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m.role == crate::core::llm::ChatMessageRole::User
+                && m.kind == crate::core::llm::MessageKind::Normal
+        })
+        .and_then(|m| m.msg_id.as_deref())
+        .or_else(|| agent.file_baselines.as_ref().map(|b| b.message_id.as_str()))
+        .or(assistant_message_id.as_deref());
+    if let Some(owner_id) = owner_id {
+        if agent
+            .file_baselines
+            .as_ref()
+            .is_none_or(|b| b.message_id != owner_id || !b.keep_is_current())
+        {
+            agent.file_baselines = agent.session_manager.as_ref().and_then(|s| {
+                let path = s.current_transcript_path().ok()??;
+                let cwd = crate::core::checkpoint::file_baselines::session_cwd(&path)?;
+                crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+                    &path, owner_id, cwd,
+                )
+            });
+        }
+    }
 
     let mut tool_results: Vec<Message> = Vec::new();
     let mut steered = false;

@@ -680,20 +680,49 @@ pub(super) async fn collapse_to_branch_summary(
 
     let compaction_provider = agent.compaction_provider();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
-    let artifacts = build_collapse_summary_artifacts(
+    let request = CollapseSummaryRequest {
+        plan_runtime: plan_runtime.as_deref(),
+        session_model: Some(session_model.as_str()),
+        cache_key: cache_key.as_deref(),
+        resolved_output_limit: agent.config.compaction_output_limit,
+        transcript_path: (!transcript_path.as_os_str().is_empty())
+            .then_some(transcript_path.as_path()),
+    };
+    let artifacts = match build_collapse_summary_artifacts(
         messages,
         compaction_provider.as_ref(),
         &agent.config.context_config.compaction_model,
-        CollapseSummaryRequest {
-            plan_runtime: plan_runtime.as_deref(),
-            session_model: Some(session_model.as_str()),
-            cache_key: cache_key.as_deref(),
-            resolved_output_limit: agent.config.compaction_output_limit,
-            transcript_path: (!transcript_path.as_os_str().is_empty())
-                .then_some(transcript_path.as_path()),
-        },
+        request,
     )
-    .await?;
+    .await
+    {
+        Ok(artifacts) => artifacts,
+        Err(error) if agent.config.context_config.compaction_model != session_model => {
+            let reason = super::error_classifier::err_snippet(&error.to_string());
+            agent.emit_event(crate::infra::events::AgentEvent::LlmNotice {
+                finish_reason: "compaction_model_fallback".to_string(),
+                message: crate::infra::i18n::tr(
+                    "agentLoop.compactionFallback",
+                    &[
+                        ("model", &agent.config.context_config.compaction_model),
+                        ("fallback", agent.catalog_id()),
+                        ("reason", &reason),
+                    ],
+                ),
+            });
+            build_collapse_summary_artifacts(
+                messages,
+                agent.llm.as_ref(),
+                &session_model,
+                CollapseSummaryRequest {
+                    resolved_output_limit: None,
+                    ..request
+                },
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(());
     };
@@ -724,6 +753,7 @@ pub(super) async fn collapse_to_branch_summary(
 }
 
 /// 生成 collapse 摘要所需的可选运行时资料，集中传递避免 helper 位置参数继续增长。
+#[derive(Clone, Copy)]
 struct CollapseSummaryRequest<'a> {
     plan_runtime: Option<&'a PlanRuntime>,
     session_model: Option<&'a str>,

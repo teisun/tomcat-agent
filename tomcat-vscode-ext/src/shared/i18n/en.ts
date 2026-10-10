@@ -210,6 +210,8 @@ export const en = {
   "tool.images.other": "{count} image(s)",
   "tool.interruptedWrite": "Interrupted write",
   "tool.interruptedEdit": "Interrupted edit",
+  "tool.failedWrite": "Write failed",
+  "tool.failedEdit": "Edit failed",
   "tool.interruptedCommand": "Interrupted command",
   "tool.interruptedQuestion": "Interrupted question",
   "tool.interruptedNamed": "Interrupted {name}",

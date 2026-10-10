@@ -286,6 +286,8 @@ still overweight?
 - **生成方式**：
   - 复用既有 structured summary 家族，直接对 **B 处理后的整份 working messages** 生成一条摘要；
   - 同一条摘要文本末尾拼接 `Execution Keepalive` 区块；
+  - 压缩模型生成摘要失败、且线上模型名不是当前会话模型时，发一次 `llm_notice(compaction_model_fallback)`，提示模型及截断到 200 字符的原因，再改用当前模型重做一次；同模型不重复请求，兜底仍失败则返回当前模型的错误。复用同一请求与既有摘要应用流程，不更改配置或记住故障状态；后台预压缩与手动 `/compact` 不加兜底。
+    <small style="color:gray">参考 `codex/codex-rs/core/src/compact_model_fallback.rs::should_retry_with_current_model`；本仓 `current_tail_guard.rs::collapse_to_branch_summary`。代价是前台等待一次当前模型全量摘要请求；若等待频繁，再考虑将兜底下沉到 preheat。</small>
   - `KeepaliveSnapshot` 来源固定为：`PlanRuntime.mode()`、`active_plan_path()`、`mode().active_plan_id()`、plan file frontmatter.todos（EXEC / Pending 取 `in_progress` 或第一个 `pending`；Planning 取 `active_planning_plan_id + session_todos`）、`ContextState.latest_plan_event`。
 - **持久化与应用**：
   - 不新增 `current_tail.split_turn` 自定义事件；
@@ -750,6 +752,9 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::collapse_handles_missing_msg_ids_without_sink` | DONE | 缺 `msg_id` 也能补锚点并继续 collapse。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_test.rs::mid_turn_guard_rewrites_tail_and_transcript` | DONE | Step 0 指针回写生效；placeholder wave 不写 marker。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_test.rs::collapse_to_branch_summary_keeps_planning_snapshot` | DONE | planning keepalive 在 collapse 后保留。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_provider_routing_test.rs::collapse_falls_back_to_session_model_when_compaction_model_fails` | DONE | 压缩模型 402 后当前模型生成摘要成功，发一次失败原因提示。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_provider_routing_test.rs::collapse_does_not_retry_when_compaction_model_is_session_model` | DONE | 同模型只请求一次、不发兜底提示，保留原始错误和工作集。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_provider_routing_test.rs::collapse_returns_session_model_error_when_fallback_also_fails` | DONE | 两边均失败时返回当前模型错误，不重复请求或应用失败摘要。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::mid_turn_guard_reduced_tail_is_recomputed_after_reload` | DONE | placeholder wave 的原文 reload 后恢复，再由 guard 重算。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::legacy_tool_results_compacted_marker_is_ignored_on_reload` | DONE | 历史 marker 可读但不再改变 hydrate 结果。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::over_budget_without_preheat_still_collapses` | DONE | 无预热且本地可回收空间不足时直接走 Collapse。 |

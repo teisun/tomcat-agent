@@ -67,6 +67,21 @@ describe("MessageQueue: volatile content and one send lane", () => {
     expect(f.send.mock.calls.map(c => c[2].text)).toEqual(["C", "A", "B", "D"]);
   });
 
+  it.each(["interrupted", "failed"] as const)("an external run unpauses after %s, then drains only after idle", async outcome => {
+    const f = fixture(); f.queue.enqueue("s", content("A"));
+    f.idle(outcome);
+    expect(f.queue.view("s").paused).toBe(true);
+    f.changed.mockClear();
+    f.conditions.busy = true; f.queue.start("s");
+    expect(f.queue.view("s").paused).toBe(false);
+    expect(f.changed).toHaveBeenCalledWith("s");
+    f.queue.dispatch("s"); await flush();
+    expect(f.send).not.toHaveBeenCalled();
+    f.idle(); await flush();
+    expect(f.send).toHaveBeenCalledTimes(1);
+    expect(f.send).toHaveBeenCalledWith("s", "prompt", expect.objectContaining({ text: "A" }));
+  });
+
   it("a failed explicit C does not unpause or execute old work", async () => {
     const f = fixture(); f.queue.enqueue("s", content("A")); f.queue.stop("s"); f.idle("interrupted");
     f.send.mockResolvedValueOnce({ success: false, error: "bad config" });
@@ -171,6 +186,9 @@ describe("MessageQueue: volatile content and one send lane", () => {
     const first = f.queue.submit("s", content("A"));
     f.queue.stop("s"); ack.resolve({success: true}); await first.completion;
     expect(f.interrupt).toHaveBeenCalledWith("s"); expect(f.queue.view("s").paused).toBe(true);
+    expect(f.queue.hasInFlight("s")).toBe(false);
+    f.queue.start("s");
+    expect(f.queue.view("s").paused).toBe(true);
   });
 
   it("serve replacement discards all sessions and ignores old attempts", async () => {

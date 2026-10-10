@@ -409,6 +409,7 @@ ToolRow
 
 1. **edit**
    - 只认 `edit / write / hashline_edit`，与 transcript 内部的 mutation 语义对齐。
+   - 完成后的编辑失败（单文件 `isError` 或批量中有失败项）默认折叠；单文件标题写“编辑失败 / 写入失败”，批量标题保留“N failed”计数。报错是给 AI 修正调用的提示，点开仍能看原文；流式期间和用户手动选择的展开状态保持原有规则。bash、read、计划工具的失败展开规则不变。
    - diff 徽章与逐行 diff 都来自核心 `ToolDisplay::File.added/removed/diff`，经 [`src/serveClient/wire.d.ts`](../../../src/serveClient/wire.d.ts) → [`src/ui/webview/state.ts`](../../../src/ui/webview/state.ts) 直达 GUI。
    - `display` 不再是 live-only 临时态：history hydration 也读同一份 `tool_display`。因此“纯单文件”和“批量单文件”reload 后仍是可点 diff 的单卡；只有真多文件 batch 才退成列表卡。
    - 有 `diff` 时，`ToolRow` 会装配 `DisclosureCard(body=DiffView)`：折叠态不是看“文件尾部 5 行”，而是围绕**第一处真实改动**取迷你预览；展开态看完整结构化 diff（最大半屏、高度内滚动）。

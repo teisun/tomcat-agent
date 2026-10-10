@@ -159,6 +159,7 @@ pub(super) struct RecordingChatLlmProvider {
     provider_name: &'static str,
     summary_text: String,
     calls: Arc<Mutex<Vec<RecordedChatCall>>>,
+    error: Option<fn() -> AppError>,
 }
 
 impl RecordingChatLlmProvider {
@@ -171,6 +172,20 @@ impl RecordingChatLlmProvider {
             provider_name,
             summary_text: summary_text.into(),
             calls,
+            error: None,
+        }
+    }
+
+    pub(super) fn failing(
+        provider_name: &'static str,
+        calls: Arc<Mutex<Vec<RecordedChatCall>>>,
+        error: fn() -> AppError,
+    ) -> Self {
+        Self {
+            provider_name,
+            summary_text: String::new(),
+            calls,
+            error: Some(error),
         }
     }
 }
@@ -191,6 +206,9 @@ impl LlmProvider for RecordingChatLlmProvider {
                 .filter_map(|message| message.text_content().map(str::to_string))
                 .collect(),
         });
+        if let Some(error) = self.error {
+            return Err(error());
+        }
         Ok(ChatResponse {
             id: None,
             choices: vec![crate::core::llm::ChatResponseChoice {

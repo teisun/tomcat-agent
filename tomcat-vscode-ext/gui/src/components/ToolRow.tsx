@@ -384,6 +384,7 @@ export function buildFlatLabel(item: WebviewToolCard, t: Translator = defaultT, 
     }
   }
   if (item.isError && isPlanTool(item)) return t("tool.failed", { name: item.toolName });
+  if (item.isError && category === "edit") return t(item.toolName === "write" ? "tool.failedWrite" : "tool.failedEdit");
   switch (item.toolName) {
     case "read":
     case "read_file": return t(running ? compactFile ? "tool.reading" : "tool.readingFile" : compactFile ? "tool.read" : "tool.readFile");
@@ -1248,6 +1249,9 @@ function shouldShowBodyByDefault(
   if (category === "command") {
     return item.isError;
   }
+  if (category === "edit") {
+    return item.status !== "complete";
+  }
   return item.isError || item.status !== "complete";
 }
 
@@ -1504,7 +1508,7 @@ function ToolRowComponent({
         {usesDisclosureCard ? (
           <DisclosureCard
             bodyTestId="tool-row-body"
-            defaultExpanded={!hasImages && (shouldExpandByDefault || hasFailedFileEntry)}
+            defaultExpanded={shouldExpandByDefault}
             header={disclosureHeader}
             leadingIcon={disclosureLeadingIcon}
             preview={

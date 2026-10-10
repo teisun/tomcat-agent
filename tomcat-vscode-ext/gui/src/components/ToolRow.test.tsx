@@ -82,6 +82,32 @@ describe("ToolRow", () => {
     expect(onOpenFile).toHaveBeenCalledWith("/workspace/README.md");
   });
 
+  it.each(["edit", "hashline_edit", "write"])("failed %s is collapsed, labels the failure and preserves the original error", toolName => {
+    const summary = "Ambiguous: old_content appears twice; enlarge the context";
+    const item = buildTool({ toolName, isError: true, args: { path: "/workspace/a.rs" }, summary });
+    render(<LocaleProvider locale="en"><ToolRow item={item} onOpenFile={vi.fn()} /></LocaleProvider>);
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(translate("en", toolName === "write" ? "tool.failedWrite" : "tool.failedEdit"));
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("a.rs");
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-result").textContent).toContain(summary);
+  });
+
+  it.each([false, true])("streaming edit failure collapses unless the user chose expansion (interacted=%s)", interacted => {
+    const item = buildTool({ toolName: "edit", status: "streaming", args: { path: "/workspace/a.rs" }, summary: "editing" });
+    const open = vi.fn();
+    const { rerender } = render(<ToolRow item={item} onOpenFile={open} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("true");
+    if (interacted) {
+      fireEvent.click(screen.getByTestId("tool-row-toggle"));
+      fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    }
+    rerender(<ToolRow item={{ ...item, status: "complete", isError: true, summary: "Ambiguous: matched twice" }} onOpenFile={open} />);
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe(interacted ? "true" : "false");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(translate("en", "tool.failedEdit"));
+  });
+
   it("edit row shows diff badges and routes the View diff action", () => {
     const onOpenDiff = vi.fn();
     const { container } = render(
@@ -1455,7 +1481,7 @@ describe("ToolRow", () => {
     );
   });
 
-  it("batch edit card summarises applied and failed files and keeps failures visible", () => {
+  it("batch edit card summarises applied and failed files and collapses failures behind the status count", () => {
     render(
       <ToolRow
         item={buildTool({
@@ -1491,7 +1517,9 @@ describe("ToolRow", () => {
       "1 applied · 1 failed",
     );
 
-    // 有失败项时默认展开：折叠态只有一个计数，看不出是哪个文件、为什么失败。
+    expect(screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("tool-row-file-entry")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
     const entries = screen.getAllByTestId("tool-row-file-entry");
     expect(entries).toHaveLength(2);
     expect(entries[1].getAttribute("data-status")).toBe("failed");

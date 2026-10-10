@@ -170,6 +170,277 @@ async fn file_baseline_dispatcher_rebuilds_for_keep_changes_only() {
     );
 }
 
+fn baseline_test_agent(root: &std::path::Path, manager: &SessionManager) -> AgentLoop {
+    let (provider, _) = RecordingStreamLlmProvider::new(vec![]);
+    AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        file_primitive(root),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            message_append_sink: Some(Arc::new(manager.clone())),
+            read_file_state: Arc::new(ReadFileState::new()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    )
+    .with_session_manager(manager.clone())
+}
+
+async fn dispatch_baseline_write(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    path: &std::path::Path,
+    content: &str,
+) {
+    for (name, args) in [
+        ("read", serde_json::json!({"path": path})),
+        (
+            "write",
+            serde_json::json!({"path": path, "content": content, "overwrite": true}),
+        ),
+    ] {
+        let calls = [crate::core::agent_loop::ToolCallInfo {
+            id: format!("{name}-{}", messages.len()),
+            name: name.into(),
+            arguments: args.to_string(),
+        }];
+        super::super::tool_dispatcher::run_tool_calls(
+            agent, messages, &calls, "", "", None, None, None, None, None, None,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+}
+
+#[tokio::test]
+async fn file_baseline_owner_survives_compacted_history() {
+    use crate::core::checkpoint::{file_baselines, session_files};
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().canonicalize().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(sessions.path().into());
+    manager
+        .create_session(
+            manager.current_session_key(),
+            Some(root.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let user_id = manager
+        .append_message(serde_json::json!({"role": "user", "content": "implement"}))
+        .unwrap();
+    let mut build = ChatMessage::user("start building");
+    build.kind = crate::core::llm::MessageKind::PlanBuild;
+    manager
+        .append_message(serde_json::to_value(&build).unwrap())
+        .unwrap();
+    // A blocking collapse leaves only the summary in memory, and the first
+    // batch after it writes before any other message has been persisted.
+    let mut messages = vec![ChatMessage::compaction_summary(
+        "compacted user input and build",
+        "summary-marker",
+    )];
+    let mut agent = baseline_test_agent(&root, &manager);
+    let path = root.join("created.txt");
+    let calls = [crate::core::agent_loop::ToolCallInfo {
+        id: "write-first".into(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path": path, "content": "created"}).to_string(),
+    }];
+    super::super::tool_dispatcher::run_tool_calls(
+        &mut agent,
+        &mut messages,
+        &calls,
+        "",
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "created");
+    let owner_id = messages[1].msg_id.clone().unwrap();
+    assert_eq!(
+        agent.file_baselines.as_ref().map(|b| b.message_id.as_str()),
+        Some(owner_id.as_str()),
+        "the batch's own assistant reply owns the baseline"
+    );
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    let files = session_files::list(&transcript, "s").unwrap();
+    assert_eq!(files.files.len(), 1);
+    assert_eq!(files.source_turn_id.as_deref(), Some(owner_id.as_str()));
+    let (target, turns) = manager.rewind_target(&user_id).unwrap();
+    assert!(turns.contains(&owner_id));
+    file_baselines::preview(
+        &transcript,
+        &turns,
+        &target.timestamp,
+        &root,
+        7,
+        chrono::Utc::now(),
+    )
+    .unwrap()
+    .restore()
+    .unwrap();
+    assert!(
+        !path.exists(),
+        "rewind restores the original absence of a new file"
+    );
+}
+
+#[tokio::test]
+async fn file_baseline_owner_after_resume_without_user_message() {
+    use crate::core::checkpoint::{file_baselines, session_files};
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().canonicalize().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(sessions.path().into());
+    manager
+        .create_session(
+            manager.current_session_key(),
+            Some(root.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let older_id = manager
+        .append_message(serde_json::json!({"role": "user", "content": "earlier"}))
+        .unwrap();
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    let older_path = root.join("earlier.txt");
+    let older =
+        file_baselines::TurnFileBaselines::new(&transcript, &older_id, root.clone()).unwrap();
+    let pending = older.prepare(older_path.to_str().unwrap()).unwrap();
+    std::fs::write(&older_path, "keep earlier work").unwrap();
+    pending.commit();
+    let user_id = manager
+        .append_message(serde_json::json!({"role": "user", "content": "continue"}))
+        .unwrap();
+    let mut assistant = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id": "prior-read", "type": "function", "function": {"name": "read", "arguments": "{}"}
+        })],
+    );
+    assistant.msg_id = Some(
+        manager
+            .append_message(serde_json::to_value(&assistant).unwrap())
+            .unwrap(),
+    );
+    let mut tool = ChatMessage::tool("prior-read", "previous tool result");
+    tool.msg_id = Some(
+        manager
+            .append_message(serde_json::to_value(&tool).unwrap())
+            .unwrap(),
+    );
+    let mut messages = vec![
+        ChatMessage::compaction_summary("history", "summary-marker"),
+        assistant,
+        tool,
+    ];
+    let mut agent = baseline_test_agent(&root, &manager);
+    let path = root.join("resumed.txt");
+    std::fs::write(&path, "original").unwrap();
+    let first_new = messages.len();
+    dispatch_baseline_write(&mut agent, &mut messages, &path, "resumed").await;
+    let owner_id = messages[first_new].msg_id.clone().unwrap();
+    assert_eq!(agent.file_baselines.as_ref().unwrap().message_id, owner_id);
+    assert_eq!(
+        session_files::list(&transcript, "s").unwrap().files.len(),
+        2
+    );
+    let (target, turns) = manager.rewind_target(&user_id).unwrap();
+    assert!(turns.contains(&owner_id));
+    assert!(!turns.contains(&older_id));
+    file_baselines::preview(
+        &transcript,
+        &turns,
+        &target.timestamp,
+        &root,
+        7,
+        chrono::Utc::now(),
+    )
+    .unwrap()
+    .restore()
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    manager
+        .rewind_user_message_with_files_restored(
+            &user_id,
+            serde_json::json!({"role": "user", "content": "replacement"}),
+            true,
+        )
+        .unwrap();
+    let backups = file_baselines::session_dir(&transcript);
+    assert!(!backups.join(&owner_id).exists());
+    assert!(backups.join(&older_id).exists());
+    assert_eq!(
+        std::fs::read_to_string(&older_path).unwrap(),
+        "keep earlier work"
+    );
+}
+
+#[tokio::test]
+async fn file_baseline_owner_sticky_within_run_after_compaction() {
+    use crate::core::checkpoint::{file_baselines, session_files};
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path().canonicalize().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(sessions.path().into());
+    manager
+        .create_session(
+            manager.current_session_key(),
+            Some(root.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let mut user = ChatMessage::user("edit files");
+    let user_id = manager
+        .append_message(serde_json::to_value(&user).unwrap())
+        .unwrap();
+    user.msg_id = Some(user_id.clone());
+    let mut agent = baseline_test_agent(&root, &manager);
+    let mut messages = vec![user];
+    let path = root.join("a.txt");
+    std::fs::write(&path, "original").unwrap();
+    dispatch_baseline_write(&mut agent, &mut messages, &path, "first").await;
+    let initial = agent.file_baselines.clone().unwrap();
+    messages[0] = ChatMessage::compaction_summary("user was compacted", "summary-marker");
+    dispatch_baseline_write(&mut agent, &mut messages, &path, "second").await;
+    let other = root.join("b.txt");
+    dispatch_baseline_write(&mut agent, &mut messages, &other, "other").await;
+    assert!(Arc::ptr_eq(
+        &initial,
+        agent.file_baselines.as_ref().unwrap()
+    ));
+    assert_eq!(
+        file_baselines::read_rows(
+            &file_baselines::session_dir(&manager.current_transcript_path().unwrap().unwrap())
+                .join(&user_id)
+        )
+        .unwrap()
+        .len(),
+        2
+    );
+    let transcript = manager.current_transcript_path().unwrap().unwrap();
+    assert_eq!(
+        session_files::list(&transcript, "s").unwrap().files.len(),
+        2
+    );
+    assert_eq!(
+        session_files::baseline(&transcript, "s", &user_id, path.to_str().unwrap())
+            .unwrap()
+            .text,
+        "original"
+    );
+    let dirs = std::fs::read_dir(file_baselines::session_dir(&transcript))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(dirs, vec![user_id]);
+}
+
 #[tokio::test]
 async fn genuine_image_only_user_keeps_file_ownership() {
     let root = tempfile::tempdir().unwrap();

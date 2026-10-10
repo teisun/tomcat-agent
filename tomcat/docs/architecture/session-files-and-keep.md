@@ -34,7 +34,7 @@ AI 一次任务常常跨好几条消息改文件：普通对话、Build 执行�
 
 - **原件（基线）**：AI 在这一轮周期里第一次动某个文件之前，这个文件的内容。Files 和 Undo 都拿它当"改动前"。
 - **登记行**：每抓一份原件，就往账本里写一行记录。
-- **备份页**：每条用户消息一个目录，里面放这条消息期间的登记行和原件副本。
+- **备份页**：按归属消息 id 命名的目录，里面放这份归属期间的登记行和原件副本。通常归属普通用户消息；压缩后的兜底归属 AI 回复。
 - **Keep 线 / 周期**：一次 Keep 在时间线上画一条线；两条线之间叫一个周期。
 
 ## 2. 解决方案
@@ -72,7 +72,7 @@ file-baselines/<会话id>/
   └─ keep-1760000000000/      ← 空目录，就是那条 Keep 线（名字里是毫秒时间）
 ```
 
-登记行归到"最近一条普通用户消息"的备份页下。Build、系统提示这类合成消息不会成为新的归属。
+登记行优先归到内存中最近一条普通用户消息的备份页下；上下文里已没有它时，沿用本轮已有归属，再不行就归到本批工具调用所在的 AI 回复。归属在这条 AI 回复落盘之后才挑选，所以整段压缩把内存清到只剩摘要时，第一批写入也有归属。归属选择不倒读聊天记录；有普通用户消息时，Build、系统提示等合成消息不抢归属。rewind 挑选目标起所有消息命名的备份页，因此 AI 回复作为兜底归属时也能还原。
 
 #### 第三步：Files 列表怎么算
 
@@ -118,7 +118,7 @@ Keep 只做一件事：**新建一个空目录 `keep-<当前毫秒>`**。不复�
                          Undo ──► 回到 v2，你的手动修改保留
 ```
 
-为了让"Keep 之后同一条消息里也会重新抓原件"，写入追踪器在两种情况下重建：换了一条用户消息，或者 Keep 发生了变化（新增或被撤销）。
+为了让"Keep 之后同一份归属里也会重新抓原件"，写入追踪器在两种情况下重建：归属消息改变，或者 Keep 发生了变化（新增或被撤销）。同一轮中途压缩掉普通用户消息时沿用已有归属，不会因新工具结果不断换页。
 
 #### 第五步：Undo
 
@@ -170,7 +170,7 @@ rewind ：按消息找，不管 Keep     ──► a@t1   （能退回最初版�
 
 正因为 rewind 不看 Keep、要能找回最初的版本，所以 **Keep 和 Undo 都不删备份**。备份只在两种情况下删除：
 
-- rewind 删掉了那几条消息：对应的备份页跟着删。
+- rewind 恢复了文件并截断目标起的消息：这些消息（不限 user 角色）对应的备份页跟着删；目标前的页不动。只回退聊天、不恢复文件时保留备份。
 - 整个会话闲置超过保留期（`checkpoint.retention_days`，默认 7 天），或会话被删除：整个会话的备份一起清理。
 
 ### 2.2 UI 效果
@@ -196,7 +196,7 @@ Keep All 无确认框；运行中、操作进行中或列表为空时禁用。Un
 - **Keep 只是一个空目录 `keep-<毫秒>`，不复制、不快照。**
   <small style="color:gray">`session_files.rs::keep`、`file_baselines.rs::latest_keep`；非空或命名不合法的目录不算 Keep；没有锁、全局序号或独立索引。</small>
 - **写入追踪器在"换消息"或"Keep 变化"时重建。**
-  <small style="color:gray">`tool_dispatcher.rs` 中 `b.message_id != user_id || !b.keep_is_current()`；保证 Keep 后同一条消息里也会重新抓原件。</small>
+  <small style="color:gray">`tool_dispatcher.rs` 中 `b.message_id != owner_id || !b.keep_is_current()`；保证 Keep 后同一份归属里也会重新抓原件。</small>
 - **新登记的时间严格晚于最近一次 Keep。**
   <small style="color:gray">`file_baselines.rs::timestamp_after`；同一毫秒会等到下一毫秒；时钟回拨直接报错 `baseline_clock_not_advanced`，不伪造时间。</small>
 - **所有动作都校验起点，起点过期就拒绝。**
@@ -229,6 +229,9 @@ Keep All 无确认框；运行中、操作进行中或列表为空时禁用。Un
 - 实测发现提交后刷新变慢（目前每个被提交的文件跑一次 `git cat-file`），这时再考虑可重建的缓存。
 
 ## 3. 测试用例清单
+
+- **压缩后的登记归属与回退**：整段压缩后内存只剩摘要，第一批就是写入时仍登记新文件，归属本批 AI 回复；无用户消息的 Resume 同样归属 AI 回复，rewind 能还原并删除目标后的备份页、保留目标前的页；本轮中途压缩后保持同一追踪器，同文件不重复登记。
+  <small style="color:gray">`tomcat/src/core/agent_loop/tests/tool_media_batch_test.rs`：`file_baseline_owner_survives_compacted_history`、`file_baseline_owner_after_resume_without_user_message`、`file_baseline_owner_sticky_within_run_after_compaction`。</small>
 
 - **跨消息累计与排序**：多条普通消息、Build、Resume 连续改文件，列表不清空；同一文件取最早原件；排序看行时间而不是备份页修改时间；旧消息被重新激活后仍取真原件。
   <small style="color:gray">`tomcat/src/core/checkpoint/tests/session_files_test.rs`：`session_file_normal_turns_accumulate_without_switching`、`session_file_same_path_across_turns_uses_earliest_baseline`、`session_file_scope_order_uses_record_at_not_manifest_mtime`、`session_file_reactivated_owner_keeps_true_earliest_baseline`；`tomcat/src/api/serve/tests/session_files_test.rs::session_files_build_resume_continue_never_reset`。</small>
