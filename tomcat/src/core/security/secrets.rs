@@ -13,6 +13,7 @@
 //! | Slack token | `xox[baprs]-[A-Za-z0-9-]{10,}` | `xoxb-1234567890-abc...` |
 //! | Generic high-entropy hex | 40+ 位连续 hex | `40` 位以上的随机 hex 串 |
 
+use crate::infra::i18n::tr;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -80,9 +81,9 @@ pub fn scan(content: &str) -> Vec<SecretHit> {
 /// 又避免把密钥原文写到日志 / 审计落库。
 pub fn format_preview(hits: &[SecretHit]) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "edit / write 内容命中 {} 条潜在敏感信息：\n",
-        hits.len()
+    out.push_str(&tr(
+        "secrets.preview",
+        &[("count", &hits.len().to_string())],
     ));
     for (i, h) in hits.iter().enumerate() {
         let mask = if h.matched.len() > 8 {
@@ -100,7 +101,10 @@ pub fn format_preview(hits: &[SecretHit]) -> String {
             mask
         ));
         if i + 1 >= 5 && hits.len() > 5 {
-            out.push_str(&format!("  …还有 {} 条已折叠\n", hits.len() - 5));
+            out.push_str(&tr(
+                "secrets.more",
+                &[("count", &(hits.len() - 5).to_string())],
+            ));
             break;
         }
     }

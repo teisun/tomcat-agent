@@ -87,7 +87,8 @@ pub(crate) fn append_subagent_transcript_hint(
     let note = if transcript_exists {
         format!("[debug transcript] {path}")
     } else {
-        "[no transcript] 子 Agent 未产生任何消息（首个 LLM 请求即失败）".to_string()
+        "[no transcript] The sub-Agent produced no messages (its first LLM request failed)"
+            .to_string()
     };
     if summary.is_empty() {
         *summary = note;
@@ -174,11 +175,12 @@ impl JsonlFileAppendSink {
                     .get("tool_call_id")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
-                        AppError::Config("tool_display message is missing tool_call_id".to_string())
+                        AppError::Config(crate::infra::i18n::tr("session.toolCallIdRequired", &[]))
                     })?;
                 let display = serde_json::from_value::<ToolDisplay>(value).map_err(|error| {
-                    AppError::Config(format!(
-                        "invalid tool_display on subagent transcript message: {error}"
+                    AppError::Config(crate::infra::i18n::tr(
+                        "session.subagentDisplayInvalid",
+                        &[("detail", &error.to_string())],
                     ))
                 })?;
                 append_tool_display(&self.path, tool_call_id, &timestamp, &display)?;

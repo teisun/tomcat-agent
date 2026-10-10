@@ -302,6 +302,26 @@ fn promote_releases_lease_and_refreshes_blob_grace_window() {
 }
 
 #[test]
+fn clear_session_reports_lease_and_directory_errors() {
+    let (_tmp, store) = setup();
+    let sha = store.put(b"shared").unwrap();
+    let directory = store.root().join("pending/session");
+    let marker = directory.join(&sha);
+    std::fs::create_dir_all(&marker).unwrap();
+    assert!(store.clear_session("session").is_err());
+    assert!(marker.is_dir());
+    assert_eq!(store.get(&sha).unwrap(), Some(b"shared".to_vec()));
+    std::fs::remove_dir(&marker).unwrap();
+    assert_eq!(store.clear_session("session").unwrap().leases_released, 0);
+    assert_eq!(store.clear_session("session").unwrap().leases_released, 0);
+    store.promote("session", &sha).unwrap(); // An absent lease remains idempotent.
+    store.mark_pending("session", &sha).unwrap();
+    assert_eq!(store.clear_session("session").unwrap().leases_released, 1);
+    std::fs::create_dir_all(directory.join("not-a-lease")).unwrap();
+    assert!(store.clear_session("session").is_err());
+}
+
+#[test]
 fn touch_pending_renews_an_expiring_lease() {
     let (_tmp, store) = setup();
     let sha = store.put(&minimal_png()).unwrap();

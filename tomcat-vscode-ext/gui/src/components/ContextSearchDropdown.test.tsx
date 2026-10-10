@@ -71,7 +71,7 @@ describe("ContextSearchDropdown", () => {
       />,
     );
 
-    expect(screen.getByTestId("context-search-loading").textContent).toContain("搜索中");
+    expect(screen.getByTestId("context-search-loading").textContent).toContain("Searching");
 
     rerender(
       <ContextSearchDropdown
@@ -83,7 +83,7 @@ describe("ContextSearchDropdown", () => {
         truncated={false}
       />,
     );
-    expect(screen.getByTestId("context-search-empty").textContent).toContain("未找到匹配文件");
+    expect(screen.getByTestId("context-search-empty").textContent).toContain("No matching files");
 
     rerender(
       <ContextSearchDropdown
@@ -96,7 +96,7 @@ describe("ContextSearchDropdown", () => {
       />,
     );
     expect(screen.getByTestId("context-search-truncated").textContent).toContain(
-      "仅显示前 2 条，输入更精确关键词",
+      "Showing the first 2 results; enter a more specific query",
     );
   });
 
@@ -108,7 +108,7 @@ describe("ContextSearchDropdown", () => {
 
     expect(screen.queryByTestId("context-search-loading")).toBeNull();
     expect(screen.getAllByTestId("context-search-option")).toHaveLength(2);
-    expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("搜索中");
+    expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("Searching");
   });
 
   it("supports keyboard navigation and selection", () => {

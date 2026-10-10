@@ -39,7 +39,7 @@ pub(in super::super) async fn handle_task_output(
     let task_id = args
         .get("task_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "task_output 缺少 task_id".to_string())?;
+        .ok_or_else(|| "task_output: missing required field `task_id`".to_string())?;
     let since = args.get("since").and_then(|v| v.as_u64());
     let block_param = args.get("block").and_then(|v| v.as_bool()).unwrap_or(false);
     let wait_ms_raw = args.get("wait_ms").and_then(|v| v.as_u64());

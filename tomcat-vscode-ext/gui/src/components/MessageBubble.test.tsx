@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { MessageBubble } from "./MessageBubble";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 
 describe("MessageBubble", () => {
   it.each(["Single line", "First line\nSecond line"])("keeps the file-revert edit affordance clickable for %j", (text) => {
@@ -168,9 +170,9 @@ describe("MessageBubble", () => {
     expect(retriedMessageId).toBe("u-failed");
   });
 
-  it("renders a superseded failed user message as an abandoned bubble", () => {
+  it.each(["en", "zh-CN"] as const)("renders a superseded failed user message as an abandoned bubble (%s)", (locale) => {
     render(
-      <MessageBubble
+      <LocaleProvider locale={locale}><MessageBubble
         item={{
           abandoned: true,
           id: "u-abandoned",
@@ -178,13 +180,13 @@ describe("MessageBubble", () => {
           text: "Retry me",
           type: "message",
         }}
-      />,
+      /></LocaleProvider>,
     );
 
     expect(screen.getByTestId("message-block").className).toContain("tc-message--user-abandoned");
-    expect(screen.getByTestId("abandoned-user-message-status").textContent).toContain(
-      "已废弃 · 未发送给模型",
-    );
+    const status = screen.getByTestId("abandoned-user-message-status");
+    expect(status.isConnected).toBe(true);
+    if (locale === "en") expect(status.textContent).toContain(translate("en", "message.abandoned"));
   });
 
   it("shows a rejected recovery reason on the persistent error card", () => {

@@ -797,6 +797,7 @@ fn append_user_message_with_structured_parts_derives_title_from_input_text() {
 
 #[test]
 fn append_user_message_persists_title_once_and_never_overwrites() {
+    let title = "帮我重构 session 列表的标题逻辑";
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -807,14 +808,11 @@ fn append_user_message_persists_title_once_and_never_overwrites() {
     // 首条 user message 写入后，title 应被派生并持久化。
     mgr.append_message(serde_json::json!({
         "role": "user",
-        "content": "帮我重构 session 列表的标题逻辑\n第二行不该进标题",
+        "content": format!("{title}\n第二行不该进标题"),
     }))
     .unwrap();
     let entry = mgr.current_session_entry().unwrap().unwrap();
-    assert_eq!(
-        entry.title.as_deref(),
-        Some("帮我重构 session 列表的标题逻辑")
-    );
+    assert_eq!(entry.title.as_deref(), Some(title));
 
     // 后续 user message 不应覆盖已有 title。
     mgr.append_message(serde_json::json!({
@@ -823,10 +821,7 @@ fn append_user_message_persists_title_once_and_never_overwrites() {
     }))
     .unwrap();
     let entry_after = mgr.current_session_entry().unwrap().unwrap();
-    assert_eq!(
-        entry_after.title.as_deref(),
-        Some("帮我重构 session 列表的标题逻辑")
-    );
+    assert_eq!(entry_after.title.as_deref(), Some(title));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

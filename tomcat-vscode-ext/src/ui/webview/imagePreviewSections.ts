@@ -15,8 +15,9 @@ export function imagePreviewSections(session: WebviewSessionSnapshot | undefined
   const history = session.timeline.flatMap((item, index) => {
     if (item.type !== "tool" && (item.type !== "message" || item.kind !== "user")) return [];
     const pictures = (item.attachments ?? []).filter(a => usable(a) && !pendingIds.has(a.id)).map(toPicture);
-    const label = item.type === "tool" ? `Tool images · ${item.summaryTitle || item.toolName}` : `Sent images ${index + 1}`;
-    return pictures.length ? [{ label, pictures }] : [];
+    const label = item.type === "tool" ? item.summaryTitle || item.toolName : String(index + 1);
+    const kind = item.type === "tool" ? "tool" as const : "sent" as const;
+    return pictures.length ? [{ kind, label, pictures }] : [];
   });
-  return [...(pending.length ? [{ label: "Pending", pictures: pending }] : []), ...history];
+  return [...(pending.length ? [{ kind: "pending" as const, label: "", pictures: pending }] : []), ...history];
 }

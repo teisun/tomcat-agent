@@ -1,5 +1,6 @@
 use crate::api::chat::ChatContext;
 use crate::core::llm::{Capabilities, LlmScene, ModelEntry};
+use crate::infra::i18n::tr;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -19,7 +20,7 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
             model_id: model_id.to_string(),
         }),
         _ => ChatCommand::UsageError {
-            message: "用法错误：/model [current|list|use <model_id>]".to_string(),
+            message: tr("slash.model.usage", &[]),
         },
     }
 }
@@ -40,25 +41,54 @@ fn run_current(ctx: &ChatContext) -> ChatCommandOutcome {
     {
         Ok(entry) => entry,
         Err(err) => {
-            println!("[model] 读取当前会话失败: {}", err);
+            println!(
+                "{}",
+                tr(
+                    "slash.sessionReadFailed",
+                    &[("command", "model"), ("detail", &err.to_string())]
+                )
+            );
             return ChatCommandOutcome::Handled;
         }
     };
     let current_model = ctx.effective_model(entry.as_ref());
-    println!("当前会话模型: {}", current_model);
-    println!("全局默认模型: {}", ctx.config.llm.default_model);
+    println!(
+        "{}",
+        tr("slash.model.current", &[("model", &current_model)])
+    );
+    println!(
+        "{}",
+        tr(
+            "slash.model.default",
+            &[("model", &ctx.config.llm.default_model)]
+        )
+    );
     match ctx.resolve_call(LlmScene::Main, entry.as_ref()) {
         Ok(resolved) => {
             println!(
-                "解析结果: api={} provider={} base_url={} key_source={}",
-                resolved.api,
-                resolved.provider,
-                resolved.base_url.as_deref().unwrap_or("(provider default)"),
-                resolved.key_source
+                "{}",
+                tr(
+                    "slash.model.resolved",
+                    &[
+                        ("api", &resolved.api),
+                        ("provider", &resolved.provider),
+                        (
+                            "url",
+                            resolved
+                                .base_url
+                                .as_deref()
+                                .unwrap_or(&tr("slash.model.providerDefault", &[]))
+                        ),
+                        ("source", &resolved.key_source),
+                    ]
+                )
             );
         }
         Err(err) => {
-            println!("解析结果: {}", err);
+            println!(
+                "{}",
+                tr("slash.model.resolveFailed", &[("detail", &err.to_string())])
+            );
         }
     }
     ChatCommandOutcome::Handled
@@ -72,14 +102,20 @@ fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
     {
         Ok(entry) => entry,
         Err(err) => {
-            println!("[model] 读取当前会话失败: {}", err);
+            println!(
+                "{}",
+                tr(
+                    "slash.sessionReadFailed",
+                    &[("command", "model"), ("detail", &err.to_string())]
+                )
+            );
             return ChatCommandOutcome::Handled;
         }
     };
     let current_model = ctx.effective_model(entry.as_ref());
     let default_model = ctx.config.llm.default_model.as_str();
 
-    println!("可用模型:");
+    println!("{}", tr("cli.model.list", &[]));
     for item in ctx.global_services.model_catalog.entries() {
         println!(
             "{}",
@@ -92,7 +128,7 @@ fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
 fn run_use(ctx: &ChatContext, model_id: &str) -> ChatCommandOutcome {
     let model_id = model_id.trim();
     if model_id.is_empty() {
-        println!("[model] 用法错误：/model use <model_id>");
+        println!("{}", tr("slash.model.useUsage", &[]));
         return ChatCommandOutcome::Handled;
     }
 
@@ -111,12 +147,22 @@ fn run_use(ctx: &ChatContext, model_id: &str) -> ChatCommandOutcome {
     {
         Ok(()) => {
             println!(
-                "[model] 当前会话已切换到 {}（api={} provider={}）",
-                entry.id, entry.api, entry.provider
+                "{}",
+                tr(
+                    "slash.model.switched",
+                    &[
+                        ("model", &entry.id),
+                        ("api", &entry.api),
+                        ("provider", &entry.provider)
+                    ]
+                )
             );
         }
         Err(err) => {
-            println!("[model] 切换失败: {}", err);
+            println!(
+                "{}",
+                tr("slash.model.switchFailed", &[("detail", &err.to_string())])
+            );
         }
     }
     ChatCommandOutcome::Handled

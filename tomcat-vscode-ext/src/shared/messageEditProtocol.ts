@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import type { PreviewRewindResponse, RewindFiles } from "../serveClient/wire";
 import type { WebviewMessageSegment, WebviewPendingAttachment, WebviewReference } from "../ui/webview/protocol";
 
@@ -19,13 +20,13 @@ export type MessageEditEvent = {
 };
 
 export function rewindErrorDetail(error: string | null | undefined, payload: unknown): string | undefined {
-  if (error === "stop_timeout") return "停止当前任务超时，尚未重发；请等任务结束后再试。";
-  if (error === "busy") return "会话仍在处理中，修改稿已保留，请稍后再试。";
-  if (error === "rewind_target_ineligible") return "这条消息不是可编辑的独立用户轮次。";
+  if (error === "stop_timeout") return t("rewind.stopTimeout");
+  if (error === "busy") return t("rewind.busy");
+  if (error === "rewind_target_ineligible") return t("rewind.ineligible");
   if (error === "revert_failed" && payload && typeof payload === "object") {
     const details = payload as { path?: unknown; reason?: unknown };
     if (typeof details.path === "string" && typeof details.reason === "string") {
-      return `恢复 ${details.path} 失败：${details.reason}。文件可能已部分恢复；修改稿已保留。`;
+      return t("rewind.restoreFailed", { path: details.path, reason: details.reason });
     }
   }
   return undefined;

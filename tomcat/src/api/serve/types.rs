@@ -325,6 +325,19 @@ pub struct SetConnectorToolEnabledResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServeCommand {
     #[serde(rename_all = "camelCase")]
+    DeleteSession {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetUiLanguage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        language: crate::infra::config::UiLanguage,
+    },
+    #[serde(rename_all = "camelCase")]
     Prompt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -857,6 +870,8 @@ impl ServeCommand {
     pub fn command_id(&self) -> Option<&str> {
         match self {
             Self::Prompt { id, .. }
+            | Self::SetUiLanguage { id, .. }
+            | Self::DeleteSession { id, .. }
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
             | Self::Resume { id, .. }
@@ -939,6 +954,7 @@ impl ServeCommand {
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
             Self::SwitchSession { session_id, .. }
+            | Self::DeleteSession { session_id, .. }
             | Self::RewindAndResend { session_id, .. }
             | Self::PreviewRewind { session_id, .. }
             | Self::GetSessionFiles { session_id, .. }
@@ -948,6 +964,7 @@ impl ServeCommand {
             | Self::RetainAttachmentLeases { session_id, .. }
             | Self::DiscardDetachedSession { session_id, .. } => Some(session_id.as_str()),
             Self::NewSession { .. }
+            | Self::SetUiLanguage { .. }
             | Self::ListModels { .. }
             | Self::UpsertModel { .. }
             | Self::RemoveModel { .. }
@@ -989,6 +1006,8 @@ impl ServeCommand {
     pub fn wire_type(&self) -> &'static str {
         match self {
             Self::Prompt { .. } => "prompt",
+            Self::SetUiLanguage { .. } => "set_ui_language",
+            Self::DeleteSession { .. } => "delete_session",
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
             Self::Resume { .. } => "resume",

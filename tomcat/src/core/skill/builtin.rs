@@ -58,7 +58,7 @@ fn materialize_file(path: &Path, contents: &[u8]) -> Result<(), AppError> {
     }
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::Config("内置 verify skill 路径缺少父目录".into()))?;
+        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("skill.builtinParent", &[])))?;
     std::fs::create_dir_all(parent)?;
     crate::infra::platform::write_file_atomic(path, contents)?;
     Ok(())

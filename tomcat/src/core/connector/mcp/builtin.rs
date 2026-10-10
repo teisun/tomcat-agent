@@ -24,7 +24,12 @@ pub fn materialize_default_mcp_json(cfg: &AppConfig) -> Result<PathBuf, AppError
             }
         }
     }))
-    .map_err(|error| AppError::Config(format!("serialize default mcp.json: {error}")))?;
+    .map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "mcp.defaultSerialize",
+            &[("detail", &error.to_string())],
+        ))
+    })?;
     crate::infra::platform::write_file_atomic(&path, &contents)?;
     Ok(path)
 }

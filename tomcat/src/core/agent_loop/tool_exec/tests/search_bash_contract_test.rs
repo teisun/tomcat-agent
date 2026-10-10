@@ -137,7 +137,10 @@ async fn edit_success_returns_bounded_current_disk_view_for_the_next_edit() {
 
     let (text, is_error, _) = execute_tool(&primitive, &None, &None, None, &first).await;
     assert!(!is_error, "edit 应成功: {text}");
-    assert!(text.contains("编辑后视图"), "必须回喂当前磁盘视图: {text}");
+    assert!(
+        text.contains("Post-edit view"),
+        "必须回喂当前磁盘视图: {text}"
+    );
     for expected in ["     1\tbefore", "     2\tnew value", "     3\tafter"] {
         assert!(text.contains(expected), "视图缺少 {expected:?}: {text}");
     }
@@ -165,6 +168,7 @@ async fn bash_and_edit_sequence_needs_no_recovery_turns_after_contract_fixes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().canonicalize().unwrap();
     let script = root.join("参数回显.mjs");
+    let argument = "含空格的参数";
     std::fs::write(&script, "process.stdout.write(process.argv[2]);\n").expect("write script");
     let file = root.join("continuation.txt");
     std::fs::write(&file, "before\nold value\nafter\n").expect("write fixture");
@@ -174,7 +178,7 @@ async fn bash_and_edit_sequence_needs_no_recovery_turns_after_contract_fixes() {
         id: "tc-contract-sequence-bash".to_string(),
         name: "bash".to_string(),
         arguments: serde_json::json!({
-            "command": format!("node {} \"含空格的参数\"", script.display()),
+            "command": format!("node {} \"{argument}\"", script.display()),
             "cwd": root.display().to_string()
         })
         .to_string(),
@@ -185,7 +189,7 @@ async fn bash_and_edit_sequence_needs_no_recovery_turns_after_contract_fixes() {
         "单一 command 的 CJK 多 token bash 应成功: {bash_text}"
     );
     assert!(
-        bash_text.contains("含空格的参数"),
+        bash_text.contains(argument),
         "bash 必须回传脚本输出: {bash_text}"
     );
 
@@ -251,7 +255,7 @@ async fn edit_notfound_returns_nearby_current_disk_view_when_an_old_line_is_uniq
     assert!(is_error, "NotFound 必须保持失败语义: {text}");
     assert!(text.contains("NotFound:"), "应保留原始错误分类: {text}");
     assert!(
-        text.contains("old_content 的就近当前视图"),
+        text.contains("Nearby current view for old_content"),
         "NotFound 应直接回喂可纠正的当前视图: {text}"
     );
     for expected in [
@@ -299,11 +303,13 @@ async fn edit_notfound_without_a_reliable_anchor_requests_a_fresh_read() {
     let (text, is_error, _) = execute_tool(&primitive, &None, &None, None, &stale).await;
     assert!(is_error, "NotFound 必须保持失败语义: {text}");
     assert!(
-        text.contains("未能从 old_content 可靠定位当前区域；请先重新 `read`"),
+        text.contains(
+            "Could not reliably locate the current area from old_content; read the file again"
+        ),
         "无法可靠定位时必须明确要求重新读取: {text}"
     );
     assert!(
-        !text.contains("old_content 的就近当前视图"),
+        !text.contains("Nearby current view for old_content"),
         "不能猜测目标区域并伪造当前视图: {text}"
     );
 }

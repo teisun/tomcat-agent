@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import { LocaleProvider } from "./i18n/LocaleProvider";
+import { translate, type Locale } from "../../src/shared/i18n";
 import type {
   HostToWebviewFrame,
   VsCodeApiLike,
@@ -10,6 +12,10 @@ import type {
   WebviewStateSnapshot,
   WebviewTimelineItem,
 } from "./types";
+
+const SECOND_TURN_INPUT = "第二轮问题";
+const THIRD_TURN_INPUT = "第三轮问题";
+const SESSION_TITLE_INPUT = "帮我重构 session 列表";
 
 vi.mock("./attachments/imagePipeline", () => ({
   prepareAttachment: vi.fn(
@@ -23,7 +29,7 @@ vi.mock("./attachments/imagePipeline", () => ({
   ),
 }));
 
-function mount(initialState?: unknown) {
+function mount(initialState?: unknown, locale?: Locale) {
   const postMessage = vi.fn();
   let persistedState = initialState;
   const vscodeApi: VsCodeApiLike = {
@@ -33,14 +39,37 @@ function mount(initialState?: unknown) {
       persistedState = state;
     }),
   };
-  const view = render(<App vscodeApi={vscodeApi} />);
+  const view = render(<LocaleProvider locale={locale}><App vscodeApi={vscodeApi} /></LocaleProvider>);
   return {
     getPersistedState: () => persistedState,
     postMessage,
     unmount: view.unmount,
+    rerenderLocale: (next: Locale) => view.rerender(<LocaleProvider locale={next}><App vscodeApi={vscodeApi} /></LocaleProvider>),
     vscodeApi,
   };
 }
+
+describe("chat locale continuity", () => {
+  it("switches chrome without changing the current session, draft or technical terms", async () => {
+    const f = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    Object.assign(snapshot.sessionViews.s1, { timeline: [], contextRatio: 0.34, activePlan: { path: "/plan.md", planId: "p", state: "planning" } });
+    await emitState({ channel: "state", content: snapshot, messageId: "locale-state" });
+    const input = screen.getByTestId("composer-input");
+    await act(async () => { fireEvent.paste(input, { clipboardData: { getData: () => "keep my unsent draft" } }); });
+    const settings = screen.getByRole("button", { name: translate("en", "settings.title") });
+    f.postMessage.mockClear();
+    f.rerenderLocale("zh-CN");
+    expect(screen.getByTestId("composer-input")).toBe(input);
+    expect(input.textContent).toBe("keep my unsent draft");
+    expect(screen.getByTestId("settings-button")).toBe(settings);
+    expect(screen.getByTestId("mode-select").textContent).toContain("Chat");
+    expect(screen.getByTestId("composer-notice-plan").textContent).toBe("Plan: planning");
+    expect(screen.getByTestId("context-ratio").textContent).toBe("Ctx 34%");
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(f.postMessage.mock.calls.some(([m]) => ["prompt", "newSession", "switchSession", "setModel"].includes(m.type))).toBe(false);
+  });
+});
 
 describe("busy input and local queue acknowledgement", () => {
   it.each(["cancel", "save"] as const)("restores the correct normal action after %s for empty/nonempty drafts and busy/idle tasks", async action => {
@@ -319,18 +348,18 @@ describe("shared slash submission and command waiting", () => {
     fireEvent.click(screen.getByTestId("send-button"));
     expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
   });
-  it("preserves attachment prompts and disables send, compact and Build for metadata-only pending", async () => {
+  it("preserves attachment prompts, disables send and Build, and keeps Settings available while pending", async () => {
     const {postMessage} = mount();
     await ready({pendingAttachments:[{id:"attachment-1",label:"a.png",blobSha:"a".repeat(64),filename:"a.png",kind:"image",mimeType:"image/png",bytes:42}]});
     await submit("/reload");
     expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
     await ready({commandPending:true, activePlan:{path:"/tmp/example.plan.md",planId:"plan-1",state:"pending"}, timeline:[{type:"tool", id:"plan-create",toolCallId:"call-plan",toolName:"create_plan",isError:false,status:"complete",summary:"created",planId:"plan-1",planPath:"/tmp/example.plan.md",planActivity:{kind:"create",stateAfter:"pending",title:"Plan"}}]});
     expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByTestId("compact-context-button") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("settings-button") as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId("composer-notice-command").textContent).toContain("处理中");
+    expect(screen.getByTestId("composer-notice-command").textContent).toContain("Processing command");
     await ready({commandPending:false});
-    expect((screen.getByTestId("compact-context-button") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("settings-button") as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
@@ -627,7 +656,7 @@ function mockScrollableTranscript({
   userTop: number;
 }) {
   const stream = screen.getByTestId("stream-container");
-  const transcript = screen.getByLabelText("active-session");
+  const transcript = screen.getByTestId("transcript");
   const userMessage = screen
     .getAllByTestId("message-block")
     .find((node) => node.getAttribute("data-kind") === "user");
@@ -704,7 +733,7 @@ function mockScrollableTranscriptUsers({
   users: Array<{ bottom: number; id: string; top: number }>;
 }) {
   const stream = screen.getByTestId("stream-container");
-  const transcript = screen.getByLabelText("active-session");
+  const transcript = screen.getByTestId("transcript");
   const userMessages = screen
     .getAllByTestId("message-block")
     .filter((node) => node.getAttribute("data-kind") === "user");
@@ -2019,7 +2048,7 @@ describe("Tomcat webview App", () => {
         .find((node) => node.textContent?.includes("Chat")) ??
         screen.getAllByTestId("mode-option")[0],
     );
-    fireEvent.click(screen.getByLabelText("添加文件/文件夹/图片"));
+    fireEvent.click(screen.getByLabelText("Add files/folders/images"));
     fireEvent.click(screen.getByTestId("attachment-chip"));
     fireEvent.click(screen.getByTestId("attachment-remove"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
@@ -2609,16 +2638,13 @@ describe("Tomcat webview App", () => {
       screen.getByTestId("connection-chip"),
     );
     const newSession = screen.getByTestId("new-session-button");
-    const compact = screen.getByTestId("compact-context-button");
-    expect(newSession.nextElementSibling).toBe(compact);
-    expect(topbar.lastElementChild).toBe(compact);
-    expect(compact.querySelector(".codicon-layers")).not.toBeNull();
-    fireEvent.click(compact);
-    expect(
-      postMessage.mock.calls.some(
-        ([message]) => message.type === "compact" && message.data?.sessionId === "s1",
-      ),
-    ).toBe(true);
+    const settings = screen.getByTestId("settings-button");
+    expect(newSession.nextElementSibling).toBe(settings);
+    expect(topbar.lastElementChild).toBe(settings);
+    expect(settings.querySelector(".codicon-settings-gear")).not.toBeNull();
+    fireEvent.click(settings);
+    expect(postMessage.mock.calls.some(([message]) => message.type === "openSettings" && message.data?.route === "general")).toBe(true);
+    expect(postMessage.mock.calls.some(([message]) => message.type === "compact")).toBe(false);
   });
 
   it("updates the thinking level select from session state", async () => {
@@ -2710,6 +2736,8 @@ describe("Tomcat webview App", () => {
   });
 
   it("shows a sticky prompt and live cluster for the active turn", async () => {
+    const prompt = "今天美国那边有什么有趣的新闻";
+    const thinking = "先整理美国热点新闻，再决定是否需要补 fetch。";
     mount();
 
     await emitState({
@@ -2743,12 +2771,12 @@ describe("Tomcat webview App", () => {
               {
                 id: "user-1",
                 kind: "user",
-                text: "今天美国那边有什么有趣的新闻",
+                text: prompt,
                 type: "message",
               },
               {
                 id: "thinking-1",
-                text: "先整理美国热点新闻，再决定是否需要补 fetch。",
+                text: thinking,
                 type: "thinking",
               },
               {
@@ -2769,7 +2797,7 @@ describe("Tomcat webview App", () => {
 
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
     expect(screen.getByTestId("thinking-summary").textContent).toContain(
-      "先整理美国热点新闻",
+      thinking.slice(0, 10),
     );
     expect(
       document.querySelector('.tc-thinking [data-testid="thinking-body"]')
@@ -2785,14 +2813,14 @@ describe("Tomcat webview App", () => {
     fireEvent.scroll(screen.getByTestId("stream-container"));
 
     expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
-      "今天美国那边有什么有趣的新闻",
+      prompt,
     );
 
     fireEvent.click(screen.getByTestId("thinking-toggle"));
     expect(
       document.querySelector('.tc-thinking [data-testid="thinking-body"]')
         ?.textContent,
-    ).toContain("先整理美国热点新闻，再决定是否需要补 fetch。");
+    ).toContain(thinking);
   });
 
   it("hides the previous sticky prompt until the newly revealed user turn scrolls past the top edge", async () => {
@@ -2843,7 +2871,7 @@ describe("Tomcat webview App", () => {
               {
                 id: "user-2",
                 kind: "user",
-                text: "第二轮问题",
+                text: SECOND_TURN_INPUT,
                 type: "message",
               },
               {
@@ -2873,9 +2901,7 @@ describe("Tomcat webview App", () => {
 
     metrics.scrollTop = 360;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
-      "第二轮问题",
-    );
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(SECOND_TURN_INPUT);
   });
 
   it("settles the previous turn and auto-switches from reveal-to-top into the current sticky prompt", async () => {
@@ -2917,7 +2943,7 @@ describe("Tomcat webview App", () => {
     });
 
     const stream = screen.getByTestId("stream-container");
-    const transcript = screen.getByLabelText("active-session");
+    const transcript = screen.getByTestId("transcript");
     let baseContentHeight = 160;
     let scrollTop = 0;
     const currentSpacerHeight = () =>
@@ -2990,7 +3016,7 @@ describe("Tomcat webview App", () => {
         messageId: "state-progress-reveal",
         timeline: [
           ...previousTurn,
-          { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+          { id: "user-2", kind: "user", text: SECOND_TURN_INPUT, type: "message" },
           {
             assistantMessageId: "assistant-2",
             id: "thinking-2",
@@ -3016,7 +3042,7 @@ describe("Tomcat webview App", () => {
         messageId: "state-progress-follow-bottom",
         timeline: [
           ...previousTurn,
-          { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+          { id: "user-2", kind: "user", text: SECOND_TURN_INPUT, type: "message" },
           {
             assistantMessageId: "assistant-2",
             id: "thinking-2",
@@ -3037,7 +3063,7 @@ describe("Tomcat webview App", () => {
       expect(screen.getByTestId("transcript-spacer").style.height).toBe("0px");
       expect(
         screen.getByTestId("sticky-user-prompt-text").textContent,
-      ).toContain("第二轮问题");
+      ).toContain(SECOND_TURN_INPUT);
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
       expect(screen.getByTestId("tool-row-label").textContent).toContain(
         "Edited",
@@ -3097,7 +3123,7 @@ describe("Tomcat webview App", () => {
               {
                 id: "user-2",
                 kind: "user",
-                text: "第二轮问题",
+                text: SECOND_TURN_INPUT,
                 type: "message",
               },
               {
@@ -3109,7 +3135,7 @@ describe("Tomcat webview App", () => {
               {
                 id: "user-3",
                 kind: "user",
-                text: "第三轮问题",
+                text: THIRD_TURN_INPUT,
                 type: "message",
               },
               {
@@ -3141,7 +3167,7 @@ describe("Tomcat webview App", () => {
     metrics.scrollTop = 460;
     fireEvent.scroll(screen.getByTestId("stream-container"));
     expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
-      "第三轮问题",
+      THIRD_TURN_INPUT,
     );
   });
 
@@ -3193,7 +3219,7 @@ describe("Tomcat webview App", () => {
               {
                 id: "user-2",
                 kind: "user",
-                text: "第二轮问题",
+                text: SECOND_TURN_INPUT,
                 type: "message",
               },
               {
@@ -3205,7 +3231,7 @@ describe("Tomcat webview App", () => {
               {
                 id: "user-3",
                 kind: "user",
-                text: "第三轮问题",
+                text: THIRD_TURN_INPUT,
                 type: "message",
               },
               {
@@ -3233,14 +3259,12 @@ describe("Tomcat webview App", () => {
     });
 
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
-      "第二轮问题",
-    );
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(SECOND_TURN_INPUT);
 
     metrics.scrollTop = 560;
     fireEvent.scroll(screen.getByTestId("stream-container"));
     expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
-      "第三轮问题",
+      THIRD_TURN_INPUT,
     );
 
     metrics.scrollTop = 0;
@@ -3371,7 +3395,7 @@ describe("Tomcat webview App", () => {
             isCurrent: true,
             ownedByThisFrontend: true,
             sessionId: "1781621492962_3ee132361e6832e6",
-            title: "帮我重构 session 列表",
+            title: SESSION_TITLE_INPUT,
             updatedAt: now,
           },
         ],
@@ -3394,7 +3418,7 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("session-select").textContent).toContain(
-      "帮我重构 session 列表",
+      SESSION_TITLE_INPUT,
     );
     expect(screen.getByTestId("session-select").textContent).not.toContain(
       "1781621492962",
@@ -3402,7 +3426,7 @@ describe("Tomcat webview App", () => {
 
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getByTestId("session-option").textContent).toContain(
-      "帮我重构 session 列表",
+      SESSION_TITLE_INPUT,
     );
   });
 
@@ -4139,7 +4163,7 @@ describe("Tomcat webview App", () => {
 
       expect(
         screen.getByTestId("context-search-loading").textContent,
-      ).toContain("搜索中");
+      ).toContain("Searching");
       expect(postMessage).not.toHaveBeenCalled();
 
       await act(async () => {
@@ -4347,7 +4371,7 @@ describe("Tomcat webview App", () => {
       expect(screen.getByTitle("src/app.ts")).toBeTruthy();
       expect(
         screen.getByTestId("context-search-loading-inline").textContent,
-      ).toContain("搜索中");
+      ).toContain("Searching");
       expect(postMessage).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -4413,7 +4437,7 @@ describe("Tomcat webview App", () => {
       });
     });
 
-    expect(await screen.findByText(/未声明 vision 能力/)).toBeTruthy();
+    expect(await screen.findByText(/does not declare vision capability/)).toBeTruthy();
     expect(
       postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
     ).toHaveLength(0);

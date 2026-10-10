@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::core::llm::{ChatMessage, ChatRequest, LlmProvider};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 
 use super::tool_summary::one_line_summary;
 
@@ -51,21 +52,25 @@ pub async fn generate_turn_summary_with_output_limit(
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    let title = match tokio::time::timeout(
+    let (title, needs_purpose) = match tokio::time::timeout(
         UTILITY_TIMEOUT,
         call_utility(&prompt, llm, model, None, resolved_output_limit),
     )
     .await
     {
-        Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
-        Ok(Ok(_)) => fallback_turn_summary(tools),
+        Ok(Ok(title)) if !title.trim().is_empty() => {
+            let title = sanitize_title(title, 10);
+            let needs_purpose = is_bare_tool_count(&title);
+            (title, needs_purpose)
+        }
+        Ok(Ok(_)) => fallback_turn_summary_with_kind(tools),
         Ok(Err(err)) => {
             tracing::warn!(
                 model,
                 err = %err,
                 "turn summary utility generation failed; keeping fallback title"
             );
-            fallback_turn_summary(tools)
+            fallback_turn_summary_with_kind(tools)
         }
         Err(err) => {
             tracing::warn!(
@@ -73,14 +78,21 @@ pub async fn generate_turn_summary_with_output_limit(
                 err = %err,
                 "turn summary utility generation timed out; keeping fallback title"
             );
-            fallback_turn_summary(tools)
+            fallback_turn_summary_with_kind(tools)
         }
     };
-    if is_bare_tool_count(&title) {
+    if needs_purpose {
         if let Some(clause) =
             generate_purpose_clause(thinking_text, tools, llm, model, resolved_output_limit).await
         {
-            return format!("Used {} tools for {clause}", tools.len());
+            return tr(
+                if tools.len() == 1 {
+                    "summary.purpose.one"
+                } else {
+                    "summary.purpose.other"
+                },
+                &[("count", &tools.len().to_string()), ("purpose", &clause)],
+            );
         }
     }
     title
@@ -244,8 +256,8 @@ pub async fn generate_command_summary_with_output_limit(
 /// 命令目的的规则回退：`Run <首个命令名>`（如 `Run git`）；无法识别时 `Ran command`。
 pub fn fallback_command_summary(command: &str) -> String {
     match first_command_binary(command) {
-        Some(bin) => format!("Run {bin}"),
-        None => "Ran command".to_string(),
+        Some(bin) => tr("summary.run", &[("command", &bin)]),
+        None => tr("summary.ranCommand", &[]),
     }
 }
 
@@ -319,26 +331,37 @@ fn split_command_segments(command: &str) -> Vec<String> {
 
 /// 规则回退：按工具类型计数拼自然语言摘要。
 pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
+    fallback_turn_summary_with_kind(tools).0
+}
+
+// Carry the enrichment decision from the branch that creates the fallback;
+// never infer it by parsing a translated title.
+fn fallback_turn_summary_with_kind(tools: &[ToolSnapshot]) -> (String, bool) {
     if tools.is_empty() {
-        return String::new();
+        return (String::new(), false);
     }
     if tools.len() == 1 {
         let t = &tools[0];
-        return match t.tool_name.as_str() {
-            "read" | "read_file" | "grep" | "search_files" => format!("Read {}", t.summary),
-            "write" | "write_file" | "edit" | "edit_file" | "str_replace" => {
-                "Edited file".to_string()
-            }
-            "bash" | "shell" | "execute_command" => "Ran shell command".to_string(),
-            "ask_question" => "Asked question".to_string(),
-            "create_plan" => "Drafted the plan".to_string(),
-            "update_plan" => "Revised the plan".to_string(),
-            "todos" => "Updated todos".to_string(),
-            "web_search" => "Searched web".to_string(),
-            "web_fetch" => "Fetched url".to_string(),
-            "search_workspace" => "Searched workspace".to_string(),
-            other => format!("Used {}", other.replace('_', " ")),
-        };
+        return (
+            match t.tool_name.as_str() {
+                "read" | "read_file" | "grep" | "search_files" => {
+                    tr("summary.read", &[("detail", &t.summary)])
+                }
+                "write" | "write_file" | "edit" | "edit_file" | "str_replace" => {
+                    tr("summary.editedFile", &[])
+                }
+                "bash" | "shell" | "execute_command" => tr("summary.shell", &[]),
+                "ask_question" => tr("summary.question", &[]),
+                "create_plan" => tr("summary.draftedPlan", &[]),
+                "update_plan" => tr("summary.revisedPlan", &[]),
+                "todos" => tr("summary.todos", &[]),
+                "web_search" => tr("summary.webSearch", &[]),
+                "web_fetch" => tr("summary.webFetch", &[]),
+                "search_workspace" => tr("summary.workspace", &[]),
+                other => tr("summary.used", &[("name", &other.replace('_', " "))]),
+            },
+            false,
+        );
     }
 
     let read_count = tools
@@ -365,20 +388,52 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
         .count();
 
     if read_count > 0 && edit_count == 0 && bash_count == 0 {
-        return format!("Reviewed {read_count} files");
+        return (
+            tr(
+                if read_count == 1 {
+                    "summary.reviewed.one"
+                } else {
+                    "summary.reviewed.other"
+                },
+                &[("count", &read_count.to_string())],
+            ),
+            false,
+        );
     }
     if edit_count > 0 && read_count == 0 && bash_count == 0 {
-        return format!("Edited {edit_count} files");
+        return (
+            tr(
+                if edit_count == 1 {
+                    "summary.edited.one"
+                } else {
+                    "summary.edited.other"
+                },
+                &[("count", &edit_count.to_string())],
+            ),
+            false,
+        );
     }
     if bash_count > 0 && read_count == 0 && edit_count == 0 {
         return if bash_count == 1 {
-            fallback_turn_summary(std::slice::from_ref(&tools[0]))
+            fallback_turn_summary_with_kind(std::slice::from_ref(&tools[0]))
         } else {
-            format!("Executed {bash_count} commands")
+            (
+                tr(
+                    "summary.commands.other",
+                    &[("count", &bash_count.to_string())],
+                ),
+                false,
+            )
         };
     }
 
-    format!("Used {} tools", tools.len())
+    (
+        tr(
+            "summary.tools.other",
+            &[("count", &tools.len().to_string())],
+        ),
+        true,
+    )
 }
 
 async fn call_utility(

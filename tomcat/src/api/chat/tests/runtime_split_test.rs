@@ -215,7 +215,11 @@ pi.registerTool({
     let message = err.to_string();
     assert!(
         message.contains("QuickJS")
-            || message.contains("JS执行错误")
+            || message.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "error.prefix.quickjs",
+                &[]
+            ))
             || message.to_ascii_lowercase().contains("memory"),
         "heap limit failure should surface as a QuickJS-side error, got: {err}"
     );

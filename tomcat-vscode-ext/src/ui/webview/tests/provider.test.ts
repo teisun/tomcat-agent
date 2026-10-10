@@ -15,6 +15,7 @@ import {
 } from "../provider";
 import type { FileDiffLine, HostToWebviewFrame, WebviewToolDisplayFile } from "../protocol";
 import type { WebviewStateStore } from "../state";
+import { setLocale, translate } from "../../../shared/i18n";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -23,7 +24,7 @@ const __testing = (
       setErrorMessageHandler(handler: ((message: string, items: string[]) => string | undefined) | undefined): void;
       setWarningMessageHandler(
         handler:
-          | ((message: string, items: string[], options?: { detail?: string; modal?: boolean }) => string | undefined)
+          | ((message: string, items: Array<string | vscode.MessageItem>, options?: { detail?: string; modal?: boolean }) => string | vscode.MessageItem | undefined)
           | undefined,
       ): void;
       registerFile(filePath: string, text: string): void;
@@ -32,6 +33,9 @@ const __testing = (
     };
   }
 ).__testing;
+
+const remoteErrorDetail = "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>";
+const remoteErrorSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-123";
 
 describe("Host message queue integration", () => {
   function setup() {
@@ -168,15 +172,16 @@ todos:
   });
 
   it("falls back to goal as title when name/title are absent", () => {
+    const title = "在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏";
     const parsed = parsePlanFrontmatter(`---
-goal: 在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏
+goal: ${title}
 draft: ...
 ---
 # body
 `);
 
     expect(parsed).toEqual({
-      title: "在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏",
+      title,
     });
   });
 
@@ -681,7 +686,7 @@ describe("error-turn recovery", () => {
         (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
       ),
     ).toMatchObject({
-      recoveryError: "这张错误卡已经过期，无法重试。请刷新会话后重新输入。",
+      recoveryError: "This error card is out of date and cannot be retried. Refresh the session and enter your request again.",
     });
     provider.dispose();
     __testing.setWarningMessageHandler(undefined);
@@ -1370,9 +1375,9 @@ describe("mutation diff stat injection", () => {
     const getMessages = vi.fn().mockResolvedValue({
       messages: [
         {
-          detail: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+          detail: remoteErrorDetail,
           id: "history-error-1",
-          summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123",
+          summary: remoteErrorSummary,
           type: "error",
         },
       ],
@@ -1408,7 +1413,7 @@ describe("mutation diff stat injection", () => {
         handleServeEvent(event: Record<string, unknown>): Promise<void>;
       }
     ).handleServeEvent({
-      error: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      error: remoteErrorDetail,
       messages: [],
       sessionId: "s1",
       type: "agent_end",
@@ -1419,7 +1424,7 @@ describe("mutation diff stat injection", () => {
       .currentState()
       .sessionViews.s1.timeline.find((item) => item.type === "message" && item.kind === "error");
     expect(errorBubble).toMatchObject({
-      text: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      text: remoteErrorDetail,
       type: "message",
     });
     expect(errorBubble && "detailText" in errorBubble ? errorBubble.detailText : undefined).toBeUndefined();
@@ -1438,8 +1443,8 @@ describe("mutation diff stat injection", () => {
       .currentState()
       .sessionViews.s1.timeline.find((item) => item.type === "message" && item.kind === "error");
     expect(errorBubble).toMatchObject({
-      detailText: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
-      text: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123",
+      detailText: remoteErrorDetail,
+      text: remoteErrorSummary,
       type: "message",
     });
 
@@ -1858,7 +1863,7 @@ describe("mutation diff stat injection", () => {
       const timeline = structuredClone(test.provider.currentState().sessionViews.s1.timeline);
       await test.openDiff();
 
-      expect(warning).toHaveBeenCalledWith("无法查看变更：这次修改没有可查看的 diff。");
+      expect(warning).toHaveBeenCalledWith("Cannot view this change: there is no diff available.");
       expect(test.showFile).not.toHaveBeenCalled();
       expect(test.openDiffPreview).not.toHaveBeenCalled();
       expect(test.provider.currentState().sessionViews.s1.timeline).toEqual(timeline);
@@ -1875,7 +1880,7 @@ describe("mutation diff stat injection", () => {
     await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
     await test.openDiff(sessionId, toolCallId);
 
-    expect(warning).toHaveBeenCalledWith("无法查看变更：这次修改没有可查看的 diff。");
+    expect(warning).toHaveBeenCalledWith("Cannot view this change: there is no diff available.");
     expect(test.openDiffPreview).not.toHaveBeenCalled();
     expect(test.showFile).not.toHaveBeenCalled();
     test.provider.dispose();
@@ -1886,7 +1891,7 @@ describe("mutation diff stat injection", () => {
     const test = createDiffProvider();
     await test.recordDiff({ file: "", kind: "file", diff: fullDiff });
     await test.openDiff();
-    expect(warning).toHaveBeenCalledWith("无法查看变更：这次修改没有可查看的 diff。");
+    expect(warning).toHaveBeenCalledWith("Cannot view this change: there is no diff available.");
     expect(test.openDiffPreview).not.toHaveBeenCalled();
     expect(test.showFile).not.toHaveBeenCalled();
     test.provider.dispose();
@@ -2248,6 +2253,32 @@ describe("plan build orchestration", () => {
     vi.restoreAllMocks();
   });
 
+  it("uses a translated native build question and accepts only the option shown", async () => {
+    const provider = createBuildProvider({});
+    setLocale("en");
+    try {
+      let shown: { message: string; detail: string | undefined; label: string | undefined } | undefined;
+      __testing.setWarningMessageHandler((message, items, options) => {
+        const item = items[0] as vscode.MessageItem;
+        shown = { message, detail: options?.detail, label: item.title };
+        return item;
+      });
+      expect(await (provider as any).confirmBuildModel("gpt-5.6", "gpt-5.4")).toBe(true);
+      expect(shown).toMatchObject({
+        message: translate("en", "host.buildQuestion", { model: "gpt-5.6" }),
+        label: translate("en", "host.continueBuild"),
+      });
+      expect(shown?.detail).toContain(translate("en", "host.buildSessionModel", { model: "gpt-5.4" }));
+      setLocale("zh-CN");
+      expect(await (provider as any).confirmBuildModel("gpt-5.6", "gpt-5.4")).toBe(true);
+      __testing.setWarningMessageHandler((_message, items) => ({ ...(items[0] as vscode.MessageItem) }));
+      expect(await (provider as any).confirmBuildModel("gpt-5.6", "gpt-5.4")).toBe(false);
+    } finally {
+      setLocale("en");
+      provider.dispose();
+    }
+  });
+
   it("buildPlan applies the configured build model before entering build mode", async () => {
     __testing.setConfiguration("tomcat.plan.buildModel", "gpt-5.4");
     const sendSetModel = vi.fn().mockResolvedValue({ success: true });
@@ -2392,6 +2423,19 @@ describe("plan preview auto-open after review", () => {
     expect(openWith).toHaveBeenCalledTimes(1);
 
     provider.dispose();
+  });
+
+  it.each(["user_skipped", "parent_abort", "not_dispatched"])("opens the saved file once for %s without changing lifecycle", async (reason) => {
+    const openWith = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(openWith, vi.fn());
+    try {
+      const planPath = "/workspace/plans/skipped.plan.md";
+      await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", state: "planning", type: "plan.create" });
+      await emit(provider, { planId: "p1", sessionId: "s1", aborted: true, reviewerStopReason: reason, summary: "not reviewed", type: "plan.review" });
+      await emit(provider, { planId: "p1", sessionId: "s1", aborted: true, reviewerStopReason: reason, type: "plan.review" });
+      expect(openWith).toHaveBeenCalledExactlyOnceWith(planPath, "tomcat.planPreview");
+      expect(provider.currentState().sessionViews.s1.activePlan?.state).toBe("planning");
+    } finally { provider.dispose(); }
   });
 
   it("does not auto-open on plan.update, path-less create, or unknown plan.review", async () => {

@@ -1,23 +1,33 @@
 use crate::core::plan_runtime::{file_store::PlanFileState, ActivePlan};
 use crate::core::session::AgentMode;
+use crate::infra::i18n::tr;
 
 fn user_prompt_label(mode: AgentMode, active_plan: Option<&ActivePlan>) -> String {
     let mode = match mode {
-        AgentMode::Chat => "Chat",
-        AgentMode::Plan => "Plan",
+        AgentMode::Chat => tr("term.mode.chat", &[]),
+        AgentMode::Plan => tr("term.mode.plan", &[]),
     };
     match active_plan.map(|plan| plan.state) {
-        Some(PlanFileState::Executing) => format!("{mode}·plan:executing"),
-        Some(PlanFileState::Pending) => format!("{mode}·plan:pending"),
-        _ => mode.to_string(),
+        Some(PlanFileState::Executing) => {
+            format!("{mode}·plan:{}", tr("term.planState.executing", &[]))
+        }
+        Some(PlanFileState::Pending) => {
+            format!("{mode}·plan:{}", tr("term.planState.pending", &[]))
+        }
+        _ => mode,
     }
 }
 
 fn agent_prompt_label(mode: AgentMode, active_plan: Option<&ActivePlan>) -> Option<String> {
-    let label = user_prompt_label(mode, active_plan);
-    match label.as_str() {
-        "Chat" => None,
-        _ => Some(label),
+    if mode == AgentMode::Chat
+        && !matches!(
+            active_plan.map(|plan| plan.state),
+            Some(PlanFileState::Executing | PlanFileState::Pending)
+        )
+    {
+        None
+    } else {
+        Some(user_prompt_label(mode, active_plan))
     }
 }
 

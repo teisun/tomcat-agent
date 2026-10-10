@@ -14,6 +14,7 @@ use std::path::Path;
 
 use crate::core::llm::catalog::{builtin_seed_entries_result, builtin_seed_toml_text};
 use crate::core::llm::{ModelCatalog, ModelEntry};
+use crate::infra::i18n::tr;
 use crate::{AppConfig, AppError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,30 +37,6 @@ pub(crate) enum ModelsTomlStatus {
     AlreadyPresent,
 }
 
-/// 文件顶部注释：仅在「新建」时写入，避免污染用户已有文件。
-const MODELS_TOML_HEADER: &str = "\
-# Tomcat 模型清单（models.toml）
-#
-# 在这里增 / 删 / 改模型，无需改代码、无需重新编译；程序启动会自动把本文件
-# 合并进内置模型表（同 id 覆盖内置，新 id 直接新增）。
-#
-# 字段说明：
-#   id              本地模型 id（选择 / 显示用）
-#   model_name      上游真实模型名；省略时默认与 id 相同
-#   api             走哪条 wire：openai | openai-responses | anthropic-messages
-#   provider        逻辑厂商；决定取哪个 <PROVIDER>_API_KEY 环境变量
-#   api_key_env     显式凭证变量名；省略时自动推断为 <PROVIDER>_API_KEY
-#   base_url        可只填 host，也可带厂商路径；程序会按 api 自动补 leaf
-#                   例如 host -> /v1/<leaf>，GLM 这类 /api/paas/v4 路径会被保留
-#   thinking_format openai | deepseek | qwen | doubao | anthropic 等
-#   capabilities    vision/files/tools/reasoning/web_search 能力位
-#   context_window     模型上下文窗口（输入历史与本轮实际输出共用）
-#   max_output_tokens  模型单轮输出上限（thinking 与正文共用）；Anthropic 请求的上限依据
-#
-# API Key 请写入 ~/.tomcat/assets/.env（0600 权限），不要回填到本文件。
-# 再加一个模型时，复制下面这段、改 id/provider/base_url 即可。
-";
-
 /// 确保 `~/.tomcat/models.toml` 存在且含全部受管预置条目。
 pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlStatus, AppError> {
     let path = ModelCatalog::default_user_path(cfg)?;
@@ -71,7 +48,11 @@ pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlSt
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(AppError::Io)?;
         }
-        let contents = format!("{MODELS_TOML_HEADER}\n{}", builtin_seed_toml_text());
+        let contents = format!(
+            "{}\n{}",
+            tr("config.modelsHeader", &[]),
+            builtin_seed_toml_text()
+        );
         write_file_atomic(&path, contents.as_bytes())?;
         return Ok(ModelsTomlStatus::Created {
             added_model_ids: seed_model_ids,

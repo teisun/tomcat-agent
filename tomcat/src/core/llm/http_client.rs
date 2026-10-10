@@ -17,7 +17,7 @@ pub(crate) fn build_http_client(
     build_outbound_client(
         options,
         OutboundClientErrorKind::Llm,
-        "创建 HTTP 客户端失败",
+        &crate::infra::i18n::tr("llm.clientFailed", &[]),
     )
 }
 

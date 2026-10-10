@@ -101,16 +101,14 @@ pub fn build_explorer_prompt(task: &ExplorerTask, workspace_root: Option<&Path>)
 pub fn contract_violations(report: &str) -> Vec<String> {
     let mut issues = Vec::new();
     if !report.contains("## Findings") {
-        issues.push("缺少 `## Findings` 小节".to_string());
+        issues.push("Missing `## Findings` section".to_string());
     }
     if !report.contains("## Conclusion") {
-        issues.push("缺少 `## Conclusion` 小节".to_string());
+        issues.push("Missing `## Conclusion` section".to_string());
     }
     if let Some(fence_lines) = fenced_block_max_lines(report) {
         if fence_lines > 3 {
-            issues.push(format!(
-                "夹带了 {fence_lines} 行代码块；Explorer 应只回 `path:line` 与结论"
-            ));
+            issues.push(format!("Report contains a {fence_lines}-line code block; Explorer should return only `path:line` references and findings"));
         }
     }
     issues
@@ -153,7 +151,7 @@ pub fn render_reports(reports: &[ExplorerReport]) -> String {
             let issues = contract_violations(&report.report);
             if !issues.is_empty() {
                 out.push_str(&format!(
-                    "(contract warning: {}; 请自行核对下面的结论)\n",
+                    "(contract warning: {}; verify the following findings yourself)\n",
                     issues.join("；")
                 ));
             }

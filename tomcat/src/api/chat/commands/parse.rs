@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use crate::api::chat::ChatContext;
+use crate::infra::i18n::tr;
 
 use super::{
     cmd_ckpt, cmd_compact, cmd_connector, cmd_context, cmd_effort, cmd_help, cmd_model, cmd_path,
@@ -142,7 +143,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         Ok(tokens) => tokens,
         Err(e) => {
             return ChatCommand::UsageError {
-                message: format!("命令参数解析失败：{}", e),
+                message: tr("slash.parseError", &[("detail", &e.to_string())]),
             };
         }
     };
@@ -214,15 +215,14 @@ pub(crate) async fn dispatch_chat_command(
 fn parse_ckpt_args(tokens: Vec<String>) -> ChatCommand {
     match tokens.as_slice() {
         [cmd] if cmd == "/ckpt" => ChatCommand::UsageError {
-            message: "用法错误：/ckpt list [--limit N] | /ckpt show <id> | /ckpt diff <id>"
-                .to_string(),
+            message: tr("slash.ckpt.usage", &[]),
         },
         [cmd, sub] if cmd == "/ckpt" && sub == "list" => ChatCommand::CkptList { limit: None },
         [cmd, sub, flag, value] if cmd == "/ckpt" && sub == "list" && flag == "--limit" => {
             match value.parse::<usize>() {
                 Ok(limit) if limit > 0 => ChatCommand::CkptList { limit: Some(limit) },
                 _ => ChatCommand::UsageError {
-                    message: "用法错误：/ckpt list [--limit N]，其中 N 必须是正整数。".to_string(),
+                    message: tr("slash.ckpt.limit", &[]),
                 },
             }
         }
@@ -233,8 +233,7 @@ fn parse_ckpt_args(tokens: Vec<String>) -> ChatCommand {
             checkpoint_id: checkpoint_id.to_string(),
         },
         _ => ChatCommand::UsageError {
-            message: "用法错误：/ckpt list [--limit N] | /ckpt show <id> | /ckpt diff <id>"
-                .to_string(),
+            message: tr("slash.ckpt.usage", &[]),
         },
     }
 }
@@ -242,7 +241,7 @@ fn parse_ckpt_args(tokens: Vec<String>) -> ChatCommand {
 fn parse_restore_args(tokens: Vec<String>) -> ChatCommand {
     if tokens.len() < 2 {
         return ChatCommand::UsageError {
-            message: "用法错误：/restore <ck_id> [--path <rel>]... [--dry-run]".to_string(),
+            message: tr("slash.restore.usage", &[]),
         };
     }
     if tokens[0] != "/restore" {
@@ -262,8 +261,7 @@ fn parse_restore_args(tokens: Vec<String>) -> ChatCommand {
             "--path" => {
                 let Some(path) = tokens.get(idx + 1) else {
                     return ChatCommand::UsageError {
-                        message: "用法错误：/restore <ck_id> [--path <rel>]... [--dry-run]"
-                            .to_string(),
+                        message: tr("slash.restore.usage", &[]),
                     };
                 };
                 paths.push(PathBuf::from(path));
@@ -271,7 +269,7 @@ fn parse_restore_args(tokens: Vec<String>) -> ChatCommand {
             }
             _ => {
                 return ChatCommand::UsageError {
-                    message: "用法错误：/restore <ck_id> [--path <rel>]... [--dry-run]".to_string(),
+                    message: tr("slash.restore.usage", &[]),
                 };
             }
         }

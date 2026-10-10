@@ -2,6 +2,7 @@ use super::shared::{render_sync_summary, SlashReply};
 use crate::api::chat::panels::{Question, QuestionOption};
 use crate::api::chat::ChatContext;
 use crate::core::package::{PackageManager, PackageVisibility};
+use crate::infra::i18n::tr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallTarget {
@@ -48,20 +49,32 @@ pub(crate) async fn run(ctx: &ChatContext, source: &str, target: InstallTarget) 
     .await;
     let outcome = match result {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(error)) => return SlashReply::error(format!("[install] 安装失败: {error}")),
-        Err(error) => return SlashReply::error(format!("[install] 安装任务失败: {error}")),
+        Ok(Err(error)) => {
+            return SlashReply::error(tr(
+                "slash.install.failed",
+                &[("detail", &error.to_string())],
+            ))
+        }
+        Err(error) => {
+            return SlashReply::error(tr(
+                "slash.install.taskFailed",
+                &[("detail", &error.to_string())],
+            ))
+        }
     };
-    let mut lines = vec![format!(
-        "[install] 已安装 package {}@{} -> {}",
-        outcome.record.name,
-        outcome.record.version,
-        target.label()
+    let mut lines = vec![tr(
+        "slash.install.done",
+        &[
+            ("name", &outcome.record.name),
+            ("version", &outcome.record.version),
+            ("target", target.label()),
+        ],
     )];
     for (kind, id) in outcome.record.resource_descriptors() {
         lines.push(format!("  - {}: {id}", kind.as_str()));
     }
     for warning in outcome.warnings {
-        lines.push(format!("  - 警告: {warning}"));
+        lines.push(tr("slash.warning", &[("detail", &warning)]));
     }
     match ctx.sync_resource_inventory().await {
         Ok(report) => {
@@ -69,8 +82,9 @@ pub(crate) async fn run(ctx: &ChatContext, source: &str, target: InstallTarget) 
             SlashReply::success(lines.join("\n"))
         }
         Err(error) => {
-            lines.push(format!(
-                "[install] 磁盘已安装，但当前会话核对失败: {error}；请执行 /reload"
+            lines.push(tr(
+                "slash.install.partial",
+                &[("detail", &error.to_string())],
             ));
             SlashReply::error(lines.join("\n"))
         }
@@ -83,8 +97,9 @@ pub(super) async fn choose_target(ctx: &ChatContext, command: &str) -> Option<In
     let result = panel
         .ask(
             vec![Question {
+                allow_custom: true,
                 id: format!("{command}-target"),
-                prompt: format!("请选择 `/{command}` 的目标层。"),
+                prompt: tr("slash.chooseTarget", &[("command", command)]),
                 options: vec![
                     QuestionOption {
                         id: "scope".into(),

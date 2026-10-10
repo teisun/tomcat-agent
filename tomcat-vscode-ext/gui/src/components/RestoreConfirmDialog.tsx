@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, type Locale, type Translator } from "../../../src/shared/i18n";
 
 import { ConfirmationDialog } from "./ConfirmationDialog";
 
@@ -7,10 +8,10 @@ function basename(filePath: string): string {
   return segments[segments.length - 1] || filePath;
 }
 
-function describeChangedFiles(changedFiles: string[]): string {
-  if (changedFiles.length === 1) return `1 changed file (${basename(changedFiles[0])})`;
-  if (changedFiles.length > 1) return `${changedFiles.length} changed files`;
-  return "your changed files";
+function describeChangedFiles(changedFiles: string[], t: Translator, locale: Locale): string {
+  if (changedFiles.length === 1) return t("checkpoint.file", { name: basename(changedFiles[0]) });
+  if (changedFiles.length > 1) return t(pluralKey(locale, "checkpoint.files.other", changedFiles.length), { count: changedFiles.length });
+  return t("checkpoint.files.unknown");
 }
 
 export function RestoreConfirmDialog({
@@ -24,16 +25,15 @@ export function RestoreConfirmDialog({
   onDontRevert(): void;
   onRevert(): void;
 }) {
-  const body = useMemo(() => {
-    const changedFilesText = describeChangedFiles(changedFiles);
-    return `Revert rolls back ${changedFilesText} to this point and clears every message after it. Don't revert keeps your current files and only clears those messages.`;
-  }, [changedFiles]);
+  const t = useT();
+  const locale = useLocale();
+  const body = t("checkpoint.confirm", { files: describeChangedFiles(changedFiles, t, locale) });
 
   return (
     <ConfirmationDialog
       actions={[
-        { id: "dont-revert", label: "Don't revert", shortcut: "⇧↵", tone: "secondary" },
-        { id: "revert", label: "Revert", shortcut: "↵", tone: "primary" },
+        { id: "dont-revert", label: t("checkpoint.keep"), shortcut: "⇧↵", tone: "secondary" },
+        { id: "revert", label: t("checkpoint.revert"), shortcut: "↵", tone: "primary" },
       ]}
       body={body}
       onAction={(actionId) => {
@@ -50,7 +50,7 @@ export function RestoreConfirmDialog({
       }}
       primaryActionId="revert"
       testId="cp-confirm"
-      title="Restore to this checkpoint?"
+      title={t("checkpoint.restore")}
     />
   );
 }

@@ -12,7 +12,7 @@ pub(in super::super) async fn handle_dispatch_agent(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let Some(runtime) = ctx.plan_runtime else {
-        return Err("dispatch_agent 不可用：PlanRuntime 未注入".into());
+        return Err("dispatch_agent is unavailable: PlanRuntime was not supplied".to_string());
     };
     let tasks = parse_tasks(args)?;
     let reports = runtime
@@ -28,7 +28,7 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<ExplorerTask>, String> {
     let raw = args
         .get("tasks")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| "dispatch_agent 需要 `tasks` 数组".to_string())?;
+        .ok_or_else(|| "dispatch_agent requires a `tasks` array".to_string())?;
     // strict schema 下模型会补空壳条目；空 prompt 的任务派出去也只是浪费一个子 Agent。
     let raw: Vec<&serde_json::Value> = raw
         .iter()
@@ -39,11 +39,11 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<ExplorerTask>, String> {
         })
         .collect();
     if raw.is_empty() {
-        return Err("dispatch_agent 的 `tasks` 不能为空".into());
+        return Err("dispatch_agent `tasks` cannot be empty".to_string());
     }
     if raw.len() > MAX_EXPLORER_TASKS {
         return Err(format!(
-            "dispatch_agent 一次最多派发 {MAX_EXPLORER_TASKS} 个任务，收到 {}",
+            "dispatch_agent allows at most {MAX_EXPLORER_TASKS} tasks per call; received {}",
             raw.len()
         ));
     }
@@ -55,7 +55,7 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<ExplorerTask>, String> {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("tasks[{idx}] 缺少非空的 `prompt`"))?;
+            .ok_or_else(|| format!("tasks[{idx}] requires a non-empty `prompt`"))?;
         let id = item
             .get("id")
             .and_then(|v| v.as_str())
@@ -65,7 +65,7 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<ExplorerTask>, String> {
             .unwrap_or_else(|| format!("task-{}", idx + 1));
         // id 是主 Agent 把结论对回问题的唯一线索，重复就失去意义。
         if !seen.insert(id.clone()) {
-            return Err(format!("tasks 里出现重复的 id `{id}`"));
+            return Err(format!("Duplicate id `{id}` in tasks"));
         }
         tasks.push(ExplorerTask {
             id,

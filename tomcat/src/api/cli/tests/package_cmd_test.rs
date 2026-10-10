@@ -24,9 +24,25 @@ fn run_uninstall_missing_agent_package_uses_shared_manual_removal_hint() {
     .unwrap_err()
     .to_string();
     assert!(
-        error.contains("package 未安装")
-            && error.contains("手动放进目录")
-            && error.contains("/reload"),
+        error.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "package.notInstalled",
+            &[
+                (
+                    "layer",
+                    &crate::core::package::PackageVisibility::Agent.to_string()
+                ),
+                ("name", "not-exist"),
+                (
+                    "plugins",
+                    &crate::infra::platform::format_home_path(&paths.plugins_dir)
+                ),
+                (
+                    "skills",
+                    &crate::infra::platform::format_home_path(&paths.skills_dir)
+                ),
+            ]
+        )),
         "{error}"
     );
     assert!(error.contains(&crate::infra::platform::format_home_path(

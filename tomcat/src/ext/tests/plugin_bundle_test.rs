@@ -89,7 +89,11 @@ fn bundle_strips_typescript_via_ts_compiler() {
 fn bundle_errors_on_missing_src_dir() {
     let dir = plugin_fixture("main.js");
     let err = bundle_plugin_from_path(dir.path()).expect_err("missing src should fail");
-    assert!(err.to_string().contains("插件源码目录不存在"));
+    assert!(err.to_string().contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "bundle.sourceMissing",
+        &[("path", "")]
+    )));
 }
 
 #[test]
@@ -100,7 +104,11 @@ fn bundle_errors_on_missing_entry() {
     std::fs::write(src.join("config.js"), "var ready = true;\n").expect("write config");
 
     let err = bundle_plugin_from_path(dir.path()).expect_err("missing entry should fail");
-    assert!(err.to_string().contains("缺少入口文件"));
+    assert!(err.to_string().contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "bundle.entryMissing",
+        &[("files", "")]
+    )));
 }
 
 #[test]
@@ -131,5 +139,9 @@ fn build_refuses_paths_outside_plugin_dir() {
     .expect("write index");
 
     let err = write_plugin_bundle_from_path(dir.path()).expect_err("sandbox rejection");
-    assert!(err.to_string().contains("逃出插件根目录"));
+    assert!(err.to_string().contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "bundle.mainOutside",
+        &[("path", "")]
+    )));
 }

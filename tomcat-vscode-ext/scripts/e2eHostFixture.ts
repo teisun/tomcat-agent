@@ -66,6 +66,10 @@ function buildFakeServeSource(
   options: HostE2eFixtureOptions,
   setupMarkerPath: string,
 ): string {
+  const reviewCopy = Object.fromEntries(["en", "zh-CN"].map(locale => {
+    const catalog = JSON.parse(readFileSync(new URL(`../../tomcat/assets/i18n/${locale}.json`, import.meta.url), "utf8")) as Record<string, string>;
+    return [locale, { prompt: catalog["plan.review.prompt"], review: catalog["plan.review.accept"], skip: catalog["plan.review.skip"] }];
+  }));
   const transcriptPlanMarkdown = JSON.stringify(`---
 name: Transcript UI Showcase
 overview: Review the transcript UI polish and confirm the merged plan card before building.
@@ -85,6 +89,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
+const reviewCopy = ${JSON.stringify(reviewCopy)};
 
 const editFilePath =
   process.env.TOMCAT_VSCODE_TEST_EDIT_FILE || ${JSON.stringify(editFilePath)};
@@ -220,6 +225,10 @@ function persistModelPreferences() {
   fs.writeFileSync(MODEL_PREFS_PATH, JSON.stringify(Object.fromEntries(modelPreferences)));
 }
 const sessions = new Map();
+let uiLanguage = "auto";
+function uiPreferences() {
+  return { language: uiLanguage, effective: uiLanguage === "auto" ? (/^zh/i.test(process.env.TOMCAT_HOST_LOCALE || "en") ? "zh-CN" : "en") : uiLanguage, envOverride: false };
+}
 const attachmentLeases = new Map();
 let sessionCounter = 1;
 let historyCounter = 1;
@@ -518,7 +527,9 @@ function listProviderKeyViews() {
 }
 
 function createSession() {
-  const sessionId = \`session-\${sessionCounter++}\`;
+  // Real session IDs are never recycled. A fake restart without a pending question
+  // drops its synthetic history, but must not collide with Host draft/retirement IDs.
+  const sessionId = \`session-\${sessionCounter++}-\${crypto.randomUUID()}\`;
   sessions.set(sessionId, touchSession({
     busy: false,
     agentMode: "chat",
@@ -1620,7 +1631,8 @@ function handlePrompt(frame) {
     }, 300);
     return;
   }
-  if (text.includes("answer card showcase")) {
+  if (text.includes("answer card showcase") || text.includes("plan review decision showcase")) {
+    const isPlanReview = text.includes("plan review decision showcase");
     // Every tool invocation owns a distinct durable id, even in the same session.
     const requestId = \`ask-answer-\${sessionId}-\${crypto.randomUUID()}\`;
     const toolCallId = \`tool-ask-\${requestId}\`;
@@ -1639,21 +1651,39 @@ function handlePrompt(frame) {
       responseEvent: \`plan.ask_question.response.\${requestId}\`,
       toolCallId,
     };
+    if (isPlanReview) {
+      const copy = reviewCopy[uiPreferences().effective];
+      request.questions = [{
+        id: "review-plan", allowCustom: false,
+        prompt: copy.prompt,
+        options: [
+          { id: "review", label: copy.review, recommended: true },
+          { id: "skip", label: copy.skip, recommended: false },
+        ],
+      }];
+      session.planId = "review-decision-" + requestId;
+      session.planPath = path.join(process.cwd(), "plans", session.planId + ".plan.md");
+      session.planState = "planning";
+      fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
+      fs.writeFileSync(session.planPath, "# Review decision\\n\\nKeep the parent plan card.\\n", "utf8");
+    }
     const pendingTool = {
-      args: { questions: request.questions },
+      args: isPlanReview
+        ? { goal: "Review decision", draft: "Keep the parent plan card", todos: [{ id: "work", content: "Implement", status: "pending" }] }
+        : { questions: request.questions },
       result: "[pending]",
       toolCallId,
-      toolName: "ask_question",
+      toolName: isPlanReview ? "create_plan" : "ask_question",
     };
-    recordHistoryAssistantWithTools(sessionId, "", [pendingTool], "Asked question");
+    recordHistoryAssistantWithTools(sessionId, "", [pendingTool], isPlanReview ? "Create review plan" : "Asked question");
     recordHistoryToolResult(sessionId, pendingTool);
-    pendingApproval = { kind: "answer-card", request, requestId, sessionId };
+    pendingApproval = { kind: "answer-card", request, requestId, sessionId, tool: pendingTool };
     persistPendingApproval();
     send({
-      args: { questions: request.questions },
+      args: pendingTool.args,
       sessionId,
       toolCallId,
-      toolName: "ask_question",
+      toolName: pendingTool.toolName,
       type: "tool_execution_start",
     });
     send({
@@ -2323,18 +2353,23 @@ function handleControlResponse(frame) {
       ? frame.payload.result
       : { answers: [], cancelled: false };
   if (pending.kind === "answer-card") {
+    const session = ensureSession(sessionId);
     const tool = {
-      args: { questions: pending.request.questions },
-      result,
-      toolCallId: pending.request.toolCallId,
-      toolName: "ask_question",
+      ...pending.tool,
+      result: pending.tool.toolName === "create_plan"
+        ? { plan_id: session.planId, path: session.planPath, state: "planning" }
+        : result,
     };
     for (const entry of ensureSession(sessionId).history) {
       if (entry.message && entry.message.tool_call_id === tool.toolCallId && entry.message.content === "[pending]") {
         entry.message.superseded = true;
       }
     }
-    emitCompletedTool(sessionId, tool);
+    if (tool.toolName === "create_plan") {
+      send({ type: "tool_execution_end", sessionId, toolCallId: tool.toolCallId, toolName: tool.toolName, result: tool.result, isError: false });
+    } else {
+      emitCompletedTool(sessionId, tool);
+    }
     clearPendingAssistantMessageId(sessionId);
     emitMessageDelta(sessionId, "Recorded your answer.");
     emitTurnEnd(sessionId, {
@@ -2445,6 +2480,7 @@ function handleCommand(frame) {
           send({
             payload: {
               attachmentRoot: ATTACHMENT_ROOT,
+              uiPreferences: uiPreferences(),
               capabilities: [
                 "prompt",
                 "steer",
@@ -2456,6 +2492,8 @@ function handleCommand(frame) {
                 "retain_attachment_leases",
                 "cache_attachment_thumbnail",
                 "discard_detached_session",
+                "set_ui_language",
+                "delete_session",
                 "new_session",
                 "switch_session",
                 "list_sessions",
@@ -2545,6 +2583,7 @@ function handleCommand(frame) {
         id: frame.id,
         payload: {
           activeSessionId,
+          sessionKey: "fake-workspace",
           sessions: [...sessions.entries()].map(([sessionId, session]) => ({
             busy: session.busy,
             isCurrent: sessionId === activeSessionId,
@@ -2704,6 +2743,26 @@ function handleCommand(frame) {
       } else {
         send(response);
       }
+      break;
+    }
+    case "set_ui_language": {
+      if (!["auto", "en", "zh-CN"].includes(frame.language)) {
+        send({ id: frame.id, type: "response", success: false, error: "invalid_language" });
+      } else {
+        uiLanguage = frame.language;
+        send({ id: frame.id, type: "response", success: true, payload: uiPreferences() });
+      }
+      break;
+    }
+    case "delete_session": {
+      if (sessions.get(frame.sessionId)?.busy) {
+        send({ id: frame.id, type: "response", success: false, sessionId: frame.sessionId, error: "busy" });
+        break;
+      }
+      sessions.delete(frame.sessionId);
+      attachmentLeases.delete(frame.sessionId);
+      if (activeSessionId === frame.sessionId) activeSessionId = sessions.keys().next().value || null;
+      send({ id: frame.id, type: "response", success: true, sessionId: frame.sessionId, payload: { warnings: [] } });
       break;
     }
     case "close_session":

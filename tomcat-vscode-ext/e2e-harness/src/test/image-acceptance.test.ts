@@ -1111,13 +1111,16 @@ suite("Tomcat image attachment visual acceptance", () => {
         messageId: "image-acceptance-retry-degrade-success",
         type: "prompt",
       });
+      const degradation = await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "llm_notice" }) as { sessionId: string; message: string };
+      assert.equal(degradation.sessionId, retryNoticeSessionId);
+      assert.equal(typeof degradation.message, "string");
       const retryNoticeSnapshot = await waitForDom(
         api,
         (snapshot) =>
           snapshot.activeSessionId === retryNoticeSessionId
             && snapshot.messageTexts.some((text) => text.includes("Retrying after error:"))
             && snapshot.messageTexts.some((text) =>
-              text.includes("本轮附件未被当前端点接受，已按纯文本发送"),
+              text.includes(degradation.message),
             )
             ? snapshot
             : undefined,
@@ -1395,7 +1398,7 @@ suite("Tomcat image attachment visual acceptance", () => {
                 text.includes("Retrying after error:"),
               ) &&
               retryNoticeSnapshot.messageTexts.some((text) =>
-                text.includes("本轮附件未被当前端点接受，已按纯文本发送"),
+                text.includes(degradation.message),
               ),
             timelineKinds: retryNoticeSnapshot.timelineKinds,
           },

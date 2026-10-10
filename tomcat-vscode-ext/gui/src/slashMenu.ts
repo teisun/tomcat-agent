@@ -1,3 +1,4 @@
+import { t as defaultT, type Translator } from "../../src/shared/i18n";
 import type { InstructionCard, SharedSlashCommand } from "../../src/serveClient/wire";
 
 export interface SlashMenuItem extends SharedSlashCommand {
@@ -11,15 +12,22 @@ export type SlashMenuRow = { type:"item"; id:string; item:SlashMenuItem; groupId
 export const COLLAPSED_GROUP_LIMIT = 3;
 const sourceOrder = (source: string) => source === ".cursor" ? 0 : source === ".agents" ? 1 : 2;
 
-export function buildSlashMenuSections(commands: readonly SharedSlashCommand[], query = "", catalog: readonly InstructionCard[] = [], leading = true): SlashMenuSection[] {
+export function buildSlashMenuSections(commands: readonly SharedSlashCommand[], query = "", catalog: readonly InstructionCard[] = [], leading = true, t: Translator = defaultT): SlashMenuSection[] {
   const matches = (name:string, description:string) => `${name} ${description}`.toLowerCase().includes(query.toLowerCase());
   const sections: SlashMenuSection[] = ["skill", "command"].map((kind) => ({
-    id: kind === "skill" ? "skills" : "commands", title:kind === "skill" ? "Skills" : "Commands",
+    id: kind === "skill" ? "skills" : "commands", title:kind === "skill" ? t("term.skills") : t("slash.commands"),
     items: catalog.filter((card) => card.kind === kind && matches(card.name,card.description))
       .sort((a,b) => a.name.localeCompare(b.name) || sourceOrder(a.source)-sourceOrder(b.source) || a.source.localeCompare(b.source))
       .map((card) => ({id:card.id,kind:card.kind,name:card.name,usage:`/${card.name}`,summary:card.description,source:card.source,path:card.path})),
   }));
-  if (leading) sections.push({id:"terminal",title:"Terminal",items:commands.filter((c) => matches(c.name,c.summary)).map((c) => ({...c,id:`terminal:${c.name}`,kind:"terminal"}))});
+  if (leading) {
+    const terminal = commands.map(command => ({ ...command, summary:
+      command.name === "reload" ? t("slash.reloadSummary")
+      : command.name === "install" ? t("slash.installSummary")
+      : command.name === "uninstall" ? t("slash.uninstallSummary") : command.summary,
+    }));
+    sections.push({ id: "terminal", title: t("slash.terminal"), items: terminal.filter(c => matches(c.name, c.summary)).map(c => ({ ...c, id: `terminal:${c.name}`, kind: "terminal" })) });
+  }
   return sections.filter((section) => section.items.length > 0);
 }
 

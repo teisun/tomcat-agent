@@ -149,7 +149,8 @@ fn rewind_and_resend_supersedes_compaction_by_marker_not_body_position() {
         serde_json::json!({"type":"branch_summary_text","forId":"before","timestamp":"t","summary":"keep"}),
         serde_json::json!({"type":"branch_summary_text","forId":"after","timestamp":"t","summary":"discard"}),
     ];
-    for row in rows {
+    std::fs::write(&path, format!("{}\n", rows[0])).unwrap();
+    for row in &rows[1..] {
         append_line(&path, &row.to_string()).unwrap();
     }
     mark_message_entries_after_anchor_superseded(&path, "target").unwrap();
@@ -402,6 +403,7 @@ fn mark_user_message_entry_superseded_by_id_is_precise_and_idempotent() {
 
 #[test]
 fn error_entry_roundtrips_as_type_error() {
+    let summary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-123";
     let entry = TranscriptEntry::Error(ErrorEntry {
         id: Some("err-1".to_string()),
         parent_id: None,
@@ -414,7 +416,7 @@ fn error_entry_roundtrips_as_type_error() {
         request_id: Some("req-123".to_string()),
         failure_kind: Some("billing".to_string()),
         failure_domain: Some("account".to_string()),
-        summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123".to_string(),
+        summary: summary.to_string(),
         detail: "API 错误 403: <html>...</html>".to_string(),
     });
 
@@ -425,7 +427,7 @@ fn error_entry_roundtrips_as_type_error() {
     );
     assert_eq!(
         json.get("summary").and_then(|value| value.as_str()),
-        Some("API 错误 403 · aigateway.sunmi.com · Request-Id req-123")
+        Some(summary)
     );
 
     let roundtrip: TranscriptEntry = serde_json::from_value(json).unwrap();

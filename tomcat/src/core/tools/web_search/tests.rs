@@ -9,6 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::core::llm::ModelCatalog;
 use crate::ext::PluginEngine;
+use crate::infra::i18n::{tr_in, Locale};
 use crate::infra::AppConfig;
 
 use super::backend::{
@@ -332,7 +333,11 @@ fn plugin_runtime_failure_is_non_retryable_and_formats_tool_error() {
     );
     let err = failure.to_tool_error("auto");
     let text = err.to_string();
-    assert!(text.contains("web_search backend `auto` 运行时错误"));
+    assert!(text.contains(&tr_in(
+        Locale::En,
+        "search.runtime",
+        &[("backend", "auto"), ("detail", "")]
+    )));
     assert!(text.contains("synthetic runtime failure"));
 }
 
@@ -968,7 +973,7 @@ async fn explicit_plugin_backend_timeout_returns_tool_error() {
         .expect_err("timeout should surface as tool error");
     assert!(err
         .to_string()
-        .contains("web_search backend `mimo` 请求超时"));
+        .contains(&tr_in(Locale::En, "search.timeout", &[("backend", "mimo")])));
 }
 
 #[tokio::test]
@@ -998,14 +1003,19 @@ async fn explicit_plugin_backend_runtime_error_returns_original_detail() {
         .await
         .expect_err("plugin runtime errors should preserve original detail");
     let text = err.to_string();
-    assert!(text.contains("web_search backend `mimo` 运行时错误"));
+    assert!(text.contains(&tr_in(
+        Locale::En,
+        "search.runtime",
+        &[("backend", "mimo"), ("detail", "")]
+    )));
     assert!(text.contains("synthetic runtime failure"));
 }
 
 #[tokio::test]
 async fn explicit_plugin_backend_unsupported_error_is_preserved() {
+    let detail = "未找到名为 `mimo` 的 web_search 插件后端";
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Incompatible {
-        detail: "未找到名为 `mimo` 的 web_search 插件后端".to_string(),
+        detail: detail.to_string(),
     })]);
 
     let mut cfg = AppConfig::default();
@@ -1028,9 +1038,7 @@ async fn explicit_plugin_backend_unsupported_error_is_preserved() {
         .await
         .expect_err("unsupported plugin backend should fail clearly");
 
-    assert!(err
-        .to_string()
-        .contains("未找到名为 `mimo` 的 web_search 插件后端"));
+    assert!(err.to_string().contains(detail));
 }
 
 #[tokio::test]
@@ -1127,9 +1135,11 @@ async fn explicit_plugin_backend_rate_limit_returns_tool_error() {
         )
         .await
         .expect_err("rate-limited plugin search should fail clearly");
-    assert!(err
-        .to_string()
-        .contains("web_search backend `tavily` 暂不可用（status=429）"));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "search.unavailable",
+        &[("backend", "tavily"), ("status", "429")]
+    )));
 }
 
 #[tokio::test]
@@ -1166,7 +1176,11 @@ async fn auto_exhausted_returns_tool_error_and_does_not_cache() {
 
     for err in [first, second] {
         let text = err.to_string();
-        assert!(text.contains("web_search 查询 `rust` 所有后端均不可用"));
+        assert!(text.contains(&tr_in(
+            Locale::En,
+            "search.allUnavailableDetails",
+            &[("query", "rust"), ("details", "")]
+        )));
         assert!(text.contains("backend_unavailable:auto"));
         assert!(text.contains("timeout (backend=auto)"));
     }
@@ -1215,10 +1229,22 @@ async fn auto_plugin_runtime_failure_fails_loud_without_all_backends_unavailable
         .await
         .expect_err("plugin runtime warnings should fail loud");
     let text = err.to_string();
-    assert!(text.contains("web_search backend `auto` 运行时错误"));
+    assert!(text.contains(&tr_in(
+        Locale::En,
+        "search.runtime",
+        &[("backend", "auto"), ("detail", "")]
+    )));
     assert!(text.contains("async hostcall requires a Tokio runtime handle"));
     assert!(
-        !text.contains("所有后端均不可用"),
+        !text.contains(&tr_in(
+            Locale::En,
+            "search.allUnavailable",
+            &[("query", "rust")]
+        )) && !text.contains(&tr_in(
+            Locale::En,
+            "search.allUnavailableDetails",
+            &[("query", "rust"), ("details", "")]
+        )),
         "plugin runtime failures should not be flattened into exhausted auto: {text}"
     );
 }

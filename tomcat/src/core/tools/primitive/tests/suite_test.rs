@@ -137,8 +137,7 @@ async fn read_file_missing_path_returns_not_found_error() {
         msg.contains("no such file")
             || msg.contains("not found")
             || msg.contains("os error 2")
-            || msg.contains("does not exist")
-            || msg.contains("不存在"),
+            || msg.contains("does not exist"),
         "错误文案应包含路径不存在语义，实际: {}",
         err
     );
@@ -172,8 +171,8 @@ async fn read_file_binary_returns_product_error() {
     let err = exec.read_file(&path_str, "p1").await.unwrap_err();
     match err {
         AppError::Primitive(msg) => {
-            assert!(msg.contains("文件存在且权限已通过检查"));
-            assert!(msg.contains("二进制或非 UTF-8 文本"));
+            assert!(msg.contains("The file exists and access was authorized"));
+            assert!(msg.contains("binary or non-UTF-8"));
         }
         other => panic!("expected product primitive error, got {:?}", other),
     }
@@ -1082,7 +1081,7 @@ async fn build_bash_task_registry_applies_wait_policy_and_guard() {
         )
         .await
         .expect_err("guard should deny forbidden bash");
-    assert!(err.to_string().contains("forbidden") || err.to_string().contains("拒绝"));
+    assert!(matches!(err, AppError::Permission(_)));
     assert!(
         registry.list().is_empty(),
         "deny should leave no tracked task"
@@ -1466,7 +1465,10 @@ async fn read_file_on_directory_returns_err() {
     );
     let r = exec.read_file(&path_str, "p1").await;
     assert!(r.is_err());
-    assert!(r.unwrap_err().to_string().contains("目录"));
+    assert!(r
+        .unwrap_err()
+        .to_string()
+        .contains("The path is a directory"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1682,6 +1684,7 @@ fn temp_edit_dir(name: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn edit_replace_all_replaces_every_match() {
+    let replacement = "DONE 文档";
     let dir = temp_edit_dir("tomcat_edit_replace_all");
     let f = dir.join("a.txt");
     // 多命中 + 多字节 + 尾换行：原文必须保留行尾 `\n`。
@@ -1693,7 +1696,7 @@ async fn edit_replace_all_replaces_every_match() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    let edits = vec![edit_seg("TODO 文档", "DONE 文档", true)];
+    let edits = vec![edit_seg("TODO 文档", replacement, true)];
     let res = exec
         .edit_file(&f.to_string_lossy(), edits, "p1")
         .await
@@ -1701,7 +1704,7 @@ async fn edit_replace_all_replaces_every_match() {
     assert!(res.applied);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
-        "DONE 文档\nbody\nDONE 文档\n",
+        format!("{replacement}\nbody\n{replacement}\n"),
         "replace_all 必须命中每一处且保留尾换行"
     );
     assert!(!dir.join("a.bak").exists(), "成功路径不应残留 .bak");
@@ -1804,7 +1807,7 @@ async fn edit_overlap_rejected() {
     assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
     assert!(msg.contains("edits[0]"), "错误文案应指出左侧段号：{}", msg);
     assert!(msg.contains("edits[1]"), "错误文案应指出右侧段号：{}", msg);
-    assert!(msg.contains("第 1 行"), "错误文案应给出行号：{}", msg);
+    assert!(msg.contains("line 1"), "错误文案应给出行号：{}", msg);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         original,
@@ -1857,7 +1860,11 @@ async fn edit_overlap_nested_reports_subset_hint() {
     assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
     assert!(msg.contains("edits[0]"), "错误文案应指出外层段号：{}", msg);
     assert!(msg.contains("edits[1]"), "错误文案应指出内层段号：{}", msg);
-    assert!(msg.contains("嵌套包含"), "错误文案应指出嵌套特例：{}", msg);
+    assert!(
+        msg.contains("Nested spans:"),
+        "错误文案应指出嵌套特例：{}",
+        msg
+    );
 }
 
 #[tokio::test]
@@ -1889,7 +1896,7 @@ async fn edit_validation_failure_restores_or_noop() {
         msg
     );
     assert!(
-        msg.contains("连续原文"),
+        msg.contains("one continuous excerpt"),
         "NotFound 应提示连续片段约束：{}",
         msg
     );
@@ -1911,7 +1918,7 @@ async fn edit_validation_failure_restores_or_noop() {
         msg2
     );
     assert!(
-        msg2.contains("匹配行号：1, 2"),
+        msg2.contains("matching lines: 1, 2"),
         "Ambiguous 应列出全部匹配行号：{}",
         msg2
     );
@@ -1952,12 +1959,12 @@ async fn edit_notfound_with_cat_n_prefix_explains_remediation() {
         msg
     );
     assert!(
-        msg.contains("cat -n 行号前缀"),
+        msg.contains("cat -n line prefixes"),
         "错误文案应指出 cat -n 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );
@@ -2010,12 +2017,12 @@ async fn edit_notfound_with_hashline_prefix_explains_remediation() {
         msg
     );
     assert!(
-        msg.contains("hashline 前缀"),
+        msg.contains("hashline prefixes"),
         "错误文案应指出 hashline 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );

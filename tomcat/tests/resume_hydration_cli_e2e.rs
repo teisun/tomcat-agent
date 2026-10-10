@@ -13,6 +13,7 @@ use tomcat::{
 fn cmd() -> Command {
     let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
     c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
+    c.env("TOMCAT__UI__LANGUAGE", "en");
     c
 }
 
@@ -507,7 +508,7 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("恢复会话"),
+        stdout.contains(&tomcat::infra::tr("terminal.resumed", &[("key", "")])),
         "stdout should mention resume flow: {stdout}"
     );
 

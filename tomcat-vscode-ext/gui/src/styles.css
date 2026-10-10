@@ -600,6 +600,45 @@ span.tc-attachment-strip__file-chip {
   background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.12));
 }
 
+.tc-session-row {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+  padding-right: 8px;
+}
+.tc-session-row--active {
+  background: var(--vscode-list-activeSelectionBackground, rgba(127, 127, 127, 0.2));
+}
+.tc-session-row .tc-session-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+.tc-session-row .tc-session-row__action {
+  background: transparent;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 26px;
+  height: 26px;
+  width: 26px;
+}
+.tc-session-row__action:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+  color: var(--vscode-foreground);
+}
+.tc-session-row button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tc-session-row__action { opacity: 0; }
+  .tc-session-row:hover .tc-session-row__action,
+  .tc-session-row:focus-within .tc-session-row__action,
+  .tc-session-row__action[aria-pressed="true"] { opacity: 1; }
+  .tc-session-row:hover .tc-session-row__action:disabled { opacity: 0.55; }
+}
+
 .tc-session-item--active {
   background: var(
     --vscode-list-activeSelectionBackground,
@@ -4712,6 +4751,11 @@ span.tc-attachment-strip__file-chip {
   min-width: 0;
   text-overflow: ellipsis;
   width: 100%;
+}
+
+.tc-composer-model-picker .tc-model-picker-trigger {
+  /* The flex item can shrink below its label's intrinsic width in a narrow sidebar. */
+  max-width: 100%;
 }
 
 .tc-composer-dropdown {

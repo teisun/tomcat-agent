@@ -8,6 +8,139 @@ use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 use tomcat::{SessionManager, TranscriptEntry};
 
+/// A separate process exercises OS file locks rather than a second Rust mutex in this process.
+#[test]
+fn session_process_worker() {
+    let Ok(mode) = std::env::var("TOMCAT_SESSION_LOCK_TEST_MODE") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(std::env::var_os("TOMCAT_SESSION_LOCK_TEST_ROOT").unwrap());
+    let manager = SessionManager::new(root);
+    if mode == "hold" {
+        let id = std::env::var("TOMCAT_SESSION_LOCK_TEST_ID").unwrap();
+        manager.pin_session(&id).unwrap();
+        let ready = std::env::var_os("TOMCAT_SESSION_LOCK_TEST_READY").unwrap();
+        std::fs::write(&ready, b"ready").unwrap();
+        loop {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            let Some(next) = line.trim().strip_prefix("switch ") else {
+                break;
+            };
+            manager.switch_current_to_session_id(next).unwrap();
+            std::fs::write(&ready, next).unwrap();
+        }
+        manager.release_session_usage();
+    } else {
+        for _ in 0..25 {
+            manager.new_current_session(None).unwrap();
+        }
+    }
+}
+
+struct SessionWorker(std::process::Child);
+impl Drop for SessionWorker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn spawn_session_worker(
+    root: &std::path::Path,
+    mode: &str,
+    id: &str,
+    ready: &std::path::Path,
+) -> SessionWorker {
+    SessionWorker(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session_process_worker", "--nocapture"])
+            .env("TOMCAT_SESSION_LOCK_TEST_MODE", mode)
+            .env("TOMCAT_SESSION_LOCK_TEST_ROOT", root)
+            .env("TOMCAT_SESSION_LOCK_TEST_ID", id)
+            .env("TOMCAT_SESSION_LOCK_TEST_READY", ready)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn independent_process_blocks_delete_and_process_exit_releases_occupancy() {
+    let temp = TempDir::new().unwrap();
+    let manager = SessionManager::new(temp.path().to_path_buf());
+    let entry = manager.new_current_session(None).unwrap();
+    let ready = temp.path().join("ready");
+    let mut child = spawn_session_worker(temp.path(), "hold", &entry.session_id, &ready);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child did not acquire occupancy"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "child exited before acquiring occupancy"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(manager
+        .delete_session(&entry.session_id)
+        .unwrap_err()
+        .to_string()
+        .contains("session_in_use"));
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    manager.delete_session(&entry.session_id).unwrap();
+    assert!(manager
+        .get_session_by_id(&entry.session_id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn independent_process_rebinding_moves_occupancy_without_following_disk_current() {
+    use std::io::Write;
+    let temp = TempDir::new().unwrap();
+    let manager = SessionManager::new(temp.path().into());
+    let a = manager.new_current_session(None).unwrap();
+    let b = manager.new_current_session(None).unwrap();
+    let ready = temp.path().join("ready-rebind");
+    let mut child = spawn_session_worker(temp.path(), "hold", &a.session_id, &ready);
+    let wait = |expected: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::fs::read_to_string(&ready).ok().as_deref() != Some(expected) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not publish {expected}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    wait("ready");
+    assert!(manager.delete_session(&a.session_id).is_err());
+    writeln!(child.0.stdin.as_mut().unwrap(), "switch {}", b.session_id).unwrap();
+    wait(&b.session_id);
+    manager.delete_session(&a.session_id).unwrap();
+    assert!(manager.get_session_by_id(&a.session_id).unwrap().is_none());
+    assert!(manager.delete_session(&b.session_id).is_err());
+    writeln!(child.0.stdin.as_mut().unwrap(), "release").unwrap();
+    assert!(child.0.wait().unwrap().success());
+    manager.delete_session(&b.session_id).unwrap();
+    assert!(manager.get_session_by_id(&b.session_id).unwrap().is_none());
+}
+
+#[test]
+fn independent_process_store_rmw_keeps_all_sessions_across_atomic_renames() {
+    let temp = TempDir::new().unwrap();
+    let ready = temp.path().join("unused");
+    let mut first = spawn_session_worker(temp.path(), "create", "", &ready);
+    let mut second = spawn_session_worker(temp.path(), "create", "", &ready);
+    assert!(first.0.wait().unwrap().success());
+    assert!(second.0.wait().unwrap().success());
+    let manager = SessionManager::new(temp.path().into());
+    assert_eq!(manager.list_sessions().unwrap().len(), 50);
+}
+
 #[test]
 fn parallel_create_session_preserves_all_scope_entries() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

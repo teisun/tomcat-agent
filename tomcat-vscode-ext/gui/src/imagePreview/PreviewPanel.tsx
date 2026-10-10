@@ -13,6 +13,8 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useT } from "../i18n/LocaleProvider";
+import { t as defaultT } from "../../../src/shared/i18n";
 import { COPY_FLASH_MS } from "../components/copyFeedback";
 import type {
   ImagePreviewDomAction,
@@ -70,7 +72,7 @@ export async function convertImageBlobToPng(blob: Blob): Promise<Blob> {
     image.decoding = "async";
     const loaded = new Promise<void>((resolve, reject) => {
       image.onload = () => resolve();
-      image.onerror = () => reject(new Error("Unable to decode image"));
+      image.onerror = () => reject(new Error(defaultT("preview.decodeFailed")));
     });
     image.src = objectUrl;
     await loaded;
@@ -79,7 +81,7 @@ export async function convertImageBlobToPng(blob: Blob): Promise<Blob> {
     canvas.height = image.naturalHeight;
     const context = canvas.getContext("2d");
     if (!context || canvas.width === 0 || canvas.height === 0) {
-      throw new Error("Unable to create image conversion canvas");
+      throw new Error(defaultT("preview.canvasFailed"));
     }
     context.drawImage(image, 0, 0);
     return await new Promise<Blob>((resolve, reject) => {
@@ -87,7 +89,7 @@ export async function convertImageBlobToPng(blob: Blob): Promise<Blob> {
         (converted) =>
           converted
             ? resolve(converted)
-            : reject(new Error("Unable to convert image to PNG")),
+            : reject(new Error(defaultT("preview.convertFailed"))),
         "image/png",
       );
     });
@@ -107,7 +109,7 @@ export async function convertImageBlobToPng(blob: Blob): Promise<Blob> {
 async function typedBlobForPicture(picture: PreviewPicture): Promise<Blob> {
   const response = await fetch(picture.fullUri);
   if (!response.ok) {
-    throw new Error("Unable to read image data");
+    throw new Error(defaultT("preview.readFailed"));
   }
   return new Blob([await response.arrayBuffer()], { type: picture.mimeType });
 }
@@ -127,6 +129,9 @@ export async function clipboardBlobForPicture(
 // ── Main Component ──
 
 export function PreviewPanel() {
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const [state, setState] = useState<PreviewState | null>(null);
   const [zoom, setZoom] = useState<"fit" | number>("fit");
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
@@ -146,10 +151,10 @@ export function PreviewPanel() {
       if (msg.type === "preview.saveResult" && msg.data) {
         announce(
           msg.data.cancelled
-            ? "Save cancelled"
+            ? tRef.current("preview.saveCancelled")
             : msg.data.success
-              ? "Image saved"
-              : `Save failed: ${msg.data.error ?? "unknown"}`,
+              ? tRef.current("preview.saved")
+              : tRef.current("preview.saveFailed", { detail: msg.data.error ?? tRef.current("error.unknown") }),
         );
       }
       if (msg.type === "preview.forceClose") {
@@ -172,9 +177,9 @@ export function PreviewPanel() {
   // Announce position changes
   useEffect(() => {
     if (state) {
-      announce(`${state.displayLabel}, ${state.position} of ${state.total}`);
+      announce(t("preview.position", { label: state.displayLabel, position: state.position, total: state.total }));
     }
-  }, [state?.activeId]);
+  }, [state?.activeId, t]);
 
   const announce = useCallback((text: string) => {
     if (liveRegionRef.current) {
@@ -325,7 +330,7 @@ export function PreviewPanel() {
     if (!activePicture) return;
     try {
       if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
-        announce("Binary image copy is not available in this VS Code version");
+        announce(t("preview.copyUnsupported"));
         return;
       }
       const blob = await clipboardBlobForPicture(activePicture);
@@ -338,13 +343,13 @@ export function PreviewPanel() {
         setCopyState("idle");
         copyResetTimerRef.current = null;
       }, COPY_FLASH_MS);
-      announce("Image copied to clipboard");
+      announce(t("preview.copied"));
     } catch {
       clearCopyResetTimer();
       setCopyState("idle");
-      announce("Copy failed");
+      announce(t("common.copyFailed"));
     }
-  }, [activePicture, announce, clearCopyResetTimer]);
+  }, [activePicture, announce, clearCopyResetTimer, t]);
 
   // Test-only bridge used by the Development Host visual acceptance harness.
   useEffect(() => {
@@ -390,12 +395,12 @@ export function PreviewPanel() {
           copyIconClass:
             document
               .querySelector<HTMLSpanElement>(
-                'button[aria-label="Copied"] .codicon, button[aria-label="Copy image"] .codicon',
+                'button[data-testid="preview-copy"] .codicon',
               )
               ?.className ?? null,
           downloadIconFontFamily:
             getComputedStyle(
-              document.querySelector<HTMLSpanElement>('button[aria-label="Save as…"] .codicon')
+              document.querySelector<HTMLSpanElement>('button[data-testid="preview-save"] .codicon')
                 ?? document.body,
               "::before",
             ).fontFamily || null,
@@ -434,7 +439,7 @@ export function PreviewPanel() {
   if (!state || !activePicture) {
     return (
       <main role="main" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
-        <p>No image selected</p>
+        <p>{t("preview.noImage")}</p>
       </main>
     );
   }
@@ -444,35 +449,35 @@ export function PreviewPanel() {
     : { width: `${zoom * 100}%`, height: `${zoom * 100}%`, objectFit: "contain" };
 
   return (
-    <main role="main" aria-label="Image preview" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+    <main role="main" aria-label={t("image.preview")} style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* aria-live region for announcements */}
       <div ref={liveRegionRef} role="status" aria-live="polite" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0,0,0,0)" }} />
 
       {/* Top bar */}
-      <header style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 16px", borderBottom: "1px solid var(--vscode-panel-border, #333)", flex: "none" }}>
-        <span style={{ fontWeight: 600 }}>{state.displayLabel}</span>
-        <span style={{ opacity: 0.7, fontSize: 12 }}>{state.position} / {state.total}</span>
-        <div style={{ flex: 1 }} />
-        <ToolButton iconClass="codicon-zoom-out" onClick={zoomOut} label="Zoom out" shortcut="-" />
+      <header style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, padding: "8px 16px", borderBottom: "1px solid var(--vscode-panel-border, #333)", flex: "none" }}>
+        <span title={state.displayLabel} style={{ fontWeight: 600, flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{state.displayLabel}</span>
+        <span style={{ opacity: 0.7, fontSize: 12, flex: "none", whiteSpace: "nowrap" }}>{state.position} / {state.total}</span>
+        <ToolButton iconClass="codicon-zoom-out" onClick={zoomOut} label={t("preview.zoomOut")} shortcut="-" />
         <ToolButton
           iconClass={zoom === "fit" ? "codicon-screen-normal" : "codicon-screen-full"}
           onClick={toggleZoom}
-          label={zoom === "fit" ? "Actual size" : "Fit to window"}
+          label={t(zoom === "fit" ? "preview.actualSize" : "preview.fit")}
           shortcut="0"
         />
-        <ToolButton iconClass="codicon-zoom-in" onClick={zoomIn} label="Zoom in" shortcut="+" />
+        <ToolButton iconClass="codicon-zoom-in" onClick={zoomIn} label={t("preview.zoomIn")} shortcut="+" />
         <div style={{ width: 1, height: 24, background: "var(--vscode-panel-border, #333)" }} />
         <ToolButton
           className={copyState === "copied" ? "is-copied" : undefined}
           copied={copyState === "copied"}
+          testId="preview-copy"
           iconClass={copyState === "copied" ? "codicon-check" : "codicon-copy"}
           onClick={handleCopy}
-          label={copyState === "copied" ? "Copied" : "Copy image"}
+          label={t(copyState === "copied" ? "common.copied" : "preview.copy")}
           shortcut=""
         />
-        <ToolButton iconClass="codicon-download" onClick={handleSave} label="Save as…" shortcut="" />
+        <ToolButton iconClass="codicon-download" onClick={handleSave} label={t("preview.save")} testId="preview-save" shortcut="" />
         <div style={{ width: 1, height: 24, background: "var(--vscode-panel-border, #333)" }} />
-        <ToolButton iconClass="codicon-close" onClick={handleClose} label="Close (Escape)" shortcut="Esc" />
+        <ToolButton iconClass="codicon-close" onClick={handleClose} label={t("preview.close")} shortcut="Esc" />
       </header>
 
       {/* Stage */}
@@ -482,7 +487,7 @@ export function PreviewPanel() {
         data-zoom={zoom}
         tabIndex={0}
         role="region"
-        aria-label="Image display"
+        aria-label={t("preview.stage")}
         style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", overflow: "auto", padding: 16, background: "var(--vscode-editor-background, #1e1e1e)", cursor: zoom === "fit" ? "default" : "grab" }}
         onClick={toggleZoom}
       >
@@ -513,9 +518,9 @@ export function PreviewPanel() {
       </div>
 
       {/* Filmstrip */}
-      <nav aria-label="Image thumbnails" style={{ flex: "none", borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "8px 0" }}>
+      <nav aria-label={t("preview.thumbnails")} style={{ flex: "none", borderTop: "1px solid var(--vscode-panel-border, #333)", padding: "8px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "0 12px" }}>
-          <FilmstripButton iconClass="codicon-chevron-left" onClick={goPrev} disabled={activeIndex <= 0} label="Previous" />
+          <FilmstripButton iconClass="codicon-chevron-left" onClick={goPrev} disabled={activeIndex <= 0} label={t("preview.previous")} />
           <div
             ref={filmstripRef}
             role="list"
@@ -529,7 +534,7 @@ export function PreviewPanel() {
               >
                 <button
                   ref={idx === activeIndex ? activeThumbRef : undefined}
-                  aria-label={`${pic.filename} — ${idx + 1} of ${pictures.length}`}
+                  aria-label={t("preview.thumbnail", { filename: pic.filename, position: idx + 1, total: pictures.length })}
                   aria-current={idx === activeIndex ? "true" : undefined}
                   className={idx === activeIndex ? "ip-thumb ip-thumb--active" : "ip-thumb"}
                   style={{
@@ -567,7 +572,7 @@ export function PreviewPanel() {
               </div>
             ))}
           </div>
-          <FilmstripButton iconClass="codicon-chevron-right" onClick={goNext} disabled={activeIndex >= pictures.length - 1} label="Next" />
+          <FilmstripButton iconClass="codicon-chevron-right" onClick={goNext} disabled={activeIndex >= pictures.length - 1} label={t("preview.next")} />
         </div>
       </nav>
     </main>
@@ -575,6 +580,7 @@ export function PreviewPanel() {
 }
 
 function ToolButton({
+  testId,
   className,
   copied = false,
   iconClass,
@@ -588,10 +594,12 @@ function ToolButton({
   onClick(): void;
   label: string;
   shortcut: string;
+  testId?: string;
 }) {
   return (
     <button
       aria-label={label}
+      data-testid={testId}
       className={className}
       title={`${label}${shortcut ? ` (${shortcut})` : ""}`}
       onClick={onClick}
@@ -604,6 +612,7 @@ function ToolButton({
           : "var(--vscode-foreground, #ccc)",
         cursor: "pointer",
         padding: "4px 8px",
+        flex: "none",
         fontSize: 0,
         lineHeight: 1,
         display: "inline-flex",

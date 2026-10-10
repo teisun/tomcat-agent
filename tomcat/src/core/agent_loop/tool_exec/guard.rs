@@ -63,18 +63,14 @@ pub(super) fn check_mutation_stamp(
         Err(_) => return Ok(()),
     };
     let Some(stamp) = state.get(&resolved) else {
-        return Err(format!(
-            "NoPriorRead: 当前会话未对 `{}` 执行过 `read`，禁止盲写/盲改；请先 `read` 再 `{}`",
-            path, op_label
-        ));
+        return Err(format!("NoPriorRead: This session has not read `{path}`; blind writes/edits are forbidden. Use `read` before `{op_label}`"));
     };
     let Ok(meta) = std::fs::metadata(&resolved) else {
         return Ok(());
     };
     if meta.is_dir() {
         return Err(format!(
-            "{}: 目标 `{}` 是目录，不能作为入参",
-            op_label, path
+            "{op_label}: target `{path}` is a directory and cannot be used as input"
         ));
     }
     let cur_mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
@@ -94,10 +90,7 @@ pub(super) fn check_mutation_stamp(
         {
             return Ok(());
         }
-        return Err(format!(
-            "Stale: 文件 `{}` 自上次 read 后已被修改（mtime/size 不一致），请先重新 `read` 再 `{}`",
-            path, op_label
-        ));
+        return Err(format!("Stale: File `{path}` changed since the last read (mtime/size mismatch); read it again before `{op_label}`"));
     }
     Ok(())
 }
@@ -148,17 +141,13 @@ pub(super) fn validate_read_bounds(offset: Option<u64>, limit: Option<u64>) -> R
     if let Some(o) = offset {
         if o < 1 {
             return Err(
-                "read.offset must be >= 1 (1-based line number; pass `1` to start from the first line)"
-                    .to_string(),
+                "read.offset must be >= 1 (1-based line number; pass `1` to start from the first line)".to_string(),
             );
         }
     }
     if let Some(l) = limit {
         if !(1..=10_000).contains(&l) {
-            return Err(format!(
-                "read.limit must be in [1, 10000] (got {}); split large reads with multiple offset+limit calls",
-                l
-            ));
+            return Err(format!("read.limit must be in [1, 10000] (got {l}); split large reads with multiple offset+limit calls"));
         }
     }
     Ok(())

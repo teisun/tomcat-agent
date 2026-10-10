@@ -2,7 +2,7 @@
 
 fn main() {
     if let Err(e) = tomcat::run_cli() {
-        eprintln!("错误: {}", e);
+        eprintln!("{}: {}", tomcat::infra::tr("cli.error", &[]), e);
         std::process::exit(1);
     }
 }

@@ -7,6 +7,8 @@ import {
 } from "react";
 
 import type { ContextSearchMatch } from "../types";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey } from "../../../src/shared/i18n";
 
 export interface ContextSearchDropdownHandle {
   onKeyDown(event: KeyboardEvent): boolean;
@@ -95,6 +97,8 @@ export const ContextSearchDropdown = forwardRef<
   query,
   truncated,
 }, ref) {
+  const t = useT();
+  const locale = useLocale();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const activeOptionId = matches[selectedIndex]
     ? optionIdForMatch(matches[selectedIndex], selectedIndex)
@@ -168,11 +172,11 @@ export const ContextSearchDropdown = forwardRef<
     >
       {loading && matches.length === 0 ? (
         <div className="tc-session-dropdown__empty" data-testid="context-search-loading">
-          搜索中
+          {t("context.searching")}
         </div>
       ) : matches.length === 0 ? (
         <div className="tc-session-dropdown__empty" data-testid="context-search-empty">
-          未找到匹配文件
+          {t("context.empty")}
         </div>
       ) : (
         <div className="tc-context-search-dropdown__list">
@@ -216,12 +220,12 @@ export const ContextSearchDropdown = forwardRef<
           className="tc-context-search-dropdown__footer tc-context-search-dropdown__footer--status"
           data-testid="context-search-loading-inline"
         >
-          搜索中
+          {t("context.searching")}
         </div>
       ) : null}
       {truncated ? (
         <div className="tc-context-search-dropdown__footer" data-testid="context-search-truncated">
-          {`仅显示前 ${matches.length} 条，输入更精确关键词`}
+          {t(pluralKey(locale, "context.truncated.other", matches.length), { count: matches.length })}
         </div>
       ) : null}
     </div>

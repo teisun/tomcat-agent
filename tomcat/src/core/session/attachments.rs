@@ -277,8 +277,9 @@ impl AttachmentBlobStore {
         for sha in &shas {
             validate_sha(sha)?;
             if self.get(sha)?.is_none() {
-                return Err(AppError::Config(format!(
-                    "cannot retain missing attachment blob {sha}"
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "attachment.blobMissing",
+                    &[("sha", sha)],
                 )));
             }
         }
@@ -313,7 +314,11 @@ impl AttachmentBlobStore {
         let path = self
             .session_pending_dir(validate_session_id(session_id)?)
             .join(sha);
-        let _ = std::fs::remove_file(path);
+        if let Err(error) = std::fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(AppError::Io(error));
+            }
+        }
         Ok(())
     }
 
@@ -377,7 +382,11 @@ impl AttachmentBlobStore {
             self.promote(session_id, &sha)?;
             report.leases_released += 1;
         }
-        let _ = std::fs::remove_dir(self.session_pending_dir(session_id));
+        if let Err(error) = std::fs::remove_dir(self.session_pending_dir(session_id)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(AppError::Io(error));
+            }
+        }
         Ok(report)
     }
 
@@ -556,7 +565,7 @@ pub(crate) fn validate_blob_sha(sha: &str) -> Result<(), AppError> {
 ///
 /// 本模块不把路径安全性寄托在调用方自觉：即使今天所有调用方都传后端可信的
 /// `slot.session_id`，作为 `pub` 模块也必须自己守住这条不变量。
-fn validate_session_id(session_id: &str) -> Result<&str, AppError> {
+pub(crate) fn validate_session_id(session_id: &str) -> Result<&str, AppError> {
     let ok = !session_id.is_empty()
         && session_id.len() <= 128
         && session_id
@@ -623,20 +632,27 @@ pub struct ValidatedImage {
 /// 因此这里不需要任何图形库。
 pub fn validate_image_bytes(bytes: &[u8], mime_type: &str) -> Result<(), String> {
     if !ALLOWED_IMAGE_MIME.contains(&mime_type) {
-        return Err(format!("unsupported mime type: {mime_type}"));
+        return Err(crate::infra::i18n::tr(
+            "attachment.imageMime",
+            &[("mime", mime_type)],
+        ));
     }
     if bytes.is_empty() {
-        return Err("empty image payload".to_string());
+        return Err(crate::infra::i18n::tr("attachment.imageEmpty", &[]));
     }
     if bytes.len() > IMAGE_MAX_BYTES {
-        return Err(format!(
-            "image too large: {} bytes (max {IMAGE_MAX_BYTES})",
-            bytes.len()
+        return Err(crate::infra::i18n::tr(
+            "attachment.imageLarge",
+            &[
+                ("bytes", &bytes.len().to_string()),
+                ("limit", &IMAGE_MAX_BYTES.to_string()),
+            ],
         ));
     }
     if !matches_image_magic(bytes, mime_type) {
-        return Err(format!(
-            "payload does not look like {mime_type} (magic byte check failed)"
+        return Err(crate::infra::i18n::tr(
+            "attachment.imageMagic",
+            &[("mime", mime_type)],
         ));
     }
     Ok(())
@@ -645,19 +661,25 @@ pub fn validate_image_bytes(bytes: &[u8], mime_type: &str) -> Result<(), String>
 /// 校验一份文件附件（目前只支持 PDF）。
 pub fn validate_file_bytes(bytes: &[u8], mime_type: &str) -> Result<(), String> {
     if !mime_type.eq_ignore_ascii_case("application/pdf") {
-        return Err(format!("unsupported file mime type: {mime_type}"));
+        return Err(crate::infra::i18n::tr(
+            "attachment.fileMime",
+            &[("mime", mime_type)],
+        ));
     }
     if bytes.is_empty() {
-        return Err("empty file payload".to_string());
+        return Err(crate::infra::i18n::tr("attachment.fileEmpty", &[]));
     }
     if bytes.len() > FILE_MAX_BYTES {
-        return Err(format!(
-            "file too large: {} bytes (max {FILE_MAX_BYTES})",
-            bytes.len()
+        return Err(crate::infra::i18n::tr(
+            "attachment.fileLarge",
+            &[
+                ("bytes", &bytes.len().to_string()),
+                ("limit", &FILE_MAX_BYTES.to_string()),
+            ],
         ));
     }
     if !bytes.starts_with(b"%PDF-") {
-        return Err("payload does not look like a PDF (magic byte check failed)".to_string());
+        return Err(crate::infra::i18n::tr("attachment.pdfMagic", &[]));
     }
     Ok(())
 }

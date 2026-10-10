@@ -1,3 +1,4 @@
+import { isUiPreferences, t, type UiPreferences } from "../shared/i18n";
 import type {
   ControlFrame,
   OutFrame,
@@ -17,6 +18,7 @@ export type RequestCommand = Exclude<
 >;
 
 export interface InitializePayload {
+  uiPreferences?: UiPreferences | null;
   protocolVersion: number;
   /** Absolute path of the attachment directory, absent on older servers. */
   attachmentRoot?: string | null;
@@ -33,6 +35,7 @@ export interface AskQuestionOption {
 }
 
 export interface AskQuestion {
+  allowCustom?: boolean;
   id: string;
   prompt: string;
   options: AskQuestionOption[];
@@ -135,6 +138,7 @@ export function parseInitializePayload(payload: unknown): InitializePayload {
 
   return {
     protocolVersion: payload.protocolVersion,
+    ...(isUiPreferences(payload.uiPreferences) ? { uiPreferences: payload.uiPreferences } : {}),
     attachmentRoot:
       typeof payload.attachmentRoot === "string" && payload.attachmentRoot.length > 0
         ? payload.attachmentRoot
@@ -166,6 +170,7 @@ function isAskQuestionOption(value: unknown): value is AskQuestionOption {
 function isAskQuestion(value: unknown): value is AskQuestion {
   return (
     isRecord(value) &&
+    (value.allowCustom === undefined || typeof value.allowCustom === "boolean") &&
     typeof value.id === "string" &&
     typeof value.prompt === "string" &&
     Array.isArray(value.options) &&
@@ -270,7 +275,7 @@ export function assertRequiredCapabilities(capabilities: string[]): void {
   );
   if (missing.length > 0) {
     throw new Error(
-      `tomcat serve is missing required capabilities: ${missing.join(", ")}`,
+      t("protocol.missingCapabilities", { capabilities: missing.join(", ") }),
     );
   }
 }

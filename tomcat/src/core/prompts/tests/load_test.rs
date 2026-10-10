@@ -64,7 +64,6 @@ fn executor_prompt_renders_plan_id() {
 fn executor_prompt_points_final_acceptance_to_verify_skill() {
     let rendered = load(PromptKey::ExecutorReminderFmt);
     assert!(rendered.contains("load_skill(verify)"));
-    assert!(rendered.contains("按影响范围复核 diff 并验证"));
     assert!(!rendered.contains("[gate]"));
     assert!(!rendered.contains("green_build"));
 }

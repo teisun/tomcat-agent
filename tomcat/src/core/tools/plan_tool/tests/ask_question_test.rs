@@ -133,7 +133,10 @@ async fn ask_question_rejected_in_exec_returns_actionable_error() {
         } => {
             assert_eq!(tool, "ask_question");
             assert_eq!(mode, "chat");
-            assert!(guidance.contains("待确认项"));
+            assert_eq!(
+                guidance,
+                "The plan is executing; record any clarification needed as an open question in the plan"
+            );
         }
         other => panic!("expected RejectedInMode, got {other:?}"),
     }
@@ -303,6 +306,37 @@ async fn ask_question_first_ctrl_c_returns_interrupted_via_signal() {
         .unwrap();
     assert_eq!(out["cancelled"], true);
     assert_eq!(out["outcome"], "interrupted");
+}
+
+#[tokio::test]
+async fn custom_answer_limit_counts_unicode_characters_not_bytes() {
+    for glyph in ["a", "中", "🙂"] {
+        for (count, allowed) in [(500, true), (501, false)] {
+            let text = glyph.repeat(count);
+            let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+                outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
+                answers: vec![Answer {
+                    question_id: "q1".into(),
+                    option_ids: vec!["__custom__".into()],
+                    custom_text: Some(text.clone()),
+                    skipped: false,
+                    picked_recommended: false,
+                }],
+            }]);
+            let out = ask_question::execute(
+                &rt_planning(),
+                &panel,
+                &good_args(),
+                AskQuestionTermination::default(),
+            )
+            .await;
+            if allowed {
+                assert_eq!(out.unwrap()["answers"][0]["custom_text"], text);
+            } else {
+                assert!(matches!(out, Err(ToolError::Internal(_))));
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -16,7 +16,6 @@ thinking_format = "openai"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 max_output_tokens = 128000
-description = "OpenAI GPT-5.2：400K context、128K maximum output 的通用推理模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -33,7 +32,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "OpenAI GPT-5.4：可选 400K 或 1M context；1M 属于长上下文计费，默认 400K。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -49,7 +47,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "OpenAI GPT-5.5：可选 400K 或 1M context；1M 属于长上下文计费，默认 400K。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -68,7 +65,6 @@ supported_speeds = ["fast"]
 context_window = 400000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "OpenAI GPT-5.6：可选 400K 或 1M context；官方最大值约 1.05M，本目录统一为 1M；默认 400K 以避开长上下文计费。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -85,7 +81,6 @@ supported_reasoning_levels = ["high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 384000
-description = "DeepSeek V4 Pro：1M context 和最高 384K output，按统一每 token 费率计价。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -101,7 +96,6 @@ supported_reasoning_levels = ["high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 384000
-description = "DeepSeek V4 Flash：1M context 和最高 384K output，按统一每 token 费率计价。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -117,7 +111,6 @@ supported_reasoning_levels = ["high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 384000
-description = "DeepSeek V4 Flash 的 Tomcat utility 角色：1M context、最高 384K output。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -137,7 +130,6 @@ supported_reasoning_levels = ["high"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Xiaomi MiMo V2.5 Pro：1M context、128K maximum output；上下文长度不再改变单价。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -156,7 +148,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Zhipu GLM-5.2：1M context、128K maximum output；支持可调 Effort，默认 1M。"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -175,7 +166,6 @@ thinking_format = "doubao"
 # K2.7 Code supports thinking mode but does not document tunable effort tiers.
 supported_reasoning_levels = ["high"]
 context_window = 256000
-description = "Kimi K2.7 Code：256K context 的 coding 模型，支持图片、视频输入和思考模式。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -191,7 +181,6 @@ supported_reasoning_levels = ["low", "high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 131072
-description = "Kimi K3：1M context、默认 128K output 的长程推理与软件工程模型。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -208,7 +197,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Opus 4.8：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -224,7 +212,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Opus 4.7：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -240,7 +227,6 @@ supported_reasoning_levels = ["low", "medium", "high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Opus 4.6：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -256,7 +242,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Fable 5：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -272,7 +257,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Opus 5：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -288,7 +272,6 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Sonnet 5：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
@@ -304,5 +287,4 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-description = "Claude Sonnet 4.6：1M context、128K maximum output，默认使用标准价的 1M 档。"
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }

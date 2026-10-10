@@ -21,8 +21,6 @@ const TRANSIENT_LLM_MAX_ATTEMPTS: usize = 3;
 
 fn is_transient_connect_failure_text(text: &str) -> bool {
     text.contains("connection closed via error")
-        || text.contains("请求连接失败")
-        || text.contains("流式请求连接失败")
         || text.contains("stage: Some(Connect)")
         || text.contains("stage=Some(Connect)")
 }

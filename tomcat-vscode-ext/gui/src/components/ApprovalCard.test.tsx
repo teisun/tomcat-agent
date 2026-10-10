@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -75,6 +77,33 @@ function ControlledApprovalCard({
 }
 
 describe("ApprovalCard", () => {
+  it.each(["en", "zh-CN"] as const)("keeps fixed-choice questions free of custom controls and submits explicit consent (%s)", (locale) => {
+    const answer = vi.fn();
+    const question = { ...buildQuestion("review", "Review this plan?"), allowCustom: false };
+    render(<LocaleProvider locale={locale}><ControlledApprovalCard item={buildItem([question])} onAnswer={answer} /></LocaleProvider>);
+    expect(screen.queryByTestId("approval-option-review-__custom__")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(answer).not.toHaveBeenCalled();
+    const radio = screen.getByTestId("approval-option-review-review-a");
+    radio.focus();
+    expect(document.activeElement).toBe(radio);
+    fireEvent.click(radio);
+    const submit = screen.getByTestId("approval-continue");
+    if (locale === "en") expect(submit.textContent).toBe(translate("en", "question.continue"));
+    fireEvent.click(submit);
+    expect(answer).toHaveBeenCalledOnce();
+    expect(answer.mock.calls[0][2].answers[0].optionIds).toEqual(["review-a"]);
+  });
+
+  it("ignores stale custom draft state when the runtime disables custom answers", () => {
+    const answer = vi.fn();
+    render(<ApprovalCard item={buildItem([{ ...buildQuestion("q1", "Review?"), allowCustom: false }])}
+      draft={{ q1: { optionId: "__custom__", customText: "stale" } }} onDraftChange={vi.fn()} onAnswer={answer} />);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect((screen.getByTestId("approval-continue") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("approval-skip"));
+    expect(answer.mock.calls[0][2]).toMatchObject({ outcome: "skipped", answers: [] });
+  });
   it("renders numbered questions, coded options, recommended badge, and action buttons", () => {
     render(
       <ControlledApprovalCard

@@ -250,7 +250,7 @@ describe("webview protocol helpers", () => {
           route: "models",
         },
         messageId: "settings-1",
-        type: "openModelSettings",
+        type: "openSettings",
       }),
     ).toBe(true);
 

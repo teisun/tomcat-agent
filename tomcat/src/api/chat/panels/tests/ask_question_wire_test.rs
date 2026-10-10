@@ -12,6 +12,7 @@ use crate::infra::{DefaultEventBus, EventBus, EventContext};
 
 fn sample_question() -> Question {
     Question {
+        allow_custom: true,
         id: "color".into(),
         prompt: "pick a color".into(),
         options: vec![
@@ -27,6 +28,28 @@ fn sample_question() -> Question {
             },
         ],
     }
+}
+
+#[test]
+fn runtime_custom_answer_flag_roundtrips_without_becoming_a_model_argument() {
+    let mut question = sample_question();
+    question.allow_custom = false;
+    let request = AskQuestionWireRequest {
+        request_id: "fixed".into(),
+        response_event: "response".into(),
+        session_id: None,
+        tool_call_id: None,
+        questions: vec![question],
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["questions"][0]["allowCustom"], false);
+    let decoded: AskQuestionWireRequest = serde_json::from_value(value).unwrap();
+    assert!(!decoded.questions[0].allow_custom);
+    let tool_question: Question = serde_json::from_value(serde_json::json!({"id":"q", "prompt":"test", "options":[], "allow_custom":false, "allowCustom":false})).unwrap();
+    assert!(
+        tool_question.allow_custom,
+        "a model cannot disable ordinary custom answers"
+    );
 }
 
 fn sample_result() -> AskQuestionResult {

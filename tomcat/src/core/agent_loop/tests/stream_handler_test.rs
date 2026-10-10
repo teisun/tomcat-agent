@@ -223,7 +223,12 @@ async fn run_chat_stream_with_text_and_llm_error_discards_partial_output_and_ret
     assert!(
         observed[0]["errorMessage"]
             .as_str()
-            .is_some_and(|message| message.contains("boom") && message.contains("已丢弃 7 字")),
+            .is_some_and(|message| message.contains("boom")
+                && message.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "agentLoop.discarded.other",
+                    &[("count", "7")]
+                ))),
         "the visible error must disclose discarded partial output: {:?}",
         observed[0]
     );

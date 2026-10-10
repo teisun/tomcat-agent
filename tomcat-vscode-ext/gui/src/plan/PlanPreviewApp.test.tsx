@@ -9,6 +9,8 @@ import type {
 } from "../../../src/shared/planPreviewProtocol";
 import type { PathResolution } from "../../../src/shared/pathResolution";
 import { PlanPreviewApp } from "./PlanPreviewApp";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 
 function makeState(overrides: Partial<PlanPreviewStateSnapshot> = {}): PlanPreviewStateSnapshot {
   return {
@@ -133,6 +135,33 @@ function intentsOfType(
 }
 
 describe("PlanPreviewApp", () => {
+  it("switches labels without replacing Markdown or losing selection, scroll and Find query", async () => {
+    const api = makeApi();
+    const view = render(<LocaleProvider locale="en"><PlanPreviewApp vscodeApi={api} /></LocaleProvider>);
+    pushState(makeState({ toolbarStyle: "hybrid", bodyMarkdown: "# Kept heading\n\n```ts\nconst stable = 1;\n```" }));
+    const content = screen.getByTestId("plan-content");
+    expect(screen.getByRole("main", { name: translate("en", "plan.preview") })).toBe(content);
+    const todoCount = screen.getByTestId("plan-todos-count");
+    expect(todoCount.textContent).toBe(translate("en", "plan.todos.other", { count: 3 }));
+    const code = screen.getByTestId("plan-markdown-body").querySelector("code")!;
+    const heading = screen.getByRole("heading", { name: "Kept heading" });
+    content.scrollTop = 120;
+    const range = document.createRange(); range.selectNodeContents(heading);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    view.rerender(<LocaleProvider locale="zh-CN"><PlanPreviewApp vscodeApi={api} /></LocaleProvider>);
+    expect(screen.getByTestId("plan-content")).toBe(content);
+    expect(screen.getByTestId("plan-markdown-body").querySelector("code")).toBe(code);
+    expect(selection.toString()).toBe("Kept heading");
+    expect(content.scrollTop).toBe(120);
+    expect(screen.getByTestId("plan-todos-count")).toBe(todoCount);
+    pushDomActionEvent({ kind: "setFindQuery", query: "stable" });
+    await waitFor(() => expect((screen.getByTestId("plan-find-input") as HTMLInputElement).value).toBe("stable"));
+    view.rerender(<LocaleProvider locale="en"><PlanPreviewApp vscodeApi={api} /></LocaleProvider>);
+    expect((screen.getByTestId("plan-find-input") as HTMLInputElement).value).toBe("stable");
+    expect(screen.getByTestId("plan-markdown-body").querySelector("code")).toBe(code);
+    expect(intentsOfType(api, "plan.ready")).toHaveLength(1);
+  });
+
   it("sends plan.ready on mount and shows a loading state until a frame arrives", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);

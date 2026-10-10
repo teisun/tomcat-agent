@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { normalizeLocale, setLocale, subscribeLocale, t, type MessageKey } from "./shared/i18n";
 
 import {
   TOMCAT_ADD_FILE_TO_CHAT_COMMAND,
@@ -48,7 +49,7 @@ import {
   type SessionHistoryPayload,
   type SessionStatePayload,
 } from "./serveClient/sessionRouter";
-import { TomcatMessenger } from "./serveClient/TomcatMessenger";
+import { TomcatMessenger, type ControlRequestHandler } from "./serveClient/TomcatMessenger";
 import { ProjectTrustPrompt } from "./ui/ProjectTrustPrompt";
 import type { ServeEvent } from "./serveClient/wire";
 import {
@@ -93,13 +94,13 @@ export type { WebviewIntent } from "./ui/webview/protocol";
 let disposeRuntime: (() => void) | undefined;
 const execFileAsync = promisify(execFile);
 const SETUP_TERMINAL_NAME = "Tomcat Setup";
-const START_SETUP_ACTION = "Start Setup";
-const RETRY_SETUP_ACTION = "I've Finished Setup";
-const RETRY_CONNECTION_ACTION = "Retry";
-const OPEN_GUIDE_ACTION = "View Guide";
-const VIEW_LOGS_ACTION = "View Logs";
-const OPEN_SETTINGS_ACTION = "Open Settings";
-const OPEN_TERMINAL_ACTION = "Open Terminal";
+const START_SETUP_ACTION: MessageKey = "host.action.startSetup";
+const RETRY_SETUP_ACTION: MessageKey = "host.action.finishSetup";
+const RETRY_CONNECTION_ACTION: MessageKey = "host.action.retry";
+const OPEN_GUIDE_ACTION: MessageKey = "host.action.guide";
+const VIEW_LOGS_ACTION: MessageKey = "host.action.logs";
+const OPEN_SETTINGS_ACTION: MessageKey = "host.action.settings";
+const OPEN_TERMINAL_ACTION: MessageKey = "host.action.terminal";
 
 type PromptRecord = {
   actions: string[];
@@ -317,10 +318,12 @@ export class TomcatSelectionCodeLensProvider
   implements vscode.CodeLensProvider, vscode.Disposable
 {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
+  private readonly stopLocale = subscribeLocale(() => this.refresh());
 
   readonly onDidChangeCodeLenses = this.changeEmitter.event;
 
   dispose(): void {
+    this.stopLocale();
     this.changeEmitter.dispose();
   }
 
@@ -347,7 +350,7 @@ export class TomcatSelectionCodeLensProvider
         ),
         {
         command: TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
-        title: "Add to Tomcat Chat",
+        title: t("host.addSelection"),
         },
       ),
     ];
@@ -396,39 +399,56 @@ function shouldSuppressExitPrompt(): boolean {
 
 function autoSelectedPromptAction(
   severity: PromptRecord["severity"],
-  actions: readonly string[],
-): string | undefined {
+  actions: readonly MessageKey[],
+): MessageKey | undefined {
   const envName =
     severity === "info" ? TEST_INFO_ACTION_ENV : TEST_WARNING_ACTION_ENV;
   const configured = process.env[envName]?.trim();
-  return configured && actions.includes(configured) ? configured : undefined;
+  return actions.find(action => action === configured);
 }
 
-async function showPromptMessage(
+export async function showPromptMessage(
   promptHistory: PromptRecord[],
   severity: PromptRecord["severity"],
   message: string,
-  actions: string[] = [],
-): Promise<string | undefined> {
-  promptHistory.push({
-    actions: [...actions],
-    message,
-    severity,
-  });
-
+  actions: MessageKey[] = [],
+): Promise<MessageKey | undefined> {
+  const items = actions.map(id => ({ id, title: t(id) }));
+  promptHistory.push({ actions: items.map(item => item.title), message, severity });
   const autoSelected = autoSelectedPromptAction(severity, actions);
-  if (autoSelected) {
-    return autoSelected;
-  }
-
-  if (shouldSuppressExitPrompt()) {
-    return undefined;
-  }
-
-  return severity === "info"
-    ? vscode.window.showInformationMessage(message, ...actions)
-    : vscode.window.showWarningMessage(message, ...actions);
+  if (autoSelected) return autoSelected;
+  if (shouldSuppressExitPrompt()) return undefined;
+  const selected = severity === "info"
+    ? await vscode.window.showInformationMessage(message, ...items)
+    : await vscode.window.showWarningMessage(message, ...items);
+  return selected?.id;
 }
+
+export const nativeConfirmationHandler: ControlRequestHandler = async (frame, controlContext) => {
+  const request = frame.payload && typeof frame.payload === "object"
+    ? frame.payload as Record<string, unknown>
+    : null;
+  const suggestedRoot = typeof request?.suggestedRoot === "string" ? request.suggestedRoot : undefined;
+  const preview = typeof request?.preview === "string" ? request.preview : t("host.protectedOperation");
+  const allowOnce = { title: t("host.allowOnce") };
+  const allowRoot = { title: t("host.allowFolder") };
+  const choice = await vscode.window.showWarningMessage(
+    preview,
+    { modal: true },
+    allowOnce,
+    ...(suggestedRoot ? [allowRoot] : []),
+  );
+  if (controlContext.signal.aborted) {
+    return { kind: "cancel", payload: { reason: "host_disconnected" } };
+  }
+  if (choice === allowOnce) {
+    return { kind: "response", payload: { decision: "allow_once" }, sessionId: frame.sessionId };
+  }
+  if (choice === allowRoot && suggestedRoot) {
+    return { kind: "response", payload: { decision: "allow_and_persist_root", root: suggestedRoot }, sessionId: frame.sessionId };
+  }
+  return { kind: "response", payload: { decision: "deny" }, sessionId: frame.sessionId };
+};
 
 async function showInformationMessage(
   promptHistory: PromptRecord[],
@@ -467,7 +487,7 @@ async function selectConnectorWorkspaceRoot(): Promise<string | null> {
     return folders[0].uri.fsPath;
   }
   const selected = await vscode.window.showWorkspaceFolderPick({
-    placeHolder: "Select the workspace for Tomcat connector settings",
+    placeHolder: t("host.selectWorkspace"),
   });
   return selected?.uri.fsPath ?? null;
 }
@@ -590,6 +610,7 @@ function appendOutput(
 export async function activate(
   context: vscode.ExtensionContext,
 ): Promise<TomcatExtensionApi> {
+  setLocale(normalizeLocale(vscode.env.language ?? "en"));
   const output = vscode.window.createOutputChannel("Tomcat");
   const ide = new VsCodeIde();
   const observedEvents: ServeEvent[] = [];
@@ -620,6 +641,7 @@ export async function activate(
   let resolvedExecutable = await resolveExecutable(context);
 
   const messenger = new TomcatMessenger({
+    env: { TOMCAT_HOST_LOCALE: vscode.env.language ?? "en" },
     cwd: getDefaultCwd(),
     executable: resolvedExecutable.executable,
     extraArgs: getTomcatExtraArgs(),
@@ -679,7 +701,7 @@ export async function activate(
         stopFirstRunSetup();
         await showInformationMessage(
           promptHistory,
-          `Tomcat setup finished. Active session: ${result.sessionId ?? "n/a"}`,
+          t("host.setupComplete", { id: result.sessionId ?? "n/a" }),
         );
       } catch {
         // The supervisor owns bounded retry and shows one evidence-based terminal prompt.
@@ -712,7 +734,7 @@ export async function activate(
     const selection = await showPromptMessage(
       promptHistory,
       "warning",
-      "Tomcat CLI was not found automatically. Install a bundled VSIX for your platform, or install `tomcat` on your PATH, or set tomcat.path if VS Code does not inherit your shell environment.",
+      t("host.cliMissing"),
       [OPEN_GUIDE_ACTION, OPEN_SETTINGS_ACTION],
     );
     if (selection === OPEN_GUIDE_ACTION) {
@@ -739,13 +761,13 @@ export async function activate(
         stopFirstRunSetup();
         await showInformationMessage(
           promptHistory,
-          `Tomcat setup finished. Active session: ${result.sessionId ?? "n/a"}`,
+          t("host.setupComplete", { id: result.sessionId ?? "n/a" }),
         );
       },
       () => undefined,
     );
     await maybeShowSetupRecoveryMessage(
-      "Tomcat setup is running in the integrated terminal. Finish the prompts there, then choose `I've Finished Setup` if Tomcat does not reconnect automatically.",
+      t("host.setupRunning"),
     );
   };
 
@@ -764,16 +786,16 @@ export async function activate(
       "warning",
       [
         bootstrapFailed
-          ? "Tomcat 已连接，但初始化数据加载失败。"
+          ? t("host.failure.bootstrap")
           : handshakeTimedOut
-          ? "Tomcat did not complete its startup handshake in time."
-          : "Tomcat could not start after several attempts.",
-        detail ? `The local serve process reported:\n${detail}` : undefined,
+          ? t("host.failure.timeout")
+          : t("host.failure.start"),
+        detail ? t("host.failure.detail", { detail }) : undefined,
         bootstrapFailed
-          ? "View Logs 查看详细错误，然后重试初始化。"
+          ? t("host.failure.bootstrapHint")
           : handshakeTimedOut
-          ? "The serve process did not answer initialize. View logs, then retry."
-          : "Check the error above, then retry or run setup if this is a new installation.",
+          ? t("host.failure.timeoutHint")
+          : t("host.failure.startHint"),
       ].filter((line): line is string => !!line).join("\n\n"),
       bootstrapFailed || handshakeTimedOut
         ? [RETRY_CONNECTION_ACTION, VIEW_LOGS_ACTION]
@@ -828,17 +850,18 @@ export async function activate(
     getDefaultCwd,
     messenger,
     confirm: async (root) => {
+      const trustChoice: { title: string; isCloseAffordance?: boolean } = { title: t("host.trust") };
       const choice = await vscode.window.showWarningMessage(
-        "Trust this project?",
+        t("host.trustQuestion"),
         { modal: true, detail: root },
-        { title: "Trust project" },
-        { title: "Not now", isCloseAffordance: true },
+        trustChoice,
+        { title: t("host.notNow"), isCloseAffordance: true },
       );
-      return choice?.title === "Trust project";
+      return choice === trustChoice;
     },
     reportError: (error, visible) => {
       appendOutput(output, "error", `project trust: ${String(error)}`);
-      if (visible) void vscode.window.showErrorMessage(`Could not trust this project: ${String(error)}`);
+      if (visible) void vscode.window.showErrorMessage(t("host.trustFailed", { detail: String(error) }));
     },
   });
   const supervisorStateSubscription = supervisor.onStateChange((state) => {
@@ -854,6 +877,7 @@ export async function activate(
       void webviewProvider.setServeConnectionState(state.status);
     }
     if (state.phase === "ready" && state.result) {
+      if (state.result.uiPreferences) setLocale(state.result.uiPreferences.effective);
       if (state.result.sessionId) {
         sessionRouter.setBootstrapSessionId(state.result.sessionId);
       }
@@ -876,7 +900,7 @@ export async function activate(
       );
       if (firstRunSetupInProgress) {
         void maybeShowSetupRecoveryMessage(
-          "Tomcat is still waiting for first-time setup. Finish `tomcat init` in the integrated terminal, then choose `I've Finished Setup` to reconnect.",
+          t("host.setupWaiting"),
           "warning",
         );
       } else {
@@ -921,6 +945,7 @@ export async function activate(
     // Workspace-scoped: the attachment directory follows the tomcat data dir, which can
     // differ per workspace, and a wrong remembered path would grant the wrong root.
     attachmentRootMemento: context.workspaceState,
+    sessionPinStorage: context.workspaceState,
     draftStorage: context,
     extensionUri: context.extensionUri,
     getDefaultCwd,
@@ -930,13 +955,7 @@ export async function activate(
     openExternal: async (href) => {
       await vscode.env.openExternal(vscode.Uri.parse(href));
     },
-    openModelSettings: (route) => {
-      void ensureInitialized().then((result) => {
-        if (hasAnyModelAdminCapability(result)) {
-          settingsPanel.reveal(route ?? "models");
-        }
-      });
-    },
+    openSettings: (route) => settingsPanel.reveal(route ?? "general"),
     refreshPlanPreview: (planId, path, state) =>
       planPreviewProvider.refreshFromServeEvent(planId, path, state),
     sessionRouter,
@@ -974,6 +993,9 @@ export async function activate(
     onModelCatalogChanged: () => webviewProvider.refreshModelCatalog(),
     selectConnectorWorkspaceRoot,
   });
+  context.subscriptions.push(supervisor.onStateChange((state) => {
+    void settingsPanel.onServeConnectionChanged(state.phase === "ready");
+  }));
   const projectTrustRefresh = projectTrustPrompt.onDidTrustProject(() => settingsPanel.onProjectTrusted());
   const selectionCodeLensProvider = new TomcatSelectionCodeLensProvider();
   let selectionCodeLensTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1015,7 +1037,7 @@ export async function activate(
       if (!sessionId) {
         await showWarningMessage(
           promptHistory,
-          "Tomcat sidebar is not ready yet. Please try again.",
+          t("host.sidebarNotReady"),
         );
         return;
       }
@@ -1080,8 +1102,8 @@ export async function activate(
         }),
       );
       const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: "Select the model used when building plans",
-        title: "Tomcat: Build Model",
+        placeHolder: t("host.selectBuildModel"),
+        title: t("host.buildModelTitle"),
       });
       if (picked) {
         await planPreviewProvider.setBuildModel(picked.modelId);
@@ -1137,48 +1159,7 @@ export async function activate(
   );
   const confirmationHandler = messenger.registerControlRequestHandler(
     "confirmation",
-    async (frame, controlContext) => {
-      const request =
-        frame.payload && typeof frame.payload === "object"
-          ? (frame.payload as Record<string, unknown>)
-          : null;
-      const suggestedRoot =
-        typeof request?.suggestedRoot === "string" ? request.suggestedRoot : undefined;
-      const preview =
-        typeof request?.preview === "string"
-          ? request.preview
-          : "A protected operation needs your approval.";
-      const allowOnce = "Allow once";
-      const allowRoot = "Always allow this folder";
-      const choice = await vscode.window.showWarningMessage(
-        preview,
-        { modal: true },
-        allowOnce,
-        ...(suggestedRoot ? [allowRoot] : []),
-      );
-      if (controlContext.signal.aborted) {
-        return { kind: "cancel" as const, payload: { reason: "host_disconnected" } };
-      }
-      if (choice === allowOnce) {
-        return {
-          kind: "response" as const,
-          payload: { decision: "allow_once" },
-          sessionId: frame.sessionId,
-        };
-      }
-      if (choice === allowRoot && suggestedRoot) {
-        return {
-          kind: "response" as const,
-          payload: { decision: "allow_and_persist_root", root: suggestedRoot },
-          sessionId: frame.sessionId,
-        };
-      }
-      return {
-        kind: "response" as const,
-        payload: { decision: "deny" },
-        sessionId: frame.sessionId,
-      };
-    },
+    nativeConfirmationHandler,
   );
 
   const stderrSubscription = messenger.onStderr((chunk) => {
@@ -1209,7 +1190,7 @@ export async function activate(
       const result = await supervisor.reconnect();
       await showInformationMessage(
         promptHistory,
-        `Tomcat serve restarted. Active session: ${result.sessionId ?? "n/a"}`,
+        t("host.serveRestarted", { id: result.sessionId ?? "n/a" }),
       );
     },
   );
@@ -1221,7 +1202,7 @@ export async function activate(
       const sessionId = await webviewProvider.beginNewSession();
       await showInformationMessage(
         promptHistory,
-        `Created Tomcat session: ${sessionId ?? "unknown"}`,
+        t("host.sessionCreated", { id: sessionId ?? "unknown" }),
       );
     },
   );
@@ -1232,16 +1213,16 @@ export async function activate(
       await ensureInitialized();
       const payload = await sessionRouter.listSessions();
       const sessionLines = payload.sessions.map((session) => {
-        const busy = session.busy ? "busy" : "idle";
+        const busy = t(session.busy ? "host.busy" : "host.idle");
         const active =
-          payload.activeSessionId === session.sessionId ? " (active)" : "";
+          payload.activeSessionId === session.sessionId ? t("host.active") : "";
         return `${session.sessionId} - ${busy}${active}`;
       });
       await showInformationMessage(
         promptHistory,
         sessionLines.length > 0
-          ? `Tomcat sessions: ${sessionLines.join(", ")}`
-          : "Tomcat has no active sessions.",
+          ? t("host.sessions", { list: sessionLines.join(", ") })
+          : t("host.noSessions"),
       );
     },
   );
@@ -1253,12 +1234,9 @@ export async function activate(
   );
   const openSettingsCommand = vscode.commands.registerCommand(
     TOMCAT_OPEN_SETTINGS_COMMAND,
-    async (route?: SettingsRoute) => {
-      // Settings includes the connector controls. The panel advertises the exact
-      // operations this Serve instance supports after its ready handshake, so a
-      // missing model-management capability must not hide connector settings.
-      await ensureInitialized();
-      settingsPanel.reveal(route ?? "models");
+    (route?: SettingsRoute) => {
+      // The settings shell must remain accessible even when Serve is unavailable.
+      settingsPanel.reveal(route ?? "general");
     },
   );
   const addSelectionToChatCommand = vscode.commands.registerCommand(
@@ -1268,7 +1246,7 @@ export async function activate(
       if (!editor) {
         await showWarningMessage(
           promptHistory,
-          "Open an editor and select some text first.",
+          t("host.selectEditor"),
         );
         return;
       }
@@ -1276,7 +1254,7 @@ export async function activate(
       if (!reference) {
         await showWarningMessage(
           promptHistory,
-          "Select some text before adding it to Tomcat Chat.",
+          t("host.selectText"),
         );
         return;
       }
@@ -1284,7 +1262,7 @@ export async function activate(
       if (!sessionId) {
         await showWarningMessage(
           promptHistory,
-          "Tomcat sidebar is not ready yet. Please try again.",
+          t("host.sidebarNotReady"),
         );
         return;
       }
@@ -1303,7 +1281,7 @@ export async function activate(
       if (!targets.length) {
         await showWarningMessage(
           promptHistory,
-          "Choose a file or folder in the explorer first.",
+          t("host.chooseFile"),
         );
         return;
       }
@@ -1311,7 +1289,7 @@ export async function activate(
       if (!sessionId) {
         await showWarningMessage(
           promptHistory,
-          "Tomcat sidebar is not ready yet. Please try again.",
+          t("host.sidebarNotReady"),
         );
         return;
       }
@@ -1360,7 +1338,7 @@ export async function activate(
         await supervisor.reconnect();
         await showInformationMessage(
           promptHistory,
-          "Tomcat settings changed. Restarted Tomcat serve.",
+          t("host.settingsRestarted"),
         );
       })().catch((error: unknown) => {
         appendOutput(output, "error", `config update failed: ${String(error)}`);

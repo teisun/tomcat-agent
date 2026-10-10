@@ -1,9 +1,10 @@
 import {
-  CONNECTOR_PROTOCOL_MISMATCH,
+  ConnectorProtocolError,
   parseConnectorReloadReceipt,
   type ConnectorView,
 } from "../../shared/connectorsProtocol";
 import type { SettingsConnectorReloadReceipt } from "../../shared/settingsProtocol";
+import { t } from "../../shared/i18n";
 
 export interface ReloadObservation {
   receipt: SettingsConnectorReloadReceipt;
@@ -40,10 +41,10 @@ export class ConnectorReloadTracker {
     if (!this.active(entry) || entry.receipt.phase !== "pending") return;
     const receipt = parseConnectorReloadReceipt(payload, entry.receipt.configKey);
     const deadline = now + receipt.recoveryTimeoutMs + 10_000;
-    if (!Number.isSafeInteger(deadline)) throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    if (!Number.isSafeInteger(deadline)) throw new ConnectorProtocolError();
     entry.afterRead = afterRead;
     entry.deadline = deadline;
-    entry.receipt = { ...entry.receipt, phase: "accepted", generation: receipt.generation, message: "Reconnection accepted." };
+    entry.receipt = { ...entry.receipt, phase: "accepted", generation: receipt.generation, message: t("connector.reloadAccepted") };
   }
 
   finish(entry: ReloadObservation, phase: "failed" | "unknown", message: string, reason?: SettingsConnectorReloadReceipt["reason"]): void {
@@ -53,7 +54,7 @@ export class ConnectorReloadTracker {
 
   disconnected(): void {
     for (const entry of this.entries.values()) {
-      this.finish(entry, "unknown", "Unable to confirm reconnection. Connection lost.", "connection-lost");
+      this.finish(entry, "unknown", t("connector.reloadDisconnected"), "connection-lost");
     }
   }
 
@@ -61,7 +62,7 @@ export class ConnectorReloadTracker {
     let changed = false;
     for (const entry of this.entries.values()) {
       if (this.active(entry) && entry.deadline !== undefined && now >= entry.deadline) {
-        this.finish(entry, "unknown", "Unable to confirm reconnection before the observation deadline.", "timeout");
+        this.finish(entry, "unknown", t("connector.reloadTimeout"), "timeout");
         changed = true;
       }
     }
@@ -73,11 +74,11 @@ export class ConnectorReloadTracker {
       if (entry.receipt.phase !== "accepted" || read <= entry.afterRead) continue;
       const connector = connectors.find((candidate) => candidate.configKey === entry.receipt.configKey);
       if (!connector) {
-        this.finish(entry, "failed", "Connector was removed during reconnection.", "removed");
+        this.finish(entry, "failed", t("connector.reloadRemoved"), "removed");
         continue;
       }
       if (connector.compatibilityError || connector.generation === undefined) {
-        this.finish(entry, "unknown", CONNECTOR_PROTOCOL_MISMATCH, "incompatible");
+        this.finish(entry, "unknown", t("connector.protocolMismatch"), "incompatible");
         continue;
       }
       const expected = entry.receipt.generation!;
@@ -85,18 +86,18 @@ export class ConnectorReloadTracker {
         // An older read cannot settle a new click. A newer recovery supersedes it.
         if (connector.generation.length > expected.length
           || (connector.generation.length === expected.length && connector.generation > expected)) {
-          this.finish(entry, "failed", "Reconnection was superseded by a newer recovery.", "superseded");
+          this.finish(entry, "failed", t("connector.reloadSuperseded"), "superseded");
         }
         continue;
       }
       if (connector.overridden) {
-        this.finish(entry, "failed", "Connector is overridden by workspace configuration.", "superseded");
+        this.finish(entry, "failed", t("connector.reloadOverridden"), "superseded");
       } else if (connector.state === "connected") {
-        entry.receipt = { ...entry.receipt, phase: "succeeded", message: "Connector reconnected." };
+        entry.receipt = { ...entry.receipt, phase: "succeeded", message: t("connector.reconnected") };
       } else if (connector.state !== "pending" && connector.state !== "connecting") {
-        const nextStep = connector.state === "needs_authorization" ? "Login is required."
-          : connector.state === "awaiting_project_trust" ? "Trust this project to connect its services."
-            : "Connector did not reconnect.";
+        const nextStep = connector.state === "needs_authorization" ? t("connector.loginRequired")
+          : connector.state === "awaiting_project_trust" ? t("connector.trustRequired")
+            : t("connector.reloadFailed");
         this.finish(entry, "failed", connector.error ?? nextStep, "rejected");
       }
     }

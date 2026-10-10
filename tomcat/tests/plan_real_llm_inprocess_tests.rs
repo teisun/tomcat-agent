@@ -545,9 +545,7 @@ fn is_transient_connect_failure(outcome: &AgentRunOutcome) -> bool {
         }
         AgentRunOutcome::Failed(err) => {
             let text = format!("{err:?}");
-            text.contains("connection closed via error")
-                || text.contains("stage: Some(Connect)")
-                || text.contains("流式请求连接失败")
+            text.contains("connection closed via error") || text.contains("stage: Some(Connect)")
         }
         AgentRunOutcome::Completed(_) | AgentRunOutcome::Interrupted(_) => false,
     }
@@ -596,6 +594,42 @@ async fn run_chat_turn_with_transient_retry(
     unreachable!("retry loop should always return");
 }
 
+// Only the human decision is fixed; main/reviewer LLMs and production dispatch remain real.
+struct ReviewConsentPanel;
+#[async_trait::async_trait]
+impl tomcat::core::plan_runtime::panels::AskQuestionPanel for ReviewConsentPanel {
+    async fn ask(
+        &self,
+        questions: Vec<tomcat::core::plan_runtime::panels::Question>,
+        termination: tomcat::core::plan_runtime::AskQuestionTermination,
+    ) -> tomcat::core::plan_runtime::panels::AskQuestionResult {
+        use tomcat::core::plan_runtime::panels::{Answer, AskQuestionResult};
+        if let Some(result) = termination.result() {
+            return result;
+        }
+        AskQuestionResult::answered(
+            questions
+                .into_iter()
+                .map(|question| {
+                    let option = question
+                        .options
+                        .iter()
+                        .find(|option| option.id == "review")
+                        .or_else(|| question.options.iter().find(|option| option.recommended))
+                        .expect("choice");
+                    Answer {
+                        question_id: question.id,
+                        option_ids: vec![option.id.clone()],
+                        custom_text: None,
+                        skipped: false,
+                        picked_recommended: option.recommended,
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn inprocess_full_plan_path_with_real_llm() {
@@ -611,7 +645,9 @@ async fn inprocess_full_plan_path_with_real_llm() {
     let fresh_session = common::begin_fresh_default_session(&sessions_dir, Some(&workdir));
 
     let result = tokio::time::timeout(TOTAL_TIMEOUT, async {
-        let ctx = ChatContext::from_config(config).expect("ChatContext::from_config 失败");
+        let ctx = ChatContext::from_config_with_overrides(config,
+            tomcat::api::chat::ChatContextOverrides::default().with_ask_question_panel(std::sync::Arc::new(ReviewConsentPanel)))
+            .expect("ChatContext::from_config 失败");
         ensure_session(&ctx);
         let mut diag_state = InprocessDiagState::default();
 
@@ -833,6 +869,10 @@ async fn inprocess_full_plan_path_with_real_llm() {
             plan_review_idx.is_some(),
             "transcript 应含至少一条 plan.review 自定义事件，实际未发现"
         );
+        for line in lines.iter().filter(|line| line.contains("\"plan.review\"")) {
+            assert!(!line.contains("\"user_skipped\"") && !line.contains("\"parent_abort\"") && !line.contains("\"not_dispatched\""),
+                "the real reviewer must be dispatched, not silently bypassed: {line}");
+        }
         assert!(
             plan_code_review_idx.is_none(),
             "transcript 不应再含 plan.code_review runtime gate 事件，实际：{plan_code_review_idx:?}"

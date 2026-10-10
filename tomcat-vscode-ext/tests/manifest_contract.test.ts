@@ -29,6 +29,24 @@ async function readManifest(): Promise<Manifest> {
 }
 
 describe("extension manifest contract", () => {
+  it("resolves every manifest contribution in both static dictionaries", async () => {
+    const root = path.resolve(__dirname, "..");
+    const manifest = await fs.readFile(path.join(root, "package.json"), "utf8");
+    const english = JSON.parse(await fs.readFile(path.join(root, "package.nls.json"), "utf8")) as Record<string, string>;
+    const chinese = JSON.parse(await fs.readFile(path.join(root, "package.nls.zh-cn.json"), "utf8")) as Record<string, string>;
+    const keys = [...manifest.matchAll(/"%([a-zA-Z][\w.]+)%"/gu)].map((match) => match[1]);
+    expect(keys.length).toBeGreaterThan(10);
+    expect(Object.keys(english).sort()).toEqual(Object.keys(chinese).sort());
+    expect([...new Set(keys)].sort()).toEqual(Object.keys(english).sort());
+    for (const key of keys) {
+      expect(english[key].trim()).not.toBe("");
+      expect(chinese[key].trim()).not.toBe("");
+    }
+    const ignore = await fs.readFile(path.join(root, ".vscodeignore"), "utf8");
+    expect(ignore).toContain("!package.nls.json");
+    expect(ignore).toContain("!package.nls.zh-cn.json");
+  });
+
   it("declares 15/25 layout defaults with bounded integer settings", async () => {
     const properties = (await readManifest()).contributes?.configuration?.properties;
     for (const [setting, defaultValue] of [

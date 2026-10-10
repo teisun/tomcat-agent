@@ -109,7 +109,7 @@ describe("DiffView", () => {
     render(<DiffView diff={undefined} />);
 
     expect(screen.getByTestId("diff-view-empty").textContent).toContain(
-      "未保存本次修改的 Diff",
+      "No Diff was saved for this change",
     );
   });
 
@@ -124,14 +124,14 @@ describe("DiffView", () => {
     );
 
     expect(screen.getByTestId("diff-view-truncated").textContent).toContain(
-      "Diff 过大已截断，无法查看本次对比",
+      "Diff is too large and was truncated; this comparison is unavailable",
     );
   });
 
   it("distinguishes a truncated missing payload from an unsaved diff", () => {
     render(<DiffView truncated />);
     expect(screen.getByTestId("diff-view-empty").textContent).toContain(
-      "Diff 过大已截断，无法查看本次对比",
+      "Diff is too large and was truncated; this comparison is unavailable",
     );
   });
 });

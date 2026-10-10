@@ -139,6 +139,8 @@ impl PrimitiveExecutor for DisplayPrimitive {
     }
 }
 
+const CONFIG_RESPONSE_MESSAGE: &str = "已设置 llm.default_model = gpt-5.4";
+
 struct DisplayConfigBackend;
 
 #[async_trait::async_trait]
@@ -150,7 +152,7 @@ impl ConfigBackend for DisplayConfigBackend {
     async fn config_set(&self, _key: &str, _value: &str) -> Result<serde_json::Value, AppError> {
         Ok(json!({
             "applied": true,
-            "message": "已设置 llm.default_model = gpt-5.4"
+            "message": CONFIG_RESPONSE_MESSAGE
         }))
     }
 }
@@ -468,7 +470,11 @@ async fn rejected_hashline_edit_invalidates_its_read_stamp_for_a_refresh_read() 
     .await;
 
     assert!(!outcome.is_error, "{}", outcome.model_text);
-    assert!(outcome.model_text.contains("hashline 编辑被拒绝"));
+    assert!(outcome.model_text.contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "toolHashline.denied",
+        &[("path", "")],
+    )));
     assert!(
         state.get(&normalized_path).is_none(),
         "被拒编辑后的下一次 read 必须能刷新，而不是命中 FILE_UNCHANGED"
@@ -606,7 +612,7 @@ async fn config_set_success_populates_text_display() {
     assert_eq!(
         outcome.display,
         Some(ToolDisplay::Text {
-            text: "已设置 llm.default_model = gpt-5.4".to_string(),
+            text: CONFIG_RESPONSE_MESSAGE.to_string(),
         })
     );
 }

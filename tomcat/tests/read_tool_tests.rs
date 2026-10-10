@@ -440,9 +440,7 @@ async fn read_oversize_image_rejected_before_loading_bytes() {
         info!(stage = "assert", err = %err, "verifying error mentions size limit");
         let msg = err.to_string();
         assert!(
-            msg.to_lowercase().contains("image")
-                || msg.to_lowercase().contains("size")
-                || msg.contains("超"),
+            msg.contains("IMAGE_MAX_BYTES"),
             "expected size-related rejection, got: {}",
             msg
         );

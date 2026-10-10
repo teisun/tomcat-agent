@@ -9,13 +9,12 @@ pub(in super::super) async fn dispatch_plan_tool(
     display_out: &mut Option<ToolDisplay>,
 ) -> ToolExecOutcome {
     let Some(rt) = ctx.plan_runtime else {
-        return ToolExecOutcome::err(format!(
-            "plan 工具 `{name}` 不可用：当前 AgentLoop 未注入 PlanRuntime（reviewer 子 Agent 或独立测试路径）"
-        ));
+        return ToolExecOutcome::err(format!("Plan tool `{name}` is unavailable: this AgentLoop has no PlanRuntime (reviewer sub-Agent or isolated test path)"));
     };
     if name == "create_plan" && ctx.subagent_type.is_reviewer() {
         return ToolExecOutcome::err(
-            "reviewer 子 Agent 禁止调用 `create_plan`（防套娃；reviewer.md §5.2 / §5.5）",
+            "reviewer sub-Agent may not call `create_plan` (no nesting; reviewer.md §5.2 / §5.5)"
+                .to_string(),
         );
     }
 
@@ -24,7 +23,28 @@ pub(in super::super) async fn dispatch_plan_tool(
     let result: Result<serde_json::Value, plan_tools::ToolError> = match name {
         "create_plan" => {
             match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(args.clone()) {
-                Ok(a) => plan_tools::create_plan::execute_with_reviewer(rt, a, true).await,
+                Ok(a) => {
+                    let termination = crate::core::plan_runtime::AskQuestionTermination::default();
+                    if ctx.cancel.is_cancelled() {
+                        termination.interrupt();
+                    }
+                    let watcher = termination.clone();
+                    let cancel = ctx.cancel.clone();
+                    let bridge = tokio::spawn(async move {
+                        cancel.cancelled().await;
+                        watcher.interrupt();
+                    });
+                    let result = plan_tools::create_plan::execute_for_tool(
+                        rt,
+                        a,
+                        true,
+                        termination,
+                        Some(ctx.tool_call_id),
+                    )
+                    .await;
+                    bridge.abort();
+                    result
+                }
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }
@@ -43,7 +63,7 @@ pub(in super::super) async fn dispatch_plan_tool(
         "ask_question" => {
             let Some(panel) = rt.ask_question_panel() else {
                 return ToolExecOutcome::err(
-                    "ask_question 不可用：PlanRuntime 未配置 AskQuestionPanel",
+                    "ask_question is unavailable: PlanRuntime has no AskQuestionPanel".to_string(),
                 );
             };
             let termination = crate::core::plan_runtime::AskQuestionTermination::default();
@@ -80,6 +100,6 @@ pub(in super::super) async fn dispatch_plan_tool(
             };
             ToolExecOutcome::ok(v.to_string())
         }
-        Err(e) => ToolExecOutcome::err(format!("{name} 失败：{e}")),
+        Err(e) => ToolExecOutcome::err(format!("{name} failed: {e}")),
     }
 }

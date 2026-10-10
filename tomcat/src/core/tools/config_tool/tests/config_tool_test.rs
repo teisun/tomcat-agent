@@ -741,7 +741,9 @@ async fn package_install_requires_ordinary_source_read_authorization() {
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::Permission(_)));
-    assert!(error.to_string().contains("拒绝读取"));
+    assert!(error
+        .to_string()
+        .contains(source.to_string_lossy().as_ref()));
     assert!(!dir
         .path()
         .join("agents/main/skills/source-needs-read")
@@ -799,7 +801,12 @@ async fn package_install_reads_a_readonly_source_but_rejects_a_readonly_target()
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::Permission(_)));
-    assert!(error.to_string().contains("目标被路径策略拒绝"));
+    assert!(
+        error
+            .to_string()
+            .contains(dir.path().join("agents").to_string_lossy().as_ref()),
+        "{error}"
+    );
     assert!(!dir
         .path()
         .join("agents/main/skills/readonly-source")

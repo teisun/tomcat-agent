@@ -126,7 +126,7 @@ async fn instruction_catalog_resolution_snapshot_deny_and_steer() {
             .len(),
         before
     );
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }
@@ -161,7 +161,7 @@ async fn project_rules_refresh_without_tool_grants() {
     });
     crate::api::chat::refresh_prompt_snapshot(&slot.ctx, 10000, &mut snapshot).await;
     assert!(!snapshot.system_text().contains("RULE_TWO"));
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }

@@ -2,32 +2,26 @@
 use super::parse::ChatCommandOutcome;
 use super::{cmd_install, cmd_reload, cmd_uninstall};
 use crate::api::chat::{ChatContext, InventoryReport};
+use crate::infra::i18n::tr;
 use schemars::JsonSchema;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SharedSlashCommand {
     pub name: &'static str,
-    pub usage: &'static str,
-    pub summary: &'static str,
+    pub usage: String,
+    pub summary: String,
 }
-pub const SHARED_SLASH_COMMANDS: &[SharedSlashCommand] = &[
-    SharedSlashCommand {
-        name: "reload",
-        usage: "/reload",
-        summary: "重新核对磁盘上的 Skill 与插件",
-    },
-    SharedSlashCommand {
-        name: "install",
-        usage: "/install <来源> <current-project|agent|global>",
-        summary: "安装 package / 插件 / Skill",
-    },
-    SharedSlashCommand {
-        name: "uninstall",
-        usage: "/uninstall <包名> <current-project|agent|global>",
-        summary: "卸载 package",
-    },
-];
+pub fn shared_slash_commands() -> Vec<SharedSlashCommand> {
+    ["reload", "install", "uninstall"]
+        .into_iter()
+        .map(|name| SharedSlashCommand {
+            name,
+            usage: tr(&format!("slash.{name}.usage"), &[]),
+            summary: tr(&format!("slash.{name}.summary"), &[]),
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SlashReply {
@@ -49,9 +43,9 @@ impl SlashReply {
     }
 }
 
-pub fn shared_command(name: &str) -> Option<&'static SharedSlashCommand> {
-    SHARED_SLASH_COMMANDS
-        .iter()
+pub fn shared_command(name: &str) -> Option<SharedSlashCommand> {
+    shared_slash_commands()
+        .into_iter()
         .find(|command| command.name == name)
 }
 
@@ -65,7 +59,12 @@ pub fn parse_shared_slash(text: &str) -> Option<Result<(String, Vec<String>), St
     Some(
         shell_words::split(text.trim())
             .map(|tokens| (name.to_string(), tokens.into_iter().skip(1).collect()))
-            .map_err(|error| format!("命令参数解析失败：{error}\n用法：{}", command.usage)),
+            .map_err(|error| {
+                tr(
+                    "slash.parseFailed",
+                    &[("detail", &error.to_string()), ("usage", &command.usage)],
+                )
+            }),
     )
 }
 
@@ -82,13 +81,14 @@ enum SharedInvocation<'a> {
 }
 
 fn unknown_command(name: &str) -> SlashReply {
-    SlashReply::error(format!(
-        "未知命令 /{name}，输入框可用：{}",
-        SHARED_SLASH_COMMANDS
-            .iter()
-            .map(|command| format!("/{}", command.name))
-            .collect::<Vec<_>>()
-            .join(" ")
+    let commands = shared_slash_commands()
+        .iter()
+        .map(|command| format!("/{}", command.name))
+        .collect::<Vec<_>>()
+        .join(" ");
+    SlashReply::error(tr(
+        "slash.unknown",
+        &[("name", name), ("commands", &commands)],
     ))
 }
 
@@ -118,14 +118,20 @@ fn parse_invocation<'a>(
         _ => return Err(unknown_command(name)),
     };
     invocation.ok_or_else(|| {
-        SlashReply::error(format!(
-            "[{name}] 用法：{}{}",
-            command.usage,
-            if name == "reload" {
-                "（不接受参数）"
-            } else {
-                ""
-            }
+        SlashReply::error(tr(
+            "slash.usage",
+            &[
+                ("name", name),
+                ("usage", &command.usage),
+                (
+                    "suffix",
+                    &if name == "reload" {
+                        tr("slash.noArguments", &[])
+                    } else {
+                        String::new()
+                    },
+                ),
+            ],
         ))
     })
 }
@@ -166,7 +172,7 @@ pub(crate) async fn run_terminal_shared(
 ) -> ChatCommandOutcome {
     if matches!(name, "install" | "uninstall") && args.len() == 1 {
         let Some(target) = cmd_install::choose_target(ctx, name).await else {
-            println!("[{name}] 已取消，未写入任何文件。");
+            println!("{}", tr("slash.cancelled", &[("name", name)]));
             return ChatCommandOutcome::Handled;
         };
         args.push(target.label().to_string());
@@ -183,51 +189,70 @@ pub(crate) fn render_sync_summary(name: &str, report: &InventoryReport) -> Strin
             .map(|(sign, count)| format!("{sign}{count}"))
             .collect::<Vec<_>>();
         if parts.is_empty() {
-            "不变".to_string()
+            tr("slash.sync.unchanged", &[])
         } else {
             parts.join(" ")
         }
     };
+    let elapsed = format!("{:.1}", report.timings.total.as_secs_f64() * 1000.0);
     let mut lines = vec![if report.has_changes() {
-        format!(
-            "[{name}] 当前会话已同步：Skill {}，插件 {}（用时 {:.1}ms）",
-            counts(
-                report.skills_added.len(),
-                report.skills_removed.len(),
-                report.skills_changed.len()
-            ),
-            counts(
-                report.plugins_added.len(),
-                report.plugins_removed.len(),
-                report.plugins_changed.len()
-            ),
-            report.timings.total.as_secs_f64() * 1000.0
+        tr(
+            "slash.sync.changed",
+            &[
+                ("name", name),
+                (
+                    "skills",
+                    &counts(
+                        report.skills_added.len(),
+                        report.skills_removed.len(),
+                        report.skills_changed.len(),
+                    ),
+                ),
+                (
+                    "plugins",
+                    &counts(
+                        report.plugins_added.len(),
+                        report.plugins_removed.len(),
+                        report.plugins_changed.len(),
+                    ),
+                ),
+                ("elapsed", &elapsed),
+            ],
         )
     } else {
-        format!(
-            "[{name}] {}：Skill 与插件没有变化（用时 {:.1}ms）",
-            if report.warnings.is_empty() {
-                "当前会话已是最新"
-            } else {
-                "当前清单保持不变，请查看警告"
-            },
-            report.timings.total.as_secs_f64() * 1000.0
+        tr(
+            "slash.sync.noChanges",
+            &[
+                ("name", name),
+                ("elapsed", &elapsed),
+                (
+                    "status",
+                    &tr(
+                        if report.warnings.is_empty() {
+                            "slash.sync.latest"
+                        } else {
+                            "slash.sync.warnings"
+                        },
+                        &[],
+                    ),
+                ),
+            ],
         )
     }];
     for (verb, kind, values) in [
-        ("新增", "skill", &report.skills_added),
-        ("移除", "skill", &report.skills_removed),
-        ("更新", "skill", &report.skills_changed),
-        ("新增", "plugin", &report.plugins_added),
-        ("移除", "plugin", &report.plugins_removed),
-        ("更新", "plugin", &report.plugins_changed),
+        ("slash.sync.added", "skill", &report.skills_added),
+        ("slash.sync.removed", "skill", &report.skills_removed),
+        ("slash.sync.updated", "skill", &report.skills_changed),
+        ("slash.sync.added", "plugin", &report.plugins_added),
+        ("slash.sync.removed", "plugin", &report.plugins_removed),
+        ("slash.sync.updated", "plugin", &report.plugins_changed),
     ] {
         for value in values {
-            lines.push(format!("  - {verb} {kind}: {value}"));
+            lines.push(format!("  - {} {kind}: {value}", tr(verb, &[])));
         }
     }
     for warning in &report.warnings {
-        lines.push(format!("  - 警告: {warning}"));
+        lines.push(tr("slash.warning", &[("detail", warning)]));
     }
     lines.join("\n")
 }

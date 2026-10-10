@@ -16,7 +16,7 @@ use super::mocks::temp_sessions_dir;
 use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 #[test]
-fn delete_session_discards_only_its_file_baselines() {
+fn delete_session_discards_only_its_file_baselines_and_preheat_cache() {
     let temp = tempfile::tempdir().unwrap();
     let manager = SessionManager::new(temp.path().to_path_buf());
     let first = manager.new_current_session(None).unwrap();
@@ -31,9 +31,22 @@ fn delete_session_discards_only_its_file_baselines() {
         std::fs::create_dir_all(dir.join("u")).unwrap();
         std::fs::write(dir.join("u/baselines.jsonl"), "fixture").unwrap();
     }
+    let first_cache = crate::core::session::preheat_cache::preheat_cache_path(
+        &manager.transcript_path(&first.session_id),
+    );
+    let second_cache = crate::core::session::preheat_cache::preheat_cache_path(
+        &manager.transcript_path(&second.session_id),
+    );
+    std::fs::write(&first_cache, "private summary").unwrap();
+    std::fs::write(&second_cache, "other summary").unwrap();
     manager.delete_session(&first.session_id).unwrap();
     assert!(!first_dir.exists());
     assert!(second_dir.join("u/baselines.jsonl").exists());
+    assert!(!first_cache.exists());
+    assert_eq!(
+        std::fs::read_to_string(&second_cache).unwrap(),
+        "other summary"
+    );
 }
 
 #[test]
@@ -90,7 +103,7 @@ fn detached_session_is_listable_without_changing_durable_or_pinned_current() {
     let current = mgr
         .new_current_session(Some("/tmp/source".to_string()))
         .unwrap();
-    mgr.pin_session(&current.session_id);
+    mgr.pin_session(&current.session_id).unwrap();
     let durable_before = mgr
         .load_store()
         .unwrap()
@@ -259,7 +272,7 @@ fn ensure_current_session_rejects_legacy_store_without_overwriting() {
     let error = mgr
         .ensure_current_session(Some("/tmp/new".to_string()))
         .expect_err("legacy store must not be reset during a normal read");
-    assert!(error.to_string().contains("会话存储"));
+    assert!(matches!(error, crate::AppError::Config(_)));
     assert_eq!(
         std::fs::read_to_string(dir.join("sessions.json")).unwrap(),
         r#"{
@@ -496,7 +509,7 @@ fn pin_only_applies_to_the_manager_scope_key() {
 
     let code_mgr = SessionManager::new_scoped(dir.clone(), "agent:test:code".to_string());
     let code_entry = code_mgr.new_current_session(None).expect("code session");
-    code_mgr.pin_session(&code_entry.session_id);
+    code_mgr.pin_session(&code_entry.session_id).unwrap();
 
     let claw_mgr = SessionManager::new_scoped(dir.clone(), "agent:test:claw".to_string());
     let claw_entry = claw_mgr.new_current_session(None).expect("claw session");
@@ -521,7 +534,7 @@ fn clone_shares_pin_and_ignores_external_repoint() {
         .new_current_session(Some("/tmp/original".to_string()))
         .expect("original session");
     let clone = mgr.clone();
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -556,7 +569,7 @@ fn append_message_stays_on_pinned_transcript_after_external_repoint() {
 
     let mgr = SessionManager::new(dir.clone());
     let original = mgr.new_current_session(None).expect("original session");
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -594,7 +607,7 @@ fn switch_current_model_updates_pinned_session_after_external_repoint() {
 
     let mgr = SessionManager::new(dir.clone());
     let original = mgr.new_current_session(None).expect("original session");
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -646,7 +659,7 @@ fn new_current_session_updates_pin_when_manager_is_already_pinned() {
     let first = mgr
         .new_current_session(Some("/tmp/one".to_string()))
         .expect("first session");
-    mgr.pin_session(&first.session_id);
+    mgr.pin_session(&first.session_id).unwrap();
 
     let second = mgr
         .new_current_session(Some("/tmp/two".to_string()))
@@ -674,7 +687,7 @@ fn switch_current_to_session_id_updates_pin_when_manager_is_already_pinned() {
     let mgr = SessionManager::new(dir.clone());
     let first = mgr.new_current_session(None).expect("first session");
     let second = mgr.new_current_session(None).expect("second session");
-    mgr.pin_session(&second.session_id);
+    mgr.pin_session(&second.session_id).unwrap();
 
     let switched = mgr
         .switch_current_to_session_id(&first.session_id)

@@ -1,9 +1,12 @@
 use super::super::*;
+use crate::infra::i18n::{tr_in, Locale};
 
 #[test]
 fn app_error_display() {
     let e = AppError::Config("test".to_string());
-    assert!(e.to_string().contains("配置错误"));
+    assert!(e
+        .to_string()
+        .contains(&tr_in(Locale::En, "error.prefix.config", &[])));
     assert!(e.to_string().contains("test"));
 }
 
@@ -30,8 +33,11 @@ fn llm_http_status_error_preserves_status_provider_and_summary() {
     assert_eq!(llm_http_status(&err), Some(503));
     assert_eq!(llm_stage(&err), None);
     assert_eq!(
-        llm_summary(&err).as_deref(),
-        Some("API 错误 503: upstream connect error")
+        llm_summary(&err),
+        Some(format!(
+            "{}: upstream connect error",
+            tr_in(Locale::En, "runtime.apiError", &[("status", "503")])
+        )),
     );
 }
 
@@ -39,7 +45,13 @@ fn llm_http_status_error_preserves_status_provider_and_summary() {
 fn llm_http_status_error_supports_uncommon_status_codes() {
     let err = llm_http_status_error("openai", 418, "teapot");
     assert_eq!(llm_http_status(&err), Some(418));
-    assert_eq!(llm_summary(&err).as_deref(), Some("API 错误 418: teapot"));
+    assert_eq!(
+        llm_summary(&err),
+        Some(format!(
+            "{}: teapot",
+            tr_in(Locale::En, "runtime.apiError", &[("status", "418")])
+        ))
+    );
 }
 
 #[test]
@@ -260,6 +272,26 @@ fn llm_failure_classification_obeys_billing_before_status() {
         let failure = classify_llm_failure(&error);
         assert_eq!(failure.kind, kind);
         assert_eq!(failure.domain, domain);
+    }
+}
+
+#[test]
+fn structured_billing_identity_does_not_depend_on_diagnostic_language() {
+    for message in ["opaque upstream detail", "余额不足"] {
+        let body =
+            serde_json::json!({ "error": { "code": "insufficient_quota", "message": message } })
+                .to_string();
+        let error = llm_http_status_error("fixture", 429, &body);
+        assert_eq!(classify_llm_failure(&error).kind, LlmFailureKind::Billing);
+        assert!(!is_retryable_llm_error(&error));
+
+        let unknown = llm_stream_terminal_error("fixture", message, None);
+        assert_eq!(classify_llm_failure(&unknown).kind, LlmFailureKind::Unknown);
+        assert_eq!(llm_summary(&unknown).as_deref(), Some(message));
+        assert!(
+            !is_retryable_llm_error(&unknown),
+            "unknown diagnostics must not obtain the elevated transport retry budget"
+        );
     }
 }
 

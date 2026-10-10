@@ -37,16 +37,18 @@ fn resolve_target_path(
     file: Option<&str>,
 ) -> Result<(PathBuf, String, bool), String> {
     let base_dir = std::fs::canonicalize(&skill.base_dir)
-        .map_err(|e| format!("load_skill: 技能目录不可访问: {e}"))?;
+        .map_err(|e| format!("load_skill: Skill directory is inaccessible: {e}"))?;
     if let Some(file) = file {
         let relative = Path::new(file);
         if relative.is_absolute() {
-            return Err("load_skill: `file` 必须是技能目录内的相对路径".to_string());
+            return Err(
+                "load_skill: `file` must be a relative path inside the Skill directory".to_string(),
+            );
         }
         let target = std::fs::canonicalize(skill.base_dir.join(relative))
-            .map_err(|e| format!("load_skill: 读取附件失败: {e}"))?;
+            .map_err(|e| format!("load_skill: could not read attachment: {e}"))?;
         if !target.starts_with(&base_dir) {
-            return Err("load_skill: `file` 越出技能目录".to_string());
+            return Err("load_skill: `file` escapes the Skill directory".to_string());
         }
         let main_skill_path =
             std::fs::canonicalize(&skill.file_path).unwrap_or_else(|_| skill.file_path.clone());
@@ -55,7 +57,7 @@ fn resolve_target_path(
     }
 
     let target = std::fs::canonicalize(&skill.file_path)
-        .map_err(|e| format!("load_skill: 读取技能正文失败: {e}"))?;
+        .map_err(|e| format!("load_skill: could not read Skill body: {e}"))?;
     Ok((target, "SKILL.md".to_string(), true))
 }
 

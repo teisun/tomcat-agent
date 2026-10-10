@@ -44,9 +44,12 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
         route_parsed_command(Arc::clone(&state), &normal_tx, command).await?;
     }
     drop(normal_tx);
-    normal_worker
-        .await
-        .map_err(|error| AppError::Config(format!("serve command worker panicked: {error}")))?
+    normal_worker.await.map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "serve.workerPanicked",
+            &[("detail", &error.to_string())],
+        ))
+    })?
 }
 
 /// Keep stateful work FIFO while letting the cancellation control plane preempt that backlog.
@@ -60,7 +63,7 @@ pub(crate) async fn route_parsed_command(
     } else {
         normal_tx
             .send(command)
-            .map_err(|_| AppError::Config("serve command worker stopped unexpectedly".to_string()))
+            .map_err(|_| AppError::Config(crate::infra::i18n::tr("serve.workerStopped", &[])))
     }
 }
 

@@ -144,7 +144,7 @@ pub(super) fn validate_request_shape(messages: &mut Vec<ChatMessage>) -> Result<
     if crate::core::session::has_dangling_tool_calls_in_messages(messages) {
         return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
             "llm_request",
-            "refusing to send a transcript with unpaired tool calls; hydrate or resolve the pending tool result first",
+            crate::infra::i18n::tr("agentLoop.unpairedTools", &[]),
         )));
     }
     if !matches!(
@@ -153,7 +153,7 @@ pub(super) fn validate_request_shape(messages: &mut Vec<ChatMessage>) -> Result<
     ) {
         return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
             "llm_request",
-            "refusing to send a transcript whose tail is not a user input or completed tool result",
+            crate::infra::i18n::tr("agentLoop.invalidTail", &[]),
         )));
     }
     Ok(())
@@ -472,38 +472,35 @@ pub(super) async fn run_reasoning_loop(
             }));
             agent.clear_pending_assistant_entry_id();
             let message = match failure_kind {
-                "output_truncated" => {
-                    "本轮输出在达到上限前没有产生可见回答。请使用 Resume 重试，或换一个模型后重试。"
-                        .to_string()
-                }
+                "output_truncated" => crate::infra::i18n::tr("agentLoop.outputTruncated", &[]),
                 "hidden_output" => {
                     if attempt >= max_attempts {
-                        format!(
-                            "本轮产生了不可显示的推理、没有可见回答。已自动重试 {} 次；请使用 Resume 重试，或换一个模型后重试。",
-                            attempt.saturating_sub(1)
+                        crate::infra::i18n::tr(
+                            "agentLoop.hiddenExhausted",
+                            &[("count", &attempt.saturating_sub(1).to_string())],
                         )
                     } else {
-                        "本轮产生了不可显示的推理、没有可见回答。正在自动重试。".to_string()
+                        crate::infra::i18n::tr("agentLoop.hiddenRetry", &[])
                     }
                 }
                 "malformed_tool_call" => {
                     if attempt >= max_attempts {
-                        format!(
-                            "模型返回了缺少工具名称的无效工具调用。已自动重试 {} 次；请使用 Resume 重试，或换一个模型后重试。",
-                            attempt.saturating_sub(1)
+                        crate::infra::i18n::tr(
+                            "agentLoop.malformedExhausted",
+                            &[("count", &attempt.saturating_sub(1).to_string())],
                         )
                     } else {
-                        "模型返回了缺少工具名称的无效工具调用。正在自动重试。".to_string()
+                        crate::infra::i18n::tr("agentLoop.malformedRetry", &[])
                     }
                 }
                 _ => {
                     if attempt >= max_attempts {
-                        format!(
-                            "本轮只产生了思考、没有产生回答。已自动重试 {} 次；请使用 Resume 重试，或换一个模型后重试。",
-                            attempt.saturating_sub(1)
+                        crate::infra::i18n::tr(
+                            "agentLoop.thinkingExhausted",
+                            &[("count", &attempt.saturating_sub(1).to_string())],
                         )
                     } else {
-                        "本轮只产生了思考、没有产生回答。正在自动重试。".to_string()
+                        crate::infra::i18n::tr("agentLoop.thinkingRetry", &[])
                     }
                 }
             };

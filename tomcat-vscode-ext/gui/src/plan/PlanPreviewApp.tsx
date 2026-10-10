@@ -24,6 +24,8 @@ import { TodoList } from "../components/TodoList";
 import { PlanFindWidget } from "./PlanFindWidget";
 import { usePlanFind } from "./usePlanFind";
 import { PlanSelectionActionButton } from "./PlanSelectionActionButton";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey } from "../../../src/shared/i18n";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown
   ? Omit<T, K>
@@ -38,10 +40,6 @@ function send(
     ...message,
     messageId: `${message.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   } as PlanPreviewIntent);
-}
-
-function todoCountLabel(count: number): string {
-  return `${count} ${count === 1 ? "To-do" : "To-dos"}`;
 }
 
 /** 1-based source line for a DOM node via the nearest `[data-source-line]` block. */
@@ -414,6 +412,8 @@ export function PlanPreviewApp({
 }: {
   vscodeApi: VsCodeApiLike<PlanPreviewIntent>;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const [state, setState] = useState<PlanPreviewStateSnapshot | null>(null);
   const stateRef = useRef<PlanPreviewStateSnapshot | null>(state);
   const contentRef = useRef<HTMLElement>(null);
@@ -571,7 +571,7 @@ export function PlanPreviewApp({
         className="tc-plan-preview tc-plan-preview--loading"
         data-testid="plan-loading"
       >
-        Loading plan…
+        {t("plan.loading")}
       </div>
     );
   }
@@ -615,7 +615,7 @@ export function PlanPreviewApp({
         />
       ) : null}
       <main
-        aria-label="Plan preview"
+        aria-label={t("plan.preview")}
         className="tc-plan-preview__content"
         data-testid="plan-content"
         ref={contentRef}
@@ -633,7 +633,7 @@ export function PlanPreviewApp({
           data-testid="plan-todos-count"
           id="plan-todos-heading"
         >
-          {todoCountLabel(state.todos.length)}
+          {t(pluralKey(locale, "plan.todos.other", state.todos.length), { count: state.todos.length })}
         </h2>
         <hr className="tc-plan-preview__divider" />
         <TodoList labelledBy="plan-todos-heading" todos={state.todos} />

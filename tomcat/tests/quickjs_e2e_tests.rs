@@ -354,7 +354,10 @@ async fn zero_timeout_session_start_reports_initialization_error_and_cleans_up()
         Err(error) => error.to_string(),
         Ok(_) => panic!("bad initialization must fail"),
     };
-    assert!(error.contains("JS执行错误"), "{error}");
+    assert!(
+        error.contains(&tomcat::infra::tr("error.prefix.quickjs", &[])),
+        "{error}"
+    );
     assert!(
         !error.contains("timed out"),
         "0 must not introduce a timer: {error}"

@@ -17,6 +17,8 @@ import type {
   WebviewIntent,
 } from "../../../extension";
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
+import { en } from "../../../shared/i18n/en";
+import { translate } from "../../../shared/i18n";
 import { captureWorkbenchArtifacts, SettingsFrameDriver, WorkbenchFindDriver } from "./workbenchFindDriver";
 
 
@@ -31,13 +33,13 @@ async function pause(ms: number): Promise<void> {
 }
 
 async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs = 20_000,
   errorMessage = "Timed out waiting for condition",
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (predicate()) {
+    if (await predicate()) {
       return;
     }
     await pause(100);
@@ -47,6 +49,228 @@ async function waitFor(
 
 type CaptureRegion = "editor" | "sidebar" | "window";
 
+
+/** Rendered Host + fake-Serve acceptance; disk/locking/reviewer execution is covered by real-Serve integration tests. */
+export async function assertSessionSettingsLanguageFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const target = await createFreshWebviewSession(api, "locale-pin-target");
+  const active = await createFreshWebviewSession(api, "locale-active-draft");
+  await waitForWebviewDomSnapshot(api, snapshot => snapshot.activeSessionId === active ? true : undefined);
+  const draft = "Draft must survive 中英文切换";
+  await api.__testing.sendWebviewDomAction({ kind: "setInputValue", testId: "composer-input", value: draft });
+  await waitForWebviewState(api, state => state.sessionViews[active]?.composerDraft?.text === draft ? true : undefined);
+  const chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  await chat.setViewport(1440, 900);
+  await chat.click("settings-button");
+  await waitFor(() => api.__testing.getSettingsPanelState().state.ready && api.__testing.getSettingsPanelState().route === "general");
+  const settings = await SettingsFrameDriver.connectFromEnvironment();
+  const setLanguage = async (language: "en" | "zh-CN") => {
+    await waitForSettingsPanelDom(api, dom => {
+      const tag = /<select\b[^>]*data-testid="settings-language"[^>]*>/.exec(dom.html)?.[0];
+      return tag && !/\bdisabled\b/.test(tag) ? true : undefined;
+    });
+    await settings.evaluate(`(() => { const input = document.querySelector('[data-testid="settings-language"]'); if (!input || input.disabled) throw new Error('Language selector unavailable'); input.value = ${JSON.stringify(language)}; input.dispatchEvent(new Event('change', {bubbles:true})); })()`);
+    await waitFor(() => api.__testing.getSettingsPanelState().state.uiPreferences?.language === language);
+    await waitFor(() => chat.evaluate<boolean>(`document.documentElement.lang === ${JSON.stringify(language)} && Boolean(document.querySelector('[data-testid="settings-button"]'))`));
+    if (language === "en") {
+      assert.equal(await chat.evaluate<string>(`document.querySelector('[data-testid="settings-button"]')?.getAttribute('aria-label')`), en["settings.title"]);
+    }
+    assert.equal(await settings.evaluate<string>("document.documentElement.lang"), language);
+    assert.equal(await chat.evaluate<string>("document.documentElement.lang"), language);
+  };
+  const capture = async (driver: SettingsFrameDriver, name: string) => {
+    if (process.env.TOMCAT_E2E_SCREENSHOT !== "1") return;
+    assert.ok(process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR, "A resolved project-resource artifact directory is required");
+    const targetPath = transcriptVisualArtifactPath(`product-i18n-${name}.png`);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await driver.capture(targetPath);
+  };
+  const rowAction = async (icon: "pin" | "pinned" | "trash") => {
+    await chat.click("session-select");
+    assert.equal(await chat.evaluate<boolean>(`(() => { const row = [...document.querySelectorAll('.tc-session-row')].find(row => row.querySelector('[data-testid="session-option"]')?.getAttribute('title') === ${JSON.stringify(target)}); const button = row?.querySelector('.codicon-${icon}')?.closest('button'); if (!button || button.disabled) return false; button.click(); return true; })()`), true);
+  };
+  let failed = false;
+  try {
+    for (const language of ["zh-CN", "en"] as const) {
+      await setLanguage(language);
+      await capture(settings, `settings-${language}`);
+      if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+        await settings.setViewport(1024, 900);
+        await settings.waitForSnapshot(snapshot => snapshot.viewport.width >= 300 && snapshot.viewport.width <= 720, "Settings narrow layout must actually be rendered");
+        await capture(settings, `settings-${language}-narrow`);
+        if (language === "zh-CN") {
+          const theme = vscode.workspace.getConfiguration("workbench").get<string>("colorTheme");
+          const wasLight = await settings.evaluate<boolean>("document.body.classList.contains('vscode-light')");
+          await vscode.workspace.getConfiguration("workbench").update("colorTheme", "Default Light Modern", vscode.ConfigurationTarget.Global);
+          try {
+            await waitFor(() => settings.evaluate<boolean>("document.body.classList.contains('vscode-light')"));
+            await capture(settings, "settings-zh-CN-narrow-light");
+          } finally {
+            if (theme) {
+              await vscode.workspace.getConfiguration("workbench").update("colorTheme", theme, vscode.ConfigurationTarget.Global);
+              await waitFor(() => settings.evaluate<boolean>(`document.body.classList.contains('vscode-light') === ${wasLight}`));
+            }
+          }
+        }
+        await settings.setViewport(1440, 900);
+      }
+      if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+        // Presentation fixtures in the real Settings webview. Save/override/failure
+        // semantics are separately covered by the real-Serve/Host tests, not this injection.
+        const base = api.__testing.getSettingsPanelState().state;
+        const showState = async (state: typeof base) => {
+          await settings.evaluate(`window.dispatchEvent(new MessageEvent('message', {data:{channel:'state', messageId:'i18n-visual-state', content:${JSON.stringify(state)}}}))`);
+        };
+        await settings.setViewport(1024, 900);
+        try {
+          for (const [name, patch, check] of [
+            ["saving-fixture", { languageStatus: "saving" }, `document.querySelector('[data-testid="settings-language"]')?.disabled`],
+            ["failed-fixture", { languageStatus: "failed", error: "[fixture] storage write failed" }, `document.querySelector('[role="alert"]')?.textContent.includes('[fixture]')`],
+            ["disconnected-fixture", { ready: false, languageStatus: undefined }, `document.querySelector('[data-testid="settings-language"]')?.disabled`],
+            ["override-fixture", { languageStatus: undefined, uiPreferences: { ...base.uiPreferences!, envOverride: true } }, `document.body.textContent.includes('TOMCAT__UI__LANGUAGE')`],
+          ] as const) {
+            await showState({ ...base, ...patch });
+            await waitFor(() => settings.evaluate<boolean>(`Boolean(${check})`));
+            await capture(settings, `settings-${language}-${name}`);
+          }
+        } finally { await showState(base); await settings.setViewport(1440, 900); }
+      }
+      await api.__testing.focusWebview();
+      assert.equal(await chat.evaluate<string>("document.querySelector('[data-testid=\"composer-input\"]').textContent"), draft);
+      await rowAction("pin");
+      await waitFor(() => api.__testing.getWebviewState().sessions.some(session => session.sessionId === target && session.isPinned));
+      assert.equal(api.__testing.getWebviewState().activeSessionId, active, "Pinning must not switch the active session");
+      await chat.click("session-select");
+      assert.equal(await chat.evaluate<boolean>(`(() => { const button = document.querySelector('.codicon-pinned')?.closest('button'); return button?.getAttribute('aria-pressed') === 'true' && button.hasAttribute('title') && !button.textContent.trim(); })()`), true);
+      if (language === "en") assert.equal(await chat.evaluate<string>(`document.querySelector('.codicon-pinned')?.closest('button')?.getAttribute('title')`), en["session.unpin"]);
+      await chat.hover("session-option");
+      await capture(chat, `pinned-${language}`);
+      await chat.click("session-select");
+      await rowAction("trash");
+      await chat.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "delete-session-cancel"), "Delete confirmation must render");
+      assert.equal(await chat.evaluate<string>("document.activeElement?.getAttribute('data-testid')"), "delete-session-cancel");
+      await capture(chat, `delete-confirm-${language}`);
+      await chat.click("delete-session-cancel");
+      assert.ok(api.__testing.getWebviewState().sessions.some(session => session.sessionId === target));
+      await rowAction("pinned");
+      await waitFor(() => api.__testing.getWebviewState().sessions.some(session => session.sessionId === target && !session.isPinned));
+    }
+    await rowAction("trash");
+    await chat.click("delete-session-delete");
+    await waitFor(() => !api.__testing.getWebviewState().sessions.some(session => session.sessionId === target));
+    assert.equal(api.__testing.getWebviewState().activeSessionId, active);
+    assert.equal(await chat.evaluate<string>("document.querySelector('[data-testid=\"composer-input\"]').textContent"), draft);
+    await chat.evaluate("window.dispatchEvent(new CustomEvent('tomcat:test:set-composer-value', {detail:{testId:'composer-input',value:''}}))");
+    for (const language of ["zh-CN", "en"] as const) {
+      await setLanguage(language);
+      await api.__testing.focusWebview();
+      await api.__testing.sendWebviewIntent({ type: "prompt", messageId: `review-visual-${language}`, data: { sessionId: active, text: "plan review decision showcase" } });
+      await chat.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "approval-option-review-plan-skip"), "Fixed review choices must render");
+      const approval = api.__testing.getWebviewState().sessionViews[active].timeline.find(item => item.type === "approval" && !item.resolved);
+      assert.ok(approval?.type === "approval");
+      const parent = api.__testing.getWebviewState().sessionViews[active].timeline.find(item => item.type === "tool" && item.toolCallId === approval.request.toolCallId);
+      assert.ok(parent?.type === "tool");
+      assert.equal(parent.toolName, "create_plan");
+      assert.equal(parent.status, "running");
+      const footerBounds = await chat.evaluate<{ modelRight: number; contextLeft: number }>(`(() => ({ modelRight: document.querySelector('[data-testid="model-select"]').getBoundingClientRect().right, contextLeft: document.querySelector('[data-testid="context-ratio"]').getBoundingClientRect().left }))()`);
+      assert.ok(footerBounds.modelRight <= footerBounds.contextLeft + 1, `Model label must not overlap Ctx: ${JSON.stringify(footerBounds)}`);
+      assert.equal(await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"approval-option-review-plan-__custom__\"]')"), false);
+      await capture(chat, `review-${language}`);
+      await api.__testing.sendWebviewIntent({ type: "deleteSession", messageId: `busy-delete-${language}`, data: { sessionId: active } });
+      await waitFor(() => api.__testing.getWebviewState().sessionActionFeedback?.code === "busy");
+      await waitFor(() => chat.evaluate<boolean>("!!document.querySelector('.tc-session-action-feedback')"));
+      assert.ok(api.__testing.getWebviewState().sessions.some(session => session.sessionId === active));
+      await capture(chat, `delete-busy-${language}`);
+      await chat.evaluate("document.querySelector('.tc-session-action-feedback button').click()");
+      if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+        // Maximize before shrinking, otherwise VS Code stores the 159px minimum
+        // sidebar width and restores that width for the next desktop capture.
+        await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+        await chat.setViewport(390, 844);
+        try { await capture(chat, `review-${language}-narrow`); }
+        finally { await chat.setViewport(1440, 900); await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar"); }
+      }
+      await chat.focusAndPress("approval-option-review-plan-skip", "Enter");
+      await chat.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "approval-continue" && !button.disabled), "Selecting the fixed option must enable Continue");
+      await capture(chat, `review-${language}-selected`);
+      await chat.focusAndPress("approval-continue", "Enter");
+      await waitFor(() => !api.__testing.getWebviewState().sessionViews[active]?.busy);
+      const completed = api.__testing.getWebviewState().sessionViews[active].timeline.find(item => item.type === "tool" && item.toolCallId === parent.toolCallId);
+      assert.ok(completed?.type === "tool");
+      assert.equal(completed.toolName, "create_plan");
+      assert.equal(completed.status, "complete");
+      assert.deepEqual(completed.args, parent.args);
+      assert.equal(completed.planActivity?.total, 1);
+      await capture(chat, `review-${language}-complete`);
+    }
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(workspaceRoot);
+    const planDirectory = path.join(workspaceRoot, ".agents", "e2e", "product-i18n");
+    const planPath = path.join(planDirectory, "locale.plan.md");
+    await fs.mkdir(planDirectory, { recursive: true });
+    await fs.writeFile(planPath, "---\nplan_id: locale-preview\nname: User plan 用户计划\nstate: planning\ntodos:\n- id: first\n  content: User task 用户任务\n  status: pending\n---\n# User plan 用户计划\n\nKeep this user-authored content unchanged.\n");
+    await vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(planPath), "tomcat.planPreview");
+    await waitForPlanPreviewDom(api, planPath, snapshot => snapshot.bodyHasContent);
+    const plan = await SettingsFrameDriver.connectFromEnvironment(".tc-plan-preview__body");
+    try {
+      for (const language of ["zh-CN", "en"] as const) {
+        await setLanguage(language);
+        await vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(planPath), "tomcat.planPreview");
+        await waitFor(() => plan.evaluate<boolean>(`document.documentElement.lang === ${JSON.stringify(language)}`));
+        assert.ok(await plan.evaluate<boolean>("document.body.textContent.includes('Keep this user-authored content unchanged.')"));
+        await capture(plan, `plan-${language}`);
+        await plan.setViewport(1024, 900);
+        try { await capture(plan, `plan-${language}-narrow`); }
+        finally { await plan.setViewport(1440, 900); }
+      }
+    } finally { plan.close(); await vscode.commands.executeCommand("workbench.action.closeActiveEditor"); await fs.unlink(planPath); }
+    const imageSession = await createFreshWebviewSession(api, "locale-image-preview");
+    const imageIdle = waitForEvent(api, { sessionId: imageSession, type: "agent_idle" });
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "locale-image-prompt", data: { sessionId: imageSession, text: "tool image showcase" } });
+    await imageIdle;
+    await chat.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "tool-row-toggle"), "Image tool row must render");
+    await chat.click("tool-row-toggle");
+    await waitFor(() => chat.evaluate<boolean>("!!document.querySelector('.tc-tool-row .tc-attachment-strip button')"));
+    await chat.evaluate("document.querySelector('.tc-tool-row .tc-attachment-strip button').click()");
+    const image = await SettingsFrameDriver.connectFromEnvironment('[data-testid="preview-stage"]');
+    try {
+      await waitFor(() => image.evaluate<boolean>("Boolean(document.querySelector('[data-testid=\"preview-stage-image\"]')?.naturalWidth)"));
+      for (const language of ["zh-CN", "en"] as const) {
+        await setLanguage(language);
+        // Reuse the thumbnail's real open/reveal path, not an assumed editor tab order.
+        await chat.evaluate("document.querySelector('.tc-tool-row .tc-attachment-strip button').click()");
+        await waitFor(() => image.evaluate<boolean>(`document.documentElement.lang === ${JSON.stringify(language)}`));
+        await capture(image, `image-${language}`);
+        await image.setViewport(1024, 900);
+        try {
+          assert.ok(await image.evaluate<boolean>(`[...document.querySelectorAll('header button')].every(button => { const r=button.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= innerWidth + 1; })`), "Image toolbar actions, including Close, must fit the narrow pane");
+          await capture(image, `image-${language}-narrow`);
+        }
+        finally { await image.setViewport(1440, 900); }
+      }
+    } finally { image.close(); await vscode.commands.executeCommand("workbench.action.closeActiveEditor"); }
+    // The fake backend resets language at restart; persistence is covered by real-Serve tests.
+    await chat.click("settings-button");
+    await setLanguage("zh-CN");
+    await api.__testing.restartServe();
+    await api.__testing.waitForWebviewReady();
+    await waitFor(() => {
+      const state = api.__testing.getSettingsPanelState().state;
+      return state.ready && state.uiPreferences?.language === "auto" && state.uiPreferences.effective === "en";
+    });
+    await waitFor(() => settings.evaluate<boolean>(`document.querySelector('[data-testid="settings-language"]')?.value === 'auto' && document.documentElement.lang === 'en'`));
+    assert.equal(await chat.evaluate<string>("document.documentElement.lang"), "en");
+    await capture(settings, "settings-after-restart");
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    try { await setLanguage("en"); await chat.setViewport(1440, 900); }
+    catch (error) { if (!failed) throw error; console.warn("Language scenario cleanup failed after the primary failure", error); }
+    finally { settings.close(); chat.close(); }
+  }
+}
 
 export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Promise<void> {
   await api.__testing.focusWebview(); await api.__testing.waitForWebviewReady();
@@ -118,8 +342,9 @@ export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Prom
     assert.ok(metrics.send && !metrics.stop, "Nonempty busy composer must not also show Stop");
     if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
       for (const [width, height, name] of [[1440, 900, "desktop"], [390, 844, "narrow"], [800, 500, "short"]] as const) {
-        await driver.setViewport(width, height);
         if (name !== "desktop") await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+        await driver.setViewport(width, height);
+        if (name !== "desktop") await driver.waitForSnapshot(snapshot => snapshot.viewport.width >= 300, "Queue capture must use the maximized narrow pane, not the 159px minimum sash");
         for (const [themeName, suffix] of [["Default Dark Modern", "dark"], ["Default Light Modern", "light"]] as const) {
           await vscode.workspace.getConfiguration("workbench").update("colorTheme", themeName, vscode.ConfigurationTarget.Global);
           const target = transcriptVisualArtifactPath(`message-queue-${name}-${suffix}.png`);
@@ -131,7 +356,7 @@ export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Prom
             composer.scrollIntoView({block:'end'});
             const button = composer.querySelector('.tc-send-button'), r = button.getBoundingClientRect();
             const hit = document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
-            return {footer:composer.getBoundingClientRect().bottom,height:innerHeight,actionReachable:button===hit||button.contains(hit)};
+            return {footer:composer.getBoundingClientRect().bottom,height:innerHeight,actionReachable:button===hit||button.contains(hit), width:innerWidth, button:r.toJSON(), hit:hit?.outerHTML.slice(0,300)};
           })()`);
           assert.ok(bounds.footer <= bounds.height + 1 && bounds.actionReachable, JSON.stringify(bounds));
           const reachable = await driver.evaluate<boolean>(`(() => {
@@ -150,10 +375,10 @@ export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Prom
           await captureWorkbenchArtifacts(target);
           await driver.capture(target.replace(".png", "-chat.png"));
         }
-        if (name !== "desktop") await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+        if (name !== "desktop") { await driver.setViewport(1440, 900); await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar"); }
       }
-      await driver.setViewport(390, 844);
       await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+      await driver.setViewport(390, 844);
       await driver.waitForSnapshot(snapshot => snapshot.viewport.width >= 300, "Editor capture needs the actual narrow layout, not a stale 159px sash");
       await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "queue-edit" });
       await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "queue-edit-send-button" && !button.disabled), "Queue editor must be ready for visual capture");
@@ -179,13 +404,15 @@ export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Prom
       await driver.click("image-lightbox-close");
       await driver.click("queue-edit-cancel");
       await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.messageQueue?.editingId ? true : undefined);
+      await driver.setViewport(1440, 900);
+      await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
     }
     await waitForWebviewDomSnapshot(api, snapshot => !snapshot.html.includes('data-testid="queue-editor"') ? true : undefined);
     await driver.click("queue-send");
     await waitForWebviewState(api, state => state.sessionViews[sessionId]?.messageQueue?.items.some(item => item.status === "steering") ? true : undefined);
     if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
       await vscode.workspace.getConfiguration("workbench").update("colorTheme", "Default Dark Modern", vscode.ConfigurationTarget.Global);
-      await waitForWebviewDomSnapshot(api, snapshot => snapshot.html.includes('aria-label="正在发送"') ? true : undefined);
+      await waitFor(() => driver.evaluate<boolean>("!!document.querySelector('.tc-message-queue__status .tc-codicon-spin')"));
       const animation = await driver.evaluate<{ name: string; duration: string; before: string; after: string; actions: number }>(`(async () => {
         const icon = document.querySelector('.tc-message-queue__status .tc-codicon-spin');
         icon.scrollIntoView({block:'nearest'});
@@ -225,6 +452,11 @@ export async function assertMessageQueueDocksFlow(api: TomcatExtensionApi): Prom
     await waitForWebviewState(api, state => !state.sessionViews[sessionId]?.busy ? true : undefined);
     await api.__testing.restartServe(); await api.__testing.waitForWebviewReady();
     assert.ok(Object.values(api.__testing.getWebviewState().sessionViews).every(session => !session.messageQueue?.items.length));
+  } catch (error) {
+    const target = transcriptVisualArtifactPath("message-queue-failure-chat.png");
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await driver.capture(target).catch(captureError => console.warn("Failure capture also failed", captureError));
+    throw error;
   } finally {
     if (theme) await vscode.workspace.getConfiguration("workbench").update("colorTheme", theme, vscode.ConfigurationTarget.Global);
     await driver.setViewport(1440, 900); driver.close();
@@ -862,7 +1094,7 @@ export async function assertWebviewPlanModeSwitchFlow(
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
       snapshot.html.includes('data-testid="stop-button"') &&
-      snapshot.html.includes("开始执行计划") &&
+      snapshot.html.includes(en["state.notePlanBuild"]) &&
       snapshot.planStateText === "Plan: executing"
         ? snapshot
         : undefined,
@@ -1018,7 +1250,7 @@ export async function assertWebviewAddModelsFlow(
         route: "models",
       },
       messageId: "webview-open-model-settings",
-      type: "openModelSettings",
+      type: "openSettings",
     }),
   );
 
@@ -1028,6 +1260,7 @@ export async function assertWebviewAddModelsFlow(
       snapshot.visible &&
       snapshot.route === "models" &&
       snapshot.state.ready &&
+      snapshot.state.models.some(model => model.source === "builtin") &&
       snapshot.webviewReady
         ? snapshot
         : undefined,
@@ -1061,7 +1294,16 @@ export async function assertWebviewAddModelsFlow(
     20_000,
   );
 
-  await assertSettingsKeyFieldsAligned(api);
+  // This assertion owns the two-column desktop form, not the intentional narrow stack.
+  await api.__testing.executeCommand("workbench.action.closeSidebar");
+  await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
+  const settingsLayout = await SettingsFrameDriver.connectFromEnvironment();
+  try {
+    await settingsLayout.setViewport(1440, 900);
+    await settingsLayout.waitForSnapshot(snapshot => snapshot.viewport.width > 720,
+      "Key-field alignment requires the desktop Settings layout");
+    await assertSettingsKeyFieldsAligned(api);
+  } finally { settingsLayout.close(); }
 
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     const openAddModelForm = async (): Promise<void> => {
@@ -1852,11 +2094,10 @@ export async function assertWebviewStreamingFlow(
     commandSnapshot.commandBlockCount >= 1,
     `expected an errored bash tool to auto-expand into a terminal block, got ${commandSnapshot.commandBlockCount}`,
   );
-  // The full command now lives in the terminal body as a `$ …` prompt line; the
-  // header shows a short purpose ("Ran" placeholder) + command-name tags.
+  // A failed command shows its failure state; the exact command remains in the body.
   assert.ok(
-    commandSnapshot.expandedToolTitles.some((title) => title.startsWith("Ran")),
-    `expected the errored bash row to auto-expand with a "Ran" header, got ${JSON.stringify(commandSnapshot.expandedToolTitles)}`,
+    commandSnapshot.expandedToolTitles.some((title) => title.startsWith(translate("en", "tool.failed", { name: "bash" }))),
+    `expected the errored bash row to auto-expand with a failure header, got ${JSON.stringify(commandSnapshot.expandedToolTitles)}`,
   );
   assert.ok(
     commandSnapshot.html.includes("npm test -- --watch=false"),
@@ -2133,7 +2374,7 @@ export async function assertWebviewBootstrapDegradedFlow(
     () => {
       const prompt = api.__testing
         .getPromptHistory()
-        .find((entry) => entry.message.includes("Tomcat 已连接，但初始化数据加载失败。"));
+        .find((entry) => entry.message.includes(en["host.failure.bootstrap"]));
       return prompt?.actions.includes("Retry") && prompt.actions.includes("View Logs")
         ? prompt
         : undefined;
@@ -2158,7 +2399,7 @@ export async function assertWebviewBootstrapRetryRecoveryFlow(
     () => {
       const record = api.__testing
         .getPromptHistory()
-        .find((entry) => entry.message.includes("Tomcat 已连接，但初始化数据加载失败。"));
+        .find((entry) => entry.message.includes(en["host.failure.bootstrap"]));
       return record?.actions.includes("Retry") ? record : undefined;
     },
     20_000,
@@ -3124,7 +3365,7 @@ export async function assertWebviewRetryRecoveryFlow(
     "a successful Retry must keep its completed failure card for audit context",
   );
   assert.ok(
-    recoveredSnapshot.html.includes("已废弃 · 未发送给模型"),
+    recoveredSnapshot.html.includes(en["message.abandoned"]),
     "Retry must render the abandoned input beside its fresh copy-forward message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
@@ -3156,7 +3397,7 @@ export async function assertWebviewRetryRecoveryFlow(
     20_000,
   );
   assert.ok(
-    rehydratedSnapshot.html.includes("已废弃 · 未发送给模型"),
+    rehydratedSnapshot.html.includes(en["message.abandoned"]),
     "rehydration must retain the abandoned input and its fresh copy-forward message",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
@@ -3225,14 +3466,14 @@ export async function assertWebviewRecoveryRejectionFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.messageTexts.some((text) => text.includes(failureSummary)) &&
-      candidate.html.includes("这张错误卡已经过期，无法重试") &&
+      candidate.html.includes(en["host.recoveryStale"]) &&
       candidate.html.includes('data-testid="recover-error-turn"')
         ? candidate
         : undefined,
     20_000,
   );
   assert.ok(
-    rejected.html.includes("这张错误卡已经过期，无法重试"),
+    rejected.html.includes(en["host.recoveryStale"]),
     "a rejected recovery must show its reason inline on the restored error card",
   );
 }
@@ -3343,12 +3584,12 @@ export async function assertWebviewCompactControlFlow(
         'data-testid="new-session-button"',
       );
       const compactIndex = candidate.html.indexOf(
-        'data-testid="compact-context-button"',
+        'data-testid="settings-button"',
       );
       return candidate.activeSessionId === sessionId &&
         newSessionIndex >= 0 &&
         compactIndex > newSessionIndex &&
-        candidate.html.includes("codicon-layers")
+        candidate.html.includes("codicon-settings-gear")
         ? candidate
         : undefined;
     },
@@ -3358,22 +3599,22 @@ export async function assertWebviewCompactControlFlow(
     'data-testid="new-session-button"',
   );
   const compactIndex = snapshot.html.indexOf(
-    'data-testid="compact-context-button"',
+    'data-testid="settings-button"',
   );
   assert.ok(
     compactIndex > newSessionIndex,
-    "the compact button must be immediately to the right of the new-session button",
+    "the settings button must be immediately to the right of the new-session button",
   );
   assert.ok(
-    snapshot.html.includes("codicon-layers"),
-    "the compact control must use the layers codicon",
+    snapshot.html.includes("codicon-settings-gear"),
+    "the settings control must use the gear codicon",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
     await pause(700);
     await captureTranscriptVisual(
-      "compact-control-position-and-icon",
+      "settings-control-position-and-icon",
       "window",
       "Extension Development Host",
     );
@@ -3452,11 +3693,11 @@ export async function assertWebviewPersistedMessageKindFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.html.includes("please answer in Chinese") &&
-      candidate.html.includes("计划未收口，已要求继续") &&
+      candidate.html.includes(en["state.noteNudge"]) &&
       candidate.html.includes(
         "Finish the remaining plan tasks before stopping.",
       ) &&
-      candidate.html.includes("后台任务已结束") &&
+      candidate.html.includes(en["state.noteSignal"]) &&
       candidate.html.includes("Background task build-1 finished successfully.")
         ? candidate
         : undefined,
@@ -3467,8 +3708,8 @@ export async function assertWebviewPersistedMessageKindFlow(
     "Steering remains a visible user bubble after hydration",
   );
   assert.ok(
-    snapshot.html.includes("计划未收口，已要求继续") &&
-      snapshot.html.includes("后台任务已结束"),
+    snapshot.html.includes(en["state.noteNudge"]) &&
+      snapshot.html.includes(en["state.noteSignal"]),
     "Nudge and Signal must rehydrate as named system-note boundaries",
   );
   assert.ok(
@@ -4863,7 +5104,7 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
     });
     assert.equal(
       warnings.at(-1),
-      "打开文件夹后可用 @",
+      en["chat.contextWorkspace"],
       "expected the no-workspace @ warning to be surfaced once the host reports workspaceAvailable=false",
     );
   } finally {
@@ -5154,10 +5395,11 @@ export async function assertInlineUserMessageEditFlow(api: TomcatExtensionApi): 
   assert.ok(!reverted.timeline.some((item) => item.type === "message" && item.text.includes("Tomcat turn interrupted")), "old interruption notice must not remain");
   assert.deepEqual(reverted.composerDraft, bottomDraftBeforeRevert, "Revert must preserve the bottom draft");
   const legacy=await createFreshWebviewSession(api,"inline-missing-baseline");
-  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:"inline edit file fixture no baseline\n第二行：检查回退箭头固定在气泡右下角"});
+  const secondLine = "第二行：检查回退箭头固定在气泡右下角";
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"composer-input",value:`inline edit file fixture no baseline\n${secondLine}`});
   await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"send-button"});
   await waitForWebviewState(api,(s)=>s.sessionViews[legacy]?.timeline.some((i)=>i.type==="tool"&&i.display?.kind==="file")?true:undefined);
-  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes("tc-message__edit-trigger--revert") && s.html.includes("第二行")?s:undefined);
+  await waitForWebviewDomSnapshot(api,(s)=>s.html.includes("tc-message__edit-trigger--revert") && s.html.includes(secondLine)?s:undefined);
   await driver.setViewport(448, 844);
   await capture("05b-bubble-multiline-narrow");
   await driver.setViewport(1000, 900);
@@ -5184,7 +5426,7 @@ function transcriptVisualArtifactPath(filename: string): string {
 async function captureTranscriptVisual(
   name:
     | "collapsed"
-    | "compact-control-position-and-icon"
+    | "settings-control-position-and-icon"
     | "diff-double-pane"
     | "draft-switch-reload"
     | "expanded"

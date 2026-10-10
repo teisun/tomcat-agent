@@ -29,6 +29,8 @@ describe("serve fixture resource ownership", () => {
       TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4", HTTP_PROXY: "", https_proxy: "" });
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.TOMCAT__AGENT__ID).toBeUndefined();
+    expect(env.TOMCAT_HOST_LOCALE).toBe("en");
+    expect(env.TOMCAT__UI__LANGUAGE).toBeUndefined();
     expect(env.TOMCAT_AGENT_ACTIVE).toBeUndefined();
     expect({ ...parent, ...env }.ANTHROPIC_API_KEY).toBeUndefined();
     expect(serveFixtureEnvironment("/fixture", {}).TOMCAT_AGENT_ACTIVE).toBeUndefined();

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isPreviewRewindResponse, rewindErrorDetail } from "./messageEditProtocol";
+import { translate } from "./i18n";
 
 describe("message edit result contracts", () => {
   it("retains a partial restore's path and cause in user-facing feedback", () => {
@@ -8,7 +9,7 @@ describe("message edit result contracts", () => {
     expect(rewindErrorDetail("revert_failed", {path:3})).toBeUndefined();
   });
   it("does not claim a timed-out task has stopped", () => {
-    expect(rewindErrorDetail("stop_timeout",null)).toContain("停止当前任务超时");
+    expect(rewindErrorDetail("stop_timeout", null)).toBe(translate("en", "rewind.stopTimeout"));
   });
   it("validates preview paths and availability reasons", () => {
     expect(isPreviewRewindResponse({revertAvailable:false,revertPaths:[],revertReason:"expired"})).toBe(true);

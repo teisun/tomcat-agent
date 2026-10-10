@@ -95,7 +95,12 @@ fn tool_messages_with_media(
             if let Some(store) = &store {
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(&image.data)
-                    .map_err(|e| AppError::Config(format!("invalid tool image base64: {e}")))?;
+                    .map_err(|e| {
+                        AppError::Config(crate::infra::i18n::tr(
+                            "agentLoop.toolImageBase64",
+                            &[("detail", &e.to_string())],
+                        ))
+                    })?;
                 let sha = store.put(&bytes)?;
                 saved.push(ChatMessageContentPart::image_blob_ref(
                     sha.clone(),
@@ -110,9 +115,10 @@ fn tool_messages_with_media(
                 continue;
             }
             if agent.config.message_append_sink.is_some() {
-                return Err(AppError::Config(
-                    "durable tool images require an attachment repository".into(),
-                ));
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "agentLoop.imageStoreRequired",
+                    &[],
+                )));
             }
         }
         saved.push(part.clone());
@@ -124,9 +130,6 @@ fn tool_messages_with_media(
     Ok((provider, archival, media))
 }
 
-const STEERED_TOOL_RESULT_TEXT: &str =
-    "[Tool call skipped because a steering message superseded the remaining tool batch.]";
-
 /// A provider may emit more than one tool call in an assistant message. If a steering message
 /// arrives after one has completed, the remaining calls must still receive terminal results before
 /// any user message is appended; otherwise the OpenAI tool-call chain is invalid.
@@ -136,6 +139,9 @@ fn append_steered_tool_result(
     tc: &ToolCallInfo,
     tool_results: &mut Vec<Message>,
 ) -> Result<(), LoopError> {
+    let steered_text =
+        "[Tool call skipped because a steering message superseded the remaining tool batch.]"
+            .to_string();
     let args = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
     agent.emit_event(AgentEvent::ToolExecutionStart {
         tool_call_id: tc.id.clone(),
@@ -151,32 +157,25 @@ fn append_steered_tool_result(
         tool_name: tc.name.clone(),
         tool_call_id: tc.id.clone(),
         input: args,
-        content: vec![ContentBlock(
-            serde_json::json!({ "text": STEERED_TOOL_RESULT_TEXT }),
-        )],
+        content: vec![ContentBlock(serde_json::json!({ "text": steered_text }))],
         details: None,
         is_error: true,
     });
     agent.emit_event(AgentEvent::ToolExecutionEnd {
         tool_call_id: tc.id.clone(),
         tool_name: tc.name.clone(),
-        result: ToolOutput(serde_json::json!(STEERED_TOOL_RESULT_TEXT)),
+        result: ToolOutput(serde_json::json!(steered_text)),
         display: None,
         media: Vec::new(),
         is_error: true,
     });
     if let Some(ref mut ctx_state) = agent.context_state {
-        ctx_state.on_message_appended(STEERED_TOOL_RESULT_TEXT.len());
+        ctx_state.on_message_appended(steered_text.len());
     }
     agent
-        .push_message(
-            messages,
-            ChatMessage::tool(&tc.id, STEERED_TOOL_RESULT_TEXT),
-        )
+        .push_message(messages, ChatMessage::tool(&tc.id, &steered_text))
         .map_err(LoopError::Fatal)?;
-    tool_results.push(Message(
-        serde_json::json!({ "content": STEERED_TOOL_RESULT_TEXT }),
-    ));
+    tool_results.push(Message(serde_json::json!({ "content": steered_text })));
     Ok(())
 }
 
@@ -373,8 +372,10 @@ pub(super) async fn run_tool_calls(
     .await
 }
 
-fn commits_on_disk(name: &str) -> bool {
-    matches!(name, "write" | "edit" | "hashline_edit")
+fn must_settle_on_cancel(name: &str) -> bool {
+    // Writes settle their commit boundary; create_plan settles the saved plan's review
+    // decision. Dropping either future can hide a completed disk side effect from the UI.
+    matches!(name, "write" | "edit" | "hashline_edit" | "create_plan")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -480,10 +481,8 @@ pub(super) async fn run_tool_calls_with_usage(
     // ── 3. block_tool_calls 短路 ──
     if agent.block_tool_calls {
         for tc in tool_calls {
-            let blocked_msg = format!(
-                "[Tool call blocked: context usage too high. Tool '{}' was not executed.]",
-                tc.name
-            );
+            let blocked_msg =
+                crate::infra::i18n::tr("agentLoop.contextBlockedTool", &[("name", &tc.name)]);
             if let Some(ref mut ctx_state) = agent.context_state {
                 ctx_state.on_message_appended(blocked_msg.len());
             }
@@ -578,9 +577,9 @@ pub(super) async fn run_tool_calls_with_usage(
                         agent.completion_routes.as_ref(),
                         agent.file_baselines.as_ref(),
                     );
-                    if commits_on_disk(tc.name.as_str()) {
-                        // Native writes observe cancellation at their commit boundary. Do not
-                        // drop a spawn_blocking writer while claiming the turn has stopped.
+                    if must_settle_on_cancel(tc.name.as_str()) {
+                        // These native tools observe cancellation themselves and settle their
+                        // disk/result boundary before the turn may report that it has stopped.
                         exec.await
                     } else {
                         tokio::select! {
@@ -624,7 +623,7 @@ pub(super) async fn run_tool_calls_with_usage(
                 agent.completion_routes.as_ref(),
                 agent.file_baselines.as_ref(),
             );
-            if commits_on_disk(tc.name.as_str()) {
+            if must_settle_on_cancel(tc.name.as_str()) {
                 exec.await
             } else {
                 tokio::select! {

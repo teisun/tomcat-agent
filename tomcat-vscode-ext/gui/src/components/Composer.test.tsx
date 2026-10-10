@@ -6,6 +6,8 @@ import { Composer, extractDropUris, type ComposerHandle, type ComposerProps } fr
 import type { ModelPickerModel } from "./ModelPicker";
 import type { Speed } from "../../../src/shared/modelSpeed";
 import type { SharedSlashCommand } from "../../../src/serveClient/wire";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate, type Locale } from "../../../src/shared/i18n";
 
 type DraftChange = (draft: {
   hasContent: boolean;
@@ -44,6 +46,7 @@ vi.mock("../attachments/imagePipeline", () => ({
 }));
 
 function renderComposer({
+  locale = "en",
   availableModelDetails,
   availableModels = ["gpt-5.4"],
   slashCommands = [],
@@ -84,6 +87,7 @@ function renderComposer({
   thinkingLevelValue = "high",
 }: {
   availableModelDetails?: Record<string, ModelPickerModel>;
+  locale?: Locale;
   availableModels?: string[];
   slashCommands?: SharedSlashCommand[];
   instructionCatalog?: import("../../../src/serveClient/wire").InstructionCard[];
@@ -181,10 +185,11 @@ function renderComposer({
       ref={ref}
     />
   );
-  const renderResult = render(element);
+  const renderResult = render(<LocaleProvider locale={locale}>{element}</LocaleProvider>);
   return {
     ...renderResult,
-    rerenderWith: (props: Partial<ComposerProps>) => renderResult.rerender(cloneElement(element, props)),
+    rerenderWith: (props: Partial<ComposerProps>) => renderResult.rerender(<LocaleProvider locale={locale}>{cloneElement(element, props)}</LocaleProvider>),
+    rerenderLocale: (next: Locale) => renderResult.rerender(<LocaleProvider locale={next}>{element}</LocaleProvider>),
     onAttachFiles,
     onDraftChange,
     onModeChange,
@@ -193,6 +198,33 @@ function renderComposer({
     ref,
   };
 }
+
+describe("composer localization", () => {
+  it("updates placeholder and chrome in place without losing draft, selection or mode terms", async () => {
+    const f = renderComposer({ locale: "en", thinkingLevelValue: "xhigh", modeValue: "chat" });
+    const input = await screen.findByTestId("composer-input");
+    await waitFor(() => expect(input.querySelector("[data-placeholder]")?.getAttribute("data-placeholder")).toBe(translate("en", "composer.placeholder")));
+    expect(input.getAttribute("aria-label")).toBe(translate("en", "composer.inputAria"));
+    const addContext = screen.getByRole("button", { name: translate("en", "composer.addContext") });
+    expect(screen.getByTestId("mode-select").textContent).toContain("Chat");
+    expect(screen.getByTestId("composer-notice-plan").textContent).toBe("Plan: planning");
+    expect(screen.getByTestId("model-select").textContent).toContain("gpt-5.4 Xhigh");
+    expect(screen.getByTestId("context-ratio").textContent).toBe("Ctx 42%");
+    await act(async () => { fireEvent.paste(input, { clipboardData: { getData: () => "unchanged draft" } }); });
+    const text = input.querySelector("p")!.firstChild!;
+    const range = document.createRange(); range.setStart(text, 4); range.collapse(true);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    const calls = f.onDraftChange.mock.calls.length;
+    const draft = f.ref.current!.getDraft();
+    f.rerenderLocale("zh-CN");
+    expect(screen.getByTestId("composer-input")).toBe(input);
+    expect(f.ref.current!.getDraft()).toEqual(draft);
+    expect(selection.anchorNode).toBe(text); expect(selection.anchorOffset).toBe(4);
+    expect(f.onDraftChange).toHaveBeenCalledTimes(calls);
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(screen.getByTestId("attachment-add")).toBe(addContext);
+  });
+});
 
 describe("configuration locking", () => {
   it.each(["mode", "model"] as const)("closes the open %s menu on busy while keeping content editable", async menu => {
@@ -212,7 +244,7 @@ describe("configuration locking", () => {
     rerenderWith({ busy: true });
     for (const id of ["mode-select", "model-select"]) {
       expect(screen.getByTestId(id)).toHaveProperty("disabled", true);
-      expect(screen.getByTestId(id).closest(".tc-field")?.getAttribute("title")).toBe("任务运行中不能切换，结束后再改");
+      expect(screen.getByTestId(id).closest(".tc-field")?.getAttribute("title")).toBe("Cannot switch while a task is running. Change it after the task finishes.");
     }
     expect(screen.queryByTestId("mode-dropdown")).toBeNull();
     expect(screen.queryByTestId("model-dropdown")).toBeNull();
@@ -436,7 +468,7 @@ describe("Composer", () => {
       [...notices.children].map((node) => (node as HTMLElement).dataset.testid),
     ).toEqual(["composer-notice-drag", "composer-notice-plan"]);
     expect(screen.getByText("Tip:", { selector: "strong" }).className).toContain("tc-notice__tip");
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: Hold Shift to drag files");
     expect(screen.getByTestId("composer-notice-drag").className).toContain("tc-notice--left");
     expect(screen.getByTestId("composer-notice-drag").getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByTestId("composer-notice-plan").className).toContain("tc-notice--right");
@@ -807,16 +839,16 @@ describe("Composer", () => {
       },
     } as unknown as DataTransfer;
 
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: Hold Shift to drag files");
 
     fireEvent.dragOver(surface, { dataTransfer });
     expect(surface.className).toContain("tc-composer__surface--drop-active");
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("松手加入上下文");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Release to add to context");
 
     fireEvent.drop(surface, { dataTransfer });
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/src/app.ts"]);
     expect(surface.className).not.toContain("tc-composer__surface--drop-active");
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: Hold Shift to drag files");
   });
 
   it("prevents default on dragenter and keeps the Shift hint even after content exists", () => {
@@ -831,7 +863,7 @@ describe("Composer", () => {
 
     fireEvent(surface, enterEvent);
     expect(enterEvent.defaultPrevented).toBe(true);
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: Hold Shift to drag files");
 
     act(() => {
       ref.current?.insertReference({
@@ -845,7 +877,7 @@ describe("Composer", () => {
       });
     });
 
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: Hold Shift to drag files");
   });
 
   it("suppresses raw editor drops and forwards file uris once", () => {
@@ -886,7 +918,7 @@ describe("Composer", () => {
 
     expect(onPickContext).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("composer-notice-capability").textContent).toContain(
-      "当前模型不支持图片/PDF 附件",
+      "The current model does not support image/PDF attachments",
     );
     expect(screen.queryByTestId("composer-notice-drag")).toBeNull();
     expect(screen.queryByTestId("composer-notice-plan")).toBeNull();
@@ -916,7 +948,7 @@ describe("Composer", () => {
 
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/assets/mockup.png"]);
     expect(screen.getByTestId("composer-notice-capability").textContent).toContain(
-      "当前模型不支持图片附件；拖入后会先加入待发送列表",
+      "The current model does not support image attachments. Dropped images will stay in the pending list",
     );
     expect(screen.queryByTestId("composer-notice-drag")).toBeNull();
     expect(screen.queryByTestId("composer-notice-plan")).toBeNull();
@@ -1237,7 +1269,7 @@ describe("Composer", () => {
         ],
       },
     });
-    expect(await screen.findByText(/未声明 vision 能力/)).toBeTruthy();
+    expect(await screen.findByText(/does not declare vision capability/)).toBeTruthy();
     await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
   });
 

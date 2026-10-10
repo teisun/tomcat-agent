@@ -2,6 +2,7 @@ use super::cmd_install::InstallTarget;
 use super::shared::{render_sync_summary, SlashReply};
 use crate::api::chat::ChatContext;
 use crate::core::package::PackageManager;
+use crate::infra::i18n::tr;
 
 pub(crate) async fn run(ctx: &ChatContext, package: &str, target: InstallTarget) -> SlashReply {
     let config = ctx.config.clone();
@@ -14,13 +15,22 @@ pub(crate) async fn run(ctx: &ChatContext, package: &str, target: InstallTarget)
     .await;
     let outcome = match result {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(error)) => return SlashReply::error(format!("[uninstall] 卸载失败: {error}")),
-        Err(error) => return SlashReply::error(format!("[uninstall] 卸载任务失败: {error}")),
+        Ok(Err(error)) => {
+            return SlashReply::error(tr(
+                "slash.uninstall.failed",
+                &[("detail", &error.to_string())],
+            ))
+        }
+        Err(error) => {
+            return SlashReply::error(tr(
+                "slash.uninstall.taskFailed",
+                &[("detail", &error.to_string())],
+            ))
+        }
     };
-    let mut lines = vec![format!(
-        "[uninstall] 已卸载 package {} <- {}",
-        outcome.record.name,
-        target.label()
+    let mut lines = vec![tr(
+        "slash.uninstall.done",
+        &[("name", &outcome.record.name), ("target", target.label())],
     )];
     for (kind, id) in outcome.record.resource_descriptors() {
         lines.push(format!("  - {}: {id}", kind.as_str()));
@@ -31,8 +41,9 @@ pub(crate) async fn run(ctx: &ChatContext, package: &str, target: InstallTarget)
             SlashReply::success(lines.join("\n"))
         }
         Err(error) => {
-            lines.push(format!(
-                "[uninstall] 磁盘已卸载，但当前会话核对失败: {error}；请执行 /reload"
+            lines.push(tr(
+                "slash.uninstall.partial",
+                &[("detail", &error.to_string())],
             ));
             SlashReply::error(lines.join("\n"))
         }

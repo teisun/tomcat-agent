@@ -40,15 +40,16 @@ impl McpRuntimeConfig {
                 || duration.as_nanos() > i64::MAX as u128
                 || Instant::now().checked_add(duration).is_none()
             {
-                return Err(AppError::Config(format!(
-                    "connector.mcp.{name} must be positive and representable: {millis}"
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "config.mcpTimeout",
+                    &[("field", name), ("value", &millis.to_string())],
                 )));
             }
         }
         if !(1..=64).contains(&self.max_concurrent_calls) {
-            return Err(AppError::Config(format!(
-                "connector.mcp.max_concurrent_calls must be between 1 and 64: {}",
-                self.max_concurrent_calls
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "config.mcpConcurrency",
+                &[("value", &self.max_concurrent_calls.to_string())],
             )));
         }
         Ok(())

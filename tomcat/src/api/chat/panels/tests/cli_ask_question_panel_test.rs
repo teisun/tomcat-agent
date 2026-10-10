@@ -48,6 +48,7 @@ impl Drop for EnvGuard {
 
 fn sample_question() -> Question {
     Question {
+        allow_custom: true,
         id: "deploy_target".into(),
         prompt: "选择发布目标".into(),
         options: vec![

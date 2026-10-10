@@ -484,9 +484,10 @@ fn hashline_format_has_stable_content_hashes() {
         h_punct_a, h_punct_b,
         "punctuation-only rows must have a content-stable hash"
     );
+    let cjk_heading = "#### 验收标准\n";
     assert_eq!(
-        hash_tag(&format_with_hashlines(368, "#### 验收标准\n")),
-        hash_tag(&format_with_hashlines(371, "#### 验收标准\n")),
+        hash_tag(&format_with_hashlines(368, cjk_heading)),
+        hash_tag(&format_with_hashlines(371, cjk_heading)),
         "CJK content must retain its hash when its line number changes"
     );
     assert_eq!(

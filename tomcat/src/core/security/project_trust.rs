@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::session::project_root;
 use crate::infra::config::get_work_dir;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::AppConfig;
 
 #[derive(Default, Deserialize, Serialize)]
@@ -33,15 +34,21 @@ impl ProjectTrustStore {
     /// Convert an existing absolute folder to the same identity used by sessions.
     pub fn root_for(path: &Path) -> Result<PathBuf, AppError> {
         if !path.is_absolute() {
-            return Err(AppError::Config("project path must be absolute".into()));
+            return Err(AppError::Config(tr("trust.absolute", &[])));
         }
         let canonical = std::fs::canonicalize(path).map_err(|error| {
-            AppError::Config(format!("project directory '{}': {error}", path.display()))
+            AppError::Config(tr(
+                "trust.directory",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("detail", &error.to_string()),
+                ],
+            ))
         })?;
         if !canonical.is_dir() {
-            return Err(AppError::Config(format!(
-                "project path '{}' is not a directory",
-                path.display()
+            return Err(AppError::Config(tr(
+                "trust.notDirectory",
+                &[("path", &path.display().to_string())],
             )));
         }
         Ok(project_root(&canonical))
@@ -51,10 +58,12 @@ impl ProjectTrustStore {
     pub fn validate_root(path: &Path) -> Result<PathBuf, AppError> {
         let root = Self::root_for(path)?;
         if path != root {
-            return Err(AppError::Config(format!(
-                "'{}' is not the canonical project root ('{}')",
-                path.display(),
-                root.display()
+            return Err(AppError::Config(tr(
+                "trust.notCanonical",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("root", &root.display().to_string()),
+                ],
             )));
         }
         Ok(root)
@@ -70,7 +79,7 @@ impl ProjectTrustStore {
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| AppError::Config("project trust file has no parent directory".into()))?;
+            .ok_or_else(|| AppError::Config(tr("trust.noParent", &[])))?;
         std::fs::create_dir_all(parent)?;
         // Lock a stable sidecar: write_file_atomic replaces the data file inode.
         let lock_path = self.path.with_extension("lock");
@@ -90,8 +99,9 @@ impl ProjectTrustStore {
     fn trust_locked(&self, root: PathBuf) -> Result<(), AppError> {
         let mut state = self.read()?;
         if state.trusted_projects.insert(root) {
-            let bytes = serde_json::to_vec_pretty(&state)
-                .map_err(|error| AppError::Config(format!("serialize project trust: {error}")))?;
+            let bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+                AppError::Config(tr("trust.serialize", &[("detail", &error.to_string())]))
+            })?;
             crate::infra::platform::write_file_atomic(&self.path, &bytes)?;
         }
         Ok(())
@@ -103,9 +113,12 @@ impl ProjectTrustStore {
         }
         let bytes = std::fs::read(&self.path)?;
         serde_json::from_slice(&bytes).map_err(|error| {
-            AppError::Config(format!(
-                "read project trust '{}': {error}",
-                self.path.display()
+            AppError::Config(tr(
+                "trust.read",
+                &[
+                    ("path", &self.path.display().to_string()),
+                    ("detail", &error.to_string()),
+                ],
             ))
         })
     }

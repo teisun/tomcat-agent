@@ -1,3 +1,4 @@
+use crate::infra::i18n::tr;
 use std::path::Path;
 
 use crate::infra::config::with_config_lock;
@@ -6,9 +7,9 @@ use crate::{validate_config, AppConfig, AppError};
 
 pub fn write_default_model(config_path: &Path, model_id: &str) -> Result<(), AppError> {
     if !config_path.exists() {
-        return Err(AppError::Config(format!(
-            "配置文件不存在: {}。请先运行: tomcat init",
-            config_path.display()
+        return Err(AppError::Config(tr(
+            "config.fileMissing",
+            &[("path", &config_path.display().to_string())],
         )));
     }
 
@@ -19,11 +20,11 @@ pub fn write_default_model(config_path: &Path, model_id: &str) -> Result<(), App
             .map_err(|error: toml::de::Error| AppError::Config(error.to_string()))?;
         let root = value
             .as_table_mut()
-            .ok_or_else(|| AppError::Config("配置文件根节点必须是 TOML 表".to_string()))?;
+            .ok_or_else(|| AppError::Config(tr("config.rootTable", &[])))?;
         let llm = root
             .get_mut("llm")
             .and_then(toml::Value::as_table_mut)
-            .ok_or_else(|| AppError::Config("配置文件缺少 llm 表".to_string()))?;
+            .ok_or_else(|| AppError::Config(tr("config.llmTableMissing", &[])))?;
         llm.insert(
             "default_model".to_string(),
             toml::Value::String(model_id.to_string()),
@@ -58,7 +59,7 @@ pub fn clear_model_references(
             .map_err(|error: toml::de::Error| AppError::Config(error.to_string()))?;
         let root = value
             .as_table_mut()
-            .ok_or_else(|| AppError::Config("配置文件根节点必须是 TOML 表".to_string()))?;
+            .ok_or_else(|| AppError::Config(tr("config.rootTable", &[])))?;
         let mut cleared = Vec::new();
         if clear_model_value(root, "llm", "default_model", model_id)? {
             cleared.push("llm.default_model");
@@ -96,13 +97,16 @@ fn clear_model_value(
     };
     let table = table
         .as_table_mut()
-        .ok_or_else(|| AppError::Config(format!("配置文件中的 {section} 必须是 TOML 表")))?;
+        .ok_or_else(|| AppError::Config(tr("config.sectionTable", &[("section", section)])))?;
     let Some(current) = table.get(key) else {
         return Ok(false);
     };
-    let current = current
-        .as_str()
-        .ok_or_else(|| AppError::Config(format!("配置文件中的 {section}.{key} 必须是字符串")))?;
+    let current = current.as_str().ok_or_else(|| {
+        AppError::Config(tr(
+            "config.fieldString",
+            &[("field", &format!("{section}.{key}"))],
+        ))
+    })?;
     if current.trim() != model_id {
         return Ok(false);
     }

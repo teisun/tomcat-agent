@@ -10,6 +10,7 @@ use rustyline::ExternalPrinter;
 
 use crate::api::chat::preflight;
 use crate::infra::event_bus::{EventContext, EventListenerId};
+use crate::infra::i18n::tr;
 use crate::infra::{wire, EventBus};
 
 pub(crate) struct ChatSessionStderrListenerIds {
@@ -93,21 +94,25 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .get("preheatResultPending")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (zh_suffix, en_suffix) = if preheat_in_progress {
-                (" | 预热中…", " | Preheating…")
+            let suffix = if preheat_in_progress {
+                tr("terminal.preheating", &[])
             } else if preheat_result_pending {
-                (" | 摘要待应用", " | Summary pending apply")
+                tr("terminal.summaryPending", &[])
             } else {
-                ("", "")
+                String::new()
             };
-            eprintln!(
-                "\n\x1b[90m[ctx] {} 令牌 | {:.1}% 占用 | 压缩 x{} | 已节省 {} 令牌 | 已持久化 {}{}\x1b[0m",
-                tokens, ratio_pct, compactions, saved, persisted_display, zh_suffix
+            let message = tr(
+                "terminal.metrics",
+                &[
+                    ("tokens", &tokens.to_string()),
+                    ("ratio", &format!("{ratio_pct:.1}")),
+                    ("compactions", &compactions.to_string()),
+                    ("saved", &saved.to_string()),
+                    ("persisted", &persisted_display),
+                    ("suffix", &suffix),
+                ],
             );
-            eprintln!(
-                "\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | saved {} tok | persisted {}{}\x1b[0m",
-                tokens, ratio_pct, compactions, saved, persisted_display, en_suffix
-            );
+            eprintln!("\n\x1b[90m{message}\x1b[0m");
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -177,17 +182,18 @@ pub(crate) fn register_chat_session_stderr_listeners(
                         }
                     }
                 }
-                block.push_str(
-                    "\n\x1b[90m[tools] search_files 仍可用进程内搜索（Tier2）| Tier2 in-process search still available\x1b[0m",
-                );
+                block.push_str(&format!(
+                    "\n\x1b[90m{}\x1b[0m",
+                    tr("terminal.searchFallback", &[])
+                ));
             } else if status == "detached" || status == "already_installing" {
                 if let Some(ex) = extra {
                     if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
                         if !p.is_empty() {
                             block.push_str(&format!("\n\x1b[90m[tools] log: {}\x1b[0m", p));
                             block.push_str(&format!(
-                                "\n\x1b[90m[tools] 可查看进度：tail -f {}\x1b[0m",
-                                p
+                                "\n\x1b[90m{}\x1b[0m",
+                                tr("terminal.searchProgress", &[("path", p)])
                             ));
                         }
                     }
@@ -269,8 +275,7 @@ pub(crate) fn register_chat_session_stderr_listeners(
             if !accepts_session(l1_start_session_id.as_deref(), &evt) {
                 return Ok(());
             }
-            eprintln!("\n\x1b[90m[ctx] 后台压缩已启动…\x1b[0m");
-            eprintln!("\x1b[90m[ctx] Background compaction started…\x1b[0m");
+            eprintln!("\n\x1b[90m{}\x1b[0m", tr("terminal.compactionStarted", &[]));
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -298,12 +303,15 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             eprintln!(
-                "\n\x1b[90m[ctx] 压缩摘要就绪（待应用）| 覆盖区 ~{} 令牌 → 摘要 ~{} 令牌（估省 {} 令牌）\x1b[0m",
-                before, summ, saved
-            );
-            eprintln!(
-                "\x1b[90m[ctx] Summary generated (pending apply) | covered ~{} tok → summary ~{} tok (saved ~{} tok)\x1b[0m",
-                before, summ, saved
+                "\n\x1b[90m{}\x1b[0m",
+                tr(
+                    "terminal.compactionReady",
+                    &[
+                        ("before", &before.to_string()),
+                        ("summary", &summ.to_string()),
+                        ("saved", &saved.to_string())
+                    ]
+                )
             );
             let _ = io::stderr().flush();
             Ok(())
@@ -334,12 +342,11 @@ pub(crate) fn register_chat_session_stderr_listeners(
             };
             if source == "apply" {
                 eprintln!(
-                    "\n\x1b[33m[ctx] 摘要应用失败：{}\x1b[0m",
-                    err_display
-                );
-                eprintln!(
-                    "\x1b[33m[ctx] Summary application failed: {}\x1b[0m",
-                    err_display
+                    "\n\x1b[33m{}\x1b[0m",
+                    tr(
+                        "terminal.compactionApplyFailed",
+                        &[("detail", &err_display)]
+                    )
                 );
                 let _ = io::stderr().flush();
                 return Ok(());
@@ -356,21 +363,19 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .unwrap_or(0);
             if exhausted && source == "preheat" {
                 eprintln!(
-                    "\n\x1b[33m[ctx] 预热失败（已重试 {} 次）：{}\x1b[0m",
-                    attempts, err_display
-                );
-                eprintln!(
-                    "\x1b[33m[ctx] Preheat failed after {} attempt(s): {}\x1b[0m",
-                    attempts, err_display
+                    "\n\x1b[33m{}\x1b[0m",
+                    tr(
+                        "terminal.preheatExhausted",
+                        &[
+                            ("attempts", &attempts.to_string()),
+                            ("detail", &err_display)
+                        ]
+                    )
                 );
             } else if source == "preheat" {
                 eprintln!(
-                    "\n\x1b[33m[ctx] 上下文压缩暂时失败，将在下次发送消息时自动重试：{}\x1b[0m",
-                    err_display
-                );
-                eprintln!(
-                    "\x1b[33m[ctx] Context compaction temporarily failed; will retry on your next message: {}\x1b[0m",
-                    err_display
+                    "\n\x1b[33m{}\x1b[0m",
+                    tr("terminal.compactionRetry", &[("detail", &err_display)])
                 );
             }
             let _ = io::stderr().flush();
@@ -390,12 +395,8 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             eprintln!(
-                "\n\x1b[90m[ctx] 上下文已压缩重置，约节省 {} 令牌\x1b[0m",
-                saved
-            );
-            eprintln!(
-                "\x1b[90m[ctx] Context compacted; saved ~{} tok\x1b[0m",
-                saved
+                "\n\x1b[90m{}\x1b[0m",
+                tr("terminal.compactionSaved", &[("saved", &saved.to_string())])
             );
             let _ = io::stderr().flush();
             Ok(())
@@ -408,8 +409,7 @@ pub(crate) fn register_chat_session_stderr_listeners(
             if !accepts_session(l3_start_session_id.as_deref(), &evt) {
                 return Ok(());
             }
-            eprintln!("\n\x1b[33m[ctx] 上下文溢出，正在截断旧消息…\x1b[0m");
-            eprintln!("\x1b[33m[ctx] Context overflow; trimming older messages…\x1b[0m");
+            eprintln!("\n\x1b[33m{}\x1b[0m", tr("terminal.trimming", &[]));
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -432,12 +432,11 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             eprintln!(
-                "\n\x1b[90m[ctx] 截断完成（删 {} 轮，估省 {} 令牌），正在重试\x1b[0m",
-                turns, saved
-            );
-            eprintln!(
-                "\x1b[90m[ctx] Trim done ({} turns removed, ~{} tok saved); retrying\x1b[0m",
-                turns, saved
+                "\n\x1b[90m{}\x1b[0m",
+                tr(
+                    "terminal.trimmed",
+                    &[("turns", &turns.to_string()), ("saved", &saved.to_string())]
+                )
             );
             let _ = io::stderr().flush();
             Ok(())
@@ -461,12 +460,11 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             eprintln!(
-                "\n\x1b[90m[ctx] L0：大文件落盘释放 ~{} 令牌 | 历史工具结果释放 ~{} 令牌\x1b[0m",
-                p, ph
-            );
-            eprintln!(
-                "\x1b[90m[ctx] L0: large file persist release ~{} tok | historical tool result release ~{} tok\x1b[0m",
-                p, ph
+                "\n\x1b[90m{}\x1b[0m",
+                tr(
+                    "terminal.layer0",
+                    &[("persisted", &p.to_string()), ("history", &ph.to_string())]
+                )
             );
             let _ = io::stderr().flush();
             Ok(())

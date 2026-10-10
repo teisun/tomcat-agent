@@ -382,6 +382,20 @@ Proxy diagnostics follow these rules:
 
 `tomcat config` reads and writes `tomcat.config.toml`, so you do not need to edit the file by hand.
 
+### Display Language
+
+```text
+Settings → General → Language ─┐
+                              ├─ ui.language in tomcat.config.toml
+Independent CLI config set ────┘
+```
+
+`ui.language` accepts `auto` (default), `zh-CN`, and `en`. Set it from an independent terminal with `tomcat config set ui.language en` (or `zh-CN` / `auto`). Auto uses VS Code's display language for the extension and the system locale for the standalone CLI. `TOMCAT__UI__LANGUAGE` is a process-level override, for example `TOMCAT__UI__LANGUAGE=en tomcat --help`.
+
+Saving in Settings updates the current window and Serve without restarting the session; other windows and standalone processes pick it up next time they start. Existing conversation content and already-produced backend messages are not translated again. Native VS Code contribution labels still follow VS Code's own language. Command names, flags, configuration keys, model IDs, and external diagnostic details do not change.
+
+Session pins, safe deletion, and optional plan-review consent are explained in [the extension guide](../../tomcat-vscode-ext/README.md#sessions-settings-and-plan-review). Review may take several minutes or longer and uses additional model tokens; skipping opens the already-saved plan without starting review or execution.
+
 ### View the Full Config
 
 ```bash
@@ -443,9 +457,9 @@ tomcat config get llm.proxy
 
 If the field does not exist:
 
-```
-未找到配置项: nonexistent.key
-  同级可用项: [...]
+```text
+Configuration key not found: nonexistent.key
+  Sibling keys: [...]
 ```
 
 ### Change a Config Item

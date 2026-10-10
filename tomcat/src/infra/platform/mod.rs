@@ -83,7 +83,7 @@ pub fn read_file_utf8(path: &Path) -> Result<String, AppError> {
 pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::Config("路径无父目录".to_string()))?;
+        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("platform.noParent", &[])))?;
     std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
@@ -107,7 +107,7 @@ pub fn write_file_atomic_with(
 ) -> Result<(), AppError> {
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::Config("路径无父目录".to_string()))?;
+        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("platform.noParent", &[])))?;
     std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));

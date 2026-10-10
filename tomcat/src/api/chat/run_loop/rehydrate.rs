@@ -143,7 +143,7 @@ async fn execute_resumed_ask_question(
         .plan_runtime
         .ask_question_panel()
         .ok_or_else(|| {
-            AppError::Config("ask_question panel is unavailable during resume".to_string())
+            AppError::Config(crate::infra::i18n::tr("runtime.resumeQuestionPanel", &[]))
         })?;
     crate::core::tools::plan_tool::ask_question::execute_for_tool(
         &ctx.session_runtime.plan_runtime,
@@ -153,7 +153,12 @@ async fn execute_resumed_ask_question(
         Some(tool_call_id),
     )
     .await
-    .map_err(|error| AppError::Tool(format!("resume ask_question failed: {error}")))
+    .map_err(|error| {
+        AppError::Tool(crate::infra::i18n::tr(
+            "runtime.resumeQuestion",
+            &[("detail", &error.to_string())],
+        ))
+    })
 }
 
 /// Replays restart-interrupted tail `ask_question` calls before a no-input agent turn.
@@ -262,12 +267,15 @@ pub(crate) fn is_append_message_chain_invariant(error: &AppError) -> bool {
     )
 }
 
-pub(super) fn nonfatal_error_hint(error: &AppError) -> &'static str {
-    if is_append_message_chain_invariant(error) {
-        "(已尝试从磁盘重新对齐上下文；可直接继续输入新消息)\n"
-    } else {
-        "(已清理失败轮的悬空输入并从磁盘重新对齐上下文；可直接继续输入新消息)\n"
-    }
+pub(super) fn nonfatal_error_hint(error: &AppError) -> String {
+    crate::infra::i18n::tr(
+        if is_append_message_chain_invariant(error) {
+            "terminal.realignHint"
+        } else {
+            "terminal.cleanHint"
+        },
+        &[],
+    )
 }
 
 fn sanitize_error_detail(raw: &str) -> String {
@@ -362,7 +370,7 @@ fn compact_error_fallback(text: &str) -> String {
     text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or("Unknown error")
+        .unwrap_or(&crate::infra::i18n::tr("runtime.unknown", &[]))
         .chars()
         .take(160)
         .collect()
@@ -396,16 +404,18 @@ pub(crate) fn render_error_message(error: &AppError) -> String {
     let failure = classify_llm_failure(error);
     match failure.kind {
         LlmFailureKind::Billing => {
-            return "账户余额或额度不足。充值或切换 Provider 后可重试。".to_string();
+            return crate::infra::i18n::tr("runtime.billing", &[]);
         }
         LlmFailureKind::ContextOverflow => {
-            return "上下文超过当前模型限制。可用 /compact 压缩上下文，或用 /restore 回退后重试。"
-                .to_string();
+            return crate::infra::i18n::tr("runtime.contextOverflow", &[]);
         }
         _ => {}
     }
     if let Some(status) = llm_http_status(error) {
-        let mut parts = vec![format!("API 错误 {status}")];
+        let mut parts = vec![crate::infra::i18n::tr(
+            "runtime.apiError",
+            &[("status", &status.to_string())],
+        )];
         if let Some(host) = extract_gateway_host(&detail) {
             parts.push(host);
         }

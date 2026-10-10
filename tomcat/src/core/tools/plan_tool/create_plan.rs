@@ -59,6 +59,8 @@ fn default_pending() -> TodoStatus {
     TodoStatus::Pending
 }
 
+use crate::infra::i18n::tr;
+
 impl CreatePlanArgs {
     /// 从 OpenAI tool_call `arguments` JSON 反序列化。
     ///
@@ -67,12 +69,12 @@ impl CreatePlanArgs {
         if let Some(obj) = raw.as_object() {
             if obj.contains_key("plan_id") {
                 return Err(ToolError::BadArgs(
-                    "create_plan 不再接受 plan_id；runtime 由 goal 派生".into(),
+                    "create_plan no longer accepts plan_id; runtime derives it from goal".into(),
                 ));
             }
             if obj.contains_key("body") {
                 return Err(ToolError::BadArgs(
-                    "create_plan 字段 body 已重命名为 draft（承载计划正文要点，落盘到 `## Plan` 段）".into(),
+                    "create_plan field body was renamed to draft (plan-body content, saved under `## Plan`)".into(),
                 ));
             }
         }
@@ -138,17 +140,19 @@ pub fn execute(
         return Err(ToolError::RejectedInMode {
             tool: "create_plan",
             mode: mode.as_str().to_string(),
-            guidance: "请先切换到 Plan 模式再创建计划",
+            guidance: crate::infra::i18n::tr("planTool.createGuidance", &[]),
         });
     }
     if args.goal.trim().is_empty() {
-        return Err(ToolError::BadArgs("goal 不可为空".into()));
+        return Err(ToolError::BadArgs("goal cannot be empty".into()));
     }
     if args.draft.trim().is_empty() {
-        return Err(ToolError::BadArgs("draft 不可为空".into()));
+        return Err(ToolError::BadArgs("draft cannot be empty".into()));
     }
     if args.todos.is_empty() {
-        return Err(ToolError::BadArgs("todos 至少 1 项".into()));
+        return Err(ToolError::BadArgs(
+            "todos must contain at least one item".into(),
+        ));
     }
     if args
         .todos
@@ -156,13 +160,13 @@ pub fn execute(
         .any(|todo| matches!(todo.kind, TodoKind::Unknown))
     {
         return Err(ToolError::BadArgs(
-            "create_plan.todos[].kind 只支持 work 或 acceptance".into(),
+            "create_plan.todos[].kind supports only work or acceptance".into(),
         ));
     }
     // G4：runtime 由 goal 派生 plan_id；LLM 不传 plan_id。
     let plan_id = derive_plan_id(&args.goal);
     assert_plan_id_safe(&plan_id)
-        .map_err(|e| ToolError::BadArgs(format!("派生 plan_id 非法: {e}")))?;
+        .map_err(|e| ToolError::BadArgs(format!("Derived plan_id is invalid: {e}")))?;
 
     let todos: Vec<TodoItem> = args
         .todos
@@ -235,7 +239,7 @@ pub fn execute(
     }))
 }
 
-/// 同 `execute`，但在写盘成功后**同步**派发 reviewer 子 Agent。
+/// Save first, then ask for explicit review consent through the existing question panel.
 ///
 /// 顺序严格遵守 RV14：write_plan 完成（lock 已释放）→ dispatch_reviewer。
 /// reviewer 解析失败 / max_turns / 父 abort 都不影响 create_plan 成功；
@@ -245,16 +249,91 @@ pub async fn execute_with_reviewer(
     args: CreatePlanArgs,
     allow_review_edit: bool,
 ) -> Result<serde_json::Value, ToolError> {
+    execute_for_tool(runtime, args, allow_review_edit, Default::default(), None).await
+}
+
+pub async fn execute_for_tool(
+    runtime: &PlanRuntime,
+    args: CreatePlanArgs,
+    allow_review_edit: bool,
+    termination: crate::core::plan_runtime::AskQuestionTermination,
+    tool_call_id: Option<&str>,
+) -> Result<serde_json::Value, ToolError> {
+    use crate::core::plan_runtime::panels::{
+        AskQuestionIdentity, AskQuestionOutcome, Question, QuestionOption,
+    };
+    use crate::core::plan_runtime::plan_reviewer::PlanReviewSummary;
+    use crate::infra::i18n::tr;
     let mut out = execute(runtime, args)?;
     let plan_id = out["plan_id"].as_str().unwrap_or("").to_string();
-    // 由 PlanRuntime 自洽派发；advisory lock 已在 write_plan 内 drop。
-    let summary = runtime.dispatch_reviewer(&plan_id, allow_review_edit).await;
+    let summary = if let Some(panel) = runtime.ask_question_panel() {
+        let result = panel
+            .ask_with_identity(
+                AskQuestionIdentity {
+                    session_id: runtime.current_session_id(),
+                    tool_call_id: tool_call_id.map(str::to_owned),
+                },
+                vec![Question {
+                    id: "plan-review".into(),
+                    allow_custom: false,
+                    prompt: tr("plan.review.prompt", &[]),
+                    options: vec![
+                        QuestionOption {
+                            id: "review".into(),
+                            label: tr("plan.review.accept", &[]),
+                            recommended: true,
+                        },
+                        QuestionOption {
+                            id: "skip".into(),
+                            label: tr("plan.review.skip", &[]),
+                            recommended: false,
+                        },
+                    ],
+                }],
+                termination.clone(),
+            )
+            .await;
+        if termination.reason().is_some()
+            || matches!(
+                result.outcome,
+                AskQuestionOutcome::Interrupted
+                    | AskQuestionOutcome::HostDisconnected
+                    | AskQuestionOutcome::CancelledUnknown
+            )
+        {
+            let summary = PlanReviewSummary::interrupted();
+            runtime.record_plan_review(&plan_id, &summary, 0);
+            summary
+        } else if review_choice(&result, "review") {
+            runtime.dispatch_reviewer(&plan_id, allow_review_edit).await
+        } else {
+            let summary = PlanReviewSummary::skipped();
+            runtime.record_plan_review(&plan_id, &summary, 0);
+            summary
+        }
+    } else {
+        let summary = PlanReviewSummary::interrupted();
+        runtime.record_plan_review(&plan_id, &summary, 0);
+        summary
+    };
     // 若 reviewer 通过 update_plan / edit 改了计划文件，刷新 active plan 缓存。
     if summary.applied_changes {
         let _ = reload_after_review(runtime, &plan_id);
     }
     out["review"] = summary.to_json();
     Ok(out)
+}
+
+fn review_choice(
+    result: &crate::core::plan_runtime::panels::AskQuestionResult,
+    choice: &str,
+) -> bool {
+    result.outcome == crate::core::plan_runtime::panels::AskQuestionOutcome::Answered
+        && result.answers.len() == 1
+        && result.answers[0].question_id == "plan-review"
+        && !result.answers[0].skipped
+        && result.answers[0].custom_text.is_none()
+        && result.answers[0].option_ids == [choice]
 }
 
 fn reload_after_review(runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {
@@ -393,7 +472,8 @@ fn normalize_plan_body(goal: &str, draft: &str) -> String {
 
 fn default_body(goal: &str, draft: &str) -> String {
     let plan = normalize_plan_body(goal, draft);
+    let notice = tr("planTool.autoBoard", &[]);
     format!(
-        "## Goal\n\n{goal}\n\n## Plan\n\n{plan}\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n（由 update_plan 自动维护，请勿手工编辑标记之间内容）\n<!-- todos-board:auto:end -->\n"
+        "## Goal\n\n{goal}\n\n## Plan\n\n{plan}\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n{notice}\n<!-- todos-board:auto:end -->\n"
     )
 }

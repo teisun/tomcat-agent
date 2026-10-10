@@ -82,13 +82,14 @@ fn grant_trigger_str(s: GrantTrigger) -> String {
     .to_string()
 }
 
-fn op_summary(op: PrimitiveOperation) -> &'static str {
-    match op {
-        PrimitiveOperation::Read => "读取",
-        PrimitiveOperation::Write => "写入",
-        PrimitiveOperation::Edit => "编辑",
-        PrimitiveOperation::Bash => "执行命令",
-    }
+fn op_summary(op: PrimitiveOperation) -> String {
+    let key = match op {
+        PrimitiveOperation::Read => "permission.op.read",
+        PrimitiveOperation::Write => "permission.op.write",
+        PrimitiveOperation::Edit => "permission.op.edit",
+        PrimitiveOperation::Bash => "permission.op.bash",
+    };
+    crate::infra::i18n::tr(key, &[])
 }
 
 /// Validate an explicit bash cwd: it must exist and be a directory. Emitting this before the
@@ -97,9 +98,8 @@ fn op_summary(op: PrimitiveOperation) -> &'static str {
 fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
     if !path.try_exists().map_err(AppError::Io)? {
         let mut msg = format!(
-            "bash.cwd does not exist: {} (input: {:?})",
-            path.display(),
-            raw_cwd
+            "bash.cwd does not exist: {} (input: {raw_cwd:?})",
+            path.display()
         );
         if let Ok(project_root) = std::env::current_dir() {
             msg.push_str(&format!(
@@ -116,9 +116,8 @@ fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
     }
     if !path.is_dir() {
         return Err(AppError::Primitive(format!(
-            "bash.cwd is not a directory: {} (input: {:?})",
-            path.display(),
-            raw_cwd
+            "bash.cwd is not a directory: {} (input: {raw_cwd:?})",
+            path.display()
         )));
     }
     Ok(())
@@ -289,23 +288,30 @@ impl BackgroundBashGuard {
                     reason,
                     suggested_root,
                 } => {
-                    let preview = format!(
-                        "[{:?}] {}\n路径: {}\n原因: {}",
-                        op,
-                        op_summary(op),
-                        normalized.display(),
-                        reason
+                    let preview = crate::infra::i18n::tr(
+                        "permission.pathPreview",
+                        &[
+                            ("op", &format!("{op:?}")),
+                            ("summary", &op_summary(op)),
+                            ("path", &normalized.display().to_string()),
+                            ("reason", &reason),
+                        ],
                     );
                     match self
                         .confirmation
-                        .confirm_decision(op, &preview, &self.plugin_id, suggested_root.clone())
+                        .confirm_decision(
+                            op,
+                            &preview,
+                            &self.plugin_id,
+                            Some(normalized.clone()),
+                            suggested_root.clone(),
+                        )
                         .await?
                     {
                         ConfirmDecision::Deny => {
-                            return Err(AppError::Permission(format!(
-                                "用户拒绝授权: {}。下次工具再次访问该路径时会重新弹出 [s]/[w]/[c] 授权选项；也可以执行 `tomcat workspace add {}` 一次性永久授权。",
-                                normalized.display(),
-                                normalized.display()
+                            return Err(AppError::Permission(crate::infra::i18n::tr(
+                                "permission.pathDenied",
+                                &[("path", &normalized.display().to_string())],
                             )));
                         }
                         ConfirmDecision::AllowOnce => {
@@ -329,13 +335,19 @@ impl BackgroundBashGuard {
             PermissionDecision::Allow { grant, scope } => Ok((scope, grant)),
             PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
             PermissionDecision::NeedConfirm { reason, .. } => {
-                let preview = format!(
-                    "[Bash] 危险命令命中确认列表\n命令: {}\n原因: {}",
-                    command, reason
+                let preview = crate::infra::i18n::tr(
+                    "permission.bashPreview",
+                    &[("command", command), ("reason", &reason)],
                 );
                 match self
                     .confirmation
-                    .confirm_decision(PrimitiveOperation::Bash, &preview, &self.plugin_id, None)
+                    .confirm_decision(
+                        PrimitiveOperation::Bash,
+                        &preview,
+                        &self.plugin_id,
+                        None,
+                        None,
+                    )
                     .await?
                 {
                     ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
@@ -344,9 +356,10 @@ impl BackgroundBashGuard {
                             GrantTrace::new(GrantType::BashPolicy, GrantTrigger::UserConfirm),
                         ))
                     }
-                    ConfirmDecision::Deny => {
-                        Err(AppError::Permission("用户拒绝 bash 确认".to_string()))
-                    }
+                    ConfirmDecision::Deny => Err(AppError::Permission(crate::infra::i18n::tr(
+                        "permission.bashDenied",
+                        &[],
+                    ))),
                 }
             }
         }
@@ -721,10 +734,9 @@ impl BashTaskRegistry {
 
         let mut child = cmd.spawn().map_err(|e| {
             let err = AppError::Primitive(format!(
-                "bash spawn failed (cwd={}, input={:?}): {}",
+                "bash spawn failed (cwd={}, input={:?}): {e}",
                 cwd.resolved_path().display(),
-                cwd.display_input(),
-                e
+                cwd.display_input()
             ));
             if let (Some(guard), Some((scope, grant))) =
                 (self.background_guard.as_ref(), bash_scope_grant)
@@ -903,7 +915,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let mut delivery = task.delivery.lock();
         let terminal = matches!(
             task.info.read().status,
@@ -933,7 +945,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let info_snap = task.info.read().clone();
         let log_path = Path::new(&info_snap.log_path);
         let mut file = tokio::fs::OpenOptions::new()
@@ -977,7 +989,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let info_snap = task.info.read().clone();
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)
@@ -1023,7 +1035,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let preview = task.preview.lock();
         Ok(BashRuntimePreview {
             output: preview.text(),
@@ -1043,7 +1055,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         task.stop_requested.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(pid) = task.pid {
@@ -1063,7 +1075,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         task.preview_flushed.store(true, Ordering::Release);
         task.preview_flush_notify.notify_waiters();
         Ok(())
@@ -1084,7 +1096,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         loop {
             // 关键顺序：先注册 notified()（等待者句柄），再做条件判定。
             // 反过来会与 wait/stop 的 `notify_waiters()` 之间存在标准
@@ -1148,7 +1160,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let info_snap = task.info.read().clone();
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)

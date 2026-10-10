@@ -336,7 +336,7 @@ async fn batch_edit_applies_every_passing_file() {
     assert!(entries
         .iter()
         .all(|e| e.status == Some(ToolDisplayFileStatus::Applied)));
-    assert!(outcome.model_text.contains("全部落盘"));
+    assert!(outcome.model_text.contains("all changes written"));
 }
 
 #[tokio::test]
@@ -382,7 +382,7 @@ async fn batch_edit_reports_all_precheck_failures_in_one_shot() {
     assert_eq!(std::fs::read_to_string(&unread).unwrap(), "untouched\n");
     assert_eq!(std::fs::read_to_string(&notebook).unwrap(), "{}\n");
     assert!(
-        outcome.model_text.contains("失败且未写入"),
+        outcome.model_text.contains("failed without writing: 2"),
         "结果必须把磁盘状态说死：{}",
         outcome.model_text
     );
@@ -530,7 +530,11 @@ async fn batch_edit_rejects_duplicate_paths_but_tolerates_a_bare_repeated_path()
     )
     .await;
     assert!(dup.is_error);
-    assert!(dup.model_text.contains("出现多次"), "{}", dup.model_text);
+    assert!(
+        dup.model_text.contains("appears more than once in files"),
+        "{}",
+        dup.model_text
+    );
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
         "a\n",
@@ -677,7 +681,7 @@ async fn batch_edit_still_rejects_a_top_level_edit_that_files_does_not_contain()
     let outcome = run(&primitive, &state, &tc).await;
     assert!(outcome.is_error);
     assert!(
-        outcome.model_text.contains("files` 里没有的编辑"),
+        outcome.model_text.contains("is not present in `files`"),
         "{}",
         outcome.model_text
     );

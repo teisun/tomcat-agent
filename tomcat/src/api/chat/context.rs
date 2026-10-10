@@ -162,7 +162,7 @@ impl ChatContext {
                     .files
                     .iter()
                     .find(|f| f.card.id == id)
-                    .ok_or_else(|| format!("命令已不存在或不可读取：{id}"))?;
+                    .ok_or_else(|| tr("runtime.commandMissing", &[("id", id)]))?;
                 let root = self
                     .scope_services
                     .resource_root
@@ -176,13 +176,15 @@ impl ChatContext {
             }
             InstructionKind::Skill => {
                 if !self.config.skills.enabled {
-                    return Err("技能系统已禁用".into());
+                    return Err(tr("runtime.skillsDisabled", &[]));
                 }
-                let name = id.strip_prefix("skill:").ok_or("非法 skill ID")?;
+                let name = id
+                    .strip_prefix("skill:")
+                    .ok_or_else(|| tr("runtime.skillIdInvalid", &[]))?;
                 let snapshot = self.skill_set_snapshot();
                 let skill = snapshot
                     .resolve_any(name)
-                    .ok_or_else(|| format!("技能已不存在：{name}"))?;
+                    .ok_or_else(|| tr("runtime.skillMissing", &[("name", name)]))?;
                 let base = skill.base_dir.canonicalize().map_err(|e| e.to_string())?;
                 let file = base.join("SKILL.md");
                 (
@@ -254,24 +256,33 @@ impl ChatContext {
             })
             .unwrap_or(320_000);
         let (_, errors, loaded) = self.project_rules(budget);
-        let summarize = |label: &str, count: usize, diagnostics: &[String]| {
-            let mut text = if label == "Rules" {
-                format!("  - Rules：{count} 条生效，{} 条未生效", diagnostics.len())
-            } else {
-                format!("  - Commands：{count} 个可用，{} 个跳过", diagnostics.len())
-            };
+        let summarize = |key: &str, count: usize, diagnostics: &[String]| {
+            let mut text = tr(
+                key,
+                &[
+                    ("count", &count.to_string()),
+                    ("skipped", &diagnostics.len().to_string()),
+                ],
+            );
             for error in diagnostics.iter().take(20) {
                 text.push_str(&format!("\n      {error}"));
             }
             if diagnostics.len() > 20 {
-                text.push_str(&format!("\n      …另 {} 项", diagnostics.len() - 20));
+                text.push_str(&tr(
+                    "runtime.moreDiagnostics",
+                    &[("count", &(diagnostics.len() - 20).to_string())],
+                ));
             }
             text
         };
         format!(
             "{}\n{}",
-            summarize("Commands", commands.files.len(), &commands.diagnostics),
-            summarize("Rules", loaded, &errors)
+            summarize(
+                "runtime.commandsSummary",
+                commands.files.len(),
+                &commands.diagnostics
+            ),
+            summarize("runtime.rulesSummary", loaded, &errors)
         )
     }
 }
@@ -426,6 +437,26 @@ fn scope_runtime_cache(
     CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
 
+/// End only VMs already owned by this process; cleanup must never construct a new chat session.
+pub(crate) fn end_cached_plugin_session(session_id: &str) -> Result<(), AppError> {
+    let managers: Vec<_> = scope_runtime_cache()
+        .read()
+        .values()
+        .filter_map(Weak::upgrade)
+        .filter_map(|scope| scope.plugin_manager.clone())
+        .collect();
+    if managers.is_empty() {
+        return Ok(());
+    }
+    let session_id = session_id.to_owned();
+    block_on_plugin_future(async move {
+        for manager in managers {
+            manager.end_session(&session_id).await?;
+        }
+        Ok(())
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scope_runtime_for(
     config: &AppConfig,
@@ -520,7 +551,7 @@ where
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         return std::thread::spawn(move || handle.block_on(future))
             .join()
-            .map_err(|_| AppError::Plugin("scope activation worker panicked".to_string()))?;
+            .map_err(|_| AppError::Plugin(crate::infra::i18n::tr("runtime.scopeWorker", &[])))?;
     }
 
     let runtime = tokio::runtime::Runtime::new().map_err(|error| {
@@ -583,7 +614,7 @@ impl ChatContext {
         // than later treating the backend process cwd as an implicit fallback.
         let current_session_entry = session
             .ensure_current_session_with_project_root(session_cwd.clone(), session_cwd.clone())?;
-        session.pin_session(&current_session_entry.session_id);
+        session.pin_session(&current_session_entry.session_id)?;
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
         let agent_workspace_dir =
@@ -813,7 +844,12 @@ impl ChatContext {
         });
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
-            .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Config(tr(
+                    "runtime.rootRegisterFailed",
+                    &[("detail", &e.to_string())],
+                ))
+            })?;
         let skill_set = shared_scope_runtime.skill_set.clone();
         let skill_discovery_handle = shared_scope_runtime.skill_discovery_handle.clone();
 
@@ -1207,6 +1243,8 @@ impl Drop for ChatContext {
     }
 }
 
+use crate::infra::i18n::tr;
+
 pub struct CliConfirmation;
 
 #[async_trait::async_trait]
@@ -1217,27 +1255,38 @@ impl UserConfirmationProvider for CliConfirmation {
         preview: &str,
         plugin_id: &str,
     ) -> Result<bool, AppError> {
-        println!("\n--- 操作确认 ---");
+        println!("{}", tr("terminal.confirm.title", &[]));
         let source_label = if plugin_id == "__agent__" {
             "host".to_string()
         } else {
             plugin_id.to_string()
         };
-        println!("类型: {:?}  来源: {}", operation, source_label);
+        println!(
+            "{}",
+            tr(
+                "terminal.confirm.source",
+                &[
+                    ("operation", &format!("{operation:?}")),
+                    ("source", &source_label)
+                ]
+            )
+        );
         if !preview.is_empty() {
             let lines: Vec<&str> = preview.lines().collect();
             let display = if lines.len() > 20 {
-                format!(
-                    "{}\n  ... ({} 行已省略)",
-                    lines[..20].join("\n"),
-                    lines.len() - 20
+                tr(
+                    "terminal.confirm.omitted",
+                    &[
+                        ("text", &lines[..20].join("\n")),
+                        ("count", &(lines.len() - 20).to_string()),
+                    ],
                 )
             } else {
                 preview.to_string()
             };
-            println!("预览:\n{}", display);
+            println!("{}", tr("terminal.confirm.preview", &[("text", &display)]));
         }
-        print!("是否执行？[y/N] ");
+        print!("{}", tr("terminal.confirm.ask", &[]));
         io::stdout().flush().map_err(AppError::Io)?;
         let mut line = String::new();
         io::stdin().read_line(&mut line).map_err(AppError::Io)?;
@@ -1250,24 +1299,28 @@ impl UserConfirmationProvider for CliConfirmation {
         operation: PrimitiveOperation,
         preview: &str,
         plugin_id: &str,
+        target: Option<std::path::PathBuf>,
         suggested_root: Option<std::path::PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
-        if operation == PrimitiveOperation::Bash {
-            return match self.confirm(operation, preview, plugin_id).await? {
-                true => Ok(ConfirmDecision::AllowOnce),
-                false => Ok(ConfirmDecision::Deny),
-            };
-        }
-
-        let target = extract_path_from_preview(preview).unwrap_or_else(|| {
-            suggested_root
-                .clone()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-        });
+        let target = match target {
+            Some(target) if operation != PrimitiveOperation::Bash => target,
+            _ => {
+                return match self.confirm(operation, preview, plugin_id).await? {
+                    true => Ok(ConfirmDecision::AllowOnce),
+                    false => Ok(ConfirmDecision::Deny),
+                };
+            }
+        };
         match permission::prompt::read_path_prompt(
             &target,
             suggested_root,
-            Some(&format!("类型: {:?}  来源: {}", operation, plugin_id)),
+            Some(&tr(
+                "terminal.confirm.source",
+                &[
+                    ("operation", &format!("{operation:?}")),
+                    ("source", plugin_id),
+                ],
+            )),
         )
         .map_err(AppError::Io)?
         {
@@ -1283,13 +1336,6 @@ impl UserConfirmationProvider for CliConfirmation {
             permission::prompt::PathPromptChoice::Cancel => Ok(ConfirmDecision::Deny),
         }
     }
-}
-
-fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
-    preview
-        .lines()
-        .find_map(|line| line.strip_prefix("路径: "))
-        .map(std::path::PathBuf::from)
 }
 
 type PluginRuntimeParts = (
@@ -1566,7 +1612,7 @@ fn build_plugin_runtime(
         build_outbound_client(
             options,
             OutboundClientErrorKind::Tool,
-            "创建 plugin net.fetch HTTP 客户端失败",
+            &tr("runtime.fetchClientFailed", &[]),
         )?
     };
     let explicit_fetch_proxy = config
@@ -1674,9 +1720,9 @@ impl ToolExecutor for NoopToolExecutor {
         _caller_plugin_id: &str,
         _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
-        Err(AppError::Tool(format!(
-            "对话模式下不支持插件工具执行: {}",
-            tool.name
+        Err(AppError::Tool(tr(
+            "runtime.pluginExecutionUnavailable",
+            &[("name", &tool.name)],
         )))
     }
 }
@@ -1836,12 +1882,20 @@ mod tests {
         let path = crate::core::connector::mcp::config::global_mcp_path(&cfg).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, r#"{"mcpServers":{"broken": "#).unwrap();
+        let path = path.canonicalize().unwrap();
 
         let error = match connector_registry_for(&cfg, Some(temp.path())) {
             Ok(_) => panic!("invalid JSON should isolate the MCP runtime"),
             Err(error) => error.to_string(),
         };
-        assert!(error.contains("parse MCP configuration"), "{error}");
+        assert!(
+            error.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "mcp.config.parse",
+                &[("path", &path.display().to_string()), ("detail", "")]
+            )),
+            "{error}"
+        );
         assert!(error.contains(&path.to_string_lossy().to_string()));
     }
 

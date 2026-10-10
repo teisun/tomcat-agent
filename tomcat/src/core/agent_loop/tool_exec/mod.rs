@@ -408,11 +408,7 @@ async fn execute_tool_tuple_full(
         _ => true,
     } {
         return (
-            format!(
-                "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 {}；create_plan 防套娃；write/dispatch_agent/checkpoint 永不可用）",
-                tc.name,
-                reviewer_allowed_tools_description(ctx.subagent_type, ctx.expose_skills_to_reviewer),
-            ),
+            format!("reviewer sub-Agent may not call `{}` (allowed: {}; create_plan nesting and write/dispatch_agent/checkpoint are forbidden)", tc.name, reviewer_allowed_tools_description(ctx.subagent_type, ctx.expose_skills_to_reviewer)),
             true,
             Vec::new(),
         );
@@ -421,11 +417,7 @@ async fn execute_tool_tuple_full(
         && !is_explorer_whitelisted_tool(tc.name.as_str())
     {
         return (
-            format!(
-                "explorer 子 Agent 只读，禁止调用工具 `{}`（仅允许 {}；写工具与 dispatch_agent 永不可用）",
-                tc.name,
-                explorer_allowed_tools_description(),
-            ),
+            format!("explorer sub-Agent is read-only and may not call `{}` (allowed: {}; write tools and dispatch_agent are forbidden)", tc.name, explorer_allowed_tools_description()),
             true,
             Vec::new(),
         );
@@ -434,11 +426,7 @@ async fn execute_tool_tuple_full(
         && !is_verifier_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
     {
         return (
-            format!(
-                "verifier 子 Agent 禁止调用工具 `{}`（仅允许 {}；create_plan/update_plan/todos/ask_question/edit/write/dispatch_agent/checkpoint 永不可用）",
-                tc.name,
-                verifier_allowed_tools_description(ctx.expose_skills_to_reviewer),
-            ),
+            format!("verifier sub-Agent may not call `{}` (allowed: {}; create_plan/update_plan/todos/ask_question/edit/write/dispatch_agent/checkpoint are forbidden)", tc.name, verifier_allowed_tools_description(ctx.expose_skills_to_reviewer)),
             true,
             Vec::new(),
         );
@@ -447,8 +435,7 @@ async fn execute_tool_tuple_full(
     if tc.name == "package_install" {
         if ctx.subagent_type != crate::core::agent_loop::types::SubagentType::User {
             return (
-                "package_install 仅允许主会话调用；只读 explorer/reviewer/verifier 不会执行安装"
-                    .to_string(),
+                "package_install is available only in the main session; read-only explorer/reviewer/verifier sub-Agents cannot install".to_string(),
                 true,
                 Vec::new(),
             );
@@ -458,7 +445,7 @@ async fn execute_tool_tuple_full(
             .is_some_and(|runtime| runtime.mode() == crate::core::session::manager::AgentMode::Plan)
         {
             return (
-                "package_install 在 PLAN 模式不可用；请先退出计划模式再安装资源".to_string(),
+                "package_install is unavailable in Plan mode; exit Plan mode before installing resources".to_string(),
                 true,
                 Vec::new(),
             );
@@ -561,7 +548,7 @@ async fn execute_tool_tuple_full(
         "config_set" => branches::handle_config_set(ctx, &args, display_out).await,
         "package_install" => branches::handle_package_install(ctx, &args).await,
         "dispatch_agent" => branches::handle_dispatch_agent(ctx, &args).await,
-        other => Err(format!("未知工具: {}", other)),
+        other => Err(format!("Unknown tool: {other}")),
     };
 
     match out {

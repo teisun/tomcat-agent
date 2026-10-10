@@ -1,8 +1,9 @@
 //! SessionManager：会话 CRUD、transcript 追加与只读、上下文组装、会话级配置隔离。
 //!
-//! 通过 Mutex 序列化 sessions.json 的写入，保证并发安全（不锁文件）。
+//! sessions.json RMW uses both an in-process mutex and a stable cross-process lock file.
 
 mod context;
+mod deletion;
 mod session_impl;
 #[cfg(test)]
 mod tests;
@@ -12,6 +13,7 @@ pub use context::{
     init_context_state, init_context_state_with_limits, INTERRUPTED_TOOL_RESULT_TEXT,
     PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
 };
+pub use deletion::DeleteSessionOutcome;
 pub(crate) use session_impl::extract_user_text_from_content;
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;

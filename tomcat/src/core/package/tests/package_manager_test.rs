@@ -6,6 +6,7 @@ use crate::core::package::{
     load_package_registry, load_plugin_registry, resolve_layer_paths, PackageManager,
     PackageVisibility,
 };
+use crate::infra::i18n::{tr_in, Locale};
 use crate::AppConfig;
 
 fn test_config(work_dir: &Path) -> AppConfig {
@@ -107,10 +108,22 @@ fn uninstall_manual_plugin_keeps_resources_and_registries_and_lists_real_paths()
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("package 未安装")
-            && error.contains("手动放进目录")
-            && error.contains("子目录名不一定等于 ID")
-            && error.contains("/reload"),
+        error.contains(&tr_in(
+            Locale::En,
+            "package.notInstalled",
+            &[
+                ("layer", &PackageVisibility::Scope.to_string()),
+                ("name", "qa-echo"),
+                (
+                    "plugins",
+                    &crate::infra::platform::format_home_path(&paths.plugins_dir)
+                ),
+                (
+                    "skills",
+                    &crate::infra::platform::format_home_path(&paths.skills_dir)
+                ),
+            ]
+        )),
         "{error}"
     );
     assert!(error.contains(&crate::infra::platform::format_home_path(
@@ -172,7 +185,14 @@ fn detect_package_rejects_resource_reference_outside_package_root() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("package 根目录内"),
+        error.contains(&tr_in(
+            Locale::En,
+            "package.relativeRef",
+            &[
+                ("kind", "plugin"),
+                ("reference", &format!("{:?}", "../outside-plugin"))
+            ]
+        )),
         "unexpected error: {error}"
     );
 }
@@ -335,7 +355,14 @@ fn prepare_install_rejects_same_layer_conflict_without_force() {
         )
         .unwrap_err()
         .to_string();
-    assert!(error.contains("同层"), "unexpected error: {error}");
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.exists",
+            &[("kind", "plugin"), ("id", "conflict-plugin")]
+        )),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -365,7 +392,15 @@ fn prepare_install_reports_cross_layer_shadow_warning() {
         prepared
             .warnings
             .iter()
-            .any(|warning| warning.contains("更高优先级层")),
+            .any(|warning| warning.contains(&tr_in(
+                Locale::En,
+                "package.shadowed",
+                &[
+                    ("kind", "skill"),
+                    ("id", "commit"),
+                    ("layer", &PackageVisibility::Scope.to_string())
+                ]
+            ))),
         "warnings should mention higher-priority shadowing: {:?}",
         prepared.warnings
     );
@@ -460,12 +495,11 @@ fn invalid_registry_parent_fails_before_copying_resources() {
             Some(workspace.path()),
             false,
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
 
     assert!(
-        error.contains("Not a directory") || error.contains("不是目录"),
-        "unexpected registry preflight failure: {error}"
+        matches!(error, crate::AppError::Io(ref cause) if cause.kind() == std::io::ErrorKind::NotADirectory),
+        "{error}"
     );
     assert!(
         !scope_paths.plugins_dir.join("broken-plugin").exists(),
@@ -618,8 +652,13 @@ fn load_package_registry_corrupt_returns_error() {
     let path = dir.path().join("registry.json");
     std::fs::write(&path, "not valid json {{{").unwrap();
 
-    let error = load_package_registry(&path).unwrap_err().to_string();
-    assert!(error.contains("registry 损坏"), "unexpected error: {error}");
+    let error = load_package_registry(&path).unwrap_err();
+    assert!(matches!(error, crate::AppError::Config(_)), "{error}");
+    assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "not valid json {{{"
+    );
 }
 
 #[test]
@@ -704,7 +743,7 @@ fn install_rejects_a_source_changed_after_preparation() {
 
     let error = manager.install(prepared).unwrap_err().to_string();
     assert!(
-        error.contains("来源在确认后发生变化"),
+        error.contains(&tr_in(Locale::En, "package.sourceChanged", &[("path", "")])),
         "unexpected error: {error}"
     );
     let paths =
@@ -730,7 +769,24 @@ fn install_rejects_source_target_overlap_in_both_directions() {
         )
         .unwrap();
     let error = manager.install(prepared).unwrap_err().to_string();
-    assert!(error.contains("不能重叠"), "unexpected error: {error}");
+    let destination = resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path()))
+        .unwrap()
+        .skills_dir
+        .join("overlap");
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.overlap",
+            &[
+                (
+                    "source",
+                    &source.canonicalize().unwrap().display().to_string()
+                ),
+                ("destination", &destination.display().to_string()),
+            ]
+        )),
+        "{error}"
+    );
 }
 
 #[cfg(unix)]
@@ -758,7 +814,10 @@ fn prepare_install_rejects_special_files_in_source_tree() {
         )
         .unwrap_err()
         .to_string();
-    assert!(error.contains("特殊文件"), "unexpected error: {error}");
+    assert!(
+        error.contains(&tr_in(Locale::En, "package.specialFile", &[("path", "")])),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -841,7 +900,11 @@ fn uninstall_rolls_back_resources_and_registries_when_commit_fails() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("package uninstall 失败"),
+        error.contains(&tr_in(
+            Locale::En,
+            "package.operationFailed",
+            &[("operation", "uninstall"), ("detail", "")]
+        )),
         "unexpected error: {error}"
     );
     assert!(paths

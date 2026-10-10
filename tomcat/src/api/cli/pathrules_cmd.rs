@@ -19,6 +19,7 @@
 use crate::core::permission::{builtin_default_rules, PathRule, PathRuleMode};
 use crate::infra::config::append_path_rule_to_disk;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::platform::normalize_path;
 use crate::AppConfig;
 
@@ -36,15 +37,21 @@ pub(crate) fn run_pathrules(sub: PathRulesSub, cfg: &AppConfig) -> Result<(), Ap
             let path_str = normalized.to_string_lossy().to_string();
             if !normalized.exists() {
                 eprintln!(
-                    "警告：路径当前不存在: {} —— 仍记录该规则（路径未来出现时生效）",
-                    normalized.display()
+                    "{}",
+                    tr(
+                        "cli.pathrules.absentWarning",
+                        &[("path", &normalized.display().to_string())]
+                    )
                 );
             }
 
             if !config_path.exists() {
                 println!(
-                    "配置文件不存在: {}。请先运行: tomcat init",
-                    config_path.display()
+                    "{}",
+                    tr(
+                        "cli.config.fileMissing",
+                        &[("path", &config_path.display().to_string())]
+                    )
                 );
                 return Ok(());
             }
@@ -52,24 +59,26 @@ pub(crate) fn run_pathrules(sub: PathRulesSub, cfg: &AppConfig) -> Result<(), Ap
             // 调共享 helper（内部走 with_config_lock + dedupe + validate_config）。
             append_path_rule_to_disk(&config_path, PathRule::new(path_str.clone(), mode_enum))?;
             println!(
-                "已追加 [primitive] path_rules: path=\"{}\" mode=\"{}\"",
-                path_str,
-                mode_str(mode_enum)
+                "{}",
+                tr(
+                    "cli.pathrules.added",
+                    &[("path", &path_str), ("mode", mode_str(mode_enum))]
+                )
             );
         }
         PathRulesSub::List => {
             // 三层合并视图：builtin / user TOML / session（首版固定空）。
             // builtin 与 PermissionGate 内部用同一份 `builtin_default_rules()`，
             // 保证 list 与 gate 实际生效一致。
-            println!("[builtin]  （内置默认；不可移除）");
+            println!("{}", tr("cli.pathrules.builtin", &[]));
             for r in builtin_default_rules() {
                 print_rule(&r);
             }
 
             println!();
-            println!("[user]     （来自 ~/.tomcat/tomcat.config.toml [primitive.path_rules]）");
+            println!("{}", tr("cli.pathrules.user", &[]));
             if cfg.primitive.path_rules.is_empty() {
-                println!("  (无)");
+                println!("{}", tr("cli.pathrules.empty", &[]));
             } else {
                 for r in &cfg.primitive.path_rules {
                     print_rule(r);
@@ -77,13 +86,10 @@ pub(crate) fn run_pathrules(sub: PathRulesSub, cfg: &AppConfig) -> Result<(), Ap
             }
 
             println!();
-            println!("[session]  （chat 运行时拖拽追加；CLI 进程不可见）");
-            println!("  (无)");
+            println!("{}", tr("cli.pathrules.session", &[]));
+            println!("{}", tr("cli.pathrules.empty", &[]));
             println!();
-            println!(
-                "提示：编辑/移除使用 `tomcat config edit`（手编 TOML）；首版未实现 \
-                 `tomcat pathrules remove` 与 `clear-session`。"
-            );
+            println!("{}", tr("cli.pathrules.editHint", &[]));
         }
     }
     Ok(())
@@ -93,9 +99,9 @@ fn parse_mode(s: &str) -> Result<PathRuleMode, AppError> {
     match s.trim().to_lowercase().as_str() {
         "deny" => Ok(PathRuleMode::Deny),
         "readonly" | "ro" | "read-only" => Ok(PathRuleMode::Readonly),
-        other => Err(AppError::Config(format!(
-            "未识别的 path_rule mode: '{}'（仅支持 deny / readonly）",
-            other
+        other => Err(AppError::Config(tr(
+            "cli.pathrules.invalidMode",
+            &[("mode", other)],
         ))),
     }
 }

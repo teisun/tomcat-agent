@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { UiPreferences } from "../shared/i18n";
 
 import { assertRequiredCapabilities, parseInitializePayload } from "./protocol";
 import type { TomcatMessenger } from "./TomcatMessenger";
@@ -19,6 +20,7 @@ export const SERVE_MODEL_ADMIN_CAPABILITIES = [
 ] as const;
 
 export interface InitializeResult {
+  uiPreferences?: UiPreferences | null;
   /**
    * Absolute path of the attachment directory, or null on a server that predates it.
    *
@@ -77,6 +79,7 @@ export async function initializeServe(
 
   return {
     attachmentRoot: payload.attachmentRoot ?? null,
+    ...(payload.uiPreferences ? { uiPreferences: payload.uiPreferences } : {}),
     capabilities: payload.capabilities,
     slashCommands: payload.slashCommands ?? [],
     protocolVersion: payload.protocolVersion,

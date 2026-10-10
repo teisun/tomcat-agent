@@ -1,4 +1,6 @@
 import { memo, useEffect, useMemo, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import type { Locale, Translator } from "../../../src/shared/i18n";
 
 import type { WebviewMediaRoot, WebviewMessageBlock, WebviewToolCard } from "../types";
 import { GroupActivityTicker } from "./GroupActivityTicker";
@@ -18,15 +20,17 @@ function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): bo
 function groupHeaderTitle(
   group: AssistantResponseGroup,
   isStreaming: boolean,
+  t: Translator,
+  locale: Locale,
 ): { shimmer: boolean; text: string } {
   const summaryTitle = group.thinking?.summaryTitle ?? null;
   if (summaryTitle && (group.tools.length === 0 || !isDirtySummaryTitle(summaryTitle, group.tools))) {
     return { shimmer: isStreaming, text: summaryTitle };
   }
   if (group.tools.length > 0) {
-    return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools) };
+    return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools, t, locale) };
   }
-  return { shimmer: isStreaming, text: "Thinking" };
+  return { shimmer: isStreaming, text: t("thinking.title") };
 }
 
 type ThinkingGroupProps = {
@@ -50,6 +54,8 @@ function ThinkingGroupComponent({
   onOpenImagePreview,
   onZoomImage,
 }: ThinkingGroupProps) {
+  const t = useT();
+  const locale = useLocale();
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
   const [collapsed, setCollapsed] = useState(true);
 
@@ -57,7 +63,7 @@ function ThinkingGroupComponent({
     setCollapsed(true);
   }, [group.assistantMessageId]);
 
-  const header = useMemo(() => groupHeaderTitle(group, isStreaming), [group, isStreaming]);
+  const header = useMemo(() => groupHeaderTitle(group, isStreaming, t, locale), [group, isStreaming, t, locale]);
   const statusIconClass =
     group.tools.length > 0
       ? "tc-thinking-box__status codicon codicon-search"

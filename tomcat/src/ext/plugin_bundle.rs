@@ -1,6 +1,7 @@
 use crate::ext::plugin::parse_manifest;
 use crate::ext::ts_compiler::{transpile_pi_plugin_for_quickjs, transpile_typescript};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -25,9 +26,9 @@ pub fn bundle_plugin_from_path(path: impl AsRef<Path>) -> Result<PluginBundleRes
     let (plugin_root, manifest_main) = resolve_manifest_and_root(path.as_ref())?;
     let src_dir = plugin_root.join("src");
     if !src_dir.is_dir() {
-        return Err(AppError::Plugin(format!(
-            "插件源码目录不存在: {}",
-            src_dir.display()
+        return Err(AppError::Plugin(tr(
+            "bundle.sourceMissing",
+            &[("path", &src_dir.display().to_string())],
         )));
     }
 
@@ -61,14 +62,17 @@ fn resolve_manifest_and_root(path: &Path) -> Result<(PathBuf, String), AppError>
     } else if path.file_name().is_some_and(|name| name == "plugin.json") {
         path.to_path_buf()
     } else {
-        return Err(AppError::Plugin(format!(
-            "请传入插件目录或 plugin.json 路径: {}",
-            path.display()
+        return Err(AppError::Plugin(tr(
+            "bundle.inputPath",
+            &[("path", &path.display().to_string())],
         )));
     };
 
     let plugin_root = manifest_path.parent().ok_or_else(|| {
-        AppError::Plugin(format!("无法解析插件根目录: {}", manifest_path.display()))
+        AppError::Plugin(tr(
+            "bundle.root",
+            &[("path", &manifest_path.display().to_string())],
+        ))
     })?;
     let raw = fs::read_to_string(&manifest_path).map_err(AppError::Io)?;
     let manifest = parse_manifest(&raw)?;
@@ -87,15 +91,15 @@ fn resolve_output_path(
         .and_then(|ext| ext.to_str())
         .unwrap_or_default();
     if ext != "js" {
-        return Err(AppError::Plugin(format!(
-            "plugin.json.main 必须指向 .js 产物，当前为: {}",
-            manifest_main
+        return Err(AppError::Plugin(tr(
+            "bundle.mainJs",
+            &[("path", manifest_main)],
         )));
     }
     if output_path.starts_with(src_dir) {
-        return Err(AppError::Plugin(format!(
-            "构建产物不能写回 src/ 目录内: {}",
-            output_path.display()
+        return Err(AppError::Plugin(tr(
+            "bundle.outputInSrc",
+            &[("path", &output_path.display().to_string())],
         )));
     }
     Ok(output_path)
@@ -104,9 +108,9 @@ fn resolve_output_path(
 fn normalize_relative_path(raw: &str) -> Result<PathBuf, AppError> {
     let rel = Path::new(raw);
     if rel.is_absolute() {
-        return Err(AppError::Plugin(format!(
-            "不允许绝对路径 main 输出: {}",
-            raw
+        return Err(AppError::Plugin(tr(
+            "bundle.absoluteMain",
+            &[("path", raw)],
         )));
     }
 
@@ -117,20 +121,17 @@ fn normalize_relative_path(raw: &str) -> Result<PathBuf, AppError> {
             Component::Normal(part) => normalized.push(part),
             Component::ParentDir => {
                 if !normalized.pop() {
-                    return Err(AppError::Plugin(format!(
-                        "main 路径不能逃出插件根目录: {}",
-                        raw
-                    )));
+                    return Err(AppError::Plugin(tr("bundle.mainOutside", &[("path", raw)])));
                 }
             }
             Component::RootDir | Component::Prefix(_) => {
-                return Err(AppError::Plugin(format!("非法 main 路径: {}", raw)));
+                return Err(AppError::Plugin(tr("bundle.mainInvalid", &[("path", raw)])));
             }
         }
     }
 
     if normalized.as_os_str().is_empty() {
-        return Err(AppError::Plugin("plugin.json.main 不能为空".to_string()));
+        return Err(AppError::Plugin(tr("bundle.mainEmpty", &[])));
     }
 
     Ok(normalized)
@@ -141,9 +142,9 @@ fn ordered_source_files(src_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
     let mut all_sources = Vec::new();
     collect_source_files(src_dir, &mut all_sources)?;
     if all_sources.is_empty() {
-        return Err(AppError::Plugin(format!(
-            "src/ 目录内没有可构建的源码文件: {}",
-            src_dir.display()
+        return Err(AppError::Plugin(tr(
+            "bundle.noSources",
+            &[("path", &src_dir.display().to_string())],
         )));
     }
 
@@ -174,18 +175,21 @@ fn resolve_entry_path(src_dir: &Path) -> Result<PathBuf, AppError> {
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
     match matches.as_slice() {
-        [] => Err(AppError::Plugin(format!(
-            "src/ 缺少入口文件，期望其一: {}",
-            ENTRY_CANDIDATES.join(", ")
+        [] => Err(AppError::Plugin(tr(
+            "bundle.entryMissing",
+            &[("files", &ENTRY_CANDIDATES.join(", "))],
         ))),
         [single] => Ok(single.clone()),
-        _ => Err(AppError::Plugin(format!(
-            "src/ 存在多个入口文件，请只保留一个: {}",
-            matches
-                .iter()
-                .map(|path| relative_key(src_dir, path))
-                .collect::<Vec<_>>()
-                .join(", ")
+        _ => Err(AppError::Plugin(tr(
+            "bundle.entryMultiple",
+            &[(
+                "files",
+                &matches
+                    .iter()
+                    .map(|path| relative_key(src_dir, path))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )],
         ))),
     }
 }
@@ -199,8 +203,9 @@ fn find_root_source_by_stem(src_dir: &Path, stem: &str) -> Result<Option<PathBuf
     match matches.as_slice() {
         [] => Ok(None),
         [single] => Ok(Some(single.clone())),
-        _ => Err(AppError::Plugin(format!(
-            "src/ 根目录存在多个 `{stem}` 源文件，请只保留一个扩展名版本"
+        _ => Err(AppError::Plugin(tr(
+            "bundle.stemMultiple",
+            &[("stem", stem)],
         ))),
     }
 }
@@ -272,9 +277,9 @@ fn compile_source_for_bundle(
         "ts" | "tsx" => transpile_typescript(&raw, display_name)?,
         "js" => raw,
         _ => {
-            return Err(AppError::Plugin(format!(
-                "不支持的源码扩展名: {}",
-                path.display()
+            return Err(AppError::Plugin(tr(
+                "bundle.extension",
+                &[("path", &path.display().to_string())],
             )))
         }
     };
@@ -297,16 +302,20 @@ fn reject_leftover_module_syntax(display_name: &str, source: &str) -> Result<(),
         StringInput::from(&*fm),
         None,
     );
-    let module = parser
-        .parse_module()
-        .map_err(|err| AppError::Plugin(format!("bundle 解析失败（{display_name}）: {err:?}")))?;
+    let module = parser.parse_module().map_err(|err| {
+        AppError::Plugin(tr(
+            "bundle.parse",
+            &[("name", display_name), ("detail", &format!("{err:?}"))],
+        ))
+    })?;
     if module
         .body
         .iter()
         .any(|item| matches!(item, ModuleItem::ModuleDecl(_)))
     {
-        return Err(AppError::Plugin(format!(
-            "构建后的源码仍包含 import/export，当前 bundle 仅支持脚本片段拼接: {display_name}"
+        return Err(AppError::Plugin(tr(
+            "bundle.moduleSyntax",
+            &[("name", display_name)],
         )));
     }
     Ok(())

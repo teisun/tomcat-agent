@@ -530,11 +530,7 @@ fn load_plugin_dir_without_manifest_returns_err() {
     let r = manager.load_plugin(tmp.path());
     assert!(r.is_err());
     let err = r.unwrap_err();
-    assert!(
-        err.to_string().contains("plugin.json")
-            || err.to_string().contains("pi-plugin")
-            || err.to_string().contains("未找到")
-    );
+    assert!(err.to_string().contains("plugin.json") || err.to_string().contains("pi-plugin"));
 }
 
 #[test]
@@ -567,7 +563,11 @@ fn load_plugin_user_deny_returns_permission_err() {
     assert!(r.is_err());
     let err = r.unwrap_err();
     assert!(matches!(err, AppError::Permission(_)));
-    assert!(err.to_string().contains("拒绝"));
+    assert!(err.to_string().contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "plugin.userDenied",
+        &[]
+    )));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

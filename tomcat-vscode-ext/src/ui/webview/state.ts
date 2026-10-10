@@ -1,3 +1,4 @@
+import { t } from "../../shared/i18n";
 import type {
   AskQuestionResult,
   AskQuestionWireRequest,
@@ -152,10 +153,10 @@ function formatLlmErrorDisplay(input: {
       : null;
 
   if (!errorMessage && !reason) {
-    return { text: "Unknown error" };
+    return { text: t("state.unknownError") };
   }
   if (!errorMessage) {
-    return { text: reason ?? "Unknown error" };
+    return { text: reason ?? t("state.unknownError") };
   }
   if (!reason || reason === "error" || reason === errorMessage) {
     return { text: errorMessage };
@@ -367,11 +368,11 @@ function isToolMediaEntry(entry: unknown): boolean {
 function systemNoteTitle(message: Record<string, unknown>): string | null {
   switch (message.kind) {
     case "nudge":
-      return "计划未收口，已要求继续";
+      return t("state.noteNudge");
     case "signal":
-      return "后台任务已结束";
+      return t("state.noteSignal");
     case "plan_build":
-      return "开始执行计划";
+      return t("state.notePlanBuild");
     default:
       return null;
   }
@@ -517,15 +518,15 @@ function planEventMessageId(
 function planStalledReasonText(reason: unknown): string {
   switch (reason) {
     case "idle_nudges":
-      return "连续 2 轮没有推进（计划和代码内容都没变）";
+      return t("state.stalledIdle");
     case "injection_cap":
-      return "一次运行里催促已达上限";
+      return t("state.stalledNudgeCap");
     case "tool_round_budget":
-      return "这一轮工具调用次数用尽";
+      return t("state.stalledToolBudget");
     case "run_ended_while_executing":
-      return "运行结束时计划还没收口";
+      return t("state.stalledRunEnded");
     default:
-      return "无人值守执行没有继续推进";
+      return t("state.stalledDefault");
   }
 }
 
@@ -564,13 +565,13 @@ function parseReviewVerdict(
 function skippedReviewSummary(value: unknown): string {
   switch (value) {
     case "no_reviewable_code_diff":
-      return "no code changes";
+      return t("state.reviewNoChanges");
     case "reviewer_unavailable":
-      return "reviewer not configured";
+      return t("state.reviewNotConfigured");
     case "workspace_unavailable":
-      return "workspace unavailable";
+      return t("state.workspaceUnavailable");
     default:
-      return "review skipped";
+      return t("review.skippedDefault");
   }
 }
 
@@ -704,7 +705,7 @@ function abortRunningCodeReviewRows(session: WebviewSessionSnapshot): void {
     }
     item.status = "done";
     item.verdict = "aborted";
-    item.summary = item.summary ?? "Code review was interrupted before completion.";
+    item.summary = item.summary ?? t("state.codeReviewInterrupted");
   }
 }
 
@@ -1663,7 +1664,7 @@ function applyHistoryPlanCustomEntry(
       upsertPlanEventMessage(
         session,
         "warn",
-        `计划已暂停：${planStalledReasonText(reason)}${remaining.length ? `。剩余待办：${remaining.join("；")}` : ""}`,
+        t(remaining.length ? "state.planPausedWithWork" : "state.planPaused", { reason: planStalledReasonText(reason), remaining: remaining.join("; ") }),
         eventName,
         planId,
         reason,
@@ -1682,7 +1683,7 @@ function applyHistoryPlanCustomEntry(
         upsertPlanEventMessage(
           session,
           "notice",
-          `Tomcat plan review: ${entry.summary}`,
+          t("state.planReview", { summary: entry.summary }),
           eventName,
           planId,
           entry.summary,
@@ -1721,7 +1722,7 @@ function applyHistoryPlanCustomEntry(
         upsertPlanEventMessage(
           session,
           "notice",
-          `Tomcat plan verify: ${entry.verdict}`,
+          t("state.planVerify", { verdict: entry.verdict }),
           eventName,
           planId,
           entry.verdict,
@@ -1734,11 +1735,11 @@ function applyHistoryPlanCustomEntry(
         const reason =
           typeof entry.reason === "string" && entry.reason.length > 0
             ? entry.reason
-            : "review needs attention";
+            : null;
         upsertPlanEventMessage(
           session,
           "warn",
-          `Tomcat plan warning: ${reason}`,
+          t("state.planWarning", { reason: reason ?? t("state.reviewAttention") }),
           eventName,
           planId,
           reason,
@@ -1807,7 +1808,7 @@ function applyHistoryEntry(
         ? entry.summary
         : typeof entry.detail === "string" && entry.detail.length > 0
           ? entry.detail
-          : "Unknown error";
+          : t("state.unknownError");
     session.timeline.push({
       detailText: typeof entry.detail === "string" ? entry.detail : null,
       failureDomain: typeof entry.failureDomain === "string" ? entry.failureDomain : null,
@@ -1970,8 +1971,8 @@ function applyHistoryEntry(
       const preferredId =
         typeof entry.id === "string"
           ? `agent-interrupted:${entry.id}`
-          : undefined;
-      pushMessage(session, "warn", "Tomcat turn interrupted", preferredId);
+          : `agent-interrupted:${createGeneratedTimelineId(session, "warn")}`;
+      pushMessage(session, "warn", t("state.turnInterrupted"), preferredId);
       return;
     }
     if (
@@ -2510,10 +2511,10 @@ function effectiveBusy(
 function messageExistsAtTail(
   session: WebviewSessionSnapshot,
   kind: WebviewMessageBlock["kind"],
-  text: string,
+  idPrefix: string,
 ): boolean {
   const last = session.timeline.at(-1);
-  return last?.type === "message" && last.kind === kind && last.text === text;
+  return last?.type === "message" && last.kind === kind && last.id.startsWith(idPrefix);
 }
 
 function toolResultWasInterrupted(result: unknown): boolean {
@@ -2761,6 +2762,13 @@ export class WebviewStateStore {
       sessionViews: {},
       sessions: [],
     };
+  }
+
+  removeSession(sessionId: string): void {
+    this.runtimes.delete(sessionId);
+    delete this.state.sessionViews[sessionId];
+    this.state.sessions = this.state.sessions.filter(session => session.sessionId !== sessionId);
+    if (this.state.activeSessionId === sessionId) this.state.activeSessionId = null;
   }
 
   setActiveSession(sessionId: string | null): void {
@@ -3096,6 +3104,10 @@ export class WebviewStateStore {
           item.resolved = true;
           if (result) {
             const toolCallId = item.request.toolCallId ?? item.request.requestId;
+            const parentTool = session.timeline.find(
+              (entry) => entry.type === "tool" && entry.toolCallId === toolCallId,
+            );
+            if (parentTool?.type === "tool" && parentTool.toolName !== "ask_question") continue;
             upsertTimelineItem(session, {
               args: { questions: item.request.questions },
               id: `ask-question-result-${toolCallId}`,
@@ -3215,7 +3227,7 @@ export class WebviewStateStore {
           pushMessage(
             session,
             "notice",
-            "本轮没有产生可见回答。",
+            t("state.noVisibleAnswer"),
           );
         }
         }
@@ -3224,8 +3236,8 @@ export class WebviewStateStore {
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         abortRunningCodeReviewRows(session);
-        if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
-          pushMessage(session, "warn", "Tomcat turn interrupted");
+        if (!messageExistsAtTail(session, "warn", "agent-interrupted:")) {
+          pushMessage(session, "warn", t("state.turnInterrupted"), `agent-interrupted:${createGeneratedTimelineId(session, "warn")}`);
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_idle":
@@ -3263,14 +3275,14 @@ export class WebviewStateStore {
         pushMessage(
           session,
           "notice",
-          `Context compaction failed: ${frame.error}`,
+          t("state.compactionFailed", { detail: frame.error }),
         );
         return sessionRenderMutation(session.sessionId);
       case "auto_retry_start":
         pushMessage(
           session,
           "notice",
-          `Retrying after error: ${frame.errorMessage}`,
+          t("state.retrying", { detail: frame.errorMessage }),
         );
         return sessionRenderMutation(session.sessionId);
       case "auto_retry_end":
@@ -3278,7 +3290,7 @@ export class WebviewStateStore {
           pushMessage(
             session,
             "notice",
-            `Retry finished without success: ${frame.finalError ?? "unknown error"}`,
+            frame.finalError == null ? t("state.retryFailedUnknown") : t("state.retryFailed", { detail: frame.finalError }),
           );
         }
         return sessionRenderMutation(session.sessionId);
@@ -3287,7 +3299,7 @@ export class WebviewStateStore {
           pushMessage(
             session,
             "notice",
-            `Started ${frame.subagentType} sub-agent`,
+            t("state.subagentStarted", { type: frame.subagentType }),
           );
         }
         return sessionRenderMutation(session.sessionId);
@@ -3296,7 +3308,7 @@ export class WebviewStateStore {
           pushMessage(
             session,
             "notice",
-            `Sub-agent ${frame.subagentType} ${frame.outcome}`,
+            t("state.subagentEnded", { type: frame.subagentType, outcome: frame.outcome }),
           );
         }
         return sessionRenderMutation(session.sessionId);
@@ -3804,7 +3816,7 @@ export class WebviewStateStore {
         upsertPlanEventMessage(
           session,
           "warn",
-          `计划已暂停：${planStalledReasonText(reason)}${remaining.length ? `。剩余待办：${remaining.join("；")}` : ""}`,
+          t(remaining.length ? "state.planPausedWithWork" : "state.planPaused", { reason: planStalledReasonText(reason), remaining: remaining.join("; ") }),
           event.type,
           event.planId,
           reason,
@@ -3816,7 +3828,7 @@ export class WebviewStateStore {
           upsertPlanEventMessage(
             session,
             "notice",
-            `Tomcat plan review: ${event.summary}`,
+            t("state.planReview", { summary: event.summary }),
             event.type,
             event.planId,
             event.summary,
@@ -3855,7 +3867,7 @@ export class WebviewStateStore {
           upsertPlanEventMessage(
             session,
             "notice",
-            `Tomcat plan verify: ${event.verdict}`,
+            t("state.planVerify", { verdict: event.verdict }),
             event.type,
             event.planId,
             event.verdict,
@@ -3865,11 +3877,11 @@ export class WebviewStateStore {
       case "plan.review.warning":
       case "plan.code_review.warning":
         {
-          const reason = event.reason ?? "review needs attention";
+          const reason = event.reason ?? null;
           upsertPlanEventMessage(
             session,
             "warn",
-            `Tomcat plan warning: ${reason}`,
+            t("state.planWarning", { reason: reason ?? t("state.reviewAttention") }),
             event.type,
             event.planId,
             reason,

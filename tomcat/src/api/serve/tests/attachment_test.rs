@@ -1286,6 +1286,7 @@ async fn deleting_a_session_releases_attachment_lease_for_orphan_sweep() {
     let store = slot.ctx.session_runtime.session.attachment_store();
     assert!(store.exists(&blob_sha));
 
+    slot.ctx.session_runtime.session.release_session_usage();
     slot.ctx
         .session_runtime
         .session

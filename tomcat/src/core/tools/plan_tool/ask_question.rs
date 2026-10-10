@@ -46,7 +46,7 @@ pub async fn execute_for_tool(
         return Err(ToolError::RejectedInMode {
             tool: "ask_question",
             mode: mode.as_str().to_string(),
-            guidance: "计划正在执行；如需澄清，请在计划文件中记录为待确认项",
+            guidance: "The plan is executing; record any clarification needed as an open question in the plan".into(),
         });
     }
     let questions = parse_and_validate_questions(raw_args)?;
@@ -76,19 +76,21 @@ pub async fn execute_for_tool(
 fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>, ToolError> {
     let questions: Vec<Question> = match raw.get("questions") {
         Some(v) => serde_json::from_value(v.clone())
-            .map_err(|e| ToolError::BadArgs(format!("questions 反序列化失败: {e}")))?,
+            .map_err(|e| ToolError::BadArgs(format!("Could not deserialize questions: {e}")))?,
         None => {
             return Err(ToolError::BadArgs(
-                "ask_question 缺少 questions 字段".into(),
+                "ask_question requires a questions field".to_string(),
             ))
         }
     };
     if questions.is_empty() {
-        return Err(ToolError::BadArgs("questions 至少 1 题".into()));
+        return Err(ToolError::BadArgs(
+            "questions must contain at least one question".to_string(),
+        ));
     }
     if questions.len() > 4 {
         return Err(ToolError::BadArgs(format!(
-            "questions 最多 4 题，当前 {}",
+            "questions allows at most 4 questions; received {}",
             questions.len()
         )));
     }
@@ -96,7 +98,10 @@ fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>
     let mut seen_qid = std::collections::HashSet::new();
     for q in &questions {
         if !seen_qid.insert(&q.id) {
-            return Err(ToolError::BadArgs(format!("question.id 重复: {}", q.id)));
+            return Err(ToolError::BadArgs(format!(
+                "Duplicate question.id: {}",
+                q.id
+            )));
         }
         validate_single_question(q)?;
     }
@@ -106,13 +111,13 @@ fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>
 fn validate_single_question(q: &Question) -> Result<(), ToolError> {
     if q.prompt.trim().is_empty() {
         return Err(ToolError::BadArgs(format!(
-            "question {}: prompt 不可为空",
+            "question {}: prompt cannot be empty",
             q.id
         )));
     }
     if q.options.len() < 2 || q.options.len() > 4 {
         return Err(ToolError::BadArgs(format!(
-            "question {}: options 必须 2-4 个，当前 {}",
+            "question {}: options must contain 2–4 entries; received {}",
             q.id,
             q.options.len()
         )));
@@ -122,19 +127,19 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
     for opt in &q.options {
         if opt.id == CUSTOM_OPTION_ID {
             return Err(ToolError::BadArgs(format!(
-                "question {}: option.id 不得使用保留值 \"{}\"",
-                q.id, CUSTOM_OPTION_ID
+                "question {}: option.id cannot use reserved value \"{CUSTOM_OPTION_ID}\"",
+                q.id
             )));
         }
         if !seen.insert(&opt.id) {
             return Err(ToolError::BadArgs(format!(
-                "question {}: option.id 重复 \"{}\"",
+                "question {}: duplicate option.id \"{}\"",
                 q.id, opt.id
             )));
         }
         if opt.label.trim().is_empty() {
             return Err(ToolError::BadArgs(format!(
-                "question {}: option {} label 不可为空",
+                "question {}: option {} label cannot be empty",
                 q.id, opt.id
             )));
         }
@@ -143,10 +148,7 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
         }
     }
     if recommended_count != 1 {
-        return Err(ToolError::BadArgs(format!(
-            "question {}: 必须**恰好**一个 recommended=true 选项（当前 {}）",
-            q.id, recommended_count
-        )));
+        return Err(ToolError::BadArgs(format!("question {}: exactly one option must have recommended=true (received {recommended_count})", q.id)));
     }
     Ok(())
 }
@@ -154,7 +156,7 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
 fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Result<(), ToolError> {
     if result.answers.len() != questions.len() {
         return Err(ToolError::Internal(format!(
-            "panel 返回答案数 {} 与问题数 {} 不一致",
+            "Panel returned {} answers for {} questions",
             result.answers.len(),
             questions.len()
         )));
@@ -162,26 +164,26 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
     for (q, ans) in questions.iter().zip(result.answers.iter()) {
         if ans.question_id != q.id {
             return Err(ToolError::Internal(format!(
-                "panel 返回 question_id={} 与问题 {} 不匹配",
+                "Panel returned question_id={}, which does not match question {}",
                 ans.question_id, q.id
             )));
         }
         if ans.skipped {
             if !ans.option_ids.is_empty() {
                 return Err(ToolError::Internal(format!(
-                    "question {}: skipped=true 时 option_ids 必须为空",
+                    "question {}: skipped=true requires empty option_ids",
                     q.id
                 )));
             }
             if ans.custom_text.is_some() {
                 return Err(ToolError::Internal(format!(
-                    "question {}: skipped=true 时不应携带 custom_text",
+                    "question {}: skipped=true must not include custom_text",
                     q.id
                 )));
             }
             if ans.picked_recommended {
                 return Err(ToolError::Internal(format!(
-                    "question {}: skipped=true 时 picked_recommended 必须为 false",
+                    "question {}: skipped=true requires picked_recommended=false",
                     q.id
                 )));
             }
@@ -189,7 +191,7 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
         }
         if ans.option_ids.len() != 1 {
             return Err(ToolError::Internal(format!(
-                "question {}: 单选题应只选 1 个，实际 {}",
+                "question {}: exactly 1 choice is required; received {}",
                 q.id,
                 ans.option_ids.len()
             )));
@@ -197,16 +199,13 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
         let has_custom = ans.option_ids.iter().any(|id| id == CUSTOM_OPTION_ID);
         if has_custom {
             let text = ans.custom_text.as_deref().unwrap_or("");
-            if text.is_empty() || text.len() > 500 {
-                return Err(ToolError::Internal(format!(
-                    "question {}: 选中 __custom__ 时 custom_text 必须 1-500 字符（当前 {}）",
-                    q.id,
-                    text.len()
-                )));
+            let char_count = text.chars().count();
+            if char_count == 0 || char_count > 500 {
+                return Err(ToolError::Internal(format!("question {}: selecting __custom__ requires custom_text of 1–500 characters (received {char_count})", q.id)));
             }
         } else if ans.custom_text.is_some() {
             return Err(ToolError::Internal(format!(
-                "question {}: 未选 __custom__ 时不应携带 custom_text",
+                "question {}: custom_text must not be present unless __custom__ is selected",
                 q.id
             )));
         }
@@ -217,8 +216,8 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
             }
             if !q.options.iter().any(|o| &o.id == oid) {
                 return Err(ToolError::Internal(format!(
-                    "question {}: 答案中含未知 option_id={}",
-                    q.id, oid
+                    "question {}: answer contains unknown option_id={oid}",
+                    q.id
                 )));
             }
         }

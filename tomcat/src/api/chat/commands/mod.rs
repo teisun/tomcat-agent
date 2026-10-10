@@ -25,8 +25,8 @@ pub use cmd_install::InstallTarget;
 pub use cmd_plan::PlanCommand;
 pub(crate) use cmd_restore::{restore_core, RestoreCoreReport};
 pub use shared::{
-    parse_shared_slash, run_shared_slash_command, shared_usage_error, SharedSlashCommand,
-    SlashReply, SHARED_SLASH_COMMANDS,
+    parse_shared_slash, run_shared_slash_command, shared_slash_commands, shared_usage_error,
+    SharedSlashCommand, SlashReply,
 };
 
 #[cfg(test)]

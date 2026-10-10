@@ -61,8 +61,11 @@ pub(crate) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
                     signal.kind = crate::core::llm::MessageKind::Signal;
                     queue.lock().push(signal);
                     eprintln!(
-                        "\n[bg] task {} finished (exit={}); queued for next turn.",
-                        task_id, exit_code
+                        "{}",
+                        crate::infra::i18n::tr(
+                            "terminal.bgFinished",
+                            &[("id", &task_id), ("code", &exit_code.to_string())]
+                        )
                     );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

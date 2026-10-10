@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 export type DisclosureStatusVariant =
   "error" | "neutral" | "running" | "success" | "warning";
@@ -24,6 +25,7 @@ export function DisclosureCard({
   statusVariant: DisclosureStatusVariant;
   toggleTestId?: string;
 }) {
+  const t = useT();
   const canToggle = Boolean(preview ?? children);
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [userInteracted, setUserInteracted] = useState(false);
@@ -60,7 +62,7 @@ export function DisclosureCard({
           <button
             aria-expanded={expanded}
             aria-label={
-              expanded ? "Collapse tool result" : "Expand tool result"
+              t(expanded ? "tool.collapse" : "tool.expand")
             }
             className="tc-disclosure-card__toggle"
             data-testid={toggleTestId}

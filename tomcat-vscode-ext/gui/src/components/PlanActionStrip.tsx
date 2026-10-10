@@ -1,3 +1,4 @@
+import { useT } from "../i18n/LocaleProvider";
 import type { Speed } from "../../../src/shared/modelSpeed";
 import { buildPickerModels } from "./buildPickerModels";
 import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
@@ -39,6 +40,7 @@ export function PlanActionStrip({
   sessionThinkingLevel?: string | null;
 }) {
   const selectedModelId = buildModel || sessionModel || null;
+  const t = useT();
   const pickerModels = buildPickerModels({
     activeModelId: sessionModel,
     availableModelDetails,
@@ -53,7 +55,7 @@ export function PlanActionStrip({
       <ModelPicker
         className="tc-plan-model-picker"
         disabled={pickerModels.length === 0}
-        label="Build model"
+        label={t("plan.buildModel")}
         models={pickerModels}
         onSelectContextWindow={onSelectContextWindow}
         onSelectModel={onSetBuildModel}
@@ -70,7 +72,7 @@ export function PlanActionStrip({
         onClick={onBuild}
         type="button"
       >
-        {fileState === "pending" ? "Resume" : "Build"}
+        {t(fileState === "pending" ? "common.resume" : "plan.build")}
       </button>
     </div>
   );

@@ -1,5 +1,6 @@
 //! `tomcat plugin` 子命令实现：list / load / build / unload / enable / disable / info。
 
+use crate::infra::i18n::tr;
 use std::path::Path;
 
 pub(crate) use crate::core::package::{
@@ -35,9 +36,9 @@ impl ToolExecutor for NoopToolExecutor {
         _caller_plugin_id: &str,
         _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
-        Err(AppError::Config(format!(
-            "CLI 模式下不支持工具执行: {}",
-            tool.name
+        Err(AppError::Config(tr(
+            "cli.plugin.executionUnavailable",
+            &[("name", &tool.name)],
         )))
     }
 }
@@ -75,18 +76,54 @@ fn format_plugin_info(info: &crate::PluginInfo) {
         .map(|function| format!("{} -> {}", function.point, function.function))
         .collect::<Vec<_>>();
     println!("  ID:        {}", info.id);
-    println!("  名称:      {}", info.manifest.name);
-    println!("  版本:      {}", info.manifest.version);
-    println!("  描述:      {}", info.manifest.description);
-    println!("  作者:      {}", info.manifest.author);
-    println!("  状态:      {:?}", info.status);
-    println!("  权限:      {:?}", info.manifest.required_permissions);
-    println!("  API 版本:  {}", info.manifest.required_api_version);
-    println!("  注册工具:  {:?}", info.registered_tools);
-    println!("  注册函数:  {:?}", registered_functions);
-    println!("  注册命令:  {:?}", info.registered_commands);
-    println!("  事件监听:  {:?}", info.event_listener_ids);
-    println!("  加载时间:  {}", info.loaded_at);
+    println!("  {}: {}", tr("cli.label.name", &[]), info.manifest.name);
+    println!(
+        "  {}: {}",
+        tr("cli.label.version", &[]),
+        info.manifest.version
+    );
+    println!(
+        "  {}: {}",
+        tr("cli.label.description", &[]),
+        info.manifest.description
+    );
+    println!(
+        "  {}: {}",
+        tr("cli.label.author", &[]),
+        info.manifest.author
+    );
+    println!("  {}: {:?}", tr("cli.label.status", &[]), info.status);
+    println!(
+        "  {}: {:?}",
+        tr("cli.label.permissions", &[]),
+        info.manifest.required_permissions
+    );
+    println!(
+        "  {}: {}",
+        tr("cli.label.apiVersion", &[]),
+        info.manifest.required_api_version
+    );
+    println!(
+        "  {}: {:?}",
+        tr("cli.label.tools", &[]),
+        info.registered_tools
+    );
+    println!(
+        "  {}: {:?}",
+        tr("cli.label.functions", &[]),
+        registered_functions
+    );
+    println!(
+        "  {}: {:?}",
+        tr("cli.label.commands", &[]),
+        info.registered_commands
+    );
+    println!(
+        "  {}: {:?}",
+        tr("cli.label.listeners", &[]),
+        info.event_listener_ids
+    );
+    println!("  {}: {}", tr("cli.label.loaded", &[]), info.loaded_at);
 }
 
 // ─── Layered Plugin Registry (registry.json) ───────────────────────────────
@@ -181,12 +218,15 @@ fn render_plugin_list_from_registries(
     let mut out = String::new();
 
     if visible.is_empty() && shadowed.is_empty() {
-        out.push_str("当前无已注册插件。\n");
+        out.push_str(&tr("cli.plugin.empty", &[]));
         if !auto_load.is_empty() {
             let _ = writeln!(
                 out,
-                "  提示: auto_load 中的插件将在对话模式启动时自动加载: {:?}",
-                auto_load
+                "{}",
+                tr(
+                    "cli.plugin.autoLoad",
+                    &[("plugins", &format!("{auto_load:?}"))]
+                )
             );
         }
         return out;
@@ -195,7 +235,10 @@ fn render_plugin_list_from_registries(
     let _ = writeln!(
         out,
         "{:<24} {:<10} {:<8} {:<12}",
-        "ID", "层", "启用", "状态"
+        "ID",
+        tr("cli.label.layer", &[]),
+        tr("cli.label.enabled", &[]),
+        tr("cli.label.status", &[])
     );
     let _ = writeln!(out, "{}", "-".repeat(72));
     for item in &visible {
@@ -204,7 +247,14 @@ fn render_plugin_list_from_registries(
             "{:<24} {:<10} {:<8} {:<12}",
             item.entry.id,
             item.visibility.as_str(),
-            if item.entry.enabled { "是" } else { "否" },
+            tr(
+                if item.entry.enabled {
+                    "cli.label.yes"
+                } else {
+                    "cli.label.no"
+                },
+                &[]
+            ),
             "visible"
         );
     }
@@ -236,12 +286,12 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         PluginSub::Load { path } => {
             let p = std::path::Path::new(&path);
             if !p.exists() {
-                println!("插件路径不存在: {}", path);
+                println!("{}", tr("cli.plugin.pathMissing", &[("path", &path)]));
                 return Ok(());
             }
             match pm.load_plugin(p) {
                 Ok(()) => {
-                    println!("插件加载成功: {}", path);
+                    println!("{}", tr("cli.plugin.loaded", &[("path", &path)]));
                     let ids = pm.list_loaded();
                     if let Some(id) = ids.last() {
                         let mut registry_path_value = path.clone();
@@ -264,9 +314,9 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    println!("插件加载失败: {}", msg);
+                    println!("{}", tr("cli.plugin.loadFailed", &[("detail", &msg)]));
                     if msg.contains("plugin_engine") || msg.contains("rquickjs") {
-                        println!("  提示: 请先运行 tomcat doctor 检查运行环境");
+                        println!("{}", tr("cli.plugin.doctorHint", &[]));
                     }
                 }
             }
@@ -274,24 +324,46 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         PluginSub::Build { path } => {
             let p = std::path::Path::new(&path);
             if !p.exists() {
-                println!("插件路径不存在: {}", path);
+                println!("{}", tr("cli.plugin.pathMissing", &[("path", &path)]));
                 return Ok(());
             }
             match write_plugin_bundle_from_path(p) {
                 Ok(result) => {
-                    println!("插件构建成功: {}", result.output_path.display());
                     println!(
-                        "  源码目录:  {}",
-                        result
-                            .src_dir
-                            .strip_prefix(&result.plugin_root)
-                            .unwrap_or(&result.src_dir)
-                            .display()
+                        "{}",
+                        tr(
+                            "cli.plugin.built",
+                            &[("path", &result.output_path.display().to_string())]
+                        )
                     );
-                    println!("  源文件数:  {}", result.sources.len());
+                    println!(
+                        "{}",
+                        tr(
+                            "cli.plugin.sourceDir",
+                            &[(
+                                "path",
+                                &result
+                                    .src_dir
+                                    .strip_prefix(&result.plugin_root)
+                                    .unwrap_or(&result.src_dir)
+                                    .display()
+                                    .to_string()
+                            )]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        tr(
+                            "cli.plugin.sourceCount",
+                            &[("count", &result.sources.len().to_string())]
+                        )
+                    );
                 }
                 Err(error) => {
-                    println!("插件构建失败: {}", error);
+                    println!(
+                        "{}",
+                        tr("cli.plugin.buildFailed", &[("detail", &error.to_string())])
+                    );
                 }
             }
         }
@@ -303,9 +375,15 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     save_plugin_registry(&located.path, &registry)
                 })?;
                 let _ = pm.unload_plugin(&id);
-                println!("已卸载插件: {} ({})", id, located.visibility.as_str());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.plugin.unloaded",
+                        &[("id", &id), ("layer", located.visibility.as_str())]
+                    )
+                );
             }
-            None => println!("卸载失败: 插件未找到: {}", id),
+            None => println!("{}", tr("cli.plugin.unloadMissing", &[("id", &id)])),
         },
         PluginSub::Enable { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
@@ -318,9 +396,15 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     Ok(())
                 })?;
                 let _ = pm.enable_plugin(&id);
-                println!("已启用插件: {} ({})", id, located.visibility.as_str());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.plugin.enabled",
+                        &[("id", &id), ("layer", located.visibility.as_str())]
+                    )
+                );
             }
-            None => println!("启用失败: 插件未找到: {}", id),
+            None => println!("{}", tr("cli.plugin.enableMissing", &[("id", &id)])),
         },
         PluginSub::Disable { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
@@ -333,36 +417,75 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     Ok(())
                 })?;
                 let _ = pm.disable_plugin(&id);
-                println!("已禁用插件: {} ({})", id, located.visibility.as_str());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.plugin.disabled",
+                        &[("id", &id), ("layer", located.visibility.as_str())]
+                    )
+                );
             }
-            None => println!("禁用失败: 插件未找到: {}", id),
+            None => println!("{}", tr("cli.plugin.disableMissing", &[("id", &id)])),
         },
         PluginSub::Info { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                println!("  层:        {}", located.visibility.as_str());
-                println!("  路径:      {}", located.entry.path);
                 println!(
-                    "  启用:      {}",
-                    if located.entry.enabled { "是" } else { "否" }
+                    "  {}: {}",
+                    tr("cli.label.layer", &[]),
+                    located.visibility.as_str()
+                );
+                println!("  {}: {}", tr("cli.label.path", &[]), located.entry.path);
+                println!(
+                    "  {}: {}",
+                    tr("cli.label.enabled", &[]),
+                    tr(
+                        if located.entry.enabled {
+                            "cli.label.yes"
+                        } else {
+                            "cli.label.no"
+                        },
+                        &[]
+                    )
                 );
                 let manifest_path = Path::new(&located.entry.path).join("plugin.json");
                 match std::fs::read_to_string(&manifest_path) {
                     Ok(raw) => match parse_manifest(&raw) {
                         Ok(manifest) => {
                             println!("  ID:        {}", manifest.id);
-                            println!("  名称:      {}", manifest.name);
-                            println!("  版本:      {}", manifest.version);
-                            println!("  描述:      {}", manifest.description);
-                            println!("  作者:      {}", manifest.author);
-                            println!("  API 版本:  {}", manifest.required_api_version);
-                            println!("  权限:      {:?}", manifest.required_permissions);
+                            println!("  {}: {}", tr("cli.label.name", &[]), manifest.name);
+                            println!("  {}: {}", tr("cli.label.version", &[]), manifest.version);
+                            println!(
+                                "  {}: {}",
+                                tr("cli.label.description", &[]),
+                                manifest.description
+                            );
+                            println!("  {}: {}", tr("cli.label.author", &[]), manifest.author);
+                            println!(
+                                "  {}: {}",
+                                tr("cli.label.apiVersion", &[]),
+                                manifest.required_api_version
+                            );
+                            println!(
+                                "  {}: {:?}",
+                                tr("cli.label.permissions", &[]),
+                                manifest.required_permissions
+                            );
                         }
-                        Err(error) => println!("  清单解析失败: {}", error),
+                        Err(error) => println!(
+                            "{}",
+                            tr(
+                                "cli.plugin.manifestParse",
+                                &[("detail", &error.to_string())]
+                            )
+                        ),
                     },
-                    Err(error) => println!("  读取清单失败: {}", error),
+                    Err(error) => println!(
+                        "{}",
+                        tr("cli.plugin.manifestRead", &[("detail", &error.to_string())])
+                    ),
                 }
             }
-            None => println!("插件未找到: {}", id),
+            None => println!("{}", tr("cli.plugin.notFound", &[("id", &id)])),
         },
     }
     Ok(())

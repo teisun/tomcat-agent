@@ -8,6 +8,8 @@
  *     → host keeps the returned hash in the draft store, and nothing else
  */
 
+import { t } from "./i18n";
+
 export const IMAGE_MAX_BYTES = 4_718_592;
 export const PDF_MAX_BYTES = 25 * 1024 * 1024;
 export const ALLOWED_IMAGE_MIME_TYPES = [
@@ -94,9 +96,9 @@ export function validateAttachmentCandidate(candidate: AttachmentCandidate):
     } {
   if (candidate.mimeType === "application/pdf") {
     const bytes = decodeBase64Strict(candidate.dataBase64);
-    if (!bytes) return { error: "invalid base64 payload", ok: false };
+    if (!bytes) return { error: t("attachment.invalidBase64"), ok: false };
     if (bytes.length > PDF_MAX_BYTES) {
-      return { error: "PDF exceeds 25 MB", ok: false };
+      return { error: t("attachment.pdfTooLarge"), ok: false };
     }
     return {
       bytes,
@@ -108,12 +110,12 @@ export function validateAttachmentCandidate(candidate: AttachmentCandidate):
   }
 
   if (!(ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(candidate.mimeType)) {
-    return { error: `unsupported type ${candidate.mimeType}`, ok: false };
+    return { error: t("attachment.unsupportedType", { mime: candidate.mimeType }), ok: false };
   }
   const bytes = decodeBase64Strict(candidate.dataBase64);
-  if (!bytes) return { error: "invalid base64 payload", ok: false };
+  if (!bytes) return { error: t("attachment.invalidBase64"), ok: false };
   if (bytes.length > IMAGE_MAX_BYTES) {
-    return { error: "exceeds 4.5 MB", ok: false };
+    return { error: t("attachment.imageTooLarge"), ok: false };
   }
   const extension =
     candidate.mimeType === "image/jpeg"

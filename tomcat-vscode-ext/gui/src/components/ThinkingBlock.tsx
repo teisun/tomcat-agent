@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 import type { WebviewThinkingBlock } from "../types";
 
@@ -40,6 +41,7 @@ function ThinkingBlockComponent({
   onOpenFile?: (path: string, line?: number) => void;
   variant?: "embedded" | "standalone";
 }) {
+  const t = useT();
   const [collapsed, setCollapsed] = useState(true);
   const displayText = useMemo(() => normalizeThinkingDisplayText(item.text), [item.text]);
   const summary = useMemo(() => summarizeThinking(displayText), [displayText]);
@@ -64,7 +66,7 @@ function ThinkingBlockComponent({
       data-testid="thinking-block"
     >
       <button
-        aria-label={collapsed ? "Expand thinking" : "Collapse thinking"}
+        aria-label={t(collapsed ? "thinking.expand" : "thinking.collapse")}
         className="tc-thinking__toggle"
         data-testid="thinking-toggle"
         onClick={() => setCollapsed((value) => !value)}
@@ -80,7 +82,7 @@ function ThinkingBlockComponent({
             <span
               className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
             >
-              <span>Thinking</span>
+              <span>{t("thinking.title")}</span>
             </span>
             {collapsed && summary ? (
               <span className="tc-thinking__summary" data-testid="thinking-summary">

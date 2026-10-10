@@ -1,6 +1,7 @@
 //! `tomcat session` 子命令实现：在 scope（claw/code）内 list / new / switch /
 //! delete / archive / search。
 
+use crate::infra::i18n::tr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             let mgr = scoped_session_manager(cfg, scope)?;
             let rows = session_display_rows(&mgr)?;
             if rows.is_empty() {
-                println!("当前无会话。使用 session new 创建。");
+                println!("{}", tr("cli.session.empty", &[]));
                 return Ok(());
             }
             for row in rows {
@@ -35,38 +36,55 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             let mgr = scoped_session_manager(cfg, scope)?;
             let entry = mgr.new_current_session(None)?;
             println!(
-                "已创建会话: {}  {}",
-                entry.session_id,
-                mgr.current_session_key()
+                "{}",
+                tr(
+                    "cli.session.created",
+                    &[
+                        ("id", &entry.session_id),
+                        ("key", mgr.current_session_key())
+                    ]
+                )
             );
         }
         SessionSub::Switch { session_id, scope } => {
             let mgr = scoped_session_manager(cfg, scope)?;
             match mgr.switch_current_to_session_id(&session_id) {
                 Ok(_) => println!(
-                    "已切换到会话: {}  {}",
-                    session_id,
-                    mgr.current_session_key()
+                    "{}",
+                    tr(
+                        "cli.session.switched",
+                        &[("id", &session_id), ("key", mgr.current_session_key())]
+                    )
                 ),
                 Err(AppError::Config(_)) => {
-                    println!("会话不存在: {}", session_id);
+                    println!("{}", tr("session.not_found", &[("id", &session_id)]));
                 }
                 Err(e) => return Err(e),
             }
         }
         SessionSub::Delete { session_id, scope } => {
             let (mgr, mode) = scoped_session_manager_and_mode(cfg, scope)?;
-            cleanup_openai_files_for_session(
-                cfg,
-                mgr.sessions_dir(),
-                &session_id,
-                "session_delete",
+            let deletion = mgr.begin_delete_session(&session_id)?;
+            if deletion.exists() {
+                cleanup_openai_files_for_session(
+                    cfg,
+                    mgr.sessions_dir(),
+                    &session_id,
+                    "session_delete",
+                );
+                cleanup_plugin_session_for_session(cfg, mode, &session_id, "session_delete");
+            }
+            let trail = crate::resolve_agent_trail_dir(cfg)?;
+            let outcome = deletion.commit(Some(&trail))?;
+            println!(
+                "{}",
+                crate::infra::i18n::tr("session.deleted", &[("id", &session_id)])
             );
-            cleanup_plugin_session_for_session(cfg, mode, &session_id, "session_delete");
-            match mgr.delete_session(&session_id) {
-                Ok(()) => println!("已删除会话: {}", session_id),
-                Err(AppError::Config(_)) => println!("会话不存在: {}", session_id),
-                Err(e) => return Err(e),
+            for warning in outcome.warnings {
+                eprintln!(
+                    "{}",
+                    crate::infra::i18n::tr("session.cleanup_failed", &[("detail", &warning)])
+                );
             }
         }
         SessionSub::Archive { session_id, scope } => {
@@ -79,8 +97,10 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             );
             cleanup_plugin_session_for_session(cfg, mode, &session_id, "session_archive");
             match mgr.archive_session(&session_id) {
-                Ok(()) => println!("已归档会话: {}", session_id),
-                Err(AppError::Config(_)) => println!("会话不存在: {}", session_id),
+                Ok(()) => println!("{}", tr("cli.session.archived", &[("id", &session_id)])),
+                Err(AppError::Config(_)) => {
+                    println!("{}", tr("session.not_found", &[("id", &session_id)]))
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -88,7 +108,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             let mgr = scoped_session_manager(cfg, scope)?;
             let rows = session_display_rows(&mgr)?;
             if rows.is_empty() {
-                println!("无会话");
+                println!("{}", tr("cli.session.searchEmpty", &[]));
                 return Ok(());
             }
             let q = query.as_deref().unwrap_or("");
@@ -236,34 +256,12 @@ fn cleanup_openai_files_for_session(
 }
 
 fn cleanup_plugin_session_for_session(
-    cfg: &AppConfig,
-    mode: SessionMode,
+    _cfg: &AppConfig,
+    _mode: SessionMode,
     session_id: &str,
     reason: &str,
 ) {
-    let overrides =
-        crate::api::chat::ChatContextOverrides::default().skip_session_plugin_activation();
-    let (rt, ctx) = match super::build_runtime_and_context_with_overrides(cfg, mode, overrides) {
-        Ok(v) => v,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                session_id = session_id,
-                reason = reason,
-                "skip plugin session cleanup: cannot build cleanup context"
-            );
-            return;
-        }
-    };
-    let Some(plugin_manager) = ctx.global_services.plugin_manager.clone() else {
-        return;
-    };
-    if let Err(error) = rt.block_on(async { plugin_manager.end_session(session_id).await }) {
-        tracing::warn!(
-            error = %error,
-            session_id = session_id,
-            reason = reason,
-            "plugin session cleanup finished with failures"
-        );
+    if let Err(error) = crate::api::chat::end_cached_plugin_session(session_id) {
+        tracing::warn!(error = %error, session_id, reason, "plugin session cleanup finished with failures");
     }
 }

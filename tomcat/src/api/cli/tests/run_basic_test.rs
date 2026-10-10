@@ -7,6 +7,7 @@
 
 use super::super::*;
 use super::mocks::{test_config, with_temp_home, with_tomcat_config_in_home};
+use crate::infra::i18n::{tr_in, Locale};
 use serial_test::serial;
 use std::collections::BTreeMap;
 
@@ -528,7 +529,10 @@ fn run_doctor_is_always_ok() {
 #[test]
 fn doctor_plugin_runtime_lines_report_success_exactly() {
     let lines = crate::api::cli::init::doctor_plugin_runtime_lines(Ok(()));
-    assert_eq!(lines, vec!["✓ rquickjs 运行时：可用".to_string()]);
+    assert_eq!(
+        lines,
+        vec![tr_in(Locale::En, "cli.doctor.quickJsReady", &[])]
+    );
 }
 
 #[test]
@@ -537,9 +541,19 @@ fn doctor_plugin_runtime_lines_report_failure_and_hint() {
         "boom".to_string(),
     )));
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0], "✗ rquickjs 运行时：初始化失败 (插件错误: boom)");
+    assert_eq!(
+        lines[0],
+        tr_in(
+            Locale::En,
+            "cli.doctor.quickJsFailed",
+            &[(
+                "detail",
+                &format!("{}: boom", tr_in(Locale::En, "error.prefix.plugin", &[]))
+            )]
+        )
+    );
     assert!(
-        lines[1].contains("重新运行 tomcat init"),
+        lines[1].contains(&tr_in(Locale::En, "cli.doctor.quickJsHint", &[])),
         "failure hint should guide the user toward recovery: {}",
         lines[1]
     );
@@ -557,9 +571,11 @@ fn doctor_proxy_lines_reports_env_proxy_without_llm_override() {
     cfg.llm.proxy = None;
 
     let lines = crate::api::cli::init::doctor_proxy_lines(&cfg);
-    assert!(lines
-        .iter()
-        .any(|line| line.contains("环境代理") && line.contains("HTTPS_PROXY")));
+    assert!(lines.iter().any(|line| line.contains(&tr_in(
+        Locale::En,
+        "cli.doctor.envProxy",
+        &[("keys", "HTTPS_PROXY")]
+    ))));
 }
 
 #[test]
@@ -574,13 +590,21 @@ fn doctor_proxy_lines_warn_on_whitespace_and_socks() {
     cfg.llm.proxy = Some("http://127.0.0.1:8888 ".to_string());
 
     let lines = crate::api::cli::init::doctor_proxy_lines(&cfg);
-    assert!(lines.iter().any(|line| line.contains("llm.proxy 已配置")));
-    assert!(lines
-        .iter()
-        .any(|line| line.contains("llm.proxy 含首尾空格")));
-    assert!(lines
-        .iter()
-        .any(|line| line.contains("HTTPS_PROXY 含首尾空格")));
+    assert!(lines.iter().any(|line| line.contains(&tr_in(
+        Locale::En,
+        "cli.doctor.proxyConfigured",
+        &[]
+    ))));
+    assert!(lines.iter().any(|line| line.contains(&tr_in(
+        Locale::En,
+        "cli.doctor.proxyWhitespace",
+        &[]
+    ))));
+    assert!(lines.iter().any(|line| line.contains(&tr_in(
+        Locale::En,
+        "cli.doctor.proxyEnvWhitespace",
+        &[("name", "HTTPS_PROXY")]
+    ))));
     assert!(lines
         .iter()
         .any(|line| line.contains("reqwest socks feature")));
@@ -666,13 +690,21 @@ fn preload_runtime_env_rejects_invalid_env_file() {
     let cfg = test_config(work_dir.path());
     let env_path = work_dir.path().join("assets").join(".env");
     std::fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
-    std::fs::write(&env_path, "BROKEN_ENV=\"unterminated\n").expect("write broken env");
+    let content = "BROKEN_ENV=\"PRIVATE_CREDENTIAL_SENTINEL\n";
+    std::fs::write(&env_path, content).expect("write broken env");
 
     let error = preload_runtime_env(&cfg).expect_err("broken runtime env must fail");
+    assert!(matches!(error, AppError::Config(_)));
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("加载"),
-        "error should mention runtime env loading failure, got: {error}"
+        message.contains(env_path.to_string_lossy().as_ref()),
+        "{message}"
     );
+    assert!(
+        !message.contains("PRIVATE_CREDENTIAL_SENTINEL"),
+        "{message}"
+    );
+    assert_eq!(std::fs::read_to_string(&env_path).unwrap(), content);
 }
 
 #[test]

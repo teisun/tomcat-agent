@@ -18,6 +18,7 @@ fn result(marker_id: &str, text: &str) -> CompactionResult {
 fn cache_is_atomically_replaced_and_round_trips_one_pending_result() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("session.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
 
     write_preheat_cache(&transcript, &result("marker-1", "first")).unwrap();
     write_preheat_cache(&transcript, &result("marker-2", "second")).unwrap();
@@ -37,6 +38,7 @@ fn cache_is_atomically_replaced_and_round_trips_one_pending_result() {
 fn invalid_or_missing_marker_id_is_not_cached() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("session.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
     let mut invalid = result("marker-1", "summary");
     invalid.transcript_compaction_entry_id = None;
 

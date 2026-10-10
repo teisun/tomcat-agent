@@ -9,6 +9,7 @@
 //!   配置文件实际存在。
 
 use super::super::*;
+use crate::infra::i18n::{tr_in, Locale};
 use serial_test::serial;
 
 #[test]
@@ -64,7 +65,11 @@ fn set_toml_key_rejects_nonexistent_path() {
     let r = set_toml_key(&mut val, "nonexistent.key", "val");
     assert!(r.is_err());
     let msg = r.unwrap_err().to_string();
-    assert!(msg.contains("不存在"));
+    assert!(msg.contains(&tr_in(
+        Locale::En,
+        "cli.config.intermediateMissing",
+        &[("name", "nonexistent")]
+    )));
 }
 
 #[test]
@@ -77,16 +82,21 @@ fn set_toml_key_rejects_bad_integer() {
         "not_a_number",
     );
     assert!(r.is_err());
-    assert!(r.unwrap_err().to_string().contains("整数"));
+    assert!(r.unwrap_err().to_string().contains(&tr_in(
+        Locale::En,
+        "cli.config.intInvalid",
+        &[("value", "not_a_number")]
+    )));
 }
 
 #[test]
 #[serial(env_lock)]
 fn config_set_with_real_file() {
-    let _home = crate::test_support::home_env_lock().lock().unwrap();
-    run_init().unwrap();
-    let config_path = crate::normalize_path(DEFAULT_CONFIG_PATH).unwrap();
-    assert!(config_path.exists(), "config should exist after init");
+    super::mocks::with_temp_home(|| {
+        run_init().unwrap();
+        let config_path = crate::normalize_path(DEFAULT_CONFIG_PATH).unwrap();
+        assert!(config_path.exists(), "config should exist after init");
+    });
 }
 
 #[test]

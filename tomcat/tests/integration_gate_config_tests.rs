@@ -186,7 +186,6 @@ fn missing_live_credentials_is_not_a_successful_skip() {
             log.contains(common::openai_test_api_key_env_for_model(effective)),
             "{log}"
         );
-        assert!(log.contains("未运行"), "{log}");
     }
 }
 

@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { isValidKeySlotName } from "./keySlot";
+import { useT } from "../i18n/LocaleProvider";
 
 export interface KeySlotOption {
   envName: string;
@@ -72,6 +73,7 @@ export function KeySlotCombobox({
   refreshing,
   value,
 }: KeySlotComboboxProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -137,10 +139,12 @@ export function KeySlotCombobox({
     return entries;
   }, [createEntry, listboxId, savedOptions, suggestedOptions]);
   const activeEntry = flatEntries[activeIndex] ?? null;
+  // Translated labels are presentation, not a new list of selectable identities.
+  const entryIds = JSON.stringify(flatEntries.map((entry) => entry.id));
 
   useEffect(() => {
     setActiveIndex(0);
-  }, [open, value, options]);
+  }, [open, value, entryIds]);
 
   useEffect(() => {
     if (!open) {
@@ -206,7 +210,7 @@ export function KeySlotCombobox({
   return (
     <div className="tc-field">
       <div className="tc-field__label-row">
-        <span>Key slot</span>
+        <span>{t("models.keyslot.title")}</span>
         <button
           aria-label={refreshLabel}
           className="tc-icon-button tc-settings-keyslot__refresh"
@@ -227,7 +231,7 @@ export function KeySlotCombobox({
           aria-autocomplete="list"
           aria-controls={open ? listboxId : undefined}
           aria-expanded={open}
-          aria-label="Key slot"
+          aria-label={t("models.keyslot.title")}
           aria-describedby={hintId}
           autoComplete="off"
           className="tc-settings-combobox__input"
@@ -244,7 +248,7 @@ export function KeySlotCombobox({
           value={value}
         />
         <button
-          aria-label={open ? "Hide key slots" : "Show key slots"}
+          aria-label={t(open ? "models.keyslot.hide" : "models.keyslot.show")}
           className="tc-settings-combobox__toggle"
           onClick={() => {
             setOpen((current) => !current);
@@ -267,7 +271,7 @@ export function KeySlotCombobox({
           >
             {createEntry ? (
               <>
-                <div className="tc-session-group__header">Suggested</div>
+                <div className="tc-session-group__header">{t("models.keyslot.suggested")}</div>
                 <button
                   aria-selected={activeEntry?.id === createEntry.id}
                   className={`tc-session-item tc-settings-combobox__item${
@@ -285,14 +289,14 @@ export function KeySlotCombobox({
                 >
                   <span className="tc-session-item__title">{createEntry.envName}</span>
                   <span className="tc-settings-combobox__meta">
-                    {createEntry.valid ? "Create this slot" : "Use uppercase letters, numbers, and underscores"}
+                    {t(createEntry.valid ? "models.keyslot.create" : "models.keyslot.invalid")}
                   </span>
                 </button>
               </>
             ) : null}
             {suggestedOptions.length > 0 ? (
               <>
-                {!createEntry ? <div className="tc-session-group__header">Suggested</div> : null}
+                {!createEntry ? <div className="tc-session-group__header">{t("models.keyslot.suggested")}</div> : null}
                 {suggestedOptions.map((option) => {
                   const id = optionId(listboxId, option.group, option.envName);
                   return (
@@ -310,7 +314,7 @@ export function KeySlotCombobox({
                     >
                       <span className="tc-session-item__title">{option.envName}</span>
                       <span className="tc-settings-combobox__meta">
-                        {option.keyPresent ? "Configured" : "Suggested"}
+                        {t(option.keyPresent ? "models.keyslot.configured" : "models.keyslot.suggested")}
                       </span>
                     </button>
                   );
@@ -319,7 +323,7 @@ export function KeySlotCombobox({
             ) : null}
             {savedOptions.length > 0 ? (
               <>
-                <div className="tc-session-group__header">Saved in ~/.tomcat/assets/.env</div>
+                <div className="tc-session-group__header">{t("models.keyslot.saved")}</div>
                 {savedOptions.map((option) => {
                   const id = optionId(listboxId, option.group, option.envName);
                   return (
@@ -337,7 +341,7 @@ export function KeySlotCombobox({
                     >
                       <span className="tc-session-item__title">{option.envName}</span>
                       <span className="tc-settings-combobox__meta">
-                        {option.keyPresent ? "Configured" : "Missing"}
+                        {t(option.keyPresent ? "models.keyslot.configured" : "models.keyslot.missing")}
                       </span>
                     </button>
                   );
@@ -345,7 +349,7 @@ export function KeySlotCombobox({
               </>
             ) : null}
             {!createEntry && suggestedOptions.length === 0 && savedOptions.length === 0 ? (
-              <div className="tc-session-dropdown__empty">No matching key slots.</div>
+              <div className="tc-session-dropdown__empty">{t("models.keyslot.none")}</div>
             ) : null}
           </div>
         ) : null}

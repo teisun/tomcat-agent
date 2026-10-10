@@ -147,7 +147,11 @@ impl ModelView {
             context_window_options: entry.context_window_options.clone(),
             selected_context_window: None,
             selected_reasoning_level: None,
-            description: entry.description.clone(),
+            description: entry.description.clone().or_else(|| {
+                catalog
+                    .is_builtin_seed(&entry.id)
+                    .then(|| tr(&format!("model.description.{}", entry.id), &[]))
+            }),
             max_output_tokens: entry.max_output_tokens,
             supported_reasoning_levels: entry.supported_reasoning_levels.clone(),
             supported_speeds: entry.supported_speeds.clone(),
@@ -163,20 +167,26 @@ impl ModelView {
     }
 }
 
+use crate::infra::i18n::tr;
+
 impl ModelEntryInput {
     pub fn into_model_entry(self) -> Result<ModelEntry, AppError> {
         let id = self.id.trim().to_string();
         if id.is_empty() {
-            return Err(AppError::Config("模型 id 不能为空。".to_string()));
+            return Err(AppError::Config(tr("model.idRequired", &[])));
         }
         let api = self.api.trim().to_string();
         if api.is_empty() {
-            return Err(AppError::Config(format!("模型 `{id}` 的 api 不能为空。")));
+            return Err(AppError::Config(tr(
+                "model.fieldRequired",
+                &[("id", &id), ("field", "api")],
+            )));
         }
         let provider = self.provider.trim().to_string();
         if provider.is_empty() {
-            return Err(AppError::Config(format!(
-                "模型 `{id}` 的 provider 不能为空。"
+            return Err(AppError::Config(tr(
+                "model.fieldRequired",
+                &[("id", &id), ("field", "provider")],
             )));
         }
         let model_name = normalize_optional(self.model_name);
@@ -328,7 +338,7 @@ pub fn upsert_user_model(
             .lookup(&entry.id)
             .cloned()
             .map(|resolved| ModelView::from_entry(&reloaded, resolved))
-            .ok_or_else(|| AppError::Config(format!("模型 `{}` 写入后未能重新加载。", entry.id)))?;
+            .ok_or_else(|| AppError::Config(tr("model.reloadFailed", &[("id", &entry.id)])))?;
         Ok(UpsertModelResult {
             model: view,
             warnings: warnings.clone(),
@@ -366,18 +376,19 @@ pub fn remove_user_model_with_config_path(
 ) -> Result<(), AppError> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Config("模型 id 不能为空。".to_string()));
+        return Err(AppError::Config(tr("model.idRequired", &[])));
     }
     let path = ModelCatalog::default_user_path(cfg)?;
     with_file_lock(&models_lock_path(&path), || {
         let current = ModelCatalog::load_from_path(cfg, path.clone())?;
         if !current.is_user_model(trimmed) {
             if current.lookup(trimmed).is_some() {
-                return Err(AppError::Config(format!(
-                    "模型 `{trimmed}` 是内置模型，不能删除；如需自定义请覆盖或仅配置 API Key。"
+                return Err(AppError::Config(tr(
+                    "model.builtinDelete",
+                    &[("id", trimmed)],
                 )));
             }
-            return Err(AppError::Config(format!("模型 `{trimmed}` 不存在。")));
+            return Err(AppError::Config(tr("model.notFound", &[("id", trimmed)])));
         }
 
         let keeps_builtin_entry = current.is_builtin_seed(trimmed);
@@ -397,9 +408,13 @@ pub fn remove_user_model_with_config_path(
             for store_path in &session_stores {
                 match clear_model_overrides_in_store(store_path, trimmed) {
                     Ok(0) => {}
-                    Ok(count) => {
-                        cleared.push(format!("{} 个会话选择 ({})", count, store_path.display()))
-                    }
+                    Ok(count) => cleared.push(tr(
+                        "model.selectionsCleared",
+                        &[
+                            ("count", &count.to_string()),
+                            ("path", &store_path.display().to_string()),
+                        ],
+                    )),
                     Err(error) => return Err(removal_partial_error(trimmed, &cleared, error)),
                 }
             }
@@ -409,9 +424,7 @@ pub fn remove_user_model_with_config_path(
         let before = file.models.len();
         file.models.retain(|entry| entry.id.trim() != trimmed);
         if file.models.len() == before {
-            return Err(AppError::Config(format!(
-                "模型 `{trimmed}` 不在用户 models.toml 中。"
-            )));
+            return Err(AppError::Config(tr("model.notInFile", &[("id", trimmed)])));
         }
         let rendered = render_user_models_file(&file)?;
         validate_and_write_models(cfg, &path, rendered.as_bytes())?;
@@ -447,9 +460,13 @@ fn removal_partial_error(model_id: &str, cleared: &[String], error: AppError) ->
     if cleared.is_empty() {
         return error;
     }
-    AppError::Config(format!(
-        "模型 `{model_id}` 尚未删除；已清理 {}；原因: {error}",
-        cleared.join("、")
+    AppError::Config(tr(
+        "model.removePartial",
+        &[
+            ("id", model_id),
+            ("cleared", &cleared.join("、")),
+            ("detail", &error.to_string()),
+        ],
     ))
 }
 
@@ -460,7 +477,7 @@ pub fn set_default_model(
 ) -> Result<(), AppError> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Config("默认模型不能为空。".to_string()));
+        return Err(AppError::Config(tr("model.defaultRequired", &[])));
     }
     with_current_model_catalog(cfg, |catalog| {
         catalog.lookup_explicit(trimmed)?;
@@ -475,12 +492,16 @@ pub fn set_provider_key(
     let env_name = input.env_name.trim().to_string();
     let value = input.value.trim().to_string();
     if !is_valid_api_key_env_name(&env_name) {
-        return Err(AppError::Config(format!(
-            "envName `{env_name}` 必须匹配大写环境变量格式 `^[A-Z_][A-Z0-9_]*$`。"
+        return Err(AppError::Config(tr(
+            "model.envInvalid",
+            &[("field", "envName"), ("name", &env_name)],
         )));
     }
     if value.is_empty() {
-        return Err(AppError::Config(format!("`{env_name}` 不能为空。")));
+        return Err(AppError::Config(tr(
+            "model.keyRequired",
+            &[("name", &env_name)],
+        )));
     }
     let env_path = runtime_env_path(cfg)?;
     with_file_lock(&env_lock_path(&env_path), || {
@@ -504,17 +525,19 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
 fn validate_mutable_model_entry(entry: &ModelEntry) -> Result<(), AppError> {
     let registered = super::registered_provider_ids();
     if !registered.iter().any(|api| *api == entry.api) {
-        return Err(AppError::Config(format!(
-            "模型 `{}` 的 api=`{}` 未注册；可选值：{}。",
-            entry.id,
-            entry.api,
-            registered.join(", ")
+        return Err(AppError::Config(tr(
+            "model.apiUnregistered",
+            &[
+                ("id", &entry.id),
+                ("api", &entry.api),
+                ("available", &registered.join(", ")),
+            ],
         )));
     }
     if entry.api == "anthropic-messages" && entry.capabilities.files {
-        return Err(AppError::Config(format!(
-            "模型 `{}` 的 api=`anthropic-messages` 当前不支持 files 附件能力，请关闭 files 或改用支持文件附件的 api。",
-            entry.id
+        return Err(AppError::Config(tr(
+            "model.filesUnsupported",
+            &[("id", &entry.id)],
         )));
     }
     Ok(())
@@ -564,10 +587,9 @@ fn collect_model_warnings(entry: &ModelEntry) -> Vec<String> {
             .resolve_for_api(entry.api.as_str());
         let probe = resolve_request_fields(&ThinkingConfig::default(), fmt);
         if probe.reasoning_effort.is_none() {
-            warnings.push(format!(
-                "API `{}` expects reasoning effort, but thinking_format=`{}` will not send it. Tomcat will omit reasoning depth for this model.",
-                entry.api,
-                fmt.as_str(),
+            warnings.push(tr(
+                "model.reasoningWarning",
+                &[("api", &entry.api), ("format", fmt.as_str())],
             ));
         }
     }
@@ -647,10 +669,12 @@ fn with_file_lock<T>(
                 std::thread::sleep(LOCK_RETRY);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(AppError::Config(format!(
-                    "等待文件锁超时（{}ms）：{}",
-                    LOCK_TIMEOUT.as_millis(),
-                    lock_path.display()
+                return Err(AppError::Config(tr(
+                    "model.lockTimeout",
+                    &[
+                        ("milliseconds", &LOCK_TIMEOUT.as_millis().to_string()),
+                        ("path", &lock_path.display().to_string()),
+                    ],
                 )));
             }
             Err(error) => return Err(AppError::Io(error)),
@@ -665,8 +689,9 @@ fn with_file_lock<T>(
 
 fn validate_api_key_env_name(env_name: &str) -> Result<(), AppError> {
     if !is_valid_api_key_env_name(env_name) {
-        return Err(AppError::Config(format!(
-            "api_key_env `{env_name}` 必须匹配大写环境变量格式 `^[A-Z_][A-Z0-9_]*$`。"
+        return Err(AppError::Config(tr(
+            "model.envInvalid",
+            &[("field", "api_key_env"), ("name", env_name)],
         )));
     }
     Ok(())

@@ -53,6 +53,9 @@ pub trait UserConfirmationProvider: Send + Sync + 'static {
     /// `suggested_root` 不为 `None` 时，UI 应展示"加入工作区"选项；
     /// 否则只展示"本次允许 / 拒绝"两项（如 bash_approval 命中场景）。
     ///
+    /// `target` is the caller's actual normalized path, never parsed from `preview`.
+    /// Non-path confirmations pass `None`.
+    ///
     /// 默认实现委托给 [`Self::confirm`]：`true` -> `AllowOnce`，`false` -> `Deny`。
     /// CLI 端在 PR-4 / PR-2 override 给出真正的 3 选项 UI。
     async fn confirm_decision(
@@ -60,6 +63,7 @@ pub trait UserConfirmationProvider: Send + Sync + 'static {
         operation: PrimitiveOperation,
         preview: &str,
         plugin_id: &str,
+        _target: Option<PathBuf>,
         _suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
         match self.confirm(operation, preview, plugin_id).await? {

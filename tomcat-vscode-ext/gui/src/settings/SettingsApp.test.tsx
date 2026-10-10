@@ -10,6 +10,8 @@ import type {
   VsCodeApiLike,
 } from "../../../src/shared/settingsProtocol";
 import { SettingsApp } from "./SettingsApp";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 
 function builtinModel(
   overrides: Partial<SettingsModelView> = {},
@@ -118,6 +120,35 @@ function getPasswordInput(scope: HTMLElement): HTMLInputElement {
 }
 
 describe("SettingsApp", () => {
+  it("changes model labels and validation without replacing or exposing the unsaved key", async () => {
+    const api = { postMessage: vi.fn() };
+    const view = render(<LocaleProvider locale="en"><SettingsApp vscodeApi={api} /></LocaleProvider>);
+    await emitState(readyState({ models: [builtinModel({ keyPresent: true })], providerKeys: [providerKey({ keyPresent: true })] }));
+    fireEvent.click(screen.getByTestId("settings-add-model"));
+    const dialog = screen.getByTestId("settings-model-form");
+    fireEvent.change(dialog.querySelector('input[placeholder="For example: gpt-5.6"]')!, { target: { value: "gpt-5.6" } });
+    const keyInput = screen.getByTestId("settings-api-key-input") as HTMLInputElement;
+    fireEvent.change(keyInput, { target: { value: "private-secret" } });
+    fireEvent.click(screen.getByTestId("settings-model-advanced"));
+    fireEvent.change(screen.getByTestId("settings-supported-speeds"), { target: { value: "bogus" } });
+    expect((screen.getByTestId("settings-supported-speeds") as HTMLInputElement).value).toBe("bogus");
+    expect((screen.getByTestId("settings-save-model") as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByTestId("settings-save-model"));
+    const validation = screen.getByText(translate("en", "models.validate.speeds"));
+    const title = screen.getByRole("heading", { name: translate("en", "models.addTitle") });
+    const save = screen.getByRole("button", { name: translate("en", "models.saveModel") });
+    view.rerender(<LocaleProvider locale="zh-CN"><SettingsApp vscodeApi={api} /></LocaleProvider>);
+    expect(screen.getByTestId("settings-model-form")).toBe(dialog);
+    expect(screen.getByTestId("settings-api-key-input")).toBe(keyInput);
+    expect(keyInput.value).toBe("private-secret");
+    expect(keyInput.type).toBe("password");
+    expect(title.isConnected).toBe(true);
+    expect(screen.getByTestId("settings-save-model")).toBe(save);
+    expect(validation.isConnected).toBe(true);
+    expect((screen.getByTestId("settings-supported-speeds") as HTMLInputElement).value).toBe("bogus");
+    expect(api.postMessage.mock.calls.filter(([m]) => m.type === "settings.ready")).toHaveLength(1);
+  });
+
   it("carries a correlated Reload receipt through actual Settings state frames", async () => {
     const { postMessage } = mount();
     const source = { configKey: "key", name: "deepwiki", type: "mcp" as const, transport: "http" as const, source: "global" as const, state: "connected" as const, generation: "1", attempt: 1, recovery: null, toolCount: 2, resourceCount: 0, overridden: false, oauthConfigured: false };
@@ -755,7 +786,7 @@ describe("SettingsApp", () => {
 
     expect(
       within(dialog).getByText(
-        "当前后端不支持保存 API Key，请先升级 `tomcat serve`。",
+        "The current backend cannot save an API key; please upgrade `tomcat serve`.",
       ),
     ).toBeTruthy();
   });

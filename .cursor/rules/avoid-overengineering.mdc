@@ -24,6 +24,7 @@ This rule complements the project's engineering standards. When present, also fo
 - Do not turn a narrow feature into a platform. A language selector does not automatically require historical retranslation; a confirmation does not automatically require a new approval protocol.
 - Do not silently narrow the user's request to make implementation easier. State material UX, compatibility, persistence, and data-retention trade-offs; obtain agreement when they change requested behavior.
 - Define reliability promises: when changes take effect, what survives restart, and what a confirmed action may overwrite. Do not silently upgrade these promises or add repeated confirmations and global blocking for consequences the user explicitly accepted. This does not waive unrelated authorization, path isolation, or data-integrity checks.
+- Correct overstated descriptions instead of building extra machinery to make them true.
 - Treat future needs as reasons to revisit a decision, not reasons to implement it now. Record a concrete trigger rather than building speculative extension points.
 
 ## 2. Reuse Complete Workflows, Not Just Their Plumbing
@@ -43,9 +44,11 @@ This rule complements the project's engineering standards. When present, also fo
 - Share code or data when the same semantics genuinely need to evolve together, not merely because two strings or structures look alike.
 - Keep business decisions based on stable IDs/codes, never translated display text.
 - For localization, consider producer-side rendering when a process has one effective language and historical text need not be retranslated. Use cross-process descriptors only when actual consumers require independent rendering; do not make translation keys a durable protocol by accident.
+- Decide who needs the information before choosing how to present it. Do not translate model instructions or developer diagnostics merely because a UI can display them.
 
 ## 4. Prefer Source Invariants Over Distributed Defenses
 
+- Match safeguards to the consequences of failure. Low-risk preferences may need only a direct operation and a clear error, not rollback or blocking.
 - Identify what must never happen, then enforce it at the smallest responsible boundary instead of adding coordinated checks throughout the system.
 - Example: separating "create a transcript" from "append to an existing transcript" can prevent late appends from recreating deleted files. It does not, by itself, prove the entire deletion workflow safe.
 - Retain locks, authorization, validation, cancellation, and recovery mechanisms that protect demonstrated risks in the affected architecture. "Single-user" does not imply "single-process."
@@ -76,6 +79,7 @@ Review the plan or diff for:
 - Extra configuration, fallback layers, and compatibility paths without supported consumers.
 - Historical rewriting, live synchronization, or new lifecycle semantics the user did not request.
 - Optimizations of a mechanism that should instead be removed or moved to its proper owner.
+- Fields and branches that add no distinct information or behavior.
 
 Do not reintroduce a removed mechanism under a different name. Reopen the decision only with new requirements or evidence. When scope changes, remove downstream machinery whose justification depended on a superseded requirement.
 
@@ -85,6 +89,8 @@ Do not reintroduce a removed mechanism under a different name. Reopen the decisi
 - Separate a review's diagnosis from its proposed fix and test expansion. Accept verified findings without automatically accepting a larger redesign; converting a plan's format or correcting documentation is not authorization to expand behavior.
 - Prove one vertical slice before a broad migration; use existing tests, runners, and acceptance harnesses instead of creating parallel infrastructure.
 - Test the actual risk boundary: failure handling, ownership, concurrency, compatibility, and user-visible behavior. State what each added test proves beyond existing type checks and coverage; do not expand unchanged behavior into a matrix solely for completeness. Mocks must exercise, not bypass, the behavior under test. Retain cross-layer regressions when the changed path needs them, even if a participating layer's code is unchanged. Fewer mechanisms must not mean weaker verification.
+- Test normal initialization, saved state, and user overrides, not only ideal starting conditions.
+- Use the English source catalog for product-text assertions; check other-language resources for completeness, not exact wording.
 - Do not make estimates, guarantees, or completion claims without evidence. A simpler design remains a proposal until implementation and relevant checks establish it works.
 
 **Final standard: fewer independent concepts and obligations, with the required behavior and safety intact.**

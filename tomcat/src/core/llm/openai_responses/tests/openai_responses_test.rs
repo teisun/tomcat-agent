@@ -2322,14 +2322,15 @@ async fn responses_stream_parses_sse_chunks() {
 
 #[tokio::test]
 async fn responses_stream_completed_with_text_and_reasoning_dominance_stays_stop_without_notice() {
+    let response_text = "继续执行。";
     use tokio_stream::StreamExt;
 
     // Proxies may omit response.output[] from the terminal event even after emitting
     // text deltas. Terminal metadata must still faithfully preserve `completed`.
     let chunks: Vec<Result<Bytes, AppError>> = vec![
-        Ok(Bytes::from(
-            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"继续执行。\"}\n\n",
-        )),
+        Ok(Bytes::from(format!("data: {}\n\n", serde_json::json!({
+            "type": "response.output_text.delta", "item_id": "m1", "content_index": 0, "delta": response_text,
+        })))),
         Ok(Bytes::from(
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":182514,\"output_tokens\":245,\"total_tokens\":182759,\"output_tokens_details\":{\"reasoning_tokens\":236}}}}\n\n",
         )),
@@ -2341,7 +2342,7 @@ async fn responses_stream_completed_with_text_and_reasoning_dominance_stays_stop
     }
 
     assert!(events.iter().any(
-        |event| matches!(event, StreamEvent::ContentDelta { delta } if delta == "继续执行。")
+        |event| matches!(event, StreamEvent::ContentDelta { delta } if delta == response_text)
     ));
     assert!(events
         .iter()
@@ -2437,7 +2438,7 @@ async fn responses_stream_eof_mid_frame_is_interrupted() {
         assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
         let summary = llm_summary(&error).expect("interruption summary");
         assert!(
-            summary.contains(&format!("丢弃 {discarded_bytes} 字节")),
+            summary.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.responsesClosed", &[("bytes", &discarded_bytes.to_string())])),
             "{summary}"
         );
         assert!(!summary.contains("raw="), "{summary}");
@@ -2492,7 +2493,7 @@ async fn responses_stream_eof_between_frames_is_interrupted() {
             summary.contains("stream closed before response.completed"),
             "{summary}"
         );
-        assert!(summary.contains("丢弃 0 字节"), "{summary}");
+        assert!(summary.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.responsesClosed", &[("bytes", "0")])), "{summary}");
         assert!(stream.next().await.is_none());
         assert!(stream.next().await.is_none());
     }
@@ -2741,7 +2742,7 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
+            assert!(msg.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.idleTimeout", &[("seconds", "3")])), "unexpected msg: {}", msg);
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
                 "unexpected msg: {}",
@@ -2901,7 +2902,9 @@ async fn responses_stream_post_once_header_read_timeout_maps_to_retryable_read_t
     assert!(OpenAiResponsesProvider::is_retriable(&err));
     let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
     assert!(
-        msg.contains("等待响应头"),
+        msg.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.headersTimeout", &[
+            ("action", &crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.action.streamRequest", &[])), ("seconds", "1"),
+        ])),
         "错误文案应说明卡在响应头阶段，实际: {}",
         msg
     );
@@ -3112,11 +3115,12 @@ async fn cross_layer_completed_reasoning_only_retries_in_the_agent_loop() {
 
 #[tokio::test]
 async fn cross_layer_completed_text_with_bare_terminal_payload_stays_stop_without_notice() {
+    let response_text = "继续执行。";
     let server = MockHttpServer::start(vec![ScriptedHttpResponse {
         status: 200,
         headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
         body: responses_sse_body(&[
-            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"继续执行。"}"#,
+            &serde_json::json!({ "type": "response.output_text.delta", "item_id": "m1", "content_index": 0, "delta": response_text }).to_string(),
             r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":245,"output_tokens_details":{"reasoning_tokens":236}}}}"#,
         ]),
         delay_ms: 0,
@@ -3138,7 +3142,7 @@ async fn cross_layer_completed_text_with_bare_terminal_payload_stays_stop_withou
     let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
 
     assert!(
-        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "继续执行。")
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == response_text)
     );
     assert!(notices.lock().unwrap().is_empty());
     server.shutdown().await;
@@ -3339,7 +3343,7 @@ async fn responses_chat_stream_after_first_delta_body_read_error_is_not_retried(
     assert!(
         llm_summary(&err)
             .unwrap_or_else(|| err.to_string())
-            .contains("流读取"),
+            .contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.action.readStream", &[])),
         "错误摘要应保留流读取失败语义，实际: {}",
         err
     );

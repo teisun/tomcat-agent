@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::infra::i18n::tr;
 use crate::{resolve_agent_definition_dir, AppConfig, AppError};
 
 use super::SkillSub;
@@ -9,16 +10,16 @@ pub(crate) fn run_skill(sub: SkillSub, cfg: &AppConfig) -> Result<(), AppError> 
     match sub {
         SkillSub::List => {
             if cfg.skills.enabled {
-                println!("[skill] 当前发现结果：");
+                println!("{}", tr("cli.skill.discovered", &[]));
             } else {
-                println!("[skill] 技能系统当前已禁用（[skills].enabled=false），以下为发现结果：");
+                println!("{}", tr("cli.skill.disabledList", &[]));
             }
         }
         SkillSub::Reload => {
             if cfg.skills.enabled {
-                println!("[skill] 已重扫技能目录。");
+                println!("{}", tr("cli.skill.reloaded", &[]));
             } else {
-                println!("[skill] 技能系统当前已禁用（[skills].enabled=false），以下为重扫结果：");
+                println!("{}", tr("cli.skill.disabledReload", &[]));
             }
         }
     }

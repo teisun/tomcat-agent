@@ -1,5 +1,6 @@
 //! Structured, safe connector failures. Display/Debug never expose URLs,
 //! credentials, challenges, JSON-RPC data, or response-body previews.
+use crate::infra::i18n::tr;
 use std::fmt;
 
 use rmcp::service::ClientInitializeError;
@@ -119,7 +120,10 @@ impl McpFailure {
     }
 
     pub fn to_app_error(&self, server: &str) -> crate::infra::error::AppError {
-        crate::infra::error::AppError::Tool(format!("MCP source '{server}': {self}"))
+        crate::infra::error::AppError::Tool(tr(
+            "mcp.sourceFailure",
+            &[("source", server), ("detail", &self.to_string())],
+        ))
     }
 }
 
@@ -136,18 +140,26 @@ impl From<crate::infra::error::AppError> for McpFailure {
 
 impl fmt::Display for McpFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reason = match self.kind {
-            FailureKind::Configuration => "configuration rejected",
-            FailureKind::Authorization => "authorization required",
-            FailureKind::Forbidden => "access forbidden",
-            FailureKind::SessionExpired => "MCP session expired",
-            FailureKind::Transient => "transport request failed",
-            FailureKind::Timeout => "timed out",
-            FailureKind::Cancelled => "cancelled",
-            FailureKind::Protocol => "invalid protocol response",
-            FailureKind::Unknown => "request failed (cause unknown)",
+        let reason = tr(
+            match self.kind {
+                FailureKind::Configuration => "mcp.failure.configuration",
+                FailureKind::Authorization => "mcp.failure.authorization",
+                FailureKind::Forbidden => "mcp.failure.forbidden",
+                FailureKind::SessionExpired => "mcp.failure.expired",
+                FailureKind::Transient => "mcp.failure.transient",
+                FailureKind::Timeout => "mcp.failure.timeout",
+                FailureKind::Cancelled => "mcp.failure.cancelled",
+                FailureKind::Protocol => "mcp.failure.protocol",
+                FailureKind::Unknown => "mcp.failure.unknown",
+            },
+            &[],
+        );
+        let phase = match self.phase {
+            "source explicitly stopped; use Reload" => tr("mcp.phase.stopped", &[]),
+            "source overridden" => tr("mcp.phase.overridden", &[]),
+            phase => phase.to_string(),
         };
-        write!(f, "{}: {reason}", self.phase)?;
+        write!(f, "{phase}: {reason}")?;
         if let Some(status) = self.http_status {
             write!(f, " (HTTP {status})")?;
         }

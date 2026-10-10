@@ -376,11 +376,17 @@ pub fn read_header(path: &Path) -> Result<SessionHeader, AppError> {
     let mut reader = BufReader::new(f);
     let mut line = String::new();
     if reader.read_line(&mut line).map_err(AppError::Io)? == 0 {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Config("transcript 首行为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptHeaderEmpty",
+            &[],
+        )));
     }
     let header: SessionHeader = serde_json::from_str(trimmed)?;
     Ok(header)
@@ -634,13 +640,30 @@ pub fn append_line(path: &Path, json: &str) -> Result<(), AppError> {
     append_line_with_sync(path, json, SyncLevel::Flush)
 }
 
+/// Append to an existing transcript. Only write_header creates a transcript.
 pub fn append_line_with_sync(path: &Path, json: &str, sync: SyncLevel) -> Result<(), AppError> {
-    std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(AppError::Io)?;
-    let mut f = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(AppError::Io)?;
+    append_json_to_file(file, json, sync)
+}
+
+/// Sidecars are lazy-created after their caller checks the owning transcript.
+pub(crate) fn append_sidecar_line_with_sync(
+    path: &Path,
+    json: &str,
+    sync: SyncLevel,
+) -> Result<(), AppError> {
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(AppError::Io)?;
+    append_json_to_file(file, json, sync)
+}
+
+fn append_json_to_file(mut f: std::fs::File, json: &str, sync: SyncLevel) -> Result<(), AppError> {
     writeln!(f, "{}", json).map_err(AppError::Io)?;
     f.flush().map_err(AppError::Io)?;
     if matches!(sync, SyncLevel::SyncData) {
@@ -695,7 +718,10 @@ pub fn insert_entry_after_message_id(
         .map(|r| r.map_err(AppError::Io))
         .collect::<Result<Vec<_>, _>>()?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
 
     let mut anchor_line: Option<usize> = None;
@@ -755,7 +781,10 @@ pub(crate) fn transcript_lines(path: &Path) -> Result<Vec<String>, AppError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(AppError::Io)?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
     Ok(lines)
 }
@@ -840,7 +869,10 @@ pub fn mark_tool_result_entries_by_tool_call_id_superseded(
         .map(|r| r.map_err(AppError::Io))
         .collect::<Result<Vec<_>, _>>()?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
 
     let mut changed = 0usize;
@@ -909,7 +941,10 @@ pub fn mark_user_message_entry_superseded_by_id(
         .map(|r| r.map_err(AppError::Io))
         .collect::<Result<Vec<_>, _>>()?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
 
     let mut changed = 0usize;
@@ -974,7 +1009,10 @@ pub fn mark_trailing_user_messages_superseded(path: &Path) -> Result<usize, AppE
         .map(|r| r.map_err(AppError::Io))
         .collect::<Result<Vec<_>, _>>()?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
 
     let mut tail_indices: Vec<usize> = Vec::new();
@@ -1058,7 +1096,10 @@ pub fn rewrite_message_text_entries_by_id(
         .map(|r| r.map_err(AppError::Io))
         .collect::<Result<Vec<_>, _>>()?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
 
     let mut changed = 0usize;
@@ -1146,7 +1187,10 @@ pub fn rewrite_message_summary_titles_by_id(
         .map(|r| r.map_err(AppError::Io))
         .collect::<Result<Vec<_>, _>>()?;
     if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "session.transcriptEmpty",
+            &[],
+        )));
     }
 
     let mut changed = 0usize;

@@ -32,6 +32,7 @@ use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::openai_files::FilePurpose;
 use crate::infra::error::AppError;
 use crate::infra::events::ToolDisplay;
+use crate::infra::i18n::tr;
 
 /// inline 图片字节上限（解码后），与 [`pi_agent_rust/src/tools.rs`] 对齐。
 pub const IMAGE_MAX_BYTES: usize = 4_718_592;
@@ -316,31 +317,44 @@ impl ChatMessageContentPart {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
-            return Err(AppError::Llm(format!(
-                "image_b64: 不支持的 mime_type {:?}, 仅允许 {:?}",
-                mime, ALLOWED_IMAGE_MIMES
+            return Err(AppError::Llm(tr(
+                "media.unsupportedMime",
+                &[
+                    ("operation", "image_b64"),
+                    ("mime", &format!("{mime:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         let path_ref = path.as_ref();
         let meta = std::fs::metadata(path_ref).map_err(|e| {
-            AppError::Llm(format!(
-                "image_b64: 无法 stat 路径 {}: {}",
-                path_ref.display(),
-                e
+            AppError::Llm(tr(
+                "media.statFailed",
+                &[
+                    ("operation", "image_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         if meta.len() as usize > IMAGE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "image_b64: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
-                meta.len(),
-                IMAGE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.imageTooLarge",
+                &[
+                    ("operation", "image_b64"),
+                    ("bytes", &meta.len().to_string()),
+                    ("limit", &IMAGE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         let bytes = std::fs::read(path_ref).map_err(|e| {
-            AppError::Llm(format!(
-                "image_b64: 读取 {} 失败: {}",
-                path_ref.display(),
-                e
+            AppError::Llm(tr(
+                "media.readFailed",
+                &[
+                    ("operation", "image_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -361,20 +375,35 @@ impl ChatMessageContentPart {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
-            return Err(AppError::Llm(format!(
-                "image_base64_data: 不支持的 mime_type {:?}, 仅允许 {:?}",
-                mime, ALLOWED_IMAGE_MIMES
+            return Err(AppError::Llm(tr(
+                "media.unsupportedMime",
+                &[
+                    ("operation", "image_base64_data"),
+                    ("mime", &format!("{mime:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         let data = data_base64.into();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(data.as_bytes())
-            .map_err(|e| AppError::Llm(format!("image_base64_data: base64 解码失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "media.decodeFailed",
+                    &[
+                        ("operation", "image_base64_data"),
+                        ("detail", &e.to_string()),
+                    ],
+                ))
+            })?;
         if decoded.len() > IMAGE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "image_base64_data: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
-                decoded.len(),
-                IMAGE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.imageTooLarge",
+                &[
+                    ("operation", "image_base64_data"),
+                    ("bytes", &decoded.len().to_string()),
+                    ("limit", &IMAGE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         Ok(Self::InputImage {
@@ -396,14 +425,21 @@ impl ChatMessageContentPart {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(data.as_bytes())
             .map_err(|error| {
-                AppError::Llm(format!(
-                    "validated_svg_base64_for_transcript: base64 解码失败: {error}"
+                AppError::Llm(tr(
+                    "media.decodeFailed",
+                    &[
+                        ("operation", "validated_svg_base64_for_transcript"),
+                        ("detail", &error.to_string()),
+                    ],
                 ))
             })?;
         if decoded.is_empty() || decoded.len() > IMAGE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "validated_svg_base64_for_transcript: 图片 {} 字节不在 1..={IMAGE_MAX_BYTES} 范围内",
-                decoded.len()
+            return Err(AppError::Llm(tr(
+                "media.svgSize",
+                &[
+                    ("bytes", &decoded.len().to_string()),
+                    ("limit", &IMAGE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         Ok(Self::InputImage {
@@ -426,21 +462,34 @@ impl ChatMessageContentPart {
     ) -> Result<Self, AppError> {
         let path_ref = path.as_ref();
         let meta = std::fs::metadata(path_ref).map_err(|e| {
-            AppError::Llm(format!(
-                "file_b64: 无法 stat 路径 {}: {}",
-                path_ref.display(),
-                e
+            AppError::Llm(tr(
+                "media.statFailed",
+                &[
+                    ("operation", "file_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         if meta.len() as usize > FILE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "file_b64: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
-                meta.len(),
-                FILE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.fileTooLarge",
+                &[
+                    ("operation", "file_b64"),
+                    ("bytes", &meta.len().to_string()),
+                    ("limit", &FILE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         let bytes = std::fs::read(path_ref).map_err(|e| {
-            AppError::Llm(format!("file_b64: 读取 {} 失败: {}", path_ref.display(), e))
+            AppError::Llm(tr(
+                "media.readFailed",
+                &[
+                    ("operation", "file_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
+            ))
         })?;
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Self::InputFile {
@@ -461,12 +510,23 @@ impl ChatMessageContentPart {
         let data = data_base64.into();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(data.as_bytes())
-            .map_err(|e| AppError::Llm(format!("file_base64_data: base64 解码失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "media.decodeFailed",
+                    &[
+                        ("operation", "file_base64_data"),
+                        ("detail", &e.to_string()),
+                    ],
+                ))
+            })?;
         if decoded.len() > FILE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "file_base64_data: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
-                decoded.len(),
-                FILE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.fileTooLarge",
+                &[
+                    ("operation", "file_base64_data"),
+                    ("bytes", &decoded.len().to_string()),
+                    ("limit", &FILE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         Ok(Self::InputFile {
@@ -482,7 +542,10 @@ impl ChatMessageContentPart {
     pub fn image_file_id(file_id: impl Into<String>) -> Result<Self, AppError> {
         let id = file_id.into();
         if id.trim().is_empty() {
-            return Err(AppError::Llm("image_file_id: file_id 不能为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.fileIdEmpty",
+                &[("operation", "image_file_id")],
+            )));
         }
         Ok(Self::InputImage {
             source: ImageSource::Uploaded(ImageUploadedSource { file_id: id }),
@@ -500,9 +563,12 @@ impl ChatMessageContentPart {
         let mime_type = mime_type.into();
         let mime_lower = mime_type.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) && mime_lower != "image/svg+xml" {
-            return Err(AppError::Llm(format!(
-                "image_blob_ref: 不支持的 mime_type {:?}, 仅允许 {:?} 或 image/svg+xml",
-                mime_type, ALLOWED_IMAGE_MIMES,
+            return Err(AppError::Llm(tr(
+                "media.blobMime",
+                &[
+                    ("mime", &format!("{mime_type:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         let blob_sha = blob_sha.into();
@@ -511,9 +577,7 @@ impl ChatMessageContentPart {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(AppError::Llm(
-                "image_blob_ref: blob_sha 必须是 64 位小写十六进制".to_string(),
-            ));
+            return Err(AppError::Llm(tr("media.blobSha", &[])));
         }
         Ok(Self::InputImageRef {
             blob_sha,
@@ -531,7 +595,10 @@ impl ChatMessageContentPart {
     ) -> Result<Self, AppError> {
         let id = file_id.into();
         if id.trim().is_empty() {
-            return Err(AppError::Llm("file_file_id: file_id 不能为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.fileIdEmpty",
+                &[("operation", "file_file_id")],
+            )));
         }
         Ok(Self::InputFile {
             source: FileSource::Uploaded(FileUploadedSource {
@@ -554,13 +621,20 @@ impl ChatMessageContentPart {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
-            return Err(AppError::Llm(format!(
-                "image_upload: 不支持的 mime_type {:?}, 仅允许 {:?}",
-                mime, ALLOWED_IMAGE_MIMES
+            return Err(AppError::Llm(tr(
+                "media.unsupportedMime",
+                &[
+                    ("operation", "image_upload"),
+                    ("mime", &format!("{mime:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         if bytes.is_empty() {
-            return Err(AppError::Llm("image_upload: 文件内容为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.emptyUpload",
+                &[("operation", "image_upload")],
+            )));
         }
         let upload = adapter
             .upload(FilePurpose::Vision, &filename, &mime, bytes)
@@ -578,7 +652,10 @@ impl ChatMessageContentPart {
         let filename = filename.into();
         let mime = mime_type.into();
         if bytes.is_empty() {
-            return Err(AppError::Llm("file_upload: 文件内容为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.emptyUpload",
+                &[("operation", "file_upload")],
+            )));
         }
         let upload = adapter
             .upload(FilePurpose::UserData, &filename, &mime, bytes)

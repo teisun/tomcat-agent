@@ -7,6 +7,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
+use crate::infra::i18n::tr;
 use crate::infra::{write_file_atomic, AppError};
 
 use super::super::model::{PackageRegistryFile, PluginRegistryFile};
@@ -64,7 +65,10 @@ impl RegistrySnapshot {
         }
         let mut registry: PackageRegistryFile =
             serde_json::from_str(&self.raw_json).map_err(|error| {
-                AppError::Config(format!("package registry snapshot 损坏: {error}"))
+                AppError::Config(tr(
+                    "package.registrySnapshot",
+                    &[("kind", "package"), ("detail", &error.to_string())],
+                ))
             })?;
         registry.normalize();
         Ok(registry)
@@ -74,8 +78,12 @@ impl RegistrySnapshot {
         if !self.existed {
             return Ok(PluginRegistryFile::default());
         }
-        serde_json::from_str(&self.raw_json)
-            .map_err(|error| AppError::Config(format!("plugin registry snapshot 损坏: {error}")))
+        serde_json::from_str(&self.raw_json).map_err(|error| {
+            AppError::Config(tr(
+                "package.registrySnapshot",
+                &[("kind", "plugin"), ("detail", &error.to_string())],
+            ))
+        })
     }
 
     pub(super) fn restore(&self, path: &Path) -> Result<(), AppError> {
@@ -98,8 +106,15 @@ where
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
         Err(error) => return Err(AppError::Io(error)),
     };
-    serde_json::from_str(&raw)
-        .map_err(|error| AppError::Config(format!("registry 损坏: {} ({error})", path.display())))
+    serde_json::from_str(&raw).map_err(|error| {
+        AppError::Config(tr(
+            "package.registryCorrupt",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
+        ))
+    })
 }
 
 #[cfg(test)]

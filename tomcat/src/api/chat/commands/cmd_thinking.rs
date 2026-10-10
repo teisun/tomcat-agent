@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::api::chat::ChatContext;
 use crate::infra::config::ThinkingDisplay;
+use crate::infra::i18n::tr;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -46,22 +47,21 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
                 action: ThinkingAction::Toggle,
             },
             other => ChatCommand::UsageError {
-                message: format!(
-                    "用法错误：/thinking 仅支持 minimal/summary/full/toggle（兼容 on/off），收到 `{}`。",
-                    other
-                ),
+                message: tr("slash.thinking.invalid", &[("value", other)]),
             },
         },
         _ => ChatCommand::UsageError {
-            message: "用法错误：/thinking 仅接受 0 或 1 个参数（minimal/summary/full/toggle）。"
-                .to_string(),
+            message: tr("slash.thinking.usage", &[]),
         },
     }
 }
 
 pub(crate) fn run(ctx: &ChatContext, action: ThinkingAction) -> ChatCommandOutcome {
     let new_value = apply_action(&ctx.session_runtime.thinking_display, action);
-    println!("[thinking] 已切换到 {} 模式", display_name(new_value));
+    println!(
+        "{}",
+        tr("slash.thinking.set", &[("mode", display_name(new_value))])
+    );
     ChatCommandOutcome::Handled
 }
 

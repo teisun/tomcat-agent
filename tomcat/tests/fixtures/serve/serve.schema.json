@@ -1,9 +1,111 @@
 {
+  "ui_preferences": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "UiPreferences",
+    "type": "object",
+    "required": [
+      "effective",
+      "envOverride",
+      "language"
+    ],
+    "properties": {
+      "effective": {
+        "$ref": "#/definitions/Locale"
+      },
+      "envOverride": {
+        "type": "boolean"
+      },
+      "language": {
+        "$ref": "#/definitions/UiLanguage"
+      }
+    },
+    "definitions": {
+      "Locale": {
+        "type": "string",
+        "enum": [
+          "en",
+          "zh-CN"
+        ]
+      },
+      "UiLanguage": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "en",
+          "zh-CN"
+        ]
+      }
+    }
+  },
+  "delete_session_outcome": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "DeleteSessionOutcome",
+    "type": "object",
+    "required": [
+      "warnings"
+    ],
+    "properties": {
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
   "serve_command": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "ServeCommand",
     "description": "UI 通过 stdin 发送给 `tomcat serve` 的命令帧。",
     "oneOf": [
+      {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "delete_session"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "language",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "$ref": "#/definitions/UiLanguage"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_ui_language"
+            ]
+          }
+        }
+      },
       {
         "type": "object",
         "required": [
@@ -2194,6 +2296,14 @@
           "standard",
           "fast",
           "ultrafast"
+        ]
+      },
+      "UiLanguage": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "en",
+          "zh-CN"
         ]
       }
     }

@@ -27,6 +27,7 @@ fn isolated_command(home: &Path, cwd: &Path) -> Command {
     command
         .env("HOME", home)
         .env("SHELL", "/bin/zsh")
+        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("OPENAI_API_KEY", "offline-test-only-placeholder")
         .current_dir(cwd)
         .arg("code");
@@ -173,7 +174,7 @@ fn tty_trust_once_then_does_not_prompt_again() {
     drop(first);
 
     let mut second = Interactive::start(&fixture.home_path, &fixture.workspace);
-    second.until("输入 /help 查看命令列表。");
+    second.until("Enter /help for a command list.");
     second.answer("\u{4}");
     wait_for_exit(&mut second.child);
     while let Ok(chunk) = second.output.try_recv() {
@@ -220,7 +221,7 @@ fn tty_not_now_does_not_persist_and_non_tty_keeps_first_command() {
         "piped first line must not be consumed by trust"
     );
     assert!(
-        text.contains("可用命令："),
+        text.contains("Available commands:"),
         "piped /help must reach the chat command handler: {text}"
     );
     assert!(!record.exists());
@@ -249,11 +250,14 @@ fn legacy_mcp_config_does_not_abort_or_disable_piped_chat() {
     );
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !text.contains("[MCP 未加载]"),
+        !text.contains(&tomcat::infra::tr(
+            "terminal.mcpUnavailable",
+            &[("detail", "")]
+        )),
         "legacy keys must not disable MCP: {text}"
     );
     assert!(
-        text.contains("可用命令："),
+        text.contains("Available commands:"),
         "chat command must still work: {text}"
     );
 }

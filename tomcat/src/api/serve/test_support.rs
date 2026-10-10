@@ -345,7 +345,9 @@ pub async fn build_initialized_state_with_provider(
     let current_entry = session_manager
         .ensure_current_session(cwd_string.clone())
         .expect("current session");
-    session_manager.pin_session(&current_entry.session_id);
+    session_manager
+        .pin_session(&current_entry.session_id)
+        .expect("pin current session");
 
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()

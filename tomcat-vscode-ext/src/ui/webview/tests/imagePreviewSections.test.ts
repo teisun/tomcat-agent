@@ -12,7 +12,8 @@ describe("imagePreviewSections",()=>{
       {type:"tool",id:"t",toolCallId:"call",toolName:"read",status:"complete",isError:false,attachments:[image("tool"),image("draft"),image("no-url",{fullUri:null})]},
     ];
     const sections=imagePreviewSections(session);
-    expect(sections.map(s=>s.label)).toEqual(["Pending","Sent images 1","Tool images · read"]);
+    expect(sections.map(s=>s.label)).toEqual(["","1","read"]);
+    expect(sections.map(s=>s.kind)).toEqual(["pending","sent","tool"]);
     expect(sections.map(s=>s.pictures.map(p=>p.id))).toEqual([["draft"],["user"],["tool"]]);
     expect(sections.flatMap(s=>s.pictures).every(p=>p.thumbUri===null)).toBe(true);
     expect(imagePreviewSections(undefined)).toEqual([]);

@@ -726,7 +726,12 @@
       }
       return { ok: true, data: result };
     } catch (e) {
-      return { ok: false, error: String(e) };
+      // Keep an existing host error code across the string-only commandFailed
+      // boundary. Localized message text must not decide retry behavior.
+      var error = e && typeof e.code === 'string'
+        ? JSON.stringify({ code: e.code, message: String(e.message || e) })
+        : String(e);
+      return { ok: false, error: error };
     }
   };
 

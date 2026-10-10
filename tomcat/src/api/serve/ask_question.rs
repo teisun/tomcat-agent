@@ -38,6 +38,12 @@ impl ServeAskQuestionBridge {
         }
     }
 
+    pub fn has_pending_session(&self, session_id: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.session_id == session_id)
+    }
+
     pub fn panel_for_session(
         &self,
         event_bus: Arc<dyn EventBus>,
@@ -141,7 +147,10 @@ impl ServeAskQuestionBridge {
             serde_json::from_value::<AskQuestionWireResponse>(payload.clone())
         {
             serde_json::to_value(parsed).map_err(|error| {
-                AppError::Config(format!("serialize ask question response failed: {error}"))
+                AppError::Config(crate::infra::i18n::tr(
+                    "serve.questionResponseSerialize",
+                    &[("detail", &error.to_string())],
+                ))
             })?
         } else if payload
             .get("requestId")
@@ -159,7 +168,10 @@ impl ServeAskQuestionBridge {
                 ),
             })
             .map_err(|error| {
-                AppError::Config(format!("serialize ask question response failed: {error}"))
+                AppError::Config(crate::infra::i18n::tr(
+                    "serve.questionResponseSerialize",
+                    &[("detail", &error.to_string())],
+                ))
             })?
         };
         pending.event_bus.emit_sync(
@@ -209,7 +221,10 @@ impl ServeAskQuestionBridge {
             ),
         })
         .map_err(|error| {
-            AppError::Config(format!("serialize ask question cancel failed: {error}"))
+            AppError::Config(crate::infra::i18n::tr(
+                "serve.questionCancelSerialize",
+                &[("detail", &error.to_string())],
+            ))
         })?;
         pending.event_bus.emit_sync(
             &pending.response_event,

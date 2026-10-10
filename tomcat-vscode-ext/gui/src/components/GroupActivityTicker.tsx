@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
 
 import type { WebviewToolCard } from "../types";
 import { buildGroupTitleFromTool, isRunning, toolIconClass } from "./ToolRow";
@@ -56,6 +57,8 @@ export function GroupActivityTicker({
   isLive,
   tools,
 }: GroupActivityTickerProps) {
+  const t = useT();
+  const locale = useLocale();
   const reducedMotion = useMemo(() => prefersReducedMotion(), []);
   const rollMs = reducedMotion ? 0 : ROLL_MS;
   const collapseMs = reducedMotion ? 0 : COLLAPSE_MS;
@@ -287,7 +290,7 @@ export function GroupActivityTicker({
               <span
                 className={`tc-group-ticker__label${shouldShimmer ? " tc-loading-shimmer" : ""}`}
               >
-                {buildGroupTitleFromTool(tool)}
+                {buildGroupTitleFromTool(tool, t, locale)}
               </span>
             </span>
           );

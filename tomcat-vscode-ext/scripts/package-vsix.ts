@@ -22,7 +22,10 @@ export const PREBUILT_VSIX_ENV = "TOMCAT_PREBUILT_VSIX";
 const REQUIRED_FILES = [
   "LICENSE",
   "README.md",
+  "README.zh.md",
   "package.json",
+  "package.nls.json",
+  "package.nls.zh-cn.json",
   "gui/dist/index.js",
   "media/icon.png",
   "media/tomcat.svg",
@@ -47,7 +50,10 @@ const ROOT_ASSETS = [
   "CHANGELOG.md",
   "LICENSE",
   "README.md",
+  "README.zh.md",
   "package.json",
+  "package.nls.json",
+  "package.nls.zh-cn.json",
 ] as const;
 
 const DIRECTORY_ASSETS = [

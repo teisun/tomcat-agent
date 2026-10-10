@@ -14,6 +14,7 @@ use crate::infra::error::{
     is_retryable_llm_error, llm_error_with_source, llm_http_status_error_with_summary, AppError,
     LlmErrorStage,
 };
+use crate::infra::i18n::tr;
 
 pub const ANTHROPIC_FILES_BETA: &str = "files-api-2025-04-14";
 
@@ -153,14 +154,20 @@ impl MoonshotFilesAdapter {
         bytes: &[u8],
     ) -> Result<OpenAiFileMeta, AppError> {
         if bytes.is_empty() {
-            return Err(AppError::Llm(
-                "Moonshot Files upload: 空文件不可上传".to_string(),
-            ));
+            return Err(AppError::Llm(tr(
+                "files.empty",
+                &[("provider", "Moonshot Files")],
+            )));
         }
         let part = reqwest::multipart::Part::bytes(bytes.to_vec())
             .file_name(filename.to_string())
             .mime_str(mime_type)
-            .map_err(|e| AppError::Llm(format!("Moonshot Files upload: mime 无效: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "files.mime",
+                    &[("provider", "Moonshot Files"), ("detail", &e.to_string())],
+                ))
+            })?;
         let mut form = reqwest::multipart::Form::new()
             .text("purpose", Self::purpose_name(purpose).to_string())
             .part("file", part);
@@ -254,7 +261,12 @@ impl FilesApiAdapter for MoonshotFilesAdapter {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("Moonshot Files upload 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "Moonshot Files"), ("operation", "upload")],
+            ))
+        }))
     }
 
     async fn delete(&self, file_id: &str) -> Result<(), AppError> {
@@ -270,7 +282,12 @@ impl FilesApiAdapter for MoonshotFilesAdapter {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("Moonshot Files delete 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "Moonshot Files"), ("operation", "delete")],
+            ))
+        }))
     }
 
     fn expires_after_seconds(&self) -> u64 {
@@ -323,14 +340,20 @@ impl AnthropicFilesAdapter {
         bytes: &[u8],
     ) -> Result<OpenAiFileMeta, AppError> {
         if bytes.is_empty() {
-            return Err(AppError::Llm(
-                "Anthropic Files upload: 空文件不可上传".to_string(),
-            ));
+            return Err(AppError::Llm(tr(
+                "files.empty",
+                &[("provider", "Anthropic Files")],
+            )));
         }
         let part = reqwest::multipart::Part::bytes(bytes.to_vec())
             .file_name(filename.to_string())
             .mime_str(mime_type)
-            .map_err(|e| AppError::Llm(format!("Anthropic Files upload: mime 无效: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "files.mime",
+                    &[("provider", "Anthropic Files"), ("detail", &e.to_string())],
+                ))
+            })?;
         let form = reqwest::multipart::Form::new().part("file", part);
         let resp = self
             .client
@@ -418,8 +441,12 @@ impl FilesApiAdapter for AnthropicFilesAdapter {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err
-            .unwrap_or_else(|| AppError::Llm("Anthropic Files upload 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "Anthropic Files"), ("operation", "upload")],
+            ))
+        }))
     }
 
     async fn delete(&self, file_id: &str) -> Result<(), AppError> {
@@ -435,8 +462,12 @@ impl FilesApiAdapter for AnthropicFilesAdapter {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err
-            .unwrap_or_else(|| AppError::Llm("Anthropic Files delete 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "Anthropic Files"), ("operation", "delete")],
+            ))
+        }))
     }
 
     fn expires_after_seconds(&self) -> u64 {
@@ -461,7 +492,10 @@ fn map_send_error(provider_name: &str, op: &str, err: reqwest::Error) -> AppErro
         return llm_error_with_source(
             provider_name,
             LlmErrorStage::Connect,
-            format!("{provider_name} {op} 请求连接失败"),
+            tr(
+                "files.connect",
+                &[("provider", provider_name), ("operation", op)],
+            ),
             err,
         );
     }
@@ -469,14 +503,20 @@ fn map_send_error(provider_name: &str, op: &str, err: reqwest::Error) -> AppErro
         return llm_error_with_source(
             provider_name,
             LlmErrorStage::ReadTimeout,
-            format!("{provider_name} {op} 读/空闲超时"),
+            tr(
+                "files.idle",
+                &[("provider", provider_name), ("operation", op)],
+            ),
             err,
         );
     }
     llm_error_with_source(
         provider_name,
         LlmErrorStage::Send,
-        format!("{provider_name} {op} 请求发送失败"),
+        tr(
+            "files.send",
+            &[("provider", provider_name), ("operation", op)],
+        ),
         err,
     )
 }
@@ -486,14 +526,20 @@ fn map_body_read_error(provider_name: &str, op: &str, err: reqwest::Error) -> Ap
         return llm_error_with_source(
             provider_name,
             LlmErrorStage::ReadTimeout,
-            format!("{provider_name} {op} 读响应超时"),
+            tr(
+                "files.readTimeout",
+                &[("provider", provider_name), ("operation", op)],
+            ),
             err,
         );
     }
     llm_error_with_source(
         provider_name,
         LlmErrorStage::BodyRead,
-        format!("{provider_name} {op} 读响应失败"),
+        tr(
+            "files.read",
+            &[("provider", provider_name), ("operation", op)],
+        ),
         err,
     )
 }
@@ -502,7 +548,10 @@ fn map_parse_error(provider_name: &str, op: &str, err: impl Into<anyhow::Error>)
     llm_error_with_source(
         provider_name,
         LlmErrorStage::Parse,
-        format!("{provider_name} {op} 解析响应失败"),
+        tr(
+            "files.parse",
+            &[("provider", provider_name), ("operation", op)],
+        ),
         err,
     )
 }
@@ -521,9 +570,14 @@ fn classify_http_error(
         return llm_http_status_error_with_summary(
             provider_name,
             status.as_u16(),
-            format!(
-                "{provider_name} {op} 失败：API Key 无效（HTTP {}）。",
-                status.as_u16()
+            tr(
+                "files.invalidKey",
+                &[
+                    ("provider", provider_name),
+                    ("operation", op),
+                    ("status", &status.as_u16().to_string()),
+                    ("hint", ""),
+                ],
             ),
         );
     }
@@ -531,9 +585,13 @@ fn classify_http_error(
         return llm_http_status_error_with_summary(
             provider_name,
             status.as_u16(),
-            format!(
-                "{provider_name} {op} 失败：文件超过上游上限（HTTP {}）。",
-                status.as_u16()
+            tr(
+                "files.tooLarge",
+                &[
+                    ("provider", provider_name),
+                    ("operation", op),
+                    ("status", &status.as_u16().to_string()),
+                ],
             ),
         );
     }
@@ -541,8 +599,15 @@ fn classify_http_error(
         provider_name,
         status.as_u16(),
         format!(
-            "{provider_name} {op} 失败（HTTP {}）：{body}",
-            status.as_u16()
+            "{}: {body}",
+            tr(
+                "files.http",
+                &[
+                    ("provider", provider_name),
+                    ("operation", op),
+                    ("status", &status.as_u16().to_string())
+                ]
+            )
         ),
     )
 }

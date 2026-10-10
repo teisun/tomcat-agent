@@ -62,6 +62,12 @@ impl ServeConfirmationBridge {
         }
     }
 
+    pub fn has_pending_session(&self, session_id: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.session_id == session_id)
+    }
+
     pub fn provider_for_session(
         &self,
         session_id: impl Into<String>,
@@ -106,7 +112,10 @@ impl ServeConfirmationBridge {
                 .map(|path| path.to_string_lossy().into_owned()),
         })
         .map_err(|error| {
-            AppError::Config(format!("serialize confirmation request failed: {error}"))
+            AppError::Config(crate::infra::i18n::tr(
+                "serve.serializeFailed",
+                &[("name", "confirmation"), ("detail", &error.to_string())],
+            ))
         })?;
         self.writer.send(OutFrame::Control(ControlFrame::request(
             request_id.clone(),
@@ -114,9 +123,12 @@ impl ServeConfirmationBridge {
             Some(session_id.to_string()),
             payload,
         )))?;
-        receiver
-            .await
-            .map_err(|_| AppError::Permission("确认宿主已断开；本次操作未执行".to_string()))
+        receiver.await.map_err(|_| {
+            AppError::Permission(crate::infra::i18n::tr(
+                "serve.confirmationDisconnected",
+                &[],
+            ))
+        })
     }
 
     pub fn handle_control_response(&self, frame: &ControlFrame) -> Result<bool, AppError> {
@@ -228,6 +240,7 @@ impl UserConfirmationProvider for ServeConfirmationProvider {
         operation: PrimitiveOperation,
         preview: &str,
         plugin_id: &str,
+        _target: Option<PathBuf>,
         suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
         let decision = self

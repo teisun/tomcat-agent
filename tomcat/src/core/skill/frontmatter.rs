@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::infra::i18n::tr;
 use serde::{Deserialize, Serialize};
 
 pub const ALLOWED_SKILL_FRONTMATTER: &[&str] = &[
@@ -14,15 +15,15 @@ pub const ALLOWED_SKILL_FRONTMATTER: &[&str] = &[
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SkillParseError {
-    #[error("skill 文件缺少 frontmatter 分隔符 ---")]
+    #[error("{}", tr("skill.delimiter", &[]))]
     FrontmatterDelimMissing,
-    #[error("skill frontmatter YAML 解析失败: {0}")]
+    #[error("{prefix}: {0}", prefix = tr("skill.yaml", &[]))]
     YamlParse(String),
-    #[error("skill frontmatter 缺少必填字段: {field}")]
+    #[error("{}", tr("skill.fieldMissing", &[("field", .field)]))]
     MissingField { field: &'static str },
-    #[error("skill.name 非法: {reason}")]
+    #[error("{}", tr("skill.nameInvalid", &[("reason", .reason)]))]
     InvalidName { reason: String },
-    #[error("skill.description 非法: {reason}")]
+    #[error("{}", tr("skill.descriptionInvalid", &[("reason", .reason)]))]
     InvalidDescription { reason: String },
 }
 
@@ -173,7 +174,7 @@ fn validate_name(name: &str) -> Result<(), SkillParseError> {
     }
     if name.len() > 64 {
         return Err(SkillParseError::InvalidName {
-            reason: "长度必须 <= 64".to_string(),
+            reason: tr("skill.length", &[("limit", "64")]),
         });
     }
     if !name
@@ -181,7 +182,7 @@ fn validate_name(name: &str) -> Result<(), SkillParseError> {
         .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
     {
         return Err(SkillParseError::InvalidName {
-            reason: "仅允许 [a-z0-9-]".to_string(),
+            reason: tr("skill.nameCharacters", &[]),
         });
     }
     Ok(())
@@ -195,7 +196,7 @@ fn validate_description(description: &str) -> Result<(), SkillParseError> {
     }
     if description.len() > 1024 {
         return Err(SkillParseError::InvalidDescription {
-            reason: "长度必须 <= 1024".to_string(),
+            reason: tr("skill.length", &[("limit", "1024")]),
         });
     }
     Ok(())

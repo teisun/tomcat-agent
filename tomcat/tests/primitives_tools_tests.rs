@@ -187,9 +187,7 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.to_string().contains("白名单")
-            || err.to_string().contains("Permission")
-            || err.to_string().contains("权限"),
+        matches!(err, tomcat::AppError::Permission(_)),
         "期望权限/白名单错误，got: {}",
         err
     );
@@ -233,9 +231,7 @@ async fn test_primitive_executor_empty_whitelist_allows_workspace_dir_only(
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.to_string().contains("白名单")
-            || err.to_string().contains("Permission")
-            || err.to_string().contains("权限"),
+        matches!(err, tomcat::AppError::Permission(_)),
         "workspace 外路径应返回 Permission/白名单 错误，got: {}",
         err
     );
@@ -310,13 +306,15 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.to_string().contains("确认")
-            || err.to_string().contains("Permission")
-            || err.to_string().contains("denied"),
+        matches!(err, tomcat::AppError::Permission(_)),
         "期望用户拒绝确认错误，got: {}",
         err
     );
     tracing::info!("Assert: 返回用户拒绝确认相关错误（鲁棒性：用户拒绝）");
+    assert!(
+        !file_path.exists(),
+        "denied confirmation must not create the file"
+    );
     Ok(())
 }
 

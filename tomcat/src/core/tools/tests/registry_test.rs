@@ -158,7 +158,7 @@ async fn register_tool_rejects_scope_name_conflict() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("scope 内工具名冲突"),
+        err.to_string().contains("Tool name conflict in scope"),
         "unexpected conflict error: {err}"
     );
 }

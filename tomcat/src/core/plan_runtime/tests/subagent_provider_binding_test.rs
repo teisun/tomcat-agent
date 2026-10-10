@@ -233,7 +233,10 @@ impl LlmProvider for RecordingProvider {
                                 Some(Err(llm_error(
                                     &provider_name,
                                     LlmErrorStage::IdleTimeout,
-                                    format!("流式空闲超时: stream_timeout_sec={}s", timeout_sec),
+                                    format!(
+                                        "{UPSTREAM_IDLE_DIAGNOSTIC}: stream_timeout_sec={}s",
+                                        timeout_sec
+                                    ),
                                 )))
                             } else {
                                 None
@@ -250,6 +253,8 @@ impl LlmProvider for RecordingProvider {
         Ok(0)
     }
 }
+
+const UPSTREAM_IDLE_DIAGNOSTIC: &str = "流式空闲超时";
 
 struct FakeResolver {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
@@ -909,9 +914,7 @@ async fn resolve_failure_aborts_with_model_unresolved_and_keeps_plan_file() {
     assert!(summary.aborted);
     assert_eq!(summary.reviewer_stop_reason, "model_unresolved");
     assert!(
-        summary
-            .summary
-            .contains("模型 `fcodex/gpt-5.6-sol` 解析失败"),
+        summary.summary.contains("fcodex/gpt-5.6-sol"),
         "summary={}",
         summary.summary
     );
@@ -987,7 +990,7 @@ async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
     assert!(summary.aborted, "summary={}", summary.summary);
     assert_eq!(summary.reviewer_stop_reason, "llm_error");
     assert!(
-        summary.summary.contains("流式空闲超时"),
+        summary.summary.contains(UPSTREAM_IDLE_DIAGNOSTIC),
         "summary={}",
         summary.summary
     );

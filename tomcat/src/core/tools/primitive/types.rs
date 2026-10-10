@@ -301,29 +301,19 @@ impl HashlineSegment {
     /// 解析 `<line_no>#<2char>` 锚点；非法格式 → 结构化错误。
     pub fn parse_anchor(s: &str, ctx_idx: usize, field: &str) -> Result<(u64, String), AppError> {
         let (line_str, hash_str) = s.split_once('#').ok_or_else(|| {
-            AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 锚点格式应为 `<line>#<2char>`，实际 `{}`",
-                ctx_idx, field, s
-            ))
+            AppError::Primitive(format!("hashline_edit: edits[{ctx_idx}].{field} anchor must be `<line>#<2char>`; received `{s}`"))
         })?;
         let line_no: u64 = line_str.trim().parse().map_err(|_| {
-            AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 行号 `{}` 不是有效正整数",
-                ctx_idx, field, line_str
-            ))
+            AppError::Primitive(format!("hashline_edit: edits[{ctx_idx}].{field} line number `{line_str}` is not a valid positive integer"))
         })?;
         if line_no == 0 {
             return Err(AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 行号必须 ≥ 1",
-                ctx_idx, field
+                "hashline_edit: edits[{ctx_idx}].{field} line number must be >= 1"
             )));
         }
         let hash = hash_str.trim().to_string();
         if hash.chars().count() != 2 {
-            return Err(AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 哈希应为 2 字符，实际 `{}`",
-                ctx_idx, field, hash
-            )));
+            return Err(AppError::Primitive(format!("hashline_edit: edits[{ctx_idx}].{field} hash must contain 2 characters; received `{hash}`")));
         }
         Ok((line_no, hash))
     }

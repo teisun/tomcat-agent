@@ -1,3 +1,4 @@
+use crate::infra::i18n::{tr_in, Locale};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -252,32 +253,42 @@ fn classify_http_error_preserves_status_and_guidance() {
         0,
         86_400,
     );
-    for (status, body, needle) in [
+    for (status, body, key) in [
         (
             reqwest::StatusCode::UNAUTHORIZED,
             r#"{"error":"invalid_api_key"}"#,
-            "API Key 无效",
+            "files.invalidKey",
         ),
         (
             reqwest::StatusCode::FORBIDDEN,
             r#"{"error":"organization_restricted"}"#,
-            "Project/组织未启用 Files",
+            "files.projectDisabled",
         ),
         (
             reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":"purpose is invalid"}"#,
-            "purpose 不被接受",
+            "files.purposeRejected",
         ),
         (
             reqwest::StatusCode::PAYLOAD_TOO_LARGE,
             r#"{"error":"file_too_large"}"#,
-            "文件超过 OpenAI 上限",
+            "files.tooLarge",
         ),
     ] {
+        let needle = tr_in(
+            Locale::En,
+            key,
+            &[
+                ("provider", "OpenAI Files"),
+                ("operation", "upload"),
+                ("status", &status.as_u16().to_string()),
+                ("hint", &tr_in(Locale::En, "files.inlineHint", &[])),
+            ],
+        );
         let err = client.classify_http_error(status, body, "upload");
         assert_eq!(llm_http_status(&err), Some(status.as_u16()));
         assert!(
-            err.to_string().contains(needle),
+            err.to_string().contains(&needle),
             "status={} 文案应包含 `{}`，实际: {}",
             status,
             needle,
@@ -641,6 +652,7 @@ async fn cleanup_empty_registry_is_noop() {
 
 #[tokio::test]
 async fn tui_two_phase_attachment_order_interface() {
+    let request_text = "请总结附件";
     let server = MockServer::start(vec![ScriptedResponse::json(
         200,
         r#"{"id":"file-tui-phase","filename":"phase.pdf","bytes":5,"created_at":1700000000,"purpose":"user_data"}"#,
@@ -669,12 +681,12 @@ async fn tui_two_phase_attachment_order_interface() {
 
     // 阶段 B：文本 + 阶段 A 累积的 file_id 组装 user parts。
     let parts = [
-        ChatMessageContentPart::text("请总结附件"),
+        ChatMessageContentPart::text(request_text),
         ChatMessageContentPart::file_file_id(uploaded.id, Some("phase.pdf".to_string())).unwrap(),
     ];
     assert!(matches!(
         &parts[0],
-        ChatMessageContentPart::InputText { text } if text == "请总结附件"
+        ChatMessageContentPart::InputText { text } if text == request_text
     ));
     assert!(matches!(
         &parts[1],

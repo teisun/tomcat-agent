@@ -432,21 +432,18 @@ pub(super) async fn read_file_impl(
     let meta = metadata_with_project_root_hint(&path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
-            "路径是目录，无法读取为文件".to_string(),
+            "The path is a directory and cannot be read as a file".to_string(),
         ));
     }
     if meta.len() > executor.read_max_bytes {
         return Err(AppError::Primitive(format!(
-            "文件过大 ({} bytes)，超过限制 {} bytes",
+            "File is too large ({} bytes), exceeding the {} byte limit",
             meta.len(),
             executor.read_max_bytes
         )));
     }
     let content = read_file_utf8(&path_buf).map_err(|e| match e {
-        AppError::Config(msg) if msg.contains("invalid utf-8") => AppError::Primitive(format!(
-            "文件存在且权限已通过检查，但它是二进制或非 UTF-8 文本，不能用 read_file 按文本读取：{}",
-            path_buf.display()
-        )),
+        AppError::Config(msg) if msg.contains("invalid utf-8") => AppError::Primitive(format!("The file exists and access was authorized, but it is binary or non-UTF-8 and cannot be read as text with read_file: {}", path_buf.display())),
         other => other,
     })?;
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -487,7 +484,7 @@ pub(super) async fn read_impl(
     let meta = metadata_with_project_root_hint(&path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
-            "路径是目录，无法读取为文件".to_string(),
+            "The path is a directory and cannot be read as a file".to_string(),
         ));
     }
 

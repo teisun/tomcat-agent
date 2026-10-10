@@ -304,7 +304,10 @@ impl HttpTransport {
         AppError,
     > {
         let url = server.config.url.as_deref().ok_or_else(|| {
-            AppError::Config(format!("MCP server '{}' has no HTTP url", server.name))
+            AppError::Config(crate::infra::i18n::tr(
+                "mcp.httpUrlRequired",
+                &[("name", &server.name)],
+            ))
         })?;
         let mut config =
             rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
@@ -318,24 +321,24 @@ impl HttpTransport {
                     .strip_prefix("Bearer ")
                     .or_else(|| value.strip_prefix("bearer "))
                     .ok_or_else(|| {
-                        AppError::Config(format!(
-                            "MCP server '{}' authorization header must use Bearer",
-                            server.name
+                        AppError::Config(crate::infra::i18n::tr(
+                            "mcp.bearerRequired",
+                            &[("name", &server.name)],
                         ))
                     })?;
                 bearer = Some(token.to_string());
                 continue;
             }
             let header_name = reqwest::header::HeaderName::try_from(name).map_err(|error| {
-                AppError::Config(format!(
-                    "MCP server '{}' has invalid header name: {error}",
-                    server.name
+                AppError::Config(crate::infra::i18n::tr(
+                    "mcp.headerNameInvalid",
+                    &[("name", &server.name), ("detail", &error.to_string())],
                 ))
             })?;
             let header_value = reqwest::header::HeaderValue::try_from(value).map_err(|error| {
-                AppError::Config(format!(
-                    "MCP server '{}' has invalid header value: {error}",
-                    server.name
+                AppError::Config(crate::infra::i18n::tr(
+                    "mcp.headerValueInvalid",
+                    &[("name", &server.name), ("detail", &error.to_string())],
                 ))
             })?;
             custom_headers.insert(header_name, header_value);
@@ -355,7 +358,7 @@ pub(crate) fn http_client_for(url: &str) -> Result<reqwest::Client, AppError> {
         .timeout(std::time::Duration::from_secs(30))
         .retry(reqwest::retry::never())
         .build()
-        .map_err(|_| AppError::Tool("build HTTP MCP authorization client failed".into()))
+        .map_err(|_| AppError::Tool(crate::infra::i18n::tr("mcp.authClient", &[])))
 }
 
 fn mcp_http_client_for(url: &str) -> Result<reqwest::Client, AppError> {
@@ -363,12 +366,16 @@ fn mcp_http_client_for(url: &str) -> Result<reqwest::Client, AppError> {
         .connect_timeout(std::time::Duration::from_secs(30))
         .retry(super::scoped_http::no_replay_policy())
         .build()
-        .map_err(|_| AppError::Tool("build HTTP MCP protocol client failed".into()))
+        .map_err(|_| AppError::Tool(crate::infra::i18n::tr("mcp.protocolClient", &[])))
 }
 
 fn http_client_builder(url: &str) -> Result<reqwest::ClientBuilder, AppError> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|error| AppError::Config(format!("invalid HTTP MCP URL: {error}")))?;
+    let parsed = reqwest::Url::parse(url).map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "mcp.httpUrlInvalid",
+            &[("detail", &error.to_string())],
+        ))
+    })?;
     let mut builder = reqwest::Client::builder();
     if parsed
         .host_str()
@@ -391,7 +398,10 @@ impl HttpTransport {
         McpFailure,
     > {
         let url = server.config.url.as_deref().ok_or_else(|| {
-            AppError::Config(format!("MCP server '{}' has no HTTP url", server.name))
+            AppError::Config(crate::infra::i18n::tr(
+                "mcp.httpUrlRequired",
+                &[("name", &server.name)],
+            ))
         })?;
         let client = http_client_for(url)?;
         let mut config = self.config(server)?;

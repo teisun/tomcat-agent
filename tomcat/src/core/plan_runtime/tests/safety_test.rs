@@ -83,7 +83,7 @@ fn executing_plan_write_denial_describes_lifecycle_and_keeps_update_plan_hint() 
         .expect_err("an executing plan must reject raw writes");
     let message = err.to_string();
     assert!(!message.contains("EXEC"));
-    assert!(message.contains("计划正在执行"));
+    assert!(message.contains("While a plan is executing"));
     assert!(message.contains("update_plan"));
 }
 

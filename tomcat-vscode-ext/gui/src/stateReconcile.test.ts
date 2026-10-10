@@ -107,6 +107,39 @@ describe("stateReconcile", () => {
     expect(reconciled.connectionStatus).toBe("degraded");
   });
 
+  it.each<Partial<WebviewStateSnapshot>>([
+    { pinSupported: true }, { deleteSupported: true }, { locale: "zh-CN" },
+  ])("propagates locale and session feature changes alone: %j", (patch) => {
+    const previous = snapshot();
+    const next = reconcileStateSnapshot(previous, { ...snapshot(), ...patch });
+    expect(next).not.toBe(previous);
+    expect(next).toMatchObject(patch);
+    expect(next.sessionViews.s1).toBe(previous.sessionViews.s1);
+  });
+
+  it("publishes and clears session actions without requiring a timeline change", () => {
+    const previous = snapshot();
+    const feedback = { id: "delete-rejected", code: "busy" as const };
+    const next = reconcileStateSnapshot(previous, { ...snapshot(), sessionActionFeedback: feedback });
+    expect(next).not.toBe(previous);
+    expect(next.sessionActionFeedback).toEqual(feedback);
+    expect(next.sessionViews.s1).toBe(previous.sessionViews.s1);
+    expect(reconcileStateSnapshot(next, { ...snapshot(), sessionActionFeedback: { ...feedback } })).toBe(next);
+    const cleared = reconcileStateSnapshot(next, { ...snapshot(), sessionActionFeedback: null });
+    expect(cleared).not.toBe(next);
+    expect(cleared.sessionActionFeedback).toBeNull();
+  });
+
+  it("keeps deleting state changes in full and per-session frames", () => {
+    const previous = snapshot();
+    const next = snapshot();
+    next.sessionViews.s1.deleting = true;
+    for (const result of [reconcileStateSnapshot(previous, next), mergeSessionViewSnapshot(previous, { sessionId: "s1", view: next.sessionViews.s1 })]) {
+      expect(result.sessionViews.s1.deleting).toBe(true);
+      expect(result.sessionViews.s1.timeline).toBe(previous.sessionViews.s1.timeline);
+    }
+  });
+
   it("keeps a session draft change when everything else is unchanged", () => {
     const previous = snapshot();
     const next = snapshot();

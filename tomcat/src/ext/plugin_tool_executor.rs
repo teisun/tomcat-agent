@@ -1,6 +1,7 @@
 use crate::core::tools::contract::registry::{Tool, ToolExecutor};
 use crate::ext::{HostApiDispatcher, PluginManager};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::wire;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -58,16 +59,16 @@ impl ToolExecutor for PluginToolExecutor {
         session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let session_id = session_id
-            .ok_or_else(|| AppError::Tool(format!("插件工具执行缺少 session_id: {}", tool.name)))?;
+            .ok_or_else(|| AppError::Tool(tr("plugin.toolSession", &[("name", &tool.name)])))?;
         let plugin_manager = self
             .plugin_manager
             .upgrade()
-            .ok_or_else(|| AppError::Plugin("plugin manager unavailable".to_string()))?;
+            .ok_or_else(|| AppError::Plugin(tr("plugin.managerUnavailable", &[])))?;
         let dispatcher = self
             .dispatcher
             .lock()
             .upgrade()
-            .ok_or_else(|| AppError::Plugin("host dispatcher unavailable".to_string()))?;
+            .ok_or_else(|| AppError::Plugin(tr("plugin.dispatcherUnavailable", &[])))?;
 
         let _handle = plugin_manager
             .start_session_vm(session_id, &tool.plugin_id)
@@ -100,13 +101,16 @@ impl ToolExecutor for PluginToolExecutor {
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(message))) => Err(AppError::Tool(message)),
-            Ok(Err(_closed)) => Err(AppError::Plugin(format!(
-                "插件工具执行结果通道关闭: {}",
-                tool.name
+            Ok(Err(_closed)) => Err(AppError::Plugin(tr(
+                "plugin.toolClosed",
+                &[("name", &tool.name)],
             ))),
             Err(_) => {
                 dispatcher.drop_command_waiter(&call_id);
-                Err(AppError::Tool(format!("插件工具执行超时: {}", tool.name)))
+                Err(AppError::Tool(tr(
+                    "plugin.toolTimeout",
+                    &[("name", &tool.name)],
+                )))
             }
         }
     }

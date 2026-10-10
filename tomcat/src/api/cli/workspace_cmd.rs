@@ -1,5 +1,6 @@
 //! `tomcat workspace` 子命令实现：add / list / remove。
 
+use crate::infra::i18n::tr;
 use std::path::PathBuf;
 
 use crate::{
@@ -16,8 +17,11 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
         WorkspaceSub::List => {
             if !config_path.exists() {
                 println!(
-                    "配置文件不存在: {}。请先运行: tomcat init",
-                    config_path.display()
+                    "{}",
+                    tr(
+                        "cli.config.fileMissing",
+                        &[("path", &config_path.display().to_string())]
+                    )
                 );
                 return Ok(());
             }
@@ -38,7 +42,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
                 }
             }
             if !any {
-                println!("无已授权工作区。使用 workspace add <path> 或 workspace add --cwd 添加。");
+                println!("{}", tr("cli.workspace.empty", &[]));
             }
         }
         WorkspaceSub::Add {
@@ -47,29 +51,45 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
         } => {
             if !config_path.exists() {
                 println!(
-                    "配置文件不存在: {}。请先运行: tomcat init",
-                    config_path.display()
+                    "{}",
+                    tr(
+                        "cli.config.fileMissing",
+                        &[("path", &config_path.display().to_string())]
+                    )
                 );
                 return Ok(());
             }
             let target = if cwd {
-                std::env::current_dir()
-                    .map_err(|e| AppError::Config(format!("无法获取当前工作目录: {}", e)))?
+                std::env::current_dir().map_err(|e| {
+                    AppError::Config(tr("cli.workspace.cwdFailed", &[("detail", &e.to_string())]))
+                })?
             } else if let Some(p) = add_path {
                 PathBuf::from(p)
             } else {
-                return Err(AppError::Config("请提供目录路径或使用 --cwd".to_string()));
+                return Err(AppError::Config(tr("cli.workspace.required", &[])));
             };
             let abs = std::fs::canonicalize(&target).map_err(|_| {
-                AppError::Config(format!("路径不存在或无法访问: {}", target.display()))
+                AppError::Config(tr(
+                    "cli.workspace.inaccessible",
+                    &[("path", &target.display().to_string())],
+                ))
             })?;
             if !abs.is_dir() {
-                return Err(AppError::Config(format!("路径不是目录: {}", abs.display())));
+                return Err(AppError::Config(tr(
+                    "cli.workspace.notDir",
+                    &[("path", &abs.display().to_string())],
+                )));
             }
             let mut file_cfg = load_config_toml_file(&config_path)?;
             let existing = resolve_workspace_roots_paths(&file_cfg)?;
             if existing.contains(&abs) {
-                println!("工作区已存在: {}", abs.display());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.workspace.exists",
+                        &[("path", &abs.display().to_string())]
+                    )
+                );
                 return Ok(());
             }
             file_cfg
@@ -80,13 +100,22 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
             let toml_str =
                 toml::to_string_pretty(&file_cfg).map_err(|e| AppError::Config(e.to_string()))?;
             write_file_atomic(&config_path, toml_str.as_bytes())?;
-            println!("已添加工作区: {}", abs.display());
+            println!(
+                "{}",
+                tr(
+                    "cli.workspace.added",
+                    &[("path", &abs.display().to_string())]
+                )
+            );
         }
         WorkspaceSub::Remove { path: path_arg } => {
             if !config_path.exists() {
                 println!(
-                    "配置文件不存在: {}。请先运行: tomcat init",
-                    config_path.display()
+                    "{}",
+                    tr(
+                        "cli.config.fileMissing",
+                        &[("path", &config_path.display().to_string())]
+                    )
                 );
                 return Ok(());
             }
@@ -112,14 +141,26 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
                 !matches
             });
             if file_cfg.workspace.workspace_roots.len() == before_len {
-                println!("工作区不存在: {}", norm_user.display());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.workspace.notFound",
+                        &[("path", &norm_user.display().to_string())]
+                    )
+                );
                 return Ok(());
             }
             validate_config(&file_cfg)?;
             let toml_str =
                 toml::to_string_pretty(&file_cfg).map_err(|e| AppError::Config(e.to_string()))?;
             write_file_atomic(&config_path, toml_str.as_bytes())?;
-            println!("已移除工作区: {}", norm_user.display());
+            println!(
+                "{}",
+                tr(
+                    "cli.workspace.removed",
+                    &[("path", &norm_user.display().to_string())]
+                )
+            );
         }
     }
     Ok(())

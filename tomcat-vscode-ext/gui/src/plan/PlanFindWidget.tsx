@@ -1,4 +1,5 @@
 import { useEffect, type RefObject } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 export interface PlanFindWidgetProps {
   activeIndex: number;
@@ -26,6 +27,7 @@ export function PlanFindWidget({
   query,
   total,
 }: PlanFindWidgetProps) {
+  const t = useT();
   useEffect(() => {
     inputRef?.current?.focus();
     inputRef?.current?.select();
@@ -36,17 +38,18 @@ export function PlanFindWidget({
   const inputIsInvalid = hasQuery && !hasMatches;
   const countLabel = hasQuery
     ? hasMatches
-      ? `${activeIndex + 1} of ${total}`
-      : "No results"
+      ? t("find.count", { current: activeIndex + 1, total })
+      : t("find.none")
     : null;
 
   return (
     <section
-      aria-label="Find in plan"
+      aria-label={t("find.plan")}
       className="tc-plan-find"
       data-testid="plan-find"
     >
       <input
+        aria-label={t("find.plan")}
         aria-invalid={inputIsInvalid}
         className={`tc-plan-find__input${inputIsInvalid ? " tc-plan-find__input--empty" : ""}`}
         data-testid="plan-find-input"
@@ -76,7 +79,7 @@ export function PlanFindWidget({
         </span>
       ) : null}
       <button
-        aria-label="Previous match (Shift+Enter)"
+        aria-label={t("find.previous")}
         className="tc-plan-find__button"
         data-testid="plan-find-prev"
         disabled={!hasMatches}
@@ -86,7 +89,7 @@ export function PlanFindWidget({
         <span aria-hidden="true" className="codicon codicon-arrow-up" />
       </button>
       <button
-        aria-label="Next match (Enter)"
+        aria-label={t("find.next")}
         className="tc-plan-find__button"
         data-testid="plan-find-next"
         disabled={!hasMatches}
@@ -96,7 +99,7 @@ export function PlanFindWidget({
         <span aria-hidden="true" className="codicon codicon-arrow-down" />
       </button>
       <button
-        aria-label="Close Find (Escape)"
+        aria-label={t("find.close")}
         className="tc-plan-find__button"
         data-testid="plan-find-close"
         onClick={onClose}

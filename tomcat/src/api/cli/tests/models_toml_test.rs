@@ -3,9 +3,7 @@
 //! 本测试模块挂在 `api::cli::models_toml` 源文件下（见该文件末尾
 //! `#[cfg(test)] #[path] mod tests;`），故不在 `cli/tests/mod.rs` 声明。
 
-use super::{
-    builtin_seed_blocks, ensure_default_models_toml, ModelsTomlStatus, MODELS_TOML_HEADER,
-};
+use super::{builtin_seed_blocks, ensure_default_models_toml, ModelsTomlStatus};
 use crate::core::llm::catalog::{builtin_seed_entries, builtin_seed_toml_text};
 use crate::core::llm::{ModelCatalog, ModelEntry};
 use crate::AppConfig;
@@ -60,7 +58,11 @@ fn seed_block_text(model_id: &str) -> String {
 }
 
 fn expected_seed_file_text() -> String {
-    format!("{MODELS_TOML_HEADER}\n{}", builtin_seed_toml_text())
+    format!(
+        "{}\n{}",
+        crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "config.modelsHeader", &[]),
+        builtin_seed_toml_text()
+    )
 }
 
 fn expected_seed_blocks_text() -> String {
@@ -87,6 +89,57 @@ fn strip_model_name(block: &str) -> String {
         .filter(|line| !line.trim_start().starts_with("model_name = "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn localized_header_is_comment_only_and_keeps_identical_model_values() {
+    use crate::infra::i18n::{tr_in, Locale};
+    let seed: toml::Value = toml::from_str(builtin_seed_toml_text()).unwrap();
+    for locale in [Locale::En, Locale::ZhCn] {
+        let header = tr_in(locale, "config.modelsHeader", &[]);
+        assert!(header
+            .lines()
+            .all(|line| line.starts_with('#') || line.trim().is_empty()));
+        let text = format!("{header}\n{}", builtin_seed_toml_text());
+        assert_eq!(toml::from_str::<toml::Value>(&text).unwrap(), seed);
+    }
+}
+
+#[test]
+fn initialized_builtin_descriptions_use_catalog_unless_user_explicitly_overrides() {
+    use crate::core::llm::list_model_views;
+    use crate::infra::i18n::{tr_in, Locale};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_with_work_dir(dir.path());
+    ensure_default_models_toml(&cfg).unwrap();
+    let saved: toml::Value = toml::from_str(&models_toml_text(&cfg)).unwrap();
+    assert!(saved["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|model| model.get("description").is_none()));
+    let catalog = ModelCatalog::load(&cfg).unwrap();
+    for view in list_model_views(&catalog) {
+        let key = format!("model.description.{}", view.id);
+        let english = tr_in(Locale::En, &key, &[]);
+        assert_ne!(english, tr_in(Locale::En, "error.unknown", &[]), "{key}");
+        assert_eq!(view.description, Some(english), "{key}");
+    }
+
+    let description = "My custom model description";
+    let path = ModelCatalog::default_user_path(&cfg).unwrap();
+    std::fs::write(
+        &path,
+        format!("[[models]]\nid = \"gpt-5.4\"\ndescription = \"{description}\"\n"),
+    )
+    .unwrap();
+    let catalog = ModelCatalog::load(&cfg).unwrap();
+    let view = list_model_views(&catalog)
+        .into_iter()
+        .find(|view| view.id == "gpt-5.4")
+        .unwrap();
+    assert_eq!(view.description.as_deref(), Some(description));
 }
 
 #[test]

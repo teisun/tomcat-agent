@@ -11,6 +11,7 @@ use serde_yaml::Value;
 
 use crate::core::permission::{PermissionDecision, PermissionGate};
 use crate::core::tools::primitive::PrimitiveOperation;
+use crate::infra::i18n::tr;
 
 pub const MAX_FILE_BYTES: usize = 65_536;
 const MAX_HEADER_BYTES: usize = 4096;
@@ -60,18 +61,22 @@ fn readable(gate: &dyn PermissionGate, path: &Path) -> Result<(), String> {
         .check(PrimitiveOperation::Read, &path.to_string_lossy())
         .map_err(|e| e.to_string())?
     {
-        PermissionDecision::Deny { reason } => Err(format!("被 Deny 规则禁止读取：{reason}")),
+        PermissionDecision::Deny { reason } => {
+            Err(tr("instructions.denied", &[("reason", &reason)]))
+        }
         _ => Ok(()),
     }
 }
 
 /// Reject links in every component below the trusted scope root (including .cursor).
 fn safe_path(root: &Path, path: &Path) -> Result<(), String> {
-    let relative = path.strip_prefix(root).map_err(|_| "路径超出资源根")?;
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| tr("instructions.outsideRoot", &[]))?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
         let Component::Normal(name) = component else {
-            return Err("非法路径".into());
+            return Err(tr("instructions.invalidPath", &[]));
         };
         current.push(name);
         if fs::symlink_metadata(&current)
@@ -79,12 +84,12 @@ fn safe_path(root: &Path, path: &Path) -> Result<(), String> {
             .file_type()
             .is_symlink()
         {
-            return Err("不读取 symlink".into());
+            return Err(tr("instructions.noSymlink", &[]));
         }
     }
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
     if !canonical.starts_with(root) {
-        return Err("路径超出资源根".into());
+        return Err(tr("instructions.outsideRoot", &[]));
     }
     Ok(())
 }
@@ -97,9 +102,10 @@ pub fn parse_document(text: &str) -> Result<(String, bool, &str), String> {
     let (yaml, body) =
         crate::core::skill::frontmatter::split_frontmatter(text).map_err(|e| e.to_string())?;
     if yaml.len() > MAX_HEADER_BYTES {
-        return Err("文件头过大".into());
+        return Err(tr("instructions.headerLarge", &[]));
     }
-    let value: Value = serde_yaml::from_str(yaml).map_err(|e| format!("YAML 解析失败：{e}"))?;
+    let value: Value = serde_yaml::from_str(yaml)
+        .map_err(|e| tr("instructions.yaml", &[("detail", &e.to_string())]))?;
     let description = value
         .get("description")
         .and_then(Value::as_str)
@@ -118,7 +124,7 @@ pub fn read_body(root: &Path, path: &Path, gate: &dyn PermissionGate) -> Result<
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES as u64 {
-        return Err("文件不是普通文件或超过 64 KiB".into());
+        return Err(tr("instructions.notRegular", &[]));
     }
     let mut bytes = Vec::new();
     file.by_ref()
@@ -126,12 +132,12 @@ pub fn read_body(root: &Path, path: &Path, gate: &dyn PermissionGate) -> Result<
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > MAX_FILE_BYTES {
-        return Err("文件超过 64 KiB".into());
+        return Err(tr("instructions.fileLarge", &[]));
     }
-    let text = String::from_utf8(bytes).map_err(|_| "文件不是 UTF-8".to_string())?;
+    let text = String::from_utf8(bytes).map_err(|_| tr("instructions.utf8", &[]))?;
     let (_, _, body) = parse_document(&text)?;
     if body.trim().is_empty() {
-        return Err("正文为空".into());
+        return Err(tr("instructions.empty", &[]));
     }
     Ok(body.to_string())
 }
@@ -199,9 +205,10 @@ fn scan(
     result: &mut Discovery,
 ) {
     if depth > MAX_DEPTH {
-        result
-            .diagnostics
-            .push(format!("{}：超过 8 层", diagnostic_path(root, dir)));
+        result.diagnostics.push(tr(
+            "instructions.depth",
+            &[("path", &diagnostic_path(root, dir))],
+        ));
         return;
     }
     if let Err(e) = safe_path(root, dir).and_then(|_| readable(gate, dir)) {
@@ -241,9 +248,9 @@ fn scan(
         }
     }
     if truncated {
-        result.diagnostics.push(format!(
-            "{}：目录项已截断（上限 4096；结果仅含有界枚举批次）",
-            diagnostic_path(root, dir)
+        result.diagnostics.push(tr(
+            "instructions.entriesTruncated",
+            &[("path", &diagnostic_path(root, dir))],
         ));
     }
     *entries += count;
@@ -264,9 +271,10 @@ fn scan(
             }
         };
         if meta.file_type().is_symlink() {
-            result
-                .diagnostics
-                .push(format!("{}：不读取 symlink", diagnostic_path(root, &path)));
+            result.diagnostics.push(tr(
+                "instructions.symlinkSkipped",
+                &[("path", &diagnostic_path(root, &path))],
+            ));
             continue;
         }
         if meta.is_dir() {
@@ -289,9 +297,9 @@ fn scan(
             continue;
         }
         if *candidates >= MAX_FILES {
-            result.diagnostics.push(format!(
-                "{}：候选文件已截断（上限 256）",
-                diagnostic_path(root, &path)
+            result.diagnostics.push(tr(
+                "instructions.filesTruncated",
+                &[("path", &diagnostic_path(root, &path))],
             ));
             break;
         }
@@ -300,7 +308,7 @@ fn scan(
             safe_path(root, &path)?;
             readable(gate, &path)?;
             if meta.len() > MAX_FILE_BYTES as u64 {
-                return Err("文件超过 64 KiB".to_string());
+                return Err(tr("instructions.fileLarge", &[]));
             }
             let mut bytes = Vec::new();
             File::open(&path)
@@ -312,19 +320,20 @@ fn scan(
             let text = match std::str::from_utf8(&bytes) {
                 Ok(t) => t,
                 Err(e) if e.error_len().is_none() && meta.len() > bytes.len() as u64 => {
-                    std::str::from_utf8(&bytes[..e.valid_up_to()]).map_err(|_| "文件不是 UTF-8")?
+                    std::str::from_utf8(&bytes[..e.valid_up_to()])
+                        .map_err(|_| tr("instructions.utf8", &[]))?
                 }
-                Err(_) => return Err("文件不是 UTF-8".into()),
+                Err(_) => return Err(tr("instructions.utf8", &[])),
             };
             let (description, always, body) = parse_document(text).map_err(|e| {
                 if text.starts_with("---") && bytes.len() > MAX_HEADER_BYTES {
-                    "文件头过大".into()
+                    tr("instructions.headerLarge", &[])
                 } else {
                     e
                 }
             })?;
             if body.trim().is_empty() && meta.len() <= bytes.len() as u64 {
-                return Err("正文为空".into());
+                return Err(tr("instructions.empty", &[]));
             }
             Ok((description, always))
         })();
@@ -373,7 +382,7 @@ pub fn render_rules(
     let mut loaded = 0;
     for file in &discovery.files {
         if !file.always_apply {
-            diagnostics.push(format!("{}：alwaysApply 不是 true", file.card.path));
+            diagnostics.push(tr("instructions.notAlways", &[("path", &file.card.path)]));
             continue;
         }
         match read_body(root, &file.file_path, gate) {
@@ -393,7 +402,7 @@ pub fn render_rules(
                     file.card.path
                 );
                 if text.chars().count() + entry.chars().count() > limit {
-                    diagnostics.push(format!("{}：超出章节预算", file.card.path));
+                    diagnostics.push(tr("instructions.budget", &[("path", &file.card.path)]));
                     continue;
                 }
                 text.push_str(&entry);
@@ -565,6 +574,13 @@ mod tests {
         let d = discover(&root, ".agents", false, &gate());
         assert_eq!(d.files.len(), 256);
         assert_eq!(d.files[255].card.name, "255");
-        assert!(d.diagnostics.iter().any(|e| e.contains("截断")));
+        assert!(d
+            .diagnostics
+            .iter()
+            .any(|e| e.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "instructions.filesTruncated",
+                &[("path", "")]
+            ))));
     }
 }

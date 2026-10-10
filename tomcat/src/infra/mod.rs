@@ -12,6 +12,7 @@ pub(crate) mod error;
 pub(crate) mod event_bus;
 pub(crate) mod events;
 pub(crate) mod http_client;
+pub(crate) mod i18n;
 pub(crate) mod logging;
 pub(crate) mod net_guard;
 pub(crate) mod platform;
@@ -53,5 +54,6 @@ pub use error::{llm_error, llm_http_status_error, AppError, LlmError, LlmErrorSt
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId, ScopedEventEmitter};
 pub use events::wire;
 pub use events::{AgentEvent, ExtensionEvent};
+pub use i18n::tr;
 pub use logging::init_logging;
 pub use platform::{normalize_path, read_file_utf8, write_file_atomic};

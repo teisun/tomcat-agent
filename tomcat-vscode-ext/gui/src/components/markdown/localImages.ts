@@ -1,3 +1,4 @@
+import { t } from "../../../../src/shared/i18n";
 import type { WebviewMediaRoot } from "../../types";
 
 const WINDOWS_DRIVE_RE = /^[a-z]:[\\/]/iu;
@@ -109,8 +110,11 @@ function createBlockedImageReplacement(
   const link = image.ownerDocument.createElement("a");
   link.className = "tc-blocked-image";
   link.dataset.testid = "blocked-inline-image";
-  link.textContent = rawSrc || image.getAttribute("alt") || "image";
-  link.title = rawSrc || image.getAttribute("alt") || "image";
+  const suppliedLabel = rawSrc || image.getAttribute("alt");
+  if (!suppliedLabel) link.dataset.tcDefaultImageLabel = "1";
+  const label = suppliedLabel || t("image.label");
+  link.textContent = label;
+  link.title = label;
   if (hasUriScheme(rawSrc)) {
     link.href = rawSrc;
   } else {

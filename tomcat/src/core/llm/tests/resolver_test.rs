@@ -766,9 +766,13 @@ fn compaction_keeps_original_error_when_already_on_default_model() {
         .expect_err("missing default-model credential should surface original error");
     let msg = err.to_string();
     assert!(msg.contains("DEEPSEEK_API_KEY"));
-    assert!(
-        !msg.contains("压缩模型 `deepseek-v4-pro` 不可用"),
-        "same-model path should not wrap the error as a fallback failure: {msg}"
+    assert_eq!(
+        msg,
+        resolver
+            .resolve(LlmScene::Main, None)
+            .unwrap_err()
+            .to_string(),
+        "same-model compaction must retain the original main-model error",
     );
 }
 

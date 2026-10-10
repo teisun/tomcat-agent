@@ -19,7 +19,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::core::session::transcript::{append_line_with_sync, SyncLevel};
+use crate::core::session::transcript::{append_sidecar_line_with_sync, SyncLevel};
 use crate::infra::error::AppError;
 use crate::infra::events::ToolDisplay;
 use crate::infra::platform::write_file_atomic_with;
@@ -82,10 +82,14 @@ pub(crate) fn append_tool_display(
     let line = serde_json::to_string(&entry)?;
     let path = tool_display_sidecar_path(transcript_path);
     let lock = sidecar_lock(&path);
-    let _guard = lock
-        .lock()
-        .map_err(|error| AppError::Config(format!("tool-display sidecar lock failed: {error}")))?;
-    append_line_with_sync(&path, &line, SyncLevel::SyncData)
+    let _guard = lock.lock().map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "session.displayLock",
+            &[("detail", &error.to_string())],
+        ))
+    })?;
+    std::fs::metadata(transcript_path).map_err(AppError::Io)?;
+    append_sidecar_line_with_sync(&path, &line, SyncLevel::SyncData)
 }
 
 fn compact_display(display: &mut ToolDisplay) -> bool {
@@ -220,9 +224,12 @@ pub(crate) fn compact_tool_display_sidecar(
 ) -> Result<ToolDisplayCompaction, AppError> {
     let path = tool_display_sidecar_path(transcript_path);
     let lock = sidecar_lock(&path);
-    let _guard = lock
-        .lock()
-        .map_err(|error| AppError::Config(format!("tool-display sidecar lock failed: {error}")))?;
+    let _guard = lock.lock().map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "session.displayLock",
+            &[("detail", &error.to_string())],
+        ))
+    })?;
     let cutoff = now
         - chrono::Duration::from_std(TOOL_DISPLAY_DIFF_RETENTION)
             .expect("seven-day retention fits chrono duration");
@@ -234,6 +241,7 @@ pub(crate) fn compact_tool_display_sidecar(
     }
     let file = std::fs::File::open(&path).map_err(AppError::Io)?;
 
+    std::fs::metadata(transcript_path).map_err(AppError::Io)?;
     write_file_atomic_with(&path, |writer| {
         for line in BufReader::new(file).lines() {
             let line = line.map_err(AppError::Io)?;

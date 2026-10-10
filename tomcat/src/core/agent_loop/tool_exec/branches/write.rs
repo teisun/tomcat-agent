@@ -1,5 +1,6 @@
 use super::super::guard::check_mutation_stamp;
 use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
+use crate::infra::i18n::tr;
 
 pub(in super::super) async fn handle_write(
     ctx: &ToolExecCtx<'_>,
@@ -13,10 +14,7 @@ pub(in super::super) async fn handle_write(
         .unwrap_or_else(|_| std::path::PathBuf::from(path));
     let exists = resolved.exists();
     if exists && !overwrite {
-        return Err(format!(
-            "Exists: 路径 `{}` 已存在；如需替换请先 `read` 该文件，然后再用 `overwrite=true` 调用 `write`",
-            path
-        ));
+        return Err(format!("Exists: Path `{path}` already exists; read it first, then call write with `overwrite=true` to replace it"));
     }
     if exists && overwrite {
         if let Some(state) = ctx.read_file_state {
@@ -45,12 +43,16 @@ pub(in super::super) async fn handle_write(
                     diff_truncated: r.diff_truncated,
                     expired: false,
                 });
-                let verb = if r.diff_hint.is_some() {
-                    "已覆盖"
-                } else {
-                    "已写入"
-                };
-                let mut msg = format!("{}: {} ({} bytes)", verb, r.path, r.bytes_written);
+                let mut msg = format!(
+                    "{}: {} ({} bytes)",
+                    if r.diff_hint.is_some() {
+                        "Overwritten"
+                    } else {
+                        "Written"
+                    },
+                    r.path,
+                    r.bytes_written
+                );
                 if let Some(diff) = r.diff_hint.as_ref() {
                     if !diff.is_empty() {
                         msg.push_str("\n--- diff (truncated)\n");
@@ -59,9 +61,10 @@ pub(in super::super) async fn handle_write(
                 }
                 Ok(msg)
             } else {
-                let msg = format!("写入被拒绝: {}", r.path);
-                *display_out = Some(ToolDisplay::Text { text: msg.clone() });
-                Ok(msg)
+                *display_out = Some(ToolDisplay::Text {
+                    text: tr("toolWrite.denied", &[("path", &r.path)]),
+                });
+                Ok(format!("Write denied: {}", r.path))
             }
         }
         Err(e) => Err(e.to_string()),

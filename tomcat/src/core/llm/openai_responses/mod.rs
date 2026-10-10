@@ -67,6 +67,7 @@ mod stream;
 // 进而通过 `#[path = "../tests/openai_responses_test.rs"] mod tests;` 的 `super::*`
 // 暴露给同名单测——tests 是本模块的子模块，可以看到 mod.rs 私有的 `use` 别名。
 // 不向外加 `pub`，外部仍只能通过 `OpenAiResponsesProvider` 公共 API 接触。
+use crate::infra::i18n::tr;
 #[allow(unused_imports)]
 use payload::{
     build_responses_input, convert_tools_to_responses, responses_payload_to_chat_response,
@@ -78,13 +79,17 @@ use stream::responses_chunk_to_events;
 use stream::{
     responses_chunk_to_events_with_state, ReasoningState, ResponsesStream, ToolCallTrack,
 };
+
 const PROVIDER_NAME: &str = "openai-responses";
 
 fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::IdleTimeout,
-        format!("流式空闲超时: stream_timeout_sec={}s", stream_timeout_sec),
+        tr(
+            "llm.idleTimeout",
+            &[("seconds", &stream_timeout_sec.to_string())],
+        ),
     )
 }
 
@@ -92,9 +97,9 @@ fn non_stream_stale_timeout_error(non_stream_stale_timeout_sec: u64) -> AppError
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::NonStreamStale,
-        format!(
-            "非流式请求长时间无响应: non_stream_stale_timeout_sec={}s",
-            non_stream_stale_timeout_sec
+        tr(
+            "llm.nonStreamStale",
+            &[("seconds", &non_stream_stale_timeout_sec.to_string())],
         ),
     )
 }
@@ -104,7 +109,7 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::Connect,
-            format!("{prefix}连接失败"),
+            tr("llm.connectFailed", &[("action", prefix)]),
             err,
         );
     }
@@ -112,9 +117,12 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::ReadTimeout,
-            format!(
-                "{prefix}读/空闲超时（等待响应头）: http_read_timeout_sec={}s",
-                http_read_timeout_sec
+            tr(
+                "llm.headersTimeout",
+                &[
+                    ("action", prefix),
+                    ("seconds", &http_read_timeout_sec.to_string()),
+                ],
             ),
             err,
         );
@@ -122,7 +130,7 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::Send,
-        format!("{prefix}发送失败"),
+        tr("llm.sendFailed", &[("action", prefix)]),
         err,
     )
 }
@@ -132,9 +140,12 @@ fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec:
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::ReadTimeout,
-            format!(
-                "{prefix}超时: http_read_timeout_sec={}s",
-                http_read_timeout_sec
+            tr(
+                "llm.readTimeout",
+                &[
+                    ("action", prefix),
+                    ("seconds", &http_read_timeout_sec.to_string()),
+                ],
             ),
             err,
         );
@@ -142,7 +153,7 @@ fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec:
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::BodyRead,
-        format!("{prefix}失败"),
+        tr("llm.failed", &[("action", prefix)]),
         err,
     )
 }
@@ -151,7 +162,7 @@ fn map_parse_error(prefix: &str, err: impl Into<anyhow::Error>) -> AppError {
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::Parse,
-        format!("{prefix}失败"),
+        tr("llm.failed", &[("action", prefix)]),
         err,
     )
 }
@@ -698,21 +709,30 @@ impl OpenAiResponsesProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| map_send_error("请求", e, self.http_read_timeout_sec))?;
+            .map_err(|e| {
+                map_send_error(
+                    &tr("llm.action.request", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
 
         let status = resp.status();
         let retry_after_ms = parse_retry_after_ms(resp.headers());
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| map_body_read_error("读取响应", e, self.http_read_timeout_sec))?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            map_body_read_error(
+                &tr("llm.action.readResponse", &[]),
+                e,
+                self.http_read_timeout_sec,
+            )
+        })?;
 
         if !status.is_success() {
             return Err(map_http_status_error(status, &bytes, retry_after_ms));
         }
 
-        let raw: Value =
-            serde_json::from_slice(&bytes).map_err(|e| map_parse_error("解析响应", e))?;
+        let raw: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| map_parse_error(&tr("llm.action.parseResponse", &[]), e))?;
         Ok(payload::responses_payload_to_chat_response(&raw))
     }
 
@@ -749,7 +769,7 @@ impl OpenAiResponsesProvider {
                 }
             }
         }
-        let err = last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+        let err = last_err.unwrap_or_else(|| AppError::Llm(tr("llm.retriesExhausted", &[])));
         if Self::is_connect_or_network_error(&err) {
             if let Some(ref fallback) = self.api_base_fallback {
                 warn!("主 API 不可达，尝试 fallback: {}", fallback);
@@ -790,14 +810,23 @@ impl OpenAiResponsesProvider {
             .json(body)
             .send()
             .await
-            .map_err(|e| map_send_error("流式请求", e, self.http_read_timeout_sec))?;
+            .map_err(|e| {
+                map_send_error(
+                    &tr("llm.action.streamRequest", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
         let status = resp.status();
         let retry_after_ms = parse_retry_after_ms(resp.headers());
         if !status.is_success() {
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| map_body_read_error("读取错误响应", e, self.http_read_timeout_sec))?;
+            let bytes = resp.bytes().await.map_err(|e| {
+                map_body_read_error(
+                    &tr("llm.action.readErrorResponse", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
             return Err(map_http_status_error(status, &bytes, retry_after_ms));
         }
         Ok(resp)
@@ -829,7 +858,7 @@ impl OpenAiResponsesProvider {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("Responses 流式建连重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| AppError::Llm(tr("llm.responsesRetriesExhausted", &[]))))
     }
 
     async fn stream_post_with_base_fallback(
@@ -948,11 +977,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
         let _permit = if let Some(ref sem) = self.semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| AppError::Llm(format!("限流信号量关闭: {}", e)))?,
-            )
+            Some(sem.acquire().await.map_err(|e| {
+                AppError::Llm(tr("llm.semaphoreClosed", &[("detail", &e.to_string())]))
+            })?)
         } else {
             None
         };
@@ -985,11 +1012,9 @@ impl LlmProvider for OpenAiResponsesProvider {
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
         let _permit = if let Some(ref sem) = self.semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| AppError::Llm(format!("限流信号量关闭: {}", e)))?,
-            )
+            Some(sem.acquire().await.map_err(|e| {
+                AppError::Llm(tr("llm.semaphoreClosed", &[("detail", &e.to_string())]))
+            })?)
         } else {
             None
         };
@@ -1026,9 +1051,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         let http_read_timeout_sec = self.http_read_timeout_sec;
         let stream_timeout_sec = self.stream_timeout_sec;
-        let bytes_stream = resp
-            .bytes_stream()
-            .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
+        let bytes_stream = resp.bytes_stream().map_err(move |e| {
+            map_body_read_error(&tr("llm.action.readStream", &[]), e, http_read_timeout_sec)
+        });
         let event_stream = stream::ResponsesStream::new(
             bytes_stream,
             prefer_ndjson,

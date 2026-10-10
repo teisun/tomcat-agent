@@ -7,6 +7,7 @@
 //! - `ChatRequest` 序列化为 snake_case JSON。
 //! - `TokenUsage::default` / `StreamEvent::ContentDelta` 序列化默认值。
 
+use crate::infra::i18n::{tr_in, Locale};
 use super::super::types::{
     ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
     ChatMessageContentPart, ChatMessageRole, ChatRequest, ContextRefKind, ContextReference,
@@ -621,7 +622,7 @@ fn content_part_serde_roundtrip_file_id() {
 fn image_base64_data_rejects_invalid_base64() {
     let err = ChatMessageContentPart::image_base64_data("image/png", "***not-base64***")
         .expect_err("非法 base64 应拒绝");
-    assert!(err.to_string().contains("base64 解码失败"));
+    assert!(err.to_string().contains(&tr_in(Locale::En, "media.decodeFailed", &[("operation", "image_base64_data"), ("detail", "")])));
 }
 
 #[test]
@@ -633,10 +634,13 @@ fn image_base64_data_rejects_non_whitelisted_mime() {
 
 #[test]
 fn image_b64_rejects_missing_path() {
+    let expected = tr_in(Locale::En, "media.statFailed", &[
+        ("operation", "image_b64"), ("path", "/nonexistent/never-here-xyzz.png"), ("detail", ""),
+    ]);
     let err = ChatMessageContentPart::image_b64("image/png", "/nonexistent/never-here-xyzz.png")
         .expect_err("路径不存在应拒绝");
     let s = err.to_string();
-    assert!(s.contains("无法 stat"), "错误文案应提示 stat 失败: {}", s);
+    assert!(s.contains(&expected), "{s}");
 }
 
 #[test]
@@ -707,6 +711,9 @@ fn content_part_serde_rejects_input_file_with_no_source() {
 
 #[test]
 fn file_b64_rejects_missing_path() {
+    let expected = tr_in(Locale::En, "media.statFailed", &[
+        ("operation", "file_b64"), ("path", "/nonexistent/never-here-xyzz.pdf"), ("detail", ""),
+    ]);
     let err = ChatMessageContentPart::file_b64(
         "a.pdf",
         "application/pdf",
@@ -714,7 +721,7 @@ fn file_b64_rejects_missing_path() {
     )
     .expect_err("路径不存在应拒绝");
     let s = err.to_string();
-    assert!(s.contains("无法 stat"), "错误文案应提示 stat 失败: {}", s);
+    assert!(s.contains(&expected), "{s}");
 }
 
 #[test]
@@ -729,7 +736,7 @@ fn file_b64_rejects_oversize() {
 #[test]
 fn image_file_id_rejects_empty() {
     let err = ChatMessageContentPart::image_file_id("   ").expect_err("空 file_id 应拒绝");
-    assert!(err.to_string().contains("不能为空"));
+    assert!(err.to_string().contains(&tr_in(Locale::En, "media.fileIdEmpty", &[("operation", "image_file_id")])));
 }
 
 #[tokio::test]
@@ -759,5 +766,5 @@ async fn file_upload_rejects_empty_bytes_before_network() {
     let err = ChatMessageContentPart::file_upload(&client, "a.pdf", "application/pdf", &[])
         .await
         .expect_err("空字节应在发请求前失败");
-    assert!(err.to_string().contains("为空"));
+    assert!(err.to_string().contains(&tr_in(Locale::En, "media.emptyUpload", &[("operation", "file_upload")])));
 }

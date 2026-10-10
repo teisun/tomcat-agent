@@ -1,4 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey } from "../../../src/shared/i18n";
 import { COLLAPSED_GROUP_LIMIT, visibleSlashRows, type SlashMenuItem, type SlashMenuSection, type SlashMenuRow } from "../slashMenu";
 
 export interface SlashCommandMenuHandle { onKeyDown(event: KeyboardEvent): boolean }
@@ -6,6 +8,8 @@ interface Props { sections: SlashMenuSection[]; query: string; open: boolean; on
 const optionId = (id:string) => `slash-command-${encodeURIComponent(id)}`;
 
 export const SlashCommandMenu = forwardRef<SlashCommandMenuHandle, Props>(function SlashCommandMenu({sections,query,open,onSelect,onClose},ref) {
+  const t = useT();
+  const locale = useLocale();
   const [expandedGroups,setExpandedGroups] = useState<Set<string>>(new Set());
   const rows = useMemo(() => visibleSlashRows(sections,expandedGroups),[sections,expandedGroups]);
   const [selectedId,setSelectedId] = useState<string | null>(null);
@@ -33,11 +37,11 @@ export const SlashCommandMenu = forwardRef<SlashCommandMenuHandle, Props>(functi
     return false;
   }}),[rows,selected,open,onSelect,onClose,sections]);
   if (!open || !rows.length) return null;
-  return <div className="tc-session-dropdown tc-context-search-dropdown tc-slash-menu" role="listbox" aria-label="斜杠命令" aria-activedescendant={selected ? optionId(selected.id) : undefined} data-testid="slash-command-menu">
+  return <div className="tc-session-dropdown tc-context-search-dropdown tc-slash-menu" role="listbox" aria-label={t("slash.aria")} aria-activedescendant={selected ? optionId(selected.id) : undefined} data-testid="slash-command-menu">
     {sections.map((section) => <div key={section.id} role="group" aria-label={section.title} className="tc-session-group">
       <div className="tc-session-group__header">{section.title}</div>
-      {rows.filter((row) => row.groupId === section.id).map((row) => <button key={row.id} id={optionId(row.id)} role="option" aria-selected={selected?.id === row.id} aria-label={row.type === "more" ? `Show ${row.count} more ${row.title}` : undefined} className={`tc-session-item tc-slash-menu__item${selected?.id === row.id ? " tc-session-item--active" : ""}`} type="button" data-testid={row.type === "more" ? "slash-command-more" : "slash-command-option"} title={row.type === "item" ? `${row.item.usage}${row.item.summary ? ` — ${row.item.summary}` : ""}${row.item.source ? ` · ${row.item.source}` : ""}` : undefined} onMouseDown={(event) => event.preventDefault()} onClick={() => activate(row)}>
-        {row.type === "more" ? <span className="tc-slash-menu__more">Show {row.count} more</span> : <>
+      {rows.filter((row) => row.groupId === section.id).map((row) => <button key={row.id} id={optionId(row.id)} role="option" aria-selected={selected?.id === row.id} aria-label={row.type === "more" ? t(pluralKey(locale, "slash.moreAria.other", row.count), { count: row.count, group: row.title }) : undefined} className={`tc-session-item tc-slash-menu__item${selected?.id === row.id ? " tc-session-item--active" : ""}`} type="button" data-testid={row.type === "more" ? "slash-command-more" : "slash-command-option"} title={row.type === "item" ? `${row.item.usage}${row.item.summary ? ` — ${row.item.summary}` : ""}${row.item.source ? ` · ${row.item.source}` : ""}` : undefined} onMouseDown={(event) => event.preventDefault()} onClick={() => activate(row)}>
+        {row.type === "more" ? <span className="tc-slash-menu__more">{t(pluralKey(locale, "slash.more.other", row.count), { count: row.count })}</span> : <>
           <span className="tc-slash-menu__heading"><span className="tc-session-item__title">{row.item.usage}</span>{row.item.source && <span className="tc-slash-menu__source">{row.item.source}</span>}</span>
           {row.item.summary && <span className="tc-slash-menu__description">{row.item.summary}</span>}
         </>}

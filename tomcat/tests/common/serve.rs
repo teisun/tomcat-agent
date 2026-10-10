@@ -42,6 +42,7 @@ pub fn isolated_serve_command(home: &Path) -> StdCommand {
     }
     command
         .env("HOME", home)
+        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("SHELL", "/bin/zsh")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost");

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 import { typedBlobUrl } from "../attachments/imagePipeline";
 
 export interface ZoomedImage {
@@ -8,6 +9,7 @@ export interface ZoomedImage {
 }
 
 function LightboxImage({ image }: { image: ZoomedImage }) {
+  const t = useT();
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
   useEffect(() => {
@@ -20,9 +22,9 @@ function LightboxImage({ image }: { image: ZoomedImage }) {
     }).catch(() => { if (!cancelled) setError(true); });
     return () => { cancelled = true; if (ownedUrl) URL.revokeObjectURL(ownedUrl); };
   }, [image.src, image.mimeType]);
-  if (error) return <div role="alert">Unable to load image preview.</div>;
+  if (error) return <div role="alert">{t("image.preview.failed")}</div>;
   const src = image.mimeType === "image/svg+xml" ? url : image.src;
-  if (!src) return <div role="status">Loading image…</div>;
+  if (!src) return <div role="status">{t("image.preview.loading")}</div>;
   return <img alt={image.alt} className="tc-image-lightbox__image" data-testid="image-lightbox-image"
     src={src} onMouseDown={event => event.stopPropagation()} onError={() => setError(true)} />;
 }
@@ -34,6 +36,7 @@ export function ImageLightbox({
   image: ZoomedImage | null;
   onClose(): void;
 }) {
+  const t = useT();
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
 
@@ -87,7 +90,7 @@ export function ImageLightbox({
       role="presentation"
     >
       <section
-        aria-label="Image preview"
+        aria-label={t("image.preview")}
         aria-modal="true"
         className="tc-image-lightbox"
         data-testid="image-lightbox"
@@ -101,7 +104,7 @@ export function ImageLightbox({
         role="dialog"
       >
         <button
-          aria-label="Close image preview"
+          aria-label={t("image.preview.close")}
           className="tc-image-lightbox__close"
           data-testid="image-lightbox-close"
           onClick={onClose}

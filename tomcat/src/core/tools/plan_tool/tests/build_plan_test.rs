@@ -36,7 +36,14 @@ fn plan_build_rejects_active_executing_plan() {
     rt.build_plan("other_plan", None).unwrap();
     let err = rt.build_plan("blockee", None).unwrap_err();
     match err {
-        PlanRuntimeError::BuildBlocked(s) => assert!(s.contains("已在执行计划"), "{s}"),
+        PlanRuntimeError::BuildBlocked(s) => assert_eq!(
+            s,
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "planRuntime.alreadyExecuting",
+                &[("id", "other_plan")]
+            )
+        ),
         other => panic!("expected BuildBlocked, got {other:?}"),
     }
     cleanup_home(&home);

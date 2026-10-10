@@ -94,7 +94,12 @@ impl ChatContext {
             (skills, plugins, skills_time, phase.elapsed())
         })
         .await
-        .map_err(|error| AppError::Plugin(format!("inventory scan failed: {error}")))?;
+        .map_err(|error| {
+            AppError::Plugin(crate::infra::i18n::tr(
+                "runtime.inventoryScan",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
         report.timings.discover_skills = skills_time;
         report.timings.discover_plugins = plugins_time;
         report.warnings.extend(skills.warnings.clone());

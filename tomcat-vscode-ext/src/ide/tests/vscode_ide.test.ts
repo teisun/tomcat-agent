@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 
 import type { DiffPresentation } from "../../shared/diffPresentation";
 import { VsCodeIde } from "../VsCodeIde";
+import { setLocale, translate } from "../../shared/i18n";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -93,6 +94,21 @@ describe("VsCodeIde files", () => {
 });
 
 describe("VsCodeIde read-only history preview", () => {
+  it("localizes native diff titles while preserving the original file contents", async () => {
+    const ide = new VsCodeIde();
+    setLocale("en");
+    try {
+      const presentation = { kind: "full" as const, fragments: [{ before: "original text", after: "changed text" }] };
+      await ide.openDiffPreview("s", "tool", "sample.ts", presentation);
+      expect(__testing.lastDiffCommand!.title).toBe(translate("en", "ide.originalTitle", { file: "sample.ts" }));
+      const original = __testing.lastDiffCommand!.original;
+      setLocale("zh-CN");
+      await ide.openDiffPreview("s", "tool", "sample.ts", presentation);
+      expect(ide.provideTextDocumentContent(original)).toBe("original text");
+      expect(ide.provideTextDocumentContent(__testing.lastDiffCommand!.modified)).toBe("changed text");
+    } finally { setLocale("en"); ide.dispose(); }
+  });
+
   beforeEach(() => {
     __testing.reset();
   });
@@ -142,12 +158,12 @@ describe("VsCodeIde read-only history preview", () => {
 
     const changes = __testing.lastChangesCommand!;
     expect(executeCommand).toHaveBeenCalledExactlyOnceWith("vscode.changes", changes.title, changes.changes);
-    expect(changes.title).toBe("example.ts · 本次修改（2 个变更片段）");
+    expect(changes.title).toBe("example.ts · This change (2 fragments)");
     expect(changes.changes).toHaveLength(2);
     for (const [index, [resource, original, proposed]] of changes.changes.entries()) {
       expect(resource).toEqual(proposed);
       expect(original.path).toBe(proposed.path);
-      expect(original.path).toContain(`片段 ${index + 1}／2`);
+      expect(original.path).toContain(`Fragment ${index + 1}/2`);
       expect(original.path).toMatch(/\.ts$/);
       expect(original.path).not.toContain("session-1");
       expect(original.path).not.toContain("tool-1");
@@ -161,8 +177,8 @@ describe("VsCodeIde read-only history preview", () => {
         presentation.fragments[index].after,
       ]);
     }
-    expect(changes.changes[0][1].path).toContain("原 L25-26 → 新 L25-26");
-    expect(changes.changes[1][1].path).toContain("原 L235-236 → 新 L235-236");
+    expect(changes.changes[0][1].path).toContain("Old L25-26 → New L25-26");
+    expect(changes.changes[1][1].path).toContain("Old L235-236 → New L235-236");
     expect(__testing.lastDiffCommand).toBeUndefined();
   });
 
@@ -203,9 +219,9 @@ describe("VsCodeIde read-only history preview", () => {
     const changes = __testing.lastChangesCommand!.changes;
     expect(await readPair(changes[0][1], changes[0][2])).toEqual(["", "added"]);
     expect(await readPair(changes[1][1], changes[1][2])).toEqual(["deleted", ""]);
-    expect(changes[0][1].path).toBe("/new · 片段 1／3 · 新 L4.ts");
-    expect(changes[1][1].path).toBe("/new · 片段 2／3 · 原 L10.ts");
-    expect(changes[2][1].path).toBe("/new · 片段 3／3.ts");
+    expect(changes[0][1].path).toBe("/new · Fragment 1/3 · New L4.ts");
+    expect(changes[1][1].path).toBe("/new · Fragment 2/3 · Old L10.ts");
+    expect(changes[2][1].path).toBe("/new · Fragment 3/3.ts");
   });
 
   it.each(["full", "fragments"] as const)("reuses stable %s preview URIs after the disk file changes", async (kind) => {
@@ -229,11 +245,11 @@ describe("VsCodeIde read-only history preview", () => {
     });
     const original = __testing.lastDiffCommand!.original;
     const unknown = original.with({ query: `${original.query}&unknown=1` });
-    expect(() => ide.provideTextDocumentContent(unknown)).toThrow("变更预览已不可用");
+    expect(() => ide.provideTextDocumentContent(unknown)).toThrow("Change preview is no longer available");
 
     ide.dispose();
 
-    expect(() => ide.provideTextDocumentContent(original)).toThrow("变更预览已不可用");
+    expect(() => ide.provideTextDocumentContent(original)).toThrow("Change preview is no longer available");
   });
 
   it("rejects an empty preview without opening an editor", async () => {
@@ -241,7 +257,7 @@ describe("VsCodeIde read-only history preview", () => {
     const executeCommand = vi.spyOn(vscode.commands, "executeCommand");
     await expect(ide.openDiffPreview("session-1", "tool-1", "src/example.ts", {
       kind: "fragments", fragments: [],
-    })).rejects.toThrow("没有可查看的变更内容");
+    })).rejects.toThrow("No changes are available to preview");
     expect(executeCommand).not.toHaveBeenCalled();
   });
 

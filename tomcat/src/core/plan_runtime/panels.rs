@@ -16,6 +16,13 @@ pub const CUSTOM_OPTION_ID: &str = "__custom__";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
+    /// Runtime-owned presentation option. Model tool arguments cannot disable free text.
+    #[serde(
+        default = "allow_custom_default",
+        skip_deserializing,
+        skip_serializing_if = "is_true"
+    )]
+    pub allow_custom: bool,
     pub id: String,
     pub prompt: String,
     pub options: Vec<QuestionOption>,
@@ -38,6 +45,13 @@ pub struct Answer {
     #[serde(default, skip_serializing_if = "is_false")]
     pub skipped: bool,
     pub picked_recommended: bool,
+}
+
+pub(crate) fn allow_custom_default() -> bool {
+    true
+}
+pub(crate) fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn is_false(value: &bool) -> bool {

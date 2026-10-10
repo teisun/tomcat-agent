@@ -57,7 +57,7 @@ describe("host shared command replies", () => {
       await f.send(); const state = f.provider.currentState();
       expect(state.sessionViews.s1.commandPending).toBe(false);
       expect(state.sessionViews.s1.timeline.at(-1)).toMatchObject({kind:"error"});
-      if(detail === "busy") expect(state.sessionViews.s1.timeline.at(-1)).toMatchObject({text:expect.stringMatching(/等待|等待完成|处理中/u)});
+      if(detail === "busy") expect(state.sessionViews.s1.timeline.at(-1)).toMatchObject({text:expect.stringContaining("Wait until it finishes")});
     } finally { f.provider.dispose(); }
   });
   it("shares pending/finally behavior with compact and refreshes its transcript", async () => {
@@ -67,7 +67,7 @@ describe("host shared command replies", () => {
       expect(f.frames.some((frame)=>frame.sessionViews.s1.commandPending)).toBe(true);
       expect(f.provider.currentState().sessionViews.s1.commandPending).toBe(false);
       expect(f.host.refreshSessionHistory).toHaveBeenCalledWith("s1");
-      expect(f.provider.currentState().sessionViews.s1.timeline.at(-1)).toMatchObject({kind:"notice",text:expect.stringContaining("已压缩")});
+      expect(f.provider.currentState().sessionViews.s1.timeline.at(-1)).toMatchObject({kind:"notice",text:expect.stringContaining("Context compacted")});
     } finally { f.provider.dispose(); }
   });
 });

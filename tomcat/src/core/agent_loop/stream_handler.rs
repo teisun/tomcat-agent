@@ -475,7 +475,17 @@ pub(super) async fn run_chat_stream(
         let displayed_message = if content_buf.trim().is_empty() {
             message.clone()
         } else {
-            format!("{message}（已丢弃 {discarded_text_chars} 字未完成输出）")
+            format!(
+                "{message}{}",
+                crate::infra::i18n::tr(
+                    if discarded_text_chars == 1 {
+                        "agentLoop.discarded.one"
+                    } else {
+                        "agentLoop.discarded.other"
+                    },
+                    &[("count", &discarded_text_chars.to_string())]
+                )
+            )
         };
         warn!(
             target: "tomcat_chat_diag",

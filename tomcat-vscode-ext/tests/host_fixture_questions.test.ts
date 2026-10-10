@@ -9,6 +9,21 @@ type HistoryEntry = { id: string; message?: {
   tool_calls?: Array<{ id: string }>;
 } };
 
+it("does not recycle a deleted session ID after a restart without a pending question", async () => {
+  const fixture = await createHostE2eFixture();
+  const messenger = new TomcatMessenger({ executable: fixture.fakeServePath, env: fixture.env });
+  try {
+    const first = await initializeServe(messenger);
+    const deleted = await messenger.request({ type: "delete_session", sessionId: first.sessionId! });
+    expect(deleted.success).toBe(true);
+    expect(deleted.payload).toMatchObject({ warnings: [] });
+    messenger.restart();
+    const next = await initializeServe(messenger);
+    expect(next.sessionId).toBeTruthy();
+    expect(next.sessionId).not.toBe(first.sessionId);
+  } finally { await messenger.disposeAsync(); await fixture.cleanup(); }
+});
+
 it("keeps distinct question calls durable across a host restart and settles the resumed call", async () => {
   const fixture = await createHostE2eFixture();
   const messenger = new TomcatMessenger({ executable: fixture.fakeServePath, env: fixture.env });

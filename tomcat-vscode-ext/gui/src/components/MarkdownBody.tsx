@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
-import { buildDecoratedHtml, flashCopyButton } from "./markdown/markdownDecorators";
+import { buildDecoratedHtml, flashCopyButton, setCopyButtonCopiedState } from "./markdown/markdownDecorators";
 import { renderMermaidBlocks } from "./markdown/markdownRuntime";
 import type { PathResolution } from "../types";
 
@@ -56,6 +57,9 @@ export const MarkdownBody = memo(function MarkdownBody({
   resolvePaths,
   sourceLineMap,
 }: MarkdownBodyProps) {
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const containerRef = useRef<HTMLDivElement>(null);
   const [pathResolutions, setPathResolutions] = useState<ReadonlyMap<string, PathResolution>>(
     () => new Map(),
@@ -64,6 +68,15 @@ export const MarkdownBody = memo(function MarkdownBody({
     () => buildDecoratedHtml(markdown, { pathResolutions, sourceLineMap }),
     [markdown, pathResolutions, sourceLineMap],
   );
+  const htmlMarkup = useMemo(() => ({ __html: html }), [html]);
+  useEffect(() => {
+    for (const button of containerRef.current?.querySelectorAll<HTMLElement>("[data-tc-copy-code]") ?? []) {
+      setCopyButtonCopiedState(button, button.classList.contains("is-copied"), t);
+    }
+    for (const link of containerRef.current?.querySelectorAll<HTMLElement>("[data-tc-default-image-label]") ?? []) {
+      link.textContent = t("image.label"); link.title = t("image.label");
+    }
+  }, [html, t]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -128,7 +141,7 @@ export const MarkdownBody = memo(function MarkdownBody({
       const codeText = card?.querySelector("pre code")?.textContent ?? "";
       if (typeof navigator?.clipboard?.writeText === "function") {
         void navigator.clipboard.writeText(codeText).then(
-          () => flashCopyButton(copyButton),
+          () => flashCopyButton(copyButton, (key, args) => tRef.current(key, args)),
           () => undefined,
         );
       }
@@ -157,7 +170,7 @@ export const MarkdownBody = memo(function MarkdownBody({
     <div
       className="tc-plan-preview__body"
       data-testid="plan-markdown-body"
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={htmlMarkup}
       onClick={handleClick}
       ref={containerRef}
     />

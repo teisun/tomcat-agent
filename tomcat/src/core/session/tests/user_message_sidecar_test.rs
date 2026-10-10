@@ -283,5 +283,5 @@ async fn async_ensure_degrades_when_sidecar_path_cannot_be_read_or_rebuilt() {
 #[test]
 fn missing_transcript_path_is_rejected_for_caller_to_gracefully_degrade() {
     let err = ensure_user_message_sidecar(std::path::Path::new("")).unwrap_err();
-    assert!(err.to_string().contains("缺少 transcript 路径"));
+    assert!(matches!(err, crate::AppError::Config(_)));
 }

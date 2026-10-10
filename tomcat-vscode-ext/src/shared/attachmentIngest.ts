@@ -28,6 +28,7 @@ import type {
 } from "../serveClient/wire";
 
 import type { DraftAttachmentRef } from "./composerDraft";
+import { t } from "./i18n";
 
 /** Everything the webview managed to derive from one pasted image. */
 export interface AttachmentUpload {
@@ -85,7 +86,7 @@ export async function ingestAttachment(
   }
 
   if (!response.success || !response.payload) {
-    return { error: response.error ?? "ingest_attachment failed", ok: false };
+    return { error: response.error ?? t("attachment.ingestFailed"), ok: false };
   }
 
   const payload = parseIngestResponse(response.payload);
@@ -94,7 +95,7 @@ export async function ingestAttachment(
     // snapshot, the URL the webview fetches — is built from `blobSha`, so letting an
     // unverified one through produces an attachment that exists in the UI and resolves
     // to nothing, with the cause several layers away from the symptom.
-    return { error: "ingest_attachment returned an unusable response", ok: false };
+    return { error: t("attachment.ingestInvalid"), ok: false };
   }
 
   return {

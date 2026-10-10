@@ -27,7 +27,7 @@ fn dispatch_agent_description_enforces_bounded_explorer_usage() {
         "confirmation of one implementation",
         "one or two batches of direct-tool calls",
         "self-review or final audit of your own Plan",
-        "work already covered by the automatic Plan/Code Reviewer",
+        "work already covered by the Plan/Code Reviewer",
     ] {
         assert!(
             description.contains(forbidden),
@@ -344,6 +344,17 @@ fn search_files_catalog_contract_matches_plan() {
         !entry.description.contains("`rg`") && !entry.description.contains("`fd`"),
         "description 不应泄露 search_files 的系统实现细节"
     );
+}
+
+#[test]
+fn create_plan_requires_explicit_interaction_but_is_not_replay_safe() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "create_plan")
+        .unwrap();
+    assert!(entry.requires_user_interaction);
+    assert!(entry.description.contains("explicit consent"));
+    assert!(!super::super::catalog::is_replay_safe_tool("create_plan"));
 }
 
 #[test]

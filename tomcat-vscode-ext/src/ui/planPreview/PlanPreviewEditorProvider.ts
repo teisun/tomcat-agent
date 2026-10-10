@@ -153,6 +153,7 @@ interface PlanPanelEntry {
   watcherSubscriptions: vscode.Disposable[];
 }
 
+import { getLocale, subscribeLocale, t } from "../../shared/i18n";
 export class PlanPreviewEditorProvider
   implements vscode.CustomReadonlyEditorProvider, vscode.Disposable
 {
@@ -182,6 +183,7 @@ export class PlanPreviewEditorProvider
 
   constructor(private readonly deps: PlanPreviewEditorProviderDeps) {
     this.subscriptions = [
+      { dispose: subscribeLocale(() => { for (const path of this.panels.keys()) void this.postFor(path); }) },
       vscode.workspace.onDidChangeConfiguration((event) =>
         this.handleConfigurationChange(event),
       ),
@@ -477,7 +479,7 @@ export class PlanPreviewEditorProvider
     this.panelPlanId.set(path, snapshot.planId);
     const frame: PlanPreviewHostFrame = {
       channel: "state",
-      content: snapshot,
+      content: { ...snapshot, locale: getLocale() },
       messageId: `plan-state-${Date.now()}`,
     };
     if (await entry.panel.webview.postMessage(frame)) {
@@ -663,7 +665,7 @@ export class PlanPreviewEditorProvider
           await vscode.window.showErrorMessage(
             error instanceof Error
               ? error.message
-              : `Unable to open file: ${intent.data.path}`,
+              : t("plan.host.openFailed", { path: intent.data.path }),
           );
         }
         return;
@@ -687,10 +689,10 @@ export class PlanPreviewEditorProvider
         if (!sessionId) return;
         try {
           const response = await this.deps.messenger.sendSetSpeed(sessionId, intent.data.modelId, intent.data.speed);
-          if (!response.success) throw new Error(response.error ?? "Unable to change speed");
+          if (!response.success) throw new Error(response.error ?? t("plan.host.speedFailed"));
         } catch (error) {
           await vscode.window.showErrorMessage(
-            error instanceof Error ? `Speed was not changed: ${error.message}` : "Speed was not changed.",
+            error instanceof Error ? t("plan.host.speedError", { detail: error.message }) : t("plan.host.speedUnchanged"),
           );
           return;
         }
@@ -709,8 +711,8 @@ export class PlanPreviewEditorProvider
         } catch (error) {
           await vscode.window.showErrorMessage(
             error instanceof Error
-              ? `Context tier was not changed: ${error.message}`
-              : "Context tier was not changed.",
+              ? t("plan.host.contextError", { detail: error.message })
+              : t("plan.host.contextUnchanged"),
           );
           return;
         }
@@ -729,8 +731,8 @@ export class PlanPreviewEditorProvider
         } catch (error) {
           await vscode.window.showErrorMessage(
             error instanceof Error
-              ? `Effort was not changed: ${error.message}`
-              : "Effort was not changed.",
+              ? t("plan.host.effortError", { detail: error.message })
+              : t("plan.host.effortUnchanged"),
           );
           return;
         }
@@ -791,7 +793,7 @@ export class PlanPreviewEditorProvider
     const assets = resolveWebviewEntryAssets(distRoot, "plan.html", "plan.js");
     if (assets.scripts.length === 0) {
       return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
   <body>
     <pre>Tomcat plan preview assets are missing. Run \`npm run build\` in \`tomcat-vscode-ext\` first.</pre>
   </body>
@@ -811,7 +813,7 @@ export class PlanPreviewEditorProvider
       )
       .join("\n    ");
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -820,7 +822,7 @@ export class PlanPreviewEditorProvider
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     ${styleTags}
-    <title>Tomcat Plan Preview</title>
+    <title>Tomcat ${t("plan.preview")}</title>
   </head>
   <body class="tc-plan-webview">
     <div id="root"></div>

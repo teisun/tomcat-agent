@@ -110,11 +110,19 @@ pub(crate) fn build_provider_with_route(
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
     match PROVIDERS.iter().find(|(id, _)| *id == entry.api) {
         Some((_, ctor)) => ctor(entry, runtime, credential, route),
-        None => Err(AppError::Config(format!(
-            "未知模型 `{}` 的 api = {:?}; 已注册: {:?}",
-            entry.id,
-            entry.api,
-            PROVIDERS.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        None => Err(AppError::Config(crate::infra::i18n::tr(
+            "model.unknownApi",
+            &[
+                ("id", &entry.id),
+                ("api", &format!("{:?}", entry.api)),
+                (
+                    "registered",
+                    &format!(
+                        "{:?}",
+                        PROVIDERS.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+                    ),
+                ),
+            ],
         ))),
     }
 }

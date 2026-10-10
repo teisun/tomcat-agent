@@ -2,13 +2,14 @@
 
 use super::super::{parse_chat_command, ChatCommand};
 use crate::api::chat::commands::help_text;
+use crate::infra::i18n::{tr_in, Locale};
 
 #[test]
 fn help_text_renders_each_shared_command_once() {
     let help = help_text();
-    for command in super::super::SHARED_SLASH_COMMANDS {
-        assert!(help.contains(command.usage));
-        assert!(help.contains(command.summary));
+    for command in super::super::shared_slash_commands() {
+        assert!(help.contains(&command.usage));
+        assert!(help.contains(&command.summary));
     }
     assert_eq!(help.matches("/install").count(), 1);
 }
@@ -16,7 +17,8 @@ fn help_text_renders_each_shared_command_once() {
 #[test]
 fn help_text_mentions_project_command_invocation() {
     let text = help_text();
-    for command in ["/command list", "/command use", "/<命令名>"] {
+    assert!(text.contains(&tr_in(Locale::En, "slash.help", &[])));
+    for command in ["/command list", "/command use"] {
         assert!(text.contains(command), "missing {command}: {text}");
     }
 }
@@ -42,7 +44,7 @@ fn help_command_is_lowercase_only() {
 fn help_text_mentions_checkpoint_commands() {
     let h = help_text();
     assert!(
-        h.contains("/install <来源>"),
+        h.contains(&tr_in(Locale::En, "slash.install.usage", &[])),
         "/help 应列出 /install：{}",
         h
     );
@@ -70,7 +72,7 @@ fn help_text_mentions_plan_without_goal_argument() {
         h
     );
     assert!(
-        !h.contains("/plan \"<目标>\""),
+        !h.contains("/plan \""),
         "/help 不应再暴露旧的 /plan 目标参数用法：{}",
         h
     );

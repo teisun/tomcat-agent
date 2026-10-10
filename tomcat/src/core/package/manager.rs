@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::core::skill::parse as parse_skill_frontmatter;
 use crate::ext::parse_manifest as parse_plugin_manifest;
 use crate::infra::config::with_config_lock;
+use crate::infra::i18n::tr;
 use crate::infra::{read_file_utf8, AppError};
 use crate::AppConfig;
 
@@ -51,9 +52,9 @@ pub fn with_resource_transaction_lock<R>(
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| {
-            AppError::Config(format!(
-                "资源注册表路径缺少层目录: {}",
-                registry_path.display()
+            AppError::Config(tr(
+                "package.layerParent",
+                &[("path", &registry_path.display().to_string())],
             ))
         })?
         .to_path_buf();
@@ -100,30 +101,30 @@ impl<'a> PackageManager<'a> {
             if skill_file.is_file() {
                 return detect_bare_skill(&skill_file);
             }
-            return Err(AppError::Config(format!(
-                "source 无法识别为 Tomcat package/plugin/skill: {}",
-                source.display()
+            return Err(AppError::Config(tr(
+                "package.unknownSource",
+                &[("path", &source.display().to_string())],
             )));
         }
 
         let Some(file_name) = source.file_name().and_then(|name| name.to_str()) else {
-            return Err(AppError::Config(format!(
-                "source 文件名无效: {}",
-                source.display()
+            return Err(AppError::Config(tr(
+                "package.invalidFilename",
+                &[("name", "source"), ("path", &source.display().to_string())],
             )));
         };
         match file_name {
             "package.json" => detect_package_manifest_file(&source, true)?.ok_or_else(|| {
-                AppError::Config(format!(
-                    "package.json 缺少顶层 tomcat 块: {}",
-                    source.display()
+                AppError::Config(tr(
+                    "package.tomcatMissing",
+                    &[("path", &source.display().to_string())],
                 ))
             }),
             "plugin.json" => detect_bare_plugin(&source),
             "SKILL.md" => detect_bare_skill(&source),
-            _ => Err(AppError::Config(format!(
-                "source 只支持 package.json / plugin.json / SKILL.md 或其所在目录: {}",
-                source.display()
+            _ => Err(AppError::Config(tr(
+                "package.sourceTypes",
+                &[("path", &source.display().to_string())],
             ))),
         }
     }
@@ -154,9 +155,9 @@ impl<'a> PackageManager<'a> {
             .any(|record| record.name == detected.manifest.name)
             && !force
         {
-            return Err(AppError::Config(format!(
-                "同层 package 已存在，需加 --force: {}",
-                detected.manifest.name
+            return Err(AppError::Config(tr(
+                "package.exists",
+                &[("kind", "package"), ("id", &detected.manifest.name)],
             )));
         }
 
@@ -166,17 +167,15 @@ impl<'a> PackageManager<'a> {
         for resource in ordered_detected_resources(&detected.resources) {
             let destination_dir = resource_target_dir(&layer_paths, resource.kind, &resource.id)?;
             if destination_dir.exists() && !force {
-                return Err(AppError::Config(format!(
-                    "同层 {} 已存在，需加 --force: {}",
-                    resource.kind.as_str(),
-                    resource.id
+                return Err(AppError::Config(tr(
+                    "package.exists",
+                    &[("kind", resource.kind.as_str()), ("id", &resource.id)],
                 )));
             }
             if destination_dir.exists() && force {
-                warnings.push(format!(
-                    "将覆盖当前层已存在的 {} `{}`",
-                    resource.kind.as_str(),
-                    resource.id
+                warnings.push(tr(
+                    "package.overwrite",
+                    &[("kind", resource.kind.as_str()), ("id", &resource.id)],
                 ));
             }
             resources.push(PreparedInstallResource {
@@ -221,9 +220,12 @@ impl<'a> PackageManager<'a> {
                     .iter()
                     .any(|record| record.name == prepared.detected.manifest.name)
             {
-                return Err(AppError::Config(format!(
-                    "同层 package 已在等待确认期间被安装: {}",
-                    prepared.detected.manifest.name
+                return Err(AppError::Config(tr(
+                    "package.installedDuringWait",
+                    &[
+                        ("kind", "package"),
+                        ("id", &prepared.detected.manifest.name),
+                    ],
                 )));
             }
             for resource in &prepared.resources {
@@ -239,17 +241,15 @@ impl<'a> PackageManager<'a> {
                         }
                 });
                 if owned_by_other_package {
-                    return Err(AppError::Config(format!(
-                        "{} `{}` is already owned by another package; force cannot take ownership",
-                        resource.kind.as_str(),
-                        resource.id
+                    return Err(AppError::Config(tr(
+                        "package.foreignOwner",
+                        &[("kind", resource.kind.as_str()), ("id", &resource.id)],
                     )));
                 }
                 if resource.destination_dir.exists() && !prepared.force {
-                    return Err(AppError::Config(format!(
-                        "同层 {} 已在等待确认期间被安装: {}",
-                        resource.kind.as_str(),
-                        resource.id
+                    return Err(AppError::Config(tr(
+                        "package.installedDuringWait",
+                        &[("kind", resource.kind.as_str()), ("id", &resource.id)],
                     )));
                 }
                 if resource.kind == PackageResourceKind::Plugin
@@ -259,9 +259,9 @@ impl<'a> PackageManager<'a> {
                         .any(|entry| entry.id == resource.id)
                     && !prepared.force
                 {
-                    return Err(AppError::Config(format!(
-                        "plugin 注册表已归属同名 ID，拒绝覆盖: {}",
-                        resource.id
+                    return Err(AppError::Config(tr(
+                        "package.pluginOwner",
+                        &[("id", &resource.id)],
                     )));
                 }
             }
@@ -408,11 +408,18 @@ impl<'a> PackageManager<'a> {
                     &mutations,
                 );
                 if rollback_errors.is_empty() {
-                    Err(AppError::Config(format!("package install 失败: {error}")))
+                    Err(AppError::Config(tr(
+                        "package.operationFailed",
+                        &[("operation", "install"), ("detail", &error.to_string())],
+                    )))
                 } else {
-                    Err(AppError::Config(format!(
-                        "package install 失败且 rollback 不完整: {error}; dirty_state: {}",
-                        rollback_errors.join(" | ")
+                    Err(AppError::Config(tr(
+                        "package.rollbackIncomplete",
+                        &[
+                            ("operation", "install"),
+                            ("detail", &error.to_string()),
+                            ("dirty", &rollback_errors.join(" | ")),
+                        ],
                     )))
                 }
             }
@@ -448,11 +455,20 @@ impl<'a> PackageManager<'a> {
                 .iter()
                 .position(|record| record.name == package_name)
             else {
-                return Err(AppError::Config(format!(
-                    "package 未安装在 {}: {package_name}\n  如果它是手动放进目录的插件或 Skill，请到下面目录里删掉它所在的子目录，再在会话里执行 /reload\n  （子目录名不一定等于 ID，以 plugin.json 的 id、SKILL.md 的 name 为准）：\n  - {}\n  - {}",
-                    layer_paths.visibility,
-                    crate::infra::platform::format_home_path(&layer_paths.plugins_dir),
-                    crate::infra::platform::format_home_path(&layer_paths.skills_dir)
+                return Err(AppError::Config(tr(
+                    "package.notInstalled",
+                    &[
+                        ("layer", &layer_paths.visibility.to_string()),
+                        ("name", package_name),
+                        (
+                            "plugins",
+                            &crate::infra::platform::format_home_path(&layer_paths.plugins_dir),
+                        ),
+                        (
+                            "skills",
+                            &crate::infra::platform::format_home_path(&layer_paths.skills_dir),
+                        ),
+                    ],
                 )));
             };
             let record = package_registry.packages.remove(index);
@@ -508,11 +524,18 @@ impl<'a> PackageManager<'a> {
                     &mutations,
                 );
                 if rollback_errors.is_empty() {
-                    Err(AppError::Config(format!("package uninstall 失败: {error}")))
+                    Err(AppError::Config(tr(
+                        "package.operationFailed",
+                        &[("operation", "uninstall"), ("detail", &error.to_string())],
+                    )))
                 } else {
-                    Err(AppError::Config(format!(
-                        "package uninstall 失败且 rollback 不完整: {error}; dirty_state: {}",
-                        rollback_errors.join(" | ")
+                    Err(AppError::Config(tr(
+                        "package.rollbackIncomplete",
+                        &[
+                            ("operation", "uninstall"),
+                            ("detail", &error.to_string()),
+                            ("dirty", &rollback_errors.join(" | ")),
+                        ],
                     )))
                 }
             }
@@ -582,17 +605,18 @@ fn detect_package_manifest_file(
 ) -> Result<Option<DetectedPackageSource>, AppError> {
     let root = manifest_path
         .parent()
-        .ok_or_else(|| AppError::Config("package.json 缺少父目录".to_string()))?
+        .ok_or_else(|| AppError::Config(tr("package.noParent", &[("file", "package.json")])))?
         .canonicalize()
         .map_err(AppError::Io)?;
     let raw = read_file_utf8(manifest_path)?;
-    let parsed: RawPackageJson = serde_json::from_str(&raw)
-        .map_err(|error| AppError::Config(format!("package.json 解析失败: {error}")))?;
+    let parsed: RawPackageJson = serde_json::from_str(&raw).map_err(|error| {
+        AppError::Config(tr("package.jsonParse", &[("detail", &error.to_string())]))
+    })?;
     let Some(tomcat) = parsed.tomcat else {
         return if require_tomcat_block {
-            Err(AppError::Config(format!(
-                "package.json 缺少顶层 tomcat 块: {}",
-                manifest_path.display()
+            Err(AppError::Config(tr(
+                "package.tomcatMissing",
+                &[("path", &manifest_path.display().to_string())],
             )))
         } else {
             Ok(None)
@@ -603,16 +627,24 @@ fn detect_package_manifest_file(
         .name
         .or(parsed.name)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| AppError::Config("package.tomcat.name 缺失".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Config(tr(
+                "package.fieldMissing",
+                &[("field", "package.tomcat.name")],
+            ))
+        })?;
     if tomcat.version.is_some() {
-        return Err(AppError::Config(
-            "tomcat.version 已废弃，请改用外层 package.json.version".to_string(),
-        ));
+        return Err(AppError::Config(tr("package.deprecatedVersion", &[])));
     }
     let version = parsed
         .version
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| AppError::Config("package.json.version 缺失".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Config(tr(
+                "package.fieldMissing",
+                &[("field", "package.json.version")],
+            ))
+        })?;
     let description = tomcat.description.or(parsed.description);
     let schema = tomcat
         .schema
@@ -633,10 +665,7 @@ fn detect_package_manifest_file(
         skills,
     };
     if manifest.plugins.is_empty() && manifest.skills.is_empty() {
-        return Err(AppError::Config(
-            "package.tomcat.plugins / skills 不能同时为空，且未发现 plugins/* 或 skills/*"
-                .to_string(),
-        ));
+        return Err(AppError::Config(tr("package.emptyResources", &[])));
     }
 
     let resources = resolve_package_resources(&root, &manifest)?;
@@ -661,9 +690,12 @@ fn scan_package_entry_dirs(root: &Path, namespace: &str) -> Result<Vec<String>, 
         return Ok(Vec::new());
     }
     if !namespace_dir.is_dir() {
-        return Err(AppError::Config(format!(
-            "package 根目录下的 {namespace} 必须是目录: {}",
-            namespace_dir.display()
+        return Err(AppError::Config(tr(
+            "package.namespaceDir",
+            &[
+                ("namespace", namespace),
+                ("path", &namespace_dir.display().to_string()),
+            ],
         )));
     }
 
@@ -742,7 +774,10 @@ fn resolve_package_resources(
         let (plugin_root, plugin_manifest) = resolve_plugin_source(&plugin_path)?;
         let id = plugin_manifest.id.clone();
         if !seen.insert((PackageResourceKind::Plugin.as_str().to_string(), id.clone())) {
-            return Err(AppError::Config(format!("package 内 plugin 重复: {id}")));
+            return Err(AppError::Config(tr(
+                "package.duplicateResource",
+                &[("kind", "plugin"), ("id", &id)],
+            )));
         }
         resources.push(DetectedPackageResource {
             kind: PackageResourceKind::Plugin,
@@ -758,8 +793,9 @@ fn resolve_package_resources(
             PackageResourceKind::Skill.as_str().to_string(),
             skill_name.clone(),
         )) {
-            return Err(AppError::Config(format!(
-                "package 内 skill 重复: {skill_name}"
+            return Err(AppError::Config(tr(
+                "package.duplicateResource",
+                &[("kind", "skill"), ("id", &skill_name)],
             )));
         }
         resources.push(DetectedPackageResource {
@@ -777,29 +813,42 @@ fn resolve_plugin_source(path: &Path) -> Result<(PathBuf, crate::PluginManifest)
     let (plugin_root, manifest_path) = if resolved.is_dir() {
         let manifest_path = resolved.join("plugin.json");
         if !manifest_path.is_file() {
-            return Err(AppError::Config(format!(
-                "plugin 目录下缺少 plugin.json: {}",
-                resolved.display()
+            return Err(AppError::Config(tr(
+                "package.missingManifest",
+                &[
+                    ("kind", "plugin"),
+                    ("file", "plugin.json"),
+                    ("path", &resolved.display().to_string()),
+                ],
             )));
         }
         (resolved, manifest_path)
     } else {
         let Some(file_name) = resolved.file_name().and_then(|name| name.to_str()) else {
-            return Err(AppError::Config(format!(
-                "plugin.json 文件名无效: {}",
-                resolved.display()
+            return Err(AppError::Config(tr(
+                "package.invalidFilename",
+                &[
+                    ("name", "plugin.json"),
+                    ("path", &resolved.display().to_string()),
+                ],
             )));
         };
         if file_name != "plugin.json" {
-            return Err(AppError::Config(format!(
-                "plugin source 只支持 plugin.json 或其所在目录: {}",
-                resolved.display()
+            return Err(AppError::Config(tr(
+                "package.sourceFileOnly",
+                &[
+                    ("kind", "plugin"),
+                    ("file", "plugin.json"),
+                    ("path", &resolved.display().to_string()),
+                ],
             )));
         }
         (
             resolved
                 .parent()
-                .ok_or_else(|| AppError::Config("plugin.json 缺少父目录".to_string()))?
+                .ok_or_else(|| {
+                    AppError::Config(tr("package.noParent", &[("file", "plugin.json")]))
+                })?
                 .to_path_buf(),
             resolved,
         )
@@ -817,21 +866,21 @@ fn validate_plugin_main(
 ) -> Result<(), AppError> {
     let root = plugin_root.canonicalize().map_err(AppError::Io)?;
     let main_path = canonicalize_existing_path(&root.join(&manifest.main)).map_err(|error| {
-        AppError::Config(format!(
-            "plugin main 不存在或不可读: {} ({})",
-            manifest.main, error
+        AppError::Config(tr(
+            "package.mainUnreadable",
+            &[("path", &manifest.main), ("detail", &error.to_string())],
         ))
     })?;
     if !main_path.starts_with(&root) {
-        return Err(AppError::Permission(format!(
-            "plugin main 不得越出插件根目录: {}",
-            main_path.display()
+        return Err(AppError::Permission(tr(
+            "package.mainOutside",
+            &[("path", &main_path.display().to_string())],
         )));
     }
     if !main_path.is_file() {
-        return Err(AppError::Config(format!(
-            "plugin main 必须是文件: {}",
-            main_path.display()
+        return Err(AppError::Config(tr(
+            "package.mainFile",
+            &[("path", &main_path.display().to_string())],
         )));
     }
     Ok(())
@@ -842,29 +891,40 @@ fn resolve_skill_source(path: &Path) -> Result<(PathBuf, String, String), AppErr
     let (skill_root, skill_file) = if resolved.is_dir() {
         let skill_file = resolved.join("SKILL.md");
         if !skill_file.is_file() {
-            return Err(AppError::Config(format!(
-                "skill 目录下缺少 SKILL.md: {}",
-                resolved.display()
+            return Err(AppError::Config(tr(
+                "package.missingManifest",
+                &[
+                    ("kind", "skill"),
+                    ("file", "SKILL.md"),
+                    ("path", &resolved.display().to_string()),
+                ],
             )));
         }
         (resolved, skill_file)
     } else {
         let Some(file_name) = resolved.file_name().and_then(|name| name.to_str()) else {
-            return Err(AppError::Config(format!(
-                "SKILL.md 文件名无效: {}",
-                resolved.display()
+            return Err(AppError::Config(tr(
+                "package.invalidFilename",
+                &[
+                    ("name", "SKILL.md"),
+                    ("path", &resolved.display().to_string()),
+                ],
             )));
         };
         if file_name != "SKILL.md" {
-            return Err(AppError::Config(format!(
-                "skill source 只支持 SKILL.md 或其所在目录: {}",
-                resolved.display()
+            return Err(AppError::Config(tr(
+                "package.sourceFileOnly",
+                &[
+                    ("kind", "skill"),
+                    ("file", "SKILL.md"),
+                    ("path", &resolved.display().to_string()),
+                ],
             )));
         }
         (
             resolved
                 .parent()
-                .ok_or_else(|| AppError::Config("SKILL.md 缺少父目录".to_string()))?
+                .ok_or_else(|| AppError::Config(tr("package.noParent", &[("file", "SKILL.md")])))?
                 .to_path_buf(),
             resolved,
         )
@@ -902,18 +962,22 @@ fn collect_cross_layer_warnings(
                 .position(|visibility| *visibility == layer.visibility)
                 .unwrap_or(0);
             if other_index < target_index {
-                warnings.push(format!(
-                    "{} `{}` 在更高优先级层已存在（{}），当前安装后会被遮蔽",
-                    resource.kind.as_str(),
-                    resource.id,
-                    layer.visibility
+                warnings.push(tr(
+                    "package.shadowed",
+                    &[
+                        ("kind", resource.kind.as_str()),
+                        ("id", &resource.id),
+                        ("layer", &layer.visibility.to_string()),
+                    ],
                 ));
             } else {
-                warnings.push(format!(
-                    "{} `{}` 也存在于更低优先级层（{}），当前安装后会覆盖其可见性",
-                    resource.kind.as_str(),
-                    resource.id,
-                    layer.visibility
+                warnings.push(tr(
+                    "package.shadows",
+                    &[
+                        ("kind", resource.kind.as_str()),
+                        ("id", &resource.id),
+                        ("layer", &layer.visibility.to_string()),
+                    ],
                 ));
             }
         }
@@ -944,9 +1008,9 @@ fn resource_target_dir(
     validate_resource_id(id, kind.as_str())?;
     if let Ok(metadata) = fs::symlink_metadata(&layer.layer_root) {
         if metadata.file_type().is_symlink() {
-            return Err(AppError::Permission(format!(
-                "package 层根目录不能是符号链接: {}",
-                layer.layer_root.display()
+            return Err(AppError::Permission(tr(
+                "package.layerSymlink",
+                &[("path", &layer.layer_root.display().to_string())],
             )));
         }
     }
@@ -956,10 +1020,12 @@ fn resource_target_dir(
     };
     if let Ok(metadata) = fs::symlink_metadata(root) {
         if metadata.file_type().is_symlink() {
-            return Err(AppError::Permission(format!(
-                "package {} 目标根目录不能是符号链接: {}",
-                kind.as_str(),
-                root.display()
+            return Err(AppError::Permission(tr(
+                "package.rootSymlink",
+                &[
+                    ("kind", kind.as_str()),
+                    ("path", &root.display().to_string()),
+                ],
             )));
         }
     }
@@ -974,8 +1040,9 @@ fn validate_resource_id(id: &str, label: &str) -> Result<(), AppError> {
         || !matches!(path.components().next(), Some(Component::Normal(component)) if component == std::ffi::OsStr::new(id))
         || path.components().nth(1).is_some()
     {
-        return Err(AppError::Config(format!(
-            "package {label} ID 必须是单个安全目录名: {id:?}"
+        return Err(AppError::Config(tr(
+            "package.invalidId",
+            &[("kind", label), ("id", &format!("{id:?}"))],
         )));
     }
     Ok(())
@@ -998,8 +1065,9 @@ fn resolve_package_resource_path(
             )
         })
     {
-        return Err(AppError::Config(format!(
-            "package {label} 引用必须是 package 根目录内相对路径: {reference:?}"
+        return Err(AppError::Config(tr(
+            "package.relativeRef",
+            &[("kind", label), ("reference", &format!("{reference:?}"))],
         )));
     }
     let mut candidate = root.to_path_buf();
@@ -1011,18 +1079,18 @@ fn resolve_package_resource_path(
                 .file_type()
                 .is_symlink()
             {
-                return Err(AppError::Permission(format!(
-                    "package {label} 引用不能穿过符号链接: {}",
-                    candidate.display()
+                return Err(AppError::Permission(tr(
+                    "package.symlinkRef",
+                    &[("kind", label), ("path", &candidate.display().to_string())],
                 )));
             }
         }
     }
     let resolved = canonicalize_existing_path(&candidate)?;
     if !resolved.starts_with(root) {
-        return Err(AppError::Permission(format!(
-            "package {label} 引用不得越出 package 根目录: {}",
-            resolved.display()
+        return Err(AppError::Permission(tr(
+            "package.outsideRef",
+            &[("kind", label), ("path", &resolved.display().to_string())],
         )));
     }
     Ok(resolved)
@@ -1030,6 +1098,12 @@ fn resolve_package_resource_path(
 
 fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, AppError> {
     path.canonicalize().map_err(|error| {
-        AppError::Config(format!("路径不存在或不可读: {} ({error})", path.display()))
+        AppError::Config(tr(
+            "package.pathUnreadable",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
+        ))
     })
 }

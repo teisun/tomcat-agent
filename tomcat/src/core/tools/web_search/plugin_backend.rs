@@ -89,9 +89,7 @@ impl PluginWebSearchBackend {
 
 fn is_retryable_timeout_warning(warning: &str) -> bool {
     warning.starts_with("plugin_backend_error")
-        && (warning.contains("pi.fetch request timed out")
-            || warning.contains("request timed out")
-            || warning.contains("请求超时"))
+        && (warning.contains("pi.fetch request timed out") || warning.contains("request timed out"))
 }
 
 #[derive(Debug, Deserialize)]

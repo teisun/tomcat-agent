@@ -762,7 +762,7 @@ async fn build_collapse_summary_artifacts(
     request: CollapseSummaryRequest<'_>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
     let (covered_start_id, covered_end_id) = collapse_bounds(messages)
-        .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
+        .ok_or_else(|| AppError::Config("collapse is missing a message anchor".to_string()))?;
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // recent-files 也在同一个入口生成，避免不同 compaction 路径漏掉其中一块。
     let control = request

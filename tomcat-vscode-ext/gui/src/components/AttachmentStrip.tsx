@@ -1,3 +1,4 @@
+import { useT } from "../i18n/LocaleProvider";
 import type { KeyboardEvent } from "react";
 
 import type { WebviewPendingAttachment } from "../types";
@@ -26,6 +27,7 @@ export function AttachmentStrip({
   onOpen?(attachment: WebviewPendingAttachment): void;
   readonly?: boolean;
 }) {
+  const t = useT();
   if (!attachments.length) {
     return null;
   }
@@ -33,7 +35,7 @@ export function AttachmentStrip({
   return (
     <section
       className={`tc-attachment-strip${readonly ? " tc-attachment-strip--history" : ""}`}
-      aria-label={readonly ? "Attached images" : "Pending attachments"}
+      aria-label={t(readonly ? "attachment.history" : "attachment.pending")}
       data-attachment-source={readonly ? "history" : "draft"}
       role="list"
     >
@@ -42,14 +44,14 @@ export function AttachmentStrip({
         const removeButton =
           !readonly && onRemove ? (
             <button
-              aria-label={`Remove ${attachment.label}`}
+              aria-label={t("attachment.remove", { name: attachment.label })}
               className="tc-attachment-strip__close"
               data-testid="attachment-remove"
               onClick={(e) => {
                 e.stopPropagation();
                 onRemove(attachment.id);
               }}
-              title="Remove"
+              title={t("attachment.removeAction")}
               type="button"
             >
               ×
@@ -71,7 +73,7 @@ export function AttachmentStrip({
           // Spelled out for screen readers and on hover, because the strip has room for
           // a filename and not for a sentence. A blank square or a broken-image glyph
           // would leave the user guessing.
-          const explanation = `${attachment.label}: image data is no longer available. Remove it and add the image again.`;
+          const explanation = t("attachment.unavailable", { name: attachment.label });
           return (
             <div
               key={attachment.id}
@@ -104,7 +106,7 @@ export function AttachmentStrip({
               role="listitem"
             >
               <span
-                aria-label={`${attachment.label} is loading`}
+                aria-label={t("attachment.loading", { name: attachment.label })}
                 className="tc-attachment-strip__skeleton"
                 data-testid="attachment-skeleton"
                 title={attachment.label}
@@ -122,7 +124,7 @@ export function AttachmentStrip({
               role="listitem"
             >
               <button
-                aria-label={`Open ${attachment.label}`}
+                aria-label={t("attachment.open", { name: attachment.label })}
                 className="tc-attachment-strip__thumb"
                 data-testid={readonly ? "history-attachment-thumb" : "attachment-thumb"}
                 onClick={() => onOpen?.(attachment)}
@@ -165,7 +167,7 @@ export function AttachmentStrip({
           >
             {isClickable ? (
               <button
-                aria-label={`Open ${attachment.label}`}
+                aria-label={t("attachment.open", { name: attachment.label })}
                 className="tc-attachment-strip__thumb tc-attachment-strip__file-chip"
                 data-testid={readonly ? "history-attachment-chip" : "attachment-chip"}
                 onClick={() => onOpen?.(attachment)}

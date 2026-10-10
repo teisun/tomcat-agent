@@ -47,6 +47,8 @@ export interface PreviewPicture {
 /** One preview section — a user turn (history) or the current pending draft. */
 export interface PreviewSection {
   label: string;
+  /** Product-owned section kind; `label` remains the unmodified tool title or turn number. */
+  kind?: "pending" | "sent" | "tool";
   pictures: PreviewPicture[];
 }
 
@@ -62,6 +64,7 @@ export interface PreviewReady {
 export interface PreviewState {
   type: "preview.state";
   data: {
+    locale?: import("./i18n").Locale;
     /** Sections grouped by user turn + optional pending section at end. */
     sections: PreviewSection[];
     /** Active (currently displayed) picture id. */

@@ -32,6 +32,8 @@ use crate::core::llm::{AnthropicFilesAdapter, FilesApiProviderContext, ANTHROPIC
 mod stream;
 mod wire;
 
+use crate::infra::i18n::tr;
+
 const PROVIDER_NAME: &str = "anthropic";
 
 fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -99,7 +101,7 @@ impl AnthropicProvider {
             .base_url
             .clone()
             .or_else(|| infer_default_base_url(Some(entry.provider.as_str())))
-            .ok_or_else(|| AppError::Config(format!("模型 `{}` 缺少 base_url。", entry.id)))?;
+            .ok_or_else(|| AppError::Config(tr("llm.baseUrlMissing", &[("id", &entry.id)])))?;
         let configured_thinking_format = ThinkingFormat::parse_or_auto(
             entry
                 .thinking_format
@@ -178,9 +180,9 @@ impl AnthropicProvider {
             Err(_) => Err(llm_error(
                 PROVIDER_NAME,
                 LlmErrorStage::NonStreamStale,
-                format!(
-                    "Anthropic 非流式请求长时间无响应: {}s",
-                    self.non_stream_stale_timeout_sec
+                tr(
+                    "llm.anthropicStale",
+                    &[("seconds", &self.non_stream_stale_timeout_sec.to_string())],
                 ),
             )),
         }
@@ -293,9 +295,13 @@ impl AnthropicProvider {
                     } else {
                         LlmErrorStage::Send
                     },
-                    format!(
-                        "Anthropic {}请求失败",
-                        if stream { "流式" } else { "非流式" }
+                    tr(
+                        if stream {
+                            "llm.anthropicStreamFailed"
+                        } else {
+                            "llm.anthropicRequestFailed"
+                        },
+                        &[],
                     ),
                     anyhow::anyhow!(error),
                 )
@@ -373,7 +379,7 @@ impl AnthropicProvider {
                 Err(error) => return Err(error),
             }
         }
-        Err(last_error.unwrap_or_else(|| AppError::Llm("Anthropic 请求重试耗尽".to_string())))
+        Err(last_error.unwrap_or_else(|| AppError::Llm(tr("llm.anthropicRetries", &[]))))
     }
 }
 
@@ -409,7 +415,10 @@ fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::IdleTimeout,
-        format!("流式空闲超时: stream_timeout_sec={}s", stream_timeout_sec),
+        tr(
+            "llm.idleTimeout",
+            &[("seconds", &stream_timeout_sec.to_string())],
+        ),
     )
 }
 
@@ -450,7 +459,7 @@ impl LlmProvider for AnthropicProvider {
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::BodyRead,
-                    "读取 Anthropic 响应失败".to_string(),
+                    tr("llm.anthropicReadFailed", &[]),
                     anyhow::anyhow!(error),
                 )
             })?;
@@ -458,7 +467,7 @@ impl LlmProvider for AnthropicProvider {
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::Parse,
-                    "解析 Anthropic JSON 失败".to_string(),
+                    tr("llm.anthropicJsonFailed", &[]),
                     anyhow::anyhow!(error),
                 )
             })?;

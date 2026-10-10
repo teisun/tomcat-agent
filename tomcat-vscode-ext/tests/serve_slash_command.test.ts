@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { initializeServe } from "../src/serveClient/initialize";
@@ -19,7 +19,8 @@ describe("real Serve shared slash boundary", () => {
       const before = await runtime.messenger.request({type:"get_messages",sessionId});
       expect((await router.runSlashCommand(sessionId, "/reload")).ok).toBe(true);
       expect(await router.runSlashCommand(sessionId, "/unknown")).toMatchObject({ok:false});
-      expect(await router.runSlashCommand(sessionId, "/install ./missing")).toMatchObject({ok:false,text:expect.stringContaining("用法")});
+      const english = JSON.parse(await readFile(path.resolve(__dirname, "../../tomcat/assets/i18n/en.json"), "utf8")) as Record<string, string>;
+      expect(await router.runSlashCommand(sessionId, "/install ./missing")).toMatchObject({ok:false,text:expect.stringContaining(english["slash.install.usage"])});
       const source = path.join(runtime.fixture.workspacePath, "source with space", "remote-slash-skill");
       await mkdir(source, {recursive:true});
       await writeFile(path.join(source, "SKILL.md"), "---\nname: remote-slash-skill\ndescription: Slash integration fixture\n---\nSay hello.\n");

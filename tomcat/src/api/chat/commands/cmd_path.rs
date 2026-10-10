@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::api::chat::ChatContext;
 use crate::core::permission::{PathRuleMode, PermissionDecision, PermissionGate};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -20,16 +21,16 @@ pub(crate) fn parse_args(tokens: Vec<String>, original_line: &str) -> ChatComman
             original_line: original_line.to_string(),
         },
         [_cmd] => ChatCommand::UsageError {
-            message: "用法错误：/path 需要一个路径参数。".to_string(),
+            message: tr("slash.path.required", &[]),
         },
         [_cmd, _path] => ChatCommand::UsageError {
-            message: "用法错误：/path 参数必须是一个路径。".to_string(),
+            message: tr("slash.path.invalid", &[]),
         },
         [_cmd, ..] => ChatCommand::UsageError {
-            message: "用法错误：/path 仅支持一个路径参数。".to_string(),
+            message: tr("slash.path.single", &[]),
         },
         _ => ChatCommand::UsageError {
-            message: "用法错误：/path 需要一个路径参数。".to_string(),
+            message: tr("slash.path.required", &[]),
         },
     }
 }
@@ -63,7 +64,10 @@ pub(super) fn precheck_existence(path: &Path) -> Result<(), String> {
     if path.exists() {
         Ok(())
     } else {
-        Err(format!("路径不存在: {}", path.display()))
+        Err(tr(
+            "slash.path.missing",
+            &[("path", &path.display().to_string())],
+        ))
     }
 }
 
@@ -89,12 +93,12 @@ pub(super) fn effective_workspace_root(path: &Path) -> PathBuf {
 pub(super) fn extra_root_menu_line(path: &Path) -> String {
     if path.is_file() {
         let parent = path.parent().unwrap_or(path);
-        format!(
-            "  [w] 以后也允许访问（检测到为文件，将其父目录 {}/ 写入 workspace.workspace_roots）",
-            parent.display()
+        tr(
+            "slash.path.parent",
+            &[("path", &parent.display().to_string())],
         )
     } else {
-        "  [w] 以后也允许访问（写入配置 workspace.workspace_roots）".to_string()
+        tr("slash.path.persist", &[])
     }
 }
 
@@ -185,15 +189,16 @@ pub fn render_path_menu(path: &Path, gate: &dyn PermissionGate) -> PathMenuOptio
 
     let probe = gate.check(PrimitiveOperation::Read, &path.to_string_lossy());
     match probe {
-        Ok(PermissionDecision::Deny { .. }) => {
-            PathMenuOptions::deny_only(format!("该路径已被禁止读写访问：{}", path.display()))
-        }
+        Ok(PermissionDecision::Deny { .. }) => PathMenuOptions::deny_only(tr(
+            "slash.path.denied",
+            &[("path", &path.display().to_string())],
+        )),
         Ok(PermissionDecision::Allow { grant, .. })
             if grant.grant_type == crate::core::permission::GrantType::PathRuleReadOnly =>
         {
-            PathMenuOptions::readonly_only(format!(
-                "这是只读路径，本次会话可以读取其中内容，但不能写入、修改或删除：{}",
-                path.display()
+            PathMenuOptions::readonly_only(tr(
+                "slash.path.readonly",
+                &[("path", &path.display().to_string())],
             ))
         }
         _ => PathMenuOptions::full(),
@@ -233,27 +238,33 @@ fn render_menu_and_read(
     opts: &PathMenuOptions,
     rl: &mut rustyline::DefaultEditor,
 ) -> PathMenuChoice {
-    println!("\n--- 路径授权（/path）---");
-    println!("路径: {}", path.display());
+    println!("{}", tr("slash.path.title", &[]));
+    println!(
+        "{}",
+        tr(
+            "terminal.permission.path",
+            &[("path", &path.display().to_string())]
+        )
+    );
     if let Some(note) = &opts.note {
-        println!("提示: {}", note);
+        println!("{}", tr("terminal.permission.note", &[("note", note)]));
     }
     if opts.allow_once {
-        println!("  [a] 本次会话允许访问");
+        println!("{}", tr("slash.path.session", &[]));
     }
     if opts.persist_extra_root {
         println!("{}", extra_root_menu_line(path));
     }
     if opts.persist_readonly {
-        println!("  [r] 设为只读：允许读取，禁止写入");
+        println!("{}", tr("slash.path.readonlyOption", &[]));
     }
     if opts.persist_deny {
-        println!("  [d] 禁止访问：拒绝读取和写入");
+        println!("{}", tr("slash.path.denyOption", &[]));
     }
     if opts.cancel {
-        println!("  [c] 取消授权，不发送给 LLM");
+        println!("{}", tr("slash.path.cancelOption", &[]));
     }
-    print!("选择: ");
+    print!("{}", tr("terminal.permission.choose", &[]));
     let _ = io::stdout().flush();
 
     let line = rl.readline("").unwrap_or_else(|_| "c".to_string());
@@ -290,7 +301,13 @@ fn apply_menu_choice(
             ctx.global_services
                 .gate
                 .grant_session(canon, GrantTrigger::DraggedPathMenu);
-            eprintln!("✓ {} 本次会话期间允许访问", path.display());
+            eprintln!(
+                "{}",
+                tr(
+                    "terminal.cwd.allowed",
+                    &[("path", &path.display().to_string())]
+                )
+            );
             Ok(())
         }
         PathMenuChoice::PersistWorkspaceRoot => {
@@ -305,7 +322,13 @@ fn apply_menu_choice(
             ctx.global_services
                 .gate
                 .grant_session(canon.clone(), GrantTrigger::DraggedPathMenu);
-            eprintln!("✓ 已更新配置：以后允许访问 {}", canon.display());
+            eprintln!(
+                "{}",
+                tr(
+                    "slash.path.persisted",
+                    &[("path", &canon.display().to_string())]
+                )
+            );
             Ok(())
         }
         PathMenuChoice::PersistReadonly | PathMenuChoice::PersistDeny => {
@@ -327,10 +350,16 @@ fn apply_menu_choice(
                 mode,
             });
             let status = match mode {
-                PathRuleMode::Readonly => "已设为只读",
-                PathRuleMode::Deny => "已禁止访问",
+                PathRuleMode::Readonly => tr("slash.path.readonlyStatus", &[]),
+                PathRuleMode::Deny => tr("slash.path.deniedStatus", &[]),
             };
-            eprintln!("✓ 已更新访问规则：{} {}", path.display(), status);
+            eprintln!(
+                "{}",
+                tr(
+                    "slash.path.ruleUpdated",
+                    &[("path", &path.display().to_string()), ("status", &status)]
+                )
+            );
             Ok(())
         }
         PathMenuChoice::Cancel => Ok(()),
@@ -347,10 +376,9 @@ fn precheck_read_allow(ctx: &ChatContext, path: &Path) -> Result<PathBuf, AppErr
         .gate
         .check(PrimitiveOperation::Read, &canon.to_string_lossy())?
     {
-        PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
-            "该路径已被禁止访问，无法授权本次会话：{} ({})",
-            path.display(),
-            reason
+        PermissionDecision::Deny { reason } => Err(AppError::Permission(tr(
+            "slash.path.grantDenied",
+            &[("path", &path.display().to_string()), ("reason", &reason)],
         ))),
         _ => Ok(canon),
     }

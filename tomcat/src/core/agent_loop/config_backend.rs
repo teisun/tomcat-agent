@@ -41,18 +41,24 @@ impl PackageInstallRequest {
             scope: Option<crate::core::package::PackageVisibility>,
         }
 
-        let raw: RawRequest = serde_json::from_value(value.clone())
-            .map_err(|error| AppError::Config(format!("package_install 参数无效: {error}")))?;
+        let raw: RawRequest = serde_json::from_value(value.clone()).map_err(|error| {
+            AppError::Config(crate::infra::i18n::tr(
+                "install.arguments",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
         if raw.source.trim().is_empty() {
-            return Err(AppError::Config(
-                "package_install.source 不能为空".to_string(),
-            ));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "install.sourceEmpty",
+                &[],
+            )));
         }
         let source = PathBuf::from(raw.source);
         if !source.is_absolute() {
-            return Err(AppError::Config(
-                "package_install.source 必须是绝对路径".to_string(),
-            ));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "install.sourceAbsolute",
+                &[],
+            )));
         }
         Ok(Self {
             source,

@@ -2,6 +2,7 @@ import * as assert from "node:assert/strict";
 
 import {
   assertPlanPreviewCustomEditorFlow,
+  assertSessionSettingsLanguageFlow,
   assertPlanPreviewTablesFlow,
   assertInlineUserMessageEditFlow,
   assertSessionFilesDockFlow,
@@ -46,6 +47,10 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  test("session pins and language: gear, bilingual controls, deletion and fixed review choices", async function () {
+    this.timeout(180_000);
+    await assertSessionSettingsLanguageFlow(await getTomcatExtensionApi());
+  });
   test("tool images: thumbnail, original preview and reload", async function () {
     this.timeout(120_000);
     await assertWebviewToolImageThumbnailFlow(await getTomcatExtensionApi());
@@ -71,7 +76,7 @@ suite("Tomcat host E2E", () => {
     process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES === "1";
   const bootstrapRetryScenario =
     bootstrapFailureScenario &&
-    process.env.TOMCAT_VSCODE_TEST_WARNING_ACTION === "Retry";
+    process.env.TOMCAT_VSCODE_TEST_WARNING_ACTION === "host.action.retry";
 
   (bootstrapFailureScenario && !bootstrapRetryScenario ? test : test.skip)(
     "shows the connected-but-degraded bootstrap state",

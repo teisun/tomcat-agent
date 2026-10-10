@@ -128,7 +128,11 @@ fn discover_keeps_diagnostics_for_bad_skill_without_blocking_good_ones() {
     assert_eq!(set.diagnostics.len(), 1);
     assert!(set.diagnostics[0]
         .reason
-        .contains("skill 文件缺少 frontmatter 分隔符"));
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "skill.delimiter",
+            &[]
+        )));
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -203,7 +207,13 @@ fn discover_rejects_a_header_without_a_complete_closing_delimiter_in_the_read_wi
 
     let set = discover(&cfg, &project);
     assert!(!set.by_name.contains_key("truncated"));
-    assert!(set.diagnostics[0].reason.contains("完整的 --- 分隔行"));
+    assert!(set.diagnostics[0]
+        .reason
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "skill.frontmatterLimit",
+            &[("limit", "4096")]
+        )));
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -224,7 +234,13 @@ fn discover_rejects_invalid_utf8_inside_the_completed_header() {
 
     let set = discover(&cfg, &project);
     assert!(!set.by_name.contains_key("invalid"));
-    assert!(set.diagnostics[0].reason.contains("不是 UTF-8"));
+    assert!(set.diagnostics[0]
+        .reason
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "skill.utf8",
+            &[("detail", "")]
+        )));
 
     let _ = std::fs::remove_dir_all(&temp);
 }

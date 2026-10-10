@@ -22,6 +22,7 @@ import type {
 } from "../../shared/imagePreviewProtocol";
 import { resolveWebviewEntryAssets } from "../guiAssets";
 
+import { getLocale, subscribeLocale, t } from "../../shared/i18n";
 export class ImagePreviewPanel {
   private static instance: ImagePreviewPanel | undefined;
 
@@ -89,7 +90,7 @@ export class ImagePreviewPanel {
     // Create new panel
     this.panel = vscode.window.createWebviewPanel(
       "tomcat.imagePreview",
-      "Image Preview",
+      t("preview.title"),
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -103,7 +104,9 @@ export class ImagePreviewPanel {
     );
 
     this.panel.webview.html = this.buildHtml(this.panel.webview);
+    const stopLocale = subscribeLocale(() => { if (this.activeId) this.postState(this.activeId); });
     this.panel.onDidDispose(() => {
+      stopLocale();
       this.panel = undefined;
       this.rejectTestSnapshotWaiters(
         new Error("Image preview panel was closed before the DOM snapshot completed"),
@@ -237,6 +240,7 @@ export class ImagePreviewPanel {
 
   private postState(activeId: string): void {
     if (!this.panel) return;
+    this.panel.title = t("preview.title");
     this.activeId = activeId;
     const idx = this.ids.indexOf(activeId);
     const activePic = idx >= 0 ? this.pictureMap.get(activeId) : null;
@@ -246,21 +250,29 @@ export class ImagePreviewPanel {
       const firstPic = this.pictureMap.get(firstId);
       if (firstPic) {
         this.activeId = firstId;
-        this.postStateToPanel(firstId, 1, this.ids.length, `Attached image 1`);
+        this.postStateToPanel(firstId, 1, this.ids.length, t("preview.attached", { position: 1 }));
         return;      }
     }
     if (activePic) {
-      this.postStateToPanel(activeId, idx + 1, this.ids.length, `Attached image ${idx + 1}`);
+      this.postStateToPanel(activeId, idx + 1, this.ids.length, t("preview.attached", { position: idx + 1 }));
     }
   }
 
   private postStateToPanel(activeId: string, position: number, total: number, displayLabel: string): void {
     const source = this.sections.find(section => section.pictures.some(picture => picture.id === activeId));
-    if (source?.label.startsWith("Tool images · ")) displayLabel = source.label;
+    if (source?.kind === "tool") displayLabel = t("preview.section.tool", { name: source.label });
+    const sections = this.sections.map((section) => ({
+      ...section,
+      label: section.kind === "pending" ? t("preview.section.pending")
+        : section.kind === "sent" ? t("preview.section.sent", { name: section.label })
+        : section.kind === "tool" ? t("preview.section.tool", { name: section.label })
+        : section.label,
+    }));
     this.panel?.webview.postMessage({
       type: "preview.state",
       data: {
-        sections: this.sections,
+        locale: getLocale(),
+        sections,
         activeId,
         displayLabel,
         position,
@@ -272,7 +284,7 @@ export class ImagePreviewPanel {
   private async handleSave(attachmentId: string): Promise<void> {
     const pic = this.pictureMap.get(attachmentId);
     if (!pic) {
-      this.sendSaveResult(false, "Image not found");
+      this.sendSaveResult(false, t("preview.notFound"));
       return;
     }
 
@@ -280,7 +292,7 @@ export class ImagePreviewPanel {
     const uri = await vscode.window.showSaveDialog({
       defaultUri,
       filters: {
-        Images: ["png", "jpg", "jpeg", "gif", "webp", "svg"],
+        [t("preview.imageFilter")]: ["png", "jpg", "jpeg", "gif", "webp", "svg"],
       },
     });
     if (!uri) {
@@ -292,7 +304,7 @@ export class ImagePreviewPanel {
       // needs the bytes in the host process, and it needs them exactly once, on demand.
       const source = this.blobUriFor(pic);
       if (!source) {
-        this.sendSaveResult(false, "the image bytes are no longer available");
+        this.sendSaveResult(false, t("preview.bytesMissing"));
         return;
       }
       await vscode.workspace.fs.copy(source, uri, { overwrite: true });
@@ -344,7 +356,7 @@ export class ImagePreviewPanel {
     const distRoot = path.join(this.extensionUri.fsPath, "gui", "dist");
     const assets = resolveWebviewEntryAssets(distRoot, "image-preview.html", "image-preview.js");
     if (assets.scripts.length === 0) {
-      return `<!DOCTYPE html><html><body><pre>Image preview assets not available. Run \`npm run build\`.</pre></body></html>`;
+      return `<!DOCTYPE html><html lang="${getLocale()}"><body><pre>${t("preview.assetsMissing")}</pre></body></html>`;
     }
 
     const nonce = getNonce();
@@ -356,13 +368,13 @@ export class ImagePreviewPanel {
       .join("\n    ");
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'none'; img-src ${webview.cspSource} blob:; connect-src ${webview.cspSource}; font-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'strict-dynamic';" />  ${styleTags}
-  <title>Image Preview</title>
+  <title>${t("preview.title")}</title>
 </head>
 <body>
   <div id="root"></div>

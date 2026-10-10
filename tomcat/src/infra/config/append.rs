@@ -29,8 +29,12 @@ pub fn append_workspace_root_to_disk(config_path: &Path, abs_path: String) -> Re
         }
         cfg.workspace.workspace_roots.push(abs_path);
         validate_config(&cfg)?;
-        let toml_str = toml::to_string_pretty(&cfg)
-            .map_err(|e| AppError::Config(format!("序列化配置失败: {}", e)))?;
+        let toml_str = toml::to_string_pretty(&cfg).map_err(|e| {
+            AppError::Config(crate::infra::i18n::tr(
+                "configTool.serializeFailed",
+                &[("detail", &e.to_string())],
+            ))
+        })?;
         write_file_atomic(config_path, toml_str.as_bytes())?;
         Ok(())
     })
@@ -50,8 +54,12 @@ pub fn append_path_rule_to_disk(config_path: &Path, rule: PathRule) -> Result<()
         }
         cfg.primitive.path_rules.push(rule);
         validate_config(&cfg)?;
-        let toml_str = toml::to_string_pretty(&cfg)
-            .map_err(|e| AppError::Config(format!("序列化配置失败: {}", e)))?;
+        let toml_str = toml::to_string_pretty(&cfg).map_err(|e| {
+            AppError::Config(crate::infra::i18n::tr(
+                "configTool.serializeFailed",
+                &[("detail", &e.to_string())],
+            ))
+        })?;
         write_file_atomic(config_path, toml_str.as_bytes())?;
         Ok(())
     })
@@ -70,8 +78,12 @@ pub fn append_workspace_entry_to_disk(
         }
         cfg.workspace.entries.push(entry);
         validate_config(&cfg)?;
-        let toml_str = toml::to_string_pretty(&cfg)
-            .map_err(|e| AppError::Config(format!("序列化配置失败: {}", e)))?;
+        let toml_str = toml::to_string_pretty(&cfg).map_err(|e| {
+            AppError::Config(crate::infra::i18n::tr(
+                "configTool.serializeFailed",
+                &[("detail", &e.to_string())],
+            ))
+        })?;
         write_file_atomic(config_path, toml_str.as_bytes())?;
         Ok(())
     })

@@ -95,7 +95,7 @@ async fn work_todo_content_is_frozen_while_executing() {
     .expect_err("executing work content must be immutable");
 
     assert!(
-        err.to_string().contains("content 已冻结") && err.to_string().contains("evidence"),
+        err.to_string().contains("Executing work todo `t1` content is frozen; keep the approved work description and record progress or verification in set_status `evidence`"),
         "unexpected error: {err}"
     );
     cleanup_home(&home);

@@ -8,6 +8,7 @@ mod primitive;
 mod runtime;
 mod skills;
 mod tools;
+mod ui;
 
 pub use connector::*;
 pub use context::*;
@@ -17,12 +18,15 @@ pub use primitive::*;
 pub use runtime::*;
 pub use skills::*;
 pub use tools::*;
+pub use ui::*;
 
 use serde::{Deserialize, Serialize};
 
 /// 应用顶层配置，聚合 log / llm / storage / agent / plugin / security / primitive 等子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub ui: UiConfig,
     #[serde(default)]
     pub log: LogConfig,
     #[serde(default)]

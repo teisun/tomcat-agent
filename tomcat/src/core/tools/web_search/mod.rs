@@ -269,7 +269,7 @@ impl WebSearchRuntime {
                 .get()
                 .cloned()
                 .ok_or_else(|| BackendFailure::Incompatible {
-                    detail: "web_search plugin backend invoker not configured".to_string(),
+                    detail: crate::infra::i18n::tr("search.invokerMissing", &[]),
                 })?;
         let start = Instant::now();
         let raw = PluginWebSearchBackend::new(invoker, backend, session_id)
@@ -313,7 +313,7 @@ impl WebSearchRuntime {
 }
 
 fn plugin_invoker_missing_error() -> AppError {
-    AppError::Tool("web_search plugin backend invoker not configured".to_string())
+    AppError::Tool(crate::infra::i18n::tr("search.invokerMissing", &[]))
 }
 
 fn build_web_search_http_client(
@@ -327,7 +327,7 @@ fn build_web_search_http_client(
     build_outbound_client(
         options,
         OutboundClientErrorKind::Llm,
-        "创建 web_search HTTP 客户端失败",
+        &crate::infra::i18n::tr("search.client", &[]),
     )
 }
 
@@ -350,11 +350,14 @@ fn log_hard_failure(backend: &str, error: AppError) -> AppError {
 
 fn all_backends_unavailable_error(query: &str, warnings: &[String]) -> AppError {
     if warnings.is_empty() {
-        return AppError::Tool(format!("web_search 查询 `{query}` 所有后端均不可用。"));
+        return AppError::Tool(crate::infra::i18n::tr(
+            "search.allUnavailable",
+            &[("query", query)],
+        ));
     }
-    AppError::Tool(format!(
-        "web_search 查询 `{query}` 所有后端均不可用：{}",
-        warnings.join("; ")
+    AppError::Tool(crate::infra::i18n::tr(
+        "search.allUnavailableDetails",
+        &[("query", query), ("details", &warnings.join("; "))],
     ))
 }
 

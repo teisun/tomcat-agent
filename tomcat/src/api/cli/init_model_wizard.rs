@@ -4,6 +4,7 @@ use std::path::Path;
 use dialoguer::{Confirm, Password, Select};
 
 use crate::core::llm::{env_name_for_provider, ModelCatalog, ModelEntry};
+use crate::infra::i18n::tr;
 use crate::{AppConfig, AppError};
 
 pub(crate) use crate::infra::config::{read_env_entries, write_env_entries};
@@ -27,9 +28,7 @@ pub(crate) fn run_model_wizard(
 ) -> Result<InitModelChoice, AppError> {
     let entries = catalog.entries();
     if entries.is_empty() {
-        return Err(AppError::Config(
-            "模型 catalog 为空，无法执行 init 向导。".to_string(),
-        ));
+        return Err(AppError::Config(tr("cli.init.catalogEmpty", &[])));
     }
     let default_index = entries
         .iter()
@@ -45,7 +44,7 @@ pub(crate) fn run_model_wizard(
         })
         .collect();
     let selected_index = Select::new()
-        .with_prompt("  选择默认模型")
+        .with_prompt(tr("cli.init.selectDefault", &[]))
         .items(&labels)
         .default(default_index)
         .interact_opt()
@@ -100,7 +99,7 @@ pub(crate) fn prompt_additional_provider_keys(
     }
 
     let should_prompt = Confirm::new()
-        .with_prompt("  是否顺手补充其它 provider 的 API Key（便于后续 /model use）")
+        .with_prompt(tr("cli.init.moreKeys", &[]))
         .default(false)
         .interact_opt()
         .unwrap_or(None)
@@ -131,7 +130,7 @@ pub(crate) fn prompt_and_store_provider_key(
     }
 
     let value: String = Password::new()
-        .with_prompt(format!("  输入 {}（回车跳过）", env_name))
+        .with_prompt(tr("cli.init.enterKey", &[("name", env_name)]))
         .allow_empty_password(true)
         .interact()
         .unwrap_or_default();

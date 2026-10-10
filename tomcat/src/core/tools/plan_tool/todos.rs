@@ -36,7 +36,7 @@ impl TodosArgs {
             for op in ops {
                 if op.get("op").is_some() && op.get("kind").is_none() {
                     return Err(ToolError::BadArgs(
-                        "todos ops: 字段 `op` 已下线，请改用 `kind`（kind: upsert | set_status | remove）"
+                        "todos ops: field `op` was removed; use `kind` (kind: upsert | set_status | remove)"
                             .into(),
                     ));
                 }

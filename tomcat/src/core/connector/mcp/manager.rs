@@ -33,6 +33,7 @@ use crate::core::connector::mcp::naming::to_model_name;
 use crate::core::connector::mcp::oauth::OAuthTokenStore;
 use crate::core::security::project_trust::ProjectTrustStore;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::AppConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,16 +60,8 @@ impl ServerState {
         }
     }
 
-    pub fn display_label(&self) -> &'static str {
-        match self {
-            Self::Pending => "等待连接",
-            Self::Connecting => "连接中",
-            Self::Ready => "已连接",
-            Self::Disconnected => "已断开",
-            Self::AwaitingProjectTrust => "等待项目信任",
-            Self::NeedsAuthorization => "需要授权",
-            Self::Failed(_) => "失败",
-        }
+    pub fn display_label(&self) -> String {
+        crate::infra::i18n::tr(&format!("mcp.state.{}", self.code()), &[])
     }
 }
 
@@ -440,16 +433,14 @@ impl McpManager {
         self.cancel_login(&key);
         let server = self
             .configured_server(&key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))?;
+            .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", identifier)])))?;
         let removed = match server.source {
             McpConfigSource::Global => remove_global_server(cfg, &server.name)?,
             McpConfigSource::Project => {
-                let workspace_root = self.workspace_root.as_deref().ok_or_else(|| {
-                    AppError::Config(
-                        "project MCP configuration requires an explicit session project root"
-                            .into(),
-                    )
-                })?;
+                let workspace_root = self
+                    .workspace_root
+                    .as_deref()
+                    .ok_or_else(|| AppError::Config(tr("mcp.projectRootRequired", &[])))?;
                 remove_project_server(cfg, workspace_root, &server.name)?
             }
         };
@@ -485,7 +476,7 @@ impl McpManager {
             .map_err(ToolEnableApplyError::not_saved)?;
         let server = self
             .configured_server(&key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))
+            .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", identifier)])))
             .map_err(ToolEnableApplyError::not_saved)?;
         let known_tool = self
             .entries
@@ -499,8 +490,9 @@ impl McpManager {
                     .any(|tool| tool.raw_name == raw_name)
             });
         if !known_tool {
-            return Err(ToolEnableApplyError::not_saved(AppError::Tool(format!(
-                "unknown MCP tool '{raw_name}' for source '{identifier}'"
+            return Err(ToolEnableApplyError::not_saved(AppError::Tool(tr(
+                "mcp.unknownSourceTool",
+                &[("tool", raw_name), ("source", identifier)],
             ))));
         }
         match server.source {
@@ -508,12 +500,10 @@ impl McpManager {
                 set_global_tool_enabled(cfg, &server.name, raw_name, enabled)
             }
             McpConfigSource::Project => {
-                let workspace_root = self.workspace_root.as_deref().ok_or_else(|| {
-                    AppError::Config(
-                        "project MCP configuration requires an explicit session project root"
-                            .into(),
-                    )
-                });
+                let workspace_root = self
+                    .workspace_root
+                    .as_deref()
+                    .ok_or_else(|| AppError::Config(tr("mcp.projectRootRequired", &[])));
                 workspace_root.and_then(|workspace_root| {
                     set_project_tool_enabled(cfg, workspace_root, &server.name, raw_name, enabled)
                 })
@@ -535,16 +525,14 @@ impl McpManager {
         self.ensure_runnable(&key)?;
         let server = self
             .configured_server(&key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))?;
+            .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", identifier)])))?;
         match server.source {
             McpConfigSource::Global => set_global_tool_filter(cfg, &server.name, filter)?,
             McpConfigSource::Project => {
-                let workspace_root = self.workspace_root.as_deref().ok_or_else(|| {
-                    AppError::Config(
-                        "project MCP configuration requires an explicit session project root"
-                            .into(),
-                    )
-                })?;
+                let workspace_root = self
+                    .workspace_root
+                    .as_deref()
+                    .ok_or_else(|| AppError::Config(tr("mcp.projectRootRequired", &[])))?;
                 set_project_tool_filter(cfg, workspace_root, &server.name, filter)?
             }
         }
@@ -579,10 +567,11 @@ impl McpManager {
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [key] => Ok(key.clone()),
-            [] => Err(AppError::Tool(format!("unknown MCP server: {identifier}"))),
-            _ => Err(AppError::Tool(format!(
-                "MCP server name '{identifier}' is ambiguous; use configKey"
+            [] => Err(AppError::Tool(tr(
+                "mcp.unknownServer",
+                &[("id", identifier)],
             ))),
+            _ => Err(AppError::Tool(tr("mcp.ambiguous", &[("id", identifier)]))),
         }
     }
 
@@ -590,7 +579,7 @@ impl McpManager {
         let key = self.resolve_key(identifier)?;
         self.configured_server(&key)
             .map(|server| server.source)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))
+            .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", identifier)])))
     }
 
     #[cfg(test)]
@@ -613,11 +602,11 @@ impl McpManager {
         let entries = self.entries.read();
         let entry = entries
             .get(key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {key}")))?;
+            .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", key)])))?;
         if entry.status.overridden {
-            return Err(AppError::Tool(format!(
-                "MCP server '{}' is overridden by the workspace connector with the same name",
-                entry.server.name
+            return Err(AppError::Tool(tr(
+                "mcp.overriddenServer",
+                &[("name", &entry.server.name)],
             )));
         }
         Ok(())
@@ -692,23 +681,19 @@ impl McpManager {
     pub fn tool_catalog_snapshot(&self, identifier: &str) -> Result<McpToolCatalog, AppError> {
         let key = self
             .resolve_key(identifier)
-            .map_err(|_| AppError::Tool(format!("unknown MCP source: {identifier}")))?;
+            .map_err(|_| AppError::Tool(tr("mcp.unknownSource", &[("id", identifier)])))?;
         self.ensure_runnable(&key)?;
         let (connection, filter) = {
             let entries = self.entries.read();
             let entry = entries
                 .get(&key)
-                .ok_or_else(|| AppError::Tool(format!("unknown MCP source: {identifier}")))?;
+                .ok_or_else(|| AppError::Tool(tr("mcp.unknownSource", &[("id", identifier)])))?;
             if entry.status.overridden {
-                return Err(AppError::Tool(
-                    "MCP source is overridden by workspace configuration".into(),
-                ));
+                return Err(AppError::Tool(tr("mcp.overridden", &[])));
             }
             (
                 entry.connection.clone().ok_or_else(|| {
-                    AppError::Tool(format!(
-                        "MCP source '{identifier}' is not ready; use /connector list for status"
-                    ))
+                    AppError::Tool(tr("mcp.sourceNotReady", &[("id", identifier)]))
                 })?,
                 entry.server.config.tool_filter.clone(),
             )
@@ -741,14 +726,12 @@ impl McpManager {
     ) -> Result<Vec<McpToolSearchMatch>, AppError> {
         let query = query.trim();
         if query.is_empty() {
-            return Err(AppError::Tool(
-                "tool search query cannot be empty".to_string(),
-            ));
+            return Err(AppError::Tool(tr("mcp.emptyQuery", &[])));
         }
         let source_key = source
             .map(|identifier| {
                 self.resolve_key(identifier)
-                    .map_err(|_| AppError::Tool(format!("unknown MCP source: {identifier}")))
+                    .map_err(|_| AppError::Tool(tr("mcp.unknownSource", &[("id", identifier)])))
             })
             .transpose()?;
         let normalized_query = query.to_lowercase();
@@ -804,7 +787,7 @@ impl McpManager {
                 Some(tool) => tools.push(tool),
                 None => errors.push(McpToolLookupError {
                     name: name.clone(),
-                    message: format!("unknown or not-ready deferred tool: {name}"),
+                    message: tr("mcp.deferredUnknown", &[("name", name)]),
                 }),
             }
         }
@@ -827,9 +810,7 @@ impl McpManager {
         context: McpCallContext,
     ) -> Result<serde_json::Value, AppError> {
         let tool = self.lookup_tool(model_tool_name).ok_or_else(|| {
-            AppError::Tool(format!(
-                "unknown or not-ready deferred tool: {model_tool_name}"
-            ))
+            AppError::Tool(tr("mcp.deferredUnknown", &[("name", model_tool_name)]))
         })?;
         self.call_tool_with_context(&tool.server, &tool.model_name, params, context)
             .await
@@ -946,16 +927,12 @@ impl McpManager {
         self.ensure_runnable(&key)?;
         let (connection, filter, generation) = {
             let entries = self.entries.read();
-            let entry = entries.get(&key).ok_or_else(|| {
-                AppError::Tool(format!(
-                    "MCP server '{identifier}' is not ready; use /connector list for status"
-                ))
-            })?;
+            let entry = entries
+                .get(&key)
+                .ok_or_else(|| AppError::Tool(tr("mcp.serverNotReady", &[("id", identifier)])))?;
             (
                 entry.connection.clone().ok_or_else(|| {
-                    AppError::Tool(format!(
-                        "MCP server '{identifier}' is not ready; use /connector list for status"
-                    ))
+                    AppError::Tool(tr("mcp.serverNotReady", &[("id", identifier)]))
                 })?,
                 entry.server.config.tool_filter.clone(),
                 entry.generation,
@@ -964,23 +941,19 @@ impl McpManager {
         let tool = visible_tools(&connection, &filter)?
             .get(model_tool_name)
             .cloned()
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP tool: {model_tool_name}")))?;
+            .ok_or_else(|| AppError::Tool(tr("mcp.unknownTool", &[("name", model_tool_name)])))?;
         let arguments = params.as_object().cloned().ok_or_else(|| {
-            AppError::Tool(format!(
-                "MCP tool '{model_tool_name}' arguments must be a JSON object"
-            ))
+            AppError::Tool(tr("mcp.argumentsObject", &[("name", model_tool_name)]))
         })?;
         let request = rmcp::model::CallToolRequestParams::new(tool.raw_name.clone())
             .with_arguments(arguments);
         if connection.owner.peer.is_transport_closed() {
             self.connection_event(&key, connection.id, ConnectionEvent::SubmissionClosed);
-            return Err(AppError::Tool(
-                "MCP submission channel closed; request not sent".into(),
-            ));
+            return Err(AppError::Tool(tr("mcp.submissionClosed", &[])));
         }
         let deadline = entered
             .checked_add(connection.calls.timeout)
-            .ok_or_else(|| AppError::Config("MCP admission timeout is too large".into()))?;
+            .ok_or_else(|| AppError::Config(tr("mcp.admissionOverflow", &[])))?;
         let admission = connection
             .calls
             .admitted
@@ -1022,9 +995,7 @@ impl McpManager {
             if !visible_tools(&connection, &current.server.config.tool_filter)?
                 .contains_key(model_tool_name)
             {
-                return Err(AppError::Tool(
-                    "MCP request no longer permitted; request not sent".into(),
-                ));
+                return Err(AppError::Tool(tr("mcp.notPermitted", &[])));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(CallFailure::QueueTimeout.to_app_error(model_tool_name));
@@ -1038,11 +1009,9 @@ impl McpManager {
                 admission,
             )
         };
-        let result = result.await.map_err(|_| {
-            AppError::Tool(
-                "MCP request task ended without a result; execution result unknown".into(),
-            )
-        })?;
+        let result = result
+            .await
+            .map_err(|_| AppError::Tool(tr("mcp.noResult", &[])))?;
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -1061,8 +1030,7 @@ impl McpManager {
                 return Err(error.to_app_error(model_tool_name));
             }
         };
-        serde_json::to_value(result)
-            .map_err(|_| AppError::Tool("serialize MCP tool result failed".into()))
+        serde_json::to_value(result).map_err(|_| AppError::Tool(tr("mcp.serializeResult", &[])))
     }
 
     pub async fn connect_all(&self) {
@@ -1239,19 +1207,13 @@ fn parse_tools(
     let tools = listed
         .get("tools")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            AppError::Tool(format!("MCP server '{server}' returned invalid tools/list"))
-        })?;
+        .ok_or_else(|| AppError::Tool(tr("mcp.invalidToolList", &[("name", server)])))?;
     let mut definitions = BTreeMap::new();
     for tool in tools {
         let raw_name = tool
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                AppError::Tool(format!(
-                    "MCP server '{server}' returned a tool without name"
-                ))
-            })?;
+            .ok_or_else(|| AppError::Tool(tr("mcp.toolWithoutName", &[("name", server)])))?;
         let model_name = to_model_name(server, raw_name);
         definitions.insert(
             model_name.clone(),
@@ -1849,9 +1811,11 @@ mod tests {
             .await
             .expect_err("tool_call must not bypass project connector confirmation");
         assert!(
-            error
-                .to_string()
-                .contains("unknown or not-ready deferred tool"),
+            error.to_string().contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "mcp.deferredUnknown",
+                &[("name", "mcp__project-fake__capture")]
+            )),
             "unapproved sources must not expose a callable deferred tool: {error}"
         );
     }

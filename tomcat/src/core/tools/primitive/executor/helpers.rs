@@ -20,13 +20,14 @@ pub(super) async fn until_cancelled<T>(
     }
 }
 
-pub(super) fn op_summary(op: PrimitiveOperation) -> &'static str {
-    match op {
-        PrimitiveOperation::Read => "读取",
-        PrimitiveOperation::Write => "写入",
-        PrimitiveOperation::Edit => "编辑",
-        PrimitiveOperation::Bash => "执行命令",
-    }
+pub(super) fn op_summary(op: PrimitiveOperation) -> String {
+    let key = match op {
+        PrimitiveOperation::Read => "permission.op.read",
+        PrimitiveOperation::Write => "permission.op.write",
+        PrimitiveOperation::Edit => "permission.op.edit",
+        PrimitiveOperation::Bash => "permission.op.bash",
+    };
+    crate::infra::i18n::tr(key, &[])
 }
 
 /// 把 [`PermissionScope`] 序列化为审计字符串（与 serde rename_all = snake_case 一致）。
@@ -93,5 +94,5 @@ pub(super) fn find_binary(candidates: &[&str]) -> Option<PathBuf> {
 /// 纯文件工具收到 URL-like 输入时，直接以“这不是本地文件路径”失败，
 /// 避免把 `http://...` 误当成磁盘路径继续读写。
 pub(super) fn url_like_fs_miss(path: &str) -> Option<AppError> {
-    is_url_like(path).then(|| AppError::Primitive(format!("No such file or directory: {}", path)))
+    is_url_like(path).then(|| AppError::Primitive(format!("No such file or directory: {path}")))
 }

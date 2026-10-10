@@ -349,7 +349,7 @@ pub(super) fn build_simple_diff(old: &str, new: &str) -> String {
         out.push_str(&format!("  ... ({} -> {} lines)\n", o.len(), n.len()));
     }
     if out.is_empty() {
-        out = "(无变化)".to_string();
+        out = "(no changes)".to_string();
     }
     out
 }

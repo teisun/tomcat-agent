@@ -136,9 +136,13 @@ impl EffectiveModelLimits {
             .unwrap_or(0)
             .max(model_or_local_reserve);
         if output_reserve_tokens >= context_window {
-            return Err(AppError::Config(format!(
-                "模型 `{}` 的 output reserve ({output_reserve_tokens}) 必须小于 context_window ({context_window})。",
-                entry.id
+            return Err(AppError::Config(tr(
+                "model.reserveInvalid",
+                &[
+                    ("id", &entry.id),
+                    ("reserve", &output_reserve_tokens.to_string()),
+                    ("window", &context_window.to_string()),
+                ],
             )));
         }
 
@@ -382,6 +386,8 @@ pub fn capability_requirements_for_messages(messages: &[ChatMessage]) -> Capabil
     requirements
 }
 
+use crate::infra::i18n::tr;
+
 pub fn validate_capabilities(
     catalog: &ModelCatalog,
     default_model: &str,
@@ -405,9 +411,9 @@ pub fn validate_capabilities(
         .map(|candidate| candidate.id)
         .unwrap_or_else(|| default_model.to_string());
     let missing = requirements.missing_labels(capabilities).join("/");
-    Err(AppError::Llm(format!(
-        "provider/model 不支持 {}，建议改用 `{}`。",
-        missing, suggested
+    Err(AppError::Llm(tr(
+        "model.capabilitiesMissing",
+        &[("missing", &missing), ("suggested", &suggested)],
     )))
 }
 
@@ -700,9 +706,14 @@ impl DefaultLlmResolver {
                 );
                 match self.resolve_model_call(LlmScene::Compaction, default_model) {
                     Ok(resolved) => Ok(resolved),
-                    Err(fallback_err) => Err(AppError::Config(format!(
-                        "压缩模型 `{}` 不可用，回退默认模型 `{}` 也失败。原始错误：{}；回退错误：{}",
-                        selected_model, default_model, original_err, fallback_err
+                    Err(fallback_err) => Err(AppError::Config(tr(
+                        "model.compactionFallbackFailed",
+                        &[
+                            ("selected", selected_model),
+                            ("fallback", default_model),
+                            ("original", &original_err.to_string()),
+                            ("detail", &fallback_err.to_string()),
+                        ],
                     ))),
                 }
             }

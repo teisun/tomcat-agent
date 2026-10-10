@@ -1,6 +1,7 @@
 use super::super::args::parse_hashline_edit_args;
 use super::super::guard::{check_mutation_stamp, refresh_read_stamp};
 use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
+use crate::infra::i18n::tr;
 
 pub(in super::super) async fn handle_hashline_edit(
     ctx: &ToolExecCtx<'_>,
@@ -31,15 +32,16 @@ pub(in super::super) async fn handle_hashline_edit(
                     diff_truncated: r.diff_truncated,
                     expired: false,
                 });
-                format!("已 hashline 编辑: {}", r.path)
+                format!("Hashline edited: {}", r.path)
             } else {
                 // hashline 段哈希不匹配时，旧 read 结果不能再作为下一次编辑
                 // 的依据。失效 stamp 让模型可获得一次真实的 refresh read，而不是
                 // 被 FILE_UNCHANGED 去重短路。
                 invalidate_read_stamp(ctx, path);
-                let msg = format!("hashline 编辑被拒绝: {}", r.path);
-                *display_out = Some(ToolDisplay::Text { text: msg.clone() });
-                msg
+                *display_out = Some(ToolDisplay::Text {
+                    text: tr("toolHashline.denied", &[("path", &r.path)]),
+                });
+                format!("Hashline edit denied: {}", r.path)
             }
         })
         .map_err(|e| {

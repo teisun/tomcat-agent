@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tomcat::core::session::read_entries_tail;
+use tomcat::infra::tr;
 use tomcat::{
     load_config_toml_file, resolve_agent_trail_dir, resolve_sessions_dir, CheckpointKind,
     CheckpointRecordRequest, CheckpointStore, SessionManager, ShadowGitStore, TranscriptEntry,
@@ -33,6 +34,7 @@ fn isolated_cli_command() -> StdCommand {
             command.env_remove(key);
         }
     }
+    command.env("TOMCAT__UI__LANGUAGE", "en");
     command
 }
 
@@ -616,7 +618,10 @@ fn test_resume_after_interrupt() {
 
     assert
         .success()
-        .stdout(predicate::str::contains("恢复会话"))
+        .stdout(predicate::str::contains(tr(
+            "terminal.resumed",
+            &[("key", "")],
+        )))
         .stdout(predicate::str::contains(&checkpoint_id));
 }
 
@@ -670,9 +675,10 @@ fn test_slash_restore_recovers_after_bad_edit() {
         .write_stdin(format!("/restore {checkpoint_id}\n"))
         .assert();
 
-    assert
-        .success()
-        .stdout(predicate::str::contains("已恢复 checkpoint"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "slash.restore.paths",
+        &[("id", &checkpoint_id), ("paths", "note.txt")],
+    )));
     assert_eq!(
         fs::read_to_string(fx.workdir.join("note.txt")).unwrap(),
         "good"
@@ -843,7 +849,7 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
         .write_stdin("")
         .assert()
         .success()
-        .stdout(predicate::str::contains("再见！"));
+        .stdout(predicate::str::contains(tr("terminal.goodbye", &[])));
 
     let checkpoints = fx
         .store
@@ -891,7 +897,7 @@ fn test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning() {
         .write_stdin("")
         .assert()
         .success()
-        .stdout(predicate::str::contains("再见！"))
+        .stdout(predicate::str::contains(tr("terminal.goodbye", &[])))
         .stderr(predicate::str::contains("[cleanup_instance] no event_sender").not());
 }
 
@@ -975,7 +981,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "运行中挂断后子进程应在 soft interrupt + EOF 下正常退出，stderr={stderr}"
     );
     assert!(
-        stderr.contains("^C 已中断（partial 已保存）"),
+        stderr.contains(tr("terminal.interrupted", &[]).trim_start()),
         "挂断应走 Interrupted 持久化路径，stderr={stderr}"
     );
 
@@ -1090,7 +1096,10 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     unsafe {
         libc::kill(chat_pid as i32, libc::SIGINT);
     }
-    child.wait_for_stderr("^C 已中断（partial 已保存）", TOOL_ROUND_TIMEOUT);
+    child.wait_for_stderr(
+        tr("terminal.interrupted", &[]).trim_start(),
+        TOOL_ROUND_TIMEOUT,
+    );
     wait_for_transcript(
         &transcript_path,
         TOOL_ROUND_TIMEOUT,
@@ -1135,7 +1144,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "第二轮不应因 append_message_chain 退出，stderr={stderr}"
     );
     assert!(
-        stderr.contains("^C 已中断（partial 已保存）"),
+        stderr.contains(tr("terminal.interrupted", &[]).trim_start()),
         "soft interrupt prompt must be visible before same-process followup; stderr={stderr}",
     );
     assert!(
@@ -1144,7 +1153,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         output.stdout
     );
     assert!(
-        !stderr.contains("\n[错误]"),
+        !stderr.contains(&tr("terminal.error", &[("detail", "")])),
         "the followup turn must complete rather than render a partial failed reply; stderr={stderr}"
     );
     assert!(
@@ -1195,7 +1204,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
                         .message
                         .get("content")
                         .and_then(|value| value.as_str())
-                        .is_some_and(|content| content.contains("stopped") || content.contains("已停止"))
+                        .is_some_and(|content| content.starts_with("Stopped: "))
         )),
         "background task must be explicitly stopped before RECOVERED_E2E; entries={entries:?}",
     );

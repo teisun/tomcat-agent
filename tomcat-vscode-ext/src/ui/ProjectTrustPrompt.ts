@@ -1,6 +1,7 @@
 import type { TomcatMessenger } from "../serveClient/TomcatMessenger";
 import type { InitializeResult } from "../serveClient/initialize";
 import { parseProjectTrustPayload } from "../shared/connectorsProtocol";
+import { t } from "../shared/i18n";
 
 /** The host asks on Serve readiness, even when Settings has never been opened. */
 export class ProjectTrustPrompt {
@@ -29,7 +30,7 @@ export class ProjectTrustPrompt {
     let trustAttempted = false;
     try {
       const lookup = await this.deps.messenger.sendGetProjectTrust(cwd);
-      if (!lookup.success) throw new Error(lookup.error ?? "Unable to read project trust.");
+      if (!lookup.success) throw new Error(lookup.error ?? t("host.trustReadFailed"));
       const status = parseProjectTrustPayload(lookup.payload);
       if (status.error) throw new Error(status.error);
       if (status.trusted || this.asked.has(status.projectRoot)) return;
@@ -41,15 +42,15 @@ export class ProjectTrustPrompt {
       const currentCwd = this.deps.getDefaultCwd();
       if (!currentCwd) return;
       const current = await this.deps.messenger.sendGetProjectTrust(currentCwd);
-      if (!current.success) throw new Error(current.error ?? "Unable to verify the current project.");
+      if (!current.success) throw new Error(current.error ?? t("host.trustVerifyFailed"));
       const verified = parseProjectTrustPayload(current.payload);
       if (verified.error || verified.projectRoot !== status.projectRoot) return;
       trustAttempted = true;
       const granted = await this.deps.messenger.sendTrustProject(status.projectRoot);
-      if (!granted.success) throw new Error(granted.error ?? "Unable to trust this project.");
+      if (!granted.success) throw new Error(granted.error ?? t("host.trustGrantFailed"));
       const receipt = parseProjectTrustPayload(granted.payload);
       if (!receipt.trusted || receipt.projectRoot !== status.projectRoot || receipt.error) {
-        throw new Error("Project trust receipt did not match the displayed project.");
+        throw new Error(t("host.trustReceiptMismatch"));
       }
       for (const listener of this.listeners) listener();
     } catch (error) {

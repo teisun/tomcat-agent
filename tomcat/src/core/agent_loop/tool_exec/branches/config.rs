@@ -8,7 +8,7 @@ pub(in super::super) async fn handle_config_get(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let Some(backend) = ctx.config_backend.as_ref() else {
-        return Err("config 工具未启用：当前会话不允许通过 LLM 读改配置".to_string());
+        return Err("config tools are disabled: this session may not read or modify configuration through the LLM".to_string());
     };
     let key = args["key"].as_str().unwrap_or("");
     backend
@@ -24,7 +24,7 @@ pub(in super::super) async fn handle_config_set(
     display_out: &mut Option<ToolDisplay>,
 ) -> Result<String, String> {
     let Some(backend) = ctx.config_backend.as_ref() else {
-        return Err("config 工具未启用：当前会话不允许通过 LLM 读改配置".to_string());
+        return Err("config tools are disabled: this session may not read or modify configuration through the LLM".to_string());
     };
     let key = args["key"].as_str().unwrap_or("");
     let value = args["value"].as_str().unwrap_or("");
@@ -47,7 +47,10 @@ pub(in super::super) async fn handle_package_install(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let Some(backend) = ctx.package_install_backend.as_ref() else {
-        return Err("package_install 未启用：当前会话没有安装后端".to_string());
+        return Err(
+            "package_install is disabled: no installation backend is available for this session"
+                .to_string(),
+        );
     };
     let request = crate::core::agent_loop::PackageInstallRequest::parse(args)
         .map_err(|error| error.to_string())?;
@@ -56,7 +59,9 @@ pub(in super::super) async fn handle_package_install(
         .await
         .and_then(|result| {
             serde_json::to_value(result).map_err(|error| {
-                AppError::Config(format!("序列化 package_install 结果失败: {error}"))
+                AppError::Config(format!(
+                    "Could not serialize package_install result: {error}"
+                ))
             })
         })
         .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()))

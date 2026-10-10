@@ -838,7 +838,8 @@ impl PlanRuntime {
     ) -> Result<Vec<explorer::ExplorerReport>, PlanRuntimeError> {
         let Some(dispatcher) = self.explorer.lock().clone() else {
             return Err(PlanRuntimeError::Io(
-                "dispatch_agent 不可用：explorer 子 Agent 派发器未注入".into(),
+                "dispatch_agent is unavailable: explorer sub-Agent dispatcher was not supplied"
+                    .into(),
             ));
         };
         Ok(
@@ -1036,7 +1037,9 @@ impl PlanRuntime {
         allow_review_edit: bool,
     ) -> plan_reviewer::PlanReviewSummary {
         let Some(dispatcher) = self.plan_reviewer.lock().clone() else {
-            return plan_reviewer::PlanReviewSummary::placeholder_pending();
+            let summary = plan_reviewer::PlanReviewSummary::placeholder_pending();
+            self.record_plan_review(plan_id, &summary, 0);
+            return summary;
         };
         // 软上限：默认 1 轮；超出 → warning（这里以摘要 prefix 表示，
         // chat_loop 在装配 transcript 时会写 `plan.review.warning`）
@@ -1061,17 +1064,23 @@ impl PlanRuntime {
         let path = match file_store::plan_path_for_id(plan_id) {
             Ok(p) => p,
             Err(e) => {
-                return plan_reviewer::PlanReviewSummary::aborted_with(format!(
-                    "plan_id 非法: {e}"
+                let summary = plan_reviewer::PlanReviewSummary::aborted_with(tr(
+                    "planRuntime.invalidId",
+                    &[("detail", &e.to_string())],
                 ));
+                self.record_plan_review(plan_id, &summary, rounds);
+                return summary;
             }
         };
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
-                return plan_reviewer::PlanReviewSummary::aborted_with(format!(
-                    "read plan 失败: {e}"
+                let summary = plan_reviewer::PlanReviewSummary::aborted_with(tr(
+                    "planRuntime.readFailed",
+                    &[("detail", &e.to_string())],
                 ));
+                self.record_plan_review(plan_id, &summary, rounds);
+                return summary;
             }
         };
 
@@ -1081,6 +1090,17 @@ impl PlanRuntime {
         if rounds > 1 {
             summary.summary = format!("[round {rounds}] {}", summary.summary);
         }
+        self.record_plan_review(plan_id, &summary, rounds);
+        summary
+    }
+
+    /// One result event for reviewed, skipped, interrupted and unavailable paths.
+    pub(crate) fn record_plan_review(
+        &self,
+        plan_id: &str,
+        summary: &plan_reviewer::PlanReviewSummary,
+        rounds: u32,
+    ) {
         // 落 transcript 自定义事件（reviewer.md §11 / events::wire::WIRE_PLAN_REVIEW）。
         // 失败仅 warning，create_plan 主流程不受影响。
         let mut review_payload = summary.to_json();
@@ -1111,7 +1131,6 @@ impl PlanRuntime {
             });
             self.write_transcript_custom(warn_payload);
         }
-        summary
     }
 
     /// 同步派发保留的 code reviewer。它不在默认完成路径中；手动或实验调用方负责：
@@ -1136,8 +1155,9 @@ impl PlanRuntime {
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
-                return code_reviewer::CodeReviewSummary::aborted_with(format!(
-                    "read plan 失败: {e}"
+                return code_reviewer::CodeReviewSummary::aborted_with(tr(
+                    "planRuntime.readFailed",
+                    &[("detail", &e.to_string())],
                 ));
             }
         };
@@ -1164,7 +1184,12 @@ impl PlanRuntime {
         };
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
-            Err(e) => return verify::VerifySummary::aborted_with(format!("read plan 失败: {e}")),
+            Err(e) => {
+                return verify::VerifySummary::aborted_with(tr(
+                    "planRuntime.readFailed",
+                    &[("detail", &e.to_string())],
+                ))
+            }
         };
 
         dispatcher.dispatch(plan_id, &plan_text).await
@@ -1174,7 +1199,8 @@ impl PlanRuntime {
         if let Some(active) = self.active_plan().filter(|plan| plan.id == plan_id) {
             return Ok(active.path);
         }
-        file_store::plan_path_for_id(plan_id).map_err(|e| format!("plan_id 非法: {e}"))
+        file_store::plan_path_for_id(plan_id)
+            .map_err(|e| tr("planRuntime.invalidId", &[("detail", &e.to_string())]))
     }
 
     /// 把最终版 VerifySummary 写入 transcript `plan.verify` 事件。
@@ -1423,9 +1449,7 @@ impl PlanRuntime {
             if !path.is_file() {
                 return Err(PlanRuntimeError::BuildPlanNotFound {
                     plan_id: plan_id_or_path.to_string(),
-                    hint: format!(
-                        "未找到 ~/.tomcat/plans/{plan_id_or_path}.plan.md；先通过 PLAN 模式 create_plan 生成"
-                    ),
+                    hint: tr("planRuntime.createFirst", &[("id", plan_id_or_path)]),
                 });
             }
             return Ok((path, Some(plan_id_or_path.to_string())));
@@ -1436,7 +1460,7 @@ impl PlanRuntime {
         if !path.is_file() {
             return Err(PlanRuntimeError::BuildPlanPathNotFound {
                 path: crate::infra::platform::format_home_path(&path),
-                hint: "检查 plan path 是否正确，或改用 /plan build <plan_id/path>".into(),
+                hint: tr("planRuntime.checkPath", &[]),
             });
         }
         Ok((path, None))
@@ -1452,9 +1476,10 @@ impl PlanRuntime {
         }) {
             return Ok(plan.id);
         }
-        Err(PlanRuntimeError::BuildBlocked(
-            "`/plan build` 需要 plan_id 或 path".into(),
-        ))
+        Err(PlanRuntimeError::BuildBlocked(tr(
+            "planRuntime.targetRequired",
+            &[],
+        )))
     }
 
     /// `/plan build <plan_id/path>` 入口；执行 plan-runtime §5.1 的 5 件事 + 原子回滚。
@@ -1510,8 +1535,9 @@ impl PlanRuntime {
 
             // ─── 闸门 1：同一 session 不得同时执行两份计划 ─────────────
             if let Some(cur) = self.executing_plan_id() {
-                return Err(PlanRuntimeError::BuildBlocked(format!(
-                    "当前 session 已在执行计划（plan_id={cur}）；先中断使其变为 pending"
+                return Err(PlanRuntimeError::BuildBlocked(tr(
+                    "planRuntime.alreadyExecuting",
+                    &[("id", &cur)],
                 )));
             }
 
@@ -1520,13 +1546,15 @@ impl PlanRuntime {
             match prev_disk_state {
                 file_store::PlanFileState::Planning | file_store::PlanFileState::Pending => {}
                 file_store::PlanFileState::Executing => {
-                    return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "PlanFile {plan_id} state=executing；可能被其它进程占用，请稍后或手工修复"
+                    return Err(PlanRuntimeError::BuildBlocked(tr(
+                        "planRuntime.fileExecuting",
+                        &[("id", &plan_id)],
                     )));
                 }
                 file_store::PlanFileState::Completed => {
-                    return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "PlanFile {plan_id} state=completed；已完成的 plan 不可再 build"
+                    return Err(PlanRuntimeError::BuildBlocked(tr(
+                        "planRuntime.fileCompleted",
+                        &[("id", &plan_id)],
                     )));
                 }
             }
@@ -1536,9 +1564,13 @@ impl PlanRuntime {
             if matches!(prev_disk_state, file_store::PlanFileState::Pending) {
                 if let Some(prev_key) = &plan.frontmatter.session_key {
                     if prev_key != self.session_key.as_str() {
-                        warnings.push(format!(
-                            "pending plan {plan_id} 原绑定 session_key={prev_key}；本次将覆盖为 {}",
-                            self.session_key
+                        warnings.push(tr(
+                            "planRuntime.rebind",
+                            &[
+                                ("id", &plan_id),
+                                ("previous", prev_key),
+                                ("current", &self.session_key),
+                            ],
                         ));
                     }
                 }
@@ -1563,13 +1595,11 @@ impl PlanRuntime {
                 return match requested_plan_id {
                     Some(plan_id) => Err(PlanRuntimeError::BuildPlanNotFound {
                         plan_id: plan_id.clone(),
-                        hint: format!(
-                            "未找到 ~/.tomcat/plans/{plan_id}.plan.md；先通过 PLAN 模式 create_plan 生成"
-                        ),
+                        hint: tr("planRuntime.createFirst", &[("id", &plan_id)]),
                     }),
                     None => Err(PlanRuntimeError::BuildPlanPathNotFound {
                         path: crate::infra::platform::format_home_path(&path),
-                        hint: "检查 plan path 是否正确，或改用 /plan build <plan_id/path>".into(),
+                        hint: tr("planRuntime.checkPath", &[]),
                     }),
                 };
             }
@@ -1582,10 +1612,7 @@ impl PlanRuntime {
         let plan_id = build.plan_id.clone();
         let mut warnings = build.warnings;
         if has_active_session_todos {
-            warnings.push(
-                "当前 session 仍有未完成 scratchpad todos；本次继续 build，不影响目标 PlanFile，建议稍后收口"
-                    .into(),
-            );
+            warnings.push(tr("planRuntime.openScratchpad", &[]));
         }
         let prev_disk_state = build.prev_disk_state;
         // 4: 写盘成功后刷新 active-plan 缓存；Build 离开 Plan 会话模式。
@@ -1617,7 +1644,10 @@ impl PlanRuntime {
                     notes: Some(serde_json::json!({ "plan_id": plan_id })),
                 };
                 if let Err(e) = store.record(req) {
-                    warnings.push(format!("plan_build checkpoint record 失败: {e}"));
+                    warnings.push(tr(
+                        "planRuntime.checkpointFailed",
+                        &[("detail", &e.to_string())],
+                    ));
                     tracing::warn!(target: "plan_runtime::build",
                         "plan_build checkpoint record 失败: {e}");
                 }
@@ -1835,23 +1865,25 @@ pub trait VerifierDispatcher: Send + Sync {
     async fn dispatch(&self, plan_id: &str, plan_text: &str) -> verify::VerifySummary;
 }
 
+use crate::infra::i18n::tr;
+
 /// `PlanRuntime` 操作错误。
 #[derive(Debug, thiserror::Error)]
 pub enum PlanRuntimeError {
-    #[error("当前已经在 {0} 模式，无法重复进入")]
+    #[error("{}", tr("planRuntime.alreadyMode", &[("mode", .0)]))]
     AlreadyInMode(String),
-    #[error("plan_id 非法或不安全：{0}")]
+    #[error("{prefix}: {0}", prefix = tr("planRuntime.unsafeId", &[]))]
     UnsafePlanId(String),
     /// PlanFile 文件 IO / serde 错误（P2 起细化）。
-    #[error("plan io: {0}")]
+    #[error("{prefix}: {0}", prefix = tr("planRuntime.io", &[]))]
     Io(String),
     /// `/plan build` 闸门未通过（运行态冲突 / disk mode 不合规等）。
-    #[error("/plan build 闸门未通过：{0}")]
+    #[error("{prefix}: {0}", prefix = tr("planRuntime.blocked", &[]))]
     BuildBlocked(String),
     /// `/plan build` 指定 plan_id 不存在；`hint` 给出友好引导（"先 create_plan"）。
-    #[error("plan_id={plan_id} 不存在：{hint}")]
+    #[error("{}", tr("planRuntime.missingId", &[("id", .plan_id), ("hint", .hint)]))]
     BuildPlanNotFound { plan_id: String, hint: String },
-    #[error("plan path={path} 不存在：{hint}")]
+    #[error("{}", tr("planRuntime.missingPath", &[("path", .path), ("hint", .hint)]))]
     BuildPlanPathNotFound { path: String, hint: String },
 }
 
@@ -1860,7 +1892,7 @@ impl PlanRuntimeError {
     pub(crate) fn from_plan_io(e: file_store::PlanError) -> Self {
         match e {
             file_store::PlanError::NotFound { path } => {
-                PlanRuntimeError::Io(format!("plan not found: {path}"))
+                PlanRuntimeError::Io(tr("planFile.notFound", &[("path", &path)]))
             }
             other => PlanRuntimeError::Io(other.to_string()),
         }

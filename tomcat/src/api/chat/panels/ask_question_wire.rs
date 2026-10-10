@@ -61,6 +61,11 @@ pub struct AskQuestionWireResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireQuestion {
+    #[serde(
+        default = "crate::core::plan_runtime::panels::allow_custom_default",
+        skip_serializing_if = "crate::core::plan_runtime::panels::is_true"
+    )]
+    allow_custom: bool,
     id: String,
     prompt: String,
     options: Vec<WireQuestionOption>,
@@ -72,6 +77,7 @@ impl From<Question> for WireQuestion {
             id: value.id,
             prompt: value.prompt,
             options: value.options.into_iter().map(Into::into).collect(),
+            allow_custom: value.allow_custom,
         }
     }
 }
@@ -82,6 +88,7 @@ impl From<WireQuestion> for Question {
             id: value.id,
             prompt: value.prompt,
             options: value.options.into_iter().map(Into::into).collect(),
+            allow_custom: value.allow_custom,
         }
     }
 }

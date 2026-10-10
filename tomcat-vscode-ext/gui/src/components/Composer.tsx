@@ -45,22 +45,23 @@ import { ReferenceChip } from "./ReferenceChip";
 import { InvocationNode, instructionFromAttrs } from "./InvocationNode";
 import { withOccurrence } from "../../../src/shared/composerOccurrences";
 import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
+import { useT } from "../i18n/LocaleProvider";
+import type { MessageKey, Translator } from "../../../src/shared/i18n";
 
-function formatPlanStatus(planState?: WebviewPlanFileState | null): string | null {
+function formatPlanStatus(planState: WebviewPlanFileState | null | undefined, t: Translator): string | null {
   if (!planState) {
     return null;
   }
-  return `Plan: ${planState}`;
+  return `${t("term.mode.plan")}: ${t(`term.planState.${planState}`)}`;
 }
 
 const REFERENCE_NODE_NAME = "reference";
 const DROP_URI_SCHEMES = /^(file|vscode-file|vscode-remote):/i;
-const DEFAULT_PROMPT_PLACEHOLDER = "Message Tomcat (Enter to send, Shift+Enter for newline)";
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 const TEST_SET_COMPOSER_VALUE_EVENT = "tomcat:test:set-composer-value";
 const MODE_OPTIONS = [
-  { label: "Chat", value: "chat" },
-  { label: "Plan", value: "plan" },
+  { labelKey: "term.mode.chat", value: "chat" },
+  { labelKey: "term.mode.plan", value: "plan" },
 ] as const;
 
 function hasCapability(capabilities: string[], capability: "files" | "vision"): boolean {
@@ -80,7 +81,7 @@ function extractUriExtension(uri: string): string | null {
   }
 }
 
-function buildPickerHint(capabilities?: string[]): string | null {
+function buildPickerHint(capabilities?: string[]): MessageKey | null {
   if (!capabilities) {
     return null;
   }
@@ -90,15 +91,15 @@ function buildPickerHint(capabilities?: string[]): string | null {
     return null;
   }
   if (!supportsVision && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；图片/PDF 会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.pickBoth";
   }
   if (!supportsVision) {
-    return "当前模型不支持图片附件；图片会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.pickImage";
   }
-  return "当前模型不支持 PDF 附件；PDF 会先加入待发送列表，发送时会提示切换模型。";
+  return "composer.hint.pickPdf";
 }
 
-function buildDropHint(capabilities: string[] | undefined, uris: string[]): string | null {
+function buildDropHint(capabilities: string[] | undefined, uris: string[]): MessageKey | null {
   if (!capabilities) {
     return null;
   }
@@ -113,18 +114,18 @@ function buildDropHint(capabilities: string[] | undefined, uris: string[]): stri
   });
   const includesPdf = uris.some((uri) => extractUriExtension(uri) === ".pdf");
   if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.dropBoth";
   }
   if (includesImage && !supportsVision) {
-    return "当前模型不支持图片附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.dropImage";
   }
   if (includesPdf && !supportsFiles) {
-    return "当前模型不支持 PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.dropPdf";
   }
   return null;
 }
 
-function buildPasteHint(capabilities: string[] | undefined, files: File[]): string | null {
+function buildPasteHint(capabilities: string[] | undefined, files: File[]): MessageKey | null {
   if (!capabilities) {
     return null;
   }
@@ -136,13 +137,13 @@ function buildPasteHint(capabilities: string[] | undefined, files: File[]): stri
   const includesImage = files.some((file) => file.type.startsWith("image/"));
   const includesPdf = files.some((file) => file.type === "application/pdf");
   if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；粘贴后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.pasteBoth";
   }
   if (includesImage && !supportsVision) {
-    return "当前模型未声明 vision 能力；图片会保留在草稿中，请切换支持图片的模型后发送。";
+    return "composer.hint.pasteImage";
   }
   if (includesPdf && !supportsFiles) {
-    return "当前模型不支持 PDF 附件；PDF 会保留在草稿中，请切换支持文件的模型后发送。";
+    return "composer.hint.pastePdf";
   }
   return null;
 }
@@ -163,8 +164,8 @@ function extractFileSourcePath(file: File): string | null {
   return null;
 }
 
-function modeLabel(value: "chat" | "plan"): string {
-  return MODE_OPTIONS.find((option) => option.value === value)?.label ?? "Chat";
+function modeLabel(value: "chat" | "plan", t: Translator): string {
+  return t(value === "plan" ? "term.mode.plan" : "term.mode.chat");
 }
 
 export interface ComposerDraft {
@@ -564,11 +565,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onSubmit,
   planState,
 }, ref) {
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const testId = (name: string) => instanceId ? `${instanceId}-${name}` : name;
   const canChangeConfig = canPrompt && configAllowed;
-  const configHint = !configAllowed ? "任务运行中不能切换，结束后再改" : undefined;
-  const planStatus = formatPlanStatus(planState);
-  const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
+  const configHint = !configAllowed ? t("composer.configBusy") : undefined;
+  const planStatus = formatPlanStatus(planState, t);
+  const [capabilityHint, setCapabilityHint] = useState<MessageKey | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [stopping, setStopping] = useState(false);
 
@@ -689,7 +693,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         orderedList: false,
       }),
       Placeholder.configure({
-        placeholder: DEFAULT_PROMPT_PLACEHOLDER,
+        placeholder: () => tRef.current("composer.placeholder"),
       }),
       ReferenceNode,
       InvocationNode,
@@ -697,7 +701,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ],
     editorProps: {
       attributes: {
-        "aria-label": "Tomcat prompt",
+        "aria-label": t("composer.inputAria"),
         class: "tc-composer__editor",
         "data-testid": testId("composer-input"),
       },
@@ -830,6 +834,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       updateDraft(serializeComposerDocument(nextEditor.getJSON()));
     },
   });
+
+  useEffect(() => {
+    if (!editor) return;
+    editor.setOptions({ editorProps: { ...editor.options.editorProps, attributes: {
+      "aria-label": t("composer.inputAria"), class: "tc-composer__editor", "data-testid": testId("composer-input"),
+    } } });
+    // Recompute placeholder decorations without replacing the document, selection or history.
+    editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
+  }, [editor, t]);
 
   useEffect(() => {
     isSlashOpenRef.current = slashState !== null && buildSlashMenuSections(slashCommands, slashState.query, instructionCatalog, slashState.leading).length > 0;
@@ -1076,7 +1089,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const warningNotice: ComposerNotice | null = capabilityHint
     ? {
         id: "capability",
-        text: capabilityHint,
+        text: t(capabilityHint),
         tone: "warning",
       }
     : null;
@@ -1084,12 +1097,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ? dropActive
       ? {
           id: "drag",
-          text: "松手加入上下文",
+          text: t("composer.dragReady"),
           tone: "active",
         }
       : {
           id: "drag",
-          text: "拖文件请按住 Shift",
+          text: t("composer.dragTip"),
           tone: "info",
         }
     : null;
@@ -1105,10 +1118,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Keep the legacy Stop-only behavior when an older server cannot queue input.
   const hasInput = draft.hasContent || hasAttachments || attachmentsPending;
   const showStop = busy && (!allowBusyInput || !hasInput);
-  const submitName = submitAriaLabel ?? (busy ? "Queue message" : "Send prompt");
+  const submitName = submitAriaLabel ?? t(busy ? "composer.queue" : "composer.send");
 
   return (
-    <section className="tc-composer" aria-label="prompt" data-testid={testId("composer")} onKeyDown={(event) => {
+    <section className="tc-composer" aria-label={t("composer.aria")} data-testid={testId("composer")} onKeyDown={(event) => {
       if (event.key === "Escape" && !event.defaultPrevented && !event.nativeEvent.isComposing && !mentionOpen && !slashState && !modeMenuOpen && !event.currentTarget.querySelector('[aria-expanded="true"]')) {
         event.preventDefault(); onCancelEdit?.();
       }
@@ -1126,7 +1139,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         <div className="tc-composer__body">
         {hasNotice ? (
           <div className="tc-composer__notices" role="status" aria-live="polite" data-testid={testId("composer-notices")}>
-            {commandPending && <span className="tc-notice tc-notice--info" data-testid={testId("composer-notice-command")}>命令处理中，请稍候…</span>}
+            {commandPending && <span className="tc-notice tc-notice--info" data-testid={testId("composer-notice-command")}>{t("composer.commandPending")}</span>}
             {warningNotice ? (
               <span className="tc-notice tc-notice--warning" data-testid={testId("composer-notice-capability")}>
                 {warningNotice.text}
@@ -1141,7 +1154,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   >
                     {dragNotice.tone === "info" ? (
                       <>
-                        <strong className="tc-notice__tip">Tip:</strong> {dragNotice.text}
+                        <strong className="tc-notice__tip">{t("composer.tip")}</strong> {dragNotice.text}
                       </>
                     ) : (
                       dragNotice.text
@@ -1169,16 +1182,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           query={contextSearchQuery}
           truncated={contextSearchTruncated}
         />
-        <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "", instructionCatalog, slashState?.leading ?? true)} query={slashState?.query ?? ""} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
+        <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "", instructionCatalog, slashState?.leading ?? true, t)} query={slashState?.query ?? ""} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
         <EditorContent editor={editor} />
         <div className="tc-composer__bar" data-testid={testId("composer-bar")}>
           <button
-            aria-label="添加文件/文件夹/图片"
+            aria-label={t("composer.addContext")}
             className="tc-icon-button"
             data-testid={testId("attachment-add")}
             disabled={!canPrompt}
             onClick={handlePickContext}
-            title="添加文件/文件夹/图片"
+            title={t("composer.addContext")}
             type="button"
           >
             +
@@ -1192,10 +1205,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ref={modeMenuRef}
             title={configHint}
           >
-            <span>Mode</span>
+            <span>{t("composer.mode")}</span>
             <button
               aria-expanded={modeMenuOpen}
-              aria-label="Tomcat chat mode"
+              aria-label={t("composer.modeAria")}
               className="tc-topbar__trigger tc-topbar__trigger--compact"
               data-testid={testId("mode-select")}
               disabled={!canChangeConfig}
@@ -1204,7 +1217,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               }}
               type="button"
             >
-              <span className="tc-topbar__trigger-label">{modeLabel(modeValue)}</span>
+              <span className="tc-topbar__trigger-label">{modeLabel(modeValue, t)}</span>
               <span className="tc-topbar__caret" aria-hidden="true">
                 {modeMenuOpen ? "▴" : "▾"}
               </span>
@@ -1222,7 +1235,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                       onClick={() => handleModePick(option.value)}
                       type="button"
                     >
-                      <span className="tc-session-item__title">{option.label}</span>
+                      <span className="tc-session-item__title">{t(option.labelKey)}</span>
                     </button>
                   );
                 })}
@@ -1234,7 +1247,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </span>
 
           <div className="tc-field tc-field--compact tc-field--dropdown tc-field--model" title={configHint}>
-            <span>Model</span>
+            <span>{t("model.label")}</span>
             <ModelPicker
               className="tc-composer-model-picker"
               disabled={!canChangeConfig}
@@ -1270,8 +1283,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </span>
 
           <button
-            aria-label={showStop ? (stopping ? "Stopping…" : "Stop") : submitName}
-            title={showStop ? (stopping ? "正在停止…" : "停止当前任务") : submitAriaLabel ?? (busy ? "加入待发队列" : "发送消息")}
+            aria-label={showStop ? t(stopping ? "composer.stopping" : "composer.stop") : submitName}
+            title={showStop ? t(stopping ? "composer.stopping" : "composer.stopTooltip") : submitAriaLabel ?? t(busy ? "composer.queueTooltip" : "composer.sendTooltip")}
             className="tc-send-button"
             data-testid={testId(showStop ? "stop-button" : "send-button")}
             disabled={showStop ? !canInterrupt || stopping : !draft.hasContent || !canPrompt || submitDisabled || attachmentsPending}
@@ -1287,7 +1300,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             type="button"
           >
             {showStop && stopping ? (
-              "Stopping…"
+              t("composer.stopping")
             ) : showStop ? (
               <span aria-hidden="true" className="tc-stop-square" data-testid={testId("stop-glyph")} />
             ) : (

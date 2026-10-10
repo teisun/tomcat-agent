@@ -1,5 +1,6 @@
 use super::super::run_shared_slash_command;
 use super::test_support::{skill, Fixture};
+use crate::infra::i18n::{tr_in, Locale};
 use serial_test::serial;
 
 fn put(workspace: &std::path::Path, relative: &str, body: &str) {
@@ -47,12 +48,20 @@ async fn cmd_reload_instruction_counts_paths_and_deny_source() {
     let reply = run_shared_slash_command(&ctx, "reload", &[]).await;
     assert!(reply.ok, "{reply:?}");
     assert!(
-        reply.text.contains("Commands：1 个可用，0 个跳过"),
+        reply.text.contains(&tr_in(
+            Locale::En,
+            "runtime.commandsSummary",
+            &[("count", "1"), ("skipped", "0")]
+        )),
         "{}",
         reply.text
     );
     assert!(
-        reply.text.contains("Rules：1 条生效，2 条未生效"),
+        reply.text.contains(&tr_in(
+            Locale::En,
+            "runtime.rulesSummary",
+            &[("count", "1"), ("skipped", "2")]
+        )),
         "{}",
         reply.text
     );
@@ -65,10 +74,10 @@ async fn cmd_reload_instruction_counts_paths_and_deny_source() {
     assert_eq!(reasons.len(), 2, "{}", reply.text);
     assert!(reasons
         .iter()
-        .any(|line| line.starts_with(".cursor/rules/off.md：") && line.contains("alwaysApply")));
+        .any(|line| line.starts_with(".cursor/rules/off.md") && line.contains("alwaysApply")));
     assert!(reasons
         .iter()
-        .any(|line| line.starts_with(".cursor/rules/secret.mdc：")
+        .any(|line| line.starts_with(".cursor/rules/secret.mdc")
             && line.contains(&format!("path_rule deny: {denied}"))));
 }
 
@@ -87,12 +96,20 @@ async fn cmd_reload_instruction_diagnostics_truncate_exactly_twenty_one() {
     let reply = run_shared_slash_command(&fixture.ctx(), "reload", &[]).await;
     assert!(reply.ok, "{reply:?}");
     assert!(
-        reply.text.contains("Commands：0 个可用，0 个跳过"),
+        reply.text.contains(&tr_in(
+            Locale::En,
+            "runtime.commandsSummary",
+            &[("count", "0"), ("skipped", "0")]
+        )),
         "{}",
         reply.text
     );
     assert!(
-        reply.text.contains("Rules：0 条生效，21 条未生效"),
+        reply.text.contains(&tr_in(
+            Locale::En,
+            "runtime.rulesSummary",
+            &[("count", "0"), ("skipped", "21")]
+        )),
         "{}",
         reply.text
     );
@@ -104,7 +121,15 @@ async fn cmd_reload_instruction_diagnostics_truncate_exactly_twenty_one() {
             .count(),
         20
     );
-    assert!(reply.text.contains("…另 1 项"), "{}", reply.text);
+    assert!(
+        reply.text.contains(&tr_in(
+            Locale::En,
+            "runtime.moreDiagnostics",
+            &[("count", "1")]
+        )),
+        "{}",
+        reply.text
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -119,13 +144,37 @@ async fn cmd_reload_noop_description_update_and_removal() {
     ctx.await_skill_discovery().await;
     let reply = run_shared_slash_command(&ctx, "reload", &[]).await;
     assert!(reply.ok, "{reply:?}");
-    assert!(reply.text.contains("没有变化") && reply.text.contains("用时"));
+    assert!(
+        reply
+            .text
+            .contains(&tr_in(Locale::En, "slash.sync.latest", &[]))
+            && reply.text.contains("ms)")
+    );
     skill(&root, "demo", "new-description");
     let reply = run_shared_slash_command(&ctx, "reload", &[]).await;
-    assert!(reply.ok && reply.text.contains("更新 skill: demo"));
+    assert!(
+        reply.ok
+            && reply.text.contains(&format!(
+                "{} skill: demo",
+                tr_in(Locale::En, "slash.sync.updated", &[])
+            ))
+    );
     std::fs::remove_dir_all(&root).unwrap();
     let reply = run_shared_slash_command(&ctx, "reload", &[]).await;
-    assert!(reply.ok && reply.text.contains("移除 skill: demo"));
+    assert!(
+        reply.ok
+            && reply.text.contains(&format!(
+                "{} skill: demo",
+                tr_in(Locale::En, "slash.sync.removed", &[])
+            ))
+    );
     let reply = run_shared_slash_command(&ctx, "reload", &["now".into()]).await;
-    assert!(!reply.ok && reply.text.contains("用法：/reload"));
+    assert!(
+        !reply.ok
+            && reply.text.contains(&tr_in(
+                Locale::En,
+                "slash.usage",
+                &[("name", "reload"), ("usage", "/reload"), ("suffix", "")]
+            ))
+    );
 }

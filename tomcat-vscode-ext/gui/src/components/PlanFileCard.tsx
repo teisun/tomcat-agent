@@ -1,4 +1,6 @@
 import { memo } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, t as defaultT, type Translator } from "../../../src/shared/i18n";
 
 import type { Speed } from "../../../src/shared/modelSpeed";
 import { buildPickerModels } from "./buildPickerModels";
@@ -44,10 +46,6 @@ function derivePlanTitle(item: WebviewPlanFileCard, fileName: string): string {
   return fileName;
 }
 
-function todoCountLabel(count: number): string {
-  return `${count} ${count === 1 ? "todo" : "todos"}`;
-}
-
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -58,6 +56,7 @@ function planPathForTool(item: WebviewToolCard): string | undefined {
 
 function createPlanTodosFromArgs(
   args: Record<string, unknown> | undefined,
+  t: Translator,
 ): WebviewTodo[] | undefined {
   const todos = args?.todos;
   if (!Array.isArray(todos)) {
@@ -68,7 +67,7 @@ function createPlanTodosFromArgs(
       return [];
     }
     const entry = todo as Record<string, unknown>;
-    const content = asString(entry.content) ?? `Todo ${index + 1}`;
+    const content = asString(entry.content) ?? t("todo.untitled", { number: index + 1 });
     const id = asString(entry.id) ?? `todo-${index + 1}`;
     const status =
       entry.status === "cancelled" ||
@@ -89,6 +88,7 @@ export function createPlanFileCardFromTool(
     currentPlanState?: WebviewPlanFileState | null;
     planTodos?: WebviewTodo[];
   },
+  t: Translator = defaultT,
 ): WebviewPlanFileCard | null {
   if (item.toolName !== "create_plan" || item.isError) {
     return null;
@@ -102,7 +102,7 @@ export function createPlanFileCardFromTool(
     return null;
   }
   const isActivePlan = !!item.planId && item.planId === options.currentPlanId;
-  const argTodos = createPlanTodosFromArgs(item.args);
+  const argTodos = createPlanTodosFromArgs(item.args, t);
   const ambientTodos =
     options.planTodos && options.planTodos.length > 0
       ? options.planTodos
@@ -151,6 +151,9 @@ function PlanFileCardComponent({
   onOpenPlanFile(path: string): void;
   planTodos?: WebviewTodo[];
 }) {
+  const t = useT();
+  const locale = useLocale();
+  const count = item.todos?.length ?? planTodos.length;
   const fileName = basename(item.path);
   const title = derivePlanTitle(item, fileName);
   const buildAllowed =
@@ -170,7 +173,7 @@ function PlanFileCardComponent({
   return (
     <section className="tc-card tc-plan-card" data-testid="plan-card">
       <button
-        aria-label="Open plan file"
+        aria-label={t("plan.open")}
         className="tc-plan-card__file-row"
         data-testid="plan-card-file-link"
         onClick={() => onOpenPlanFile(item.path)}
@@ -182,7 +185,7 @@ function PlanFileCardComponent({
         </span>
       </button>
       <button
-        aria-label="Open plan file"
+        aria-label={t("plan.open")}
         className="tc-plan-card__title"
         data-testid="plan-card-title"
         onClick={() => onOpenPlanFile(item.path)}
@@ -196,13 +199,13 @@ function PlanFileCardComponent({
         </p>
       ) : null}
       <div className="tc-plan-card__todos-count" data-testid="plan-todos-count">
-        {todoCountLabel(item.todos?.length ?? planTodos.length)}
+        {t(pluralKey(locale, "todo.count.other", count), { count })}
       </div>
       <div className="tc-plan-card__footer">
         {creating ? (
           <button
             aria-busy="true"
-            aria-label="Creating plan file"
+            aria-label={t("plan.creating")}
             className="tc-plan-card__footer-link tc-plan-card__footer-link--busy"
             data-testid="view-plan-pending"
             disabled
@@ -212,20 +215,20 @@ function PlanFileCardComponent({
           </button>
         ) : (
           <button
-            aria-label="View plan file"
+            aria-label={t("plan.viewAria")}
             className="tc-plan-card__footer-link"
             data-testid="view-plan"
             onClick={() => onOpenPlanFile(item.path)}
             type="button"
           >
-            View Plan
+            {t("plan.view")}
           </button>
         )}
         {modelPicker ? (
           <ModelPicker
             className="tc-plan-model-picker"
             disabled={pickerModels.length === 0}
-            label="Model"
+            label={t("model.label")}
             models={pickerModels}
             onSelectContextWindow={modelPicker.onSelectContextWindow}
             onSelectModel={modelPicker.onSetBuildModel}
@@ -243,7 +246,7 @@ function PlanFileCardComponent({
           onClick={() => onBuild(item.planId ?? null, item.path)}
           type="button"
         >
-          {item.state === "pending" ? "Resume" : "Build"}
+          {t(item.state === "pending" ? "common.resume" : "plan.build")}
         </button>
       </div>
     </section>

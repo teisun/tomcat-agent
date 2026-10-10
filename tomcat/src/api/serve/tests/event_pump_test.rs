@@ -479,7 +479,7 @@ async fn serve_cleanup_aborts_background_task_subscribers() {
         "serve register_slot_hooks should install background task listener handle"
     );
 
-    super::super::cleanup_session_slot(&state, &slot, false, "test_cleanup")
+    super::super::cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Shutdown)
         .await
         .expect("cleanup session slot");
 

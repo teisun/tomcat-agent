@@ -1,5 +1,6 @@
 //! `tomcat audit` 子命令实现：list / show / export。
 
+use crate::infra::i18n::tr;
 use std::path::PathBuf;
 
 use crate::{resolve_audit_dir, wire, AppConfig, AppError, AuditFilter, AuditStore};
@@ -101,19 +102,28 @@ pub(crate) fn read_audit_entries(
 
 pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> {
     if !cfg.security.enable_audit_log {
-        println!("审计日志未开启。请在配置中设置 security.enable_audit_log = true");
+        println!("{}", tr("cli.audit.disabled", &[]));
         return Ok(());
     }
     let store = match AuditStore::new(cfg) {
         Ok(s) => s,
         Err(e) => {
-            println!("无法打开审计存储: {}", e);
+            println!(
+                "{}",
+                tr("cli.audit.openFailed", &[("detail", &e.to_string())])
+            );
             return Ok(());
         }
     };
     let audit_dir = resolve_audit_dir(cfg)?;
     if !audit_dir.exists() {
-        println!("审计目录不存在: {}，尚无审计记录", audit_dir.display());
+        println!(
+            "{}",
+            tr(
+                "cli.audit.dirMissing",
+                &[("path", &audit_dir.display().to_string())]
+            )
+        );
         return Ok(());
     }
 
@@ -126,12 +136,16 @@ pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> 
             };
             let entries = store.query(&filter)?;
             if entries.is_empty() {
-                println!("未找到审计记录");
+                println!("{}", tr("cli.audit.empty", &[]));
                 return Ok(());
             }
             println!(
-                "{:<6} {:<28} {:<14} {:<6} 详情",
-                "序号", "时间", "类型", "状态"
+                "{:<6} {:<28} {:<14} {:<6} {}",
+                tr("cli.label.index", &[]),
+                tr("cli.label.time", &[]),
+                tr("cli.label.type", &[]),
+                tr("cli.label.status", &[]),
+                tr("cli.label.detail", &[])
             );
             println!("{}", "-".repeat(90));
             for e in &entries {
@@ -145,7 +159,10 @@ pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> 
                     e.detail_short()
                 );
             }
-            println!("共 {} 条", entries.len());
+            println!(
+                "{}",
+                tr("cli.audit.count", &[("count", &entries.len().to_string())])
+            );
         }
         AuditSub::Show { id } => {
             let idx: u64 = id.parse().unwrap_or(0);
@@ -157,14 +174,14 @@ pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> 
             match entries.iter().find(|e| e.id == idx) {
                 Some(e) => {
                     let status = if e.success() { "OK" } else { "FAIL" };
-                    println!("序号:   {}", e.id);
-                    println!("时间:   {}", e.timestamp);
-                    println!("类型:   {}", e.kind_label());
-                    println!("状态:   {}", status);
-                    println!("详情:   {}", e.detail_short());
+                    println!("{}:   {}", tr("cli.label.index", &[]), e.id);
+                    println!("{}:   {}", tr("cli.label.time", &[]), e.timestamp);
+                    println!("{}:   {}", tr("cli.label.type", &[]), e.kind_label());
+                    println!("{}:   {}", tr("cli.label.status", &[]), status);
+                    println!("{}:   {}", tr("cli.label.detail", &[]), e.detail_short());
                 }
                 None => {
-                    println!("未找到审计记录: {}", id);
+                    println!("{}", tr("cli.audit.notFound", &[("id", &id)]));
                 }
             }
         }
@@ -175,11 +192,20 @@ pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> 
             };
             let entries = store.query(&filter)?;
             if entries.is_empty() {
-                println!("无审计记录可导出");
+                println!("{}", tr("cli.audit.exportEmpty", &[]));
                 return Ok(());
             }
             store.export_to(&path)?;
-            println!("已导出 {} 条审计记录到 {}", entries.len(), path.display());
+            println!(
+                "{}",
+                tr(
+                    "cli.audit.exported",
+                    &[
+                        ("count", &entries.len().to_string()),
+                        ("path", &path.display().to_string())
+                    ]
+                )
+            );
         }
     }
     Ok(())

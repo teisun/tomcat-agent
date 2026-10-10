@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { setLocale, translate } from "../../../shared/i18n";
 
 import {
   type WebviewApprovalCard,
@@ -11,6 +12,9 @@ import {
   derivePlanActivity,
   WebviewStateStore,
 } from "../state";
+
+const backendEditNote = "第 2 段匹配到 3 处";
+const backendEditSummary = "1 个文件已落盘，1 个失败且未写入";
 
 describe("tool-owned attachment state", () => {
   const sha = "a".repeat(64);
@@ -195,11 +199,11 @@ describe("derivePlanActivity", () => {
 
 describe("WebviewStateStore wire routing", () => {
   it.each([
-    ["idle_nudges", "连续 2 轮没有推进（计划和代码内容都没变）"],
-    ["injection_cap", "一次运行里催促已达上限"],
-    ["tool_round_budget", "这一轮工具调用次数用尽"],
-    ["run_ended_while_executing", "运行结束时计划还没收口"],
-  ])("renders plan.stalled reason %s as a visible Chinese notice", (reason, explanation) => {
+    ["idle_nudges", "state.stalledIdle"],
+    ["injection_cap", "state.stalledNudgeCap"],
+    ["tool_round_budget", "state.stalledToolBudget"],
+    ["run_ended_while_executing", "state.stalledRunEnded"],
+  ] as const)("renders plan.stalled reason %s as a visible notice", (reason, explanationKey) => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
@@ -222,7 +226,8 @@ describe("WebviewStateStore wire routing", () => {
     expect(view.activePlan?.state).toBe("pending");
     expect(view.timeline).toContainEqual(expect.objectContaining({
       kind: "warn",
-      text: expect.stringContaining(`计划已暂停：${explanation}`),
+      id: `plan-event:plan.stalled:plan-1:${reason}`,
+      text: translate("en", "state.planPausedWithWork", { reason: translate("en", explanationKey), remaining: "- t1 (pending)" }),
       type: "message",
     }));
     expect(view.timeline).not.toContainEqual(expect.objectContaining({
@@ -1186,7 +1191,7 @@ describe("WebviewStateStore wire routing", () => {
         {
           id: "tool-result-1",
           message: {
-            content: "1 个文件已落盘，1 个失败且未写入",
+            content: backendEditSummary,
             role: "tool",
             tool_call_id: "tc-edit-batch",
             tool_display: {
@@ -1199,12 +1204,12 @@ describe("WebviewStateStore wire routing", () => {
                 },
                 {
                   file: "src/b.ts",
-                  note: "第 2 段匹配到 3 处",
+                  note: backendEditNote,
                   status: "failed",
                 },
               ],
               kind: "files",
-              summary: "1 个文件已落盘，1 个失败且未写入",
+              summary: backendEditSummary,
             },
           },
           type: "message",
@@ -1229,12 +1234,12 @@ describe("WebviewStateStore wire routing", () => {
           },
           {
             file: "src/b.ts",
-            note: "第 2 段匹配到 3 处",
+            note: backendEditNote,
             status: "failed",
           },
         ],
         kind: "files",
-        summary: "1 个文件已落盘，1 个失败且未写入",
+        summary: backendEditSummary,
       },
       toolCallId: "tc-edit-batch",
       toolName: "edit",
@@ -1834,7 +1839,7 @@ describe("session state hydration", () => {
       expect.arrayContaining([
         expect.objectContaining({
           kind: "notice",
-          text: "本轮没有产生可见回答。",
+          text: translate("en", "state.noVisibleAnswer"),
         }),
       ]),
     );
@@ -2171,12 +2176,15 @@ describe("session state hydration", () => {
       toolResultsCount: 0,
       type: "agent_interrupted",
     });
-    store.applyEvent({
-      partialTextLen: 0,
-      sessionId: "s1",
-      toolResultsCount: 0,
-      type: "agent_interrupted",
-    });
+    setLocale("zh-CN");
+    try {
+      store.applyEvent({
+        partialTextLen: 0,
+        sessionId: "s1",
+        toolResultsCount: 0,
+        type: "agent_interrupted",
+      });
+    } finally { setLocale("en"); }
 
     const session = store.snapshot().sessionViews.s1;
     const tool = session.timeline.find((item) => item.type === "tool");
@@ -2213,6 +2221,11 @@ describe("session state hydration", () => {
         (item) => item.type === "message" && item.id === "agent-interrupted:interrupt-1",
       ),
     ).toMatchObject({ kind: "warn", text: "Tomcat turn interrupted" });
+    setLocale("zh-CN");
+    try {
+      store.applyEvent({ type: "agent_interrupted", sessionId: "s1", partialTextLen: 0, toolResultsCount: 0 });
+      expect(store.snapshot().sessionViews.s1.timeline.filter(item => item.type === "message" && item.kind === "warn")).toHaveLength(1);
+    } finally { setLocale("en"); }
   });
 
   it("rehydrates distinct cards for multiple durable interruption markers", () => {
@@ -2566,6 +2579,34 @@ describe("custom history replay", () => {
           item.text === "Tomcat plan verify: pass",
       ),
     ).toHaveLength(1);
+  });
+
+  it("keeps the create_plan parent through its internal answer, completion and ready replay", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const args = { goal: "Review identity", draft: "Keep the original plan", todos: [{ id: "work", content: "Implement", status: "pending" }] };
+    const questions = [{ id: "review-plan", prompt: "Review?", allowCustom: false, options: [
+      { id: "review", label: "Review", recommended: true }, { id: "skip", label: "Skip", recommended: false },
+    ] }];
+    const answer = { answers: [{ questionId: "review-plan", optionIds: ["review"], pickedRecommended: true }], cancelled: false, outcome: "answered" as const };
+    store.applyEvent({ type: "tool_execution_start", sessionId: "s1", toolCallId: "create-1", toolName: "create_plan", args });
+    store.applyEvent({ type: "control_request", subtype: "ask_question", sessionId: "s1", requestId: "review-1",
+      payload: { requestId: "review-1", sessionId: "s1", toolCallId: "create-1", questions, responseEvent: "plan.ask_question.response.review-1" },
+    });
+    store.resolveApproval("review-1", answer);
+    const answered = store.snapshot().sessionViews.s1.timeline;
+    expect(answered.find(item => item.type === "tool")).toMatchObject({ toolName: "create_plan", toolCallId: "create-1", status: "running", args });
+    expect(answered.find(item => item.type === "approval")).toMatchObject({ resolved: true });
+    store.applyEvent({ type: "tool_execution_end", sessionId: "s1", toolCallId: "create-1", toolName: "create_plan", isError: false,
+      result: { plan_id: "plan-1", path: "/workspace/review.plan.md", state: "planning" },
+    });
+    const completed = store.snapshot().sessionViews.s1.timeline;
+    expect(completed.filter(item => item.type === "tool")).toHaveLength(1);
+    expect(completed.find(item => item.type === "tool")).toMatchObject({ toolName: "create_plan", args, status: "complete",
+      planActivity: { kind: "create", title: "Review identity", total: 1, completed: 0, stateAfter: "planning" },
+    });
+    store.resolveApproval("review-1", answer);
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual(completed);
   });
 
   it("uses a legacy ask_question custom entry only when the standard tool result is missing", () => {
@@ -5022,19 +5063,19 @@ describe("persisted system note history", () => {
       expect.objectContaining({
         id: "plan-build-1",
         summary: "Start building plan `plan-1`.",
-        title: "开始执行计划",
+        title: translate("en", "state.notePlanBuild"),
         type: "boundary",
       }),
       expect.objectContaining({
         id: "nudge-1",
         summary: "Continue the active plan.",
-        title: "计划未收口，已要求继续",
+        title: translate("en", "state.noteNudge"),
         type: "boundary",
       }),
       expect.objectContaining({
         id: "signal-1",
         summary: "Background task build-1 finished successfully.",
-        title: "后台任务已结束",
+        title: translate("en", "state.noteSignal"),
         type: "boundary",
       }),
     ]);

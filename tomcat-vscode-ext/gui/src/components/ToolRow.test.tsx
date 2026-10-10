@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewToolCard } from "../types";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 import {
   buildFlatLabel,
   clampTaskOutputBudget,
@@ -11,6 +13,8 @@ import {
   toolCategory,
   ToolRow,
 } from "./ToolRow";
+
+const backendEditNote = "第 2 段匹配到 3 处";
 
 function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
   return {
@@ -26,6 +30,19 @@ function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
 }
 
 describe("ToolRow", () => {
+  it("translates tool chrome in place while preserving tool IDs, raw output and expanded state", () => {
+    const item = buildTool({ toolName: "bash", isError: true, args: { command: "exit 1" }, summary: "upstream diagnostic: code 1" });
+    const open = vi.fn();
+    const view = render(<LocaleProvider locale="en"><ToolRow item={item} onOpenFile={open} /></LocaleProvider>);
+    const purpose = screen.getByTestId("tool-row-cmd-purpose");
+    expect(purpose.textContent).toBe(translate("en", "tool.failed", { name: "bash" }));
+    expect(screen.getByTestId("tool-row-body").textContent).toContain("upstream diagnostic: code 1");
+    view.rerender(<LocaleProvider locale="zh-CN"><ToolRow item={item} onOpenFile={open} /></LocaleProvider>);
+    expect(screen.getByTestId("tool-row-cmd-purpose")).toBe(purpose);
+    expect(purpose.closest(".tc-tool-row--error")).toBeTruthy();
+    expect(screen.getByTestId("tool-row-body").textContent).toContain("upstream diagnostic: code 1");
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -156,9 +173,9 @@ describe("ToolRow", () => {
     );
 
     expect(screen.getByTestId("diff-view-truncated").textContent).toContain(
-      "Diff 过大已截断，无法查看本次对比",
+      "Diff is too large and was truncated; this comparison is unavailable",
     );
-    expect(screen.getByRole("button", { name: "打开当前文件" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open current file" })).toBeTruthy();
     expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
     fireEvent.click(screen.getByTestId("tool-row-open-file"));
     expect(onOpenFile).toHaveBeenCalledWith("/workspace/a.rs");
@@ -187,7 +204,7 @@ describe("ToolRow", () => {
     );
 
     expect(screen.getByTestId("diff-view-expired").textContent).toContain(
-      "超过 7 天保留期",
+      "has exceeded its 7-day retention period",
     );
     expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
   });
@@ -1452,7 +1469,7 @@ describe("ToolRow", () => {
               },
               {
                 file: "/workspace/protocol.ts",
-                note: "第 2 段匹配到 3 处",
+                note: backendEditNote,
                 status: "failed",
               },
             ],
@@ -1479,7 +1496,7 @@ describe("ToolRow", () => {
     expect(entries).toHaveLength(2);
     expect(entries[1].getAttribute("data-status")).toBe("failed");
     expect(screen.getByTestId("tool-row-file-note").textContent).toBe(
-      "第 2 段匹配到 3 处",
+      backendEditNote,
     );
   });
 

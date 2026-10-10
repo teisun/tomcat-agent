@@ -1,4 +1,6 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey } from "../../../src/shared/i18n";
 
 import {
   CUSTOM_OPTION_ID,
@@ -70,6 +72,8 @@ function ApprovalCardComponent({
   presentation?: ApprovalCardPresentation;
   submitting?: boolean;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const draft = suppliedDraft ?? createApprovalAnswerDraft(item);
   const isPendingPanel = presentation === "pending";
   const questions = item.request.questions;
@@ -106,9 +110,9 @@ function ApprovalCardComponent({
         data-testid="approval-card-restoring"
       >
         <div className="tc-card__header">
-          <h3>Question pending</h3>
+          <h3>{t("question.pending")}</h3>
         </div>
-        <p>Restoring this question…</p>
+        <p>{t("question.restoring")}</p>
       </section>
     );
   }
@@ -119,9 +123,9 @@ function ApprovalCardComponent({
       return false;
     }
     if (questionDraft.optionId !== CUSTOM_OPTION_ID) {
-      return true;
+      return question.options.some(option => option.id === questionDraft.optionId);
     }
-    return questionDraft.customText.trim().length > 0;
+    return question.allowCustom !== false && questionDraft.customText.trim().length > 0;
   });
 
   const selectOption = (questionId: string, optionId: string) => {
@@ -203,23 +207,23 @@ function ApprovalCardComponent({
       <div className="tc-card__header tc-approval-card__header">
         <h3>
           {isPendingPanel ? <span aria-hidden="true" className="codicon codicon-question" /> : null}
-          Questions
+          {t("question.title")}
         </h3>
         {isPendingPanel ? (
           <div className="tc-approval-card__navigation">
             {extraGroupCount > 0 ? (
               <span className="tc-approval-card__more-groups">
-                {extraGroupCount} more question group{extraGroupCount === 1 ? "" : "s"} waiting
+                {t(pluralKey(locale, "question.groups.other", extraGroupCount), { count: extraGroupCount })}
               </span>
             ) : null}
             {!collapsed ? (
               <button
-                aria-label="Previous question"
+                aria-label={t("question.previous")}
                 className="tc-approval-card__nav-button"
                 data-testid="approval-previous-question"
                 disabled={!hasPreviousQuestion}
                 onClick={() => showQuestion(activeQuestionIndex - 1)}
-                title="Previous question"
+                title={t("question.previous")}
                 type="button"
               >
                 <span aria-hidden="true" className="codicon codicon-chevron-left" />
@@ -230,16 +234,16 @@ function ApprovalCardComponent({
               className="tc-approval-card__count"
               data-testid="approval-question-count"
             >
-              {questions.length === 0 ? 0 : activeQuestionIndex + 1} of {questions.length}
+              {t("question.position", { current: questions.length === 0 ? 0 : activeQuestionIndex + 1, total: questions.length })}
             </span>
             {!collapsed ? (
               <button
-                aria-label="Next question"
+                aria-label={t("question.next")}
                 className="tc-approval-card__nav-button"
                 data-testid="approval-next-question"
                 disabled={!hasNextQuestion}
                 onClick={() => showQuestion(activeQuestionIndex + 1)}
-                title="Next question"
+                title={t("question.next")}
                 type="button"
               >
                 <span aria-hidden="true" className="codicon codicon-chevron-right" />
@@ -248,12 +252,12 @@ function ApprovalCardComponent({
             <button
               aria-controls={bodyId}
               aria-expanded={!collapsed}
-              aria-label={collapsed ? "Expand questions" : "Collapse questions"}
+              aria-label={t(collapsed ? "question.expand" : "question.collapse")}
               className="tc-approval-card__collapse"
               data-testid="approval-collapse"
               onClick={toggleCollapsed}
               ref={collapseButtonRef}
-              title={collapsed ? "Expand questions" : "Collapse questions"}
+              title={t(collapsed ? "question.expand" : "question.collapse")}
               type="button"
             >
               <span
@@ -263,7 +267,7 @@ function ApprovalCardComponent({
             </button>
           </div>
         ) : (
-          <span className="tc-chip tc-chip--warning">{questions.length} of {questions.length}</span>
+          <span className="tc-chip tc-chip--warning">{t("question.position", { current: questions.length, total: questions.length })}</span>
         )}
       </div>
 
@@ -281,7 +285,7 @@ function ApprovalCardComponent({
             const questionDraft = draft[question.id] ?? { customText: "", optionId: null };
             const options: WebviewApprovalOption[] = [
               ...question.options,
-              { id: CUSTOM_OPTION_ID, label: "Other..." },
+              ...(question.allowCustom === false ? [] : [{ id: CUSTOM_OPTION_ID, label: t("question.other") }]),
             ];
 
             return (
@@ -303,7 +307,7 @@ function ApprovalCardComponent({
                     return (
                       <button
                         aria-checked={selected}
-                        aria-label={option.recommended ? `${option.label} Recommended` : option.label}
+                        aria-label={option.recommended ? t("question.recommendedOption", { label: option.label }) : option.label}
                         className={
                           selected
                             ? "tc-approval-option tc-approval-option--selected"
@@ -329,23 +333,23 @@ function ApprovalCardComponent({
                         <span className="tc-approval-option__content">
                           <span className="tc-approval-option__label">{option.label}</span>
                           {option.recommended ? (
-                            <span className="tc-approval-option__recommended">Recommended</span>
+                            <span className="tc-approval-option__recommended">{t("question.recommended")}</span>
                           ) : null}
                         </span>
                       </button>
                     );
                   })}
                 </div>
-                {questionDraft.optionId === CUSTOM_OPTION_ID ? (
+                {question.allowCustom !== false && questionDraft.optionId === CUSTOM_OPTION_ID ? (
                   <label className="tc-field tc-approval-custom">
-                    <span>Custom answer</span>
+                    <span>{t("question.custom")}</span>
                     <input
                       autoFocus={isPendingPanel}
                       className="tc-approval-custom__input"
                       data-testid={`approval-custom-${question.id}`}
                       disabled={submitting}
                       onChange={(event) => updateCustomText(question.id, event.target.value)}
-                      placeholder="Enter a custom answer"
+                      placeholder={t("question.customPlaceholder")}
                       type="text"
                       value={questionDraft.customText}
                     />
@@ -366,7 +370,7 @@ function ApprovalCardComponent({
             onClick={skipQuestions}
             type="button"
           >
-            Skip
+            {t("question.skip")}
           </button>
           <button
             className="tc-button tc-button--primary"
@@ -375,7 +379,7 @@ function ApprovalCardComponent({
             onClick={submitAnswers}
             type="button"
           >
-            {submitting ? "Submitting…" : "Continue"}
+            {t(submitting ? "question.submitting" : "question.continue")}
           </button>
         </div>
       ) : null}

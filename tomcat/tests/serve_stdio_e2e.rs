@@ -1231,14 +1231,14 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
     assert!(
         messages.iter().any(|message| {
             let text = flatten_content_text(message);
-            text.contains("[图片已省略：当前模型不支持图片输入]") && text.contains("describe image")
+            text.contains("[Image omitted: the current model does not support image input]") && text.contains("describe image")
         }),
         "third request should carry a downgraded image placeholder instead of raw image input: {messages:?}"
     );
     assert!(
         messages.iter().any(|message| {
             let text = flatten_content_text(message);
-            text.contains("[文件已省略：当前模型不支持文件输入]") && text.contains("summarize pdf")
+            text.contains("[File omitted: the current model does not support file input]") && text.contains("summarize pdf")
         }),
         "third request should carry a downgraded file placeholder instead of raw file input: {messages:?}"
     );

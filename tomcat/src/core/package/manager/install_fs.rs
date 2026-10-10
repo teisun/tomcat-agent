@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use uuid::Uuid;
 
+use crate::infra::i18n::tr;
 use crate::infra::AppError;
 
 use super::super::model::PreparedInstallResource;
@@ -35,15 +36,20 @@ pub(super) fn install_resource(
     let parent = resource
         .destination_dir
         .parent()
-        .ok_or_else(|| AppError::Config("目标目录无父目录".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("package.destinationNoParent", &[])))?;
     fs::create_dir_all(parent).map_err(AppError::Io)?;
-    reject_symlink_path(parent, "目标父目录")?;
-    reject_symlink_path(&resource.destination_dir, "目标目录")?;
+    reject_symlink_path(parent, &tr("package.destinationParent", &[]))?;
+    reject_symlink_path(&resource.destination_dir, &tr("package.destination", &[]))?;
     if paths_overlap(&resource.source_dir, &resource.destination_dir) {
-        return Err(AppError::Config(format!(
-            "安装源目录与目标目录不能重叠: {} <-> {}",
-            resource.source_dir.display(),
-            resource.destination_dir.display()
+        return Err(AppError::Config(tr(
+            "package.overlap",
+            &[
+                ("source", &resource.source_dir.display().to_string()),
+                (
+                    "destination",
+                    &resource.destination_dir.display().to_string(),
+                ),
+            ],
         )));
     }
 
@@ -56,9 +62,9 @@ pub(super) fn install_resource(
     let backup_dir = if resource.destination_dir.exists() {
         if !force {
             let _ = remove_path_if_exists(&stage_dir);
-            return Err(AppError::Config(format!(
-                "目标已存在且未开启 force: {}",
-                resource.destination_dir.display()
+            return Err(AppError::Config(tr(
+                "package.forceRequired",
+                &[("path", &resource.destination_dir.display().to_string())],
             )));
         }
         let backup = hidden_sibling_path(parent, &resource.id, "backup");
@@ -86,9 +92,9 @@ pub(super) fn install_resource(
 fn reject_symlink_path(path: &Path, label: &str) -> Result<(), AppError> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() {
-            return Err(AppError::Permission(format!(
-                "package {label} 不能是符号链接: {}",
-                path.display()
+            return Err(AppError::Permission(tr(
+                "package.pathSymlink",
+                &[("label", label), ("path", &path.display().to_string())],
             )));
         }
     }
@@ -103,11 +109,11 @@ pub(super) fn prepare_force_remove_path(
     }
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::Config("待移除资源无父目录".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("package.removeNoParent", &[])))?;
     let stem = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| AppError::Config("待移除资源名称无效".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("package.removeBadName", &[])))?;
     let backup_path = hidden_sibling_path(parent, stem, "backup");
     fs::rename(path, &backup_path).map_err(AppError::Io)?;
     Ok(Some(InstallFsMutation::Removed {
@@ -151,26 +157,35 @@ pub(super) fn rollback_install(
                 stage_dir,
             } => {
                 if let Err(error) = remove_path_if_exists(destination_dir) {
-                    errors.push(format!(
-                        "remove {} failed: {error}",
-                        destination_dir.display()
+                    errors.push(tr(
+                        "package.rollbackRemove",
+                        &[
+                            ("path", &destination_dir.display().to_string()),
+                            ("detail", &error.to_string()),
+                        ],
                     ));
                 }
                 if let Some(backup_dir) = backup_dir {
                     if backup_dir.exists() {
                         if let Err(error) = fs::rename(backup_dir, destination_dir) {
-                            errors.push(format!(
-                                "restore {} failed: {error}",
-                                destination_dir.display()
+                            errors.push(tr(
+                                "package.rollbackRestore",
+                                &[
+                                    ("path", &destination_dir.display().to_string()),
+                                    ("detail", &error.to_string()),
+                                ],
                             ));
                         }
                     }
                 }
                 if stage_dir.exists() {
                     if let Err(error) = remove_path_if_exists(stage_dir) {
-                        errors.push(format!(
-                            "cleanup stage {} failed: {error}",
-                            stage_dir.display()
+                        errors.push(tr(
+                            "package.rollbackStage",
+                            &[
+                                ("path", &stage_dir.display().to_string()),
+                                ("detail", &error.to_string()),
+                            ],
                         ));
                     }
                 }
@@ -181,9 +196,12 @@ pub(super) fn rollback_install(
             } => {
                 if backup_path.exists() {
                     if let Err(error) = fs::rename(backup_path, original_path) {
-                        errors.push(format!(
-                            "restore removed {} failed: {error}",
-                            original_path.display()
+                        errors.push(tr(
+                            "package.rollbackRemoved",
+                            &[
+                                ("path", &original_path.display().to_string()),
+                                ("detail", &error.to_string()),
+                            ],
                         ));
                     }
                 }
@@ -192,10 +210,16 @@ pub(super) fn rollback_install(
     }
 
     if let Err(error) = package_snapshot.restore(&layer_paths.package_registry_path) {
-        errors.push(format!("restore package registry failed: {error}"));
+        errors.push(tr(
+            "package.rollbackRegistry",
+            &[("kind", "package"), ("detail", &error.to_string())],
+        ));
     }
     if let Err(error) = plugin_snapshot.restore(&layer_paths.plugin_registry_path) {
-        errors.push(format!("restore plugin registry failed: {error}"));
+        errors.push(tr(
+            "package.rollbackRegistry",
+            &[("kind", "plugin"), ("detail", &error.to_string())],
+        ));
     }
     errors
 }
@@ -239,9 +263,9 @@ fn copy_dir_snapshot_checked(
     snapshot_tree(source, Path::new(""), Some(target), &mut hasher)?;
     let actual_digest = format!("{:x}", hasher.finalize());
     if actual_digest != expected_digest {
-        return Err(AppError::Permission(format!(
-            "安装来源在确认后发生变化，已拒绝写入目标: {}",
-            source.display()
+        return Err(AppError::Permission(tr(
+            "package.sourceChanged",
+            &[("path", &source.display().to_string())],
         )));
     }
     Ok(())
@@ -261,14 +285,14 @@ fn snapshot_tree(
     let directory_handle = open_source_directory(source)?;
     let metadata = directory_handle.metadata().map_err(AppError::Io)?;
     if !metadata.is_dir() {
-        return Err(AppError::Config(format!(
-            "待安装资源必须是目录: {}",
-            source.display()
+        return Err(AppError::Config(tr(
+            "package.sourceDirectory",
+            &[("path", &source.display().to_string())],
         )));
     }
     if let Some(target) = target {
         fs::create_dir_all(target).map_err(AppError::Io)?;
-        reject_symlink_path(target, "暂存目录")?;
+        reject_symlink_path(target, &tr("package.staging", &[]))?;
     }
 
     let mut entries = fs::read_dir(source)
@@ -279,9 +303,9 @@ fn snapshot_tree(
     for entry in entries {
         let name = entry.file_name();
         let name = name.to_str().ok_or_else(|| {
-            AppError::Config(format!(
-                "安装来源含有非 UTF-8 路径名: {}",
-                entry.path().display()
+            AppError::Config(tr(
+                "package.sourceUtf8",
+                &[("path", &entry.path().display().to_string())],
             ))
         })?;
         let source_path = entry.path();
@@ -289,9 +313,9 @@ fn snapshot_tree(
         let target_path = target.map(|target| target.join(name));
         let file_type = entry.file_type().map_err(AppError::Io)?;
         if file_type.is_symlink() {
-            return Err(AppError::Permission(format!(
-                "不支持复制符号链接: {}",
-                source_path.display()
+            return Err(AppError::Permission(tr(
+                "package.copySymlink",
+                &[("path", &source_path.display().to_string())],
             )));
         }
         if file_type.is_dir() {
@@ -308,9 +332,9 @@ fn snapshot_tree(
             hasher.update(child_relative.to_string_lossy().as_bytes());
             copy_regular_file(&source_path, target_path.as_deref(), hasher)?;
         } else {
-            return Err(AppError::Permission(format!(
-                "安装来源包含不支持的特殊文件: {}",
-                source_path.display()
+            return Err(AppError::Permission(tr(
+                "package.specialFile",
+                &[("path", &source_path.display().to_string())],
             )));
         }
     }
@@ -329,9 +353,7 @@ fn open_source_directory(path: &Path) -> Result<File, AppError> {
 
 #[cfg(not(unix))]
 fn open_source_directory(_path: &Path) -> Result<File, AppError> {
-    Err(AppError::Permission(
-        "当前平台没有安全的无链接安装快照实现，package_install 已被阻止".to_string(),
-    ))
+    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
 }
 
 #[cfg(unix)]
@@ -343,9 +365,9 @@ fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), A
         || opened.dev() != current.dev()
         || opened.ino() != current.ino()
     {
-        return Err(AppError::Permission(format!(
-            "安装来源目录在读取时发生变化，已拒绝写入目标: {}",
-            path.display()
+        return Err(AppError::Permission(tr(
+            "package.directoryChanged",
+            &[("path", &path.display().to_string())],
         )));
     }
     Ok(())
@@ -353,9 +375,7 @@ fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), A
 
 #[cfg(not(unix))]
 fn ensure_source_directory_unchanged(_path: &Path, _handle: &File) -> Result<(), AppError> {
-    Err(AppError::Permission(
-        "当前平台没有安全的无链接安装快照实现，package_install 已被阻止".to_string(),
-    ))
+    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
 }
 
 #[cfg(unix)]
@@ -369,9 +389,7 @@ fn open_source_file(path: &Path) -> Result<File, AppError> {
 
 #[cfg(not(unix))]
 fn open_source_file(_path: &Path) -> Result<File, AppError> {
-    Err(AppError::Permission(
-        "当前平台没有安全的无链接安装快照实现，package_install 已被阻止".to_string(),
-    ))
+    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
 }
 
 fn copy_regular_file(
@@ -382,9 +400,9 @@ fn copy_regular_file(
     let mut source_file = open_source_file(source)?;
     let metadata = source_file.metadata().map_err(AppError::Io)?;
     if !metadata.is_file() {
-        return Err(AppError::Permission(format!(
-            "安装来源在读取时不再是普通文件: {}",
-            source.display()
+        return Err(AppError::Permission(tr(
+            "package.notRegular",
+            &[("path", &source.display().to_string())],
         )));
     }
     let mut target_file = target

@@ -12,7 +12,8 @@
 #   ./scripts/run-integration-tests.sh doctest              # 仅文档测试（cargo test --doc）
 #   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + serial 兜底空组）
 #   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（nextest 4 并发，含原串行组已放开的 binary）
-#   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（默认空）
+#   ./scripts/run-integration-tests.sh integration-parallel -E 'test(=case_name)' # 聚焦重跑；后续参数原样传给 nextest
+#   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（也支持 nextest 过滤参数）
 #   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM 显式层（nextest real-llm profile，max-threads=2）
 #   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组（需当前 OpenAI target 对应 key）
 #   ./scripts/run-integration-tests.sh gate-fast            # 快门禁：clippy → lib → doctest → integration
@@ -148,7 +149,7 @@ run_integration_parallel() {
   cargo build --bin tomcat
   ensure_nextest
   log_phase "开始 integration-parallel（默认 integration 门禁，nextest 4 并发）"
-  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}"
+  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}" "$@"
   local status=$?
   log_phase "结束 integration-parallel"
   return $status
@@ -167,7 +168,7 @@ run_integration_serial() {
 
   ensure_nextest
   log_phase "开始 integration-serial（nextest serial 兜底组）"
-  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}"
+  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}" "$@"
   local status=$?
   log_phase "结束 integration-serial"
   return $status
@@ -268,10 +269,10 @@ case "$CMD" in
     run_integration
     ;;
   integration-parallel)
-    run_integration_parallel
+    run_integration_parallel "${@:2}"
     ;;
   integration-serial)
-    run_integration_serial
+    run_integration_serial "${@:2}"
     ;;
   integration-real-llm)
     run_integration_real_llm

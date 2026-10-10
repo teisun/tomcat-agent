@@ -1,3 +1,5 @@
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, type Translator } from "../../../src/shared/i18n";
 import {
   CUSTOM_OPTION_ID,
   type AskQuestionAnswer,
@@ -21,29 +23,30 @@ function effectiveOutcome(result: AskQuestionResult): AskQuestionOutcome {
   return result.outcome ?? (result.cancelled ? "cancelled_unknown" : "answered");
 }
 
-function outcomeLabel(outcome: AskQuestionOutcome): string {
+function outcomeLabel(outcome: AskQuestionOutcome, t: Translator): string {
   switch (outcome) {
     case "answered":
-      return "Answered";
+      return t("answer.answered");
     case "skipped":
-      return "Entire request skipped";
+      return t("answer.skippedRequest");
     case "interrupted":
-      return "Interrupted";
+      return t("answer.interrupted");
     case "host_disconnected":
-      return "Disconnected";
+      return t("answer.disconnected");
     case "cancelled_unknown":
-      return "Cancelled";
+      return t("answer.cancelled");
   }
 }
 
 function questionStatus(
   outcome: AskQuestionOutcome,
   answer: AskQuestionAnswer | undefined,
+  t: Translator,
 ): string {
-  if (outcome !== "answered") return outcomeLabel(outcome);
-  if (!answer) return "Not answered";
-  if (answer.skipped || answer.optionIds.length === 0) return "Skipped";
-  return "Answered";
+  if (outcome !== "answered") return outcomeLabel(outcome, t);
+  if (!answer) return t("answer.notAnswered");
+  if (answer.skipped || answer.optionIds.length === 0) return t("answer.skipped");
+  return t("answer.answered");
 }
 
 function optionIsSelected(answer: AskQuestionAnswer | undefined, optionId: string): boolean {
@@ -53,12 +56,13 @@ function optionIsSelected(answer: AskQuestionAnswer | undefined, optionId: strin
 function optionLabel(
   option: WebviewApprovalOption,
   answer: AskQuestionAnswer | undefined,
+  t: Translator,
 ): string {
   if (option.id !== CUSTOM_OPTION_ID || !optionIsSelected(answer, CUSTOM_OPTION_ID)) {
     return option.label;
   }
   const custom = answer?.customText?.trim();
-  return custom ? `Other — ${custom}` : "Other";
+  return custom ? t("answer.custom", { text: custom }) : t("answer.other");
 }
 
 export function AnswerCard({
@@ -68,6 +72,8 @@ export function AnswerCard({
   questions: WebviewApprovalQuestion[];
   result: AskQuestionResult;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const outcome = effectiveOutcome(result);
   const answersByQuestion = new Map(result.answers.map((answer) => [answer.questionId, answer]));
   const answeredCount = questions.filter((question) => {
@@ -78,20 +84,20 @@ export function AnswerCard({
     const answer = answersByQuestion.get(question.id);
     return !!answer && (answer.skipped || answer.optionIds.length === 0);
   }).length;
-  const summary =
-    outcome === "answered"
-      ? `${answeredCount} answered${skippedCount ? ` · ${skippedCount} skipped` : ""}`
-      : outcomeLabel(outcome);
+  const answeredLabel = t(pluralKey(locale, "answer.count.other", answeredCount), { count: answeredCount });
+  const summary = outcome === "answered" ? skippedCount
+    ? t("answer.summary", { answered: answeredLabel, skipped: t(pluralKey(locale, "answer.skippedCount.other", skippedCount), { count: skippedCount }) })
+    : answeredLabel : outcomeLabel(outcome, t);
 
   return (
     <section
-      aria-label={`Question result: ${outcomeLabel(outcome)}`}
+      aria-label={t("answer.aria", { outcome: outcomeLabel(outcome, t) })}
       className={`tc-card tc-answer-card tc-answer-card--${outcome}`}
       data-outcome={outcome}
       data-testid="answer-card"
     >
       <div className="tc-card__header">
-        <h3>Answers</h3>
+        <h3>{t("answer.title")}</h3>
         <span className="tc-answer-card__outcome" data-testid="answer-card-outcome">
           {summary}
         </span>
@@ -99,10 +105,10 @@ export function AnswerCard({
       <div className="tc-answer-card__questions">
         {questions.map((question, questionIndex) => {
           const answer = answersByQuestion.get(question.id);
-          const status = questionStatus(outcome, answer);
+          const status = questionStatus(outcome, answer, t);
           const options: WebviewApprovalOption[] = [
             ...question.options,
-            { id: CUSTOM_OPTION_ID, label: "Other" },
+            ...(question.allowCustom === false ? [] : [{ id: CUSTOM_OPTION_ID, label: t("answer.other") }]),
           ];
 
           return (
@@ -151,9 +157,9 @@ export function AnswerCard({
                         {buildOptionCode(optionIndex)}
                       </span>
                       <span className="tc-approval-option__content">
-                        <span className="tc-approval-option__label">{optionLabel(option, answer)}</span>
+                        <span className="tc-approval-option__label">{optionLabel(option, answer, t)}</span>
                         {option.recommended ? (
-                          <span className="tc-approval-option__recommended">Recommended</span>
+                          <span className="tc-approval-option__recommended">{t("question.recommended")}</span>
                         ) : null}
                       </span>
                     </div>

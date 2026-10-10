@@ -17,6 +17,8 @@ await mkdir(out, { recursive: true });
 process.env.PLAYWRIGHT_BROWSERS_PATH = resolveBrowserPath(verifyUrl.href);
 const { chromium } = createRequire(verifyUrl)("playwright");
 
+const draftLine = "保留这份输入草稿";
+const customAnswer = "自定义答案";
 const shortQuestion = {
   id: "q1", prompt: "如果多出一天假期，你最想怎么过？",
   options: [
@@ -50,8 +52,8 @@ function fixture(questions, stress = false) {
       sessionId: "s1", ownedByThisFrontend: true, busy: stress, model: "gpt-5.4",
       activePlan: null, agentMode: "chat", thinkingLevel: "high", contextRatio: 0.04,
       composerDraft: stress ? {
-        text: "保留这份输入草稿\n".repeat(16),
-        segments: [{ type: "text", text: "保留这份输入草稿\n".repeat(16) }],
+        text: `${draftLine}\n`.repeat(16),
+        segments: [{ type: "text", text: `${draftLine}\n`.repeat(16) }],
       } : undefined,
       planTodos: [], sessionTodos: stress ? [
         { id: "one", content: "检查提问布局", status: "in_progress" },
@@ -261,7 +263,7 @@ try {
             && r.top >= Math.max(0, body.top, panel.top) - 1
             && r.bottom <= Math.min(innerHeight, body.bottom, panel.bottom) + 1;
         }), "Other must focus and reveal its field before a test fills or scrolls it");
-        await page.getByTestId("approval-custom-q2").fill("  自定义答案  ");
+        await page.getByTestId("approval-custom-q2").fill(`  ${customAnswer}  `);
         await page.getByTestId("approval-custom-q2").scrollIntoViewIfNeeded();
         await capture("custom");
       }
@@ -300,7 +302,7 @@ try {
       const answers = await page.evaluate(() => window.__answers);
       assert.equal(answers.length, 1);
       assert.equal(answers[0].result.answers[0].optionIds[0], "b");
-      if (scenario.long) assert.equal(answers[0].result.answers[1].customText, "自定义答案");
+      if (scenario.long) assert.equal(answers[0].result.answers[1].customText, customAnswer);
       if (scenario.two) assert.equal(answers[0].result.answers[1].optionIds[0], "b");
       await page.evaluate(() => {
         window.__composerNode = document.querySelector('[data-testid="composer-input"]');
@@ -310,7 +312,7 @@ try {
       await page.getByTestId("pending-question-panel").waitFor({ state: "detached" });
       assert.equal(await page.evaluate(() => window.__composerNode === document.querySelector('[data-testid="composer-input"]')), true);
       await capture("completed");
-      if (scenario.stress) assert.ok((await page.getByTestId("composer-input").textContent()).includes("保留这份输入草稿"));
+      if (scenario.stress) assert.ok((await page.getByTestId("composer-input").textContent()).includes(draftLine));
       results.at(-1).passed = true;
     } catch (error) {
       await capture("failed");

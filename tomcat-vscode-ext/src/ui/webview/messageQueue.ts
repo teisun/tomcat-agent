@@ -137,7 +137,12 @@ export class MessageQueue {
     s.items = s.items.filter(item => !(item.status === "steering" && ids.includes(item.userMessageId)));
     this.driver.changed(id); this.dispatch(id);
   }
-  reset(): void { const ids = [...this.sessions.keys()]; this.sessions.clear(); for (const id of ids) this.driver.changed(id); }
+  forget(id: string): void { this.sessions.delete(id); }
+  reset(preserve: ReadonlySet<string> = new Set()): void {
+    for (const id of [...this.sessions.keys()]) {
+      if (!preserve.has(id)) { this.sessions.delete(id); this.driver.changed(id); }
+    }
+  }
   dispatch(id: string): void {
     const s = this.session(id), conditions = this.driver.conditions(id), item = s.items[0];
     if (!conditions.enabled || conditions.commandPending || this.busy(id) || s.paused || s.inFlight || !item || item.status !== "queued" || s.editingId === item.userMessageId) return;

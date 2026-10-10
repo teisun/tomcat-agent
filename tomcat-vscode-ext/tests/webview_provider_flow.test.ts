@@ -31,9 +31,9 @@ const __testing = (
         handler:
           | ((
               message: string,
-              items: string[],
+              items: Array<string | vscode.MessageItem>,
               options?: { detail?: string; modal?: boolean },
-            ) => string | undefined)
+            ) => string | vscode.MessageItem | undefined)
           | undefined,
       ): void;
     };
@@ -53,6 +53,7 @@ type MutableSessionState = {
 };
 
 type BuildProviderOptions = {
+  sessionPinStorage?: Pick<vscode.Memento, "get" | "update">;
   messageQueueSupported?: boolean;
   getMessagesImpl?: (
     sessionId?: string,
@@ -65,7 +66,7 @@ type BuildProviderOptions = {
   listCheckpointsImpl?: (sessionId?: string) => Promise<SessionCheckpointListPayload>;
   listModelsPayload?: Record<string, unknown>;
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
-  openModelSettings?: (route?: "models") => void;
+  openSettings?: (route?: "general" | "models" | "connectors") => void;
   requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
   retryImpl?: (sessionId: string, messageId: string) => Promise<void>;
   resumeImpl?: (sessionId: string) => Promise<void>;
@@ -430,7 +431,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
       return sessionId;
     },
   };
-  const openModelSettings = options.openModelSettings ?? vi.fn();
+  const openSettings = options.openSettings ?? vi.fn();
 
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/extension"),
@@ -446,8 +447,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
       attachmentRoot: messenger.attachmentRoot,
     }),
     messenger: messenger as never,
-    openModelSettings,
+    openSettings,
     sessionRouter: sessionRouter as never,
+    sessionPinStorage: options.sessionPinStorage,
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
@@ -458,6 +460,30 @@ function buildProvider(options: BuildProviderOptions = {}) {
 const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
 
 describe("webview provider integration", () => {
+  it("projects durable pins without changing last-active or calling the backend", async () => {
+    const values = new Map<string, unknown>();
+    const storage = {
+      get: <T>(key: string, fallback?: T): T => (values.has(key) ? values.get(key) : fallback) as T,
+      update: vi.fn(async (key: string, value: unknown) => { values.set(key, value); }),
+    };
+    const { provider, messenger } = buildProvider({ sessionPinStorage: storage });
+    try {
+      await provider.dispatchTestIntent({ messageId: "ready-pin", type: "ready" });
+      const before = provider.currentState();
+      const id = before.sessions[0].sessionId;
+      const requests = messenger.requestCalls.length;
+      await provider.dispatchTestIntent({ messageId: "pin", type: "setSessionPinned", data: { sessionId: id, pinned: true } });
+      const after = provider.currentState();
+      expect(after.sessions.find(s => s.sessionId === id)?.isPinned).toBe(true);
+      expect(after.activeSessionId).toBe(before.activeSessionId);
+      expect(after.sessions.map(s => [s.sessionId, s.isCurrent, s.updatedAt])).toEqual(before.sessions.map(s => [s.sessionId, s.isCurrent, s.updatedAt]));
+      expect(messenger.requestCalls).toHaveLength(requests);
+      storage.update.mockRejectedValueOnce(new Error("memento failure"));
+      await provider.dispatchTestIntent({ messageId: "unpin", type: "setSessionPinned", data: { sessionId: id, pinned: false } });
+      expect(provider.currentState().sessions.find(s => s.sessionId === id)?.isPinned).toBe(true);
+    } finally { provider.dispose(); }
+  });
+
   it("hydrates history during bootstrap and carries attachments through prompt requests", async () => {
     const { messenger, provider } = buildProvider();
     __testing.registerFile("/workspace/diagram.png", "png-bytes");
@@ -1040,10 +1066,10 @@ describe("webview provider integration", () => {
   });
 
   it("opens model settings when the composer footer intent fires", async () => {
-    const openModelSettings = vi.fn();
+    const openSettings = vi.fn();
     const { provider } = buildProvider({
       listModelsPayload: { models: [] },
-      openModelSettings,
+      openSettings,
     });
 
     await provider.dispatchTestIntent({
@@ -1053,10 +1079,10 @@ describe("webview provider integration", () => {
     await provider.dispatchTestIntent({
       data: { route: "models" },
       messageId: "open-model-settings",
-      type: "openModelSettings",
+      type: "openSettings",
     });
 
-    expect(openModelSettings).toHaveBeenCalledWith("models");
+    expect(openSettings).toHaveBeenCalledWith("models");
     provider.dispose();
   });
 
@@ -1261,7 +1287,7 @@ describe("webview provider integration", () => {
       (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
     );
     expect(failedUserMessage).toMatchObject({
-      deliveryError: "上一条请求仍在处理中。请等待完成，或先停止当前任务后再试。",
+      deliveryError: "A previous request is still running. Wait for it to finish or stop the current task before retrying.",
       deliveryErrorDetail: "busy",
       deliveryState: "failed",
       retryable: true,
@@ -2623,9 +2649,9 @@ describe("webview provider integration", () => {
     const { messenger, provider } = buildProvider();
     __testing.setConfiguration("tomcat.plan.buildModel", "deepseek-v4-flash");
     const prompts: Array<{ detail?: string; message: string }> = [];
-    __testing.setWarningMessageHandler((message, _items, options) => {
+    __testing.setWarningMessageHandler((message, items, options) => {
       prompts.push({ detail: options?.detail, message });
-      return "Continue Build";
+      return items[0];
     });
 
     await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
@@ -3322,6 +3348,7 @@ describe("webview provider integration", () => {
       {
         questions: [{
           id: "q-exit",
+          allowCustom: false,
           options: [{ id: "continue", label: "Continue", recommended: true }],
           prompt: "Continue after reload?",
         }],
@@ -3336,7 +3363,7 @@ describe("webview provider integration", () => {
     expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          request: expect.objectContaining({ requestId: "ask-exit" }),
+          request: expect.objectContaining({ requestId: "ask-exit", questions: [expect.objectContaining({ id: "q-exit", allowCustom: false })] }),
           resolved: false,
           type: "approval",
         }),

@@ -499,7 +499,7 @@ impl AgentLoop {
                 let err_msg = last_err
                     .as_ref()
                     .map(ToString::to_string)
-                    .unwrap_or_else(|| "retry".to_string());
+                    .unwrap_or_else(|| crate::infra::i18n::tr("agentLoop.retry", &[]));
                 self.emit_event(AgentEvent::AutoRetryStart {
                     attempt,
                     max_attempts,
@@ -617,9 +617,9 @@ impl AgentLoop {
                     }
                     last_err = Some(e);
                     if attempt == max_attempts {
-                        let fatal = last_err
-                            .take()
-                            .unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+                        let fatal = last_err.take().unwrap_or_else(|| {
+                            AppError::Llm(crate::infra::i18n::tr("llm.retriesExhausted", &[]))
+                        });
                         let final_error = fatal.to_string();
                         self.emit_event(AgentEvent::AutoRetryEnd {
                             success: false,
@@ -639,8 +639,8 @@ impl AgentLoop {
                 }
             }
         }
-        Err(LoopError::Fatal(
-            last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string())),
-        ))
+        Err(LoopError::Fatal(last_err.unwrap_or_else(|| {
+            AppError::Llm(crate::infra::i18n::tr("llm.retriesExhausted", &[]))
+        })))
     }
 }

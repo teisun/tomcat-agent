@@ -94,9 +94,18 @@ struct GetMessagesCursor {
 fn decode_get_messages_cursor(cursor: &str) -> Result<GetMessagesCursor, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(cursor.as_bytes())
-        .map_err(|error| AppError::Config(format!("invalid get_messages cursor: {error}")))?;
-    serde_json::from_slice::<GetMessagesCursor>(&bytes)
-        .map_err(|error| AppError::Config(format!("invalid get_messages cursor payload: {error}")))
+        .map_err(|error| {
+            AppError::Config(crate::infra::i18n::tr(
+                "serve.cursorInvalid",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
+    serde_json::from_slice::<GetMessagesCursor>(&bytes).map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "serve.cursorPayload",
+            &[("detail", &error.to_string())],
+        ))
+    })
 }
 
 fn encode_get_messages_cursor(offset: u64, boundary_id: Option<&str>) -> Result<String, AppError> {
@@ -105,7 +114,10 @@ fn encode_get_messages_cursor(offset: u64, boundary_id: Option<&str>) -> Result<
         boundary_id: boundary_id.map(ToString::to_string),
     };
     let bytes = serde_json::to_vec(&cursor).map_err(|error| {
-        AppError::Config(format!("serialize get_messages cursor failed: {error}"))
+        AppError::Config(crate::infra::i18n::tr(
+            "serve.cursorSerialize",
+            &[("detail", &error.to_string())],
+        ))
     })?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
@@ -257,6 +269,12 @@ pub(crate) async fn handle_command(
     }
 
     match command {
+        ServeCommand::DeleteSession { id, session_id } => {
+            super::session_delete::handle(state, id, session_id).await?;
+        }
+        ServeCommand::SetUiLanguage { id, language } => {
+            super::ui_preferences::set_language(&state, id, language).await?;
+        }
         ServeCommand::RewindAndResend {
             id,
             session_id,
@@ -606,7 +624,10 @@ pub(crate) async fn handle_command(
                 .session
                 .read_session_header_for_session(&slot.session_id)
                 .map_err(|error| {
-                    AppError::Config(format!("read session header failed: {error}"))
+                    AppError::Config(crate::infra::i18n::tr(
+                        "serve.headerRead",
+                        &[("detail", &error.to_string())],
+                    ))
                 })?;
             let cursor = params
                 .cursor
@@ -629,7 +650,10 @@ pub(crate) async fn handle_command(
                 .session
                 .get_entries_before_for_session(&slot.session_id, cap, before)
                 .map_err(|error| {
-                    AppError::Config(format!("read session entries failed: {error}"))
+                    AppError::Config(crate::infra::i18n::tr(
+                        "serve.entriesRead",
+                        &[("detail", &error.to_string())],
+                    ))
                 })?;
             let page = complete_leading_tool_companions(
                 &slot.ctx.session_runtime.session,
@@ -637,7 +661,10 @@ pub(crate) async fn handle_command(
                 page,
             )?;
             let next_cursor = encode_next_cursor(&page).map_err(|error| {
-                AppError::Config(format!("encode get_messages cursor failed: {error}"))
+                AppError::Config(crate::infra::i18n::tr(
+                    "serve.cursorEncode",
+                    &[("detail", &error.to_string())],
+                ))
             })?;
             let mut page = page;
             let queued = queued_input_ids(&slot);
@@ -832,16 +859,14 @@ pub(crate) async fn handle_command(
                     )))?;
                 }
                 ListSessionsScope::Disk => {
-                    let slot = resolve_active_slot(&state)?;
-                    let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
-                    let session_manager = SessionManager::new_scoped(
-                        sessions_dir,
-                        slot.ctx
-                            .session_runtime
-                            .session
-                            .current_session_key()
-                            .to_string(),
-                    );
+                    let session_manager = match resolve_active_slot(&state) {
+                        Ok(slot) => SessionManager::new_scoped(
+                            crate::resolve_sessions_dir(&state.cfg)?,
+                            slot.ctx.session_runtime.session.current_session_key(),
+                        ),
+                        Err(_) => super::scoped_session_manager(&state)
+                            .ok_or_else(|| AppError::Config("unknown_session".into()))?,
+                    };
                     let current_session_id = session_manager.current_session_id()?;
                     let sessions = session_manager
                     .list_sessions()?
@@ -878,6 +903,7 @@ pub(crate) async fn handle_command(
                         current_session_id.clone(),
                         Some(serde_json::json!({
                             "activeSessionId": current_session_id,
+                            "sessionKey": session_manager.current_session_key(),
                             "sessions": sessions,
                         })),
                     )))?;
@@ -1333,9 +1359,12 @@ pub(crate) async fn handle_command(
                     &state,
                     id,
                     Some(slot.session_id.clone()),
-                    format!(
-                        "invalid_context_window: 模型 `{model}` 可选档位为 {:?}。",
-                        entry.context_window_options
+                    crate::infra::i18n::tr(
+                        "serve.contextUnsupported",
+                        &[
+                            ("model", &model),
+                            ("tiers", &format!("{:?}", entry.context_window_options)),
+                        ],
                     ),
                 )?;
                 return Ok(());
@@ -1391,7 +1420,10 @@ pub(crate) async fn handle_command(
                 state.registry.active_session_id(),
                 Some(
                     serde_json::to_value(ListModelsPayload { models }).map_err(|error| {
-                        AppError::Config(format!("serialize list_models payload failed: {error}"))
+                        AppError::Config(crate::infra::i18n::tr(
+                            "serve.serializeFailed",
+                            &[("name", "list_models"), ("detail", &error.to_string())],
+                        ))
                     })?,
                 ),
             )))?;
@@ -1419,7 +1451,10 @@ pub(crate) async fn handle_command(
                         warnings: result.warnings,
                     })
                     .map_err(|error| {
-                        AppError::Config(format!("serialize upsert_model payload failed: {error}"))
+                        AppError::Config(crate::infra::i18n::tr(
+                            "serve.serializeFailed",
+                            &[("name", "upsert_model"), ("detail", &error.to_string())],
+                        ))
                     })?,
                 ),
             )))?;
@@ -1442,10 +1477,9 @@ pub(crate) async fn handle_command(
                 .and_then(|config| refresh_model_runtime(&state, &config))
             {
                 Ok(()) => Vec::new(),
-                Err(error) => vec![format!(
-                    "模型 `{}` 已删除，但刷新模型目录失败：{}。请刷新后核对当前列表。",
-                    model_id,
-                    render_error_message(&error)
+                Err(error) => vec![crate::infra::i18n::tr(
+                    "serve.modelRemovedRefreshFailed",
+                    &[("id", &model_id), ("detail", &render_error_message(&error))],
                 )],
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
@@ -1454,8 +1488,9 @@ pub(crate) async fn handle_command(
                 Some(
                     serde_json::to_value(RemoveModelResponse { model_id, warnings }).map_err(
                         |error| {
-                            AppError::Config(format!(
-                                "serialize remove_model payload failed: {error}"
+                            AppError::Config(crate::infra::i18n::tr(
+                                "serve.serializeFailed",
+                                &[("name", "remove_model"), ("detail", &error.to_string())],
                             ))
                         },
                     )?,
@@ -1809,7 +1844,10 @@ pub(crate) async fn handle_command(
                 .map(serde_json::from_value::<McpOAuthConfig>)
                 .transpose()
                 .map_err(|error| {
-                    AppError::Config(format!("invalid connector oauth config: {error}"))
+                    AppError::Config(crate::infra::i18n::tr(
+                        "serve.oauthConfig",
+                        &[("detail", &error.to_string())],
+                    ))
                 })?;
             let token_resource = url.clone();
             let config = McpServerConfig {
@@ -1828,7 +1866,7 @@ pub(crate) async fn handle_command(
             let project_root = if use_workspace {
                 Some(ProjectTrustStore::root_for(
                     workspace_root.as_deref().ok_or_else(|| {
-                        AppError::Config("workspace connector requires a project root".into())
+                        AppError::Config(crate::infra::i18n::tr("serve.projectRequired", &[]))
                     })?,
                 )?)
             } else {
@@ -1836,9 +1874,7 @@ pub(crate) async fn handle_command(
             };
             let config_path = if use_workspace {
                 let workspace_root = workspace_root.as_deref().ok_or_else(|| {
-                    AppError::Config(
-                        "workspace connector configuration requires an explicit session project root".into(),
-                    )
+                    AppError::Config(crate::infra::i18n::tr("serve.projectRequired", &[]))
                 })?;
                 project_mcp_path(&state.cfg, workspace_root)?
             } else {
@@ -2302,11 +2338,14 @@ pub(crate) async fn handle_command(
                 return Ok(());
             };
             let manager = SessionManager::new_scoped(sessions_dir, entry.session_key);
-            manager.delete_session(&session_id)?;
+            let trail = crate::resolve_agent_trail_dir(&state.cfg)?;
+            let outcome = manager
+                .begin_delete_session(&session_id)?
+                .commit(Some(&trail))?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(session_id.clone()),
-                Some(serde_json::json!({ "discarded": true, "sessionId": session_id })),
+                Some(serde_json::json!({ "discarded": true, "warnings": outcome.warnings, "sessionId": session_id })),
             )))?;
         }
         ServeCommand::CloseSession { id, session_id } => {
@@ -2317,7 +2356,7 @@ pub(crate) async fn handle_command(
             state
                 .ask_question
                 .cancel_live_session(&slot.session_id, "close_session");
-            cleanup_session_slot(&state, &slot, true, "close_session").await?;
+            cleanup_session_slot(&state, &slot, super::SlotCleanup::Close).await?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -2385,7 +2424,7 @@ fn attach_page_tool_displays(
             continue;
         };
         let object = message.message.as_object_mut().ok_or_else(|| {
-            AppError::Config("tool transcript message is not an object".to_string())
+            AppError::Config(crate::infra::i18n::tr("serve.toolMessageObject", &[]))
         })?;
         object.insert("tool_display".to_string(), serde_json::to_value(display)?);
     }
@@ -2509,29 +2548,24 @@ async fn open_existing_session_slot(
     if state.registry.len() >= state.registry.max_sessions() {
         return Err(AppError::Config("too_many_sessions".to_string()));
     }
-    let base_slot = resolve_active_slot(&state)?;
-    let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
-    let session_manager = SessionManager::new_scoped(
-        sessions_dir,
-        base_slot
-            .ctx
-            .session_runtime
-            .session
-            .current_session_key()
-            .to_string(),
-    );
+    let scope = state
+        .registry
+        .current_scope()
+        .ok_or_else(|| AppError::Config("unknown_session".to_string()))?;
+    let session_manager =
+        SessionManager::new_scoped(crate::resolve_sessions_dir(&state.cfg)?, scope.key);
     let entry = match session_manager.switch_current_to_session_id(session_id) {
         Ok(entry) => entry,
         Err(AppError::Config(_)) => return Err(AppError::Config("unknown_session".to_string())),
         Err(error) => return Err(error),
     };
-    session_manager.pin_session(&entry.session_id);
+    session_manager.pin_session(&entry.session_id)?;
     create_session_slot(
         state,
         super::types::NewSessionParams {
-            cwd: entry.cwd.or_else(|| base_slot.cwd.clone()),
+            cwd: entry.cwd.or(scope.cwd),
             detached: false,
-            mode: Some(match base_slot.mode {
+            mode: Some(match scope.mode {
                 SessionMode::Code => ServeSessionMode::Code,
                 SessionMode::Claw => ServeSessionMode::Claw,
             }),
@@ -2688,8 +2722,9 @@ pub(crate) async fn start_turn(
         .rearm_root(&slot.session_id, turn_token.child_token())
     {
         slot.mark_idle();
-        return Err(AppError::Config(format!(
-            "agent_registry root rearm 失败: {error}"
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "terminal.rearmFailed",
+            &[("detail", &error.to_string())],
         )));
     }
 
@@ -2850,13 +2885,13 @@ pub(super) fn rehydrate_slot_context_state(
         .lock()
         .as_ref()
         .map(|state| state.prompt_snapshot.system_text().to_string())
-        .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
+        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("serve.runtimeUnavailable", &[])))?;
     let context_state = crate::api::chat::reload_context_state(&slot.ctx, &system_text)?;
     let context_budget_chars = context_state.context_budget_chars;
     let mut turn_state = slot.turn_state.lock();
     let state = turn_state
         .as_mut()
-        .ok_or_else(|| AppError::Config("session runtime is unavailable".to_string()))?;
+        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("serve.runtimeUnavailable", &[])))?;
     state.context_state = context_state;
     state.context_budget_chars = context_budget_chars;
     drop(turn_state);
@@ -2877,10 +2912,16 @@ async fn rearm_pending_question_after_transcript_change(
 }
 
 fn rollback_created_session(slot: &super::registry::SessionSlot) -> Result<(), AppError> {
-    slot.ctx
+    slot.ctx.session_runtime.session.release_session_usage();
+    let outcome = slot
+        .ctx
         .session_runtime
         .session
-        .delete_session(&slot.session_id)
+        .delete_session(&slot.session_id)?;
+    for warning in outcome.warnings {
+        tracing::warn!(%warning, "created session cleanup incomplete");
+    }
+    Ok(())
 }
 
 fn emit_agent_end_once(
@@ -3036,7 +3077,9 @@ pub(super) fn build_user_message_with_instructions(
                     parts.push(ChatMessageContentPart::text(text.clone()));
                 }
                 ServeContentSegment::Instruction { .. } => {
-                    let reference = instructions.next().ok_or("调用尚未由后端解析")?;
+                    let reference = instructions.next().ok_or_else(|| {
+                        crate::infra::i18n::tr("serve.instructionUnresolved", &[])
+                    })?;
                     parts.push(ChatMessageContentPart::reference(reference.clone()));
                 }
                 ServeContentSegment::Reference { reference } => {

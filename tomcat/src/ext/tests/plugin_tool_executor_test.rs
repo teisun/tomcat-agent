@@ -262,7 +262,11 @@ async fn plugin_tool_executor_requires_session_id() {
         .await
         .expect_err("missing session_id should fail before any runtime access");
     assert!(
-        err.to_string().contains("插件工具执行缺少 session_id"),
+        err.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plugin.toolSession",
+            &[("name", "plugin_echo")]
+        )),
         "error should explain the missing session id: {err}"
     );
 }
@@ -315,7 +319,11 @@ pi.registerTool({
         .await
         .expect_err("hung plugin tool should time out");
     assert!(
-        err.to_string().contains("插件工具执行超时: plugin_hang"),
+        err.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plugin.toolTimeout",
+            &[("name", "plugin_hang")]
+        )),
         "timeout error should mention the plugin tool name: {err}"
     );
     assert_eq!(

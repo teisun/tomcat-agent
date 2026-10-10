@@ -88,7 +88,7 @@ pub fn apply_shared_todo_ops(
                 }
                 SharedTodoOpArg::SetStatus { .. } | SharedTodoOpArg::Remove { .. } => {
                     return Err(ToolError::BadArgs(
-                        "replace=true 时 ops 仅允许 kind=upsert".into(),
+                        "replace=true allows only kind=upsert ops".into(),
                     ));
                 }
             }
@@ -114,7 +114,7 @@ pub fn apply_shared_todo_ops(
                 let evidence = content.as_ref().and_then(StatusUpdateMetadata::evidence);
                 if evidence.is_some() && *status != TodoStatus::Completed {
                     return Err(ToolError::BadArgs(
-                        "evidence 仅可随 set_status completed 提交".into(),
+                        "evidence may only accompany set_status completed".into(),
                     ));
                 }
                 ops::apply_todos_ops(
@@ -166,7 +166,7 @@ fn apply_upsert(
 
     let Some(content) = content else {
         return Err(ToolError::BadArgs(format!(
-            "upsert 新增 todo `{id}` 时必须提供 content"
+            "upsert requires content when creating todo `{id}`"
         )));
     };
     ops::apply_todos_ops(

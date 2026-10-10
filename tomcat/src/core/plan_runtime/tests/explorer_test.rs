@@ -42,7 +42,7 @@ fn contract_check_flags_missing_sections_and_pasted_code() {
     );
     let issues = contract_violations(&pasted);
     assert_eq!(issues.len(), 1, "{issues:?}");
-    assert!(issues[0].contains("代码块"), "{issues:?}");
+    assert!(issues[0].contains("code block"), "{issues:?}");
 
     // 只开不闭的围栏同样要被抓到，否则少写三个反引号就能绕过检查。
     let unclosed = format!("{GOOD_REPORT}\n```rust\na\nb\nc\nd\n");
@@ -55,14 +55,18 @@ fn contract_check_flags_missing_sections_and_pasted_code() {
 
 #[test]
 fn rendered_reports_keep_task_ids_and_surface_failures() {
+    let cause = "spawn 失败";
     let rendered = render_reports(&[
         report("webview", GOOD_REPORT),
-        ExplorerReport::aborted_with("rust-api", "spawn 失败"),
+        ExplorerReport::aborted_with("rust-api", cause),
     ]);
 
     assert!(rendered.contains("=== [1/2] webview ==="), "{rendered}");
     assert!(rendered.contains("=== [2/2] rust-api ==="), "{rendered}");
-    assert!(rendered.contains("ABORTED: spawn 失败"), "{rendered}");
+    assert!(
+        rendered.contains(&format!("ABORTED: {cause}")),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -139,5 +143,10 @@ async fn dispatch_explorers_without_a_dispatcher_is_an_explicit_error() {
         }])
         .await
         .expect_err("未注入 dispatcher 时不得静默返回空结论");
-    assert!(err.to_string().contains("未注入"), "err={err}");
+    assert!(
+        err.to_string().contains(
+            "dispatch_agent is unavailable: explorer sub-Agent dispatcher was not supplied"
+        ),
+        "err={err}"
+    );
 }

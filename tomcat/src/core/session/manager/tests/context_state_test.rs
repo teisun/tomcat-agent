@@ -305,7 +305,7 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
     std::fs::create_dir_all(&dir).unwrap();
     let mgr = SessionManager::new(dir.clone());
     let original = mgr.new_current_session(None).expect("original session");
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external

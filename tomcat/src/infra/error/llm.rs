@@ -173,7 +173,11 @@ pub fn llm_http_status_error(
     llm_http_status_error_with_summary(
         provider,
         http_status,
-        format!("API 错误 {}: {}", http_status, body),
+        format!(
+            "{}: {}",
+            crate::infra::i18n::tr("runtime.apiError", &[("status", &http_status.to_string())]),
+            body
+        ),
     )
 }
 
@@ -188,7 +192,11 @@ pub fn llm_http_status_error_with_stage(
         provider,
         stage,
         http_status,
-        format!("API 错误 {}: {}", http_status, body),
+        format!(
+            "{}: {}",
+            crate::infra::i18n::tr("runtime.apiError", &[("status", &http_status.to_string())]),
+            body
+        ),
     )
 }
 
@@ -489,8 +497,8 @@ pub fn is_context_overflow(err: &AppError) -> bool {
 ///
 /// 顺序是刻意固定的：已知 code > error.type > 摘要文本 > 账户状态辅证。账户类在
 /// 401/403/429 之前检查其 code/type/text 证据，避免把 `insufficient_quota` 错判为
-/// RateLimit，或把「余额不足」错判为 Authentication。纯 `402 Payment Required` 没有
-/// 结构化错误时也归 Billing；孤立的 403 仍然只能是鉴权。
+/// RateLimit。中文自由文本没有 code/type 时不推断 Billing；纯 `402 Payment Required`
+/// 没有结构化错误时也归 Billing；孤立的 403 仍然只能是鉴权。
 pub fn classify_llm_failure(err: &AppError) -> LlmFailure {
     if let AppError::LlmDetailed(detail) = err {
         if let Some(kind) = detail.explicit_kind() {
@@ -682,9 +690,6 @@ fn is_billing_text(text: &str) -> bool {
             "spend limit",
             "spend_limit",
             "credit limit",
-            "余额不足",
-            "额度不足",
-            "余额不够",
         ],
     )
 }

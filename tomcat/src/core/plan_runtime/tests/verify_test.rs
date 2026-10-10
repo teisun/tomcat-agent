@@ -132,8 +132,8 @@ fn normalize_for_gate_demotes_empty_command_pass_and_partializes_key_checks() {
     assert_eq!(summary.checks[0].result, "skip");
     assert_eq!(summary.verdict, "partial");
     assert_eq!(warnings.len(), 2);
-    assert!(warnings[0].contains("command 为空"));
-    assert!(warnings[1].contains("降级为 partial"));
+    assert!(warnings[0].contains("pass without a command"));
+    assert!(warnings[1].contains("downgraded to partial"));
 }
 
 #[test]

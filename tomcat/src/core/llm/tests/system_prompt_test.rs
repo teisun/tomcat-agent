@@ -625,14 +625,16 @@ fn fixture_context() -> WorkspaceContext {
 
 #[test]
 fn workspace_state_section_renders_read_write() {
-    let s = WorkspaceStateSection::new(fixture_state()).render(&fixture_context());
+    let state = fixture_state();
+    let description = state.read_write[1].description.clone().unwrap();
+    let s = WorkspaceStateSection::new(state).render(&fixture_context());
     assert!(s.contains("Workspace State"));
     assert!(s.contains("/Users/yan/.tomcat/workspace-main"));
     assert!(s.contains("[agent_definition_dir]"));
     assert!(!s.contains("[agent_workspace_dir]"));
     assert!(s.contains("/Users/yan/scratch"));
     assert!(s.contains("alias=scratch"));
-    assert!(s.contains("desc=\"用户附加根\""));
+    assert!(s.contains(&format!("desc={description:?}")));
     assert!(!s.contains("[dragged_path]"));
 }
 

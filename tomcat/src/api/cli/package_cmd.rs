@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use dialoguer::{theme::ColorfulTheme, Select};
 
 use crate::core::package::{PackageLayerListing, PackageManager, PackageVisibility};
+use crate::infra::i18n::tr;
 use crate::{normalize_path, AppConfig, AppError};
 
 use super::PackageVisibilityArg;
@@ -22,8 +23,15 @@ pub(crate) fn run_install(
     let outcome = manager.install(prepared)?;
 
     println!(
-        "已安装 package: {}@{} -> {}",
-        outcome.record.name, outcome.record.version, visibility
+        "{}",
+        tr(
+            "cli.package.installed",
+            &[
+                ("name", &outcome.record.name),
+                ("version", &outcome.record.version),
+                ("visibility", &visibility.to_string())
+            ]
+        )
     );
     for (kind, id) in outcome.record.resource_descriptors() {
         println!("  - {}: {}", kind.as_str(), id);
@@ -43,9 +51,24 @@ pub(crate) fn run_uninstall(
     let manager = PackageManager::new(cfg);
     let outcome = manager.uninstall(&package, visibility, Some(&scope_context))?;
 
-    println!("已卸载 package: {} <- {}", outcome.record.name, visibility);
+    println!(
+        "{}",
+        tr(
+            "cli.package.uninstalled",
+            &[
+                ("name", &outcome.record.name),
+                ("visibility", &visibility.to_string())
+            ]
+        )
+    );
     for removed in &outcome.removed_paths {
-        println!("  - removed {}", removed.display());
+        println!(
+            "{}",
+            tr(
+                "cli.package.removed",
+                &[("path", &removed.display().to_string())]
+            )
+        );
     }
     Ok(())
 }
@@ -76,18 +99,23 @@ fn resolve_target_visibility(
     }
 
     let selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("请选择安装/卸载目标层")
+        .with_prompt(tr("cli.package.selectLayer", &[]))
         .default(0)
         .items(&["current-project (scope)", "agent", "global"])
         .interact_opt()
-        .map_err(|error| AppError::Config(format!("visibility chooser 失败: {error}")))?;
+        .map_err(|error| {
+            AppError::Config(tr(
+                "cli.package.selectFailed",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
 
     match selection {
         Some(0) => Ok(PackageVisibility::Scope),
         Some(1) => Ok(PackageVisibility::Agent),
         Some(2) => Ok(PackageVisibility::Global),
         Some(_) => Err(AppError::internal("unexpected visibility selection")),
-        None => Err(AppError::Config("已取消选择目标层".to_string())),
+        None => Err(AppError::Config(tr("cli.package.selectCancelled", &[]))),
     }
 }
 
@@ -102,7 +130,7 @@ fn render_package_listings(listings: &[PackageLayerListing]) {
     for listing in listings {
         println!("{}:", listing.visibility);
         if listing.records.is_empty() {
-            println!("  (none)");
+            println!("{}", tr("cli.package.empty", &[]));
             continue;
         }
         for record in &listing.records {
@@ -121,7 +149,7 @@ fn render_package_listings(listings: &[PackageLayerListing]) {
                     .map(|(kind, id)| format!("{}:{id}", kind.as_str()))
                     .collect::<Vec<_>>()
                     .join(", ");
-                println!("    resources: {resources}");
+                println!("{}", tr("cli.package.resources", &[("items", &resources)]));
             }
         }
     }
@@ -131,7 +159,7 @@ fn print_warnings(warnings: &[String]) {
     if warnings.is_empty() {
         return;
     }
-    println!("warnings:");
+    println!("{}", tr("cli.package.warnings", &[]));
     for warning in warnings {
         println!("  - {warning}");
     }

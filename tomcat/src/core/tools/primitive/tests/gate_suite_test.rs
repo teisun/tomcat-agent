@@ -30,6 +30,7 @@ use crate::infra::{
 #[derive(Debug, Default)]
 struct ProgrammableConfirm {
     answers: Mutex<Vec<ConfirmDecision>>,
+    targets: Mutex<Vec<Option<PathBuf>>>,
 }
 
 #[derive(Default)]
@@ -53,6 +54,7 @@ impl ProgrammableConfirm {
     fn new(decisions: Vec<ConfirmDecision>) -> Self {
         Self {
             answers: Mutex::new(decisions),
+            targets: Mutex::new(Vec::new()),
         }
     }
 }
@@ -74,8 +76,10 @@ impl UserConfirmationProvider for ProgrammableConfirm {
         _operation: PrimitiveOperation,
         _preview: &str,
         _plugin_id: &str,
+        target: Option<PathBuf>,
         _suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
+        self.targets.lock().unwrap().push(target);
         let mut q = self.answers.lock().unwrap();
         if q.is_empty() {
             return Ok(ConfirmDecision::Deny);
@@ -152,21 +156,22 @@ async fn gate_deny_path_rule_blocks_write() {
 
 #[tokio::test]
 async fn gate_need_confirm_allow_once_succeeds() {
-    let ws = workspace_dir("confirm_allow");
-    let outside = workspace_dir("confirm_outside");
-    let exec = make_executor(
-        ws,
-        vec![],
-        Arc::new(ProgrammableConfirm::new(vec![ConfirmDecision::AllowOnce])),
-    );
-    let target = outside.join("o.txt");
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let confirm = Arc::new(ProgrammableConfirm::new(vec![ConfirmDecision::AllowOnce]));
+    let exec = make_executor(ws.path().to_path_buf(), vec![], confirm.clone());
+    let target = outside.path().join("文档 with spaces.txt");
+    let expected_target =
+        crate::infra::platform::normalize_path(&target.to_string_lossy()).unwrap();
     let res = exec
         .write_file(&target.to_string_lossy(), "ok", false, "p1")
         .await
         .unwrap();
     assert!(res.written);
-    let _ = std::fs::remove_file(&target);
-    let _ = std::fs::remove_dir(&outside);
+    assert_eq!(
+        *confirm.targets.lock().unwrap(),
+        vec![Some(expected_target)],
+    );
 }
 
 #[tokio::test]

@@ -22,7 +22,7 @@ import {
   type AskQuestionWireRequest,
   type AskQuestionWireResponse,
 } from "../../serveClient/protocol";
-import type { SessionRouter } from "../../serveClient/sessionRouter";
+import type { SessionRouter, SessionListPayload } from "../../serveClient/sessionRouter";
 import type { TomcatMessenger } from "../../serveClient/TomcatMessenger";
 import type { ServeContentSegment, ServeEvent } from "../../serveClient/wire";
 import {
@@ -81,6 +81,7 @@ import { HostDraftCoordinator } from "./hostDraftCoordinator";
 import { MessageQueue, type QueueContent } from "./messageQueue";
 import { buildFileReference } from "./contextReferences";
 import { TomcatSessionPool } from "./sessionPool";
+import { SessionPins } from "./sessionPins";
 import {
   type StateBroadcasterFlushPlan,
   StateBroadcaster,
@@ -157,12 +158,13 @@ export interface TomcatWebviewProviderDeps {
    * directory, and a stale value costs nothing: it is re-granted from `get_state` anyway.
    */
   attachmentRootMemento?: Pick<vscode.Memento, "get" | "update">;
+  sessionPinStorage?: Pick<vscode.Memento, "get" | "update">;
   getDefaultCwd(): string | undefined;
   ide: VsCodeIde;
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
   openExternal?(href: string): Promise<void> | void;
-  openModelSettings?(route?: "models"): void;
+  openSettings?(route?: "general" | "models" | "connectors"): void;
   /** Surface a post-handshake bootstrap failure in the extension host's Output channel/UI. */
   reportBootstrapFailure?(error: Error): void;
   refreshPlanPreview?(
@@ -390,7 +392,7 @@ export function buildAttachmentOpenDialogOptions(): vscode.OpenDialogOptions {
     canSelectFiles: true,
     canSelectFolders: true,
     canSelectMany: true,
-    openLabel: "Add to Tomcat",
+    openLabel: t("host.addToTomcat"),
   };
 }
 
@@ -487,39 +489,40 @@ interface PendingDraftForkOperation {
   sourceSessionId: string;
 }
 
-function formatBridgeError(action: string, error: unknown): string {
+function formatBridgeError(action: MessageKey, error: unknown, args: MessageArgs = {}): string {
   const message = error instanceof Error ? error.message : String(error);
+  const operation = t(action, args);
   if (message.includes("Timed out waiting for response")) {
-    return `Unable to ${action}: Tomcat bridge is not responding. Restart Tomcat and try again.`;
+    return t("host.bridge.timeout", { action: operation });
   }
   if (message.includes("tomcat serve exited")) {
-    return `Unable to ${action}: Tomcat serve exited. Restart Tomcat and try again.`;
+    return t("host.bridge.exited", { action: operation });
   }
   if (message.includes("TomcatMessenger has been disposed")) {
-    return `Unable to ${action}: Tomcat bridge is unavailable. Restart Tomcat and try again.`;
+    return t("host.bridge.unavailable", { action: operation });
   }
-  return `Unable to ${action}: ${message}`;
+  return t("host.bridge.failed", { action: operation, detail: message });
 }
 
-function sessionFileErrorText(error: unknown, label: string, action: string): string {
+function sessionFileErrorText(error: unknown, label: string, action: MessageKey, args: MessageArgs = {}): string {
   const message = error instanceof Error ? error.message : String(error);
   switch (message) {
-    case "binary": return `${label} is a binary file, so there is no text diff.`;
-    case "too_large": return `${label} is too large to compare.`;
-    case "unavailable": return `The original copy of ${label} is missing.`;
-    case "unknown_path": return "This change list is out of date. Files has been refreshed.";
-    case "not_regular_file": return `${label} is not a regular file and cannot be undone.`;
-    case "busy": return `Stop Tomcat or wait for it to finish to ${action === "keep file changes" ? "keep" : "undo"}.`;
+    case "binary": return t("host.file.binary", { name: label });
+    case "too_large": return t("host.file.tooLarge", { name: label });
+    case "unavailable": return t("host.file.originalMissing", { name: label });
+    case "unknown_path": return t("host.file.stale");
+    case "not_regular_file": return t("host.file.notRegular", { name: label });
+    case "busy": return t("host.file.busy", { action: t(action === "host.bridge.keep" ? "host.file.keep" : "host.file.undo") });
   }
   if (message.startsWith("restore_failed: ")) {
-    return `Couldn't undo ${message.slice("restore_failed: ".length)}. The list shows what's left.`;
+    return t("host.file.restoreFailed", { detail: message.slice("restore_failed: ".length) });
   }
-  return formatBridgeError(action, error);
+  return formatBridgeError(action, error, args);
 }
 
 function displayDeliveryError(error: string): string {
   if (error.trim().toLowerCase() === "busy") {
-    return "上一条请求仍在处理中。请等待完成，或先停止当前任务后再试。";
+    return t("host.deliveryBusy");
   }
   return error;
 }
@@ -527,12 +530,12 @@ function displayDeliveryError(error: string): string {
 function displayRecoveryError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("retry_target_stale")) {
-    return "这张错误卡已经过期，无法重试。请刷新会话后重新输入。";
+    return t("host.recoveryStale");
   }
   if (message.includes("nothing_to_resume")) {
-    return "没有完整的工具结果可继续。请重新输入你的请求。";
+    return t("host.recoveryIncomplete");
   }
-  return formatBridgeError("recover this turn", error);
+  return formatBridgeError("host.bridge.recover", error);
 }
 
 function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
@@ -548,6 +551,7 @@ function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentR
   };
 }
 
+import { getLocale, subscribeLocale, t, type MessageArgs, type MessageKey } from "../../shared/i18n";
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly contextSearch = new ContextSearchService();
   private readonly domSnapshots = new PendingMessageTracker<DomSnapshot>();
@@ -589,6 +593,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }>();
   private serveEventQueue: Promise<void> = Promise.resolve();
   private readonly sessionPool: TomcatSessionPool;
+  private readonly sessionPins: SessionPins | null;
+  private readonly pendingDeletions = new Map<string, { requestId: string; scopeKey: string; unknown: boolean }>();
+  private diskScopeKey: string | undefined;
+  private sessionFeedback: import("./protocol").SessionActionFeedback | null = null;
   private readonly stateStore: WebviewStateStore;
   private readonly stateBroadcaster: StateBroadcaster;
   private readonly eventSubscription: { dispose(): void };
@@ -631,12 +639,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         // for the lifetime of the window and no further. Better than refusing to run.
         new ComposerDraftStore(vscode.Uri.joinPath(deps.extensionUri, ".drafts"));
     this.sessionPool = new TomcatSessionPool(deps.sessionRouter);
+    this.sessionPins = deps.sessionPinStorage ? new SessionPins(deps.sessionPinStorage) : null;
     this.stateStore = new WebviewStateStore();
+    this.fileSubscriptions.push({ dispose: subscribeLocale(() => { void this.postState(); }) });
     this.messageQueue = new MessageQueue({
       conditions: (sessionId) => {
         const session = this.peekState().sessionViews[sessionId];
         return { busy: !!session?.busy, commandPending: !!session?.commandPending,
-          enabled: this.messageQueueEnabled && !this.disposed && !!session && !this.closedFileSessions.has(sessionId)
+          enabled: this.messageQueueEnabled && !this.disposed && !!session && !this.closedFileSessions.has(sessionId) && !this.sessionBlocked(sessionId)
             && !["failed", "reconnecting"].includes(this.serveConnectionStatus) };
       },
       send: (sessionId, kind, content) => this.sendQueueInput(sessionId, kind, content),
@@ -701,6 +711,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.view?.visible === true && this.isReady
         ? this.peekState().activeSessionId
         : null;
+    if (sourceSessionId && this.sessionBlocked(sourceSessionId)) throw new Error(t("session.delete.pending"));
     if (!sourceSessionId) {
       const sessionId = await this.sessionPool.createSession(cwd ?? this.deps.getDefaultCwd());
       await this.selectSession(sessionId);
@@ -755,7 +766,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * so a recycled ID cannot point to stale transcript or model state.
    */
   async refreshAfterServeRestart(): Promise<void> {
-    this.messageQueue.reset();
+    this.messageQueue.reset(new Set(this.pendingDeletions.keys()));
     this.fileGeneration += 1;
     this.fileRefreshes.clear();
     this.closedFileSessions.clear();
@@ -956,7 +967,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     signal?: AbortSignal,
   ): Promise<AskQuestionWireResponse> {
     const ownerSessionId = sessionId ?? request.sessionId ?? this.peekState().activeSessionId;
-    if (!ownerSessionId) {
+    if (!ownerSessionId || this.draftCoordinator.isRetired(ownerSessionId)) {
       return {
         requestId: request.requestId,
         result: { answers: [], cancelled: true, outcome: "host_disconnected" },
@@ -967,6 +978,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       pending = { request, resolve, sessionId: ownerSessionId, settled: false };
       this.pendingQuestions.set(`${ownerSessionId}\0${request.requestId}`, pending);
     }).then((response) => {
+      if (this.draftCoordinator.isRetired(ownerSessionId)) return response;
       this.finalizedQuestionResults.set(`${ownerSessionId}\0${request.requestId}`, {
         request,
         response,
@@ -1038,9 +1050,17 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private decorateStateSnapshot(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
+    const sessions = snapshot.sessions.filter(session => !this.draftCoordinator.isRetired(session.sessionId));
     return {
       ...snapshot,
+      activeSessionId: snapshot.activeSessionId && this.draftCoordinator.isRetired(snapshot.activeSessionId) ? null : snapshot.activeSessionId,
+      sessionViews: Object.fromEntries(Object.entries(snapshot.sessionViews).filter(([id]) => !this.draftCoordinator.isRetired(id))),
+      sessions: sessions.map(session => ({ ...(this.sessionPins ? this.sessionPins.project(session) : session), deleting: this.pendingDeletions.has(session.sessionId) })),
+      pinSupported: !!this.sessionPins,
+      deleteSupported: !!this.initialized && hasServeCapability(this.initialized, "delete_session"),
+      sessionActionFeedback: this.sessionFeedback,
       mediaRoots: this.view ? this.mediaRootsForWebview(this.view.webview) : [],
+      locale: getLocale(),
     };
   }
 
@@ -1052,6 +1072,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     session: WebviewStateSnapshot["sessionViews"][string],
   ): WebviewStateSnapshot["sessionViews"][string] {
+    session = { ...session, deleting: this.pendingDeletions.has(sessionId), commandPending: session.commandPending === true || this.pendingDeletions.has(sessionId) };
     if (this.messageQueueEnabled) {
       const queue = this.messageQueue.view(sessionId);
       session = { ...session, busy: session.busy || this.messageQueue.isRunning(sessionId),
@@ -1342,6 +1363,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   /** Shared wire construction, with no active-session or draft side effects. */
   private sendQueueInput(sessionId: string, kind: UserSubmitKind, content: QueueContent) {
+    if (this.sessionBlocked(sessionId)) return Promise.resolve({ success: false, error: t("session.delete.pending"), type: "response" as const });
     return this.deps.messenger.request({
       type: kind, sessionId, text: content.text,
       params: {
@@ -1360,7 +1382,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const selectedIds = intent.data.attachmentIds ? new Set(intent.data.attachmentIds) : null;
       const attachments = selectedIds ? draft.attachments.filter(a => selectedIds.has(a.id)) : [...draft.attachments];
       if (selectedIds && attachments.length !== selectedIds.size) {
-        this.stateStore.appendMessage(sessionId, "error", "附件准备结果已失效，请重新添加后发送。");
+        this.stateStore.appendMessage(sessionId, "error", t("host.attachmentsStale"));
         return { queued: false, completion: Promise.resolve(false), revision: null, userMessageId: intent.data.userMessageId ?? randomUUID() };
       }
       // Never overwrite a newer draft with a snapshot frozen before asynchronous preparation.
@@ -1397,6 +1419,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       retrying?: boolean;
     },
   ): Promise<void> {
+    if (this.sessionBlocked(sessionId)) return;
     const userMessageId = options?.messageId ?? randomUUID();
     const draftAtSubmit = submitKind === "prompt" ? this.draftStore.peek(sessionId) : null;
     // Steering messages join a turn already in flight and carry no attachments.
@@ -1439,8 +1462,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.postState();
     try {
       if (segments?.some((s) => s.type === "instruction")) {
-        if (!this.initialized || !hasServeCapability(this.initialized, "get_instruction_catalog")) throw new Error("当前 CLI 不支持 command/skill 标签，请更新 CLI 后重启 Serve。");
-        if (submitKind === "steer") throw new Error("steer 不支持 command/skill 调用。");
+        if (!this.initialized || !hasServeCapability(this.initialized, "get_instruction_catalog")) throw new Error(t("host.instructionsUnsupported"));
+        if (submitKind === "steer") throw new Error(t("host.steerInstructionsUnsupported"));
       }
       const response = await this.deps.messenger.request({
         params: {
@@ -1464,7 +1487,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         type: submitKind,
       });
       if (!response.success) {
-        const rawError = response.error ?? `Tomcat ${submitKind} failed`;
+        const rawError = response.error ?? t("host.submitFailed", { kind: submitKind });
         this.stateStore.markLocalUserMessageFailed(
           sessionId,
           userMessageId,
@@ -1490,7 +1513,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         sessionId,
         userMessageId,
         formatBridgeError(
-          submitKind === "prompt" ? "send the message" : "send the steering message",
+          submitKind === "prompt" ? "host.bridge.send" : "host.bridge.steer",
           error,
         ),
         false,
@@ -1618,14 +1641,144 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return null;
   }
 
+  private sessionBlocked(sessionId: string): boolean {
+    return this.pendingDeletions.has(sessionId) || this.draftCoordinator.isRetired(sessionId);
+  }
+
+  private async deleteSession(sessionId: string, requestId: string): Promise<void> {
+    if (this.sessionBlocked(sessionId) || !this.peekState().sessions.some(s => s.sessionId === sessionId)) return;
+    const view = this.peekState().sessionViews[sessionId];
+    if (view?.busy || view?.commandPending || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)
+      || [...this.pendingQuestions.values()].some(q => q.sessionId === sessionId && !q.settled)) {
+      this.sessionFeedback = { id: requestId, code: "busy" }; await this.postState(); return;
+    }
+    if (this.pendingDraftForkBySource.has(sessionId)) {
+      this.sessionFeedback = { id: requestId, code: "pending_changes" }; await this.postState(); return;
+    }
+    const operation = { requestId, scopeKey: this.diskScopeKey ?? "", unknown: false };
+    this.pendingDeletions.set(sessionId, operation);
+    this.sessionFeedback = null;
+    await this.postState();
+    let sent = false;
+    let response;
+    try {
+      const initialized = await this.ensureInitialized();
+      if (!hasServeCapability(initialized, "delete_session")) {
+        this.pendingDeletions.delete(sessionId);
+        this.sessionFeedback = { id: requestId, code: "unavailable" }; await this.postState(); return;
+      }
+      if (!operation.scopeKey) {
+        const disk = await this.sessionPool.refresh();
+        if (!disk.sessionKey) throw new Error(t("session.delete.scope"));
+        operation.scopeKey = disk.sessionKey;
+      }
+      await this.draftCoordinator.fence(sessionId);
+      sent = true;
+      response = await this.deps.messenger.request({ type: "delete_session", sessionId, id: requestId });
+    } catch (error) {
+      if (!sent) {
+        this.pendingDeletions.delete(sessionId);
+        this.sessionFeedback = { id: requestId, code: "failed", detail: String(error) };
+      } else {
+        operation.unknown = true;
+        this.sessionFeedback = { id: requestId, code: "unknown" };
+        // A fresh, valid, same-scope disk result is the only alternative to an acknowledgement.
+        try { await this.refreshSessions({ post: false, expectedScope: operation.scopeKey }); } catch { /* Keep the draft and pause this ID. */ }
+      }
+      await this.postState(); return;
+    }
+    if (!response.success) {
+      this.pendingDeletions.delete(sessionId);
+      const code = response.error;
+      this.sessionFeedback = { id: requestId,
+        code: code === "busy" || code === "stop_timeout" ? "busy" : code === "session_in_use" ? "session_in_use" : code === "session_scope_mismatch" ? "session_scope_mismatch" : "failed",
+        ...(code && !["busy", "stop_timeout", "session_in_use", "session_scope_mismatch"].includes(code) ? { detail: code } : {}),
+      };
+      if (this.peekState().activeSessionId === sessionId) {
+        try { await this.selectSession(sessionId); }
+        catch (error) { console.warn("Tomcat could not reopen a session after refused deletion", error); }
+      }
+      await this.postState(); this.messageQueue.dispatch(sessionId); return;
+    }
+    const payload = response.payload;
+    if (!isRecordValue(payload) || !Array.isArray(payload.warnings) || !payload.warnings.every(w => typeof w === "string")) {
+      operation.unknown = true;
+      this.sessionFeedback = { id: requestId, code: "unknown" };
+      try { await this.refreshSessions({ post: false, expectedScope: operation.scopeKey }); } catch { /* Not evidence of absence. */ }
+      await this.postState(); return;
+    }
+    const wasActive = await this.removeDeletedSession(sessionId, requestId, payload.warnings);
+    try {
+      const disk = await this.sessionPool.refresh();
+      if (disk.sessionKey !== operation.scopeKey) throw new Error(t("session.delete.scope"));
+      this.diskScopeKey = disk.sessionKey;
+      this.stateStore.syncSessionList(disk);
+      if (wasActive) await this.selectDeletionFallback(disk);
+    } catch (error) {
+      // removeDeletedSession may set feedback after the initial reset in this method.
+      const feedback = this.sessionFeedback as import("./protocol").SessionActionFeedback | null;
+      const cleanupDetail = feedback?.id === requestId ? feedback.detail : undefined;
+      this.sessionFeedback = { id: requestId, code: "fallback_failed", detail: [cleanupDetail, String(error)].filter(Boolean).join("\n") };
+    }
+    await this.postState();
+  }
+
+  private async removeDeletedSession(sessionId: string, requestId: string, warnings: string[] = []): Promise<boolean> {
+    const wasActive = this.peekState().activeSessionId === sessionId;
+    const retirement = this.draftCoordinator.retire(sessionId);
+    this.pendingDeletions.delete(sessionId);
+    this.bumpHistoryFetchGen(sessionId);
+    this.closedFileSessions.add(sessionId);
+    for (const pending of this.pendingQuestions.values()) {
+      if (pending.sessionId === sessionId) this.finalizePendingQuestion(pending, "interrupted");
+    }
+    await retirement;
+    for (const [key, result] of this.finalizedQuestionResults) if (result.sessionId === sessionId) this.finalizedQuestionResults.delete(key);
+    this.messageQueue.forget(sessionId);
+    this.stateStore.removeSession(sessionId);
+    const cleanupWarnings = [...warnings];
+    try { await this.draftStore.discardStrict(sessionId); } catch (error) { cleanupWarnings.push(String(error)); }
+    try { await this.sessionPins?.setPinned(sessionId, false); } catch (error) { cleanupWarnings.push(String(error)); }
+    if (this.imagePreviewSessionId === sessionId) {
+      const { ImagePreviewPanel } = await import("../imagePreview/ImagePreviewPanel.js");
+      if (this.imagePreviewSessionId === sessionId) { ImagePreviewPanel.getCurrent()?.close(); this.imagePreviewSessionId = null; }
+    }
+    if (cleanupWarnings.length) this.sessionFeedback = { id: requestId, code: "partial_cleanup", detail: cleanupWarnings.join("\n") };
+    return wasActive;
+  }
+
+  private async reconcileDeletions(disk: SessionListPayload): Promise<boolean> {
+    let removedActive = false;
+    if (disk.scope !== "disk" || !disk.sessionKey) return false;
+    for (const [sessionId, operation] of this.pendingDeletions) {
+      if (!operation.unknown || operation.scopeKey !== disk.sessionKey) continue;
+      if (disk.sessions.some(s => s.sessionId === sessionId)) {
+        this.pendingDeletions.delete(sessionId);
+        this.sessionFeedback = { id: operation.requestId, code: "retained" };
+        this.messageQueue.dispatch(sessionId);
+      } else {
+        this.sessionFeedback = null;
+        removedActive = await this.removeDeletedSession(sessionId, operation.requestId) || removedActive;
+      }
+    }
+    return removedActive;
+  }
+
+  private async selectDeletionFallback(disk: SessionListPayload): Promise<void> {
+    const fallback = this.sessionPool.pickDefaultSession(disk);
+    const id = fallback ?? await this.sessionPool.createSession(this.deps.getDefaultCwd());
+    await this.selectSession(id);
+  }
+
   private async bootstrap(): Promise<void> {
     await this.refreshModels({ strict: true });
     const sessions = await this.sessionPool.refresh();
+    await this.reconcileDeletions(sessions);
+    this.diskScopeKey = sessions.sessionKey;
     this.stateStore.syncSessionList(sessions);
     const preferredSessionId =
       this.sessionPool.pickDefaultSession(sessions) ??
-      this.initialized?.sessionId ??
-      null;
+      (this.initialized?.sessionId && !this.draftCoordinator.isRetired(this.initialized.sessionId) ? this.initialized.sessionId : null);
     if (!preferredSessionId) {
       const sessionId = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       await this.selectSession(sessionId, { strict: true });
@@ -1671,7 +1824,31 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleIntent(intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>): Promise<void> {
+    const data: Record<string, unknown> | undefined = "data" in intent && isRecordValue(intent.data) ? intent.data : undefined;
+    const scoped = data?.sessionId ?? data?.sourceSessionId;
+    if (typeof scoped === "string" && this.sessionBlocked(scoped)) {
+      if (intent.type === "answerQuestion") await this.postEvent({ type: "answerQuestionResult", accepted: false, requestId: intent.data.requestId, sessionId: scoped });
+      if ((intent.type === "prompt" || intent.type === "steer") && intent.data.userMessageId) await this.postEvent({ type: "composerSubmissionResult", accepted: false, userMessageId: intent.data.userMessageId, sessionId: scoped });
+      if ((intent.type === "attachFiles" || intent.type === "pickContext" || intent.type === "resolveDrop") && intent.data?.operationId) await this.postEvent({ type: "composerWorkResult", success: false, operationId: intent.data.operationId, sessionId: scoped, error: t("session.delete.pending") });
+      return;
+    }
     switch (intent.type) {
+      case "deleteSession":
+        await this.deleteSession(intent.data.sessionId, intent.messageId);
+        return;
+      case "setSessionPinned": {
+        const { sessionId, pinned } = intent.data;
+        if (!this.sessionPins || !this.peekState().sessions.some(s => s.sessionId === sessionId)) return;
+        try {
+          await this.sessionPins.setPinned(sessionId, pinned);
+        } catch (error) {
+          void vscode.window.showErrorMessage(t("session.pin.failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        await this.postState();
+        return;
+      }
       case "webviewError":
         this.observedWebviewErrors.push({
           message: intent.data.message,
@@ -1891,7 +2068,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             intent.data.sessionId ?? null,
           );
           if (!resolvedSessionId) {
-            throw new Error("No session is available for dropped context");
+            throw new Error(t("host.droppedNoSession"));
           }
           sessionId = resolvedSessionId;
           const uris: vscode.Uri[] = [];
@@ -1930,7 +2107,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.ensureInitialized();
           const resolvedSessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
           if (!resolvedSessionId) {
-            throw new Error("No session is available for picked context");
+            throw new Error(t("host.pickedNoSession"));
           }
           sessionId = resolvedSessionId;
           const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
@@ -2084,7 +2261,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           console.error("[Tomcat webview] interrupt request failed", error);
-          await vscode.window.showErrorMessage(`Unable to stop Tomcat: ${detail}`);
+          await vscode.window.showErrorMessage(t("host.stopFailed", { detail }));
         }
         return;
       }
@@ -2094,7 +2271,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         const resultType = intent.type === "previewRewind" ? "previewRewindResult" : "rewindAndResendResult";
         try {
           const initialized = await this.ensureInitialized();
-          if (!hasServeCapability(initialized, "rewind_and_resend")) throw new Error("当前 CLI 不支持历史编辑，请更新 CLI。");
+          if (!hasServeCapability(initialized, "rewind_and_resend")) throw new Error(t("host.rewindUnsupported"));
           const obsoleteIds = new Set(this.peekState().sessionViews[sessionId]?.timeline.map((item) => item.id) ?? []);
           const response = intent.type === "previewRewind"
             ? await this.deps.messenger.request({ type: "preview_rewind", sessionId, messageId })
@@ -2115,7 +2292,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
                   })),
                 },
               });
-          if (response.sessionId && response.sessionId !== sessionId) throw new Error("编辑结果的会话不匹配。");
+          if (response.sessionId && response.sessionId !== sessionId) throw new Error(t("host.rewindSessionMismatch"));
           const committed = !response.success && response.payload !== null && typeof response.payload === "object"
             && "committed" in response.payload && response.payload.committed === true;
           if (intent.type === "rewindAndResend" && (response.success || response.error === "rewind_target_stale" || committed)) {
@@ -2126,7 +2303,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               this.stateStore.appendMessage(
                 sessionId,
                 "error",
-                `历史已更新，但新一轮没有启动：${rewindErrorDetail(response.error, response.payload) ?? response.error ?? "未知错误"}`,
+                t("host.rewindCommitted", { detail: rewindErrorDetail(response.error, response.payload) ?? response.error ?? t("error.unknown") }),
               );
             }
             await this.postState();
@@ -2138,7 +2315,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             sessionId,
             success: response.success && (intent.type !== "previewRewind" || !!preview),
             errorDetail: rewindErrorDetail(response.error, response.payload),
-            error: response.error ?? (intent.type === "previewRewind" && !preview ? "无法读取恢复信息" : undefined),
+            error: response.error ?? (intent.type === "previewRewind" && !preview ? t("host.rewindPreviewFailed") : undefined),
             preview,
           });
         } catch (error) {
@@ -2169,7 +2346,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("restore checkpoint", error),
+            formatBridgeError("host.bridge.restore", error),
           );
           await this.postState();
           return;
@@ -2191,7 +2368,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         const session = this.peekState().sessionViews[sessionId];
         if (session?.busy || session?.commandPending) {
-          this.stateStore.appendMessage(sessionId, "error", "当前会话仍在处理中，请等待完成后再执行命令。");
+          this.stateStore.appendMessage(sessionId, "error", t("host.commandBusy"));
           await this.postState();
           return;
         }
@@ -2199,7 +2376,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         try {
           await this.postState();
           if (intent.type === "runSlashCommand") {
-            if (!hasServeCapability(initialized, "run_slash_command")) throw new Error("当前 CLI 不支持共享命令，请更新 CLI 后重启 Serve。");
+            if (!hasServeCapability(initialized, "run_slash_command")) throw new Error(t("host.commandUnsupported"));
             const reply = await this.deps.sessionRouter.runSlashCommand(sessionId, intent.data.text);
             if (reply.ok) await this.refreshInstructionCatalog(sessionId);
             if (this.peekState().sessionViews[sessionId]) this.stateStore.appendMessage(sessionId, reply.ok ? "notice" : "error", reply.text);
@@ -2208,12 +2385,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             if (!this.peekState().sessionViews[sessionId]) return;
             await this.refreshSessionState(sessionId, { trustBusy: true });
             await this.refreshSessionHistory(sessionId);
-            this.stateStore.appendMessage(sessionId, "notice", `上下文已压缩：${(report.beforeUsageRatio * 100).toFixed(1)}% → ${(report.afterUsageRatio * 100).toFixed(1)}%。`);
+            this.stateStore.appendMessage(sessionId, "notice", t("host.compacted", { before: (report.beforeUsageRatio * 100).toFixed(1), after: (report.afterUsageRatio * 100).toFixed(1) }));
           }
         } catch (error) {
           if (this.peekState().sessionViews[sessionId]) {
             const detail = error instanceof Error ? error.message : String(error);
-            this.stateStore.appendMessage(sessionId, "error", detail.trim() === "busy" ? "当前会话仍在处理中，请等待完成后再执行命令。" : formatBridgeError(intent.type === "compact" ? "compact context" : "run command", error));
+            this.stateStore.appendMessage(sessionId, "error", detail.trim() === "busy" ? t("host.commandBusy") : formatBridgeError(intent.type === "compact" ? "host.bridge.compact" : "host.bridge.command", error));
           }
         } finally {
           this.stateStore.setCommandPending(sessionId, false);
@@ -2239,14 +2416,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to switch model",
+              response.error ?? t("host.modelSwitchFailed"),
             );
           }
         } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("switch models", error),
+            formatBridgeError("host.bridge.switchModel", error),
           );
         }
         await this.refreshModels();
@@ -2271,7 +2448,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to change reasoning effort",
+              response.error ?? t("host.effortFailed"),
             );
           } else {
             await this.refreshModels();
@@ -2280,7 +2457,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("change reasoning effort", error),
+            formatBridgeError("host.bridge.effort", error),
           );
         }
         await this.refreshSessionState(sessionId, { trustBusy: true });
@@ -2297,12 +2474,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         try {
           const response = await this.deps.messenger.sendSetSpeed(sessionId, intent.data.modelId, intent.data.speed);
           if (!response.success) {
-            this.stateStore.appendMessage(sessionId, "error", response.error ?? "Unable to change speed");
+            this.stateStore.appendMessage(sessionId, "error", response.error ?? t("plan.host.speedFailed"));
           } else {
             await this.refreshModels();
           }
         } catch (error) {
-          this.stateStore.appendMessage(sessionId, "error", formatBridgeError("change speed", error));
+          this.stateStore.appendMessage(sessionId, "error", formatBridgeError("host.bridge.speed", error));
         }
         await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();
@@ -2325,14 +2502,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to change context window",
+              response.error ?? t("host.contextFailed"),
             );
           }
         } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("change context window", error),
+            formatBridgeError("host.bridge.context", error),
           );
         }
         await this.refreshModels();
@@ -2340,11 +2517,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
-      case "openModelSettings":
-        if (!hasAnyModelAdminCapability(await this.ensureInitialized())) {
-          return;
-        }
-        this.deps.openModelSettings?.(intent.data?.route ?? "models");
+      case "openSettings":
+        this.deps.openSettings?.(intent.data?.route ?? "general");
         return;
       case "setBuildModel": {
         await vscode.workspace
@@ -2381,14 +2555,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to change plan mode",
+              response.error ?? t("host.planModeFailed"),
             );
           }
         } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("change plan mode", error),
+            formatBridgeError("host.bridge.planMode", error),
           );
         }
         await this.refreshSessionState(sessionId, { trustBusy: true });
@@ -2401,7 +2575,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.deps.ide.showFile(intent.data.path, intent.data.line);
         } catch (error) {
           await vscode.window.showErrorMessage(
-            formatBridgeError(`open file ${intent.data.path}`, error),
+            formatBridgeError("host.bridge.openFile", error, { path: intent.data.path }),
           );
         }
         return;
@@ -2428,7 +2602,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           const baseline = await this.deps.sessionRouter.getSessionFileBaseline(sessionId, sourceTurnId, filePath);
           await this.deps.ide.openSessionFileDiff(sessionId, sourceTurnId, filePath, baseline.text);
         } catch (error) {
-          void vscode.window.showWarningMessage(sessionFileErrorText(error, path.basename(filePath), `open diff ${filePath}`));
+          void vscode.window.showWarningMessage(sessionFileErrorText(error, path.basename(filePath), "host.bridge.openDiff", { path: filePath }));
           void this.refreshSessionFiles(sessionId);
         }
         return;
@@ -2446,13 +2620,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         const initialized = this.initialized;
         if (!initialized || !hasServeCapability(initialized, "session_files") || !session || this.closedFileSessions.has(sessionId)) return;
         if (session.busy || session.commandPending) {
-          await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: `Stop Tomcat or wait for it to finish to ${keeping ? "keep" : "undo"}.` });
+          await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: t("host.file.busy", { action: t(keeping ? "host.file.keep" : "host.file.undo") }) });
           return;
         }
         const targets = new Set(paths.map(sessionFileIdentity));
         const dirty = (vscode.workspace.textDocuments ?? []).find((document) => document.uri.scheme === "file" && document.isDirty && targets.has(sessionFileIdentity(document.uri.fsPath)));
         if (dirty) {
-          detail = `Save or revert unsaved changes in ${path.basename(dirty.uri.fsPath)}, then try again.`;
+          detail = t("host.file.dirty", { name: path.basename(dirty.uri.fsPath) });
           void vscode.window.showWarningMessage(detail);
           await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: detail });
           return;
@@ -2464,7 +2638,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           else await this.deps.sessionRouter.restoreSessionFiles(sessionId, sourceTurnId, paths);
           success = true;
         } catch (error) {
-          detail = sessionFileErrorText(error, paths.length === 1 ? path.basename(paths[0]) : "the selected files", keeping ? "keep file changes" : "undo file changes");
+          detail = sessionFileErrorText(error, paths.length === 1 ? path.basename(paths[0]) : t("host.file.selected"), keeping ? "host.bridge.keep" : "host.bridge.undo");
           void vscode.window.showWarningMessage(detail);
         } finally {
           if (!this.disposed && generation === this.fileGeneration && initialized === this.initialized && !this.closedFileSessions.has(sessionId)) {
@@ -2487,7 +2661,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               ? tool.args.path
               : null;
         if (!tool || !displayPath || !isDiffViewable(tool)) {
-          await vscode.window.showWarningMessage("无法查看变更：这次修改没有可查看的 diff。");
+          await vscode.window.showWarningMessage(t("host.diffUnavailable"));
           return;
         }
         try {
@@ -2499,7 +2673,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           );
         } catch (error) {
           await vscode.window.showErrorMessage(
-            formatBridgeError(`open diff ${displayPath}`, error),
+            formatBridgeError("host.bridge.openDiff", error, { path: displayPath }),
           );
         }
         return;
@@ -2516,7 +2690,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
               this.stateStore.appendMessage(
                 sessionId,
                 "error",
-                formatBridgeError(`open plan file ${intent.data.path}`, error),
+                formatBridgeError("host.bridge.openPlan", error, { path: intent.data.path }),
               );
               await this.postState();
             }
@@ -2535,7 +2709,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "notice",
-              "This question is no longer active. Please ask again if you still need it.",
+              t("host.questionInactive"),
             );
             await this.postState();
           }
@@ -2557,6 +2731,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
+    if (event.sessionId && this.draftCoordinator.isRetired(event.sessionId)) return;
     if (event.type === "tool_execution_end" && event.sessionId && ["write", "edit", "hashline_edit"].includes(event.toolName)) {
       void this.refreshSessionFiles(event.sessionId);
     }
@@ -2672,7 +2847,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.domSnapshots.resolve(message.messageId, message.data as DomSnapshot);
       return;
     }
-    await this.handleIntent(message);
+    try { await this.handleIntent(message); }
+    catch (error) {
+      const data: Record<string, unknown> | undefined = "data" in message && isRecordValue(message.data) ? message.data : undefined;
+      const sessionId = data?.sessionId ?? data?.sourceSessionId;
+      if (typeof sessionId === "string" && this.draftCoordinator.isRetired(sessionId)) return;
+      throw error;
+    }
   }
 
   private currentStateToSessionList() {
@@ -2692,19 +2873,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async ensureWebviewSession(sessionId: string | null): Promise<string | null> {
     const target = sessionId ?? this.peekState().activeSessionId;
+    if (target && this.sessionBlocked(target)) return null;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       await this.selectSession(created);
       return created;
     }
     await this.selectSession(target);
-    return target;
+    return this.sessionBlocked(target) ? null : target;
   }
 
   private async ensureWebviewSessionWithoutHistory(
     sessionId: string | null,
   ): Promise<string | null> {
     const target = sessionId ?? this.peekState().activeSessionId;
+    if (target && this.sessionBlocked(target)) return null;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       this.stateStore.setActiveSession(created);
@@ -2715,7 +2898,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
     this.stateStore.setActiveSession(target);
     await this.sessionPool.switchTo(target);
-    return target;
+    return this.sessionBlocked(target) ? null : target;
   }
 
   private async postComposerWorkResult(
@@ -2825,6 +3008,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private postMessage(frame: HostToWebviewFrame): WebviewMessageDelivery {
+    if (frame.channel !== "state" && "sessionId" in frame.content && typeof frame.content.sessionId === "string" && this.draftCoordinator.isRetired(frame.content.sessionId)) {
+      return { delivered: Promise.resolve() };
+    }
     const delivered = this.view
       ? Promise.resolve(this.view.webview.postMessage(frame)).then((accepted) => {
         if (!accepted) {
@@ -2875,7 +3061,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       channel: "sessionView",
       content: {
         sessionId,
-        tab,
+        tab: tab ? { ...(this.sessionPins ? this.sessionPins.project(tab) : tab), deleting: this.pendingDeletions.has(sessionId) } : null,
         view: this.projectCurrentDraft(sessionId, enriched),
       },
       messageId: createHostFrameMessageId("session-view"),
@@ -3079,20 +3265,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!buildModel || !sessionModel || buildModel === sessionModel) {
       return true;
     }
+    const continueBuild = { title: t("host.continueBuild") };
     const choice = await vscode.window.showWarningMessage(
-      `Build this plan with ${buildModel}?`,
+      t("host.buildQuestion", { model: buildModel }),
       {
         detail: [
-          `Session model: ${sessionModel}`,
-          `This build will use: ${buildModel}`,
+          t("host.buildSessionModel", { model: sessionModel }),
+          t("host.buildUses", { model: buildModel }),
           "",
-          `Source: setting ${TOMCAT_CONFIG_SECTION}.plan.buildModel`,
+          t("host.buildSource", { setting: `${TOMCAT_CONFIG_SECTION}.plan.buildModel` }),
         ].join("\n"),
         modal: true,
       },
-      "Continue Build",
+      continueBuild,
     );
-    return choice === "Continue Build";
+    return choice === continueBuild;
   }
 
   /**
@@ -3111,7 +3298,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.stateStore.appendMessage(
         sessionId,
         "notice",
-        "Build model changed while confirmation was open. Please start the build again.",
+        t("host.buildChanged"),
       );
       await this.refreshModels();
       await this.postState();
@@ -3124,7 +3311,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            modelResponse.error ?? "Unable to switch model",
+            modelResponse.error ?? t("host.modelSwitchFailed"),
           );
         }
       }
@@ -3137,14 +3324,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.stateStore.appendMessage(
           sessionId,
           "error",
-          response.error ?? "Unable to change plan mode",
+          response.error ?? t("host.planModeFailed"),
         );
       }
     } catch (error) {
       this.stateStore.appendMessage(
         sessionId,
         "error",
-        formatBridgeError("change plan mode", error),
+        formatBridgeError("host.bridge.planMode", error),
       );
     }
     if (buildModel) {
@@ -3202,10 +3389,17 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     );
   }
 
-  private async refreshSessions(options: { post?: boolean } = {}): Promise<void> {
+  private async refreshSessions(options: { post?: boolean; expectedScope?: string } = {}): Promise<void> {
     await this.ensureInitialized();
     const sessions = await this.sessionPool.refresh();
+    if (options.expectedScope && sessions.sessionKey !== options.expectedScope) throw new Error(t("session.delete.scope"));
+    const removedActive = await this.reconcileDeletions(sessions);
+    this.diskScopeKey = sessions.sessionKey;
     this.stateStore.syncSessionList(sessions);
+    if (removedActive) {
+      try { await this.selectDeletionFallback(sessions); }
+      catch (error) { this.sessionFeedback = { id: createHostFrameMessageId("delete-fallback"), code: "fallback_failed", detail: String(error) }; }
+    }
     if (options.post ?? true) {
       await this.postState();
     }
@@ -3227,7 +3421,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
       return;
     }
-    if (!state) {
+    if (!state || this.draftCoordinator.isRetired(sessionId)) {
       return;
     }
     this.stateStore.applySessionState(state, { trustBusy: options.trustBusy ?? true });
@@ -3317,7 +3511,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
       return;
     }
-    if (!checkpoints || checkpoints.sessionId !== sessionId) {
+    if (!checkpoints || checkpoints.sessionId !== sessionId || this.draftCoordinator.isRetired(sessionId)) {
       return;
     }
     this.stateStore.setCheckpoints(sessionId, checkpoints.checkpoints);
@@ -3343,6 +3537,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       cursor,
       limit: HISTORY_PAGE_ENTRIES,
     }).catch(() => null);
+    if (this.draftCoordinator.isRetired(sessionId)) return;
     if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
       this.stateStore.setHistoryLoading(sessionId, false);
       await this.postState();
@@ -3417,8 +3612,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * verify is the safe direction.
    */
   private async sessionExists(sessionId: string): Promise<boolean> {
+    if (this.draftCoordinator.isRetired(sessionId)) return false;
+    const scopeKey = this.diskScopeKey;
+    if (!scopeKey || !this.peekState().sessions.some(s => s.sessionId === sessionId)) return true;
     try {
-      const payload = await this.deps.sessionRouter.listSessions();
+      const payload = await this.sessionPool.refresh();
+      if (payload.scope !== "disk" || payload.sessionKey !== scopeKey) return true;
       return payload.sessions.some((session) => session.sessionId === sessionId);
     } catch {
       return true;
@@ -3475,6 +3674,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     draft: ComposerDraft,
   ): Promise<void> {
+    if (this.draftCoordinator.isRetired(sessionId)) return;
     this.stateStore.setComposerDraft(sessionId, {
       segments: draft.segments,
       text: draft.text,
@@ -3645,6 +3845,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const { ImagePreviewPanel } = await import(
       "../imagePreview/ImagePreviewPanel.js"
     );
+    if (this.imagePreviewSessionId !== sessionId || this.draftCoordinator.isRetired(sessionId)) return;
     ImagePreviewPanel.getCurrent()?.updateSections(
       this.imagePreviewSections(sessionId),
     );
@@ -3823,7 +4024,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       .join("\n    ");
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -3843,7 +4044,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private renderFallbackHtml(message: string): string {
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
   <body>
     <pre>${message}</pre>
   </body>
@@ -3871,7 +4072,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.removePendingDraftFork(operation);
       try {
         await this.postDraftForkResult({
-          error: formatBridgeError("create a session from this draft", normalized),
+          error: formatBridgeError("host.bridge.createFromDraft", normalized),
           operationId: operation.operationId,
           sourceSessionId: operation.sourceSessionId,
           success: false,
@@ -4008,6 +4209,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     options: { strict?: boolean } = {},
   ): Promise<void> {
+    if (this.sessionBlocked(sessionId)) return;
     await this.ensureInitialized();
     await this.sessionPool.switchTo(sessionId);
     await this.refreshSessionState(sessionId, {
@@ -4017,6 +4219,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.refreshSessionHistory(sessionId, { strict: options.strict });
     await this.refreshCheckpoints(sessionId, { strict: options.strict });
     await this.refreshSessions({ post: false });
+    if (this.sessionBlocked(sessionId)) return;
     this.stateStore.setActiveSession(sessionId);
 
     // Hydrate composer draft from Rust backend (pending images/text/segments)
@@ -4027,6 +4230,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async switchSessionView(sessionId: string): Promise<void> {
+    if (this.sessionBlocked(sessionId)) return;
     const previous = this.peekState().activeSessionId;
     if (previous && this.messageQueue.view(previous).editingId) this.messageQueue.pause(previous);
     this.closedFileSessions.delete(sessionId);
@@ -4036,6 +4240,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);
     await this.refreshSessions({ post: false });
+    if (this.sessionBlocked(sessionId)) return;
     this.stateStore.setActiveSession(sessionId);
     // Hydrate draft for this session
     await this.hydrateDraft(sessionId);

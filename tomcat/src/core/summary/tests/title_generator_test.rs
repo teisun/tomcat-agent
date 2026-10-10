@@ -351,6 +351,42 @@ async fn generate_turn_summary_appends_purpose_when_bare_count() {
 }
 
 #[tokio::test]
+async fn fallback_purpose_uses_tool_facts_not_its_display_label() {
+    use crate::infra::i18n::{tr_in, Locale};
+
+    let llm = MockTwoPhaseLlm {
+        title: String::new(),
+        purpose: "finding missing tests".into(),
+    };
+    let tools = mixed_tools();
+    assert_eq!(
+        fallback_turn_summary(&tools),
+        tr_in(Locale::En, "summary.tools.other", &[("count", "3")])
+    );
+    let title = generate_turn_summary(Some("think"), &tools, &llm, "utility-flash").await;
+    assert_eq!(
+        title,
+        tr_in(
+            Locale::En,
+            "summary.purpose.other",
+            &[("count", "3"), ("purpose", &llm.purpose)]
+        )
+    );
+
+    // This one tool renders like a count, but must not trigger a purpose request.
+    let named_like_a_count = [ToolSnapshot {
+        tool_name: "3_tools".into(),
+        summary: String::new(),
+    }];
+    let title =
+        generate_turn_summary(Some("think"), &named_like_a_count, &llm, "utility-flash").await;
+    assert_eq!(
+        title,
+        tr_in(Locale::En, "summary.used", &[("name", "3 tools")])
+    );
+}
+
+#[tokio::test]
 async fn generate_turn_summary_keeps_descriptive_title_without_downgrade() {
     info!(target: "test", phase = "arrange");
     // 描述句本身够好，不该被降级成 "Used N tools for ..."。

@@ -908,7 +908,15 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "llm.idleTimeout",
+                    &[("seconds", "3")]
+                )),
+                "unexpected msg: {}",
+                msg
+            );
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
                 "unexpected msg: {}",
@@ -1097,7 +1105,21 @@ async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
     assert!(OpenAiProvider::is_retriable(&err));
     let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
     assert!(
-        msg.contains("等待响应头"),
+        msg.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "llm.headersTimeout",
+            &[
+                (
+                    "action",
+                    &crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "llm.action.streamRequest",
+                        &[]
+                    )
+                ),
+                ("seconds", "1"),
+            ]
+        )),
         "错误文案应说明卡在响应头阶段，实际: {}",
         msg
     );
@@ -1230,7 +1252,11 @@ async fn chat_stream_after_first_delta_body_read_error_is_not_retried() {
     assert!(
         llm_summary(&err)
             .unwrap_or_else(|| err.to_string())
-            .contains("流读取"),
+            .contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.action.readStream",
+                &[]
+            )),
         "错误摘要应保留流读取失败语义，实际: {}",
         err
     );

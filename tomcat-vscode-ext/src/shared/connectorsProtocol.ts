@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 import type {
   ConnectorRecoveryProgress,
   ConnectorReloadReceipt,
@@ -13,7 +15,9 @@ export type {
   SetConnectorToolEnabledResponse,
 };
 
-export const CONNECTOR_PROTOCOL_MISMATCH = "Serve and extension connector protocols do not match. Restart with a matching Tomcat build.";
+export class ConnectorProtocolError extends Error {
+  constructor() { super(t("connector.protocolMismatch")); }
+}
 
 export interface ConnectorConnectionIdentity {
   configKey: string;
@@ -55,7 +59,7 @@ export function parseProjectTrustPayload(value: unknown): ProjectTrustPayload {
     || typeof value.trusted !== "boolean"
     || (value.error !== undefined && value.error !== null && typeof value.error !== "string")
     || (value.trusted && typeof value.error === "string")) {
-    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    throw new ConnectorProtocolError();
   }
   return { projectRoot: value.projectRoot, trusted: value.trusted, error: value.error as string | null | undefined };
 }
@@ -63,7 +67,7 @@ export function parseProjectTrustPayload(value: unknown): ProjectTrustPayload {
 export function parseConnectorProject(value: unknown): ConnectorProject | null {
   if (value === null) return null;
   if (!isRecord(value) || typeof value.root !== "string" || !value.root || typeof value.trusted !== "boolean") {
-    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    throw new ConnectorProtocolError();
   }
   return { root: value.root, trusted: value.trusted };
 }
@@ -154,18 +158,18 @@ export function parseConnectorReloadReceipt(value: unknown, configKey: string): 
   if (!isRecord(value) || value.configKey !== configKey || value.accepted !== true
     || !isConnectorGeneration(value.generation) || value.generation === "0"
     || !isInteger(value.recoveryTimeoutMs, 1, Number.MAX_SAFE_INTEGER - 10_000)) {
-    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    throw new ConnectorProtocolError();
   }
   return { configKey, accepted: true, generation: value.generation, recoveryTimeoutMs: value.recoveryTimeoutMs };
 }
 
 export function parseConnectorToolCatalog(value: unknown, configKey: string): ListConnectorToolsPayload {
   if (!isRecord(value) || value.configKey !== configKey || !isConnectorGeneration(value.generation)
-    || !isInteger(value.attempt, 1, 3) || !Array.isArray(value.tools)) throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    || !isInteger(value.attempt, 1, 3) || !Array.isArray(value.tools)) throw new ConnectorProtocolError();
   const tools = value.tools.map((tool: unknown) => {
     if (!isRecord(tool) || typeof tool.modelName !== "string" || typeof tool.rawName !== "string"
       || typeof tool.label !== "string" || typeof tool.description !== "string" || typeof tool.enabled !== "boolean") {
-      throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+      throw new ConnectorProtocolError();
     }
     return { modelName: tool.modelName, rawName: tool.rawName, label: tool.label, description: tool.description, enabled: tool.enabled };
   });
@@ -182,7 +186,7 @@ export function parseSetConnectorToolEnabledResponse(
     || value.enabled !== expected.enabled
     || typeof value.configSaved !== "boolean"
     || typeof value.runtimeApplied !== "boolean") {
-    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    throw new ConnectorProtocolError();
   }
   return {
     configKey: expected.configKey,
@@ -221,7 +225,7 @@ export function normalizeConnectorView(value: unknown): ConnectorView | null {
     generation: isConnectorGeneration(raw.generation) ? raw.generation : undefined,
     attempt: isInteger(raw.attempt, 0, 3) ? raw.attempt : undefined,
     recovery: isRecoveryProgress(raw.recovery) ? raw.recovery : null,
-    compatibilityError: validIdentity && validRecovery ? undefined : CONNECTOR_PROTOCOL_MISMATCH,
+    compatibilityError: validIdentity && validRecovery ? undefined : t("connector.protocolMismatch"),
     toolCount: typeof raw.toolCount === "number" ? raw.toolCount : 0,
     resourceCount: typeof raw.resourceCount === "number" ? raw.resourceCount : 0,
     url: typeof raw.url === "string" ? raw.url : null,

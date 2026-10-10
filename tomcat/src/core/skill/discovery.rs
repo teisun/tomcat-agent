@@ -101,7 +101,7 @@ fn scan_root(
             .push(format!("skills_root_unreadable:{}", root.display()));
         skill_set.diagnostics.push(SkillDiagnostic {
             path: root.to_path_buf(),
-            reason: "skills 根目录不可读取".to_string(),
+            reason: crate::infra::i18n::tr("skill.rootUnreadable", &[]),
         });
         return;
     };
@@ -120,7 +120,7 @@ fn scan_root(
         let Ok(file_type) = entry.file_type() else {
             skill_set.diagnostics.push(SkillDiagnostic {
                 path: entry.path(),
-                reason: "无法读取目录项类型".to_string(),
+                reason: crate::infra::i18n::tr("resource.entryType", &[]),
             });
             continue;
         };
@@ -208,7 +208,8 @@ fn inspect_skill_file(
 }
 
 fn read_frontmatter_prefix(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("打开 skill 文件失败: {e}"))?;
+    let mut file = File::open(path)
+        .map_err(|e| crate::infra::i18n::tr("skill.open", &[("detail", &e.to_string())]))?;
     let mut buf = Vec::with_capacity(FRONTMATTER_READ_LIMIT_BYTES);
     let mut chunk = [0_u8; 1024];
     while buf.len() < FRONTMATTER_READ_LIMIT_BYTES {
@@ -216,21 +217,25 @@ fn read_frontmatter_prefix(path: &Path) -> Result<String, String> {
         let chunk_len = chunk.len();
         let read = file
             .read(&mut chunk[..remaining.min(chunk_len)])
-            .map_err(|e| format!("读取 skill frontmatter 失败: {e}"))?;
+            .map_err(|e| {
+                crate::infra::i18n::tr("skill.readFrontmatter", &[("detail", &e.to_string())])
+            })?;
         if read == 0 {
             break;
         }
         buf.extend_from_slice(&chunk[..read]);
         if let Some(end) = complete_frontmatter_end(&buf) {
-            return String::from_utf8(buf[..end].to_vec())
-                .map_err(|error| format!("skill 文件不是 UTF-8 文本: {error}"));
+            return String::from_utf8(buf[..end].to_vec()).map_err(|error| {
+                crate::infra::i18n::tr("skill.utf8", &[("detail", &error.to_string())])
+            });
         }
     }
     if !buf.starts_with(b"---\n") && !buf.starts_with(b"---\r\n") {
-        return Err("skill 文件缺少 frontmatter 分隔符 ---".to_string());
+        return Err(crate::infra::i18n::tr("skill.delimiter", &[]));
     }
-    Err(format!(
-        "skill frontmatter 在 {FRONTMATTER_READ_LIMIT_BYTES} 字节内没有完整的 --- 分隔行"
+    Err(crate::infra::i18n::tr(
+        "skill.frontmatterLimit",
+        &[("limit", &FRONTMATTER_READ_LIMIT_BYTES.to_string())],
     ))
 }
 

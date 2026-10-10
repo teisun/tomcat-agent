@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import type { DiffFragment, DiffPresentation, DiffRange } from "../shared/diffPresentation";
+import { getLocale, pluralKey, t } from "../shared/i18n";
 
 const DIFF_SCHEME = "tomcat-diff";
 
@@ -17,10 +18,10 @@ function fragmentFileName(fileName: string, fragment: DiffFragment, index: numbe
   const extension = path.extname(fileName);
   const name = fileName.slice(0, fileName.length - extension.length);
   const ranges = [
-    fragment.oldRange ? `原 ${formatDiffRange(fragment.oldRange)}` : "",
-    fragment.newRange ? `新 ${formatDiffRange(fragment.newRange)}` : "",
+    fragment.oldRange ? t("ide.oldRange", { range: formatDiffRange(fragment.oldRange) }) : "",
+    fragment.newRange ? t("ide.newRange", { range: formatDiffRange(fragment.newRange) }) : "",
   ].filter(Boolean).join(" → ");
-  return `${name} · 片段 ${index + 1}／${total}${ranges ? ` · ${ranges}` : ""}${extension}`;
+  return t("ide.fragment", { name, index: index + 1, total, ranges: ranges ? ` · ${ranges}` : "", extension });
 }
 
 export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Disposable {
@@ -46,7 +47,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     presentation: DiffPresentation,
   ): Promise<void> {
     if (presentation.fragments.length === 0) {
-      throw new Error("没有可查看的变更内容。");
+      throw new Error(t("ide.noChanges"));
     }
 
     const fileName = path.basename(displayPath);
@@ -80,13 +81,13 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
         "vscode.diff",
         original,
         proposed,
-        `${fileName}: Original ↔ Tomcat`,
+        t("ide.originalTitle", { file: fileName }),
         { preview: false },
       );
     } else {
       await vscode.commands.executeCommand(
         "vscode.changes",
-        `${fileName} · 本次修改（${pairs.length} 个变更片段）`,
+        t(pluralKey(getLocale(), "ide.fragments.other", pairs.length), { file: fileName, count: pairs.length }),
         pairs.map(({ original, proposed }): [vscode.Uri, vscode.Uri, vscode.Uri] => [
           proposed, original, proposed,
         ]),
@@ -101,14 +102,14 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     let modified = vscode.Uri.file(filePath);
     try {
       const stat = await vscode.workspace.fs.stat(modified);
-      if (stat.type & vscode.FileType.Directory) throw new Error("The changed path is a directory.");
+      if (stat.type & vscode.FileType.Directory) throw new Error(t("ide.directory"));
     } catch (error) {
       if (!(error instanceof vscode.FileSystemError) || error.code !== "FileNotFound") throw error;
       modified = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${fileName}`, query: new URLSearchParams({ sessionId, sourceTurnId, path: filePath, side: "missing" }).toString() });
       this.previewContents.set(modified.toString(), "");
     }
     await this.ensureSideBySideDiffRendering();
-    await vscode.commands.executeCommand("vscode.diff", original, modified, `${fileName}: Review baseline ↔ Current`, { preview: false });
+    await vscode.commands.executeCommand("vscode.diff", original, modified, t("ide.baselineTitle", { file: fileName }), { preview: false });
   }
 
   async showFile(displayPath: string, line?: number): Promise<void> {
@@ -120,7 +121,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
       if (!(error instanceof vscode.FileSystemError)) {
         throw error;
       }
-      throw new Error(`File not found: ${uri.fsPath}`);
+      throw new Error(t("ide.fileMissing", { path: uri.fsPath }));
     }
     if (stat.type & vscode.FileType.Directory) {
       await vscode.commands.executeCommand("revealInExplorer", uri);
@@ -160,7 +161,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
   async openWith(displayPath: string, viewType: string): Promise<void> {
     const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
     if (!(await this.fileExists(uri))) {
-      throw new Error(`File not found: ${uri.fsPath}`);
+      throw new Error(t("ide.fileMissing", { path: uri.fsPath }));
     }
     try {
       await vscode.commands.executeCommand("vscode.openWith", uri, viewType);
@@ -173,7 +174,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
   provideTextDocumentContent(uri: vscode.Uri): string {
     const content = this.previewContents.get(uri.toString());
     if (content === undefined) {
-      throw new Error("变更预览已不可用，请从会话中的 View diff 重新打开。");
+      throw new Error(t("ide.diffExpired"));
     }
     return content;
   }

@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 import { LoadingDots } from "./LoadingDots";
 
@@ -7,13 +8,14 @@ function ProgressRowComponent({
 }: {
   busy: boolean;
 }) {
+  const t = useT();
   if (!busy) {
     return null;
   }
 
   return (
     <div
-      aria-label="Still working"
+      aria-label={t("progress.working")}
       className="tc-progress-row"
       data-testid="progress-row"
       role="status"

@@ -184,7 +184,10 @@ impl McpManager {
         if !self.project_trusted_for(&entry.server) {
             entry.retire_connection();
             entry.status.state = ServerState::AwaitingProjectTrust;
-            return Err(AppError::Tool("project MCP awaits project trust".into()));
+            return Err(AppError::Tool(crate::infra::i18n::tr(
+                "mcp.awaitingTrust",
+                &[],
+            )));
         }
         if !matches!(trigger, Trigger::Authorized(..)) {
             if let Some(run) = entry.run.as_ref().filter(|run| run.is_active()) {

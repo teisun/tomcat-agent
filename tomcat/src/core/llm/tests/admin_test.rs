@@ -376,7 +376,11 @@ base_url = "https://gateway.example.test/v1"
 
     let error = remove_user_model(&cfg, "gpt-5.4").expect_err("pure builtin remove must fail");
     assert!(
-        error.to_string().contains("内置模型"),
+        error.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "model.builtinDelete",
+            &[("id", "gpt-5.4")]
+        )),
         "unexpected error: {error}"
     );
 }
@@ -785,7 +789,7 @@ fn remove_user_model_does_not_touch_files_when_session_precheck_fails() {
 
     let error = remove_user_model_with_config_path(&cfg, Some(&config_path), "custom-claude")
         .expect_err("corrupt sessions store must block deletion");
-    assert!(error.to_string().contains("拒绝覆盖"));
+    assert!(matches!(error, crate::AppError::Config(_)));
     assert_eq!(
         fs::read(&models_path).expect("read models after"),
         models_before
@@ -862,7 +866,8 @@ fn set_provider_key_rejects_invalid_env_file() {
 
     let env_path = work_dir.path().join("assets").join(".env");
     std::fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
-    std::fs::write(&env_path, "BROKEN_ENV=\"unterminated\n").expect("seed broken env");
+    let invalid_env = "BROKEN_ENV=\"unterminated\n";
+    std::fs::write(&env_path, invalid_env).expect("seed broken env");
 
     let error = set_provider_key(
         &cfg,
@@ -872,15 +877,11 @@ fn set_provider_key_rejects_invalid_env_file() {
         },
     )
     .expect_err("broken env file must fail");
-    assert!(
-        error.to_string().contains("解析"),
-        "error should mention env parse failure, got: {error}"
-    );
-    let env_text = std::fs::read_to_string(&env_path).expect("read .env");
-    assert!(
-        env_text.contains("unterminated"),
-        "broken env file should remain unchanged"
-    );
+    assert!(matches!(error, crate::AppError::Config(_)));
+    assert!(error
+        .to_string()
+        .contains(env_path.to_string_lossy().as_ref()));
+    assert_eq!(std::fs::read_to_string(&env_path).unwrap(), invalid_env);
 }
 
 #[test]

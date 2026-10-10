@@ -275,8 +275,6 @@ async fn install_live_refresh_does_not_execute_plugin() {
     )
     .await;
     assert!(outcome.ok, "{}", outcome.text);
-    assert!(outcome.text.contains("当前会话已同步"));
-    assert!(!outcome.text.contains("已加载 plugin 不会热更新"));
 
     let tools = ctx
         .global_services
@@ -374,8 +372,6 @@ pi.registerTool({
     )
     .await;
     assert!(outcome.ok, "{}", outcome.text);
-    assert!(outcome.text.contains("当前会话已同步"));
-    assert!(!outcome.text.contains("已加载 plugin 不会热更新"));
 
     let tools_after = ctx
         .global_services

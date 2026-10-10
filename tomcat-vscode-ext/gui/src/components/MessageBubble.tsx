@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 import { AttachmentStrip } from "./AttachmentStrip";
 import { ReferenceChip } from "./ReferenceChip";
@@ -12,13 +13,6 @@ import type {
   PathResolution,
 } from "../types";
 
-const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
-  assistant: "Tomcat",
-  error: "Error",
-  notice: "Notice",
-  user: "You",
-  warn: "Warn",
-};
 const NOOP_OPEN_FILE = () => undefined;
 
 type MessageBubbleProps = {
@@ -50,6 +44,7 @@ function MessageBubbleComponent({
   recoveryDisabled = false,
   onZoomImage,
 }: MessageBubbleProps) {
+  const t = useT();
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const isFailedUserMessage = item.kind === "user" && item.deliveryState === "failed";
@@ -115,8 +110,8 @@ function MessageBubbleComponent({
           type="button"
           className={`tc-message__edit-trigger${hasFileWrites ? " tc-message__edit-trigger--revert" : ""}`}
           data-testid="edit-user-message"
-          aria-label="Edit message"
-          title="Edit message"
+          aria-label={t("message.edit")}
+          title={t("message.edit")}
           onClick={() => onEdit(item)}
         >
           <span aria-hidden="true" className={`codicon ${hasFileWrites ? "codicon-discard" : "codicon-edit"}`} />
@@ -124,8 +119,8 @@ function MessageBubbleComponent({
       ) : null}
       {showHeader ? (
         <div className="tc-message__header">
-          <strong>{MESSAGE_LABELS[item.kind]}</strong>
-          <span>{item.label ?? item.kind}</span>
+          <strong>{t(`message.label.${item.kind}`)}</strong>
+          <span>{item.label ?? t(`message.kind.${item.kind}`)}</span>
         </div>
       ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">
@@ -184,7 +179,7 @@ function MessageBubbleComponent({
                   aria-hidden="true"
                   className={`codicon ${detailsExpanded ? "codicon-chevron-down" : "codicon-chevron-right"}`}
                 />
-                <span>{detailsExpanded ? "Hide original error" : "Show original error"}</span>
+                <span>{t(detailsExpanded ? "message.hideOriginal" : "message.showOriginal")}</span>
               </button>
               <button
                 className="tc-message__detail-button"
@@ -196,11 +191,7 @@ function MessageBubbleComponent({
               >
                 <span aria-hidden="true" className="codicon codicon-copy" />
                 <span>
-                  {copyState === "copied"
-                    ? "Copied"
-                    : copyState === "failed"
-                      ? "Copy failed"
-                      : "Copy original"}
+                  {t(copyState === "copied" ? "common.copied" : copyState === "failed" ? "common.copyFailed" : "message.copyOriginal")}
                 </span>
               </button>
             </div>
@@ -218,7 +209,7 @@ function MessageBubbleComponent({
                   aria-hidden="true"
                   className={`codicon ${recoveryAction === "retry" ? "codicon-refresh" : "codicon-debug-continue"}`}
                 />
-                <span>{recoveryAction === "retry" ? "Retry" : "Resume"}</span>
+                <span>{t(recoveryAction === "retry" ? "common.retry" : "common.resume")}</span>
               </button>
             </div>
           ) : null}
@@ -236,18 +227,18 @@ function MessageBubbleComponent({
       ) : null}
       {isPendingUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">
-          <span>Sending...</span>
+          <span>{t("message.sending")}</span>
         </div>
       ) : null}
       {isAbandonedUserMessage ? (
         <div className="tc-message__status" data-testid="abandoned-user-message-status">
-          <span>已废弃 · 未发送给模型</span>
+          <span>{t("message.abandoned")}</span>
         </div>
       ) : null}
       {isFailedUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">
           <span title={item.deliveryErrorDetail ?? undefined}>
-            {item.deliveryError ?? "Send failed."}
+            {item.deliveryError ?? t("message.sendFailed")}
           </span>
           {showRetry ? (
             <button
@@ -256,7 +247,7 @@ function MessageBubbleComponent({
               onClick={() => onRetry?.(item.id)}
               type="button"
             >
-              Retry
+              {t("common.retry")}
             </button>
           ) : null}
         </div>

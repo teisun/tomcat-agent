@@ -204,10 +204,19 @@ async fn runtime_auto_builtin_plugin_runtime_error_fails_loud() {
     .expect("end plugin runtime failure session");
     let err = search_result.expect_err("unexpected plugin runtime errors should fail loud");
     let text = err.to_string();
-    assert!(text.contains("web_search backend `auto` 运行时错误"));
+    assert!(text.contains(&tomcat::infra::tr(
+        "search.runtime",
+        &[("backend", "auto"), ("detail", "")]
+    )));
     assert!(text.contains("plugin_backend_error (backend=mimo)"));
     assert!(
-        !text.contains("所有后端均不可用"),
+        !text.contains(&tomcat::infra::tr(
+            "search.allUnavailable",
+            &[("query", "reqwest rust")]
+        )) && !text.contains(&tomcat::infra::tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )),
         "plugin runtime failures should not be flattened into all_backends_unavailable: {text}"
     );
 }
@@ -956,7 +965,10 @@ async fn production_path_plugin_timeout_returns_tool_error_before_vm_timeout() {
         start.elapsed()
     );
     assert!(
-        err.to_string().contains("请求超时"),
+        err.to_string().contains(&tomcat::infra::tr(
+            "search.timeout",
+            &[("backend", "tavily")]
+        )),
         "expected structured timeout, got: {err}"
     );
     assert!(proxy.saw_host("api.tavily.com"));
@@ -1561,14 +1573,10 @@ async fn real_mimo_web_search() {
 
 fn is_live_web_search_network_error(text: &str) -> bool {
     text.contains("pi.fetch request failed")
-        || text.contains("网络错误")
         || text.contains("request failed")
         || text.contains("timeout")
         || text.contains("timed out")
-        || text.contains("请求超时")
         || text.contains("connection closed via error")
-        || text.contains("请求连接失败")
-        || text.contains("流式请求连接失败")
 }
 
 fn require_env_var_or_skip(env_key: &str, test_name: &str) -> bool {

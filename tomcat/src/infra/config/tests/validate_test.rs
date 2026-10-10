@@ -157,8 +157,22 @@ fn validate_config_rejects_invalid_checkpoint_retention() {
 fn validate_config_rejects_invalid_proxy() {
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();
-    cfg.llm.proxy = Some("socks5://127.0.0.1:1080".to_string());
-    assert!(validate_config(&cfg).is_err());
+    for url in [
+        "socks5://127.0.0.1:1080",
+        "ftp://user:PRIVATE_PROXY_SENTINEL@proxy.example.com",
+    ] {
+        cfg.llm.proxy = Some(url.to_string());
+        let error = validate_config(&cfg).expect_err("unsupported scheme must fail");
+        assert!(matches!(error, crate::AppError::Config(_)));
+        assert!(error.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "config.urlScheme",
+            &[("field", "llm.proxy")],
+        )));
+        assert!(!error.to_string().contains(url));
+        assert!(!error.to_string().contains("PRIVATE_PROXY_SENTINEL"));
+        assert_eq!(cfg.llm.proxy.as_deref(), Some(url));
+    }
     cfg.llm.proxy = Some("http://127.0.0.1:7890".to_string());
     assert!(validate_config(&cfg).is_ok());
     cfg.llm.proxy = Some("https://proxy.example.com".to_string());

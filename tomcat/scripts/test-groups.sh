@@ -33,6 +33,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   skill_tool_tests
   transcript_summary_integration_tests
   integration_gate_config_tests
+  i18n_cli_tests
   cli_tests
   checkpoint_cli_e2e
   resume_hydration_cli_e2e
@@ -58,6 +59,7 @@ TOMCAT_INTEGRATION_MANUAL_TESTS=(
   prompt_cache_real_llm_tests
   ui_acceptance_real_llm_e2e
   openai_files_integration_tests
+  tool_result_media_real_llm_tests
 )
 
 # Network-only cases inside otherwise offline binaries; run explicitly with the

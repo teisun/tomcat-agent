@@ -1,3 +1,5 @@
+import "../i18n/hostLocale";
+import { LocaleProvider } from "../i18n/LocaleProvider";
 import ReactDOM from "react-dom/client";
 import { WebviewErrorBoundary } from "../WebviewErrorBoundary";
 
@@ -18,7 +20,7 @@ function reportPlanPreviewError(error: Error): void {
 }
 
 ReactDOM.createRoot(root).render(
-  <WebviewErrorBoundary reportError={reportPlanPreviewError}>
+  <LocaleProvider><WebviewErrorBoundary reportError={reportPlanPreviewError}>
     <PlanPreviewApp vscodeApi={acquireVsCodeApiLike()} />
-  </WebviewErrorBoundary>,
+  </WebviewErrorBoundary></LocaleProvider>,
 );

@@ -5,7 +5,8 @@ use crate::core::llm::{ChatMessage, MessageKind};
 
 #[test]
 fn verbatim_accepts_only_normal_user_messages() {
-    let normal = ChatMessage::user("保留 Normal user");
+    let input = "保留 Normal user";
+    let normal = ChatMessage::user(input);
     let mut signal = ChatMessage::user("排除 Signal");
     signal.kind = MessageKind::Signal;
     let mut plan_build = ChatMessage::user("排除 PlanBuild");
@@ -17,7 +18,7 @@ fn verbatim_accepts_only_normal_user_messages() {
 
     assert_eq!(
         collect_verbatim_user_messages(&[normal, signal, plan_build, steering, nudge, summary]),
-        ["保留 Normal user"],
+        [input],
     );
 }
 

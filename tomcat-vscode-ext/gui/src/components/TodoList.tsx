@@ -1,15 +1,17 @@
 import type { PlanTodo, PlanTodoStatus } from "../../../src/shared/planPreviewProtocol";
+import { useT } from "../i18n/LocaleProvider";
+import type { Translator } from "../../../src/shared/i18n";
 
-function todoStatusLabel(status: PlanTodoStatus): string {
+function todoStatusLabel(status: PlanTodoStatus, t: Translator): string {
   switch (status) {
     case "completed":
-      return "Completed";
+      return t("term.todoLabel.completed");
     case "in_progress":
-      return "In progress";
+      return t("term.todoLabel.in_progress");
     case "cancelled":
-      return "Cancelled";
+      return t("term.todoLabel.cancelled");
     default:
-      return "Pending";
+      return t("term.todoLabel.pending");
   }
 }
 
@@ -65,6 +67,7 @@ export function TodoList({
   labelledBy?: string;
   todos: PlanTodo[];
 }) {
+  const t = useT();
   if (todos.length === 0) {
     return (
       <p
@@ -72,7 +75,7 @@ export function TodoList({
         className="tc-plan-todos__empty"
         data-testid="plan-todo-empty"
       >
-        No to-dos yet.
+        {t("todo.empty")}
       </p>
     );
   }
@@ -85,7 +88,7 @@ export function TodoList({
       {todos.map((todo) => (
         <li className="tc-plan-todo" data-status={todo.status} data-testid="plan-todo-item" key={todo.id}>
           <TodoIcon status={todo.status} />
-          <span className="tc-visually-hidden">{todoStatusLabel(todo.status)}: </span>
+          <span className="tc-visually-hidden">{todoStatusLabel(todo.status, t)}: </span>
           <span className="tc-plan-todo__content">{todo.content || todo.id}</span>
         </li>
       ))}

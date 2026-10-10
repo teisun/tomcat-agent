@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useT } from "./i18n/LocaleProvider";
+import type { Translator } from "../../src/shared/i18n";
 import { freshOccurrences } from "../../src/shared/composerOccurrences";
 import { nextThumbnailTarget } from "./attachments/thumbnailBackfill";
 
@@ -1247,11 +1249,11 @@ function answerQuestion(
   });
 }
 
-function buildContextLabel(contextRatio?: number | null): string {
+function buildContextLabel(contextRatio: number | null | undefined, t: Translator): string {
   if (typeof contextRatio !== "number" || Number.isNaN(contextRatio)) {
     return "";
   }
-  return `Ctx ${Math.round(contextRatio * 100)}%`;
+  return `${t("term.ctx")} ${Math.round(contextRatio * 100)}%`;
 }
 
 function currentModeValue(agentMode?: string | null): "chat" | "plan" {
@@ -1296,10 +1298,13 @@ function submitPrompt(
 }
 
 export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
   const [editingMessage, setEditingMessage] = useState<WebviewMessageBlock | null>(null);
   useEffect(() => { setEditingMessage(null); }, [state.activeSessionId]);
-  const [questionAnnouncement, setQuestionAnnouncement] = useState("");
+  const [questionAnnouncementSessionId, setQuestionAnnouncementSessionId] = useState<string | null>(null);
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, ApprovalAnswerState>>(
     () => readPersistedApprovalAnswers(vscodeApi.getState?.()),
   );
@@ -1313,7 +1318,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [zoomedImage, setZoomedImage] = useState<ZoomedImage | null>(null);
   const [imageAttachmentFeedback, setImageAttachmentFeedback] = useState<{
     hasErrors: boolean;
-    message: string;
+    message: string | true;
     /** Bumped on every report so a repeat of the same message still re-announces. */
     seq: number;
   } | null>(null);
@@ -1442,10 +1447,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     }
     if (newlyPending.length > 0) {
       const sessionId = newlyPending[newlyPending.length - 1];
-      const sessionTitle =
-        state.sessions.find((session) => session.sessionId === sessionId)?.title?.trim()
-        || "New session";
-      setQuestionAnnouncement(`Question waiting in ${sessionTitle}.`);
+      setQuestionAnnouncementSessionId(sessionId);
     }
   }, [state.sessionViews, state.sessions]);
 
@@ -2110,7 +2112,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             if (!contextSearchWarningShownRef.current) {
               contextSearchWarningShownRef.current = true;
               postIntent(vscodeApi, "showWarningMessage", {
-                message: "打开文件夹后可用 @",
+                message: tRef.current("chat.contextWorkspace"),
               });
             }
             closeMentionFromApp();
@@ -2609,7 +2611,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     contextSearchQuery: contextSearch.query,
     contextSearchTruncated: contextSearch.truncated,
     contextWindowValue: activeSessionContextWindow,
-    contextLabel: buildContextLabel(activeSession?.contextRatio),
+    contextLabel: buildContextLabel(activeSession?.contextRatio, t),
     modelCapabilities: activeModelCapabilities,
     modeValue: currentModeValue(activeSession?.agentMode),
     modelValue: activeSession?.model ?? "",
@@ -2633,7 +2635,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     onModeChange: handleModeChange,
     onModelChange: (modelId) => { if (activeSession && modelId) postIntent(vscodeApi, "setModel", {modelId, sessionId:activeSession.sessionId}); },
-    onOpenModelSettings: modelAdminSupported ? () => postIntent(vscodeApi, "openModelSettings", {route:"models"}) : undefined,
+    onOpenModelSettings: modelAdminSupported ? () => postIntent(vscodeApi, "openSettings", {route:"models"}) : undefined,
     onThinkingLevelChange: handleSetThinkingLevel,
     onSpeedChange: handleSetSpeed,
     onPrepareAttachments: (work) => {
@@ -2671,7 +2673,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         if (preparingSubmissionsRef.current.get(sessionId) !== prep) return;
         preparingSubmissionsRef.current.delete(sessionId);
         if (prep.error || composerWorkRegistryRef.current.pendingIds(sessionId, cutoff).length) {
-          setImageAttachmentFeedback({ hasErrors: true, message: prep.error ?? "附件或引用尚未准备完成，请完成后重新发送。", seq: ++attachmentFeedbackSeqRef.current });
+          setImageAttachmentFeedback({ hasErrors: true, message: prep.error ?? true, seq: ++attachmentFeedbackSeqRef.current });
           return;
         }
         const segments = [...clicked.segments];
@@ -2686,19 +2688,20 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       else if (attachment.path) handleOpenFile(attachment.path);
     },
     onRemoveAttachment: (attachmentId) => postIntent(vscodeApi, "removeDraftAttachment", {attachmentId, sessionId:activeSession?.sessionId ?? ""}),
-    feedback: imageAttachmentFeedback,
+    feedback: imageAttachmentFeedback ? { ...imageAttachmentFeedback, message: imageAttachmentFeedback.message === true ? t("chat.attachmentsPending") : imageAttachmentFeedback.message } : null,
   };
 
   return (
     <main className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
-        canCompact={Boolean(activeSession && !activeSession.busy && !commandPending)}
         creating={draftForkFeedback.pending}
-        onCompact={() => {
-          if (!activeSession || activeSession.busy || commandPending) return;
-          postIntent(vscodeApi, "compact", { sessionId: activeSession.sessionId });
-        }}
+        creationDisabledReason={activeSession?.deleting ? t("session.delete.pending") : undefined}
+        onOpenSettings={() => postIntent(vscodeApi, "openSettings", { route: "general" })}
+        onSetPinned={state.pinSupported ? (sessionId, pinned) => postIntent(vscodeApi, "setSessionPinned", { sessionId, pinned }) : undefined}
+        onDeleteSession={(sessionId) => postIntent(vscodeApi, "deleteSession", { sessionId })}
+        deleteSupported={state.deleteSupported}
+        actionFeedback={state.sessionActionFeedback}
         onNewSession={handleNewSession}
         connectionStatus={state.connectionStatus}
         ready={state.ready}
@@ -2713,7 +2716,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           });
         }}
         pendingQuestionCounts={pendingQuestionCounts}
-        sessions={state.sessions}
+        sessions={state.sessions.map(session => ({ ...session, busy: session.busy || !!state.sessionViews[session.sessionId]?.busy || !!state.sessionViews[session.sessionId]?.commandPending }))}
       />
       <div
         aria-atomic="true"
@@ -2722,7 +2725,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         data-testid="question-announcement"
         role="status"
       >
-        {questionAnnouncement}
+        {questionAnnouncementSessionId ? t("chat.questionWaiting", { title: state.sessions.find(s => s.sessionId === questionAnnouncementSessionId)?.title?.trim() || t("session.new") }) : ""}
       </div>
       {draftForkFeedback.error ? (
         <div
@@ -2739,7 +2742,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           <div className="tc-history-loader-slot">
             {activeSession?.historyLoading ? (
               <span className="tc-history-loader" data-testid="history-loader">
-                Loading earlier…
+                {t("chat.loadingHistory")}
               </span>
             ) : null}
           </div>
@@ -2750,13 +2753,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             <div className="tc-empty-state tc-empty-state--loading" data-testid="loading-state">
               <span className="tc-spinner" aria-hidden="true" />
               <p>
-                {state.connectionStatus === "reconnecting"
-                  ? "Reconnecting…"
-                  : state.connectionStatus === "degraded"
-                    ? "Connected, but initialization failed. Choose Retry in the notification."
-                  : state.connectionStatus === "failed"
-                    ? "Unable to connect. Choose Retry in the notification."
-                    : "Connecting…"}
+                {t(state.connectionStatus === "reconnecting" ? "connection.reconnecting"
+                  : state.connectionStatus === "degraded" ? "chat.degraded"
+                  : state.connectionStatus === "failed" ? "chat.failed" : "connection.connecting")}
               </p>
             </div>
           ) : activeSession ? (
@@ -2819,20 +2818,20 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               />
             ) : (
               <div className="tc-empty-state">
-                <h2>Ready to chat</h2>
-                <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
+                <h2>{t("chat.ready")}</h2>
+                <p>{t("chat.readyDescription")}</p>
               </div>
             )
           ) : (
             <div className="tc-empty-state">
-              <h2>Ready to chat</h2>
-              <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
+              <h2>{t("chat.ready")}</h2>
+              <p>{t("chat.readyDescription")}</p>
             </div>
           )}
         </section>
         {userHasScrolled ? (
           <button
-            aria-label="Jump to latest"
+            aria-label={t("chat.jumpLatest")}
             className="tc-scroll-jump"
             data-testid="scroll-to-bottom"
             onClick={scrollToLatest}
@@ -2850,12 +2849,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ];
         return (
           <section
-            aria-label="Needs your answer"
+            aria-label={t("chat.needsAnswer")}
             className="tc-pending-question-panel"
             data-pending-session-id={ownerSessionId}
             data-testid="pending-question-panel"
           >
-            <h2 className="tc-visually-hidden">Needs your answer</h2>
+            <h2 className="tc-visually-hidden">{t("chat.needsAnswer")}</h2>
             <ApprovalCard
               collapsed={pendingQuestionDockCollapsed[ownerSessionId] === true}
               draft={answerState?.draft}

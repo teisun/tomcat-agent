@@ -40,50 +40,50 @@ const LOCK_RETRY_MAX_MS: u64 = 80;
 pub enum PlanError {
     /// 抢 advisory file lock 超时；`waited_ms` 是实际等待毫秒数；
     /// `holder_pid` 为侧车 lock 文件内当前持有锁的进程 pid（用于调试）。
-    #[error("plan 文件锁繁忙（等待 {waited_ms} ms 仍未释放；可能由 pid={holder_pid:?} 持有）")]
+    #[error("{}", crate::infra::i18n::tr("planFile.lockBusy", &[("waited", &.waited_ms.to_string()), ("pid", &format!("{:?}", .holder_pid))]))]
     LockBusy {
         waited_ms: u64,
         holder_pid: Option<i32>,
     },
 
     /// 目标 plan 文件不存在。
-    #[error("plan 文件不存在: {path}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.notFound", &[("path", .path)]))]
     NotFound { path: String },
 
     /// 找不到 frontmatter 开头/结尾的 `---` 分隔符。
-    #[error("plan 文件缺少 frontmatter 分隔符 ---")]
+    #[error("{}", crate::infra::i18n::tr("planFile.delimiter", &[]))]
     FrontmatterDelimMissing,
 
     /// `serde_yaml` 反序列化失败。
-    #[error("frontmatter YAML 解析失败: {0}")]
+    #[error("{prefix}: {0}", prefix = crate::infra::i18n::tr("planFile.yaml", &[]))]
     YamlParse(String),
 
     /// 必填字段缺失（serde 已用 default 兜底，runtime 显式校验）。
-    #[error("frontmatter 缺少必填字段: {field}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.missingField", &[("field", .field)]))]
     MissingField { field: String },
 
     /// `schema_version` 与当前 runtime 不兼容。
-    #[error("frontmatter schema_version 不兼容: 实际 {actual}, 期望 {expected}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.schema", &[("actual", &.actual.to_string()), ("expected", &.expected.to_string())]))]
     SchemaVersion { actual: i32, expected: i32 },
 
     /// `plan_id` 未通过 `assert_plan_id_safe_for_disk`（路径穿越 / 非法字符）。
-    #[error("非法 plan_id: {reason}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.invalidId", &[("reason", .reason)]))]
     InvalidPlanId { reason: String },
 
     /// 单一文件最多允许有限数量的 in_progress；写盘前校验。
-    #[error("plan 文件最多允许 {MAX_IN_PROGRESS_TODOS} 个 in_progress todo，当前: {count}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.progressLimit", &[("limit", &MAX_IN_PROGRESS_TODOS.to_string()), ("count", &.count.to_string())]))]
     MultipleInProgress { count: usize },
 
     /// todo id 在单文件内必须唯一。
-    #[error("plan 文件 todo id 重复: {id}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.duplicateTodo", &[("id", .id)]))]
     DuplicateTodoId { id: String },
 
     /// 验收 todo 是最终收口步骤，一个 plan 只能有一个。
-    #[error("一个计划仅允许一个Acceptance todo, 且kind=Acceptance只赋予最终验收todo")]
+    #[error("{}", crate::infra::i18n::tr("planFile.acceptanceLimit", &[]))]
     MultipleAcceptanceTodos,
 
     /// 写盘 IO 错误（rename / open / write 等）。
-    #[error("plan 文件 IO 错误: {0}")]
+    #[error("{prefix}: {0}", prefix = crate::infra::i18n::tr("planFile.io", &[]))]
     Io(#[from] std::io::Error),
 }
 
@@ -400,7 +400,7 @@ fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), Pla
     let parent = path.parent().ok_or_else(|| {
         PlanError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "plan 路径无父目录",
+            crate::infra::i18n::tr("planStore.noParent", &[]),
         ))
     })?;
     std::fs::create_dir_all(parent).map_err(PlanError::Io)?;

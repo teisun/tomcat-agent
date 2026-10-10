@@ -1,3 +1,4 @@
+import { useT } from "../i18n/LocaleProvider";
 import { buildReferenceTitle } from "../contextReferences";
 import type { WebviewReference } from "../types";
 
@@ -10,6 +11,7 @@ export function ReferenceChip({
   reference: WebviewReference;
   testId?: string;
 }) {
+  const t = useT();
   const title = buildReferenceTitle(reference);
   const iconClass =
     reference.kind === "selection" ? "codicon codicon-symbol-snippet" : "codicon codicon-file";
@@ -17,7 +19,7 @@ export function ReferenceChip({
   return (
     <span
       aria-label={title}
-      aria-roledescription="context reference"
+      aria-roledescription={t("reference.role")}
       className="tc-chip tc-chip--reference"
       data-ref-kind={reference.kind}
       data-testid={testId}
@@ -28,7 +30,7 @@ export function ReferenceChip({
       <span className="tc-chip__label">{reference.label}</span>
       {onRemove ? (
         <button
-          aria-label={`Remove reference ${reference.label}`}
+          aria-label={t("reference.remove", { name: reference.label })}
           className="tc-chip__remove"
           data-testid={`${testId}-remove`}
           onClick={onRemove}

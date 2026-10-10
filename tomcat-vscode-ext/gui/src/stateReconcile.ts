@@ -138,6 +138,7 @@ export function reconcileSessionSnapshot(
     previous &&
     previous.busy === next.busy &&
     previous.commandPending === next.commandPending &&
+    previous.deleting === next.deleting &&
     previous.agentMode === next.agentMode &&
     previous.contextRatio === next.contextRatio &&
     previous.hasMoreHistory === next.hasMoreHistory &&
@@ -209,6 +210,7 @@ export function reconcileStateSnapshot(
   );
   const mediaRoots = reconcileValue(previous.mediaRoots, next.mediaRoots);
   const slashCommands = reconcileValue(previous.slashCommands, next.slashCommands);
+  const sessionActionFeedback = reconcileValue(previous.sessionActionFeedback, next.sessionActionFeedback);
   if (
     previous.activeSessionId === next.activeSessionId &&
     previous.availableModels === availableModels &&
@@ -221,6 +223,10 @@ export function reconcileStateSnapshot(
     previous.modelAdminSupported === next.modelAdminSupported &&
     previous.sessionFilesSupported === next.sessionFilesSupported &&
     previous.messageQueueSupported === next.messageQueueSupported &&
+    previous.pinSupported === next.pinSupported &&
+    previous.deleteSupported === next.deleteSupported &&
+    previous.locale === next.locale &&
+    previous.sessionActionFeedback === sessionActionFeedback &&
     previous.rewindSupported === next.rewindSupported &&
     previous.slashCommands === slashCommands &&
     previous.ready === next.ready &&
@@ -236,6 +242,7 @@ export function reconcileStateSnapshot(
     availableModelReasoningLevels,
     availableModels,
     mediaRoots,
+    sessionActionFeedback,
     sessions,
     slashCommands,
     sessionViews,

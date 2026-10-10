@@ -1,4 +1,5 @@
 import type { ServePlanEvent } from "../serveClient/wire";
+import { t } from "./i18n";
 
 export type WebviewPlanFileState =
   | "planning"
@@ -29,15 +30,15 @@ export function planFileStateProgressLabel(
   const suffix = planId ? ` (${planId})` : "";
   switch (state) {
     case "planning":
-      return `Tomcat plan mode${suffix}`;
+      return t("plan.progress.planning", { suffix });
     case "executing":
-      return `Tomcat executing plan${suffix}`;
+      return t("plan.progress.executing", { suffix });
     case "pending":
-      return `Tomcat plan pending${suffix}`;
+      return t("plan.progress.pending", { suffix });
     case "completed":
-      return `Tomcat completed plan${suffix}`;
+      return t("plan.progress.completed", { suffix });
     default:
-      return "Tomcat plan state updated";
+      return t("plan.progress.updated");
   }
 }
 

@@ -47,7 +47,7 @@ import type {
   ConnectorView,
 } from "../../shared/connectorsProtocol";
 import {
-  CONNECTOR_PROTOCOL_MISMATCH,
+  ConnectorProtocolError,
   normalizeConnectorView,
   parseConnectorProject,
   parseProjectTrustPayload,
@@ -186,7 +186,7 @@ function parseConnectorsPayload(payload: unknown): {
   project: ConnectorProject | null;
   configPaths?: ConnectorConfigPaths;
 } {
-  if (!isRecord(payload) || !Array.isArray(payload.connectors)) throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+  if (!isRecord(payload) || !Array.isArray(payload.connectors)) throw new ConnectorProtocolError();
   return {
     connectors: payload.connectors
       .map(normalizeConnectorView)
@@ -291,6 +291,7 @@ type ConnectorToolToggleLock = {
   enabled: boolean;
 };
 
+import { getLocale, subscribeLocale, isUiPreferences, normalizeLocale, setLocale, t, type LanguagePreference } from "../../shared/i18n";
 export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private webviewReady = false;
@@ -340,7 +341,11 @@ export class SettingsPanel implements vscode.Disposable {
   };
 
   constructor(private readonly deps: SettingsPanelDeps) {
+    this.subscriptions.push({ dispose: subscribeLocale(() => this.postState()) });
     const exit = deps.messenger.onExit?.(() => {
+      this.state.uiPreferences = null;
+      this.state.connectorLogin = null;
+      this.state.languageStatus = "failed";
       this.connectorEpoch += 1;
       this.viewEpoch += 1;
       this.connectorToolsReadSequence += 1;
@@ -354,11 +359,11 @@ export class SettingsPanel implements vscode.Disposable {
           configKey,
           rawName: operation.rawName,
           enabled: operation.enabled,
-          error: "Connection lost; result unknown.",
+          error: t("settings.host.resultUnknown"),
         };
       }
       this.connectorToolToggleLocks.clear();
-      this.state = { ...this.state, ready: false, error: "Connection lost.", connectorTools: [], connectorToolsIdentity: null, connectorReloads: this.connectorReloads.snapshot(), connectorToolToggles };
+      this.state = { ...this.state, ready: false, error: t("settings.host.connectionLost"), connectorTools: [], connectorToolsIdentity: null, connectorReloads: this.connectorReloads.snapshot(), connectorToolToggles };
       this.postState();
       this.updateConnectorPoller();
     });
@@ -368,6 +373,20 @@ export class SettingsPanel implements vscode.Disposable {
       if (this.route === "connectors" && this.webviewReady) void this.refreshState();
     });
     if (workspace) this.subscriptions.push(workspace);
+  }
+
+  async onServeConnectionChanged(ready: boolean): Promise<void> {
+    if (!ready && this.route === "general") this.viewEpoch += 1;
+    this.state.ready = ready;
+    if (ready) {
+      this.state.uiPreferences = null;
+      this.state.languageStatus = undefined;
+      if (this.webviewReady && this.route === "general") {
+        await this.refreshGeneral();
+        return;
+      }
+    }
+    this.postState();
   }
 
   onProjectTrusted(): void {
@@ -398,7 +417,7 @@ export class SettingsPanel implements vscode.Disposable {
         const workspaceRoot = this.deps.selectConnectorWorkspaceRoot
           ? await this.deps.selectConnectorWorkspaceRoot()
           : await this.selectDefaultConnectorWorkspaceRoot();
-        if (epoch !== this.connectorEpoch) throw new Error("Connector workspace selection was superseded.");
+        if (epoch !== this.connectorEpoch) throw new Error(t("settings.host.selectionSuperseded"));
         const context = { workspaceRoot };
         this.connectorContextValue = context;
         return context;
@@ -416,12 +435,13 @@ export class SettingsPanel implements vscode.Disposable {
       return folders[0].uri.fsPath;
     }
     const selected = await vscode.window.showWorkspaceFolderPick({
-      placeHolder: "Select the workspace for Tomcat connector settings",
+      placeHolder: t("host.selectWorkspace"),
     });
     return selected?.uri.fsPath ?? null;
   }
 
   private resetConnectorViewLifecycle(): void {
+    this.state.connectorLogin = null;
     if (this.connectorRefreshTimer) {
       clearInterval(this.connectorRefreshTimer);
       this.connectorRefreshTimer = undefined;
@@ -468,7 +488,7 @@ export class SettingsPanel implements vscode.Disposable {
     this.webviewReady = false;
     this.panel = vscode.window.createWebviewPanel(
       "tomcat.settings",
-      "Tomcat Settings",
+      `Tomcat ${t("settings.title")}`,
       {
         preserveFocus: this.shouldPreserveFocus(),
         viewColumn: vscode.ViewColumn.Active,
@@ -518,6 +538,46 @@ export class SettingsPanel implements vscode.Disposable {
     });
     this.panel.webview.html = this.renderHtml(this.panel.webview);
     void this.refreshState();
+  }
+
+  private async refreshGeneral(): Promise<void> {
+    const epoch = ++this.viewEpoch;
+    try {
+      const initialized = await this.deps.ensureInitialized();
+      if (epoch !== this.viewEpoch) return;
+      this.state = { ...this.state,
+        capabilities: { ...this.state.capabilities, setUiLanguage: hasServeCapability(initialized, "set_ui_language") },
+        uiPreferences: this.state.uiPreferences ?? initialized.uiPreferences ?? null,
+        hostLocale: normalizeLocale(vscode.env.language ?? "en"),
+        expectedCliVersion: this.deps.expectedCliVersion,
+        extensionVersion: this.deps.extensionVersion,
+        serverVersion: initialized.serverVersion,
+        ready: true, error: null,
+      };
+    } catch (error) {
+      if (epoch !== this.viewEpoch) return;
+      this.state = { ...this.state, ready: false, error: String(error) };
+    }
+    this.postState();
+  }
+
+  private async setUiLanguage(language: LanguagePreference): Promise<void> {
+    if (this.state.languageStatus === "saving" || !this.state.ready || !this.state.capabilities.setUiLanguage) return;
+    this.state = { ...this.state, languageStatus: "saving", error: null };
+    this.postState();
+    try {
+      const response = await this.deps.messenger.request({ type: "set_ui_language", language });
+      if (!response.success || !isUiPreferences(response.payload)) {
+        throw new Error(response.error ?? t("settings.language.failed"));
+      }
+      // The write belongs to this window, not the currently selected settings route.
+      // A navigation or panel close must not discard an acknowledged preference.
+      this.state = { ...this.state, uiPreferences: response.payload, languageStatus: "saved" };
+      setLocale(response.payload.effective);
+    } catch (error) {
+      this.state = { ...this.state, languageStatus: "failed", error: String(error) };
+    }
+    this.postState();
   }
 
   __testingSnapshot(): {
@@ -575,6 +635,9 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async handleIntent(intent: SettingsIntent): Promise<void> {
     switch (intent.type) {
+      case "setUiLanguage":
+        await this.setUiLanguage(intent.data.language);
+        return;
       case "settings.ready":
         this.webviewReady = true;
         this.setRoute(intent.data?.route ?? this.route);
@@ -619,7 +682,7 @@ export class SettingsPanel implements vscode.Disposable {
       case "loginConnector":
       case "cancelLoginConnector":
       case "logoutConnector":
-        await this.handleConnectorAction(intent.type, intent.data.configKey);
+        await this.handleConnectorAction(intent.type, intent.data.configKey, intent.messageId);
         return;
       case "openConnectorConfig":
         await this.openConnectorConfig(intent.data.configKey, intent.data.scope);
@@ -636,8 +699,8 @@ export class SettingsPanel implements vscode.Disposable {
           this.connectorToolsReadSequence += 1;
           this.connectorToolsRequested = undefined;
           this.state = { ...this.state, connectorTools: [], connectorToolsIdentity: null,
-            error: response.success ? null : response.error ?? "Unable to update connector tools.",
-            status: response.success ? "Connector tools updated." : null };
+            error: response.success ? null : response.error ?? t("settings.host.toolsUpdateFailed"),
+            status: response.success ? t("settings.host.toolsUpdated") : null };
           this.postState();
           await this.refreshConnectors(true);
         } catch (error) {
@@ -666,7 +729,7 @@ export class SettingsPanel implements vscode.Disposable {
   ): Promise<void> {
     const epoch = this.connectorEpoch;
     if (this.state.capabilities.connectorCapabilities?.toggle !== true) {
-      const error = "This Tomcat Serve does not support changing individual connector tools.";
+      const error = t("settings.host.toggleUnsupported");
       this.state = {
         ...this.state,
         connectorToolToggles: {
@@ -688,7 +751,7 @@ export class SettingsPanel implements vscode.Disposable {
     }
     const source = this.state.connectors?.find((entry) => entry.configKey === configKey);
     if (!source || source.overridden || source.state !== "connected" || !this.connectorContextValue) {
-      const error = "This connector is not available to change tools.";
+      const error = t("settings.host.toggleUnavailable");
       this.state = {
         ...this.state,
         connectorToolToggles: {
@@ -710,7 +773,7 @@ export class SettingsPanel implements vscode.Disposable {
     }
     const reload = this.state.connectorReloads?.[configKey];
     if (reload?.phase === "pending" || reload?.phase === "accepted") {
-      const error = "Wait for this connector to finish reloading before changing a tool.";
+      const error = t("settings.host.toggleReloading");
       this.state = {
         ...this.state,
         connectorToolToggles: {
@@ -742,7 +805,7 @@ export class SettingsPanel implements vscode.Disposable {
             enabled,
             configSaved: false,
             runtimeApplied: false,
-            error: "Another tool setting for this connector is still being saved.",
+            error: t("settings.host.togglePending"),
           },
         },
       };
@@ -775,14 +838,14 @@ export class SettingsPanel implements vscode.Disposable {
       const rejected = !response.success && !configSaved && !runtimeApplied;
       const partial = !response.success && configSaved && !runtimeApplied;
       if (!completed && !rejected && !partial) {
-        throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+        throw new ConnectorProtocolError();
       }
-      const action = enabled ? "enabled" : "disabled";
+      const successKey = enabled ? "settings.host.toolEnabled" : "settings.host.toolDisabled";
       const error = completed
         ? null
         : response.error ?? (partial
-          ? "Runtime synchronization could not be confirmed."
-          : "Unable to update this tool setting.");
+          ? t("settings.host.syncUnknown")
+          : t("settings.host.toggleFailed"));
       if (completed) this.confirmConnectorToolEnabled(configKey, rawName, enabled);
       const receipt = {
         requestId,
@@ -801,9 +864,9 @@ export class SettingsPanel implements vscode.Disposable {
         },
         error,
         status: completed
-          ? `Tool ${action}.`
+          ? t(successKey)
           : partial
-            ? `Tool setting saved, but runtime synchronization could not be confirmed. Retry to synchronize. ${error ?? ""}`.trim()
+            ? t("settings.host.toolPartial", { detail: error ?? "" }).trim()
             : error,
       };
       this.postState();
@@ -882,7 +945,7 @@ export class SettingsPanel implements vscode.Disposable {
         ? path.join(os.homedir(), rawConfigPath.slice(2))
         : rawConfigPath;
     if (!configPath) {
-      await this.refreshState("The connector configuration file is not available to open.");
+      await this.refreshState(t("settings.host.configUnavailable"));
       return;
     }
     try {
@@ -903,7 +966,7 @@ export class SettingsPanel implements vscode.Disposable {
       const document = await vscode.workspace.openTextDocument(vscode.Uri.file(configPath));
       await vscode.window.showTextDocument(document, { preview: false });
     } catch (error) {
-      await this.refreshState(`Unable to open connector configuration: ${String(error)}`);
+      await this.refreshState(t("settings.host.configOpenFailed", { detail: String(error) }));
     }
   }
 
@@ -917,7 +980,7 @@ export class SettingsPanel implements vscode.Disposable {
       );
       if (!capabilities.upsertModel) {
         await this.refreshState(
-          "Model management is unavailable for this serve instance.",
+          t("settings.host.modelUnavailable"),
         );
         return;
       }
@@ -925,14 +988,14 @@ export class SettingsPanel implements vscode.Disposable {
         toWireModelEntryInput(model),
       );
       if (!response.success) {
-        await this.refreshState(response.error ?? "Unable to save model.");
+        await this.refreshState(response.error ?? t("settings.host.modelSaveFailed"));
         return;
       }
       const warnings = response.payload?.warnings ?? null;
       if (providerKey) {
         if (!capabilities.setProviderKey) {
           await this.refreshState(
-            "Model saved, but this serve instance cannot store API keys yet.",
+            t("settings.host.keyUnsupported"),
             null,
             warnings,
           );
@@ -945,7 +1008,7 @@ export class SettingsPanel implements vscode.Disposable {
         );
         if (!keyResponse.success) {
           await this.refreshState(
-            `Model saved, but API key was not stored: ${keyResponse.error ?? "Unknown error."}`,
+            t("settings.host.keySaveFailed", { detail: keyResponse.error ?? t("error.unknown") }),
             null,
             warnings,
           );
@@ -954,13 +1017,13 @@ export class SettingsPanel implements vscode.Disposable {
         }
         await this.refreshState(
           null,
-          `Saved ${providerKey.envName}.`,
+          t("settings.host.savedKey", { name: providerKey.envName }),
           warnings,
         );
         await this.deps.onModelCatalogChanged?.();
         return;
       }
-      await this.refreshState(null, "Model saved.", warnings);
+      await this.refreshState(null, t("settings.host.modelSaved"), warnings);
       await this.deps.onModelCatalogChanged?.();
     } catch (error) {
       await this.refreshState(String(error), null);
@@ -973,7 +1036,7 @@ export class SettingsPanel implements vscode.Disposable {
     if (this.state.connectorProject?.root !== projectRoot
       || this.state.connectorProject.trusted
       || this.state.capabilities.connectorCapabilities?.trustProject !== true) {
-      this.state = { ...this.state, error: "Project trust status changed. Refresh Connectors and retry." };
+      this.state = { ...this.state, error: t("settings.host.trustChanged") };
       this.postState();
       return;
     }
@@ -984,16 +1047,16 @@ export class SettingsPanel implements vscode.Disposable {
       const context = await this.connectorContext();
       if (epoch !== this.connectorEpoch) return;
       if (!context.workspaceRoot || this.state.connectorProject?.root !== projectRoot) {
-        throw new Error("Project selection changed. Refresh Connectors and retry.");
+        throw new Error(t("settings.host.selectionChanged"));
       }
       const response = await this.deps.messenger.sendTrustProject(projectRoot);
       if (epoch !== this.connectorEpoch) return;
-      if (!response.success) throw new Error(response.error ?? "Unable to trust project.");
+      if (!response.success) throw new Error(response.error ?? t("settings.host.trustFailed"));
       const result = parseProjectTrustPayload(response.payload);
       if (!result.trusted || result.projectRoot !== projectRoot || result.error) {
-        throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+        throw new ConnectorProtocolError();
       }
-      this.state = { ...this.state, error: null, status: "Project trusted. Connecting services…" };
+      this.state = { ...this.state, error: null, status: t("settings.host.trusted") };
       await this.refreshConnectors(true);
     } catch (error) {
       if (epoch === this.connectorEpoch) {
@@ -1027,10 +1090,10 @@ export class SettingsPanel implements vscode.Disposable {
         ...this.state,
         connectorReceipt: receipt,
         error,
-        status: "Connector add failed.",
+        status: t("settings.host.addFailed"),
       };
       this.postState();
-      void this.refreshState(error, "Connector add failed.", null, receipt);
+      void this.refreshState(error, t("settings.host.addFailed"), null, receipt);
     };
     try {
       const context = await this.connectorContext();
@@ -1038,7 +1101,7 @@ export class SettingsPanel implements vscode.Disposable {
       if (trustProject && (input.scope !== "workspace" || !context.workspaceRoot
         || this.state.connectorProject?.trusted !== false
         || this.state.capabilities.connectorCapabilities?.trustProject !== true)) {
-        failed("Project trust status changed. Refresh Connectors before adding.");
+        failed(t("settings.host.addTrustChanged"));
         return;
       }
       const response = await this.deps.messenger.sendAddConnector({
@@ -1056,7 +1119,7 @@ export class SettingsPanel implements vscode.Disposable {
       });
       if (epoch !== this.connectorEpoch) return;
       if (!response.success) {
-        failed(response.error ?? "Unable to add connector.");
+        failed(response.error ?? t("settings.host.addUnavailable"));
         return;
       }
       const payload = isRecord(response.payload) ? response.payload : {};
@@ -1064,7 +1127,7 @@ export class SettingsPanel implements vscode.Disposable {
       const connectionStarted = payload.connectionStarted === true;
       const postSaveError = typeof payload.postSaveError === "string" ? payload.postSaveError : null;
       if (!configSaved) {
-        failed(postSaveError ?? "Connector did not acknowledge configuration persistence.");
+        failed(postSaveError ?? t("settings.host.addUnacknowledged"));
         return;
       }
       const receipt: SettingsConnectorReceipt = {
@@ -1075,8 +1138,8 @@ export class SettingsPanel implements vscode.Disposable {
         requestId,
       };
       const status = connectionStarted
-        ? "Connector saved. Connection is starting."
-        : `Connector saved, but connection was not started.${postSaveError ? ` ${postSaveError}` : ""}`;
+        ? t("settings.host.addStarted")
+        : t("settings.host.addNotStarted", { detail: postSaveError ? ` ${postSaveError}` : "" });
       this.state = {
         ...this.state,
         connectorReceipt: receipt,
@@ -1103,7 +1166,7 @@ export class SettingsPanel implements vscode.Disposable {
         this.connectorReloads.finish(
           entry,
           "failed",
-          "Wait for the tool setting to finish before reloading this connector.",
+          t("settings.host.reloadPending"),
           "rejected",
         );
         this.publishConnectorReloads();
@@ -1125,14 +1188,14 @@ export class SettingsPanel implements vscode.Disposable {
       const response = await this.deps.messenger.sendReloadConnector(configKey, context);
       if (epoch !== this.connectorEpoch || !this.connectorReloads.active(entry)) return;
       if (!response.success) {
-        this.connectorReloads.finish(entry, "failed", response.error ?? "Reconnection was rejected.", "rejected");
+        this.connectorReloads.finish(entry, "failed", response.error ?? t("settings.host.reloadRejected"), "rejected");
       } else {
         this.connectorReloads.accept(entry, response.payload, this.connectorReadSequence, Date.now());
       }
     } catch (error) {
       if (epoch !== this.connectorEpoch) return;
-      const incompatible = error instanceof Error && error.message === CONNECTOR_PROTOCOL_MISMATCH;
-      this.connectorReloads.finish(entry, "unknown", incompatible ? CONNECTOR_PROTOCOL_MISMATCH : `Unable to confirm reconnection. ${String(error)}`, incompatible ? "incompatible" : "connection-lost");
+      const incompatible = error instanceof ConnectorProtocolError;
+      this.connectorReloads.finish(entry, "unknown", incompatible ? t("connector.protocolMismatch") : t("settings.host.reloadUnknown", { detail: String(error) }), incompatible ? "incompatible" : "connection-lost");
     }
     if (epoch !== this.connectorEpoch) return;
     this.publishConnectorReloads();
@@ -1144,6 +1207,7 @@ export class SettingsPanel implements vscode.Disposable {
   private async handleConnectorAction(
     action: "removeConnector" | "loginConnector" | "logoutConnector" | "cancelLoginConnector",
     configKey: string,
+    requestId: string,
   ): Promise<void> {
     const epoch = this.connectorEpoch;
     try {
@@ -1157,12 +1221,13 @@ export class SettingsPanel implements vscode.Disposable {
               ? await this.deps.messenger.sendCancelLoginConnector(configKey, context)
               : await this.deps.messenger.sendLogoutConnector(configKey, context);
       if (epoch !== this.connectorEpoch) return;
-      this.state = { ...this.state, error: response.success ? null : response.error ?? "Connector operation failed.", status: response.success ? action === "loginConnector" ? "Authorizing connector…" : "Connector updated." : null };
+      this.state = { ...this.state, connectorLogin: { configKey, requestId, phase: response.success && action === "loginConnector" ? "authorizing" : "settled" } };
+      this.state = { ...this.state, error: response.success ? null : response.error ?? t("settings.host.operationFailed"), status: response.success ? action === "loginConnector" ? t("settings.host.authorizing") : t("settings.host.updated") : null };
       this.postState();
       await this.refreshConnectors(true);
     } catch (error) {
       if (epoch !== this.connectorEpoch) return;
-      this.state = { ...this.state, error: String(error) };
+      this.state = { ...this.state, connectorLogin: { configKey, requestId, phase: "settled" }, error: String(error) };
       this.postState();
     }
   }
@@ -1196,7 +1261,7 @@ export class SettingsPanel implements vscode.Disposable {
     };
     const failed = async (error: unknown) => {
       const warnings = buildPreferenceCleared
-        ? ["The matching Build preference was cleared before deletion."]
+        ? [t("settings.host.prefCleared")]
         : [];
       await report(String(error), null, warnings, false);
     };
@@ -1205,7 +1270,7 @@ export class SettingsPanel implements vscode.Disposable {
         await this.deps.ensureInitialized(),
       );
       if (!capabilities.removeModel) {
-        await failed("Model removal is unavailable for this serve instance.");
+        await failed(t("settings.host.removeUnavailable"));
         return;
       }
       // This write belongs to the extension host. Await it before asking serve to delete,
@@ -1216,13 +1281,13 @@ export class SettingsPanel implements vscode.Disposable {
         ...this.state,
         error: null,
         modelRemovalReceipt: null,
-        status: `Removing ${modelId}…`,
+        status: t("settings.host.removing", { name: modelId }),
         warnings: null,
       };
       this.postState();
       const response = await this.deps.messenger.sendRemoveModel(modelId);
       if (!response.success) {
-        await failed(response.error ?? "Unable to remove model.");
+        await failed(response.error ?? t("settings.host.removeFailed"));
         return;
       }
       const removalWarnings = (response.payload as { warnings?: unknown } | null)
@@ -1232,7 +1297,7 @@ export class SettingsPanel implements vscode.Disposable {
         : [];
       await report(
         null,
-        warnings.length > 0 ? "Model removed with warnings." : "Model removed.",
+        warnings.length > 0 ? t("settings.host.removedWarnings") : t("settings.host.removed"),
         warnings,
         true,
       );
@@ -1252,7 +1317,7 @@ export class SettingsPanel implements vscode.Disposable {
       );
       if (!capabilities.setProviderKey) {
         await this.refreshState(
-          "API key storage is unavailable for this serve instance.",
+          t("settings.host.keyStorageUnavailable"),
         );
         return;
       }
@@ -1261,10 +1326,10 @@ export class SettingsPanel implements vscode.Disposable {
         value,
       );
       if (!response.success) {
-        await this.refreshState(response.error ?? "Unable to store API key.");
+        await this.refreshState(response.error ?? t("settings.host.keyStoreFailed"));
         return;
       }
-      await this.refreshState(null, `Saved ${envName}.`);
+      await this.refreshState(null, t("settings.host.savedKey", { name: envName }));
       await this.deps.onModelCatalogChanged?.();
     } catch (error) {
       await this.refreshState(String(error), null);
@@ -1278,6 +1343,10 @@ export class SettingsPanel implements vscode.Disposable {
     connectorReceipt: SettingsConnectorReceipt | null = null,
     modelRemovalReceipt: SettingsModelRemovalReceipt | null = null,
   ): Promise<void> {
+    if (this.route === "general") {
+      await this.refreshGeneral();
+      return;
+    }
     if (this.route === "connectors") {
       this.state = { ...this.state, error: error ?? this.state.error, status: status ?? this.state.status, connectorReceipt: connectorReceipt ?? this.state.connectorReceipt };
       this.postState();
@@ -1346,7 +1415,7 @@ export class SettingsPanel implements vscode.Disposable {
       const response = await this.deps.messenger.sendListModels();
       if (!response.success) {
         return {
-          error: response.error ?? "Unable to load models.",
+          error: response.error ?? t("settings.host.modelsLoadFailed"),
           models: fallback,
         };
       }
@@ -1410,7 +1479,7 @@ export class SettingsPanel implements vscode.Disposable {
       const read = ++this.connectorReadSequence;
       const response = await this.deps.messenger.sendListConnectors(context);
       if (epoch !== this.connectorEpoch || read !== this.connectorReadSequence) return;
-      if (!response.success) throw new Error(response.error ?? "Unable to load connectors.");
+      if (!response.success) throw new Error(response.error ?? t("settings.host.connectorsLoadFailed"));
       const parsed = parseConnectorsPayload(response.payload);
       const previous = this.state.connectors?.find((entry) => entry.configKey === this.state.selectedConnector);
       this.connectorReloads.expire(Date.now());
@@ -1470,7 +1539,7 @@ export class SettingsPanel implements vscode.Disposable {
       if (!current()) return;
       const response = await this.deps.messenger.sendListConnectorTools(configKey, context);
       if (!current()) return;
-      if (!response.success) throw new Error(response.error ?? "Unable to load connector tools.");
+      if (!response.success) throw new Error(response.error ?? t("settings.host.toolsLoadFailed"));
       const catalog = parseConnectorToolCatalog(response.payload, configKey);
       const latest = this.state.connectors?.find((entry) => entry.configKey === configKey);
       if (latest?.state !== "connected" || latest.generation !== catalog.generation || latest.attempt !== catalog.attempt) {
@@ -1503,7 +1572,7 @@ export class SettingsPanel implements vscode.Disposable {
       const response = await this.deps.messenger.sendListProviderKeys();
       if (!response.success) {
         return {
-          error: response.error ?? "Unable to load provider keys.",
+          error: response.error ?? t("settings.host.keysLoadFailed"),
           providerKeys: fallback,
         };
       }
@@ -1561,9 +1630,10 @@ export class SettingsPanel implements vscode.Disposable {
     if (!this.panel) {
       return;
     }
+    this.panel.title = `Tomcat ${t("settings.title")}`;
     const frame: SettingsHostFrame = {
       channel: "state",
-      content: this.state,
+      content: { ...this.state, locale: getLocale() },
       messageId: `settings-state-${Date.now()}`,
     };
     void this.panel.webview.postMessage(frame);
@@ -1595,7 +1665,7 @@ export class SettingsPanel implements vscode.Disposable {
       )
       .join("\n    ");
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}" data-settings-route="${this.route}">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -1604,7 +1674,7 @@ export class SettingsPanel implements vscode.Disposable {
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     ${styleTags}
-    <title>Tomcat Settings</title>
+    <title>Tomcat ${t("settings.title")}</title>
   </head>
   <body>
     <div id="root"></div>
@@ -1615,7 +1685,7 @@ export class SettingsPanel implements vscode.Disposable {
 
   private renderFallbackHtml(message: string): string {
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}" data-settings-route="${this.route}">
   <body>
     <pre>${message}</pre>
   </body>

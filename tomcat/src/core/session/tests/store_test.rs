@@ -68,7 +68,7 @@ fn load_store_empty_file_returns_error_without_rewriting() {
     std::fs::write(&path, "").unwrap();
 
     let error = load_store(&path).expect_err("blank store must not be reset during a read");
-    assert!(error.to_string().contains("拒绝覆盖"));
+    assert!(matches!(error, crate::AppError::Config(_)));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
 
     let _ = std::fs::remove_file(&path);

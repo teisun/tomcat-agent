@@ -470,7 +470,7 @@ async fn tool_exec_pdf_over_inline_limit_returns_error() {
         "without files runtime, oversize pdf must fail by policy"
     );
     assert!(
-        msg.contains("大") || msg.contains("limit") || msg.contains("FILE_MAX_BYTES"),
+        msg.contains("FILE_MAX_BYTES"),
         "should clearly report the inline bound, got: {:?}",
         msg
     );
@@ -587,7 +587,7 @@ async fn edit_legacy_edit_file_returns_unknown_tool_error() {
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "legacy edit_file 必须按未知工具回错");
     assert!(
-        msg.contains("edit_file") || msg.to_lowercase().contains("unknown") || msg.contains("未知"),
+        msg.contains("edit_file") && msg.to_lowercase().contains("unknown"),
         "错误文案应提示未知工具：{}",
         msg
     );
@@ -878,12 +878,12 @@ async fn read_line_numbers_output_misused_as_edit_old_content_returns_line_prefi
         msg
     );
     assert!(
-        msg.contains("cat -n 行号前缀"),
+        msg.contains("cat -n line prefixes"),
         "错误文案应指出 cat -n 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("near line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );
@@ -940,12 +940,12 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
         msg
     );
     assert!(
-        msg.contains("hashline 前缀"),
+        msg.contains("hashline prefixes"),
         "错误文案应指出 hashline 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("near line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );
@@ -1123,6 +1123,7 @@ async fn hashline_edit_batches_non_overlapping_original_ranges_despite_line_coun
 
 #[tokio::test]
 async fn hashline_edit_cjk_anchor_is_stable_after_lines_are_inserted_above_it() {
+    let replacement = "#### 已验收\n";
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let file = dir_path.join("cjk-anchor.txt");
@@ -1171,9 +1172,10 @@ async fn hashline_edit_cjk_anchor_is_stable_after_lines_are_inserted_above_it() 
         id: "cjk-anchor-replace".into(),
         name: "hashline_edit".into(),
         arguments: format!(
-            r#####"{{"path":{:?},"edits":[{{"op":"replace","pos":"371#{}","lines":"#### 已验收\n"}}]}}"#####,
+            r#####"{{"path":{:?},"edits":[{{"op":"replace","pos":"371#{}","lines":{}}}]}}"#####,
             file.to_string_lossy(),
             moved_cjk_tag,
+            serde_json::to_string(replacement).unwrap(),
         ),
     };
     let (replace_output, replace_error, _) =
@@ -1181,7 +1183,7 @@ async fn hashline_edit_cjk_anchor_is_stable_after_lines_are_inserted_above_it() 
     assert!(!replace_error, "{replace_output}");
     assert!(std::fs::read_to_string(&file)
         .unwrap()
-        .contains("#### 已验收\n"));
+        .contains(replacement));
 }
 
 fn hashline_tag_at(output: &str, line_no: u64) -> String {
@@ -1384,7 +1386,7 @@ async fn hashline_edit_reports_all_mismatched_anchors_without_writing() {
 
     assert!(is_error, "陈旧 hashline 锚点必须拒绝：{message}");
     assert!(
-        message.contains("HashlineValidationFailed: 2 个锚点无效"),
+        message.contains("HashlineValidationFailed: Invalid anchors: 2"),
         "应汇总错误锚点数量：{message}"
     );
     assert!(
@@ -1392,7 +1394,7 @@ async fn hashline_edit_reports_all_mismatched_anchors_without_writing() {
         "应报告第一个陈旧锚点：{message}"
     );
     assert!(
-        message.contains(&format!("最新锚点 `1#{}`", compute_line_hash("alpha"))),
+        message.contains(&format!("latest anchor `1#{}`", compute_line_hash("alpha"))),
         "应给出可直接替换的第一个锚点：{message}"
     );
     assert!(
@@ -1400,7 +1402,7 @@ async fn hashline_edit_reports_all_mismatched_anchors_without_writing() {
         "应报告第二个陈旧锚点：{message}"
     );
     assert!(
-        message.contains(&format!("最新锚点 `3#{}`", compute_line_hash("gamma"))),
+        message.contains(&format!("latest anchor `3#{}`", compute_line_hash("gamma"))),
         "应给出可直接替换的第二个锚点：{message}"
     );
     assert_eq!(
@@ -1436,7 +1438,7 @@ async fn hashline_edit_reports_mismatch_and_out_of_range_together() {
 
     assert!(is_error, "陈旧或越界锚点必须拒绝：{message}");
     assert!(
-        message.contains("HashlineValidationFailed: 2 个锚点无效"),
+        message.contains("HashlineValidationFailed: Invalid anchors: 2"),
         "应汇总错误锚点数量：{message}"
     );
     assert!(
@@ -1444,7 +1446,7 @@ async fn hashline_edit_reports_mismatch_and_out_of_range_together() {
         "应保留 mismatch 诊断：{message}"
     );
     assert!(
-        message.contains("edits[1].pos: OutOfRange: 锚点行号 4 超过文件总行数 3"),
+        message.contains("edits[1].pos: OutOfRange: Anchor line 4 exceeds the file's 3 lines"),
         "应在同一响应报告越界锚点：{message}"
     );
     assert_eq!(
@@ -1606,9 +1608,7 @@ async fn tool_exec_legacy_write_file_returns_unknown_tool_error() {
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "legacy write_file 必须按未知工具回错");
     assert!(
-        msg.contains("write_file")
-            || msg.to_lowercase().contains("unknown")
-            || msg.contains("未知"),
+        msg.contains("write_file") && msg.to_lowercase().contains("unknown"),
         "错误文案应提示未知工具：{}",
         msg
     );

@@ -2,6 +2,7 @@ use super::super::args::parse_optional_u64;
 use super::super::guard::validate_read_bounds;
 use super::super::{ToolDisplay, ToolExecCtx, AGENT_PLUGIN_ID};
 use crate::infra::events::{ToolDisplayFileEntry, ToolDisplayFileStatus};
+use crate::infra::i18n::tr;
 
 /// 整批 `paths` 共享的输出预算，与单次 read 的后读护栏同一个数值 —— 批量只是把
 /// 若干次 read 摊进一次往返，不该因此获得更大的上下文配额。
@@ -57,7 +58,7 @@ fn parse_batch_specs(args: &serde_json::Value) -> Result<Option<Vec<ReadSpec>>, 
     };
     let raw = raw
         .as_array()
-        .ok_or_else(|| "`paths` 必须是数组".to_string())?;
+        .ok_or_else(|| "`paths` must be an array".to_string())?;
     let raw: Vec<&serde_json::Value> = raw
         .iter()
         .filter(|item| {
@@ -71,7 +72,7 @@ fn parse_batch_specs(args: &serde_json::Value) -> Result<Option<Vec<ReadSpec>>, 
     }
     if raw.len() > MAX_BATCH_READ_ENTRIES {
         return Err(format!(
-            "一次批量读最多 {MAX_BATCH_READ_ENTRIES} 个文件，收到 {}",
+            "A batch read allows at most {MAX_BATCH_READ_ENTRIES} files; received {}",
             raw.len()
         ));
     }
@@ -82,7 +83,7 @@ fn parse_batch_specs(args: &serde_json::Value) -> Result<Option<Vec<ReadSpec>>, 
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .ok_or_else(|| format!("paths[{idx}] 缺少非空的 `path`"))?;
+            .ok_or_else(|| format!("paths[{idx}] requires a non-empty `path`"))?;
         let offset = parse_optional_u64(item, "offset");
         let limit = parse_optional_u64(item, "limit");
         validate_read_bounds(offset, limit).map_err(|e| format!("paths[{idx}]: {e}"))?;
@@ -150,7 +151,7 @@ async fn read_batch(
                 expired: false,
                 range: None,
                 status: Some(ToolDisplayFileStatus::Skipped),
-                note: Some(format!("output budget exhausted; resume: {hint}")),
+                note: Some(tr("toolRead.budget", &[("hint", &hint)])),
             });
             continue;
         }
@@ -194,13 +195,21 @@ async fn read_batch(
     }
 
     let read = total - skipped - failed;
-    let mut summary = format!("已读取 {read} 个文件");
-    if skipped > 0 {
-        summary.push_str(&format!("，{skipped} 个因输出预算跳过"));
-    }
-    if failed > 0 {
-        summary.push_str(&format!("，{failed} 个读取失败"));
-    }
+    let key = match (skipped > 0, failed > 0) {
+        (true, true) => "toolRead.withBoth",
+        (true, false) => "toolRead.withSkipped",
+        (false, true) => "toolRead.withFailed",
+        (false, false) if read == 1 => "toolRead.readCount.one",
+        (false, false) => "toolRead.readCount.other",
+    };
+    let summary = tr(
+        key,
+        &[
+            ("read", &read.to_string()),
+            ("skipped", &skipped.to_string()),
+            ("failed", &failed.to_string()),
+        ],
+    );
     *display_out = Some(ToolDisplay::Files {
         summary,
         files: entries,
@@ -261,9 +270,7 @@ async fn read_one(
         return Ok(ReadOutcome {
             header: format!("{path} already covered by your earlier read of {coverage}"),
             range: Some(coverage.clone()),
-            note: Some(format!(
-                "already covered by your earlier read of {coverage}"
-            )),
+            note: Some(tr("toolRead.covered", &[("coverage", &coverage)])),
             text: format!(
                 "{} (earlier read covered {coverage}; to request another rendering, call read with line_numbers or hashline — do not modify the file)",
                 crate::core::tools::pipeline::read_state::FILE_UNCHANGED_STUB
@@ -368,23 +375,34 @@ fn render_locator(
     match result {
         crate::core::tools::primitive::ReadResult::Text(t) => {
             let end = t.start_line + t.num_lines.saturating_sub(1);
-            let range = format!("L{}-{end} ({} lines)", t.start_line, t.num_lines);
+            let range = tr(
+                if t.num_lines == 1 {
+                    "toolRead.range.one"
+                } else {
+                    "toolRead.range.other"
+                },
+                &[
+                    ("start", &t.start_line.to_string()),
+                    ("end", &end.to_string()),
+                    ("count", &t.num_lines.to_string()),
+                ],
+            );
             let note = t.truncated.then(|| {
-                format!(
-                    "truncated; resume: read(path=\"{path}\", offset={})",
-                    end + 1
+                tr(
+                    "toolRead.resume",
+                    &[("path", path), ("offset", &(end + 1).to_string())],
                 )
             });
             (Some(range), note)
         }
         crate::core::tools::primitive::ReadResult::Image(b) => {
-            (None, Some(format!("image {}", b.mime)))
+            (None, Some(tr("toolRead.image", &[("mime", &b.mime)])))
         }
         crate::core::tools::primitive::ReadResult::Pdf(b) => {
             (None, Some(format!("pdf {}", b.mime)))
         }
         crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => {
-            (None, Some("unchanged since your last read".to_string()))
+            (None, Some(tr("toolRead.unchanged", &[])))
         }
     }
 }

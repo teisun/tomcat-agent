@@ -69,7 +69,7 @@ it.each([true, false])("background completion before EOF=%s preserves notificati
   try {
     fixture = await setupServeFixture(`http://127.0.0.1:${port}`);
     const binary = await ensureTomcatBinary();
-    const env = { ...fixture.env, TOMCAT__PRIMITIVE__AUTO_CONFIRM: "true", TOMCAT__LLM__TITLE_MODEL: "gpt-5.4", RUST_LOG: "tomcat=info" };
+    const env = { ...fixture.env, TOMCAT__UI__LANGUAGE: "en", TOMCAT__PRIMITIVE__AUTO_CONFIRM: "true", TOMCAT__LLM__TITLE_MODEL: "gpt-5.4", RUST_LOG: "tomcat=info" };
     await exec(binary, ["workspace", "add", fixture.workspacePath], { cwd: fixture.workspacePath, env, timeout: 15_000 });
     child = spawn(binary, ["code"], { cwd: fixture.workspacePath, env, stdio: "pipe", detached: process.platform !== "win32" });
     closed = new Promise((resolve, reject) => { child!.once("close", resolve); child!.once("error", reject); });

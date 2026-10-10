@@ -13,7 +13,7 @@ export class TomcatSessionPool {
   pickDefaultSession(payload: SessionListPayload): string | null {
     return (
       payload.sessions.find((session) => session.isCurrent)?.sessionId ??
-      payload.activeSessionId ??
+      payload.sessions.find((session) => session.sessionId === payload.activeSessionId)?.sessionId ??
       payload.sessions[0]?.sessionId ??
       null
     );

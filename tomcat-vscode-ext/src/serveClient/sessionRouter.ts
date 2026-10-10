@@ -23,6 +23,8 @@ export interface SessionSummary {
 }
 
 export interface SessionListPayload {
+  /** Scope identity for safe deletion-result reconciliation; absent on legacy Serve. */
+  sessionKey?: string;
   activeSessionId: string | null;
   scope: ListSessionsScope;
   sessions: SessionSummary[];
@@ -261,17 +263,15 @@ export class SessionRouter {
       scope,
       type: "list_sessions",
     });
+    requireSuccessfulResponse(response, "list_sessions");
     const payload = response.payload;
-
-    if (!isRecord(payload)) {
-      return {
-        activeSessionId: null,
-        scope,
-        sessions: [],
-      };
+    if (!isRecord(payload) || !Array.isArray(payload.sessions)
+      || !payload.sessions.every(session => isRecord(session) && typeof session.sessionId === "string" && session.sessionId.length > 0)) {
+      throw new Error("Tomcat list_sessions returned an invalid session list");
     }
 
     return {
+      ...(typeof payload.sessionKey === "string" ? { sessionKey: payload.sessionKey } : {}),
       activeSessionId:
         typeof payload.activeSessionId === "string" ? payload.activeSessionId : null,
       scope,

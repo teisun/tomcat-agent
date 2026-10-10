@@ -481,7 +481,7 @@ describe("TranscriptView", () => {
       />,
     );
 
-    const transcript = screen.getByLabelText("active-session");
+    const transcript = screen.getByTestId("transcript");
     const checkpointButton = screen.getByTestId("checkpoint-marker-button");
     expect(transcript.textContent).toContain("first prompt");
     expect(transcript.textContent).toContain("Restore Checkpoint");

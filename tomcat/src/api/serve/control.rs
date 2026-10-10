@@ -37,6 +37,7 @@ pub(crate) async fn handle_control_or_interrupt(
                     session_id.or_else(|| state.registry.active_session_id()),
                     serde_json::json!({
                         "protocolVersion": 2,
+                        "uiPreferences": super::ui_preferences::snapshot().ok(),
                         "serverVersion": env!("CARGO_PKG_VERSION"),
                         "capabilities": [
                             "prompt",
@@ -53,6 +54,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "get_instruction_catalog",
                             "set_plan_mode",
                             "set_model",
+                            "set_ui_language",
                             "set_thinking_level",
                             "set_speed",
                             "set_context_window",
@@ -83,12 +85,13 @@ pub(crate) async fn handle_control_or_interrupt(
                             "cache_attachment_thumbnail",
                             "discard_detached_session",
                             "close_session",
+                            "delete_session",
                             "list_sessions",
                             "interrupt",
                             "ask_question",
                             "confirmation"
                         ],
-                        "slashCommands": crate::api::chat::commands::SHARED_SLASH_COMMANDS,
+                        "slashCommands": crate::api::chat::commands::shared_slash_commands(),
                         "sessionId": state.registry.active_session_id(),
                         // 见 `serve::attachment_root`：宿主必须在渲染 webview 之前拿到它。
                         "attachmentRoot": super::attachment_root(&state)
@@ -192,7 +195,7 @@ pub(crate) async fn shutdown_all_sessions(state: Arc<ServeState>) -> Result<(), 
         .filter_map(|summary| state.registry.get(&summary.session_id))
         .collect::<Vec<_>>();
     for slot in slots {
-        cleanup_session_slot(&state, &slot, false, "serve_stdio_shutdown").await?;
+        cleanup_session_slot(&state, &slot, super::SlotCleanup::Shutdown).await?;
     }
     Ok(())
 }

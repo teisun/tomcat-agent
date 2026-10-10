@@ -75,27 +75,13 @@ impl HashlineAnchorValidationError {
             HashlineAnchorValidationKind::OutOfRange {
                 line_no,
                 total_lines,
-            } => format!(
-                "- edits[{}].{}: OutOfRange: 锚点行号 {} 超过文件总行数 {}",
-                self.segment_index, self.field, line_no, total_lines
-            ),
+            } => format!("- edits[{}].{}: OutOfRange: Anchor line {line_no} exceeds the file's {total_lines} lines", self.segment_index, self.field),
             HashlineAnchorValidationKind::Mismatch {
                 line_no,
                 expected_hash,
                 actual_hash,
                 line_excerpt,
-            } => format!(
-                "- edits[{}].{}: HashMismatch: 锚点 {}#{} 与当前文件第 {} 行哈希 {} 不一致；最新锚点 `{}#{}`；当前行摘要 {:?}",
-                self.segment_index,
-                self.field,
-                line_no,
-                expected_hash,
-                line_no,
-                actual_hash,
-                line_no,
-                actual_hash,
-                line_excerpt,
-            ),
+            } => format!("- edits[{}].{}: HashMismatch: Anchor {line_no}#{expected_hash} does not match current line {line_no} hash {actual_hash}; latest anchor `{line_no}#{actual_hash}`; current line excerpt {line_excerpt:?}", self.segment_index, self.field),
         }
     }
 }
@@ -136,10 +122,7 @@ pub async fn hashline_edit_impl(
     let outcome = tokio::task::spawn_blocking(move || -> Result<HashlineEditOutcome, AppError> {
         let original = read_file_utf8(&path_for_edit).map_err(|e| match e {
             AppError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData => {
-                AppError::Primitive(format!(
-                    "BinaryFile: `{}` 不是 UTF-8 文本，hashline_edit 拒绝执行",
-                    user_path
-                ))
+                AppError::Primitive(format!("BinaryFile: `{user_path}` is not UTF-8 text; hashline_edit refused"))
             }
             other => other,
         })?;
@@ -187,21 +170,14 @@ pub async fn hashline_edit_impl(
                 .map(HashlineAnchorValidationError::render)
                 .collect::<Vec<_>>()
                 .join("\n");
-            return Err(AppError::Primitive(format!(
-                "HashlineValidationFailed: {} 个锚点无效；文件未修改。请重新 `read hashline=true` 获取全部涉及区段的最新锚点：\n{}",
-                validation_errors.len(),
-                details
-            )));
+            return Err(AppError::Primitive(format!("HashlineValidationFailed: Invalid anchors: {}; file was not modified. Reread all affected ranges with `read hashline=true` for current anchors:\n{details}", validation_errors.len())));
         }
         spans.sort_by_key(|(s, _, _)| *s);
         for w in spans.windows(2) {
             let (_, e1, _) = &w[0];
             let (s2, _, _) = &w[1];
             if *s2 <= *e1 {
-                return Err(AppError::Primitive(format!(
-                    "Overlap: hashline_edit 段在行 [{}..{}] 与下一段起始行 {} 相交",
-                    w[0].0, e1, s2
-                )));
+                return Err(AppError::Primitive(format!("Overlap: hashline_edit range [{}..{e1}] overlaps the next range starting at line {s2}", w[0].0)));
             }
         }
 
@@ -365,7 +341,7 @@ fn line_excerpt(line: &str) -> String {
     let mut chars = line.trim().chars();
     let excerpt: String = chars.by_ref().take(MAX_CHARS).collect();
     if excerpt.is_empty() {
-        return "（空行）".to_string();
+        return "(empty line)".to_string();
     }
     if chars.next().is_some() {
         format!("{excerpt}…")

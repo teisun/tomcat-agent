@@ -66,12 +66,12 @@ it("missing attachments disable Save but keep the editor editable for repair", (
 it("paused row uses only content and necessary ARIA actions; steer row is read-only", () => {
   const postMessage = vi.fn(), q = queue(); const props = composerProps();
   const view = render(<MessageQueueDock sessionId="s" queue={q} busy composerProps={props} vscodeApi={{ postMessage }} />);
-  expect(screen.getByRole("button", { name: "Collapse messages" }).textContent).toContain("1 Queued · 已暂停");
-  fireEvent.click(screen.getByRole("button", { name: "立即插入当前任务，沿用当前模式和模型" }));
+  expect(screen.getByRole("button", { name: "Collapse messages" }).textContent).toContain("1 Queued · Paused");
+  fireEvent.click(screen.getByRole("button", { name: "Insert into the current task using its current mode and model" }));
   expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "queueAction", data: { sessionId: "s", userMessageId: "X", action: "send" } }));
   view.rerender(<MessageQueueDock sessionId="s" queue={{ ...q, items: [{ ...q.items[0], status: "steering" }] }} busy composerProps={props} vscodeApi={{ postMessage }} />);
-  expect(screen.queryByRole("button", { name: "删除待发消息" })).toBeNull(); expect(screen.queryByRole("button", { name: "编辑待发消息" })).toBeNull();
-  expect(screen.getByLabelText("正在发送")).toBeTruthy(); expect(screen.getByRole("button", { name: "Collapse messages" }).textContent).toContain("Messages");
+  expect(screen.queryByRole("button", { name: "Delete queued message" })).toBeNull(); expect(screen.queryByRole("button", { name: "Edit queued message" })).toBeNull();
+  expect(screen.getByLabelText("Sending")).toBeTruthy(); expect(screen.getByRole("button", { name: "Collapse messages" }).textContent).toContain("Messages");
 });
 it("composer editor keeps the screenshot header, shared config and arrow save without rewind", async () => {
   const postMessage = vi.fn(), action = vi.fn(), props = composerProps(); const q = queue();

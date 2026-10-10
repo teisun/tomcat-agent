@@ -35,7 +35,10 @@ fn rejects_empty_missing_and_oversized_task_lists() {
         "tasks": (0..7).map(|i| serde_json::json!({ "prompt": format!("q{i}") })).collect::<Vec<_>>()
     });
     let err = parse_tasks(&too_many).expect_err("should reject oversized batch");
-    assert!(err.contains("最多派发"), "err={err}");
+    assert!(
+        err.contains("dispatch_agent allows at most 6 tasks per call"),
+        "err={err}"
+    );
 }
 
 #[test]
@@ -47,5 +50,5 @@ fn rejects_duplicate_ids_because_reports_are_matched_by_id() {
         ]
     })))
     .expect_err("duplicate ids must be rejected");
-    assert!(err.contains("重复的 id"), "err={err}");
+    assert!(err.contains("Duplicate id"), "err={err}");
 }

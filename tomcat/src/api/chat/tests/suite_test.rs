@@ -1907,7 +1907,14 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
 
     assert_eq!(
         crate::api::chat::render_error_message(&err),
-        "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
+        format!(
+            "{} · PS-SHA-01JfN78 · Request-Id req_turn2",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
 
     let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
@@ -1929,7 +1936,14 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
         .expect("expected structured error entry");
     assert_eq!(
         error_entry.summary,
-        "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
+        format!(
+            "{} · PS-SHA-01JfN78 · Request-Id req_turn2",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
     assert_eq!(
         error_entry.failure_kind.as_deref(),
@@ -1972,7 +1986,7 @@ fn failed_turn_recovery_renders_actionable_normalized_failure_messages() {
     );
     assert_eq!(
         crate::api::chat::render_error_message(&billing),
-        "账户余额或额度不足。充值或切换 Provider 后可重试。"
+        crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "runtime.billing", &[])
     );
 
     let overflow = crate::infra::error::llm_stream_terminal_error(
@@ -2077,7 +2091,14 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
 
     assert_eq!(
         crate::api::chat::render_error_message(&err),
-        "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
+        format!(
+            "{} · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
 
     let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
@@ -2107,7 +2128,14 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
     );
     assert_eq!(
         error_entry.summary,
-        "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
+        format!(
+            "{} · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
     assert!(error_entry
         .detail

@@ -60,7 +60,9 @@ async fn dispatch_verifier_without_dispatcher_returns_placeholder_summary() {
 
     assert_eq!(summary.verdict, "aborted");
     assert_eq!(summary.verifier_stop_reason, "not_dispatched");
-    assert!(summary.summary.contains("未注入"));
+    assert!(summary
+        .summary
+        .contains("Verifier sub-Agent was not supplied"));
     cleanup_home(&home);
 }
 
@@ -119,7 +121,7 @@ async fn write_verify_transcript_keeps_plan_verify_event_available_for_future_re
         .iter()
         .find(|v| v["event"] == "plan.verify")
         .expect("缺少 plan.verify 事件");
-    assert!(warnings.iter().any(|w| w.contains("降级为 skip")));
+    assert!(warnings.iter().any(|w| w.contains("downgraded to skip")));
     assert_eq!(summary.verdict, "partial");
     assert_eq!(summary.checks[0].result, "skip");
     assert_eq!(verify_event["plan_id"], plan_id);
@@ -148,10 +150,12 @@ fn normalize_for_gate_downgrades_empty_pass_command_and_marks_partial() {
 
     assert_eq!(summary.checks[0].result, "skip");
     assert_eq!(summary.verdict, "partial");
-    assert!(warnings.iter().any(|w| w.contains("command 为空")));
     assert!(warnings
         .iter()
-        .any(|w| w.contains("verdict 已降级为 partial")));
+        .any(|w| w.contains("pass without a command")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("verdict downgraded to partial")));
 }
 
 #[test]

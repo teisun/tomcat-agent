@@ -58,6 +58,8 @@ export type InstructionKind = "command" | "skill";
 
 export type ListSessionsScope = "live" | "disk";
 
+export type Locale = "en" | "zh-CN";
+
 export type Message = any;
 
 export interface ModelEntryInput {
@@ -405,6 +407,8 @@ export type ToolMediaRef = {
 
 export type ToolOutput = any;
 
+export type UiLanguage = "auto" | "en" | "zh-CN";
+
 export interface ConnectorRecoveryProgress {
   maxAttempts: number;
   phase: string;
@@ -434,6 +438,9 @@ export type ControlFrame = {
   type: "control_response";
 };
 
+export interface DeleteSessionOutcome {
+  warnings: string[];
+}
 export interface IngestAttachmentResponse {
   blobSha: string;
   bytes: number;
@@ -604,6 +611,10 @@ export type ServeCommand = {
   type: "rewind_and_resend";
 } | {
   id?: null | string;
+  language: UiLanguage;
+  type: "set_ui_language";
+} | {
+  id?: null | string;
   level: string;
   model: string;
   sessionId?: null | string;
@@ -698,6 +709,10 @@ export type ServeCommand = {
   sessionId: string;
   sourceTurnId: string;
   type: "keep_session_files";
+} | {
+  id?: null | string;
+  sessionId: string;
+  type: "delete_session";
 } | {
   id?: null | string;
   sessionId: string;
@@ -812,6 +827,11 @@ export interface SharedSlashCommand {
 export interface SlashReply {
   ok: boolean;
   text: string;
+}
+export interface UiPreferences {
+  effective: Locale;
+  envOverride: boolean;
+  language: UiLanguage;
 }
 export interface UpsertModelResponse {
   model: ModelView;

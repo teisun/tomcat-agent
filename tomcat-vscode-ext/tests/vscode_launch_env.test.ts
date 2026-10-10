@@ -59,6 +59,7 @@ describe("VS Code GUI launch environment", () => {
       const before = [...launchArgs];
       await runVsCodeGuiTests(async (received) => {
         const supplied = Number(received.extensionTestsEnv!.TOMCAT_E2E_CDP_PORT);
+        expect(received.launchArgs).toContain("--locale=en");
         expect(supplied).toBeGreaterThan(0);
         expect(received.launchArgs!.filter((arg) => arg.startsWith("--remote-debugging-port=")))
           .toEqual([`--remote-debugging-port=${supplied}`]);
@@ -69,6 +70,14 @@ describe("VS Code GUI launch environment", () => {
       }, { launchArgs, extensionTestsEnv: { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root } });
       expect(launchArgs).toEqual(before);
     }
+  });
+
+  it("preserves an explicitly requested host locale", async () => {
+    const root = await temp();
+    await runVsCodeGuiTests(async received => {
+      expect(received.launchArgs?.filter(arg => arg.startsWith("--locale="))).toEqual(["--locale=zh-CN"]);
+      return 0;
+    }, { launchArgs: ["--locale=zh-CN"], extensionTestsEnv: { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root } });
   });
 
   it("rejects overlapping scopes without disturbing the active launch", async () => {

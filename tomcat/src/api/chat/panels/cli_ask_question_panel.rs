@@ -1,3 +1,4 @@
+use crate::infra::i18n::tr;
 use async_trait::async_trait;
 
 use crate::core::plan_runtime::panels::{
@@ -39,15 +40,27 @@ impl AskQuestionPanel for CliAskQuestionPanel {
                 eprintln!("\n{}", question.prompt);
                 for (index, option) in question.options.iter().enumerate() {
                     let suffix = if option.recommended {
-                        " — 推荐"
+                        tr("question.recommended", &[])
                     } else {
-                        ""
+                        String::new()
                     };
                     eprintln!("  {}. {}{}", index + 1, option.label, suffix);
                 }
-                eprintln!("  c. 自定义…");
-                eprintln!("  skip. 跳过本题");
-                eprint!("单选/c/skip > ");
+                if question.allow_custom {
+                    eprintln!("{}", tr("question.custom_menu", &[]));
+                }
+                eprintln!("{}", tr("question.skip_menu", &[]));
+                eprint!(
+                    "{}",
+                    tr(
+                        if question.allow_custom {
+                            "question.input_custom"
+                        } else {
+                            "question.input_fixed"
+                        },
+                        &[]
+                    )
+                );
 
                 let line = match read_one_line(&termination).await {
                     Ok(line) => line,
@@ -79,7 +92,7 @@ impl AskQuestionPanel for CliAskQuestionPanel {
                     answers.push(answer);
                     break;
                 }
-                eprintln!("(无法识别，请重试当前题)");
+                eprintln!("{}", tr("question.invalid", &[]));
             }
         }
         AskQuestionResult::answered(answers)
@@ -110,6 +123,9 @@ async fn parse_custom_answer(
     line: &str,
     termination: &AskQuestionTermination,
 ) -> Result<Option<Answer>, AskQuestionResult> {
+    if !question.allow_custom {
+        return Ok(None);
+    }
     let mut chars = line.chars();
     let Some(first) = chars.next() else {
         return Ok(None);
@@ -119,11 +135,11 @@ async fn parse_custom_answer(
     }
     let mut text = chars.as_str().trim().to_string();
     if text.is_empty() {
-        eprint!("自定义内容（1-500 字符）> ");
+        eprint!("{}", tr("question.custom_prompt", &[]));
         text = read_one_line(termination).await?.trim().to_string();
     }
-    if text.is_empty() || text.len() > 500 {
-        eprintln!("(无效自定义文本，请重试当前题)");
+    if text.is_empty() || text.chars().count() > 500 {
+        eprintln!("{}", tr("question.custom_invalid", &[]));
         return Ok(None);
     }
     Ok(Some(Answer {
@@ -266,4 +282,50 @@ pub(crate) async fn read_one_line_from_fd_for_test(
                 AskQuestionOutcome::HostDisconnected,
             ))
         })
+}
+
+#[cfg(test)]
+mod custom_answer_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cli_custom_answer_counts_characters_not_utf8_bytes() {
+        let question = Question {
+            allow_custom: true,
+            id: "q1".into(),
+            prompt: "Choose".into(),
+            options: vec![
+                QuestionOption {
+                    id: "a".into(),
+                    label: "A".into(),
+                    recommended: true,
+                },
+                QuestionOption {
+                    id: "b".into(),
+                    label: "B".into(),
+                    recommended: false,
+                },
+            ],
+        };
+        for glyph in ["a", "中", "🙂"] {
+            let text = glyph.repeat(500);
+            let answer = parse_custom_answer(
+                &question,
+                &format!("c {text}"),
+                &AskQuestionTermination::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(answer.custom_text.as_deref(), Some(text.as_str()));
+            assert!(parse_custom_answer(
+                &question,
+                &format!("c {}", glyph.repeat(501)),
+                &AskQuestionTermination::default()
+            )
+            .await
+            .unwrap()
+            .is_none());
+        }
+    }
 }

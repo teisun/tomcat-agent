@@ -10,6 +10,7 @@ mod env_file;
 mod load;
 pub mod lock;
 mod types;
+pub mod ui;
 
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,7 @@ pub use append::append_workspace_entry_to_disk;
 pub use append::{append_path_rule_to_disk, append_workspace_root_to_disk};
 pub use assets::ensure_embedded_assets;
 pub use default_model::{clear_model_references, write_default_model};
+pub(crate) use env_file::env_file_error;
 pub use env_file::{read_env_entries, write_env_entries};
 pub use load::{
     ensure_work_dir_structure, get_work_dir, load_config, load_config_for_init,
@@ -29,6 +31,7 @@ pub use load::{
     resolve_tmp_dir, resolve_workspace_dir, resolve_workspace_roots_paths, validate_config,
 };
 pub use lock::with_config_lock;
+pub use types::UiLanguage;
 #[allow(unused_imports)]
 pub use types::WorkspaceEntry;
 #[allow(unused_imports)]

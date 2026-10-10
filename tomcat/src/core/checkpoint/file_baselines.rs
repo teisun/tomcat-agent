@@ -296,7 +296,12 @@ impl TurnFileBaselines {
                     Some(BackupPermissions::capture(meta.permissions())),
                 ),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
-                Ok(_) => return Err(AppError::Config("baseline requires a regular file".into())),
+                Ok(_) => {
+                    return Err(AppError::Config(crate::infra::i18n::tr(
+                        "baseline.regularFile",
+                        &[],
+                    )))
+                }
                 Err(error) => return Err(error.into()),
             };
             Ok(Baseline {

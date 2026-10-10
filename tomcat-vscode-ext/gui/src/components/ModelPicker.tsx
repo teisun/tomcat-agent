@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useT } from "../i18n/LocaleProvider";
 
 import { SPEEDS, type Speed } from "../../../src/shared/modelSpeed";
 import { filterModels } from "./modelSearch";
@@ -69,7 +70,7 @@ export function ModelPicker({
   disabled = false,
   dropdownTestId = "model-dropdown",
   legacyThinkingTriggerTestId,
-  label = "Model",
+  label: explicitLabel,
   models,
   onOpenModelSettings,
   onSelectContextWindow,
@@ -81,6 +82,8 @@ export function ModelPicker({
   selectedModelId,
   testId = "model-select",
 }: ModelPickerProps) {
+  const t = useT();
+  const label = explicitLabel ?? t("model.label");
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [primaryPosition, setPrimaryPosition] = useState<{ left: number; top: number } | null>(null);
@@ -105,7 +108,7 @@ export function ModelPicker({
     modelId: selectedModelId,
     selectedReasoningLevel: selectedModel?.selectedReasoningLevel,
     supportedReasoningLevels: selectedModel?.supportedReasoningLevels,
-  });
+  }, t);
   const configModel =
     models.find((model) => model.id === configModelId) ?? null;
 
@@ -138,7 +141,7 @@ export function ModelPicker({
     updatePosition();
     window.addEventListener("resize", updatePosition);
     return () => window.removeEventListener("resize", updatePosition);
-  }, [open, placement, visibleModels]);
+  }, [open, placement, visibleModels, t]);
 
   const clearCloseTimer = () => {
     if (closeConfigTimer.current !== null) {
@@ -213,7 +216,7 @@ export function ModelPicker({
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", closeOnScroll, true);
     };
-  }, [configModelId, visibleModels]);
+  }, [configModelId, visibleModels, t]);
 
   useEffect(
     () => () => {
@@ -320,7 +323,7 @@ export function ModelPicker({
               modelId: selectedModel.id,
               selectedReasoningLevel: selectedModel.selectedReasoningLevel,
               supportedReasoningLevels: selectedModel.supportedReasoningLevels,
-            })}
+            }, t)}
           </span>
         </button>
       ) : null}
@@ -332,20 +335,20 @@ export function ModelPicker({
           style={{ position: "fixed", bottom: "auto", top: primaryPosition?.top ?? 0, left: primaryPosition?.left ?? 0, visibility: primaryPosition ? undefined : "hidden", maxHeight: "calc(100vh - 16px)", overflowY: "auto" }}
         >
           <input
-            aria-label="Search models"
+            aria-label={t("model.search")}
             autoFocus
             className="tc-model-picker-search"
             onChange={(event) => {
               setConfigModelId(null);
               setQuery(event.target.value);
             }}
-            placeholder="Search models"
+            placeholder={t("model.search")}
             type="search"
             value={query}
           />
           <div className="tc-model-picker-list">
             {visibleModels.length === 0 ? (
-              <div className="tc-model-picker-empty">No matching models</div>
+              <div className="tc-model-picker-empty">{t("model.noMatch")}</div>
             ) : (
               visibleModels.map((model) => {
                 const selected = model.id === selectedModelId;
@@ -357,7 +360,7 @@ export function ModelPicker({
                   modelId: model.id,
                   selectedReasoningLevel: model.selectedReasoningLevel,
                   supportedReasoningLevels: model.supportedReasoningLevels,
-                });
+                }, t);
                 return (
                   <div
                     data-model-id={model.id}
@@ -405,7 +408,7 @@ export function ModelPicker({
                     <span className="tc-model-picker-option-action">
                       <button
                         aria-hidden={!editVisible}
-                        aria-label={`Edit ${model.modelName ?? model.id}`}
+                        aria-label={t("model.editNamed", { name: model.modelName ?? model.id })}
                         className={[
                           "tc-model-picker-edit",
                           editVisible ? "is-visible" : "",
@@ -420,11 +423,11 @@ export function ModelPicker({
                         tabIndex={editVisible ? 0 : -1}
                         type="button"
                       >
-                        Edit
+                        {t("model.edit")}
                       </button>
                       {selected && !editVisible ? (
                         <i
-                          aria-label="Selected"
+                          aria-label={t("model.selected")}
                           className="codicon codicon-check"
                         />
                       ) : null}
@@ -445,7 +448,7 @@ export function ModelPicker({
               }}
               type="button"
             >
-              Add Models...
+              {t("model.add")}
             </button>
           ) : null}
         </div>
@@ -488,6 +491,7 @@ function ModelConfigPopover({
   popoverRef: RefObject<HTMLElement | null>;
   position: ConfigPopoverPosition | null;
 }) {
+  const t = useT();
   const contextWindowOptions =
     model.contextWindowOptions?.length
       ? model.contextWindowOptions
@@ -499,7 +503,7 @@ function ModelConfigPopover({
     model.selectedContextWindow ?? model.contextWindow;
   return (
     <section
-      aria-label={`Configure ${model.modelName ?? model.id}`}
+      aria-label={t("model.configure", { name: model.modelName ?? model.id })}
       className={`tc-model-config-popover is-side-${placement}`}
       data-testid="thinking-level-dropdown"
       onMouseEnter={onMouseEnter}
@@ -512,25 +516,25 @@ function ModelConfigPopover({
       }}
     >
       {onSelectSpeed && (model.supportedSpeeds?.length ?? 0) > 0 ? (
-        <ConfigSection title="Speed">
+        <ConfigSection title={t("model.speed")}>
           {SPEEDS.filter(
             (speed) => speed === "standard" || model.supportedSpeeds?.includes(speed),
           ).map((speed) => (
             <ConfigOption
               key={speed}
-              label={{ standard: "Standard", fast: "Fast", ultrafast: "Ultrafast" }[speed]}
+              label={t(`term.speed.${speed}`)}
               onSelect={() => onSelectSpeed(model.id, speed)}
               selected={speed === (model.selectedSpeed ?? "standard")}
               testId="speed-option"
               title={speed === "standard"
                 ? undefined
-                : "Faster output; higher cost. Upstream access required."}
+                : t("model.speedHint")}
             />
           ))}
         </ConfigSection>
       ) : null}
       {onSelectContextWindow && contextWindowOptions.length > 0 ? (
-        <ConfigSection title="Context">
+        <ConfigSection title={t("model.context")}>
           {contextWindowOptions.map((contextWindow) => (
             <ConfigOption
               key={contextWindow}
@@ -543,11 +547,11 @@ function ModelConfigPopover({
         </ConfigSection>
       ) : null}
       {onSelectThinkingLevel && supportedReasoningLevels.length > 0 ? (
-        <ConfigSection title="Effort">
+        <ConfigSection title={t("model.effort")}>
           {supportedReasoningLevels.map((level) => (
             <ConfigOption
               key={level}
-              label={thinkingLevelLabel(level)}
+              label={thinkingLevelLabel(level, t)}
               onSelect={() => onSelectThinkingLevel?.(model.id, level)}
               selected={level === model.selectedReasoningLevel}
               testId="thinking-level-option"
@@ -595,6 +599,7 @@ function ConfigOption({
   testId: string;
   title?: string;
 }) {
+  const t = useT();
   return (
     <button
       className="tc-model-config-option"
@@ -607,7 +612,7 @@ function ConfigOption({
     >
       <span>{label}</span>
       {selected ? (
-        <i aria-label="Selected" className="codicon codicon-check" />
+        <i aria-label={t("model.selected")} className="codicon codicon-check" />
       ) : null}
     </button>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 import { freshOccurrences } from "../../../src/shared/composerOccurrences";
 import { isPreviewRewindResponse } from "../../../src/shared/messageEditProtocol";
 import type { PreviewRewindResponse } from "../../../src/serveClient/wire";
@@ -35,6 +36,7 @@ export function InlineMessageEditor({
   vscodeApi: VsCodeApiLike;
   onClose(): void;
 }) {
+  const t = useT();
   const editor = useRef<ComposerHandle>(null);
   const root = useRef<HTMLDivElement>(null);
   const inside = useRef(false);
@@ -49,7 +51,7 @@ export function InlineMessageEditor({
   const [attachments, setAttachments] = useState<WebviewPendingAttachment[]>(() =>
     (message.attachments ?? []).map((a) => ({ ...a, label: a.filename })),
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | true | null>(null);
   const [pending, setPending] = useState(false);
   const [zoomedImage, setZoomedImage] = useState<ZoomedImage | null>(null);
   const [preview, setPreview] = useState<PreviewRewindResponse | null>(null);
@@ -164,7 +166,7 @@ export function InlineMessageEditor({
         closeRef.current();
         return;
       }
-      setError(content.errorDetail ?? content.error ?? "未能重新发送，修改稿已保留。");
+      setError(content.errorDetail ?? content.error ?? true);
       if (content.error === "revert_unavailable") {
         const key = id();
         request.current = { id: key, kind: "preview" };
@@ -251,7 +253,7 @@ export function InlineMessageEditor({
         onDraftChange={() => undefined}
         attachments={attachments}
         attachmentsPending={workCount > 0}
-        feedback={error ? { hasErrors: true, message: error } : null}
+        feedback={error ? { hasErrors: true, message: error === true ? t("edit.sendFailed") : error } : null}
         onRemoveAttachment={(key) => setAttachments((old) => old.filter((a) => a.id !== key))}
         onOpenAttachment={(a) => {
           if (a.kind === "image" && a.fullUri) setZoomedImage({ alt: a.filename, src: a.fullUri });
@@ -294,11 +296,11 @@ export function InlineMessageEditor({
         }}
       />
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
-      {workCount > 0 ? <div role="status" className="tc-inline-editor__status">正在准备附件…</div> : null}
+      {workCount > 0 ? <div role="status" className="tc-inline-editor__status">{t("edit.preparing")}</div> : null}
       {pending ? (
         <div role="status" className="tc-inline-editor__status">
-          {request.current?.kind === "preview" ? "正在读取恢复信息…"
-            : frozen.current?.busy ? "正在停止当前任务…" : "正在重发…"}
+          {t(request.current?.kind === "preview" ? "edit.previewPending"
+            : frozen.current?.busy ? "edit.stopPending" : "edit.resendPending")}
         </div>
       ) : null}
       {preview ? (

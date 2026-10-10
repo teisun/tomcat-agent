@@ -23,7 +23,7 @@ pub(super) fn parse_load_skill_args(
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "load_skill: 缺少必填字段 `name`".to_string())?;
+        .ok_or_else(|| "load_skill: missing required field `name`".to_string())?;
     let file = match args.get("file") {
         None => None,
         Some(value) if value.is_null() => None,
@@ -32,7 +32,7 @@ pub(super) fn parse_load_skill_args(
                 .as_str()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| "load_skill: `file` 必须是字符串或 null".to_string())?,
+                .ok_or_else(|| "load_skill: `file` must be a string or null".to_string())?,
         ),
     };
     Ok((name, file))
@@ -46,7 +46,7 @@ pub(super) fn parse_edit_args(
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .ok_or_else(|| "edit: 缺少必填字段 `path`".to_string())?;
+        .ok_or_else(|| "edit: missing required field `path`".to_string())?;
 
     let ops = parse_edit_ops(args, "edit")?;
     Ok((path, ops))
@@ -118,9 +118,11 @@ pub(super) fn parse_edit_ops(
     {
         let arr = edits_v
             .as_array()
-            .ok_or_else(|| format!("edit: `{scope}.edits` 必须是数组"))?;
+            .ok_or_else(|| format!("edit: `{scope}.edits` must be an array"))?;
         if arr.is_empty() {
-            return Err(format!("edit: `{scope}.edits` 至少需要一条编辑段"));
+            return Err(format!(
+                "edit: `{scope}.edits` requires at least one edit segment"
+            ));
         }
         let mut ops = Vec::with_capacity(arr.len());
         for (i, seg) in arr
@@ -131,11 +133,15 @@ pub(super) fn parse_edit_ops(
             let old = seg
                 .get("old_content")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("edit: {scope}.edits[{i}].old_content 缺失或非字符串"))?;
+                .ok_or_else(|| {
+                    format!("edit: {scope}.edits[{i}].old_content is missing or not a string")
+                })?;
             let new_c = seg
                 .get("new_content")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("edit: {scope}.edits[{i}].new_content 缺失或非字符串"))?;
+                .ok_or_else(|| {
+                    format!("edit: {scope}.edits[{i}].new_content is missing or not a string")
+                })?;
             let replace_all = seg
                 .get("replace_all")
                 .and_then(|v| v.as_bool())
@@ -149,11 +155,11 @@ pub(super) fn parse_edit_ops(
     let old = args
         .get("old_content")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("edit: {scope} 缺少 `old_content`（或 `edits`）"))?;
+        .ok_or_else(|| format!("edit: {scope} requires `old_content` (or `edits`)"))?;
     let new_c = args
         .get("new_content")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("edit: {scope} 缺少 `new_content`"))?;
+        .ok_or_else(|| format!("edit: {scope} requires `new_content`"))?;
     let replace_all = args
         .get("replace_all")
         .and_then(|v| v.as_bool())
@@ -170,7 +176,7 @@ fn parse_edit_mode(args: &serde_json::Value, scope: &str) -> Result<EditStringMo
             Some("insert_before") => Ok(EditStringMode::InsertBefore),
             Some("insert_after") => Ok(EditStringMode::InsertAfter),
             _ => Err(format!(
-                "edit: {scope}.mode 必须是 `replace`、`insert_before` 或 `insert_after`"
+                "edit: {scope}.mode must be `replace`, `insert_before` or `insert_after`"
             )),
         },
     }
@@ -185,7 +191,7 @@ fn make_edit_op(
 ) -> Result<EditOperation, String> {
     if replace_all && mode != EditStringMode::Replace {
         return Err(format!(
-            "edit: {scope}.replace_all 只能与 mode=`replace` 一起使用"
+            "edit: {scope}.replace_all may only be used with mode=`replace`"
         ));
     }
     let encoded_old = match mode {
@@ -223,37 +229,36 @@ pub(super) fn parse_hashline_edit_args(
     let path = args
         .get("path")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "hashline_edit: 缺少必填字段 `path`".to_string())?;
+        .ok_or_else(|| "hashline_edit: missing required field `path`".to_string())?;
     let edits_v = args
         .get("edits")
-        .ok_or_else(|| "hashline_edit: 缺少必填字段 `edits`".to_string())?;
+        .ok_or_else(|| "hashline_edit: missing required field `edits`".to_string())?;
     let arr = edits_v
         .as_array()
-        .ok_or_else(|| "hashline_edit: `edits` 必须是数组".to_string())?;
+        .ok_or_else(|| "hashline_edit: `edits` must be an array".to_string())?;
     if arr.is_empty() {
-        return Err("hashline_edit: `edits` 至少需要一条段".to_string());
+        return Err("hashline_edit: `edits` requires at least one edit segment".to_string());
     }
     let mut segments = Vec::with_capacity(arr.len());
     for (i, seg) in arr.iter().enumerate() {
         let op_str = seg
             .get("op")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("hashline_edit: edits[{}].op 缺失或非字符串", i))?;
+            .ok_or_else(|| format!("hashline_edit: edits[{i}].op is missing or not a string"))?;
         let op = match op_str {
             "replace" => HashlineOp::Replace,
             "insert" => HashlineOp::Insert,
             "delete" => HashlineOp::Delete,
             other => {
                 return Err(format!(
-                    "hashline_edit: edits[{}].op 必须是 replace|insert|delete，实际 `{}`",
-                    i, other
-                ))
+                    "hashline_edit: edits[{i}].op must be replace|insert|delete; received `{other}`"
+                ));
             }
         };
         let pos = seg
             .get("pos")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("hashline_edit: edits[{}].pos 缺失或非字符串", i))?;
+            .ok_or_else(|| format!("hashline_edit: edits[{i}].pos is missing or not a string"))?;
         let (start_line, start_hash) =
             HashlineSegment::parse_anchor(pos, i, "pos").map_err(|e| e.to_string())?;
         let (end_line, end_hash) = match seg.get("end").and_then(|v| v.as_str()) {

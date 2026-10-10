@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::infra::config::{get_work_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::AppConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,9 +111,7 @@ pub struct McpServerConfig {
 impl McpServerConfig {
     pub fn validate(&self, server_name: &str) -> Result<(), AppError> {
         if server_name.trim().is_empty() {
-            return Err(AppError::Config(
-                "MCP server name cannot be empty".to_string(),
-            ));
+            return Err(AppError::Config(tr("mcp.config.nameEmpty", &[])));
         }
         let has_command = !self.command.trim().is_empty();
         let has_url = self
@@ -120,19 +119,22 @@ impl McpServerConfig {
             .as_deref()
             .is_some_and(|url| !url.trim().is_empty());
         if self.url.is_some() && !has_url {
-            return Err(AppError::Config(format!(
-                "MCP server '{server_name}' url cannot be empty"
+            return Err(AppError::Config(tr(
+                "mcp.config.urlEmpty",
+                &[("name", server_name)],
             )));
         }
         if has_command == has_url {
-            return Err(AppError::Config(format!(
-                "MCP server '{server_name}' must define exactly one of command or url"
+            return Err(AppError::Config(tr(
+                "mcp.config.transportChoice",
+                &[("name", server_name)],
             )));
         }
         if let Some(auth) = self.auth.as_deref() {
             if !matches!(auth, "none" | "bearer" | "oauth") {
-                return Err(AppError::Config(format!(
-                    "MCP server '{server_name}' has unsupported auth mode '{auth}'"
+                return Err(AppError::Config(tr(
+                    "mcp.config.authUnsupported",
+                    &[("name", server_name), ("auth", auth)],
                 )));
             }
         }
@@ -142,31 +144,36 @@ impl McpServerConfig {
             .any(|key| key.eq_ignore_ascii_case("authorization"));
         match self.auth.as_deref() {
             Some("none") if has_auth_header || self.oauth.is_some() => {
-                return Err(AppError::Config(format!(
-                    "MCP server '{server_name}' auth=none cannot include OAuth or Authorization"
+                return Err(AppError::Config(tr(
+                    "mcp.config.noAuthConflict",
+                    &[("name", server_name)],
                 )));
             }
             Some("bearer") if self.oauth.is_some() => {
-                return Err(AppError::Config(format!(
-                    "MCP server '{server_name}' bearer auth cannot include OAuth config"
+                return Err(AppError::Config(tr(
+                    "mcp.config.bearerConflict",
+                    &[("name", server_name)],
                 )));
             }
             Some("oauth") if has_auth_header => {
-                return Err(AppError::Config(format!(
-                    "MCP server '{server_name}' OAuth auth cannot include Authorization"
+                return Err(AppError::Config(tr(
+                    "mcp.config.oauthConflict",
+                    &[("name", server_name)],
                 )));
             }
             _ => {}
         }
         if let Some(url) = self.url.as_deref() {
             let parsed = reqwest::Url::parse(url).map_err(|error| {
-                AppError::Config(format!(
-                    "MCP server '{server_name}' has invalid url: {error}"
+                AppError::Config(tr(
+                    "mcp.config.invalidUrl",
+                    &[("name", server_name), ("detail", &error.to_string())],
                 ))
             })?;
             if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-                return Err(AppError::Config(format!(
-                    "MCP server '{server_name}' url must be an http(s) URL"
+                return Err(AppError::Config(tr(
+                    "mcp.config.httpUrl",
+                    &[("name", server_name)],
                 )));
             }
         }
@@ -214,20 +221,18 @@ pub fn project_mcp_path(cfg: &AppConfig, workspace_root: &Path) -> Result<PathBu
 /// label or the effective Workspace-over-Global resolution.
 pub fn connector_config_key(path: &Path, name: &str) -> Result<String, AppError> {
     if name.trim().is_empty() {
-        return Err(AppError::Config(
-            "MCP server name cannot be empty".to_string(),
-        ));
+        return Err(AppError::Config(tr("mcp.config.nameEmpty", &[])));
     }
     let parent = path.parent().ok_or_else(|| {
-        AppError::Config(format!(
-            "MCP configuration '{}' has no parent",
-            path.display()
+        AppError::Config(tr(
+            "mcp.config.noParent",
+            &[("path", &path.display().to_string())],
         ))
     })?;
     let file_name = path.file_name().ok_or_else(|| {
-        AppError::Config(format!(
-            "MCP configuration '{}' has no file name",
-            path.display()
+        AppError::Config(tr(
+            "mcp.config.noFilename",
+            &[("path", &path.display().to_string())],
         ))
     })?;
     let lexical_parent = normalize_path_lexically(parent);
@@ -337,9 +342,9 @@ pub fn add_project_server(
 fn add_server_to_file(path: &Path, name: String, server: McpServerConfig) -> Result<(), AppError> {
     mutate_mcp_file(path, move |file| {
         if file.mcp_servers.contains_key(&name) {
-            return Err(AppError::Config(format!(
-                "MCP server '{name}' already exists in {}",
-                path.display()
+            return Err(AppError::Config(tr(
+                "mcp.config.exists",
+                &[("name", &name), ("path", &path.display().to_string())],
             )));
         }
         file.mcp_servers.insert(name, server);
@@ -390,7 +395,10 @@ fn set_tool_filter_in_file(
 ) -> Result<(), AppError> {
     mutate_mcp_file(path, |file| {
         let server = file.mcp_servers.get_mut(name).ok_or_else(|| {
-            AppError::Tool(format!("unknown MCP server '{name}' in {}", path.display()))
+            AppError::Tool(tr(
+                "mcp.config.unknown",
+                &[("name", name), ("path", &path.display().to_string())],
+            ))
         })?;
         server.tool_filter = tool_filter;
         Ok(((), true))
@@ -431,12 +439,15 @@ fn set_tool_enabled_in_file(
     enabled: bool,
 ) -> Result<bool, AppError> {
     if raw_name.is_empty() {
-        return Err(AppError::Config("MCP tool name cannot be empty".into()));
+        return Err(AppError::Config(tr("mcp.config.toolNameEmpty", &[])));
     }
     let exact_pattern = globset::escape(raw_name);
     mutate_mcp_file(path, |file| {
         let server = file.mcp_servers.get_mut(name).ok_or_else(|| {
-            AppError::Tool(format!("unknown MCP server '{name}' in {}", path.display()))
+            AppError::Tool(tr(
+                "mcp.config.unknown",
+                &[("name", name), ("path", &path.display().to_string())],
+            ))
         })?;
         let before = server.tool_filter.clone();
         let mut next = before.clone();
@@ -460,9 +471,7 @@ fn set_tool_enabled_in_file(
         }
 
         if !ToolFilterMatcher::compile(&next)?.allows(raw_name) && enabled {
-            return Err(AppError::Tool(
-                "此工具被配置中的批量规则禁用，请打开配置文件修改。".into(),
-            ));
+            return Err(AppError::Tool(tr("mcp.config.batchRule", &[])));
         }
         let changed = next != before;
         if changed {
@@ -476,12 +485,18 @@ fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, AppError> {
     let mut builder = globset::GlobSetBuilder::new();
     for pattern in patterns {
         builder.add(globset::Glob::new(pattern).map_err(|error| {
-            AppError::Config(format!("invalid MCP tool filter '{pattern}': {error}"))
+            AppError::Config(tr(
+                "mcp.config.invalidFilter",
+                &[("pattern", pattern), ("detail", &error.to_string())],
+            ))
         })?);
     }
-    builder
-        .build()
-        .map_err(|error| AppError::Config(format!("build MCP tool filter: {error}")))
+    builder.build().map_err(|error| {
+        AppError::Config(tr(
+            "mcp.config.buildFilter",
+            &[("detail", &error.to_string())],
+        ))
+    })
 }
 
 /// Server-level keys Tomcat no longer reads. They stay tolerated on purpose: a
@@ -536,16 +551,22 @@ fn read_mcp_file(path: &Path) -> Result<McpFile, AppError> {
     }
     let content = std::fs::read_to_string(path)?;
     let raw: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
-        AppError::Config(format!(
-            "parse MCP configuration '{}': {error}",
-            path.display()
+        AppError::Config(tr(
+            "mcp.config.parse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
         ))
     })?;
     warn_about_ignored_server_keys(path, &raw);
     serde_json::from_str(&content).map_err(|error| {
-        AppError::Config(format!(
-            "parse MCP configuration '{}': {error}",
-            path.display()
+        AppError::Config(tr(
+            "mcp.config.parse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
         ))
     })
 }
@@ -567,18 +588,18 @@ fn mutate_mcp_file<T>(
 
 fn acquire_mcp_file_lock(path: &Path) -> Result<File, AppError> {
     let parent = path.parent().ok_or_else(|| {
-        AppError::Config(format!(
-            "MCP configuration '{}' has no parent",
-            path.display()
+        AppError::Config(tr(
+            "mcp.config.noParent",
+            &[("path", &path.display().to_string())],
         ))
     })?;
     std::fs::create_dir_all(parent)?;
     let file_name = path
         .file_name()
         .ok_or_else(|| {
-            AppError::Config(format!(
-                "MCP configuration '{}' has no file name",
-                path.display()
+            AppError::Config(tr(
+                "mcp.config.noFilename",
+                &[("path", &path.display().to_string())],
             ))
         })?
         .to_string_lossy();
@@ -599,9 +620,9 @@ fn acquire_mcp_file_lock(path: &Path) -> Result<File, AppError> {
                 thread::sleep(Duration::from_millis(25));
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(AppError::Config(format!(
-                    "timed out waiting for MCP configuration lock '{}': 2 seconds",
-                    path.display()
+                return Err(AppError::Config(tr(
+                    "mcp.config.lockTimeout",
+                    &[("path", &path.display().to_string())],
                 )));
             }
             Err(error) => return Err(error.into()),
@@ -610,8 +631,12 @@ fn acquire_mcp_file_lock(path: &Path) -> Result<File, AppError> {
 }
 
 fn write_mcp_file(path: &Path, file: &McpFile) -> Result<(), AppError> {
-    let contents = serde_json::to_vec_pretty(file)
-        .map_err(|error| AppError::Config(format!("serialize MCP configuration: {error}")))?;
+    let contents = serde_json::to_vec_pretty(file).map_err(|error| {
+        AppError::Config(tr(
+            "mcp.config.serialize",
+            &[("detail", &error.to_string())],
+        ))
+    })?;
     crate::infra::platform::write_file_atomic(path, &contents)
 }
 
@@ -805,7 +830,11 @@ mod tests {
         std::fs::write(&path, batch_rule).expect("write batch rule");
         let error = set_global_tool_enabled(&cfg, "fake", "capture", true)
             .expect_err("a single tool must not weaken a batch rule");
-        assert!(error.to_string().contains("批量规则禁用"));
+        assert!(error.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "mcp.config.batchRule",
+            &[]
+        )));
         assert_eq!(
             std::fs::read_to_string(path).expect("read unchanged batch rule"),
             batch_rule
@@ -1012,7 +1041,11 @@ mod tests {
 
         let error = add_global_server(&cfg, "same".to_string(), replacement)
             .expect_err("duplicate add must fail");
-        assert!(error.to_string().contains("already exists"));
+        assert!(error.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "mcp.config.exists",
+            &[("name", "same"), ("path", "")]
+        )));
         let servers = load_servers(&cfg, None).expect("read existing server");
         assert_eq!(servers[0].config.args, ["first"]);
     }

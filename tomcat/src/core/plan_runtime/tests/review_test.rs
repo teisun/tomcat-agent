@@ -302,7 +302,7 @@ fn normalize_for_code_review_fills_missing_verdict() {
     };
     let warnings = summary.normalize_for_result();
     assert_eq!(summary.verdict.as_deref(), Some("partial"));
-    assert!(warnings.iter().any(|w| w.contains("未返回 verdict")));
+    assert!(warnings.iter().any(|w| w.contains("returned no verdict")));
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn normalize_for_code_review_forces_aborted() {
     assert_eq!(summary.verdict.as_deref(), Some("aborted"));
     assert!(warnings
         .iter()
-        .any(|w| w.contains("verdict 已规范化为 aborted")));
+        .any(|w| w.contains("verdict normalized to aborted")));
 }
 
 #[test]

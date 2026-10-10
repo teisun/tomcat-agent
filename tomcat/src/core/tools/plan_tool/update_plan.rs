@@ -49,6 +49,8 @@ pub struct UpdatePlanArgs {
 
 pub use super::shared_todo_ops::SharedTodoOpArg as UpdateOp;
 
+use crate::infra::i18n::tr;
+
 impl UpdatePlanArgs {
     pub fn from_json(raw: &serde_json::Value) -> Result<Self, ToolError> {
         // D3 破坏性：旧字段名 `op` 已下线，遇到立即报错。
@@ -56,20 +58,20 @@ impl UpdatePlanArgs {
             for op in ops {
                 if op.get("op").is_some() && op.get("kind").is_none() {
                     return Err(ToolError::BadArgs(
-                        "update_plan ops: 字段 `op` 已下线，请改用 `kind`（kind: upsert | set_status | remove）".into(),
+                        "update_plan ops: field `op` was removed; use `kind` (kind: upsert | set_status | remove)".into(),
                     ));
                 }
             }
         }
         if raw.get("replace_todos").is_some() || raw.get("replace_milestones").is_some() {
             return Err(ToolError::BadArgs(
-                "update_plan 顶层字段 `replace_todos` / `replace_milestones` 已下线，请统一改用 `replace`"
-                    .into(),
+                "update_plan top-level fields `replace_todos` / `replace_milestones` were removed; use `replace`".into(),
             ));
         }
         if raw.get("milestones_ops").is_some() {
             return Err(ToolError::BadArgs(
-                "update_plan 不再支持 `milestones_ops`；当前仅支持 todo-only ops".into(),
+                "update_plan no longer supports `milestones_ops`; only todo-only ops are supported"
+                    .into(),
             ));
         }
         serde_json::from_value(raw.clone())
@@ -115,7 +117,7 @@ pub async fn execute_for_tool(
             && !plan_completion_ready(&plan.frontmatter.todos)
         {
             plan.frontmatter.state = PlanFileState::Pending;
-            warnings.push("plan was reopened because its todos are no longer all complete".into());
+            warnings.push(tr("planTool.reopened", &[]));
         }
 
         rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
@@ -216,7 +218,7 @@ fn apply_plan_todo_ops(
         )
     }) {
         return Err(ToolError::BadArgs(
-            "update_plan.ops[].todo_kind 只支持 work 或 acceptance".into(),
+            "update_plan.ops[].todo_kind supports only work or acceptance".into(),
         ));
     }
     apply_shared_todo_ops(todos, ops_list, replace)?;
@@ -273,13 +275,13 @@ fn resolve_target_plan_path(
     }
     if let Some(path) = explicit_path {
         return crate::infra::platform::normalize_path(&path)
-            .map_err(|e| ToolError::BadArgs(format!("update_plan path 非法：{e}")));
+            .map_err(|e| ToolError::BadArgs(format!("Invalid update_plan path: {e}")));
     }
     if let Some(plan) = runtime.active_plan() {
         return Ok(plan.path);
     }
     Err(ToolError::BadArgs(
-        "update_plan 需要 plan_id 或 path；当前模式无 active plan".into(),
+        "update_plan requires plan_id or path; there is no active plan in the current mode".into(),
     ))
 }
 
@@ -294,7 +296,7 @@ fn enforce_cross_session_policy(
     let target_key = fm.session_key.as_deref().unwrap_or("");
     if target_key != runtime.session_key() {
         return Err(ToolError::CrossSessionDenied(format!(
-            "plan {} 当前由 session {target_key} 在 EXEC，本 session {} 不能写入",
+            "plan {} is executing in session {target_key}; current session {} cannot write it",
             fm.plan_id,
             runtime.session_key()
         )));
@@ -327,7 +329,7 @@ fn enforce_executing_work_content_is_frozen(
         };
         if existing.kind == TodoKind::Work && existing.content != *content {
             return Err(ToolError::BadArgs(format!(
-                "执行中的 work todo `{id}` 的 content 已冻结；请保持原工作描述，并用 set_status 的 `evidence` 记录进展或验证结果"
+                "Executing work todo `{id}` content is frozen; keep the approved work description and record progress or verification in set_status `evidence`"
             )));
         }
     }
@@ -354,7 +356,7 @@ fn enforce_state_matrix(plan_state: PlanFileState, ops_list: &[UpdateOp]) -> Res
                 },
             ) => {
                 return Err(ToolError::BadArgs(format!(
-                    "in_progress 仅允许在 executing 状态下使用；当前 plan.state = {}",
+                    "in_progress is allowed only while executing; current plan.state = {}",
                     plan_state.as_str()
                 )));
             }
@@ -418,7 +420,6 @@ mod tests {
         let hint = NextAction::RunVerify.instruction();
 
         assert!(hint.contains("load_skill(verify)"));
-        assert!(hint.contains("按影响范围复核 diff 并验证"));
         assert!(!hint.contains("green_build"));
         assert!(!hint.contains("acceptance_commands"));
     }

@@ -25,8 +25,6 @@ use crate::core::llm::types::{
     ImageSource, ReasoningContinuation, ReasoningFormat,
 };
 
-pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ResponsesTerminalMetadata {
     pub finish_reason: Option<String>,
@@ -53,7 +51,7 @@ impl ResponsesTerminalMetadata {
     fn max_output_tokens() -> Self {
         Self {
             finish_reason: Some("max_output_tokens".to_string()),
-            notice_message: Some(MAX_OUTPUT_TOKENS_NOTICE.to_string()),
+            notice_message: Some(crate::infra::i18n::tr("llm.maxOutputNotice", &[])),
             ..Self::default()
         }
     }
@@ -485,7 +483,7 @@ fn part_to_responses_value(p: &ChatMessageContentPart) -> Value {
             v
         }
         ChatMessageContentPart::InputImageRef { .. } => {
-            json!({"type": "input_text", "text": "[图片引用尚未物化]"})
+            json!({"type": "input_text", "text": "[Image reference has not been materialized]"})
         }
         ChatMessageContentPart::InputFile { source } => {
             let mut v = json!({"type": "input_file"});

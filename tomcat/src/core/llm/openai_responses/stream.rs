@@ -264,7 +264,10 @@ impl<S> ResponsesStream<S> {
     fn process_chunk(&mut self, raw: &str) -> Result<Vec<StreamEvent>, AppError> {
         let seen_valid_event = self.seen_valid_event;
         let value: Value = serde_json::from_str(raw).map_err(|e| {
-            let summary = format!("解析 Responses chunk 失败: {e} | raw={raw}");
+            let summary = format!(
+                "{} | raw={raw}",
+                crate::infra::i18n::tr("llm.responsesChunkParse", &[("detail", &e.to_string())])
+            );
             if seen_valid_event {
                 llm_error_with_source(
                     PROVIDER_NAME,
@@ -402,7 +405,10 @@ where
                     if !self.terminal_seen {
                         self.eof_error = Some(llm_stream_interrupted_error(
                             PROVIDER_NAME,
-                            format!("stream closed before response.completed（丢弃 {discarded_bytes} 字节未完成帧）"),
+                            crate::infra::i18n::tr(
+                                "llm.responsesClosed",
+                                &[("bytes", &discarded_bytes.to_string())],
+                            ),
                         ));
                     }
                     self.pending = events.into_iter();
@@ -457,7 +463,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::Parse,
-                    "NDJSON UTF-8 错误".to_string(),
+                    crate::infra::i18n::tr("llm.utf8Error", &[("format", "NDJSON")]),
                     e,
                 )
             })?;
@@ -477,7 +483,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::Parse,
-                    "SSE UTF-8 错误".to_string(),
+                    crate::infra::i18n::tr("llm.utf8Error", &[("format", "SSE")]),
                     e,
                 )
             })?;

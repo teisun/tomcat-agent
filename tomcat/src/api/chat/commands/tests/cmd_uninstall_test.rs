@@ -2,6 +2,7 @@ use super::super::{run_shared_slash_command, shared::run_terminal_shared};
 use super::test_support::{plugin, skill, Fixture};
 use crate::api::chat::panels::{Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel};
 use crate::core::plan_runtime::AskQuestionOutcome;
+use crate::infra::i18n::{tr_in, Locale};
 use serial_test::serial;
 use std::sync::Arc;
 
@@ -41,10 +42,7 @@ async fn cmd_uninstall_package_removes_live_vm_skill_tools_but_keeps_unrelated_r
         ],
     )
     .await;
-    assert!(
-        reply.ok && reply.text.contains("当前会话已同步"),
-        "{reply:?}"
-    );
+    assert!(reply.ok, "{reply:?}");
     let sid = ctx
         .session_runtime
         .session
@@ -61,10 +59,22 @@ async fn cmd_uninstall_package_removes_live_vm_skill_tools_but_keeps_unrelated_r
     )
     .await;
     assert!(
-        reply.ok && reply.text.contains("已卸载 package bundle"),
+        reply.ok
+            && reply.text.contains(&tr_in(
+                Locale::En,
+                "slash.uninstall.done",
+                &[("name", "bundle"), ("target", "current-project")]
+            )),
         "{reply:?}"
     );
-    assert!(reply.text.contains("移除 skill: hello") && reply.text.contains("移除 plugin: echo"));
+    assert!(reply.text.contains(&format!(
+        "{} skill: hello",
+        tr_in(Locale::En, "slash.sync.removed", &[])
+    )));
+    assert!(reply.text.contains(&format!(
+        "{} plugin: echo",
+        tr_in(Locale::En, "slash.sync.removed", &[])
+    )));
     assert!(!ctx.skill_set_snapshot().by_name.contains_key("hello"));
     assert!(ctx.skill_set_snapshot().by_name.contains_key("keep"));
     assert!(ctx
@@ -119,12 +129,28 @@ async fn cmd_uninstall_missing_and_manual_plugin_fail_without_changing_resources
             run_shared_slash_command(&ctx, "uninstall", &[name.into(), "current-project".into()])
                 .await;
         assert!(!reply.ok);
-        assert!(reply.text.contains("package 未安装"));
-        assert!(
-            reply.text.contains("手动放进目录")
-                && reply.text.contains("子目录名不一定等于 ID")
-                && reply.text.contains("/reload")
-        );
+        let paths = crate::core::package::resolve_layer_paths(
+            &ctx.config,
+            crate::core::package::PackageVisibility::Scope,
+            Some(&ctx.scope_services.resource_root),
+        )
+        .unwrap();
+        assert!(reply.text.contains(&tr_in(
+            Locale::En,
+            "package.notInstalled",
+            &[
+                ("layer", &paths.visibility.to_string()),
+                ("name", name),
+                (
+                    "plugins",
+                    &crate::infra::platform::format_home_path(&paths.plugins_dir)
+                ),
+                (
+                    "skills",
+                    &crate::infra::platform::format_home_path(&paths.skills_dir)
+                ),
+            ]
+        )));
         assert!(reply.text.contains(
             &fixture
                 .workspace

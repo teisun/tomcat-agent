@@ -240,7 +240,7 @@ fn plan_build_atomic_rollback_on_write_failure() {
     assert_eq!(rt.mode(), AgentMode::Chat);
     match err {
         PlanRuntimeError::Io(s) => {
-            assert!(s.contains("锁") || s.contains("lock") || s.contains("LockBusy"));
+            assert!(s.contains("lock") || s.contains("LockBusy"));
         }
         other => panic!("expected Io (LockBusy), got {other:?}"),
     }

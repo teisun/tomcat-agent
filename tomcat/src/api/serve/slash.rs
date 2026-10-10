@@ -8,6 +8,7 @@ use super::{
 use crate::api::chat::commands::{
     parse_shared_slash, run_shared_slash_command, shared_usage_error, SlashReply,
 };
+use crate::infra::i18n::tr;
 use crate::AppError;
 use std::sync::Arc;
 
@@ -31,14 +32,24 @@ pub(super) async fn run(
         }),
         None => Err(SlashReply {
             ok: false,
-            text: format!(
-                "未知命令 {}，输入框可用：{}",
-                text.split_whitespace().next().unwrap_or("（空输入）"),
-                crate::api::chat::commands::SHARED_SLASH_COMMANDS
-                    .iter()
-                    .map(|command| format!("/{}", command.name))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+            text: tr(
+                "serve.unknownCommand",
+                &[
+                    (
+                        "command",
+                        text.split_whitespace()
+                            .next()
+                            .unwrap_or(&tr("serve.emptyInput", &[])),
+                    ),
+                    (
+                        "available",
+                        &crate::api::chat::commands::shared_slash_commands()
+                            .iter()
+                            .map(|command| format!("/{}", command.name))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                ],
             ),
         }),
     };

@@ -1030,7 +1030,7 @@ async fn test_same_chat_context_recovers_after_task_output_interrupt_without_sig
             message.role == tomcat::core::llm::ChatMessageRole::Tool
                 && message
                     .text_content()
-                    .is_some_and(|text| text.contains("已被取消") || text == "[interrupted]")
+                    .is_some_and(|text| text == "[interrupted]")
         }),
         "second request must hydrate the interrupted task_output tool round"
     );

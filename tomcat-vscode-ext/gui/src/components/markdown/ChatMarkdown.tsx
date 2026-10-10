@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useT } from "../../i18n/LocaleProvider";
 
-import { buildDecoratedHtml, flashCopyButton } from "./markdownDecorators";
+import { buildDecoratedHtml, flashCopyButton, setCopyButtonCopiedState } from "./markdownDecorators";
 import { renderMermaidBlocks, splitTopLevelBlocks } from "./markdownRuntime";
 import { logRichRender } from "./richRenderRuntime";
 import type { PathResolution, WebviewMediaRoot } from "../../types";
@@ -36,6 +37,7 @@ const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
   raw: string;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
 }) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const [pathResolutions, setPathResolutions] = useState<ReadonlyMap<string, PathResolution>>(
     () => new Map(),
@@ -48,6 +50,18 @@ const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
       }),
     [mediaRoots, pathResolutions, raw],
   );
+  // Keep the HTML wrapper stable: a locale-only render must not replace live code/diagram nodes.
+  const htmlMarkup = useMemo(() => ({ __html: html }), [html]);
+
+  useEffect(() => {
+    for (const button of containerRef.current?.querySelectorAll<HTMLElement>("[data-tc-copy-code]") ?? []) {
+      setCopyButtonCopiedState(button, button.classList.contains("is-copied"), t);
+    }
+    for (const link of containerRef.current?.querySelectorAll<HTMLElement>("[data-tc-default-image-label]") ?? []) {
+      link.textContent = t("image.label");
+      link.title = t("image.label");
+    }
+  }, [html, t]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -107,7 +121,7 @@ const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
   return (
     <div
       className="tc-chat-markdown__block"
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={htmlMarkup}
       ref={containerRef}
     />
   );
@@ -128,6 +142,9 @@ function ChatMarkdownComponent({
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   onZoomImage?(image: { alt: string; src: string }): void;
 }) {
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const blocks = useMemo(() => splitTopLevelBlocks(markdown), [markdown]);
 
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
@@ -140,7 +157,7 @@ function ChatMarkdownComponent({
       const codeText = card?.querySelector("pre code")?.textContent ?? "";
       if (typeof navigator?.clipboard?.writeText === "function") {
         void navigator.clipboard.writeText(codeText).then(
-          () => flashCopyButton(copyButton),
+          () => flashCopyButton(copyButton, (key, args) => tRef.current(key, args)),
           () => undefined,
         );
       }

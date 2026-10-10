@@ -307,6 +307,8 @@ pub(crate) fn append_planned_messages_with_rehydrate_retry(
     }
 }
 
+use crate::infra::i18n::tr;
+
 /// Only interactive terminals may consume an answer; piped first input belongs to chat.
 fn prompt_project_trust(ctx: &ChatContext) {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -337,7 +339,13 @@ fn prompt_project_trust(ctx: &ChatContext) {
             return;
         }
     }
-    print!("Trust this project?  {}  [y/N] ", root.display());
+    print!(
+        "{}",
+        tr(
+            "terminal.trustProject",
+            &[("path", &root.display().to_string())]
+        )
+    );
     if io::stdout().flush().is_err() {
         return;
     }
@@ -370,20 +378,23 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
     if resume {
         println!(
-            "恢复会话: {}",
-            ctx.session_runtime.session.current_session_key()
+            "{}",
+            tr(
+                "terminal.resumed",
+                &[("key", ctx.session_runtime.session.current_session_key())]
+            )
         );
     }
-    println!("tomcat 对话模式 (模型: {})", model);
-    println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
-    println!("输入 /help 查看命令列表。\n");
+    println!("{}", tr("terminal.welcome", &[("model", &model)]));
+    println!("{}", tr("terminal.inputHint", &[]));
+    println!("{}", tr("terminal.helpHint", &[]));
     if let Some(error) = ctx
         .scope_services
         .scope_container
         .connector_load_error
         .as_deref()
     {
-        println!("[MCP 未加载] {error}。修正 mcp.json 后重启 Tomcat。");
+        println!("{}", tr("terminal.mcpUnavailable", &[("detail", error)]));
     }
     prompt_project_trust(ctx);
 
@@ -431,7 +442,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         .session_runtime
         .session
         .current_session_id()?
-        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?;
     let root_event_emitter = Arc::new(ScopedEventEmitter::new(
         ctx.global_services.event_bus.clone(),
         session_id.clone(),
@@ -494,8 +505,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         if !auto_drain {
             if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
                 eprintln!(
-                    "\n[bg] auto-turn budget exhausted ({}); falling back to user input.",
-                    AUTO_TURN_BUDGET
+                    "{}",
+                    tr(
+                        "terminal.autoBudget",
+                        &[("count", &AUTO_TURN_BUDGET.to_string())]
+                    )
                 );
             }
             auto_turn_count = 0;
@@ -508,7 +522,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             let raw = match rl.readline(&current_user_prompt(ctx)) {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {
-                    println!("\n再见！");
+                    println!("{}", tr("terminal.goodbye", &[]));
                     context_state.preheat.abort();
                     break "chat_eof_exit";
                 }
@@ -527,7 +541,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     continue;
                 }
                 Err(error) => {
-                    eprintln!("输入错误: {}", error);
+                    eprintln!(
+                        "{}",
+                        tr("terminal.inputError", &[("detail", &error.to_string())])
+                    );
                     context_state.preheat.abort();
                     break "chat_input_error_exit";
                 }
@@ -598,11 +615,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 &ctx.session_runtime
                     .session
                     .current_session_id()?
-                    .ok_or_else(|| AppError::Config("无当前会话".to_string()))?,
+                    .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?,
                 turn_token.child_token(),
             )
             .map_err(|error| {
-                AppError::Config(format!("agent_registry root rearm 失败: {error}"))
+                AppError::Config(tr(
+                    "terminal.rearmFailed",
+                    &[("detail", &error.to_string())],
+                ))
             })?;
 
         let input_message =
@@ -630,17 +650,20 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     .hard_exit_requested
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    eprintln!("\n^C 已中断，正在退出...");
+                    eprintln!("{}", tr("terminal.interruptedExit", &[]));
                     context_state.preheat.abort();
                     break "hard_interrupt_exit";
                 }
-                eprintln!("\n^C 已中断（partial 已保存）");
+                eprintln!("{}", tr("terminal.interrupted", &[]));
             }
             AgentRunOutcome::Failed(error) => {
                 let fatal = rehydrate::is_fatal_error(&error);
-                eprintln!("\n[错误] {}", error);
+                eprintln!(
+                    "{}",
+                    tr("terminal.error", &[("detail", &error.to_string())])
+                );
                 if fatal {
-                    eprintln!("(致命错误，退出对话)");
+                    eprintln!("{}", tr("terminal.fatal", &[]));
                     context_state.preheat.abort();
                     fatal_error = Some(error);
                     break "chat_fatal_exit";
@@ -771,7 +794,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         .session_runtime
         .session
         .current_session_id()?
-        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?;
     let root_event_emitter = Arc::new(ScopedEventEmitter::new(
         ctx.global_services.event_bus.clone(),
         session_id.clone(),
@@ -1041,7 +1064,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
             .session_runtime
             .session
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?;
         Some(thinking_persist::register_thinking_persist_listeners(
             &*ctx.global_services.event_bus,
             transcript_path,

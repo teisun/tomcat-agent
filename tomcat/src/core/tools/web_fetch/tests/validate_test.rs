@@ -1,10 +1,19 @@
+use super::super::types::MAX_URL_LENGTH;
 use super::super::validate::validate_input_url;
+use crate::infra::i18n::{tr_in, Locale};
 
 #[test]
 fn url_too_long_rejected() {
     let url = format!("https://example.com/{}", "a".repeat(2_001));
     let err = validate_input_url(&url).expect_err("should reject");
-    assert!(err.to_string().contains("过长"));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "net.urlLong",
+        &[
+            ("operation", "web_fetch"),
+            ("limit", &MAX_URL_LENGTH.to_string())
+        ],
+    )));
 }
 
 #[test]
@@ -17,7 +26,11 @@ fn url_with_credentials_rejected() {
 #[test]
 fn url_invalid_scheme_rejected() {
     let err = validate_input_url("file:///tmp/demo.txt").expect_err("should reject");
-    assert!(err.to_string().contains("仅允许 http/https"));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "net.scheme",
+        &[("operation", "web_fetch"), ("scheme", "file")],
+    )));
 }
 
 #[test]

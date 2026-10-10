@@ -1,3 +1,4 @@
+import { t as defaultT, type Translator } from "../../../../src/shared/i18n";
 import { fileChipIconClass } from "../FileChip";
 import { COPY_FLASH_MS } from "../copyFeedback";
 import { parseCodeFenceInfo } from "./codeFence";
@@ -65,8 +66,8 @@ function createCopyButton(documentRef: Document): HTMLButtonElement {
   copyButton.dataset.tcCopyCode = "1";
   copyButton.dataset.testid = "assistant-code-copy";
   copyButton.type = "button";
-  copyButton.title = "Copy code";
-  copyButton.setAttribute("aria-label", "Copy code");
+  copyButton.title = defaultT("code.copy");
+  copyButton.setAttribute("aria-label", defaultT("code.copy"));
 
   const copyIcon = documentRef.createElement("span");
   copyIcon.setAttribute("aria-hidden", "true");
@@ -76,10 +77,11 @@ function createCopyButton(documentRef: Document): HTMLButtonElement {
   return copyButton;
 }
 
-export function setCopyButtonCopiedState(button: HTMLElement, copied: boolean): void {
+export function setCopyButtonCopiedState(button: HTMLElement, copied: boolean, t: Translator = defaultT): void {
   button.classList.toggle("is-copied", copied);
-  button.setAttribute("aria-label", copied ? "Copied" : "Copy code");
-  button.title = copied ? "Copied" : "Copy code";
+  const label = t(copied ? "common.copied" : "code.copy");
+  button.setAttribute("aria-label", label);
+  button.title = label;
   const icon = button.querySelector<HTMLElement>(".tc-code-card__copy-icon");
   if (!icon) {
     return;
@@ -88,15 +90,15 @@ export function setCopyButtonCopiedState(button: HTMLElement, copied: boolean): 
   icon.classList.toggle("codicon-check", copied);
 }
 
-export function flashCopyButton(button: HTMLElement): void {
+export function flashCopyButton(button: HTMLElement, t: Translator = defaultT): void {
   const existingTimer = button.dataset.tcCopyResetTimer;
   if (existingTimer) {
     window.clearTimeout(Number(existingTimer));
   }
-  setCopyButtonCopiedState(button, true);
+  setCopyButtonCopiedState(button, true, t);
   button.dataset.tcCopyResetTimer = String(
     window.setTimeout(() => {
-      setCopyButtonCopiedState(button, false);
+      setCopyButtonCopiedState(button, false, t);
       delete button.dataset.tcCopyResetTimer;
     }, COPY_FLASH_MS),
   );

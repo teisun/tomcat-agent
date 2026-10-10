@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PreviewSection } from "../../../src/shared/imagePreviewProtocol";
 import { COPY_FLASH_MS } from "../components/copyFeedback";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 import {
   PreviewPanel,
   clipboardBlobForPicture,
@@ -65,6 +67,36 @@ afterEach(() => {
 });
 
 describe("PreviewPanel", () => {
+  it("switches controls in place without resetting image, zoom or filmstrip", () => {
+    const view = render(<LocaleProvider locale="en"><PreviewPanel /></LocaleProvider>);
+    pushState();
+    fireEvent.click(screen.getByRole("button", { name: translate("en", "preview.zoomIn") }));
+    const next = screen.getByRole("button", { name: translate("en", "preview.next") });
+    const copy = screen.getByRole("button", { name: translate("en", "preview.copy") });
+    const image = screen.getByTestId("preview-stage-image");
+    const stage = screen.getByTestId("preview-stage");
+    const active = screen.getByRole("button", { name: /image-2.png — 2 of 11/ });
+    const readyCount = postMessage.mock.calls.filter(([m]) => m.type === "preview.ready").length;
+    view.rerender(<LocaleProvider locale="zh-CN"><PreviewPanel /></LocaleProvider>);
+    expect(screen.getByTestId("preview-stage-image")).toBe(image);
+    expect(stage.getAttribute("data-zoom")).toBe("1.5");
+    expect(document.querySelector('.ip-thumb--active[aria-current="true"]')).toBe(active);
+    expect(screen.getByTestId("preview-copy")).toBe(copy);
+    fireEvent.click(next);
+    expect(postMessage).toHaveBeenCalledWith({ type: "preview.select", data: { attachmentId: "image-3" } });
+    expect(postMessage.mock.calls.filter(([m]) => m.type === "preview.ready")).toHaveLength(readyCount);
+  });
+
+  it("keeps the header label single-line with a full tooltip while controls retain their width", () => {
+    render(<PreviewPanel />);
+    pushState();
+    const title = screen.getByTitle("Attached image 2");
+    expect(title.style.whiteSpace).toBe("nowrap");
+    expect(title.style.textOverflow).toBe("ellipsis");
+    expect(screen.getByText("2 / 11").style.whiteSpace).toBe("nowrap");
+    expect(screen.getByRole("button", { name: "Close (Escape)" }).style.flex).toBe("0 0 auto");
+  });
+
   it("flattens sections in stable display order", () => {
     expect(collectPictures(sections(3)).map((picture) => picture.id)).toEqual([
       "image-1",

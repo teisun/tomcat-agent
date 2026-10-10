@@ -382,6 +382,20 @@ doctor 逐项检查环境并给出可执行的修复建议：
 
 `tomcat config` 提供对 `tomcat.config.toml` 的读写操作，无需手动编辑文件。
 
+### 显示语言
+
+```text
+Settings → 通用 → 语言 ─┐
+                       ├─ tomcat.config.toml 中的 ui.language
+独立终端 config set ────┘
+```
+
+`ui.language` 支持 `auto`（默认）、`zh-CN`、`en`。在独立终端执行 `tomcat config set ui.language en`（或 `zh-CN` / `auto`）可修改同一份偏好。自动模式下，扩展跟随 VS Code 显示语言，独立 CLI 跟随系统语言。`TOMCAT__UI__LANGUAGE` 是进程级覆盖，例如 `TOMCAT__UI__LANGUAGE=en tomcat --help`。
+
+Settings 保存后当前窗口及 Serve 原地切换，无需重启会话；其他窗口和独立进程下次启动读取。既有对话及已经生成的后端提示不重新翻译；VS Code 原生命令和菜单仍跟随 VS Code 自身语言。命令名、flag、配置键、模型 ID、外部原始诊断均保持不变。
+
+置顶、安全删除和可跳过的计划审查见[扩展使用说明](../../tomcat-vscode-ext/README.zh.md#会话settings-与计划审查)。审查可能需要几分钟或更久，并消耗额外模型用量；跳过直接打开已保存的计划，不启动审查或执行。
+
 ### 查看完整配置
 
 ```bash

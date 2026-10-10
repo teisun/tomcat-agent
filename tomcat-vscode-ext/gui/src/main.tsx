@@ -1,3 +1,5 @@
+import "./i18n/hostLocale";
+import { LocaleProvider } from "./i18n/LocaleProvider";
 import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 
@@ -116,11 +118,11 @@ function ErrorBoundaryCrashFixture() {
 }
 
 ReactDOM.createRoot(root).render(
-  <>
+  <LocaleProvider>
     <ErrorFallbackDomSnapshotResponder />
     <WebviewErrorBoundary reportError={reportWebviewError}>
       <ErrorBoundaryCrashFixture />
       <App vscodeApi={vscodeApi} />
     </WebviewErrorBoundary>
-  </>,
+  </LocaleProvider>,
 );

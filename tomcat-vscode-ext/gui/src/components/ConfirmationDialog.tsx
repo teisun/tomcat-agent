@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 export type ConfirmationAction = {
   id: string;
@@ -13,7 +14,7 @@ export function ConfirmationDialog({
   actions,
   ariaLabelledBy,
   body,
-  cancelLabel = "Cancel",
+  cancelLabel,
   onAction,
   onCancel,
   onKeyDown,
@@ -32,6 +33,7 @@ export function ConfirmationDialog({
   testId?: string;
   title: string;
 }) {
+  const t = useT();
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const primaryButtonRef = useRef<HTMLButtonElement | null>(null);
   const titleId = ariaLabelledBy ?? `${testId}-title`;
@@ -106,7 +108,7 @@ export function ConfirmationDialog({
             onClick={onCancel}
             type="button"
           >
-            <span>{cancelLabel}</span>
+            <span>{cancelLabel ?? t("common.cancel")}</span>
             <span className="tc-confirm-dialog__shortcut">Esc</span>
           </button>
           {actions.map((action) => (

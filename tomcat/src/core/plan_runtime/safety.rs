@@ -60,19 +60,15 @@ pub fn assert_plan_id_safe_for_disk(plan_id: &str) -> Result<(), PlanRuntimeErro
 /// 写工具路径策略拒绝原因（[`enforce_write_path_policy`] 返回 Err 时携带）。
 #[derive(Debug, thiserror::Error)]
 pub enum WritePathDenied {
-    #[error(
-        "PLAN 模式下 write/edit/delete 仅允许写入 ~/.tomcat/plans/*.plan.md；目标 {target:?} 不在白名单内"
-    )]
+    #[error("In PLAN mode, write/edit/delete may only target ~/.tomcat/plans/*.plan.md; target {target:?} is not allowed")]
     PlanModeOnlyPlanFiles { target: PathBuf },
-    #[error(
-        "计划正在执行时 ~/.tomcat/plans/* 全部禁写（含正文与 frontmatter）；推进任务请使用 update_plan 工具。目标 {target:?}"
-    )]
+    #[error("While a plan is executing, ~/.tomcat/plans/* is read-only (body and frontmatter); use update_plan to advance tasks. Target {target:?}")]
     ExecutingPlanFilesReadOnly { target: PathBuf },
-    #[error("reviewer 子 Agent 只能写 ~/.tomcat/plans/*.plan.md（frontmatter raw edit 仍由 edit 守卫具体检查）")]
+    #[error("A reviewer sub-Agent may only write ~/.tomcat/plans/*.plan.md (the edit guard also checks raw frontmatter edits)")]
     ReviewerOnlyPlanFiles,
-    #[error("code reviewer 是严格只读子 Agent；禁止调用任何 write/edit/delete 类工具")]
+    #[error("The code reviewer is a strictly read-only sub-Agent; write/edit/delete tools are forbidden")]
     CodeReviewerReadOnly,
-    #[error("无法解析 ~/.tomcat/plans/ 目录：{0}")]
+    #[error("Could not resolve ~/.tomcat/plans/ directory: {0}")]
     PlansDirUnavailable(String),
 }
 
@@ -162,7 +158,7 @@ pub fn reviewer_body_diff_guard(old: &str, new: &str) -> Result<(), ReviewDiffDe
 /// reviewer 段守卫拒绝原因。
 #[derive(Debug, thiserror::Error)]
 pub enum ReviewDiffDenied {
-    #[error("reviewer 不能 raw 修改 plan 文件 frontmatter；请用 update_plan 修改结构化字段")]
+    #[error("A reviewer cannot raw-edit plan frontmatter; use update_plan for structured fields")]
     FrontmatterTouched,
 }
 

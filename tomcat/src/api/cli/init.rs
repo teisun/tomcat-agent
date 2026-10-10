@@ -1,5 +1,6 @@
 //! `tomcat init` 与 `tomcat doctor` 子命令实现。
 
+use crate::infra::i18n::tr;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -20,13 +21,16 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     let config_file = normalize_path(DEFAULT_CONFIG_PATH)?;
 
     // --- [1/3] 环境初始化（标题先于配置写入，便于失败时仍可见步骤）---
-    println!("\n[1/3] 环境初始化");
+    println!("{}", tr("cli.init.stageSetup", &[]));
 
     let config_existed = config_file.exists();
     if config_existed {
         println!(
-            "  已存在配置文件，将以现有内容为基线更新：{}",
-            config_file.display()
+            "{}",
+            tr(
+                "cli.init.configExisting",
+                &[("path", &config_file.display().to_string())]
+            )
         );
     }
 
@@ -54,42 +58,85 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     std::fs::write(&config_file, toml_str).map_err(AppError::Io)?;
 
     if config_existed {
-        println!("  ✓ 配置文件已更新: {}", config_file.display());
+        println!(
+            "{}",
+            tr(
+                "cli.init.configUpdated",
+                &[("path", &config_file.display().to_string())]
+            )
+        );
     } else {
-        println!("  ✓ 配置文件已写入: {}", config_file.display());
+        println!(
+            "{}",
+            tr(
+                "cli.init.configWritten",
+                &[("path", &config_file.display().to_string())]
+            )
+        );
     }
-    println!("  ✓ 默认模型: {}", cfg.llm.default_model);
-    println!("  ✓ 默认模型协议线: {}", model_choice.entry.api);
-    println!("  ✓ 模型逻辑厂商: {}", model_choice.entry.provider);
-    println!("  ✓ 当前模型凭证变量: {}", model_choice.env_name);
+    println!(
+        "{}",
+        tr("cli.init.model", &[("id", &cfg.llm.default_model)])
+    );
+    println!(
+        "{}",
+        tr("cli.init.api", &[("api", &model_choice.entry.api)])
+    );
+    println!(
+        "{}",
+        tr(
+            "cli.init.provider",
+            &[("provider", &model_choice.entry.provider)]
+        )
+    );
+    println!(
+        "{}",
+        tr("cli.init.keyName", &[("name", &model_choice.env_name)])
+    );
 
     ensure_work_dir_structure(&cfg)?;
-    println!("  ✓ 目录结构就绪");
+    println!("{}", tr("cli.init.directories", &[]));
     let mcp_config_path = crate::core::connector::mcp::builtin::materialize_default_mcp_json(&cfg)?;
-    println!("  ✓ 默认 MCP 配置已就绪: {}", mcp_config_path.display());
+    println!(
+        "{}",
+        tr(
+            "cli.init.mcp",
+            &[("path", &mcp_config_path.display().to_string())]
+        )
+    );
     let sessions_path = resolve_sessions_dir(&cfg)?.join("sessions.json");
-    let store = match load_store(&sessions_path) {
-        Ok(store) => store,
-        // `init` is an explicit user recovery/migration command. Ordinary session reads
-        // still reject malformed data without changing it.
-        Err(AppError::Config(_)) => {
-            save_store(&sessions_path, &SessionStore::new())?;
-            println!("  ✓ sessions.json 格式已重置为当前版本");
-            SessionStore::new()
+    let store = crate::core::session::store::with_store_write_lock(&sessions_path, || {
+        match load_store(&sessions_path) {
+            Ok(store) => Ok(store),
+            // Explicit init recovery shares the same RMW lock as normal session mutations.
+            Err(AppError::Config(_)) => {
+                save_store(&sessions_path, &SessionStore::new())?;
+                println!("{}", tr("cli.init.sessionsReset", &[]));
+                Ok(SessionStore::new())
+            }
+            Err(error) => Err(error),
         }
-        Err(error) => return Err(error),
-    };
+    })?;
     if store.is_empty() {
-        println!("  ✓ sessions.json 已初始化");
+        println!("{}", tr("cli.init.sessionsCreated", &[]));
     } else {
-        println!("  ✓ sessions.json 已保留（{} 个历史会话）", store.len());
+        println!(
+            "{}",
+            tr(
+                "cli.init.sessionsKept",
+                &[("count", &store.len().to_string())]
+            )
+        );
     }
 
     match models_toml_status {
         crate::api::cli::models_toml::ModelsTomlStatus::Created { added_model_ids } => {
             println!(
-                "  ✓ 已生成模型清单 models.toml（含 {}）",
-                added_model_ids.join(", ")
+                "{}",
+                tr(
+                    "cli.init.modelsCreated",
+                    &[("models", &added_model_ids.join(", "))]
+                )
             )
         }
         crate::api::cli::models_toml::ModelsTomlStatus::UpdatedExisting {
@@ -100,39 +147,50 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             updated_model_name_ids.is_empty(),
         ) {
             (false, false) => println!(
-                "  ✓ 已向现有 models.toml 补齐受管预置模型：{}；并补写 model_name：{}",
-                added_model_ids.join(", "),
-                updated_model_name_ids.join(", ")
+                "{}",
+                tr(
+                    "cli.init.modelsAddedNames",
+                    &[
+                        ("added", &added_model_ids.join(", ")),
+                        ("names", &updated_model_name_ids.join(", "))
+                    ]
+                )
             ),
             (false, true) => println!(
-                "  ✓ 已向现有 models.toml 补齐受管预置模型：{}",
-                added_model_ids.join(", ")
+                "{}",
+                tr(
+                    "cli.init.modelsAdded",
+                    &[("added", &added_model_ids.join(", "))]
+                )
             ),
             (true, false) => println!(
-                "  ✓ 已为现有 models.toml 补写受管预置模型的 model_name：{}",
-                updated_model_name_ids.join(", ")
+                "{}",
+                tr(
+                    "cli.init.modelsNamed",
+                    &[("names", &updated_model_name_ids.join(", "))]
+                )
             ),
-            (true, true) => println!("  ✓ models.toml 已就绪（受管预置模型已齐全）"),
+            (true, true) => println!("{}", tr("cli.init.modelsComplete", &[])),
         },
         crate::api::cli::models_toml::ModelsTomlStatus::AlreadyPresent => {
-            println!("  ✓ models.toml 已就绪（受管预置模型与 model_name 已齐全）")
+            println!("{}", tr("cli.init.modelsPresent", &[]))
         }
     }
 
     match crate::api::cli::builtin_plugins::ensure_builtin_plugins(&cfg)? {
         crate::api::cli::builtin_plugins::BuiltinPluginsStatus::Created => {
-            println!("  ✓ 已安装官方插件 web-search-backends")
+            println!("{}", tr("cli.init.pluginInstalled", &[]))
         }
         crate::api::cli::builtin_plugins::BuiltinPluginsStatus::UpdatedExistingPlugin => {
-            println!("  ✓ 已更新官方插件 web-search-backends 的缺失文件/关键 manifest 字段")
+            println!("{}", tr("cli.init.pluginUpdated", &[]))
         }
         crate::api::cli::builtin_plugins::BuiltinPluginsStatus::AlreadyPresent => {
-            println!("  ✓ 官方插件 web-search-backends 已就绪")
+            println!("{}", tr("cli.init.pluginPresent", &[]))
         }
     }
 
     ensure_embedded_assets(&cfg)?;
-    println!("  ✓ 内嵌资源目录已就绪");
+    println!("{}", tr("cli.init.assets", &[]));
 
     match std::env::current_exe() {
         Ok(exe) => {
@@ -141,43 +199,47 @@ pub(crate) fn run_init() -> Result<(), AppError> {
                 .as_ref()
                 .is_ok_and(|path| is_target_deps_artifact(path))
             {
-                println!(
-                    "  ⚠ 检测到 cargo test 的临时构建产物，跳过 PATH 自动配置以避免写入悬空 target/deps 路径"
-                );
+                println!("{}", tr("cli.init.testBinary", &[]));
             } else if let Some(home) = crate::infra::platform::home_dir() {
                 let local_bin_dir = canonical_local_bin_dir(&home);
                 match install_canonical_symlink(&exe, &local_bin_dir) {
                     Ok(Some(link)) => println!(
-                        "  ✓ 已建立稳定命令入口: {}",
-                        crate::infra::platform::format_home_path(&link)
+                        "{}",
+                        tr(
+                            "cli.init.commandLink",
+                            &[("path", &crate::infra::platform::format_home_path(&link))]
+                        )
                     ),
                     Ok(None) => {}
                     Err(err) => {
-                        println!("  ⚠ 无法建立稳定命令入口（{}）；后续仍可继续初始化", err);
+                        println!(
+                            "{}",
+                            tr("cli.init.linkFailed", &[("detail", &err.to_string())])
+                        );
                     }
                 }
                 if auto_add_to_path(&home) {
-                    println!("  ✓ 已加入 PATH 环境变量");
+                    println!("{}", tr("cli.init.pathAdded", &[]));
                 } else {
-                    println!("  ⚠ 无法自动配置 PATH，请手动执行：");
+                    println!("{}", tr("cli.init.pathManual", &[]));
                     println!("    {}", LOCAL_BIN_EXPORT_LINE);
                 }
             } else if let Some(bin_dir) = exe.parent() {
-                println!("  ⚠ 无法确定 HOME 目录，请手动执行：");
+                println!("{}", tr("cli.init.homeMissing", &[]));
                 println!("    export PATH=\"{}:$PATH\"", bin_dir.display());
             } else {
-                println!("  ⚠ 无法确定可执行文件所在目录，请手动配置 PATH");
+                println!("{}", tr("cli.init.binMissing", &[]));
             }
         }
-        Err(_) => println!("  ⚠ 无法确定可执行文件路径，请手动配置 PATH"),
+        Err(_) => println!("{}", tr("cli.init.exeMissing", &[])),
     }
 
     // --- [2/3] 资源检查（与 tomcat doctor 一致，跳过 API Key）---
-    println!("\n[2/3] 资源检查");
+    println!("{}", tr("cli.init.stageCheck", &[]));
     run_doctor_checks(&cfg, config_file.as_path(), true)?;
 
     // --- [3/3] API Key 配置 ---
-    println!("\n[3/3] API Key 配置");
+    println!("{}", tr("cli.init.stageKey", &[]));
     let work_dir = get_work_dir(&cfg)?;
     let env_path = work_dir.join("assets").join(".env");
     match crate::api::cli::init_model_wizard::prompt_and_store_provider_key(
@@ -185,16 +247,30 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         &model_choice.env_name,
     )? {
         crate::api::cli::init_model_wizard::KeyConfigStatus::AlreadyConfigured => {
-            println!("  ✓ API Key 已配置 ({})", model_choice.env_name);
+            println!(
+                "{}",
+                tr(
+                    "cli.init.keyConfigured",
+                    &[("name", &model_choice.env_name)]
+                )
+            );
         }
         crate::api::cli::init_model_wizard::KeyConfigStatus::Written => {
-            println!("  ✓ {} 已写入 .env", model_choice.env_name);
+            println!(
+                "{}",
+                tr("cli.init.keyWritten", &[("name", &model_choice.env_name)])
+            );
         }
         crate::api::cli::init_model_wizard::KeyConfigStatus::Skipped => {
             println!(
-                "  ⚠ {} 未设置，后续可运行 `tomcat init` 重新配置，或编辑 {}",
-                model_choice.env_name,
-                env_path.display()
+                "{}",
+                tr(
+                    "cli.init.keySkipped",
+                    &[
+                        ("name", &model_choice.env_name),
+                        ("path", &env_path.display().to_string())
+                    ]
+                )
             );
         }
     }
@@ -208,18 +284,21 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     )? {
         match status {
             crate::api::cli::init_model_wizard::KeyConfigStatus::AlreadyConfigured => {
-                println!("  ✓ API Key 已配置 ({})", env_name);
+                println!("{}", tr("cli.init.keyConfigured", &[("name", &env_name)]));
             }
             crate::api::cli::init_model_wizard::KeyConfigStatus::Written => {
-                println!("  ✓ {} 已写入 .env", env_name);
+                println!("{}", tr("cli.init.keyWritten", &[("name", &env_name)]));
             }
             crate::api::cli::init_model_wizard::KeyConfigStatus::Skipped => {
-                println!("  ⚠ {} 未设置，已跳过", env_name);
+                println!(
+                    "{}",
+                    tr("cli.init.additionalSkipped", &[("name", &env_name)])
+                );
             }
         }
     }
 
-    println!("\n初始化完成！运行 `tomcat code` 开始对话。");
+    println!("{}", tr("cli.init.done", &[]));
 
     Ok(())
 }
@@ -427,25 +506,43 @@ pub(crate) fn run_doctor_checks(
     skip_api_key: bool,
 ) -> Result<(), AppError> {
     if let Err(e) = validate_config(cfg) {
-        println!("✗ 配置不合法: {}", e);
         println!(
-            "  → 运行 tomcat init 重新生成或手动修复 {}",
-            config_path.display()
+            "{}",
+            tr("cli.doctor.invalid", &[("detail", &e.to_string())])
+        );
+        println!(
+            "{}",
+            tr(
+                "cli.doctor.repair",
+                &[("path", &config_path.display().to_string())]
+            )
         );
         return Ok(());
     }
     if let Err(e) = ensure_work_dir_structure(cfg) {
-        println!("✗ 创建工作目录失败: {}", e);
+        println!(
+            "{}",
+            tr("cli.doctor.workDirFailed", &[("detail", &e.to_string())])
+        );
         return Ok(());
     }
-    println!("✓ 配置合法 ({})", config_path.display());
+    println!(
+        "{}",
+        tr(
+            "cli.doctor.valid",
+            &[("path", &config_path.display().to_string())]
+        )
+    );
 
     // --- 内嵌资源 ---
     if let Err(e) = ensure_embedded_assets(cfg) {
-        println!("✗ 资源释放失败: {}", e);
-        println!("  → 运行 tomcat init 或检查磁盘空间");
+        println!(
+            "{}",
+            tr("cli.doctor.assetsFailed", &[("detail", &e.to_string())])
+        );
+        println!("{}", tr("cli.doctor.assetsHint", &[]));
     } else {
-        println!("✓ 内嵌资源已就绪");
+        println!("{}", tr("cli.doctor.assetsReady", &[]));
     }
 
     // --- rquickjs 运行时 ---
@@ -467,18 +564,24 @@ pub(crate) fn run_doctor_checks(
                 if let Ok(meta) = std::fs::metadata(&env_path) {
                     let mode = meta.permissions().mode() & 0o777;
                     if mode == 0o600 {
-                        println!("✓ .env 权限: 0600");
+                        println!("{}", tr("cli.doctor.envModeOk", &[]));
                     } else {
-                        println!("⚠ .env 权限: {:04o}（建议 0600）", mode);
+                        println!(
+                            "{}",
+                            tr(
+                                "cli.doctor.envModeWarning",
+                                &[("mode", &format!("{mode:04o}"))]
+                            )
+                        );
                         println!("  → chmod 600 {}", env_path.display());
                     }
                 }
             }
             #[cfg(not(unix))]
-            println!("✓ .env 存在");
+            println!("{}", tr("cli.doctor.envExists", &[]));
         } else {
-            println!("⚠ .env 不存在（API Key 未配置）");
-            println!("  → 运行 tomcat init 配置 API Key");
+            println!("{}", tr("cli.doctor.envMissing", &[]));
+            println!("{}", tr("cli.doctor.envHint", &[]));
         }
 
         // --- 当前默认模型所需 API Key ---
@@ -492,10 +595,18 @@ pub(crate) fn run_doctor_checks(
             })
             .unwrap_or_else(|| "OPENAI_API_KEY".to_string());
         match std::env::var(&key_env) {
-            Ok(k) if !k.is_empty() => println!("✓ {} 已设置", key_env),
+            Ok(k) if !k.is_empty() => {
+                println!("{}", tr("cli.doctor.keySet", &[("name", &key_env)]))
+            }
             _ => {
-                println!("⚠ {} 未设置", key_env);
-                println!("  → 运行 tomcat init 或编辑 {}", env_path.display());
+                println!("{}", tr("cli.doctor.keyMissing", &[("name", &key_env)]));
+                println!(
+                    "{}",
+                    tr(
+                        "cli.doctor.keyHint",
+                        &[("path", &env_path.display().to_string())]
+                    )
+                );
             }
         }
     }
@@ -541,9 +652,9 @@ pub(crate) fn doctor_proxy_lines(cfg: &AppConfig) -> Vec<String> {
 
     match configured_proxy {
         Some((raw, trimmed)) => {
-            lines.push("✓ llm.proxy 已配置，将优先于环境代理".to_string());
+            lines.push(tr("cli.doctor.proxyConfigured", &[]));
             if raw != trimmed {
-                lines.push("⚠ llm.proxy 含首尾空格；运行时会 trim，建议清理配置".to_string());
+                lines.push(tr("cli.doctor.proxyWhitespace", &[]));
             }
         }
         None if !env_proxies.is_empty() => {
@@ -552,24 +663,19 @@ pub(crate) fn doctor_proxy_lines(cfg: &AppConfig) -> Vec<String> {
                 .map(|item| item.key)
                 .collect::<Vec<_>>()
                 .join(", ");
-            lines.push(format!(
-                "✓ 检测到环境代理（{keys}）；未配置 llm.proxy 时，出网请求将由环境变量生效"
-            ));
+            lines.push(tr("cli.doctor.envProxy", &[("keys", &keys)]));
         }
         None => {
-            lines.push("✓ 未检测到 llm.proxy 或环境代理；出网请求将直连".to_string());
+            lines.push(tr("cli.doctor.noProxy", &[]));
         }
     }
 
     for item in env_proxies {
         if item.had_whitespace {
-            lines.push(format!("⚠ {} 含首尾空格；建议清理配置", item.key));
+            lines.push(tr("cli.doctor.proxyEnvWhitespace", &[("name", item.key)]));
         }
         if item.key == "ALL_PROXY" && item.value.to_ascii_lowercase().starts_with("socks5://") {
-            lines.push(
-                "⚠ ALL_PROXY 使用 socks5://，当前构建未启用 reqwest socks feature；web_search 建议改用 HTTPS_PROXY=http://..."
-                    .to_string(),
-            );
+            lines.push(tr("cli.doctor.socksUnsupported", &[]));
         }
     }
 
@@ -578,10 +684,10 @@ pub(crate) fn doctor_proxy_lines(cfg: &AppConfig) -> Vec<String> {
 
 pub(crate) fn doctor_plugin_runtime_lines(probe: Result<(), AppError>) -> Vec<String> {
     match probe {
-        Ok(()) => vec!["✓ rquickjs 运行时：可用".to_string()],
+        Ok(()) => vec![tr("cli.doctor.quickJsReady", &[])],
         Err(e) => vec![
-            format!("✗ rquickjs 运行时：初始化失败 ({})", e),
-            "  → 重新运行 tomcat init；若问题持续，请检查嵌入资源与本地构建产物".to_string(),
+            tr("cli.doctor.quickJsFailed", &[("detail", &e.to_string())]),
+            tr("cli.doctor.quickJsHint", &[]),
         ],
     }
 }
@@ -590,16 +696,25 @@ pub(crate) fn run_doctor() -> Result<(), AppError> {
     let path = match normalize_path(DEFAULT_CONFIG_PATH) {
         Ok(p) if p.exists() => p,
         _ => {
-            println!("✗ 未找到配置文件");
-            println!("  → 运行 tomcat init 生成配置");
+            println!("{}", tr("cli.doctor.noConfig", &[]));
+            println!("{}", tr("cli.doctor.noConfigHint", &[]));
             return Ok(());
         }
     };
     let cfg = match load_config(Some(path.as_path())) {
         Ok(cfg) => cfg,
         Err(e) => {
-            println!("✗ 配置加载失败: {}", e);
-            println!("  → 运行 tomcat init 重新生成或手动修复 {}", path.display());
+            println!(
+                "{}",
+                tr("cli.doctor.loadFailed", &[("detail", &e.to_string())])
+            );
+            println!(
+                "{}",
+                tr(
+                    "cli.doctor.repair",
+                    &[("path", &path.display().to_string())]
+                )
+            );
             return Ok(());
         }
     };

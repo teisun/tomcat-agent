@@ -2,6 +2,7 @@ use super::parse::ChatCommandOutcome;
 use crate::api::chat::ChatContext;
 use crate::core::llm::{ChatMessage, ChatMessageContentPart};
 use crate::core::project_instructions::{InstructionKind, PromptFile};
+use crate::infra::i18n::tr;
 
 pub(super) fn message(
     ctx: &ChatContext,
@@ -31,7 +32,10 @@ fn invoke(ctx: &ChatContext, id: &str, intent: &str, history_line: String) -> Ch
 }
 
 pub(super) fn list_text(files: &[PromptFile]) -> String {
-    let mut text = format!("Commands（{}）", files.len());
+    let mut text = tr(
+        "slash.command.count",
+        &[("count", &files.len().to_string())],
+    );
     for file in files {
         text.push_str(&format!(
             "\n  /{}  {}  {}",
@@ -44,9 +48,9 @@ pub(super) fn list_text(files: &[PromptFile]) -> String {
 }
 
 pub(super) fn duplicate_text(name: &str, files: &[&PromptFile]) -> String {
-    let mut text = format!(
-        "[command] /{name} 有 {} 个同名命令，复制其中一条：",
-        files.len()
+    let mut text = tr(
+        "slash.command.duplicate",
+        &[("name", name), ("count", &files.len().to_string())],
     );
     for file in files {
         text.push_str(&format!(
@@ -73,7 +77,7 @@ pub(super) fn run(ctx: &ChatContext, line: String) -> ChatCommandOutcome {
         }
         [_, sub, id, intent @ ..] if sub == "use" => invoke(ctx, id, &intent.join(" "), line),
         _ => {
-            println!("[command] 用法：/command list | /command use <resourceId> [补充说明]");
+            println!("{}", tr("slash.command.usage", &[]));
             ChatCommandOutcome::Handled
         }
     }

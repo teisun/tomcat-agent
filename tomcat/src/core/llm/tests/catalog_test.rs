@@ -595,19 +595,22 @@ reasoning = true
 
 #[test]
 fn context_tiers_normalize_and_description_round_trip_through_catalog() {
+    let description = "用于档位归一化测试的中转模型。";
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     std::fs::write(
         &path,
-        r#"
+        format!(
+            r#"
 [[models]]
 id = "custom-tiered"
 api = "openai-responses"
 provider = "relay"
 context_window = 400000
 context_window_options = [1000000, 400000, 400000]
-description = "用于档位归一化测试的中转模型。"
-"#,
+description = "{description}"
+"#
+        ),
     )
     .unwrap();
 
@@ -616,10 +619,7 @@ description = "用于档位归一化测试的中转模型。"
         .lookup("custom-tiered")
         .expect("tiered custom model");
     assert_eq!(entry.context_window_options, vec![400_000, 1_000_000]);
-    assert_eq!(
-        entry.description.as_deref(),
-        Some("用于档位归一化测试的中转模型。")
-    );
+    assert_eq!(entry.description.as_deref(), Some(description));
 }
 
 #[test]

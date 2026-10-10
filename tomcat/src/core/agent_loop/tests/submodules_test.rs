@@ -290,7 +290,7 @@ async fn handle_unsupported_multimodal_retry_degrades_input_file_and_keeps_trans
         texts,
         vec![
             "prefix".to_string(),
-            "[文件已省略：当前模型不支持文件输入]".to_string(),
+            "[File omitted: the current model does not support file input]".to_string(),
             "suffix".to_string()
         ]
     );
@@ -298,8 +298,12 @@ async fn handle_unsupported_multimodal_retry_degrades_input_file_and_keeps_trans
     let notice = observed.lock().unwrap();
     assert_eq!(notice.len(), 1);
     assert_eq!(
-        notice[0]["message"].as_str(),
-        Some("本轮附件未被当前端点接受，已按纯文本发送")
+        notice[0]["message"],
+        crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "agentLoop.attachmentsDegraded",
+            &[]
+        )
     );
 
     let after = std::fs::read(&transcript_path).expect("read after");
@@ -510,7 +514,7 @@ async fn tool_exec_load_skill_rejected_for_reviewer() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具 `load_skill`"));
+        .contains("reviewer sub-Agent may not call `load_skill`"));
 }
 
 #[tokio::test]
@@ -613,7 +617,7 @@ async fn tool_exec_load_skill_rejected_for_verifier() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("verifier 子 Agent 禁止调用工具 `load_skill`"));
+        .contains("verifier sub-Agent may not call `load_skill`"));
 }
 
 #[tokio::test]
@@ -714,7 +718,9 @@ async fn tool_exec_load_skill_unknown_name_errors() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("未知 skill `missing-skill`"));
+    assert!(outcome
+        .model_text
+        .contains("Unknown Skill `missing-skill`. Available Skills: commit"));
     assert!(outcome.model_text.contains("commit"));
 }
 
@@ -766,7 +772,9 @@ async fn tool_exec_load_skill_file_escape_denied() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("越出技能目录"));
+    assert!(outcome
+        .model_text
+        .contains("load_skill: `file` escapes the Skill directory"));
 }
 
 #[tokio::test]
@@ -872,7 +880,7 @@ async fn tool_exec_web_search_requires_runtime_injection() {
         "web_search without runtime should report is_error=true"
     );
     assert!(
-        msg.contains("web_search runtime 未注入"),
+        msg.contains("web_search runtime was not supplied"),
         "missing-runtime error should be explicit, got: {}",
         msg
     );
@@ -893,7 +901,7 @@ async fn tool_exec_web_fetch_requires_runtime_injection() {
         "web_fetch without runtime should report is_error=true"
     );
     assert!(
-        msg.contains("web_fetch runtime 未注入"),
+        msg.contains("web_fetch runtime was not supplied"),
         "missing-runtime error should be explicit, got: {}",
         msg
     );

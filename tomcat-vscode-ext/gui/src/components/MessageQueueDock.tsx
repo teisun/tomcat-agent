@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey } from "../../../src/shared/i18n";
 import { freshOccurrences } from "../../../src/shared/composerOccurrences";
 import type { WebviewMessageQueue, WebviewQueueItem } from "../../../src/ui/webview/protocol";
 import type { ContextSearchMatch, VsCodeApiLike, WebviewIntent, WebviewPendingAttachment } from "../types";
@@ -12,6 +14,7 @@ export function QueuedMessageEditor({ item, sessionId, composerProps, vscodeApi,
   item: WebviewQueueItem; sessionId: string; composerProps: ComposerSurfaceProps; vscodeApi: VsCodeApiLike;
   action(action: "save" | "cancel", data?: Partial<Extract<WebviewIntent, { type: "queueAction" }>["data"]>): void;
 }) {
+  const t = useT();
   const editor = useRef<ComposerHandle>(null);
   const [initialDraft] = useState(() => ({ text: item.text, hasContent: true,
     segments: freshOccurrences(item.segments.length ? item.segments : [{ type: "text", text: item.text }]),
@@ -50,11 +53,11 @@ export function QueuedMessageEditor({ item, sessionId, composerProps, vscodeApi,
       providerSha: a.providerSha, bytes: a.bytes ?? 0, hasThumb: a.hasThumb,
     })) });
   }
-  return <section className="tc-queue-editor" data-testid="queue-editor" aria-label="Editing queued message">
+  return <section className="tc-queue-editor" data-testid="queue-editor" aria-label={t("queue.editing")}>
     <ComposerSurface {...composerProps} ref={editor} initialDraft={initialDraft} instanceId="queue-edit"
-      header={<><span>Editing queued message</span><button type="button" className="tc-composer__cancel" data-testid="queue-edit-cancel" onClick={() => action("cancel")}>Cancel</button></>}
+      header={<><span>{t("queue.editing")}</span><button type="button" className="tc-composer__cancel" data-testid="queue-edit-cancel" onClick={() => action("cancel")}>{t("common.cancel")}</button></>}
       canChangeConfig={composerProps.canChangeConfig ?? !composerProps.busy}
-      hideDragHint submitAriaLabel="Save queued message" busy={false} canInterrupt={false} canPrompt={composerProps.canPrompt && !composerProps.commandPending}
+      hideDragHint submitAriaLabel={t("queue.save")} busy={false} canInterrupt={false} canPrompt={composerProps.canPrompt && !composerProps.commandPending}
       submitDisabled={working || attachments.some(a => a.unavailable)}
       attachmentsPending={working}
       onCancelEdit={() => action("cancel")} onSubmit={save} onDraftChange={() => undefined} attachments={attachments}
@@ -83,6 +86,8 @@ export function QueuedMessageEditor({ item, sessionId, composerProps, vscodeApi,
 export function MessageQueueDock({ sessionId, queue, busy, composerProps, vscodeApi }: {
   sessionId: string; queue: WebviewMessageQueue; busy: boolean; composerProps: ComposerSurfaceProps; vscodeApi: VsCodeApiLike;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const root = useRef<HTMLDivElement>(null);
   const focusedRow = useRef<string | null>(null);
   const [zoom, setZoom] = useState<ZoomedImage | null>(null);
@@ -107,20 +112,21 @@ export function MessageQueueDock({ sessionId, queue, busy, composerProps, vscode
   function action(item: WebviewQueueItem, action: "send" | "edit" | "cancel" | "delete" | "save", data?: object) {
     vscodeApi.postMessage({ type: "queueAction", messageId: crypto.randomUUID(), data: { sessionId, userMessageId: item.userMessageId, action, ...data } } as WebviewIntent);
   }
-  return <DockSection label="messages" title={`${count ? `${count} Queued` : "Messages"}${queue.paused ? " · 已暂停" : ""}`} defaultExpanded testId="messages-dock">
-    <div ref={root} className="tc-message-queue" role="list" aria-label="待发消息">
+  const title = count ? t(pluralKey(locale, "queue.count.other", count), { count }) : t("queue.messages");
+  return <DockSection label="messages" title={queue.paused ? t("queue.paused", { title }) : title} defaultExpanded testId="messages-dock">
+    <div ref={root} className="tc-message-queue" role="list" aria-label={t("queue.label")}>
       {queue.items.map(item => <div key={item.userMessageId} className={`tc-message-queue__row${queue.editingId === item.userMessageId ? " tc-message-queue__row--editing" : ""}`} aria-current={queue.editingId === item.userMessageId ? true : undefined} role="listitem" data-testid="queue-row" data-user-message-id={item.userMessageId}
         onFocusCapture={() => { focusedRow.current = item.userMessageId; }} onBlurCapture={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) focusedRow.current = null; }}>
-          <span className="tc-message-queue__status" aria-label={item.status === "queued" ? "待发" : "正在发送"}>{item.status === "queued" ? "○" : <span aria-hidden="true" className="codicon codicon-loading tc-codicon-spin" />}</span>
-          <div className="tc-message-queue__body"><div>{item.text || item.segments.map(s => s.type === "text" ? s.text : s.label).join("") || "附件"}</div>
+          <span className="tc-message-queue__status" aria-label={t(item.status === "queued" ? "queue.queued" : "queue.sending")}>{item.status === "queued" ? "○" : <span aria-hidden="true" className="codicon codicon-loading tc-codicon-spin" />}</span>
+          <div className="tc-message-queue__body"><div>{item.text || item.segments.map(s => s.type === "text" ? s.text : s.label).join("") || t("queue.attachments")}</div>
             {item.attachments.length ? <AttachmentStrip attachments={item.attachments} readonly onOpen={a => { if (a.kind === "image" && a.fullUri) setZoom({ alt: a.filename, src: a.fullUri, mimeType: a.mimeType }); else composerProps.onOpenAttachment(a); }} /> : null}
           </div>
           {item.status === "queued" ? <div className="tc-message-queue__actions">
             {queue.editingId !== item.userMessageId ? <>
-            <button type="button" data-testid="queue-edit" aria-label="编辑待发消息" title="编辑待发消息" onClick={() => action(item, "edit")}><span aria-hidden="true" className="codicon codicon-edit" /></button>
-            <button type="button" data-testid="queue-send" aria-label={busy ? "立即插入当前任务，沿用当前模式和模型" : "立即发送"} title={busy ? "立即插入当前任务，沿用当前模式和模型" : "立即发送"} onClick={() => action(item, "send")}>↑</button>
+            <button type="button" data-testid="queue-edit" aria-label={t("queue.edit")} title={t("queue.edit")} onClick={() => action(item, "edit")}><span aria-hidden="true" className="codicon codicon-edit" /></button>
+            <button type="button" data-testid="queue-send" aria-label={t(busy ? "queue.steer" : "queue.send")} title={t(busy ? "queue.steer" : "queue.send")} onClick={() => action(item, "send")}>↑</button>
             </> : null}
-            <button type="button" data-testid="queue-delete" aria-label="删除待发消息" title="删除待发消息" onClick={() => action(item, "delete")}><span aria-hidden="true" className="codicon codicon-trash" /></button>
+            <button type="button" data-testid="queue-delete" aria-label={t("queue.delete")} title={t("queue.delete")} onClick={() => action(item, "delete")}><span aria-hidden="true" className="codicon codicon-trash" /></button>
           </div> : null}
       </div>)}
     </div>

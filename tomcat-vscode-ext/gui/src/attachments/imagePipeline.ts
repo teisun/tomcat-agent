@@ -22,6 +22,8 @@
  * original bytes are always what gets shown.
  */
 
+import { t } from "../../../src/shared/i18n";
+
 /** Longest edge of a generated thumbnail, in CSS pixels. */
 export const THUMBNAIL_MAX_EDGE = 192;
 
@@ -376,7 +378,7 @@ export async function prepareAttachment(
   } catch (error) {
     // Losing the thumbnail costs memory, not correctness: rendering falls back to the
     // full image. Worth a note, not worth rejecting the attachment.
-    warnings.push(`thumbnail unavailable (${describeError(error)})`);
+    warnings.push(t("image.noThumbnail", { detail: describeError(error) }));
   }
 
   if (raw.mimeType === "image/svg+xml") {
@@ -388,15 +390,15 @@ export async function prepareAttachment(
       const source = new TextDecoder("utf-8").decode(raw.bytes);
       if (raw.bytes.byteLength > SVG_SOURCE_MAX_BYTES) {
         warnings.push(
-          "this SVG could not be converted to an image and its source is too large to send as text; the model will not see it",
+          t("image.svgTooLarge"),
         );
       } else if (svgSourceIsUninformative(source)) {
         warnings.push(
-          "this SVG only wraps an embedded bitmap and could not be converted; the model will not see it",
+          t("image.svgBitmapOnly"),
         );
       } else {
         prepared.providerText = source;
-        warnings.push("sending this SVG to the model as source code rather than a picture");
+        warnings.push(t("image.svgAsSource"));
       }
     }
   }

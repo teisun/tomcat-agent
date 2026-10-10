@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::core::connector::mcp::config::McpOAuthConfig;
 use crate::infra::config::get_work_dir;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::AppConfig;
 
 const TOKEN_FILE_NAME: &str = "connector-oauth.json";
@@ -96,7 +97,7 @@ impl TokenFile {
         let revision = self.revisions.entry(key.to_owned()).or_default();
         *revision = revision
             .checked_add(1)
-            .ok_or_else(|| AppError::Config("OAuth credential revision exhausted".into()))?;
+            .ok_or_else(|| AppError::Config(tr("oauth.revisionExhausted", &[])))?;
         Ok(())
     }
 }
@@ -294,13 +295,19 @@ impl OAuthTokenStore {
             .form(&form)
             .send()
             .await
-            .map_err(|error| AppError::Tool(format!("OAuth token refresh failed: {error}")))?;
+            .map_err(|error| {
+                AppError::Tool(tr(
+                    "oauth.refreshFailed",
+                    &[("detail", &error.without_url().to_string())],
+                ))
+            })?;
         if !response.status().is_success() {
             return Ok(None);
         }
         let refreshed: TokenResponse = response.json().await.map_err(|error| {
-            AppError::Tool(format!(
-                "OAuth token refresh returned invalid JSON: {error}"
+            AppError::Tool(tr(
+                "oauth.refreshJson",
+                &[("detail", &error.without_url().to_string())],
             ))
         })?;
         let updated = StoredOAuthToken {
@@ -347,19 +354,27 @@ impl OAuthTokenStore {
         }
         let content = std::fs::read_to_string(&self.path)?;
         serde_json::from_str(&content).map_err(|error| {
-            AppError::Config(format!(
-                "parse OAuth token store '{}': {error}",
-                self.path.display()
+            AppError::Config(tr(
+                "oauth.storeParse",
+                &[
+                    ("path", &self.path.display().to_string()),
+                    ("line", &error.line().to_string()),
+                    ("column", &error.column().to_string()),
+                ],
             ))
         })
     }
     fn write_file(&self, file: &TokenFile) -> Result<(), AppError> {
-        let contents = serde_json::to_vec_pretty(file)
-            .map_err(|error| AppError::Config(format!("serialize OAuth token store: {error}")))?;
+        let contents = serde_json::to_vec_pretty(file).map_err(|error| {
+            AppError::Config(tr(
+                "oauth.storeSerialize",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| AppError::Config("OAuth token store has no parent".to_string()))?;
+            .ok_or_else(|| AppError::Config(tr("oauth.storeParent", &[])))?;
         std::fs::create_dir_all(parent)?;
         let temp_path = parent.join(format!(
             ".{}.{}",
@@ -436,8 +451,9 @@ impl OAuthDiscovery {
         supplied_challenge: Option<&str>,
         allow_initialize_probe: bool,
     ) -> Result<Self, AppError> {
-        let base = Url::parse(mcp_url)
-            .map_err(|error| AppError::Config(format!("invalid MCP URL: {error}")))?;
+        let base = Url::parse(mcp_url).map_err(|error| {
+            AppError::Config(tr("oauth.mcpUrl", &[("detail", &error.to_string())]))
+        })?;
         let challenge = if let Some(challenge) = supplied_challenge {
             Some(challenge.to_owned())
         } else {
@@ -445,7 +461,7 @@ impl OAuthDiscovery {
                 .get(base.clone())
                 .send()
                 .await
-                .map_err(|_| AppError::Tool("MCP OAuth discovery request failed".into()))?;
+                .map_err(|_| AppError::Tool(tr("oauth.discoveryFailed", &[])))?;
             response
                 .headers()
                 .get(reqwest::header::WWW_AUTHENTICATE)
@@ -467,7 +483,7 @@ impl OAuthDiscovery {
                 }))
                 .send()
                 .await
-                .map_err(|error| AppError::Tool(format!("MCP OAuth POST discovery request failed: {error}")))?;
+                .map_err(|error| AppError::Tool(tr("oauth.discoveryPost", &[("detail", &error.without_url().to_string())])))?;
             response
                 .headers()
                 .get(reqwest::header::WWW_AUTHENTICATE)
@@ -487,7 +503,10 @@ impl OAuthDiscovery {
                     .send()
                     .await
                     .map_err(|error| {
-                        AppError::Tool(format!("fetch MCP protected-resource metadata: {error}"))
+                        AppError::Tool(tr(
+                            "oauth.resourceFetch",
+                            &[("detail", &error.without_url().to_string())],
+                        ))
                     })?;
                 if response.status().is_success() {
                     found = Some(candidate);
@@ -496,27 +515,33 @@ impl OAuthDiscovery {
             }
             found
         };
-        let resource_url = resource_url.ok_or_else(|| {
-            AppError::Tool("MCP server did not advertise protected-resource metadata".into())
-        })?;
+        let resource_url =
+            resource_url.ok_or_else(|| AppError::Tool(tr("oauth.resourceMissing", &[])))?;
         let resource_response = client.get(resource_url).send().await.map_err(|error| {
-            AppError::Tool(format!("fetch MCP protected-resource metadata: {error}"))
+            AppError::Tool(tr(
+                "oauth.resourceFetch",
+                &[("detail", &error.without_url().to_string())],
+            ))
         })?;
         if !resource_response.status().is_success() {
-            return Err(AppError::Tool(format!(
-                "protected-resource metadata returned HTTP {}",
-                resource_response.status()
+            return Err(AppError::Tool(tr(
+                "oauth.resourceHttp",
+                &[("status", &resource_response.status().to_string())],
             )));
         }
         let protected: ProtectedResourceMetadata =
             resource_response.json().await.map_err(|error| {
-                AppError::Tool(format!("parse protected-resource metadata: {error}"))
+                AppError::Tool(tr(
+                    "oauth.resourceParse",
+                    &[("detail", &error.without_url().to_string())],
+                ))
             })?;
-        let issuer = protected.authorization_servers.first().ok_or_else(|| {
-            AppError::Tool("protected-resource metadata has no authorization_servers".to_string())
-        })?;
+        let issuer = protected
+            .authorization_servers
+            .first()
+            .ok_or_else(|| AppError::Tool(tr("oauth.serverMissing", &[])))?;
         let issuer_url = Url::parse(issuer).map_err(|error| {
-            AppError::Tool(format!("invalid authorization server URL: {error}"))
+            AppError::Tool(tr("oauth.serverUrl", &[("detail", &error.to_string())]))
         })?;
         let mut candidates = well_known_candidates(&issuer_url, "oauth-authorization-server");
         candidates.extend(well_known_candidates(&issuer_url, "openid-configuration"));
@@ -527,12 +552,18 @@ impl OAuthDiscovery {
                 .send()
                 .await
                 .map_err(|error| {
-                    AppError::Tool(format!("fetch OAuth authorization metadata: {error}"))
+                    AppError::Tool(tr(
+                        "oauth.metadataFetch",
+                        &[("detail", &error.without_url().to_string())],
+                    ))
                 })?;
             last_status = Some(response.status());
             if response.status().is_success() {
                 let metadata = response.json().await.map_err(|error| {
-                    AppError::Tool(format!("parse OAuth authorization metadata: {error}"))
+                    AppError::Tool(tr(
+                        "oauth.metadataParse",
+                        &[("detail", &error.without_url().to_string())],
+                    ))
                 })?;
                 return Ok(Self {
                     protected_resource: protected,
@@ -541,10 +572,10 @@ impl OAuthDiscovery {
                 });
             }
         }
-        Err(AppError::Tool(format!(
-            "authorization server metadata unavailable{}",
-            last_status.map_or(String::new(), |status| format!(" (last HTTP {status})"))
-        )))
+        Err(AppError::Tool(match last_status {
+            Some(status) => tr("oauth.metadataHttp", &[("status", &status.to_string())]),
+            None => tr("oauth.metadataUnavailable", &[]),
+        }))
     }
 }
 
@@ -592,8 +623,9 @@ pub(crate) async fn authorize_token(
         crate::core::connector::mcp::oauth_callback::OAuthCallbackListener::bind().await?
     };
     let redirect_uri = if let Some(redirect_uri) = configured_redirect_uri {
-        let parsed = Url::parse(&redirect_uri)
-            .map_err(|error| AppError::Tool(format!("invalid OAuth callback URL: {error}")))?;
+        let parsed = Url::parse(&redirect_uri).map_err(|error| {
+            AppError::Tool(tr("oauth.invalidUrl", &[("detail", &error.to_string())]))
+        })?;
         if parsed.port() == Some(0) {
             callback.redirect_uri()?
         } else {
@@ -605,8 +637,9 @@ pub(crate) async fn authorize_token(
     let (verifier, challenge) = pkce_pair()?;
     let mut resource = discovery.protected_resource.resource.clone();
     let mut state_bytes = [0_u8; 24];
-    getrandom::fill(&mut state_bytes)
-        .map_err(|error| AppError::Tool(format!("generate OAuth state: {error}")))?;
+    getrandom::fill(&mut state_bytes).map_err(|error| {
+        AppError::Tool(tr("oauth.stateGenerate", &[("detail", &error.to_string())]))
+    })?;
     let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
 
     let supports_cimd = discovery
@@ -625,16 +658,17 @@ pub(crate) async fn authorize_token(
         )
     } else if let Some(metadata_url) = oauth.client_metadata_url.clone() {
         let parsed = Url::parse(&metadata_url).map_err(|error| {
-            AppError::Tool(format!("invalid OAuth client metadata URL: {error}"))
+            AppError::Tool(tr(
+                "oauth.clientMetadataUrl",
+                &[("detail", &error.to_string())],
+            ))
         })?;
         if !supports_cimd
             || parsed.scheme() != "https"
             || parsed.host_str().is_none()
             || parsed.path() == "/"
         {
-            return Err(AppError::Tool(
-                "OAuth client metadata URL requires advertised HTTPS CIMD support".to_string(),
-            ));
+            return Err(AppError::Tool(tr("oauth.cimd", &[])));
         }
         (metadata_url, None)
     } else if let Some(endpoint) = discovery
@@ -655,22 +689,27 @@ pub(crate) async fn authorize_token(
             .send()
             .await
             .map_err(|error| {
-                AppError::Tool(format!("OAuth client registration failed: {error}"))
+                AppError::Tool(tr(
+                    "oauth.registrationFailed",
+                    &[("detail", &error.without_url().to_string())],
+                ))
             })?;
         if !response.status().is_success() {
-            return Err(AppError::Tool(format!(
-                "OAuth client registration returned HTTP {}",
-                response.status()
+            return Err(AppError::Tool(tr(
+                "oauth.registrationHttp",
+                &[("status", &response.status().to_string())],
             )));
         }
-        let response: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|error| AppError::Tool(format!("parse OAuth client registration: {error}")))?;
+        let response: serde_json::Value = response.json().await.map_err(|error| {
+            AppError::Tool(tr(
+                "oauth.registrationParse",
+                &[("detail", &error.without_url().to_string())],
+            ))
+        })?;
         let client_id = response
             .get("client_id")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| AppError::Tool("OAuth registration omitted client_id".to_string()))?
+            .ok_or_else(|| AppError::Tool(tr("oauth.registrationClientId", &[])))?
             .to_string();
         (
             client_id,
@@ -680,14 +719,18 @@ pub(crate) async fn authorize_token(
                 .map(str::to_owned),
         )
     } else {
-        return Err(AppError::Tool(format!(
-            "OAuth server '{server_name}' requires client_id or registration_endpoint"
+        return Err(AppError::Tool(tr(
+            "oauth.registrationRequired",
+            &[("name", server_name)],
         )));
     };
 
     let mut authorization_url = Url::parse(&discovery.authorization_server.authorization_endpoint)
         .map_err(|error| {
-            AppError::Tool(format!("invalid OAuth authorization endpoint: {error}"))
+            AppError::Tool(tr(
+                "oauth.authorizationUrl",
+                &[("detail", &error.to_string())],
+            ))
         })?;
     {
         let mut query = authorization_url.query_pairs_mut();
@@ -714,7 +757,7 @@ pub(crate) async fn authorize_token(
     let callback = async {
         tokio::time::timeout(std::time::Duration::from_secs(240), callback.wait(&state))
             .await
-            .map_err(|_| AppError::Tool("OAuth authorization timed out".into()))?
+            .map_err(|_| AppError::Tool(tr("oauth.authorizationTimeout", &[])))?
     };
     let navigate = async {
         if open_browser {
@@ -754,17 +797,24 @@ pub(crate) async fn authorize_token(
         .form(&form)
         .send()
         .await
-        .map_err(|error| AppError::Tool(format!("OAuth token exchange failed: {error}")))?;
+        .map_err(|error| {
+            AppError::Tool(tr(
+                "oauth.exchangeFailed",
+                &[("detail", &error.without_url().to_string())],
+            ))
+        })?;
     if !response.status().is_success() {
-        return Err(AppError::Tool(format!(
-            "OAuth token exchange returned HTTP {}",
-            response.status()
+        return Err(AppError::Tool(tr(
+            "oauth.exchangeHttp",
+            &[("status", &response.status().to_string())],
         )));
     }
-    let token: TokenResponse = response
-        .json()
-        .await
-        .map_err(|error| AppError::Tool(format!("parse OAuth token response: {error}")))?;
+    let token: TokenResponse = response.json().await.map_err(|error| {
+        AppError::Tool(tr(
+            "oauth.tokenParse",
+            &[("detail", &error.without_url().to_string())],
+        ))
+    })?;
     let stored = StoredOAuthToken {
         access_token: token.access_token,
         refresh_token: token.refresh_token,
@@ -792,20 +842,17 @@ fn open_url(url: &str) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     let mut command = std::process::Command::new("explorer.exe");
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    return Err(AppError::Tool(
-        "opening the OAuth browser is unsupported on this platform".to_string(),
-    ));
-    command
-        .arg(url)
-        .spawn()
-        .map_err(|error| AppError::Tool(format!("open OAuth authorization URL: {error}")))?;
+    return Err(AppError::Tool(tr("oauth.browserUnsupported", &[])));
+    command.arg(url).spawn().map_err(|error| {
+        AppError::Tool(tr("oauth.browserOpen", &[("detail", &error.to_string())]))
+    })?;
     Ok(())
 }
 
 pub fn pkce_pair() -> Result<(String, String), AppError> {
     let mut verifier_bytes = [0_u8; 32];
     getrandom::fill(&mut verifier_bytes)
-        .map_err(|error| AppError::Tool(format!("generate OAuth PKCE verifier: {error}")))?;
+        .map_err(|error| AppError::Tool(tr("oauth.pkce", &[("detail", &error.to_string())])))?;
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier_bytes);
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -821,12 +868,13 @@ pub fn oauth_authorization_url(
     challenge: &str,
 ) -> Result<Url, AppError> {
     let client_id = oauth.client_id.as_deref().ok_or_else(|| {
-        AppError::Tool(format!(
-            "OAuth server '{server_name}' requires a client_id or dynamic registration"
-        ))
+        AppError::Tool(tr("oauth.registrationRequired", &[("name", server_name)]))
     })?;
     let mut url = Url::parse(&metadata.authorization_endpoint).map_err(|error| {
-        AppError::Tool(format!("invalid OAuth authorization endpoint: {error}"))
+        AppError::Tool(tr(
+            "oauth.authorizationUrl",
+            &[("detail", &error.to_string())],
+        ))
     })?;
     {
         let mut query = url.query_pairs_mut();
@@ -889,9 +937,8 @@ fn set_private_file_permissions(path: &std::path::Path) -> Result<(), AppError> 
     }
     #[cfg(windows)]
     {
-        let username = std::env::var("USERNAME").map_err(|_| {
-            AppError::Config("USERNAME is unavailable for OAuth token ACL setup".to_string())
-        })?;
+        let username =
+            std::env::var("USERNAME").map_err(|_| AppError::Config(tr("oauth.aclUser", &[])))?;
         let grant = format!("{username}:F");
         let status = std::process::Command::new("icacls")
             .args([
@@ -902,9 +949,7 @@ fn set_private_file_permissions(path: &std::path::Path) -> Result<(), AppError> 
             ])
             .status()?;
         if !status.success() {
-            return Err(AppError::Config(
-                "icacls failed to protect OAuth token store".to_string(),
-            ));
+            return Err(AppError::Config(tr("oauth.aclFailed", &[])));
         }
     }
     Ok(())
@@ -1014,6 +1059,48 @@ mod tests {
                 .access_token,
             "late-access"
         );
+    }
+
+    #[test]
+    fn malformed_token_store_does_not_echo_credential_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().to_string_lossy().into_owned());
+        let store = OAuthTokenStore::open(&cfg).unwrap();
+        let raw = r#"{"servers":{"private":{"accessToken":"credential-sentinel","expiresAt":"credential-sentinel","tokenEndpoint":"https://example.com/token","clientId":"fixture"}}}"#;
+        std::fs::write(store.path(), raw).unwrap();
+        let error = store.load("private").unwrap_err();
+        assert!(!error.to_string().contains("credential-sentinel"));
+        assert!(!format!("{error:?}").contains("credential-sentinel"));
+        assert!(error.to_string().contains("OAuth"));
+        assert!(error
+            .to_string()
+            .contains(&store.path().display().to_string()));
+        assert_eq!(std::fs::read_to_string(store.path()).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn refresh_transport_error_does_not_echo_endpoint_query_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().to_string_lossy().into_owned());
+        let store = OAuthTokenStore::open(&cfg).unwrap();
+        let token: super::StoredOAuthToken = serde_json::from_value(serde_json::json!({
+            "accessToken":"access-sentinel", "refreshToken":"refresh-sentinel", "expiresAt":0,
+            "tokenEndpoint":"http://127.0.0.1:0/token?credential=query-sentinel", "clientId":"fixture"
+        })).unwrap();
+        store.save("private", token.clone()).unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let error = store.force_refresh(&client, "private").await.unwrap_err();
+        for sentinel in ["access-sentinel", "refresh-sentinel", "query-sentinel"] {
+            assert!(!error.to_string().contains(sentinel));
+            assert!(!format!("{error:?}").contains(sentinel));
+        }
+        assert_eq!(store.load("private").unwrap(), Some(token));
     }
 
     #[test]

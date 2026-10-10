@@ -98,6 +98,8 @@ export interface ServeConnectionSupervisorOptions {
   setupRetryDelayMs?: number;
 }
 
+import { t } from "../shared/i18n";
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -243,7 +245,7 @@ export class ServeConnectionSupervisor {
     if (!this.options.isExecutableAvailable()) {
       this.enterFatal({
         attempt: 0,
-        error: new Error("Tomcat CLI executable was not found"),
+        error: new Error(t("bridge.cliMissing")),
         kind: "executable_missing",
         stderr: "",
       });
@@ -489,7 +491,7 @@ export class ServeConnectionSupervisor {
   }
 
   private fatalError(): Error {
-    return this.state.failure?.error ?? new Error("Tomcat connection failed");
+    return this.state.failure?.error ?? new Error(t("bridge.connectionFailed"));
   }
 
   private transition(next: ServeConnectionState): void {

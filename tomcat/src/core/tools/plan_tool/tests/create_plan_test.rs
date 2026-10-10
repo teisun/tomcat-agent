@@ -36,12 +36,12 @@ fn rejection_message_does_not_claim_the_tool_is_invisible() {
     let error = ToolError::RejectedInMode {
         tool: "create_plan",
         mode: "chat".to_string(),
-        guidance: "Enter Plan mode before creating a plan.",
+        guidance: "Enter Plan mode before creating a plan.".into(),
     };
     let rendered = error.to_string().to_ascii_lowercase();
-    assert!(rendered.contains("不允许") || rendered.contains("not allowed"));
+    assert!(rendered.contains("not allowed"));
     assert!(
-        !rendered.contains("invisible") && !rendered.contains("不可见"),
+        !rendered.contains("invisible"),
         "the catalog is stable; rejection must describe policy, not visibility"
     );
 }

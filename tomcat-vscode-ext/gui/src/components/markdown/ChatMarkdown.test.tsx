@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 
 import { ChatMarkdown } from "./ChatMarkdown";
+import { LocaleProvider } from "../../i18n/LocaleProvider";
+import { translate } from "../../../../src/shared/i18n";
 import * as richRenderRuntime from "./richRenderRuntime";
 
 const renderMock = vi.fn(async (_id: string, _graph: string) => ({
@@ -23,6 +25,32 @@ vi.mock("mermaid", () => ({
 }));
 
 describe("ChatMarkdown", () => {
+  it("switches copy feedback language without rebuilding code nodes or translating their contents", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.navigator, { clipboard: { writeText } });
+    const markdown = "```ts\nconst same = 1;\n```";
+    const open = vi.fn();
+    const view = render(<LocaleProvider locale="en"><ChatMarkdown markdown={markdown} onOpenFile={open} /></LocaleProvider>);
+    try {
+      const card = screen.getByTestId("assistant-code-card");
+      const code = card.querySelector("code");
+      const copy = screen.getByRole("button", { name: translate("en", "code.copy") });
+      await act(async () => { fireEvent.click(copy); await Promise.resolve(); });
+      expect(copy.getAttribute("aria-label")).toBe(translate("en", "common.copied"));
+      view.rerender(<LocaleProvider locale="zh-CN"><ChatMarkdown markdown={markdown} onOpenFile={open} /></LocaleProvider>);
+      expect(screen.getByTestId("assistant-code-copy")).toBe(copy);
+      expect(copy.classList.contains("is-copied")).toBe(true);
+      expect(screen.getByTestId("assistant-code-card")).toBe(card);
+      expect(card.querySelector("code")).toBe(code);
+      expect(code?.textContent).toBe("const same = 1;\n");
+      await act(async () => { vi.advanceTimersByTime(1500); });
+      expect(copy.classList.contains("is-copied")).toBe(false);
+      expect(screen.getByTestId("assistant-code-copy")).toBe(copy);
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("const same = 1;\n");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("renders headings, lists, bold and inline code from assistant markdown", () => {
     render(
       <ChatMarkdown

@@ -35,6 +35,7 @@ fn sample_request(request_id: &str) -> AskQuestionWireRequest {
         session_id: Some("sid-a".to_string()),
         tool_call_id: Some("tool-call-a".to_string()),
         questions: vec![Question {
+            allow_custom: true,
             id: "color".to_string(),
             prompt: "Pick a color".to_string(),
             options: vec![

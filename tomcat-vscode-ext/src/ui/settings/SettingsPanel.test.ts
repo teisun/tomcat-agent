@@ -649,6 +649,8 @@ describe("connector Reload ownership and observation", () => {
       sendTrustProject: vi.fn(async (root: string): Promise<Reply> => ({ success: true, payload: { projectRoot: root, trusted: true } })),
       sendAddConnector: vi.fn(async (_input: unknown): Promise<Reply> => ({ success: true, payload: { configSaved: true, connectionStarted: false } })),
       sendReloadConnector: vi.fn(async (_key: string): Promise<Reply> => accepted()),
+      sendLoginConnector: vi.fn(async (): Promise<Reply> => ({ success: true, payload: { authorizing: true, configKey: "key" } })),
+      sendCancelLoginConnector: vi.fn(async (): Promise<Reply> => ({ success: true })),
       sendListConnectorTools: vi.fn(async (): Promise<Reply> => catalog("1", 1, "initial")),
       sendSetConnectorToolEnabled: vi.fn(async (configKey: string, rawName: string, enabled: boolean): Promise<Reply> => ({
         success: true,
@@ -686,6 +688,23 @@ describe("connector Reload ownership and observation", () => {
   }
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { panels.splice(0).forEach((panel) => panel.dispose()); vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it("returns stable login phases with request identity on success, failure and disconnect", async () => {
+    const h = harness(); await h.ready();
+    const login = (messageId: string) => h.panel.__testingDispatchIntent({ type: "loginConnector", messageId, data: { name: "key", configKey: "key" } });
+    await login("auth1");
+    expect(h.state().connectorLogin).toEqual({ configKey: "key", requestId: "auth1", phase: "authorizing" });
+    await h.panel.__testingDispatchIntent({ type: "cancelLoginConnector", messageId: "cancel-auth", data: { name: "key", configKey: "key" } });
+    expect(h.state().connectorLogin).toEqual({ configKey: "key", requestId: "cancel-auth", phase: "settled" });
+    h.messenger.sendLoginConnector.mockResolvedValueOnce({ success: false, error: "上游拒绝" });
+    await login("auth2");
+    expect(h.state().connectorLogin).toEqual({ configKey: "key", requestId: "auth2", phase: "settled" });
+    h.messenger.sendLoginConnector.mockRejectedValueOnce(new Error("socket closed"));
+    await login("auth3");
+    expect(h.state().connectorLogin).toEqual({ configKey: "key", requestId: "auth3", phase: "settled" });
+    await login("auth4"); h.exit();
+    expect(h.state().connectorLogin).toBeNull();
+  });
 
   it("trusts the displayed project once, rejects stale roots, and refreshes the list", async () => {
     const h = harness();

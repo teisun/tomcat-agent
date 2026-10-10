@@ -1,4 +1,5 @@
 use crate::api::chat::ChatContext;
+use crate::infra::i18n::tr;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -33,7 +34,7 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
 }
 
 fn usage_text() -> String {
-    "用法错误：/skill list | /skill reload | /skill use <name> \"intent...\"".to_string()
+    tr("slash.skill.usage", &[])
 }
 
 pub(crate) async fn run(ctx: &ChatContext, command: SkillCommand) -> ChatCommandOutcome {
@@ -46,7 +47,7 @@ pub(crate) async fn run(ctx: &ChatContext, command: SkillCommand) -> ChatCommand
 
 fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
     if !ctx.config.skills.enabled {
-        println!("[skill] 技能系统当前已禁用（[skills].enabled=false）。");
+        println!("{}", tr("slash.skill.disabled", &[]));
     }
     println!(
         "{}",
@@ -58,9 +59,9 @@ fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
 async fn run_reload(ctx: &ChatContext) -> ChatCommandOutcome {
     let skill_set = ctx.reload_skill_set().await;
     if ctx.config.skills.enabled {
-        println!("[skill] 已重载技能目录。");
+        println!("{}", tr("slash.skill.reloaded", &[]));
     } else {
-        println!("[skill] 技能系统已禁用；当前运行时 SkillSet 已清空。");
+        println!("{}", tr("slash.skill.cleared", &[]));
     }
     println!("{}", crate::core::skill::render_skill_inventory(&skill_set));
     ChatCommandOutcome::Handled
@@ -68,7 +69,7 @@ async fn run_reload(ctx: &ChatContext) -> ChatCommandOutcome {
 
 async fn run_use(ctx: &ChatContext, name: &str, intent: &str) -> ChatCommandOutcome {
     if !ctx.config.skills.enabled {
-        println!("[skill] 技能系统已禁用，无法执行 /skill use。");
+        println!("{}", tr("slash.skill.useDisabled", &[]));
         return ChatCommandOutcome::Handled;
     }
 
@@ -81,7 +82,11 @@ async fn run_use(ctx: &ChatContext, name: &str, intent: &str) -> ChatCommandOutc
             available
         };
         println!(
-            "[skill] 未知 skill `{name}`。当前可用技能: {available}。如已修改磁盘，请先执行 /skill reload。"
+            "{}",
+            tr(
+                "slash.skill.unknown",
+                &[("name", name), ("available", &available)]
+            )
         );
         return ChatCommandOutcome::Handled;
     }
@@ -97,7 +102,13 @@ async fn run_use(ctx: &ChatContext, name: &str, intent: &str) -> ChatCommandOutc
             history_line: format!("/skill use {name} {intent}"),
         },
         Err(error) => {
-            println!("[skill] 加载 `{name}` 失败: {error}");
+            println!(
+                "{}",
+                tr(
+                    "slash.skill.loadFailed",
+                    &[("name", name), ("detail", &error.to_string())]
+                )
+            );
             ChatCommandOutcome::Handled
         }
     }

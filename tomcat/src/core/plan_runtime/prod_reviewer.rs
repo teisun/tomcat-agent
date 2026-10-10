@@ -235,14 +235,11 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         _allow_review_edit: bool,
     ) -> PlanReviewSummary {
         let Some(deps) = self.deps.as_ref() else {
-            return PlanReviewSummary::aborted_with(format!(
-                "[{}] 生产 plan reviewer 子 Agent 未注入依赖（stub 模式）",
-                self.origin
-            ));
+            return PlanReviewSummary::aborted_with(format!("[{}] Production plan reviewer sub-Agent dependencies were not supplied (stub mode)", self.origin));
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
             return PlanReviewSummary::aborted_with(format!(
-                "[{}] PlanRuntime 已被 drop，plan reviewer 取消派发",
+                "[{}] PlanRuntime was dropped; plan reviewer dispatch cancelled",
                 self.origin
             ));
         };
@@ -284,8 +281,8 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             Ok(runtime) => runtime,
             Err(err) => {
                 let mut s = PlanReviewSummary::aborted_with(format!(
-                    "[{}] plan reviewer 模型 `{}` 解析失败：{}",
-                    self.origin, model_id, err
+                    "[{}] Could not resolve plan reviewer model `{model_id}`: {err}",
+                    self.origin
                 ));
                 s.reviewer_turns_limit = turns_limit;
                 s.reviewer_stop_reason = "model_unresolved".into();
@@ -433,13 +430,13 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             Ok(_) => match rx.await {
                 Ok(summary) => summary,
                 Err(_) => PlanReviewSummary::aborted_with(format!(
-                    "[{}] plan reviewer 子 Agent 退出但 summary channel 提前关闭",
+                    "[{}] plan reviewer sub-Agent exited but its summary channel closed early",
                     self.origin
                 )),
             },
             Err(e) => {
                 let mut s = PlanReviewSummary::aborted_with(format!(
-                    "[{}] reviewer spawn 失败：{e}",
+                    "[{}] Could not spawn reviewer: {e}",
                     self.origin
                 ));
                 s.reviewer_turns_limit = turns_limit;
@@ -473,14 +470,11 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         dispatch: &CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         let Some(deps) = self.deps.as_ref() else {
-            return CodeReviewSummary::aborted_with(format!(
-                "[{}] 生产 code reviewer 子 Agent 未注入依赖（stub 模式）",
-                self.origin
-            ));
+            return CodeReviewSummary::aborted_with(format!("[{}] Production code reviewer sub-Agent dependencies were not supplied (stub mode)", self.origin));
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
             return CodeReviewSummary::aborted_with(format!(
-                "[{}] PlanRuntime 已被 drop，code reviewer 取消派发",
+                "[{}] PlanRuntime was dropped; code reviewer dispatch cancelled",
                 self.origin
             ));
         };
@@ -546,8 +540,8 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             Ok(runtime) => runtime,
             Err(err) => {
                 let mut s = CodeReviewSummary::aborted_with(format!(
-                    "[{}] code reviewer 模型 `{}` 解析失败：{}",
-                    self.origin, model_id, err
+                    "[{}] Could not resolve code reviewer model `{model_id}`: {err}",
+                    self.origin
                 ));
                 s.reviewer_turns_limit = turns_limit;
                 s.reviewer_stop_reason = "model_unresolved".into();
@@ -711,13 +705,13 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             Ok(_) => match rx.await {
                 Ok(summary) => summary,
                 Err(_) => CodeReviewSummary::aborted_with(format!(
-                    "[{}] code reviewer 子 Agent 退出但 summary channel 提前关闭",
+                    "[{}] code reviewer sub-Agent exited but its summary channel closed early",
                     self.origin
                 )),
             },
             Err(e) => {
                 let mut s = CodeReviewSummary::aborted_with(format!(
-                    "[{}] code reviewer spawn 失败：{e}",
+                    "[{}] Could not spawn code reviewer: {e}",
                     self.origin
                 ));
                 s.reviewer_turns_limit = turns_limit;
@@ -752,9 +746,7 @@ fn build_plan_summary_from_outcome(
                     (s, SubagentOutcomeLabel::Completed)
                 }
                 None => {
-                    let mut s = PlanReviewSummary::aborted_with(format!(
-                        "[{origin}] reviewer 输出不符合 <review> 契约（child={child_session_id}）"
-                    ));
+                    let mut s = PlanReviewSummary::aborted_with(format!("[{origin}] Reviewer output does not match the <review> contract (child={child_session_id})"));
                     s.reviewer_turns_used = turns_used;
                     s.reviewer_turns_limit = turns_limit;
                     s.reviewer_stop_reason = "parse_error".into();
@@ -766,7 +758,7 @@ fn build_plan_summary_from_outcome(
         AgentRunOutcome::Interrupted(result) => {
             let turns_used = count_assistant_turns(&result.new_messages);
             let mut s = PlanReviewSummary::aborted_with(format!(
-                "[{origin}] reviewer 被父 abort / cancel（child={child_session_id}）"
+                "[{origin}] reviewer aborted/cancelled by parent (child={child_session_id})"
             ));
             s.reviewer_turns_used = turns_used;
             s.reviewer_turns_limit = turns_limit;
@@ -775,8 +767,9 @@ fn build_plan_summary_from_outcome(
             (s, SubagentOutcomeLabel::Interrupted)
         }
         AgentRunOutcome::Failed(e) => {
-            let mut s =
-                PlanReviewSummary::aborted_with(format!("[{origin}] reviewer 子 Agent 失败：{e}"));
+            let mut s = PlanReviewSummary::aborted_with(format!(
+                "[{origin}] reviewer sub-Agent failed: {e}"
+            ));
             s.reviewer_turns_limit = turns_limit;
             s.reviewer_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
@@ -810,9 +803,7 @@ fn build_code_summary_from_outcome(
                     (s, SubagentOutcomeLabel::Completed)
                 }
                 None => {
-                    let mut s = CodeReviewSummary::aborted_with(format!(
-                        "[{origin}] reviewer 输出不符合 <review> 契约（child={child_session_id}）"
-                    ));
+                    let mut s = CodeReviewSummary::aborted_with(format!("[{origin}] Reviewer output does not match the <review> contract (child={child_session_id})"));
                     s.reviewer_turns_used = turns_used;
                     s.reviewer_turns_limit = turns_limit;
                     s.reviewer_stop_reason = "parse_error".into();
@@ -824,7 +815,7 @@ fn build_code_summary_from_outcome(
         AgentRunOutcome::Interrupted(result) => {
             let turns_used = count_assistant_turns(&result.new_messages);
             let mut s = CodeReviewSummary::aborted_with(format!(
-                "[{origin}] reviewer 被父 abort / cancel（child={child_session_id}）"
+                "[{origin}] reviewer aborted/cancelled by parent (child={child_session_id})"
             ));
             s.reviewer_turns_used = turns_used;
             s.reviewer_turns_limit = turns_limit;
@@ -833,8 +824,9 @@ fn build_code_summary_from_outcome(
             (s, SubagentOutcomeLabel::Interrupted)
         }
         AgentRunOutcome::Failed(e) => {
-            let mut s =
-                CodeReviewSummary::aborted_with(format!("[{origin}] reviewer 子 Agent 失败：{e}"));
+            let mut s = CodeReviewSummary::aborted_with(format!(
+                "[{origin}] reviewer sub-Agent failed: {e}"
+            ));
             s.reviewer_turns_limit = turns_limit;
             s.reviewer_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
@@ -869,7 +861,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
             return ExplorerReport::aborted_with(
                 &task.id,
                 format!(
-                    "[{}] explorer 子 Agent 未注入依赖（stub 模式）",
+                    "[{}] Production explorer sub-Agent dependencies were not supplied (stub mode)",
                     self.origin
                 ),
             );
@@ -877,7 +869,10 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
             return ExplorerReport::aborted_with(
                 &task.id,
-                format!("[{}] PlanRuntime 已被 drop，explorer 取消派发", self.origin),
+                format!(
+                    "[{}] PlanRuntime was dropped; explorer dispatch cancelled",
+                    self.origin
+                ),
             );
         };
 
@@ -917,8 +912,8 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                 let mut r = ExplorerReport::aborted_with(
                     &task_id,
                     format!(
-                        "[{}] explorer 模型 `{}` 解析失败：{}",
-                        self.origin, model_id, err
+                        "[{}] Could not resolve explorer model `{model_id}`: {err}",
+                        self.origin
                     ),
                 );
                 r.turns_limit = turns_limit;
@@ -1057,7 +1052,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                 Err(_) => ExplorerReport::aborted_with(
                     &task_id,
                     format!(
-                        "[{}] explorer 子 Agent 退出但 report channel 提前关闭",
+                        "[{}] explorer sub-Agent exited but its report channel closed early",
                         self.origin
                     ),
                 ),
@@ -1065,7 +1060,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
             Err(e) => {
                 let mut r = ExplorerReport::aborted_with(
                     &task_id,
-                    format!("[{}] explorer spawn 失败：{e}", self.origin),
+                    format!("[{}] Could not spawn explorer: {e}", self.origin),
                 );
                 r.turns_limit = turns_limit;
                 r.stop_reason = "spawn_error".into();
@@ -1090,7 +1085,7 @@ fn build_explorer_report_from_outcome(
                 id: task_id.to_string(),
                 aborted: text.trim().is_empty(),
                 report: if text.trim().is_empty() {
-                    format!("[{origin}] explorer 未产出任何结论（child={child_session_id}）")
+                    format!("[{origin}] Explorer produced no findings (child={child_session_id})")
                 } else {
                     text
                 },
@@ -1113,7 +1108,9 @@ fn build_explorer_report_from_outcome(
         AgentRunOutcome::Interrupted(result) => {
             let mut r = ExplorerReport::aborted_with(
                 task_id,
-                format!("[{origin}] explorer 被父 abort / cancel（child={child_session_id}）"),
+                format!(
+                    "[{origin}] explorer aborted/cancelled by parent (child={child_session_id})"
+                ),
             );
             r.turns_used = count_assistant_turns(&result.new_messages);
             r.turns_limit = turns_limit;
@@ -1124,7 +1121,7 @@ fn build_explorer_report_from_outcome(
         AgentRunOutcome::Failed(e) => {
             let mut r = ExplorerReport::aborted_with(
                 task_id,
-                format!("[{origin}] explorer 子 Agent 失败：{e}"),
+                format!("[{origin}] explorer sub-Agent failed: {e}"),
             );
             r.turns_limit = turns_limit;
             r.stop_reason = "llm_error".into();

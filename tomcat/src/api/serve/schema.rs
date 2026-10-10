@@ -20,6 +20,8 @@ use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
 
 #[derive(Serialize)]
 pub(crate) struct ServeSchemaBundle {
+    ui_preferences: schemars::schema::RootSchema,
+    delete_session_outcome: schemars::schema::RootSchema,
     serve_command: schemars::schema::RootSchema,
     control_frame: schemars::schema::RootSchema,
     response_frame: schemars::schema::RootSchema,
@@ -61,6 +63,8 @@ pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 
 pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
     ServeSchemaBundle {
+        ui_preferences: schema_for!(crate::infra::config::ui::UiPreferences),
+        delete_session_outcome: schema_for!(crate::core::session::manager::DeleteSessionOutcome),
         serve_command: schema_for!(ServeCommand),
         control_frame: schema_for!(ControlFrame),
         response_frame: schema_for!(ResponseFrame),
@@ -107,8 +111,12 @@ pub fn write_schema_bundle(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     let dts_path = out_dir.join("serve.d.ts");
     std::fs::write(
         &schema_path,
-        serde_json::to_vec_pretty(&build_schema_bundle())
-            .map_err(|error| AppError::Config(format!("serialize serve schema failed: {error}")))?,
+        serde_json::to_vec_pretty(&build_schema_bundle()).map_err(|error| {
+            AppError::Config(crate::infra::i18n::tr(
+                "serve.schemaSerialize",
+                &[("detail", &error.to_string())],
+            ))
+        })?,
     )
     .map_err(AppError::Io)?;
     std::fs::write(&dts_path, serve_dts()).map_err(AppError::Io)?;
@@ -125,6 +133,8 @@ pub fn read_schema_fixture(path: &Path) -> Result<String, AppError> {
 
 fn render_typescript(bundle: &ServeSchemaBundle) -> String {
     let root_schemas = [
+        ("UiPreferences", &bundle.ui_preferences),
+        ("DeleteSessionOutcome", &bundle.delete_session_outcome),
         ("ServeCommand", &bundle.serve_command),
         ("PreviewRewindResponse", &bundle.preview_rewind_response),
         ("SessionFilesResponse", &bundle.session_files_response),

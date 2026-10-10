@@ -33,7 +33,7 @@ impl WebFetchFormat {
             "" | "markdown" => Ok(Self::Markdown),
             "text" => Ok(Self::Text),
             other => Err(AppError::Tool(format!(
-                "web_fetch: `format` 非法 `{other}`，允许 markdown/text"
+                "web_fetch: invalid `format` `{other}`; allowed: markdown/text"
             ))),
         }
     }
@@ -65,7 +65,9 @@ impl WebFetchRequest {
     pub(crate) fn from_tool_args(args: WebFetchArgs) -> Result<Self, AppError> {
         let raw_url = args.url.trim();
         if raw_url.is_empty() {
-            return Err(AppError::Tool("web_fetch: 缺少必填字段 `url`".to_string()));
+            return Err(AppError::Tool(
+                "web_fetch: required field `url` is missing".to_string(),
+            ));
         }
         Ok(Self {
             raw_url: raw_url.to_string(),

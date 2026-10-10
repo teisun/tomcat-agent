@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 
 /// MVP 默认 sessionKey：单 Agent 单入口。
@@ -94,15 +95,18 @@ pub fn load_store(path: &Path) -> Result<SessionStore, AppError> {
     };
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Config(format!(
-            "会话存储为空，拒绝覆盖: {}",
-            path.display()
+        return Err(AppError::Config(tr(
+            "session.storeEmpty",
+            &[("path", &path.display().to_string())],
         )));
     }
     let mut store: SessionStore = serde_json::from_str(trimmed).map_err(|error| {
-        AppError::Config(format!(
-            "会话存储无法解析，拒绝覆盖 {}: {error}",
-            path.display()
+        AppError::Config(tr(
+            "session.storeParse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
         ))
     })?;
     repair_missing_session_keys(&mut store);
@@ -147,9 +151,9 @@ pub(crate) fn clear_model_overrides_in_store(
             let matches = match entry.get("modelOverride") {
                 Some(value) => {
                     value.as_str().ok_or_else(|| {
-                        AppError::Config(format!(
-                            "会话存储中的 modelOverride 必须是字符串: {} (session {session_id})",
-                            path.display()
+                        AppError::Config(tr(
+                            "session.overrideString",
+                            &[("path", &path.display().to_string()), ("id", session_id)],
                         ))
                     })? == model_id
                 }
@@ -177,40 +181,49 @@ fn read_store_document(path: &Path) -> Result<Option<serde_json::Value>, AppErro
         Err(error) => return Err(error),
     };
     if content.trim().is_empty() {
-        return Err(AppError::Config(format!(
-            "会话存储为空，拒绝覆盖: {}",
-            path.display()
+        return Err(AppError::Config(tr(
+            "session.storeEmpty",
+            &[("path", &path.display().to_string())],
         )));
     }
     let document: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
-        AppError::Config(format!(
-            "会话存储无法解析，拒绝覆盖 {}: {error}",
-            path.display()
+        AppError::Config(tr(
+            "session.storeParse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
         ))
     })?;
-    let root = document
-        .as_object()
-        .ok_or_else(|| AppError::Config(format!("会话存储根节点必须是对象: {}", path.display())))?;
+    let root = document.as_object().ok_or_else(|| {
+        AppError::Config(tr(
+            "session.storeRoot",
+            &[("path", &path.display().to_string())],
+        ))
+    })?;
     let sessions = root
         .get("sessions")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| {
-            AppError::Config(format!("会话存储缺少 sessions 对象: {}", path.display()))
+            AppError::Config(tr(
+                "session.storeSessions",
+                &[("path", &path.display().to_string())],
+            ))
         })?;
     if root
         .get("current")
         .is_some_and(|current| !current.is_object())
     {
-        return Err(AppError::Config(format!(
-            "会话存储 current 必须是对象: {}",
-            path.display()
+        return Err(AppError::Config(tr(
+            "session.storeCurrent",
+            &[("path", &path.display().to_string())],
         )));
     }
     for (session_id, entry) in sessions {
         if !entry.is_object() {
-            return Err(AppError::Config(format!(
-                "会话存储 session 条目必须是对象: {} (session {session_id})",
-                path.display()
+            return Err(AppError::Config(tr(
+                "session.storeEntry",
+                &[("path", &path.display().to_string()), ("id", session_id)],
             )));
         }
     }
@@ -255,23 +268,28 @@ fn normalized_store_path(path: &Path) -> PathBuf {
     })
 }
 
-/// 同一进程内所有指向同一 sessions.json 的读改写操作共用一把锁。
-///
-/// 这不是跨进程协议：它只避免两个 SessionManager 或一次模型清理互相覆盖
-/// 同一个完整 JSON 文件里的标题、用量等无关字段。
+/// Serialize the complete RMW in this process and across cooperating CLI/Serve processes.
+/// The lock lives beside sessions.json because atomic rename replaces the store inode.
 pub(crate) fn with_store_write_lock<T>(
     path: &Path,
     work: impl FnOnce() -> Result<T, AppError>,
 ) -> Result<T, AppError> {
     let key = normalized_store_path(path);
     let lock = {
-        let mut locks = store_mutation_locks()
-            .lock()
-            .map_err(|error| AppError::Config(format!("会话存储锁注册表异常: {error}")))?;
-        Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+        let mut locks = store_mutation_locks().lock().map_err(|error| {
+            AppError::Config(tr(
+                "session.storeRegistry",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
+        Arc::clone(
+            locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     };
-    let _guard = lock
-        .lock()
-        .map_err(|error| AppError::Config(format!("会话存储写入锁异常: {error}")))?;
-    work()
+    let _guard = lock.lock().map_err(|error| {
+        AppError::Config(tr("session.storeLock", &[("detail", &error.to_string())]))
+    })?;
+    crate::infra::config::with_config_lock(&key, work)
 }

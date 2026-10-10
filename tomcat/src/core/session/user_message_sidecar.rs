@@ -246,6 +246,7 @@ fn rebuild_sidecar(
         .read_line(&mut transcript_header)
         .map_err(AppError::Io)?;
 
+    fs::metadata(transcript_path).map_err(AppError::Io)?;
     write_file_atomic_with(sidecar_path, |writer| {
         write_json_line(
             writer,

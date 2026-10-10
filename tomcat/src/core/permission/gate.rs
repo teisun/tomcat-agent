@@ -33,6 +33,7 @@ use super::types::{
 };
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::platform::normalize_path;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,7 +236,7 @@ impl PermissionGate for DefaultPermissionGate {
             match rule.mode {
                 PathRuleMode::Deny => {
                     return Ok(PermissionDecision::Deny {
-                        reason: format!("path_rule deny: {}", rule.path),
+                        reason: tr("permission.ruleDeny", &[("path", &rule.path)]),
                     });
                 }
                 PathRuleMode::Readonly => {
@@ -251,7 +252,7 @@ impl PermissionGate for DefaultPermissionGate {
                             | PrimitiveOperation::Bash
                     ) {
                         return Ok(PermissionDecision::Deny {
-                            reason: format!("path_rule readonly: {}", rule.path),
+                            reason: tr("permission.ruleReadonly", &[("path", &rule.path)]),
                         });
                     }
                     if is_builtin_default_path_rule(&rule) && self.in_agent_readonly_set(&target) {
@@ -337,7 +338,10 @@ impl PermissionGate for DefaultPermissionGate {
             .map(|p| p.to_path_buf())
             .or(Some(target.clone()));
         Ok(PermissionDecision::NeedConfirm {
-            reason: format!("路径 `{}` 不在已授权范围内", target.display()),
+            reason: tr(
+                "permission.pathOutside",
+                &[("path", &target.display().to_string())],
+            ),
             suggested_root,
         })
     }
@@ -347,7 +351,7 @@ impl PermissionGate for DefaultPermissionGate {
         for re in &self.bash_forbidden {
             if re.is_match(command) {
                 return Ok(PermissionDecision::Deny {
-                    reason: format!("bash_forbidden 命中: {}", re.as_str()),
+                    reason: tr("permission.bashForbidden", &[("pattern", re.as_str())]),
                 });
             }
         }
@@ -365,7 +369,7 @@ impl PermissionGate for DefaultPermissionGate {
                     });
                 }
                 return Ok(PermissionDecision::NeedConfirm {
-                    reason: format!("bash_approval_required 命中: {}", re.as_str()),
+                    reason: tr("permission.bashApproval", &[("pattern", re.as_str())]),
                     suggested_root: None,
                 });
             }

@@ -83,22 +83,24 @@ overview: Render the transcript UI with plan metadata.
   });
 
   it("tolerates the flat doc-style todos (content/status at column 0)", () => {
+    const alpha = "认领任务：与 develop 同步";
+    const beta = "阅读上下文, 约束: 边界语义";
     const parsed = parsePlanDocument(`---
 name: Doc Plan
 todos:
 
 - id: alpha
-content: 认领任务：与 develop 同步
+content: ${alpha}
 status: pending
 - id: beta
-content: 阅读上下文, 约束: 边界语义
+content: ${beta}
 status: in_progress
 ---
 # body
 `);
     expect(parsed.todos).toEqual([
-      { content: "认领任务：与 develop 同步", id: "alpha", status: "pending" },
-      { content: "阅读上下文, 约束: 边界语义", id: "beta", status: "in_progress" },
+      { content: alpha, id: "alpha", status: "pending" },
+      { content: beta, id: "beta", status: "in_progress" },
     ]);
   });
 

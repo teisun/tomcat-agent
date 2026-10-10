@@ -140,6 +140,7 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
     ...env,
     HOME: homePath,
     USERPROFILE: homePath,
+    TOMCAT_HOST_LOCALE: "en",
     SHELL: "/bin/zsh",
     TOMCAT__STORAGE__WORK_DIR: path.join(homePath, ".tomcat"),
     TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4",

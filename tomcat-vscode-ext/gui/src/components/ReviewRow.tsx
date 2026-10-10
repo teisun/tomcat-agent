@@ -1,10 +1,13 @@
 import { memo, useEffect, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, type Translator } from "../../../src/shared/i18n";
 
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 
 import type { WebviewReviewRow } from "../types";
 
-function verdictLabel(verdict: NonNullable<WebviewReviewRow["verdict"]>): string {
+function verdictLabel(verdict: NonNullable<WebviewReviewRow["verdict"]>, t: Translator): string {
+  if (verdict === "pass" || verdict === "fail" || verdict === "partial" || verdict === "aborted") return t(`term.verdict.${verdict}`);
   return verdict.toUpperCase();
 }
 
@@ -28,19 +31,21 @@ function formatElapsed(ms: number): string {
   return `${String(totalMinutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-function runningMeta(item: WebviewReviewRow, nowTick: number): string | null {
+function runningMeta(item: WebviewReviewRow, nowTick: number, t: Translator): string | null {
   const parts: string[] = [];
   const round = item.round ?? item.rounds;
   if (typeof round === "number") {
-    parts.push(`Round ${round}`);
+    parts.push(t("review.round", { round }));
   }
   if (typeof item.startedAt === "number") {
-    parts.push(`${formatElapsed(nowTick - item.startedAt)} elapsed`);
+    parts.push(t("review.elapsed", { duration: formatElapsed(nowTick - item.startedAt) }));
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
+  const t = useT();
+  const locale = useLocale();
   const shellClassName = "tc-tool-row-shell tc-tool-row-shell--standalone";
   const leadingIcon = (
     <span aria-hidden="true" className="tc-tool-row__leading-icon codicon codicon-shield" />
@@ -58,7 +63,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
   }, [item.startedAt, item.status]);
 
   if (item.status === "running") {
-    const meta = runningMeta(item, nowTick);
+    const meta = runningMeta(item, nowTick, t);
     return (
       <div className={shellClassName} data-testid="review-row-wrapper">
         {leadingIcon}
@@ -69,7 +74,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
                 className="tc-tool-row__text tc-loading-shimmer"
                 data-testid="review-row-running-text"
               >
-                Reviewing code...
+                {t("review.running")}
               </span>
               {meta ? (
                 <span className="tc-review-row__count" data-testid="review-row-running-meta">
@@ -91,7 +96,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
         <div className="tc-tool-row tc-review-row" data-testid="review-row-skipped">
           <div className="tc-tool-row__header">
             <span className="tc-review-row__count">
-              Code review skipped · {item.summary ?? "review skipped"}
+              {t("review.skipped", { summary: item.summary ?? t("review.skippedDefault") })}
             </span>
           </div>
         </div>
@@ -100,16 +105,16 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
   }
 
   const findings = item.findings ?? [];
-  const findingsLabel = `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+  const findingsLabel = t(pluralKey(locale, "review.findings.other", findings.length), { count: findings.length });
   const header = (
     <div className="tc-review-row__header" data-testid="review-row-header">
       <span className="tc-tool-row__inline">
-        <span className="tc-tool-row__text">Code review</span>
+        <span className="tc-tool-row__text">{t("review.title")}</span>
         <span
           className={`tc-review-row__badge tc-review-row__badge--${verdict}`}
           data-testid="review-row-verdict"
         >
-          {verdictLabel(verdict)}
+          {verdictLabel(verdict, t)}
         </span>
         <span className="tc-review-row__count" data-testid="review-row-findings-count">
           {findingsLabel}
@@ -123,7 +128,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
     </p>
   ) : (
     <p className="tc-review-row__summary" data-testid="review-row-preview">
-      Expand to inspect review details.
+      {t("review.expand")}
     </p>
   );
 
@@ -141,7 +146,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
         <div className="tc-review-row__details">
           {item.round ?? item.rounds ? (
             <p className="tc-review-row__meta" data-testid="review-row-rounds">
-              Review round {item.round ?? item.rounds}
+              {t("review.roundDetail", { round: item.round ?? item.rounds ?? 0 })}
             </p>
           ) : null}
           {item.summary ? (
@@ -158,7 +163,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
                   key={`${item.id}-finding-${index}`}
                 >
                   <span className="tc-review-row__finding-meta">
-                    {finding.severity} · {finding.area || "general"}
+                    {finding.severity} · {finding.area || t("review.general")}
                   </span>
                   <span className="tc-review-row__finding-note">{finding.note}</span>
                 </li>
@@ -166,7 +171,7 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
             </ul>
           ) : (
             <p className="tc-review-row__meta" data-testid="review-row-empty-findings">
-              No structured findings were returned.
+              {t("review.empty")}
             </p>
           )}
         </div>

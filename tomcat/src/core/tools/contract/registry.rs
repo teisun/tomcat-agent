@@ -86,7 +86,7 @@ impl DefaultToolRegistry {
     pub fn register_tool_local(&self, tool: Tool, plugin_id: &str) -> Result<(), AppError> {
         if builtin_tool_by_name(&tool.name).is_some() {
             return Err(AppError::Tool(format!(
-                "工具名与内置工具冲突: {}",
+                "Tool name conflicts with a built-in tool: {}",
                 tool.name
             )));
         }
@@ -103,7 +103,7 @@ impl DefaultToolRegistry {
                 .cloned()
             {
                 return Err(AppError::Tool(format!(
-                    "scope 内工具名冲突: '{}' 已由插件 '{}' 注册",
+                    "Tool name conflict in scope: '{}' is already registered by plugin '{}'",
                     conflict.name, conflict.plugin_id
                 )));
             }
@@ -150,8 +150,9 @@ impl ToolRegistry for DefaultToolRegistry {
 
     async fn get_tool(&self, tool_name: &str) -> Result<Tool, AppError> {
         let guard = self.tools.read();
-        get_tool_from_map(&guard, tool_name)
-            .ok_or_else(|| AppError::Tool(format!("工具不存在或已禁用: {}", tool_name)))
+        get_tool_from_map(&guard, tool_name).ok_or_else(|| {
+            AppError::Tool(format!("Tool does not exist or is disabled: {tool_name}"))
+        })
     }
 
     async fn list_tools(&self, plugin_id: Option<&str>) -> Result<Vec<Tool>, AppError> {

@@ -1,3 +1,5 @@
+export const env = { language: "en" };
+
 type CommandHandler = (...args: any[]) => any;
 type Provider = { provideTextDocumentContent(uri: Uri): string };
 type FileEntry = { text: string; type: number };
@@ -21,10 +23,11 @@ const textDocuments: TextDocument[] = [];
 
 let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
+type MessageChoice = string | { title: string; isCloseAffordance?: boolean };
 let errorMessageHandler: ((message: string, items: string[]) => any) | undefined;
-let infoMessageHandler: ((message: string, items: string[]) => any) | undefined;
+let infoMessageHandler: ((message: string, items: MessageChoice[]) => any) | undefined;
 let warningMessageHandler:
-  | ((message: string, items: string[], options?: MessageOptionsLike) => any)
+  | ((message: string, items: MessageChoice[], options?: MessageOptionsLike) => any)
   | undefined;
 
 /** Subset of `vscode.MessageOptions` the extension actually uses. */
@@ -739,17 +742,17 @@ export const window = {
   async showErrorMessage(message: string, ...items: string[]): Promise<string | undefined> {
     return errorMessageHandler?.(message, items);
   },
-  async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
+  async showInformationMessage(message: string, ...items: MessageChoice[]): Promise<MessageChoice | undefined> {
     return infoMessageHandler?.(message, items);
   },
   // 真实 API 有 (message, options, ...items) 的重载，模态确认框走的就是这一支。
   async showWarningMessage(
     message: string,
-    ...rest: Array<MessageOptionsLike | string>
-  ): Promise<string | undefined> {
+    ...rest: Array<MessageOptionsLike | MessageChoice>
+  ): Promise<MessageChoice | undefined> {
     const [first, ...others] = rest;
-    const options = typeof first === "object" && first !== null ? first : undefined;
-    const items = (options ? others : rest) as string[];
+    const options = typeof first === "object" && first !== null && !("title" in first) ? first : undefined;
+    const items = (options ? others : rest) as MessageChoice[];
     return warningMessageHandler?.(message, items, options);
   },
   async showOpenDialog(options: unknown): Promise<Uri[] | undefined> {

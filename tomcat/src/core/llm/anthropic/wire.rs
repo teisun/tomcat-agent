@@ -446,7 +446,7 @@ pub(super) fn final_stream_events(
         if stop_reason == "max_tokens" {
             events.push(StreamEvent::LlmNotice {
                 finish_reason: finish_reason.clone(),
-                message: "模型达到本轮最大输出长度，回复可能不完整。".to_string(),
+                message: crate::infra::i18n::tr("llm.anthropicMaxOutputNotice", &[]),
             });
         }
         events.push(StreamEvent::FinishReason {
@@ -2250,12 +2250,12 @@ mod tests {
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
         assert_eq!(
             body["messages"][0]["content"][0]["text"],
-            "[图片已省略：当前模型不支持图片输入]"
+            "[Image omitted: the current model does not support image input]"
         );
         assert_eq!(body["messages"][0]["content"][1]["type"], "text");
         assert_eq!(
             body["messages"][0]["content"][1]["text"],
-            "[文件已省略：当前模型不支持文件输入]"
+            "[File omitted: the current model does not support file input]"
         );
     }
 
@@ -2276,7 +2276,7 @@ mod tests {
                 StreamEvent::LlmNotice {
                     finish_reason,
                     message,
-                } if finish_reason == "max_tokens" && message.contains("最大输出长度")
+                } if finish_reason == "max_tokens" && message.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.anthropicMaxOutputNotice", &[]))
             )
         }));
         assert!(events.iter().any(|event| {

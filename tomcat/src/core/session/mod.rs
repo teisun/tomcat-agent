@@ -12,6 +12,7 @@ pub mod scope;
 pub(crate) mod store;
 pub(crate) mod subagent_transcript;
 pub(crate) mod tool_display_sidecar;
+pub(crate) mod usage_guard;
 pub(crate) mod user_message_sidecar;
 
 pub mod transcript;

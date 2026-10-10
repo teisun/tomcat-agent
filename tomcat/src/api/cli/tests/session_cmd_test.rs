@@ -410,7 +410,12 @@ fn assert_session_subcommand_cleans_plugin_vm(build_sub: impl FnOnce(String) -> 
         "session VM should register an event channel before running session command"
     );
 
-    let result = run_session(build_sub(session_id.clone()), &cfg);
+    let sub = build_sub(session_id.clone());
+    if matches!(&sub, SessionSub::Delete { .. }) {
+        // Model an idle, explicitly closed runtime while its cached VM still needs cleanup.
+        ctx.session_runtime.session.release_session_usage();
+    }
+    let result = run_session(sub, &cfg);
     assert!(
         result.is_ok(),
         "session subcommand should succeed while cleaning plugin VM: {result:?}"

@@ -322,7 +322,7 @@ async fn spawn_denied_by_path_preflight_has_no_task_side_effect() {
         )
         .await
         .expect_err("denied path should fail before spawn");
-    assert!(err.to_string().contains("deny") || err.to_string().contains("拒绝"));
+    assert!(matches!(err, crate::AppError::Permission(_)));
     assert!(
         reg.list().is_empty(),
         "preflight deny must not register a task"
@@ -367,7 +367,7 @@ async fn spawn_denied_by_bash_policy_has_no_task_side_effect() {
         )
         .await
         .expect_err("forbidden bash should fail before spawn");
-    assert!(err.to_string().contains("forbidden") || err.to_string().contains("拒绝"));
+    assert!(matches!(err, crate::AppError::Permission(_)));
     assert!(
         reg.list().is_empty(),
         "policy deny must not register a task"

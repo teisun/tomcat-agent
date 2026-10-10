@@ -16,11 +16,9 @@ use crate::core::session::housekeeping_ledger::{
     session_id_from_transcript_path, FileFingerprint, HousekeepingLedger, SidecarLedgerEntry,
     TranscriptLedgerEntry,
 };
-use crate::core::session::resume_index::remove_resume_index;
 use crate::core::session::tool_display_sidecar::{
     append_tool_display, compact_tool_display_sidecar, tool_display_sidecar_path,
 };
-use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 use crate::core::session::store::{
     load_store, save_store, with_store_write_lock, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
@@ -35,6 +33,7 @@ use crate::core::session::transcript::{
     ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry,
     ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
 };
+use crate::core::session::usage_guard::SessionUsageGuard;
 use crate::infra::error::AppError;
 use crate::infra::events::ToolDisplay;
 use crate::infra::platform::normalize_path;
@@ -108,11 +107,12 @@ fn persist_tool_display_sidecar_if_present(
         .get("tool_call_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            AppError::Config("tool_display message is missing tool_call_id".to_string())
+            AppError::Config(crate::infra::i18n::tr("session.toolCallIdRequired", &[]))
         })?;
     let display = serde_json::from_value::<ToolDisplay>(display).map_err(|error| {
-        AppError::Config(format!(
-            "invalid tool_display on tool transcript message: {error}"
+        AppError::Config(crate::infra::i18n::tr(
+            "session.toolDisplayInvalid",
+            &[("detail", &error.to_string())],
         ))
     })?;
     append_tool_display(transcript_path, tool_call_id, timestamp, &display)
@@ -272,6 +272,11 @@ impl Drop for AppendInFlightGuard {
     }
 }
 
+struct PinnedSession {
+    id: String,
+    usage: Option<crate::core::session::usage_guard::SessionUsageGuard>,
+}
+
 /// 会话管理器：持有 store 路径与写入锁，提供 CRUD 与 transcript 读写。
 pub struct SessionManager {
     /// 会话根目录（已展开 ~）
@@ -284,7 +289,7 @@ pub struct SessionManager {
     ///
     /// 这允许磁盘 `current[key]` 继续承担“跨进程默认指针”的角色，同时保证已启动
     /// 的 chat 在会话存活期间始终写回同一个 session_id。
-    pinned_session_id: Arc<parking_lot::RwLock<Option<String>>>,
+    pinned_session: Arc<parking_lot::RwLock<Option<PinnedSession>>>,
     transcript_mutexes: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
     append_in_flight: Arc<AtomicUsize>,
 }
@@ -295,7 +300,7 @@ impl Clone for SessionManager {
             sessions_dir: self.sessions_dir.clone(),
             store_path: self.store_path.clone(),
             session_key: self.session_key.clone(),
-            pinned_session_id: Arc::clone(&self.pinned_session_id),
+            pinned_session: Arc::clone(&self.pinned_session),
             transcript_mutexes: Arc::clone(&self.transcript_mutexes),
             append_in_flight: Arc::clone(&self.append_in_flight),
         }
@@ -315,7 +320,7 @@ impl SessionManager {
             sessions_dir: sessions_dir.clone(),
             store_path,
             session_key: session_key.into(),
-            pinned_session_id: Arc::new(parking_lot::RwLock::new(None)),
+            pinned_session: Arc::new(parking_lot::RwLock::new(None)),
             transcript_mutexes: Arc::new(Mutex::new(HashMap::new())),
             append_in_flight: Arc::new(AtomicUsize::new(0)),
         }
@@ -645,7 +650,7 @@ impl SessionManager {
         save_store(&self.store_path, store)
     }
 
-    fn with_store_mut<T>(
+    pub(super) fn with_store_mut<T>(
         &self,
         f: impl FnOnce(&mut SessionStore) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
@@ -661,10 +666,12 @@ impl SessionManager {
         &self,
         path: &Path,
     ) -> Result<Arc<Mutex<()>>, AppError> {
-        let mut registry = self
-            .transcript_mutexes
-            .lock()
-            .map_err(|e| AppError::Config(format!("transcript 锁注册表异常: {}", e)))?;
+        let mut registry = self.transcript_mutexes.lock().map_err(|e| {
+            AppError::Config(crate::infra::i18n::tr(
+                "session.transcriptRegistry",
+                &[("detail", &e.to_string())],
+            ))
+        })?;
         Ok(registry
             .entry(path.to_path_buf())
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -677,9 +684,12 @@ impl SessionManager {
         f: impl FnOnce() -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let lock = self.transcript_mutex_for_path(path)?;
-        let _guard = lock
-            .lock()
-            .map_err(|e| AppError::Config(format!("transcript 写入锁异常: {}", e)))?;
+        let _guard = lock.lock().map_err(|e| {
+            AppError::Config(crate::infra::i18n::tr(
+                "session.transcriptLock",
+                &[("detail", &e.to_string())],
+            ))
+        })?;
         f()
     }
 
@@ -688,13 +698,45 @@ impl SessionManager {
         &self.session_key
     }
 
-    /// 将当前 manager 绑定到某个已解析的 session_id。
-    pub fn pin_session(&self, session_id: &str) {
-        *self.pinned_session_id.write() = Some(session_id.to_string());
+    /// Bind identity and occupancy together. Acquire the new guard before releasing the old one.
+    pub fn pin_session(&self, session_id: &str) -> Result<(), AppError> {
+        let binding = self.prepare_binding(session_id)?;
+        *self.pinned_session.write() = Some(binding);
+        Ok(())
+    }
+
+    fn prepare_binding(&self, session_id: &str) -> Result<PinnedSession, AppError> {
+        crate::core::session::attachments::validate_session_id(session_id)?;
+        let validate = || -> Result<(), AppError> {
+            let entry = self
+                .get_session_by_id(session_id)?
+                .ok_or_else(|| AppError::Config("unknown_session".into()))?;
+            if entry.session_key != self.current_session_key() {
+                return Err(AppError::Config("session_scope_mismatch".into()));
+            }
+            Ok(())
+        };
+        validate()?;
+        let usage = crate::core::session::usage_guard::SessionUsageGuard::shared(
+            &self.sessions_dir,
+            session_id,
+        )?;
+        validate()?;
+        Ok(PinnedSession {
+            id: session_id.into(),
+            usage: Some(usage),
+        })
+    }
+
+    /// Closing a runtime releases occupancy, not its identity. Late writes must never follow current.
+    pub fn release_session_usage(&self) {
+        if let Some(binding) = self.pinned_session.write().as_mut() {
+            binding.usage.take();
+        }
     }
 
     fn has_pinned_session(&self) -> bool {
-        self.pinned_session_id.read().is_some()
+        self.pinned_session.read().is_some()
     }
 
     /// 解析某个 session_key 此刻应指向哪个 session_id。
@@ -703,8 +745,8 @@ impl SessionManager {
     /// scope 的 key 仍完全沿用磁盘 current 语义，避免 pin 越权污染别的 scope。
     fn resolve_active_session_id(&self, store: &SessionStore, session_key: &str) -> Option<String> {
         if session_key == self.current_session_key() {
-            if let Some(session_id) = self.pinned_session_id.read().clone() {
-                return Some(session_id);
+            if let Some(binding) = self.pinned_session.read().as_ref() {
+                return Some(binding.id.clone());
             }
         }
         store.current.get(session_key).cloned()
@@ -745,7 +787,7 @@ impl SessionManager {
         entries
     }
 
-    fn repoint_current_after_removal(
+    pub(super) fn repoint_current_after_removal(
         store: &mut SessionStore,
         session_key: &str,
         removed_id: &str,
@@ -882,7 +924,7 @@ impl SessionManager {
         let entry =
             self.create_session_with_project_root(self.current_session_key(), cwd, project_root)?;
         if self.has_pinned_session() {
-            self.pin_session(&entry.session_id);
+            self.pin_session(&entry.session_id)?;
         }
         Ok(entry)
     }
@@ -906,13 +948,21 @@ impl SessionManager {
 
     /// 把当前固定 key 切到某个已存在的 session_id。
     pub fn switch_current_to_session_id(&self, session_id: &str) -> Result<SessionEntry, AppError> {
+        let binding = self
+            .has_pinned_session()
+            .then(|| self.prepare_binding(session_id))
+            .transpose()?;
         let entry = self.with_store_mut(|store| {
             let Some(entry) = store.sessions.get_mut(session_id) else {
-                return Err(AppError::Config(format!("会话不存在: {session_id}")));
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "session.not_found",
+                    &[("id", session_id)],
+                )));
             };
             if entry.session_key != self.current_session_key() {
-                return Err(AppError::Config(format!(
-                    "会话不属于当前 scope: {session_id}"
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "session.wrong_scope",
+                    &[("id", session_id)],
                 )));
             }
             entry.updated_at = Utc::now().timestamp_millis();
@@ -923,8 +973,8 @@ impl SessionManager {
             );
             Ok(entry)
         })?;
-        if self.has_pinned_session() {
-            self.pin_session(&entry.session_id);
+        if let Some(binding) = binding {
+            *self.pinned_session.write() = Some(binding);
         }
         Ok(entry)
     }
@@ -1077,7 +1127,10 @@ impl SessionManager {
     ) -> Result<(), AppError> {
         let key = self.current_session_key();
         if self.get_session(key)?.is_none() {
-            return Err(AppError::Config("无当前会话".to_string()));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "terminal.noSession",
+                &[],
+            )));
         }
         let normalized_model = model_id
             .map(str::trim)
@@ -1101,76 +1154,19 @@ impl SessionManager {
         })
     }
 
-    /// 删除会话：从 store 移除并删除 transcript 文件（若存在）。
-    pub fn delete_session(&self, session_id: &str) -> Result<(), AppError> {
-        let entry = self.with_store_mut(|store| {
-            let Some(entry) = store.sessions.get(session_id).cloned() else {
-                return Err(AppError::Config(format!("会话不存在: {session_id}")));
-            };
-            if entry.session_key != self.current_session_key() {
-                return Err(AppError::Config(format!(
-                    "会话不属于当前 scope: {session_id}"
-                )));
-            }
-            store.sessions.remove(session_id);
-            Self::repoint_current_after_removal(store, &entry.session_key, session_id);
-            Ok(entry)
-        })?;
-        let path = self.transcript_path(&entry.session_id);
-        crate::core::checkpoint::file_baselines::discard_session(&path);
-        let sidecar_path = user_message_sidecar_path(&path);
-        let tool_display_sidecar_path = tool_display_sidecar_path(&path);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&sidecar_path);
-        let _ = std::fs::remove_file(&tool_display_sidecar_path);
-        let _ = remove_resume_index(&path);
-        // 本会话的 transcript 已删，但内容寻址意味着同一份字节可能被别的会话共享。
-        // 所以判据必须是「问遍所有 transcript」——只看自己会把别人还在用的图删掉。
-        // 仍被别的会话租着的字节由 clear_session 自己按租约保留。
-        if let Err(error) = self.attachment_store().clear_session(&entry.session_id) {
-            tracing::warn!(
-                "sessions: failed to release attachment leases for {}: {error}",
-                entry.session_id
-            );
-        }
-        match self.collect_live_blob_shas() {
-            Ok(mut live) => {
-                let store = self.attachment_store();
-                let _ = store.gc_pending(crate::core::session::attachments::PENDING_BLOB_TTL);
-                match store.collect_pending_blob_shas() {
-                    Ok(pending) => live.refresh_pending_blob_shas(pending),
-                    Err(error) => {
-                        tracing::warn!(
-                            "sessions: failed to refresh attachment leases after deleting {}: {error}",
-                            entry.session_id
-                        );
-                        return Ok(());
-                    }
-                }
-                if let Err(error) = store.sweep_orphan_blobs(
-                    &live.shas,
-                    crate::core::session::attachments::ORPHAN_BLOB_GRACE,
-                ) {
-                    tracing::warn!("sessions: failed to sweep attachment orphans: {error}");
-                }
-            }
-            Err(error) => tracing::warn!(
-                "sessions: failed to collect live attachment references after deleting {}: {error}",
-                entry.session_id
-            ),
-        }
-        Ok(())
-    }
-
     /// 归档：仅从 store 移除会话元数据，不删 transcript 文件。
     pub fn archive_session(&self, session_id: &str) -> Result<(), AppError> {
         self.with_store_mut(|store| {
             let Some(entry) = store.sessions.get(session_id).cloned() else {
-                return Err(AppError::Config(format!("会话不存在: {session_id}")));
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "session.not_found",
+                    &[("id", session_id)],
+                )));
             };
             if entry.session_key != self.current_session_key() {
-                return Err(AppError::Config(format!(
-                    "会话不属于当前 scope: {session_id}"
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "session.wrong_scope",
+                    &[("id", session_id)],
                 )));
             }
             store.sessions.remove(session_id);
@@ -1214,7 +1210,7 @@ impl SessionManager {
         };
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             self.append_message_while_locked(
                 &path,
@@ -1598,7 +1594,7 @@ impl SessionManager {
         };
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let Some(mut message) =
                 Self::retryable_user_message_from_transcript(&path, message_id)?
@@ -1641,7 +1637,10 @@ impl SessionManager {
             counter: Arc::clone(&self.append_in_flight),
         };
         if self.get_session_by_id(session_id)?.is_none() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "session.not_found",
+                &[("id", session_id)],
+            )));
         }
         let path = self.transcript_path(session_id);
         self.with_transcript_lock(&path, || {
@@ -1677,7 +1676,7 @@ impl SessionManager {
     pub fn append_thinking_level_change(&self, thinking_level: &str) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::ThinkingLevelChange(ThinkingLevelChangeEntry {
                 id: None,
@@ -1703,7 +1702,7 @@ impl SessionManager {
         }
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::ThinkingTrace(ThinkingTraceEntry {
                 id: None,
@@ -1720,7 +1719,7 @@ impl SessionManager {
     pub fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::Custom(CustomEntry {
                 id: Some(generate_entry_id()),
@@ -1736,7 +1735,7 @@ impl SessionManager {
     pub fn append_error_entry(&self, error: ErrorEntry) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             append_entry(&path, &TranscriptEntry::Error(error))
         })
@@ -1751,6 +1750,7 @@ impl SessionManager {
         message_id: &str,
         summary_title: &str,
     ) -> Result<usize, AppError> {
+        let _usage = SessionUsageGuard::shared(&self.sessions_dir, session_id)?;
         let path = self.transcript_path(session_id);
         self.with_transcript_lock(&path, || {
             rewrite_message_summary_titles_by_id(
@@ -1771,7 +1771,7 @@ impl SessionManager {
     ) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::ModelChange(ModelChangeEntry {
                 id: None,
@@ -1788,7 +1788,7 @@ impl SessionManager {
     pub fn append_compaction(&self, summary: Option<&str>) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
                 id: None,
@@ -1821,7 +1821,7 @@ impl SessionManager {
     ) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
                 id: None,
@@ -1857,7 +1857,7 @@ impl SessionManager {
     ) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
                 id: Some(generate_entry_id()),
@@ -1884,7 +1884,7 @@ impl SessionManager {
     pub fn append_session_info(&self, name: &str) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::SessionInfo(SessionInfoEntry {
                 id: None,
@@ -1900,7 +1900,7 @@ impl SessionManager {
     pub fn append_label_change(&self, label: &str) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let entry = TranscriptEntry::Label(LabelEntry {
                 id: None,
@@ -1915,7 +1915,7 @@ impl SessionManager {
     pub fn mark_messages_after_anchor_superseded(&self, anchor: &str) -> Result<usize, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             mark_message_entries_after_anchor_superseded(&path, anchor)
         })
@@ -1924,7 +1924,7 @@ impl SessionManager {
     pub fn mark_trailing_user_messages_superseded(&self) -> Result<usize, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || mark_trailing_user_messages_superseded(&path))
     }
 
@@ -1939,7 +1939,7 @@ impl SessionManager {
     ) -> Result<String, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         self.with_transcript_lock(&path, || {
             let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
             let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
@@ -1971,7 +1971,7 @@ impl SessionManager {
     pub fn get_entries(&self, cap: usize) -> Result<Vec<TranscriptEntry>, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         read_entries_tail(&path, cap)
     }
 
@@ -1982,7 +1982,7 @@ impl SessionManager {
     ) -> Result<TranscriptPage, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         read_entries_tail_before(&path, cap, before)
     }
 
@@ -1990,7 +1990,7 @@ impl SessionManager {
     pub fn get_entry(&self, id: &str) -> Result<Option<TranscriptEntry>, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         get_entry(&path, id)
     }
 
@@ -2002,7 +2002,7 @@ impl SessionManager {
     ) -> Result<Vec<TranscriptEntry>, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         get_children(&path, parent_id, cap)
     }
 
@@ -2010,7 +2010,7 @@ impl SessionManager {
     pub fn get_leaf_entry(&self) -> Result<Option<TranscriptEntry>, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         get_leaf_entry(&path)
     }
 
@@ -2018,7 +2018,7 @@ impl SessionManager {
     pub fn get_branch(&self, leaf_id: &str) -> Result<Vec<TranscriptEntry>, AppError> {
         let path = self
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("terminal.noSession", &[])))?;
         get_branch(&path, leaf_id, super::BRANCH_MAX_ENTRIES)
     }
 
@@ -2028,7 +2028,10 @@ impl SessionManager {
         cap: usize,
     ) -> Result<Vec<TranscriptEntry>, AppError> {
         if self.get_session_by_id(session_id)?.is_none() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "session.not_found",
+                &[("id", session_id)],
+            )));
         }
         read_entries_tail(&self.transcript_path(session_id), cap)
     }
@@ -2040,7 +2043,10 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<TranscriptPage, AppError> {
         if self.get_session_by_id(session_id)?.is_none() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "session.not_found",
+                &[("id", session_id)],
+            )));
         }
         read_entries_tail_before(&self.transcript_path(session_id), cap, before)
     }
@@ -2051,7 +2057,10 @@ impl SessionManager {
         id: &str,
     ) -> Result<Option<TranscriptEntry>, AppError> {
         if self.get_session_by_id(session_id)?.is_none() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "session.not_found",
+                &[("id", session_id)],
+            )));
         }
         get_entry(&self.transcript_path(session_id), id)
     }
@@ -2061,7 +2070,10 @@ impl SessionManager {
         session_id: &str,
     ) -> Result<Option<TranscriptEntry>, AppError> {
         if self.get_session_by_id(session_id)?.is_none() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "session.not_found",
+                &[("id", session_id)],
+            )));
         }
         get_leaf_entry(&self.transcript_path(session_id))
     }
@@ -2072,7 +2084,10 @@ impl SessionManager {
         leaf_id: &str,
     ) -> Result<Vec<TranscriptEntry>, AppError> {
         if self.get_session_by_id(session_id)?.is_none() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "session.not_found",
+                &[("id", session_id)],
+            )));
         }
         get_branch(
             &self.transcript_path(session_id),

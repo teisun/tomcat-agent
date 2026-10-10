@@ -4,6 +4,7 @@ use crate::core::connector::mcp::config::{
 };
 use crate::core::connector::ConnectorRegistry;
 use crate::core::security::project_trust::ProjectTrustStore;
+use crate::infra::i18n::tr;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -107,7 +108,7 @@ pub(crate) async fn run(ctx: &ChatContext, command: ConnectorCommand) -> ChatCom
 
 fn usage() -> ChatCommand {
     ChatCommand::UsageError {
-        message: "用法错误：/connector list | add <name> <command> [args...] | remove <name> | trust-project | test <name> | login|logout <name> | tools <name> [--include <glob>]... [--exclude <glob>]... | reload".to_string(),
+        message: tr("slash.connector.usage", &[]),
     }
 }
 
@@ -119,25 +120,28 @@ fn registry(
 
 fn list(ctx: &ChatContext) -> ChatCommandOutcome {
     let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用；在 tomcat.config.toml 设置 [connector] enabled = true。");
+        println!("{}", tr("slash.connector.disabledHint", &[]));
         return ChatCommandOutcome::Handled;
     };
     let statuses = registry.mcp_manager().statuses();
     if statuses.is_empty() {
-        println!(
-            "[connector] 未配置 MCP server（编辑 ~/.tomcat/mcp.json，或 /connector add ...）。"
-        );
+        println!("{}", tr("slash.connector.empty", &[]));
         return ChatCommandOutcome::Handled;
     }
-    println!("MCP servers:");
+    println!("{}", tr("slash.connector.servers", &[]));
     for status in statuses {
         println!(
-            "  - {} [{}] {}; {} tool(s), {} resource(s)",
-            status.name,
-            status.source.as_str(),
-            status.state.display_label(),
-            status.tool_count,
-            status.resource_count,
+            "{}",
+            tr(
+                "slash.connector.status",
+                &[
+                    ("name", &status.name),
+                    ("source", status.source.as_str()),
+                    ("state", &status.state.display_label()),
+                    ("tools", &status.tool_count.to_string()),
+                    ("resources", &status.resource_count.to_string())
+                ]
+            )
         );
     }
     ChatCommandOutcome::Handled
@@ -154,26 +158,38 @@ async fn tools(
             Ok(()) => {
                 if let Some(registry) = registry(ctx) {
                     if let Err(error) = registry.reload().await {
-                        println!("[connector] 工具过滤器已写入，但重载失败: {error}");
+                        println!(
+                            "{}",
+                            tr(
+                                "slash.connector.filterPartial",
+                                &[("detail", &error.to_string())]
+                            )
+                        );
                     }
                 }
             }
             Err(error) => {
-                println!("[connector] 更新工具过滤器失败: {error}");
+                println!(
+                    "{}",
+                    tr(
+                        "slash.connector.filterFailed",
+                        &[("detail", &error.to_string())]
+                    )
+                );
                 return ChatCommandOutcome::Handled;
             }
         }
     }
     let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
+        println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
     let tools = registry.mcp_manager().tool_defs(name);
     if tools.is_empty() {
-        println!("[connector] {name} 暂无 ready 工具；用 /connector list 查看状态。");
+        println!("{}", tr("slash.connector.noTools", &[("name", name)]));
         return ChatCommandOutcome::Handled;
     }
-    println!("MCP tools for {name}:");
+    println!("{}", tr("slash.connector.tools", &[("name", name)]));
     for tool in tools {
         println!("  - {} ({})", tool.model_name, tool.raw_name);
     }
@@ -216,16 +232,28 @@ async fn add(
     };
     match add_global_server(&ctx.config, name.clone(), config) {
         Ok(()) => {
-            println!("[connector] 已写入全局 mcp.json: {name}");
+            println!("{}", tr("slash.connector.saved", &[("name", &name)]));
             if let Some(registry) = registry(ctx) {
                 if let Err(error) = registry.reload().await {
-                    println!("[connector] 配置已写入，但重连失败: {error}");
+                    println!(
+                        "{}",
+                        tr(
+                            "slash.connector.savePartial",
+                            &[("detail", &error.to_string())]
+                        )
+                    );
                 }
             } else {
-                println!("[connector] 启用模块后会自动连接： [connector] enabled = true");
+                println!("{}", tr("slash.connector.enableHint", &[]));
             }
         }
-        Err(error) => println!("[connector] 添加失败: {error}"),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.addFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     ChatCommandOutcome::Handled
 }
@@ -233,22 +261,34 @@ async fn add(
 async fn remove(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
     match remove_global_server(&ctx.config, name) {
         Ok(true) => {
-            println!("[connector] 已从全局 mcp.json 移除: {name}");
+            println!("{}", tr("slash.connector.removed", &[("name", name)]));
             if let Some(registry) = registry(ctx) {
                 if let Err(error) = registry.reload().await {
-                    println!("[connector] 配置已移除，但重载失败: {error}");
+                    println!(
+                        "{}",
+                        tr(
+                            "slash.connector.removePartial",
+                            &[("detail", &error.to_string())]
+                        )
+                    );
                 }
             }
         }
-        Ok(false) => println!("[connector] 全局 mcp.json 中没有: {name}"),
-        Err(error) => println!("[connector] 移除失败: {error}"),
+        Ok(false) => println!("{}", tr("slash.connector.missing", &[("name", name)])),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.removeFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     ChatCommandOutcome::Handled
 }
 
 fn trust_project(ctx: &ChatContext) -> ChatCommandOutcome {
     let Some(root) = ctx.scope_services.session_project_root.as_deref() else {
-        println!("[connector] 当前会话没有项目目录。");
+        println!("{}", tr("slash.connector.noProject", &[]));
         return ChatCommandOutcome::Handled;
     };
     match ProjectTrustStore::root_for(root).and_then(|root| {
@@ -256,57 +296,93 @@ fn trust_project(ctx: &ChatContext) -> ChatCommandOutcome {
         ConnectorRegistry::project_trusted(&ctx.config, &root)?;
         Ok(root)
     }) {
-        Ok(root) => println!("[connector] 已信任项目: {}", root.display()),
-        Err(error) => println!("[connector] 项目信任失败: {error}"),
+        Ok(root) => println!(
+            "{}",
+            tr(
+                "slash.connector.trusted",
+                &[("path", &root.display().to_string())]
+            )
+        ),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.trustFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     ChatCommandOutcome::Handled
 }
 
 async fn test(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
     let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
+        println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
     match registry.mcp_manager().test_server(name).await {
-        Ok(()) => println!("[connector] 测试连接成功: {name}"),
-        Err(error) => println!("[connector] 测试连接失败: {error}"),
+        Ok(()) => println!("{}", tr("slash.connector.testPassed", &[("name", name)])),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.testFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     ChatCommandOutcome::Handled
 }
 
 async fn login(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
     let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
+        println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
     match registry.mcp_manager().login_server(name).await {
-        Ok(()) => println!("[connector] OAuth 授权成功并已连接: {name}"),
-        Err(error) => println!("[connector] OAuth 授权失败: {error}"),
+        Ok(()) => println!("{}", tr("slash.connector.loggedIn", &[("name", name)])),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.loginFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     ChatCommandOutcome::Handled
 }
 
 fn logout(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
     let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
+        println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
     match registry.mcp_manager().logout_server(name) {
-        Ok(true) => println!("[connector] 已退出 OAuth: {name}"),
-        Ok(false) => println!("[connector] 没有保存的 OAuth 凭证: {name}"),
-        Err(error) => println!("[connector] 退出 OAuth 失败: {error}"),
+        Ok(true) => println!("{}", tr("slash.connector.loggedOut", &[("name", name)])),
+        Ok(false) => println!("{}", tr("slash.connector.noCredentials", &[("name", name)])),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.logoutFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     ChatCommandOutcome::Handled
 }
 
 async fn reload(ctx: &ChatContext) -> ChatCommandOutcome {
     let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
+        println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
     match registry.reload().await {
-        Ok(()) => println!("[connector] 已重读 mcp.json；未变化的健康连接保持不变。"),
-        Err(error) => println!("[connector] 重载未全部成功: {error}"),
+        Ok(()) => println!("{}", tr("slash.connector.reloaded", &[])),
+        Err(error) => println!(
+            "{}",
+            tr(
+                "slash.connector.reloadFailed",
+                &[("detail", &error.to_string())]
+            )
+        ),
     }
     list(ctx)
 }

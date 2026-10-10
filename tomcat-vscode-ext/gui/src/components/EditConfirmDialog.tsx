@@ -1,11 +1,13 @@
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, type MessageKey } from "../../../src/shared/i18n";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import type { PreviewRewindResponse } from "../../../src/serveClient/wire";
 
 export const REVERT_REASONS = {
-  no_baselines: "这条消息没有可用的文件备份，只能保留文件重发。",
-  expired: "这条消息的文件备份已过期，只能保留文件重发。",
-  git_head_moved: "这条消息之后有过 Git 提交或切换过分支，不能恢复文件。",
-};
+  no_baselines: "edit.noBaselines",
+  expired: "edit.expired",
+  git_head_moved: "edit.gitMoved",
+} satisfies Record<NonNullable<PreviewRewindResponse["revertReason"]>, MessageKey>;
 
 export function EditConfirmDialog({ preview, busy, onCancel, onChoose }: {
   preview: PreviewRewindResponse;
@@ -13,17 +15,20 @@ export function EditConfirmDialog({ preview, busy, onCancel, onChoose }: {
   onCancel(): void;
   onChoose(files: "keep" | "revert"): void;
 }) {
-  const reason = preview.revertReason ? REVERT_REASONS[preview.revertReason] : undefined;
+  const t = useT();
+  const locale = useLocale();
+  const reason = preview.revertReason ? t(REVERT_REASONS[preview.revertReason]) : undefined;
   return (
     <ConfirmationDialog
       testId="edit-confirm"
-      title="重新发送这条消息？"
-      body={`重发将替换本条消息及后续对话。${busy ? "当前任务会先停止。" : ""}${preview.revertAvailable ? `Revert Files：把 AI 在本条及之后用写文件工具改过的 ${preview.revertPaths.length} 个文件恢复原样（它新建的会删除，也会覆盖这些文件后续的修改）；终端改动不会单独撤销。` : reason ?? "没有可用的文件备份。"}`}
+      title={t("edit.title")}
+      body={t("edit.body", { stopNotice: busy ? t("edit.stopNotice") : "", fileNotice: preview.revertAvailable
+        ? t(pluralKey(locale, "edit.fileNotice.other", preview.revertPaths.length), { count: preview.revertPaths.length }) : reason ?? t("edit.noBackups") })}
       actions={[
-        { id: "keep", label: "Keep Files", shortcut: "⇧↵", tone: "secondary" },
+        { id: "keep", label: t("edit.keepFiles"), shortcut: "⇧↵", tone: "secondary" },
         {
           id: "revert",
-          label: "Revert Files",
+          label: t("edit.revertFiles"),
           shortcut: "↵",
           tone: "primary",
           disabled: !preview.revertAvailable,

@@ -7,12 +7,13 @@ pub(in super::super) async fn handle_web_search(
 ) -> Result<String, String> {
     let runtime = ctx
         .web_search_runtime
-        .ok_or_else(|| "web_search runtime 未注入".to_string())?;
+        .ok_or_else(|| "web_search runtime was not supplied".to_string())?;
     let parsed: WebSearchArgs = serde_json::from_value(args.clone())
-        .map_err(|err| format!("web_search 参数解析失败: {err}"))?;
+        .map_err(|err| format!("Could not parse web_search arguments: {err}"))?;
     let output = runtime
         .search(parsed, ctx.session_id)
         .await
         .map_err(|err| err.to_string())?;
-    serde_json::to_string_pretty(&output).map_err(|err| format!("web_search 结果序列化失败: {err}"))
+    serde_json::to_string_pretty(&output)
+        .map_err(|err| format!("Could not serialize web_search result: {err}"))
 }

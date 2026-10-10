@@ -395,6 +395,7 @@ export interface WebviewSessionSnapshot {
   historyLoading?: boolean;
   model?: string | null;
   planTodos: WebviewTodo[];
+  deleting?: boolean;
   sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
@@ -404,6 +405,8 @@ export interface WebviewSessionSnapshot {
 }
 
 export interface WebviewSessionTab {
+  isPinned?: boolean;
+  deleting?: boolean;
   busy: boolean;
   isCurrent: boolean;
   ownedByThisFrontend: boolean;
@@ -438,7 +441,17 @@ export type WebviewConnectionStatus =
   | "degraded"
   | "failed";
 
+export interface SessionActionFeedback {
+  id: string;
+  code: "busy" | "session_in_use" | "session_scope_mismatch" | "unknown" | "partial_cleanup" | "fallback_failed" | "failed" | "pending_changes" | "retained" | "unavailable";
+  detail?: string;
+}
+
 export interface WebviewStateSnapshot {
+  pinSupported?: boolean;
+  deleteSupported?: boolean;
+  sessionActionFeedback?: SessionActionFeedback | null;
+  locale?: import("../../shared/i18n").Locale;
   messageQueueSupported?: boolean;
   sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
@@ -610,6 +623,8 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
+  | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
   | { messageId: string; type: "queueAction"; data: {
       sessionId: string; userMessageId: string;
       action: "send" | "edit" | "cancel" | "delete" | "save";
@@ -825,9 +840,9 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "openModelSettings";
+      type: "openSettings";
       data?: {
-        route?: "models" | null;
+        route?: "general" | "models" | "connectors" | null;
       };
     }
   | {
@@ -1226,6 +1241,10 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
             && typeof a.bytes === "number")));
     case "interrupt":
       return value.data === undefined || isRecord(value.data);
+    case "deleteSession":
+      return isRecord(value.data) && isString(value.data.sessionId);
+    case "setSessionPinned":
+      return isRecord(value.data) && isString(value.data.sessionId) && typeof value.data.pinned === "boolean";
     case "setModel":
       return isRecord(value.data) && isString(value.data.modelId);
     case "setBuildModel":
@@ -1296,12 +1315,14 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
-    case "openModelSettings":
+    case "openSettings":
       return (
         value.data === undefined ||
         (isRecord(value.data) &&
           (value.data.route === undefined ||
             value.data.route === null ||
+            value.data.route === "general" ||
+            value.data.route === "connectors" ||
             value.data.route === "models"))
       );
     case "resolveDrop":

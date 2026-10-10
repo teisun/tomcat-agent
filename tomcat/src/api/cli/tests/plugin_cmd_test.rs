@@ -102,8 +102,13 @@ fn plugin_registry_corrupt_returns_error() {
     let path = dir.path().join("registry.json");
     std::fs::write(&path, "not valid json {{{").unwrap();
 
-    let error = load_plugin_registry(&path).unwrap_err().to_string();
-    assert!(error.contains("registry 损坏"), "unexpected error: {error}");
+    let error = load_plugin_registry(&path).unwrap_err();
+    assert!(matches!(error, crate::AppError::Config(_)), "{error}");
+    assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "not valid json {{{"
+    );
 }
 
 #[test]

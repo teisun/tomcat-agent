@@ -7,6 +7,7 @@ use crate::core::tools::primitive::{
     EDIT_REPLACE_ALL_MARKER,
 };
 use crate::infra::events::{ToolDisplayFileEntry, ToolDisplayFileStatus};
+use crate::infra::i18n::tr;
 
 /// 一次批量 edit 最多几个文件。上限存在的理由是可读性：一屏能看完的失败列表才有人会看。
 const MAX_BATCH_EDIT_FILES: usize = 10;
@@ -61,9 +62,9 @@ pub(in super::super) async fn handle_edit(
                 diff_truncated: result.diff_truncated,
                 expired: false,
             });
-            let mut message = format!("已编辑: {}", result.path);
+            let mut message = format!("Edited: {}", result.path);
             if let Some(notice) = heading_notice {
-                message.push_str(&format!("\n提示：{notice}"));
+                message.push_str(&format!("\nNote: {notice}"));
             }
             if let Some(feedback) = feedback {
                 message.push_str(&feedback);
@@ -71,9 +72,10 @@ pub(in super::super) async fn handle_edit(
             Ok(message)
         }
         Ok(result) => {
-            let msg = format!("编辑被拒绝: {}", result.path);
-            *display_out = Some(ToolDisplay::Text { text: msg.clone() });
-            Ok(msg)
+            *display_out = Some(ToolDisplay::Text {
+                text: tr("toolEdit.denied", &[("path", &result.path)]),
+            });
+            Ok(format!("Edit denied: {}", result.path))
         }
         Err(error) => {
             Err(enrich_notfound_error(ctx, path, &feedback_edits, error.to_string()).await)
@@ -100,7 +102,7 @@ async fn render_post_edit_feedback(
         render_current_line_ranges(
             &current,
             &ranges,
-            "编辑后视图（当前磁盘；用这里的原文做下一次 old_content）",
+            "Post-edit view (current disk; use this text for the next old_content)",
             max_bytes,
         )
     })
@@ -226,12 +228,12 @@ fn render_current_line_ranges(
     }
 
     if rendered_lines == 0 && total_lines == 1 && current.is_empty() {
-        let _ = push_feedback_fragment(&mut rendered, "     1\t<文件现为空>\n", max_bytes);
+        let _ = push_feedback_fragment(&mut rendered, "     1\t<file is now empty>\n", max_bytes);
     }
     if truncated {
         let _ = push_feedback_fragment(
             &mut rendered,
-            "       …（编辑后视图已截断；如需更多上下文请 read）\n",
+            "       …(post-edit view truncated; use read for more context)\n",
             max_bytes,
         );
     }
@@ -273,18 +275,16 @@ async fn enrich_notfound_error(
         return error;
     };
     let Ok(current) = ctx.primitive.read_file(path, AGENT_PLUGIN_ID).await else {
-        return format!("{error}\n无法读取当前文件来定位目标；请先重新 `read` 再编辑。");
+        return format!("{error}\nCould not read the current file to locate the target; read it again before editing.");
     };
     let Some(line_no) = nearest_current_line(&current, edit) else {
-        return format!(
-            "{error}\n未能从 old_content 可靠定位当前区域；请先重新 `read` 获取文件真相后再编辑。"
-        );
+        return format!("{error}\nCould not reliably locate the current area from old_content; read the file again before editing.");
     };
     let total_lines = current.lines().count().max(1);
     let view = render_current_line_ranges(
         &current,
         &[expand_line_range(line_no, line_no, total_lines)],
-        "old_content 的就近当前视图（当前磁盘；请据此一轮改正）",
+        "Nearby current view for old_content (current disk; use this to correct the edit)",
         EDIT_FEEDBACK_MAX_BYTES,
     );
     format!("{error}\n{view}")
@@ -351,9 +351,7 @@ fn heading_replacement_notice(edits: &[EditOperation]) -> Option<String> {
         {
             return None;
         }
-        Some(format!(
-            "本次 replace 移除了 Markdown 标题 `{old}`；若本意是插入内容，请改用 mode=`insert_before`。"
-        ))
+        Some(format!("This replace removed Markdown heading `{old}`; if insertion was intended, use mode=`insert_before`."))
     })
 }
 
@@ -407,7 +405,7 @@ fn parse_batch_files(args: &serde_json::Value) -> Result<Option<Vec<BatchFile>>,
     };
     let raw = raw
         .as_array()
-        .ok_or_else(|| "edit: `files` 必须是数组".to_string())?;
+        .ok_or_else(|| "edit: `files` must be an array".to_string())?;
     let raw: Vec<&serde_json::Value> = raw
         .iter()
         .filter(|item| !is_placeholder_file(item))
@@ -418,16 +416,12 @@ fn parse_batch_files(args: &serde_json::Value) -> Result<Option<Vec<BatchFile>>,
     }
     if raw.len() > MAX_BATCH_EDIT_FILES {
         return Err(format!(
-            "edit: 一次最多批量修改 {MAX_BATCH_EDIT_FILES} 个文件，收到 {}",
+            "edit: at most {MAX_BATCH_EDIT_FILES} files may be edited in one batch; received {}",
             raw.len()
         ));
     }
     if let Some(conflict) = top_level_edit_outside_files(args, &raw) {
-        return Err(format!(
-            "edit: 顶层还带了一段 `files` 里没有的编辑（改 `{}`）。\
-             批量改多个文件时请只用 `files`，把这一段也放进去",
-            conflict.chars().take(40).collect::<String>()
-        ));
+        return Err(format!("edit: a top-level edit (changing `{}`) is not present in `files`. For multiple files, use only `files` and include that edit there", conflict.chars().take(40).collect::<String>()));
     }
 
     let mut files = Vec::with_capacity(raw.len());
@@ -438,13 +432,11 @@ fn parse_batch_files(args: &serde_json::Value) -> Result<Option<Vec<BatchFile>>,
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .ok_or_else(|| format!("edit: files[{idx}] 缺少非空的 `path`"))?;
+            .ok_or_else(|| format!("edit: files[{idx}] requires a non-empty `path`"))?;
         // 同一文件出现两次时，第二条看到的是第一条改完的内容，old_content 多半对不上；
         // 与其让它以 NotFound 失败，不如直接要求合并。
         if !seen.insert(path.to_string()) {
-            return Err(format!(
-                "edit: files 里 `{path}` 出现多次，请把它的编辑段合并成一条"
-            ));
+            return Err(format!("edit: `{path}` appears more than once in files; merge its edit segments into one entry"));
         }
         let edits = parse_edit_ops(item, &format!("files[{idx}]"))?;
         files.push(BatchFile {
@@ -524,7 +516,7 @@ async fn edit_batch(
                     note: heading_notice,
                 });
             }
-            Ok(result) => entries.push(failed_entry(result.path, "编辑被拒绝".to_string())),
+            Ok(result) => entries.push(failed_entry(result.path, "Edit denied".to_string())),
             Err(err) => entries.push(failed_entry(
                 file.path.clone(),
                 enrich_notfound_error(ctx, &file.path, &feedback_edits, err.to_string()).await,
@@ -540,15 +532,33 @@ async fn edit_batch(
         .count();
     let failed = entries.len() - applied;
     let summary = if failed == 0 {
-        format!("已编辑 {applied} 个文件，全部落盘")
+        tr(
+            if applied == 1 {
+                "toolEdit.allApplied.one"
+            } else {
+                "toolEdit.allApplied.other"
+            },
+            &[("count", &applied.to_string())],
+        )
     } else {
-        format!(
-            "{} 个文件已落盘，{failed} 个失败且未写入；失败的文件磁盘内容保持原样",
-            applied
+        tr(
+            "toolEdit.partial",
+            &[
+                ("applied", &applied.to_string()),
+                ("failed", &failed.to_string()),
+            ],
         )
     };
 
-    let mut text = summary.clone();
+    // UI status follows the user's locale; model feedback is a fixed English contract.
+    let mut text = if failed == 0 {
+        format!(
+            "Edited {applied} {}; all changes written",
+            if applied == 1 { "file" } else { "files" }
+        )
+    } else {
+        format!("Files written: {applied}; failed without writing: {failed}. Failed files retain their original disk contents")
+    };
     for entry in &entries {
         if entry.status == Some(ToolDisplayFileStatus::Applied) {
             let mut line = format!(
@@ -558,14 +568,14 @@ async fn edit_batch(
                 entry.removed.unwrap_or(0)
             );
             if let Some(notice) = entry.note.as_deref() {
-                line.push_str(&format!("\n  提示：{notice}"));
+                line.push_str(&format!("\n  Note: {notice}"));
             }
             text.push_str(&line);
         } else {
             text.push_str(&format!(
                 "\n- FAILED  {}: {}",
                 entry.file,
-                entry.note.as_deref().unwrap_or("未知错误")
+                entry.note.as_deref().unwrap_or("Unknown error")
             ));
         }
     }
@@ -612,10 +622,7 @@ fn failed_entry(file: String, error: String) -> ToolDisplayFileEntry {
 
 fn precheck_file(ctx: &ToolExecCtx<'_>, path: &str) -> Result<(), String> {
     if crate::core::tools::pipeline::edit_normalize::is_unsupported_structured_file(path) {
-        return Err(format!(
-            "Notebook: `{}` 是 Jupyter 笔记本（.ipynb），edit 不支持；请使用专用 nbformat 工具或先把目标 cell 导出为 .py / .md 再 edit",
-            path
-        ));
+        return Err(format!("Notebook: `{path}` is a Jupyter notebook (.ipynb), which edit does not support; use an nbformat tool or export the target cell to .py / .md first"));
     }
     if let Some(state) = ctx.read_file_state {
         check_mutation_stamp(state, path, "edit")?;
@@ -632,10 +639,10 @@ fn reviewer_body_guard(
         return Ok(());
     }
     let normalized_path = crate::infra::platform::normalize_path(path)
-        .map_err(|e| format!("reviewer edit 预检路径解析失败：{e}"))?;
+        .map_err(|e| format!("reviewer edit path precheck failed: {e}"))?;
     let old = std::fs::read_to_string(&normalized_path)
-        .map_err(|e| format!("reviewer edit 预检读原文失败：{e}"))?;
+        .map_err(|e| format!("reviewer edit source precheck failed: {e}"))?;
     let new = simulate_apply_edits(&old, edits);
     crate::core::plan_runtime::safety::reviewer_body_diff_guard(&old, &new)
-        .map_err(|denied| format!("reviewer edit 被拒：{denied}"))
+        .map_err(|denied| format!("reviewer edit denied: {denied}"))
 }

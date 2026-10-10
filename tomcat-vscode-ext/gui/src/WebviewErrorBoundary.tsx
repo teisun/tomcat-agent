@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode, useEffect, useState } from "react";
+import { useT } from "./i18n/LocaleProvider";
 
 type ReportError = (error: Error) => void;
 
@@ -27,13 +28,14 @@ function normalizeError(value: unknown): Error {
 }
 
 function WebviewErrorFallback({ error }: { error: Error }) {
+  const t = useT();
   return (
-    <main aria-label="Tomcat webview error" className="tc-webview-error" data-testid="webview-error-fallback">
-      <h1>Tomcat could not render this view</h1>
-      <p>The error was reported to the extension host. Reload this view to try again.</p>
+    <main aria-label={t("webview.error.aria")} className="tc-webview-error" data-testid="webview-error-fallback">
+      <h1>{t("webview.error.title")}</h1>
+      <p>{t("webview.error.description")}</p>
       <pre>{error.message || "Unknown webview error"}</pre>
       <button onClick={() => window.location.reload()} type="button">
-        Reload
+        {t("common.reload")}
       </button>
     </main>
   );

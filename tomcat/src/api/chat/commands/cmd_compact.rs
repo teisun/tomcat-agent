@@ -6,6 +6,7 @@ use crate::core::compaction::preheat::{generate_summary_with_output_limit, Summa
 use crate::core::llm::{LlmScene, PromptCacheKeyFamily};
 use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
 
+use crate::infra::i18n::tr;
 use crate::AppError;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
@@ -21,7 +22,7 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
     match tokens.as_slice() {
         [_cmd] => ChatCommand::Compact,
         _ => ChatCommand::UsageError {
-            message: "用法错误：/compact 不接受参数。".to_string(),
+            message: tr("slash.compact.usage", &[]),
         },
     }
 }
@@ -37,24 +38,38 @@ pub(crate) async fn run(
 ) -> ChatCommandOutcome {
     match compact_session(ctx).await {
         Ok(report) if report.covered_count == 0 => {
-            println!("当前会话没有可压缩的上下文。");
+            println!("{}", tr("slash.compact.empty", &[]));
         }
         Ok(report) => {
             match reload_context_state(ctx, system_text) {
                 Ok(rehydrated) => *context_state = rehydrated,
                 Err(error) => {
-                    println!("压缩结果已保存，但内存上下文重载失败：{error}");
+                    println!(
+                        "{}",
+                        tr(
+                            "slash.compact.reloadFailed",
+                            &[("detail", &error.to_string())]
+                        )
+                    );
                     return ChatCommandOutcome::Handled;
                 }
             }
             println!(
-                "上下文已压缩：{:.1}% → {:.1}%（覆盖 {} 条消息）。",
-                report.before_ratio * 100.0,
-                report.after_ratio * 100.0,
-                report.covered_count
+                "{}",
+                tr(
+                    "slash.compact.done",
+                    &[
+                        ("before", &format!("{:.1}", report.before_ratio * 100.0)),
+                        ("after", &format!("{:.1}", report.after_ratio * 100.0)),
+                        ("count", &report.covered_count.to_string())
+                    ]
+                )
             );
         }
-        Err(error) => println!("上下文压缩失败：{error}"),
+        Err(error) => println!(
+            "{}",
+            tr("slash.compact.failed", &[("detail", &error.to_string())])
+        ),
     }
     ChatCommandOutcome::Handled
 }

@@ -56,9 +56,11 @@ fn create_plan_keeps_only_llm_authored_todos_and_enforces_one_acceptance() {
         ]),
     )
     .expect_err("two acceptance todos must be rejected");
-    assert!(err
-        .to_string()
-        .contains("一个计划仅允许一个Acceptance todo, 且kind=Acceptance只赋予最终验收todo"));
+    assert!(err.to_string().contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "planFile.acceptanceLimit",
+        &[]
+    )));
     cleanup_home(&home);
 }
 
@@ -178,9 +180,11 @@ async fn update_plan_rejects_a_second_acceptance_and_completes_when_all_todos_ar
     )
     .await
     .expect_err("a second acceptance todo must be rejected");
-    assert!(err
-        .to_string()
-        .contains("一个计划仅允许一个Acceptance todo, 且kind=Acceptance只赋予最终验收todo"));
+    assert!(err.to_string().contains(&crate::infra::i18n::tr_in(
+        crate::infra::i18n::Locale::En,
+        "planFile.acceptanceLimit",
+        &[]
+    )));
 
     update_plan::execute(
         &runtime,

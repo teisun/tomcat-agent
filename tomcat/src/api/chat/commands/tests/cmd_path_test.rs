@@ -159,7 +159,15 @@ fn path_menu_with_deny_rule_hides_authorization_choices() {
         "deny 命中后不得降级为 readonly 扩权"
     );
     assert!(!menu.persist_deny, "deny 命中后无需再展示重复 deny 选项");
-    assert!(menu.note.as_deref().unwrap_or("").contains("禁止读写访问"));
+    assert!(menu
+        .note
+        .as_deref()
+        .unwrap_or("")
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "slash.path.denied",
+            &[("path", &denied.display().to_string())]
+        )));
 }
 
 #[test]
@@ -204,7 +212,11 @@ fn extra_root_menu_line_for_file_uses_parent_phrasing() {
     std::fs::write(&file, b"hello").unwrap();
     let line = extra_root_menu_line(&file);
     assert!(
-        line.contains("检测到为文件"),
+        line.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "slash.path.parent",
+            &[("path", &tmp.path().display().to_string())]
+        )),
         "文件场景文案必须明示\"检测到为文件\"：{line}"
     );
     assert!(
@@ -222,7 +234,7 @@ fn extra_root_menu_line_for_dir_uses_default_phrasing() {
     let line = extra_root_menu_line(&dir);
     assert_eq!(
         line.trim(),
-        "[w] 以后也允许访问（写入配置 workspace.workspace_roots）",
+        crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "slash.path.persist", &[]).trim(),
         "目录场景必须保留旧文案以维持 E2E 契约"
     );
 }
@@ -233,7 +245,11 @@ fn precheck_existence_rejects_missing_path() {
     let missing = tmp.path().join("does-not-exist");
     let err = precheck_existence(&missing).expect_err("不存在路径必须返回 Err");
     assert!(
-        err.contains("路径不存在"),
+        err.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "slash.path.missing",
+            &[("path", &missing.display().to_string())]
+        )),
         "错误文案应包含\"路径不存在\"：{err}"
     );
 }

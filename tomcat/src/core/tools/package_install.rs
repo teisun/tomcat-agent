@@ -21,6 +21,7 @@ use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmati
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::config::AppConfig;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 
 static NEXT_INSTALL_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -98,9 +99,7 @@ impl ChatPackageInstallBackend {
             return Ok(());
         };
         if runtime.mode() == crate::core::session::manager::AgentMode::Plan {
-            return Err(AppError::Permission(
-                "package_install 在 PLAN 模式不可用；请先退出计划模式再安装资源".to_string(),
-            ));
+            return Err(AppError::Permission(tr("install.planDisabled", &[])));
         }
         Ok(())
     }
@@ -113,9 +112,9 @@ impl ChatPackageInstallBackend {
             return Ok(());
         };
         match gate.check(PrimitiveOperation::Write, &path.to_string_lossy())? {
-            PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
-                "package_install 目标被路径策略拒绝: {} ({reason})",
-                path.display()
+            PermissionDecision::Deny { reason } => Err(AppError::Permission(tr(
+                "install.targetDenied",
+                &[("path", &path.display().to_string()), ("reason", &reason)],
             ))),
             PermissionDecision::NeedConfirm { .. } | PermissionDecision::Allow { .. } => Ok(()),
         }
@@ -124,11 +123,11 @@ impl ChatPackageInstallBackend {
     /// Runs the same three-way Read authorization as a regular file read. A
     /// package-install approval can never stand in for source access approval.
     fn record_install_audit(&self, event: InstallAuditEvent<'_>) -> Result<(), AppError> {
-        let store = self.ctx.audit_store.as_ref().ok_or_else(|| {
-            AppError::Audit(
-                "package_install requires a writable audit store for agent/global".to_string(),
-            )
-        })?;
+        let store = self
+            .ctx
+            .audit_store
+            .as_ref()
+            .ok_or_else(|| AppError::Audit(tr("install.auditRequired", &[])))?;
         let detail = serde_json::json!({
             "attempt_id": event.attempt_id,
             "status": event.status,
@@ -157,19 +156,18 @@ impl ChatPackageInstallBackend {
             match gate.check(PrimitiveOperation::Read, &path.to_string_lossy())? {
                 PermissionDecision::Allow { .. } => return Ok(()),
                 PermissionDecision::Deny { reason } => {
-                    return Err(AppError::Permission(format!(
-                        "package_install 来源被路径策略拒绝: {} ({reason})",
-                        path.display()
+                    return Err(AppError::Permission(tr(
+                        "install.sourceDenied",
+                        &[("path", &path.display().to_string()), ("reason", &reason)],
                     )));
                 }
                 PermissionDecision::NeedConfirm {
                     reason,
                     suggested_root,
                 } => {
-                    let preview = format!(
-                        "[Read] Read package installation source\n路径: {}\n原因: {}",
-                        path.display(),
-                        reason
+                    let preview = tr(
+                        "install.readPreview",
+                        &[("path", &path.display().to_string()), ("reason", &reason)],
                     );
                     match self
                         .ctx
@@ -178,14 +176,15 @@ impl ChatPackageInstallBackend {
                             PrimitiveOperation::Read,
                             &preview,
                             "package_install_source",
+                            Some(path.to_path_buf()),
                             suggested_root,
                         )
                         .await?
                     {
                         ConfirmDecision::Deny => {
-                            return Err(AppError::Permission(format!(
-                                "用户拒绝读取 package_install 来源: {}",
-                                path.display()
+                            return Err(AppError::Permission(tr(
+                                "install.readDenied",
+                                &[("path", &path.display().to_string())],
                             )));
                         }
                         ConfirmDecision::AllowOnce => {
@@ -193,9 +192,9 @@ impl ChatPackageInstallBackend {
                         }
                         ConfirmDecision::AllowAndPersistRoot { root } => {
                             if !path.starts_with(&root) {
-                                return Err(AppError::Permission(format!(
-                                    "来源授权根不包含请求路径: {}",
-                                    root.display()
+                                return Err(AppError::Permission(tr(
+                                    "install.rootMismatch",
+                                    &[("path", &root.display().to_string())],
                                 )));
                             }
                             gate.grant_session(root, GrantTrigger::UserConfirm);
@@ -212,15 +211,15 @@ impl ChatPackageInstallBackend {
             let metadata = std::fs::symlink_metadata(&path).map_err(AppError::Io)?;
             let file_type = metadata.file_type();
             if file_type.is_symlink() {
-                return Err(AppError::Config(format!(
-                    "package installation source tree must not contain symbolic links: {}",
-                    path.display()
+                return Err(AppError::Config(tr(
+                    "install.symlinkTree",
+                    &[("path", &path.display().to_string())],
                 )));
             }
             if !file_type.is_file() && !file_type.is_dir() {
-                return Err(AppError::Config(format!(
-                    "package installation source tree contains an unsupported special file: {}",
-                    path.display()
+                return Err(AppError::Config(tr(
+                    "package.specialFile",
+                    &[("path", &path.display().to_string())],
                 )));
             }
             self.authorize_source_read(&path).await?;
@@ -243,9 +242,7 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
         self.ensure_session_allows_install()?;
         let source_metadata = std::fs::symlink_metadata(&request.source).map_err(AppError::Io)?;
         if source_metadata.file_type().is_symlink() {
-            return Err(AppError::Config(
-                "package installation source must not be a symbolic link".to_string(),
-            ));
+            return Err(AppError::Config(tr("install.symlinkRoot", &[])));
         }
         let source_path = std::fs::canonicalize(&request.source).map_err(AppError::Io)?;
         self.check_source_tree(&source_path).await?;
@@ -255,14 +252,11 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
                 .ctx
                 .session_project_root
                 .as_deref()
-                .ok_or_else(|| {
-                    AppError::Config(
-                        "package_install.scope 需要创建会话时提供一个存在的绝对项目目录；当前会话没有项目根"
-                            .to_string(),
-                    )
-                })?,
+                .ok_or_else(|| AppError::Config(tr("install.projectRequired", &[])))?,
             crate::core::package::PackageVisibility::Agent
-            | crate::core::package::PackageVisibility::Global => self.ctx.session_workspace_dir.as_path(),
+            | crate::core::package::PackageVisibility::Global => {
+                self.ctx.session_workspace_dir.as_path()
+            }
         };
         let manager = PackageManager::new(&self.ctx.config);
         let prepared =
@@ -294,19 +288,19 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
         if let Some(attempt_id) = attempt_id.as_deref() {
             // Agent/global writes must be auditable before asking the user to approve them.
             if self.ctx.audit_store.is_none() {
-                return Err(AppError::Audit(
-                    "package_install agent/global 需要可写的审计日志；未写入文件".to_string(),
-                ));
+                return Err(AppError::Audit(tr("install.auditUnavailable", &[])));
             }
             let confirmed = match self
                 .ctx
                 .confirmation
                 .confirm(
                     PrimitiveOperation::Write,
-                    &format!(
-                        "Install local package {} into {}",
-                        source_path.display(),
-                        request.visibility
+                    &tr(
+                        "install.confirm",
+                        &[
+                            ("path", &source_path.display().to_string()),
+                            ("scope", request.visibility.as_str()),
+                        ],
                     ),
                     "package_install",
                 )
@@ -336,9 +330,7 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
                     target_path: &prepared.layer_paths.layer_root,
                     error: None,
                 })?;
-                return Err(AppError::Permission(
-                    "用户取消 package_install；未写入文件".to_string(),
-                ));
+                return Err(AppError::Permission(tr("install.cancelled", &[])));
             }
             self.record_install_audit(InstallAuditEvent {
                 attempt_id,
@@ -391,7 +383,9 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
                 target_path: Path::new(&target_path),
                 error: None,
             })
-            .map_err(|error| AppError::Audit(format!("资源已安装，但审计记录失败: {error}")))?;
+            .map_err(|error| {
+                AppError::Audit(tr("install.auditFailed", &[("detail", &error.to_string())]))
+            })?;
         }
         crate::api::chat::publish_resource_inventory_change();
         Ok(PackageInstallToolResult {

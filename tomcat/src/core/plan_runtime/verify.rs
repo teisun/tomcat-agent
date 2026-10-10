@@ -77,7 +77,8 @@ impl VerifySummary {
         Self {
             checks: Vec::new(),
             verdict: "aborted".into(),
-            summary: "verifier 子 Agent 未注入，返回占位摘要".into(),
+            summary: "Verifier sub-Agent was not supplied; returning a placeholder summary"
+                .to_string(),
             verifier_turns_used: 0,
             verifier_turns_limit: VERIFIER_MAX_TURNS,
             verifier_stop_reason: "not_dispatched".into(),
@@ -170,7 +171,7 @@ pub fn normalize_for_gate(summary: &mut VerifySummary) -> Vec<String> {
         if check.result == "pass" && check.command.trim().is_empty() {
             check.result = "skip".into();
             warnings.push(format!(
-                "check `{}` 声称 pass 但 command 为空，已降级为 skip",
+                "check `{}` claimed pass without a command; downgraded to skip",
                 check.name
             ));
         }
@@ -184,7 +185,10 @@ pub fn normalize_for_gate(summary: &mut VerifySummary) -> Vec<String> {
         && !saw_key_non_skip
     {
         summary.verdict = "partial".into();
-        warnings.push("关键 build/test/lint 检查均未实际跑通，verdict 已降级为 partial".into());
+        warnings.push(
+            "No key build/test/lint checks ran successfully; verdict downgraded to partial"
+                .to_string(),
+        );
     }
     warnings
 }
@@ -297,13 +301,13 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
     async fn dispatch(&self, plan_id: &str, plan_text: &str) -> VerifySummary {
         let Some(deps) = self.deps.as_ref() else {
             return VerifySummary::aborted_with(format!(
-                "[{}] 生产 verifier 子 Agent 未注入依赖（stub 模式）",
+                "[{}] Production verifier sub-Agent dependencies were not supplied (stub mode)",
                 self.origin
             ));
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
             return VerifySummary::aborted_with(format!(
-                "[{}] PlanRuntime 已被 drop，verifier 取消派发",
+                "[{}] PlanRuntime was dropped; verifier dispatch cancelled",
                 self.origin
             ));
         };
@@ -350,8 +354,8 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             Ok(runtime) => runtime,
             Err(err) => {
                 let mut s = VerifySummary::aborted_with(format!(
-                    "[{}] verifier 模型 `{}` 解析失败：{}",
-                    self.origin, model_id, err
+                    "[{}] Could not resolve verifier model `{model_id}`: {err}",
+                    self.origin
                 ));
                 s.verifier_turns_limit = turns_limit;
                 s.verifier_stop_reason = "model_unresolved".into();
@@ -503,13 +507,13 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             Ok(_) => match rx.await {
                 Ok(summary) => summary,
                 Err(_) => VerifySummary::aborted_with(format!(
-                    "[{}] verifier 子 Agent 退出但 summary channel 提前关闭",
+                    "[{}] verifier sub-Agent exited but its summary channel closed early",
                     self.origin
                 )),
             },
             Err(e) => {
                 let mut s = VerifySummary::aborted_with(format!(
-                    "[{}] verifier spawn 失败：{e}",
+                    "[{}] Could not spawn verifier: {e}",
                     self.origin
                 ));
                 s.verifier_turns_limit = turns_limit;
@@ -549,13 +553,9 @@ pub(crate) fn build_summary_from_outcome(
                 }
                 None => {
                     let mut s = if exhausted_budget {
-                        VerifySummary::aborted_with(format!(
-                            "[{origin}] verifier 在 {turns_limit} 轮预算内未正常收口（child={child_session_id}）"
-                        ))
+                        VerifySummary::aborted_with(format!("[{origin}] Verifier did not finish normally within the {turns_limit}-turn budget (child={child_session_id})"))
                     } else {
-                        VerifySummary::aborted_with(format!(
-                            "[{origin}] verifier 输出不符合 <verify> 契约（child={child_session_id}）"
-                        ))
+                        VerifySummary::aborted_with(format!("[{origin}] Verifier output does not match the <verify> contract (child={child_session_id})"))
                     };
                     s.verifier_turns_used = turns_used;
                     s.verifier_turns_limit = turns_limit;
@@ -572,7 +572,7 @@ pub(crate) fn build_summary_from_outcome(
         AgentRunOutcome::Interrupted(result) => {
             let turns_used = count_assistant_turns(&result.new_messages);
             let mut s = VerifySummary::aborted_with(format!(
-                "[{origin}] verifier 被父 abort / cancel（child={child_session_id}）"
+                "[{origin}] verifier aborted/cancelled by parent (child={child_session_id})"
             ));
             s.verifier_turns_used = turns_used;
             s.verifier_turns_limit = turns_limit;
@@ -582,7 +582,7 @@ pub(crate) fn build_summary_from_outcome(
         }
         AgentRunOutcome::Failed(e) => {
             let mut s =
-                VerifySummary::aborted_with(format!("[{origin}] verifier 子 Agent 失败：{e}"));
+                VerifySummary::aborted_with(format!("[{origin}] verifier sub-Agent failed: {e}"));
             s.verifier_turns_limit = turns_limit;
             s.verifier_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
@@ -639,9 +639,7 @@ fn ended_with_terminal_assistant_message(messages: &[ChatMessage]) -> bool {
 }
 
 fn append_budget_exhausted_note(summary: &mut String, turns_limit: u32) {
-    let note = format!(
-        "[runtime override] verifier exhausted the {turns_limit}-turn budget before normal completion."
-    );
+    let note = format!("[runtime override] verifier exhausted the {turns_limit}-turn budget before normal completion.");
     if summary.is_empty() {
         *summary = note;
     } else if !summary.contains(&note) {

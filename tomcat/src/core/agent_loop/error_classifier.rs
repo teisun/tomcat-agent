@@ -332,7 +332,7 @@ pub(super) fn handle_unsupported_multimodal_retry(
     };
     agent.emit_event(AgentEvent::LlmNotice {
         finish_reason: "unsupported_multimodal_degraded".to_string(),
-        message: "本轮附件未被当前端点接受，已按纯文本发送".to_string(),
+        message: crate::infra::i18n::tr("agentLoop.attachmentsDegraded", &[]),
     });
     info!(
         target: "tomcat_chat_diag",

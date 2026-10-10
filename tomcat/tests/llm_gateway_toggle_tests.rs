@@ -1,8 +1,7 @@
 mod common;
 
 use common::serve::{
-    extract_json_body, response, spawn_scripted_openai_stream_server, sse_delta, sse_done,
-    sse_finish,
+    extract_json_body, response, spawn_scripted_openai_stream_server, ScriptedPart,
 };
 use futures_util::StreamExt;
 use serial_test::serial;
@@ -156,9 +155,8 @@ fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
 #[serial(env_lock)]
 async fn gateway_model_routes_with_wire_name_in_request_body() {
     let server = spawn_scripted_openai_stream_server(vec![response(vec![
-        sse_delta("ok"),
-        sse_finish("stop"),
-        sse_done(),
+        ScriptedPart { delay_ms: 0, body: "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"mock\",\"content_index\":0,\"delta\":\"ok\"}\n\n".into() },
+        ScriptedPart { delay_ms: 0, body: "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n".into() },
     ])]);
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cfg = AppConfig::default();

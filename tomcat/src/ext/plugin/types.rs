@@ -1,4 +1,5 @@
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -147,7 +148,7 @@ impl PluginInstance {
 /// 清单解析与校验：必填字段、required_api_version、required_permissions。
 pub fn parse_manifest(json: &str) -> Result<PluginManifest, AppError> {
     let m: PluginManifest = serde_json::from_str(json)
-        .map_err(|e| AppError::Plugin(format!("manifest parse error: {}", e)))?;
+        .map_err(|e| AppError::Plugin(tr("plugin.manifestParse", &[("detail", &e.to_string())])))?;
     validate_manifest(&m)?;
     Ok(m)
 }
@@ -155,7 +156,10 @@ pub fn parse_manifest(json: &str) -> Result<PluginManifest, AppError> {
 /// 校验必填字段与权限格式。
 fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
     if m.id.is_empty() {
-        return Err(AppError::Plugin("manifest.id is required".to_string()));
+        return Err(AppError::Plugin(tr(
+            "plugin.required",
+            &[("field", "manifest.id")],
+        )));
     }
     let id_path = Path::new(&m.id);
     if m.id.trim().is_empty()
@@ -164,44 +168,52 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
         || !matches!(id_path.components().next(), Some(Component::Normal(component)) if component == std::ffi::OsStr::new(&m.id))
         || id_path.components().nth(1).is_some()
     {
-        return Err(AppError::Plugin(
-            "manifest.id must be one safe directory name".to_string(),
-        ));
+        return Err(AppError::Plugin(tr("plugin.safeId", &[])));
     }
     if m.name.is_empty() {
-        return Err(AppError::Plugin("manifest.name is required".to_string()));
+        return Err(AppError::Plugin(tr(
+            "plugin.required",
+            &[("field", "manifest.name")],
+        )));
     }
     if m.main.is_empty() {
-        return Err(AppError::Plugin("manifest.main is required".to_string()));
+        return Err(AppError::Plugin(tr(
+            "plugin.required",
+            &[("field", "manifest.main")],
+        )));
     }
     if m.required_api_version.is_empty() {
-        return Err(AppError::Plugin(
-            "manifest.required_api_version is required".to_string(),
-        ));
+        return Err(AppError::Plugin(tr(
+            "plugin.required",
+            &[("field", "manifest.required_api_version")],
+        )));
     }
     for tool in &m.tools {
         if tool.name.trim().is_empty() {
-            return Err(AppError::Plugin(
-                "manifest.tools[].name is required".to_string(),
-            ));
+            return Err(AppError::Plugin(tr(
+                "plugin.required",
+                &[("field", "manifest.tools[].name")],
+            )));
         }
         if !tool.parameters.is_object() {
-            return Err(AppError::Plugin(format!(
-                "manifest.tools[{}].parameters must be an object",
-                tool.name
+            return Err(AppError::Plugin(tr(
+                "plugin.toolParameters",
+                &[("name", &tool.name)],
             )));
         }
     }
     for function in &m.functions {
         if function.point.trim().is_empty() {
-            return Err(AppError::Plugin(
-                "manifest.functions[].point is required".to_string(),
-            ));
+            return Err(AppError::Plugin(tr(
+                "plugin.required",
+                &[("field", "manifest.functions[].point")],
+            )));
         }
         if function.function.trim().is_empty() {
-            return Err(AppError::Plugin(
-                "manifest.functions[].function is required".to_string(),
-            ));
+            return Err(AppError::Plugin(tr(
+                "plugin.required",
+                &[("field", "manifest.functions[].function")],
+            )));
         }
     }
     if m.required_permissions
@@ -209,10 +221,7 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
         .any(|perm| perm == "net:fetch")
         && m.allowed_hosts.is_empty()
     {
-        return Err(AppError::Plugin(
-            "manifest.allowedHosts is required when manifest.requiredPermissions contains net:fetch"
-                .to_string(),
-        ));
+        return Err(AppError::Plugin(tr("plugin.allowedHosts", &[])));
     }
     Ok(())
 }

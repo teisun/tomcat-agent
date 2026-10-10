@@ -112,9 +112,9 @@ describe("inline user-message edit",()=>{
     else expect(sends).toEqual([expect.objectContaining({data:expect.objectContaining({files:action})})]);
   });
   it.each([
-    ["no_baselines", "这条消息没有可用的文件备份"],
-    ["expired", "这条消息的文件备份已过期"],
-    ["git_head_moved", "这条消息之后有过 Git 提交或切换过分支"],
+    ["no_baselines", "This message has no file backups"],
+    ["expired", "This message's file backups have expired"],
+    ["git_head_moved", "A Git commit or branch switch occurred after this message"],
   ])("uses plain copy for unavailable Revert: %s", async (reason, text) => {
     const {intents} = setup(true);
     await waitFor(() => expect(screen.getByTestId("edit-send-button")).not.toBeDisabled());
@@ -122,10 +122,10 @@ describe("inline user-message edit",()=>{
     await reply(intents().find((i) => i.type === "previewRewind")!.messageId, {
       type: "previewRewindResult", success: true, preview: { revertAvailable: false, revertReason: reason, revertPaths: [] },
     });
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("重新发送这条消息？");
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Resend this message?");
     expect(screen.getByText(new RegExp(text))).toBeInTheDocument();
-    expect(screen.getByRole("dialog").textContent).not.toContain("0 个文件");
-    expect(screen.getByRole("dialog").textContent).not.toContain("当前任务会先停止");
+    expect(screen.getByRole("dialog").textContent).not.toContain("0 files");
+    expect(screen.getByRole("dialog").textContent).not.toContain("The current task will stop first");
   });
   it.each([true, false])("freezes busy copy at send time (busy=%s)", async (busy) => {
     const {intents} = setup(true, busy);
@@ -134,9 +134,9 @@ describe("inline user-message edit",()=>{
     await reply(intents().find((i) => i.type === "previewRewind")!.messageId, {
       type: "previewRewindResult", success: true, preview: { revertAvailable: true, revertPaths: ["a.txt"] },
     });
-    expect(screen.getByRole("dialog").textContent?.includes("当前任务会先停止")).toBe(busy);
+    expect(screen.getByRole("dialog").textContent?.includes("The current task will stop first")).toBe(busy);
     fireEvent.click(screen.getByTestId("edit-confirm-keep"));
-    expect(screen.getByText(busy ? "正在停止当前任务…" : "正在重发…")).toHaveAttribute("role", "status");
+    expect(screen.getByText(busy ? "Stopping the current task…" : "Resending…")).toHaveAttribute("role", "status");
   });
 
   it("keeps two editor instances and their test input events separate",async()=>{

@@ -194,7 +194,7 @@ async fn reviewer_blocks_non_whitelisted_tool() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具"));
+        .contains("reviewer sub-Agent may not call"));
 }
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn reviewer_blocks_web_search_tool() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具 `web_search`"));
+        .contains("reviewer sub-Agent may not call `web_search`"));
 }
 
 #[tokio::test]
@@ -257,7 +257,7 @@ async fn code_reviewer_blocks_write_capable_tools() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("仅允许 read/search_files/list_dir/bash"));
+        .contains("allowed: read/search_files/list_dir/bash"));
 }
 
 #[tokio::test]
@@ -288,7 +288,7 @@ async fn reviewer_blocks_create_plan_subagent() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具 `create_plan`"));
+        .contains("reviewer sub-Agent may not call `create_plan`"));
 }
 
 #[tokio::test]
@@ -333,7 +333,7 @@ async fn verifier_blocks_non_whitelisted_tools() {
         assert!(
             outcome
                 .model_text
-                .contains(&format!("verifier 子 Agent 禁止调用工具 `{name}`")),
+                .contains(&format!("verifier sub-Agent may not call `{name}`")),
             "{name} 拒绝文案异常: {}",
             outcome.model_text
         );
@@ -374,7 +374,9 @@ async fn verifier_web_fetch_requires_runtime_after_whitelist() {
 
     assert!(outcome.is_error, "未注入 runtime 时应返回结构化错误");
     assert!(
-        outcome.model_text.contains("web_fetch runtime 未注入"),
+        outcome
+            .model_text
+            .contains("web_fetch runtime was not supplied"),
         "runtime 缺失文案异常: {}",
         outcome.model_text
     );
@@ -507,7 +509,7 @@ async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
     );
     assert!(outcome
         .model_text
-        .contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
+        .contains("Edited: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
 }
 
 #[tokio::test]
@@ -550,9 +552,9 @@ async fn explorer_blocks_every_write_and_nesting_tool() {
         .await;
         assert!(outcome.is_error, "{name} 应被 explorer 白名单拒绝");
         assert!(
-            outcome
-                .model_text
-                .contains(&format!("explorer 子 Agent 只读，禁止调用工具 `{name}`")),
+            outcome.model_text.contains(&format!(
+                "explorer sub-Agent is read-only and may not call `{name}`"
+            )),
             "{name} 拒绝文案异常: {}",
             outcome.model_text
         );
@@ -588,7 +590,7 @@ async fn package_install_rejects_plan_mode_before_backend_lookup() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("PLAN 模式不可用"));
+    assert!(outcome.model_text.contains("unavailable in Plan mode"));
 }
 
 #[tokio::test]
@@ -618,5 +620,7 @@ async fn package_install_without_backend_is_a_zero_write_error() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("没有安装后端"));
+    assert!(outcome
+        .model_text
+        .contains("no installation backend is available for this session"));
 }

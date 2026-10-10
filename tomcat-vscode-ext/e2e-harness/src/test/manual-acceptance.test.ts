@@ -554,10 +554,12 @@ suite("Tomcat manual acceptance", () => {
       messageId: "manual-acceptance-capability-mismatch",
       type: "prompt",
     });
-    await api.__testing.waitForEvent({
+    const mismatchEvent = await api.__testing.waitForEvent({
       timeoutMs: 15_000,
       type: "agent_end",
-    });
+    }) as { sessionId: string; error: string };
+    assert.equal(mismatchEvent.sessionId, deepseekState.activeSessionId);
+    assert.equal(typeof mismatchEvent.error, "string");
     const mismatchState = await waitForWebviewState(
       api,
       (state) => {
@@ -574,7 +576,7 @@ suite("Tomcat manual acceptance", () => {
             item.type === "message" &&
             item.kind === "error" &&
             typeof item.text === "string" &&
-            /provider\/model 不支持 vision/i.test(item.text),
+            item.text === mismatchEvent.error,
         )
           ? state
           : undefined;
@@ -936,7 +938,7 @@ suite("Tomcat manual acceptance", () => {
                 item.type === "message" &&
                 item.kind === "error" &&
                 typeof item.text === "string" &&
-                /provider\/model 不支持 vision/i.test(item.text),
+                item.text === mismatchEvent.error,
             ) === true,
         },
         restart: {

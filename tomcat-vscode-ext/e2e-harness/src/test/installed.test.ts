@@ -4,6 +4,7 @@ import * as vscode from "vscode";
 
 const repoRoot = path.resolve(__dirname, "../../../");
 type HostE2eHelper = {
+  assertSessionSettingsLanguageFlow(api: unknown): Promise<void>;
   assertMessageQueueDocksFlow(api: unknown): Promise<void>;
   assertPlanPreviewTablesFlow(api: unknown): Promise<void>;
   assertSessionFilesDockFlow(api: unknown): Promise<void>;
@@ -158,6 +159,10 @@ async function waitForPackagedDom(
 }
 
 suite("Installed Tomcat extension", () => {
+  test("session pins and language: installed bilingual controls and fixed review choices", async function () {
+    this.timeout(180_000);
+    await hostE2e.assertSessionSettingsLanguageFlow(await hostE2e.getTomcatExtensionApi());
+  });
   test("uses the expected executable source when the host fixture asks for it", async function () {
     const expectedSource = process.env.TOMCAT_EXPECT_RESOLVED_SOURCE;
     if (!expectedSource) {

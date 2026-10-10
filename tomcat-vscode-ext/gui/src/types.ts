@@ -273,6 +273,7 @@ export interface WebviewApprovalOption {
 }
 
 export interface WebviewApprovalQuestion {
+  allowCustom?: boolean;
   id: string;
   options: WebviewApprovalOption[];
   prompt: string;
@@ -368,6 +369,7 @@ export interface WebviewSessionSnapshot {
   historyLoading?: boolean;
   model?: string | null;
   planTodos: WebviewTodo[];
+  deleting?: boolean;
   sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
@@ -377,6 +379,8 @@ export interface WebviewSessionSnapshot {
 }
 
 export interface WebviewSessionTab {
+  isPinned?: boolean;
+  deleting?: boolean;
   busy: boolean;
   isCurrent: boolean;
   ownedByThisFrontend: boolean;
@@ -412,6 +416,10 @@ export type WebviewConnectionStatus =
   | "failed";
 
 export interface WebviewStateSnapshot {
+  pinSupported?: boolean;
+  deleteSupported?: boolean;
+  sessionActionFeedback?: import("../../src/ui/webview/protocol").SessionActionFeedback | null;
+  locale?: import("../../src/shared/i18n").Locale;
   messageQueueSupported?: boolean;
   sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
@@ -541,6 +549,8 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
+  | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
   | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "queueAction" }>
   | SessionFileIntent
   | MessageEditIntent
@@ -729,9 +739,9 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "openModelSettings";
+      type: "openSettings";
       data?: {
-        route?: "models" | null;
+        route?: "general" | "models" | "connectors" | null;
       };
     }
   | {

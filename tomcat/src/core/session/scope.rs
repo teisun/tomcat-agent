@@ -28,8 +28,9 @@ impl FromStr for SessionMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "code" => Ok(Self::Code),
             "claw" => Ok(Self::Claw),
-            other => Err(AppError::Config(format!(
-                "session.default_mode 非法: {other}（允许 code / claw）"
+            other => Err(AppError::Config(crate::infra::i18n::tr(
+                "session.invalidMode",
+                &[("value", other)],
             ))),
         }
     }

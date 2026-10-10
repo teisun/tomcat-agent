@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tomcat::infra::tr;
 use tomcat::{
     init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
     Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult,
@@ -29,6 +30,10 @@ use tomcat::{
 use tracing::{info, info_span};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const CONTINUE_REQUEST: &str = "继续";
+const CONTINUE_ONCE_REQUEST: &str = "继续一次";
+const FAILED_REQUEST: &str = "第一轮会失败但应保留进度";
 
 #[allow(deprecated)]
 fn cmd() -> Command {
@@ -48,6 +53,7 @@ fn cmd() -> Command {
     ] {
         c.env_remove(key);
     }
+    c.env("TOMCAT__UI__LANGUAGE", "en");
     c
 }
 
@@ -91,8 +97,6 @@ fn trunc(s: &str, n: usize) -> String {
 
 fn is_transient_idatatlas_connect_failure(stderr: &str) -> bool {
     [
-        "流式请求连接失败",
-        "请求连接失败",
         "connection closed via error",
         "error sending request for url (https://sub2api.idatatlas.com",
         "retryable_llm_transport_stage",
@@ -144,15 +148,16 @@ fn create_session_via_cli(work_dir: &Path) -> String {
         "session new should succeed: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("已创建会话: ")
-                .and_then(|rest| rest.split_whitespace().next())
-        })
-        .expect("session new should print session id")
-        .to_string()
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    let manager = SessionManager::new_scoped(
+        tomcat::resolve_sessions_dir(&cfg).unwrap(),
+        current_code_session_key(),
+    );
+    manager
+        .current_session_id()
+        .expect("read created session identity")
+        .expect("session new must bind its new session")
 }
 
 fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
@@ -896,8 +901,11 @@ fn test_init_creates_config_file_in_temp_dir() {
     info!("Assert: exit 0, config file created, output mentions file path");
     assert
         .success()
-        .stdout(predicate::str::contains("[1/3] 环境初始化"))
-        .stdout(predicate::str::contains("配置文件已写入"));
+        .stdout(predicate::str::contains(tr("cli.init.stageSetup", &[])))
+        .stdout(predicate::str::contains(tr(
+            "cli.init.configWritten",
+            &[("path", "")],
+        )));
     assert!(config_path.exists(), "config file should be created");
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(
@@ -934,7 +942,7 @@ fn test_doctor_without_config_prompts_init() {
     info!("Assert: exit 0, prompts about missing config");
     assert
         .success()
-        .stdout(predicate::str::contains("未找到配置文件"));
+        .stdout(predicate::str::contains(tr("cli.doctor.noConfig", &[])));
 }
 
 /// [doctor 有配置] init 后 doctor 通过配置与环境检测
@@ -962,9 +970,11 @@ fn test_doctor_with_valid_config_checks_environment() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions config validity and wasm checks");
-    assert
-        .success()
-        .stdout(predicate::str::contains("配置合法").or(predicate::str::contains("✓")));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.doctor.valid", &[("path", "")])
+            .trim_end_matches(')')
+            .to_owned(),
+    ));
 }
 
 /// [E2E-CLI-004] 工作区 add / list / remove
@@ -993,7 +1003,10 @@ fn test_workspace_add_list_remove_e2e() {
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     let list_assert = cmd()
         .args(["workspace", "list"])
@@ -1012,14 +1025,17 @@ fn test_workspace_add_list_remove_e2e() {
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已移除工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.removed",
+            &[("path", "")],
+        )));
 
     cmd()
         .args(["workspace", "list"])
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("无已授权工作区"));
+        .stdout(predicate::str::contains(tr("cli.workspace.empty", &[])));
 }
 
 /// [E2E-CLI-017] workspace add --cwd 将当前目录加入授权列表
@@ -1046,7 +1062,10 @@ fn test_workspace_add_cwd_e2e() {
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     let list_assert = cmd()
         .args(["workspace", "list"])
@@ -1376,9 +1395,10 @@ fn test_config_get_with_unknown_key_shows_hint() {
     let assert = c.assert();
 
     info!("Assert: exit 0, output mentions not found");
-    assert
-        .success()
-        .stdout(predicate::str::contains("未找到").or(predicate::str::contains("不存在")));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.config.notFound",
+        &[("name", "nonexistent.key")],
+    )));
 }
 
 // ────────────────────── config set (boundary) ──────────────────────
@@ -1394,7 +1414,7 @@ fn test_config_set_missing_args_shows_error() {
 
     info!("Arrange: config set with no args");
     let mut c = cmd();
-    c.args(["config", "set"]);
+    c.env("TOMCAT__UI__LANGUAGE", "en").args(["config", "set"]);
 
     info!("Act: execute config set without key/value");
     let assert = c.assert();
@@ -1452,7 +1472,7 @@ fn test_plugin_list_empty_exits_ok() {
     info!("Assert: exit 0, mentions no plugins");
     assert
         .success()
-        .stdout(predicate::str::contains("无已加载插件").or(predicate::str::contains("插件")));
+        .stdout(predicate::str::contains(tr("cli.plugin.empty", &[])));
 }
 
 /// [plugin load 不存在路径] 加载不存在的 wasm 文件给出提示
@@ -1472,7 +1492,10 @@ fn test_plugin_load_nonexistent_path_shows_error() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions path not found");
-    assert.success().stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.pathMissing",
+        &[("path", "/tmp/nonexistent_pi_plugin_xyz")],
+    )));
 }
 
 /// [plugin info 不存在] 查询不存在的插件 ID 提示"未找到"
@@ -1492,7 +1515,10 @@ fn test_plugin_info_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions not found");
-    assert.success().stdout(predicate::str::contains("未找到"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.notFound",
+        &[("id", "nonexistent-plugin-id")],
+    )));
 }
 
 /// [plugin unload 不存在] 卸载不存在的插件给出"卸载失败"
@@ -1512,9 +1538,10 @@ fn test_plugin_unload_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions failure");
-    assert
-        .success()
-        .stdout(predicate::str::contains("卸载失败"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.unloadMissing",
+        &[("id", "")],
+    )));
 }
 
 /// [plugin enable 不存在] 启用不存在的插件给出"启用失败"
@@ -1534,9 +1561,10 @@ fn test_plugin_enable_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions failure");
-    assert
-        .success()
-        .stdout(predicate::str::contains("启用失败"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.enableMissing",
+        &[("id", "")],
+    )));
 }
 
 /// [plugin disable 不存在] 禁用不存在的插件给出"禁用失败"
@@ -1556,9 +1584,10 @@ fn test_plugin_disable_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions failure");
-    assert
-        .success()
-        .stdout(predicate::str::contains("禁用失败"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.disableMissing",
+        &[("id", "")],
+    )));
 }
 
 /// [plugin --help] 帮助页列出所有 plugin 子命令
@@ -1687,9 +1716,11 @@ fn test_session_new_creates_session() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions created");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已创建会话"));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.session.created", &[("id", ""), ("key", "")])
+            .trim_end()
+            .to_owned(),
+    ));
 }
 
 /// [session --help] 帮助页列出所有 session 子命令
@@ -1785,9 +1816,10 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
     assert.success();
     assert!(
-        out_str.contains("对话模式")
-            || out_str.contains("模型:")
-            || out_str.contains("agent.main>"),
+        out_str.contains(&tr(
+            "terminal.welcome",
+            &[("model", &common::idatatlas_test_model())]
+        )) || out_str.contains("agent.main>"),
         "chat 应输出对话模式 banner 或模型信息或 agent.main> 提示，实际: {}",
         out_str.chars().take(500).collect::<String>()
     );
@@ -1850,7 +1882,8 @@ fn test_unknown_subcommand_shows_error() {
 
     info!("Arrange: unknown subcommand");
     let mut c = cmd();
-    c.arg("nonexistent_command");
+    c.env("TOMCAT__UI__LANGUAGE", "en")
+        .arg("nonexistent_command");
 
     info!("Act: execute unknown command");
     let assert = c.assert();
@@ -1886,9 +1919,11 @@ fn test_init_then_doctor_roundtrip() {
     let assert = c.assert();
 
     info!("Assert: doctor passes config check");
-    assert
-        .success()
-        .stdout(predicate::str::contains("配置合法").or(predicate::str::contains("✓")));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.doctor.valid", &[("path", "")])
+            .trim_end_matches(')')
+            .to_owned(),
+    ));
 }
 
 // ────────────────────── 补充用例：session switch/delete/archive ──────────────────────
@@ -1917,7 +1952,10 @@ fn test_session_switch_nonexistent_shows_error() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions not exist");
-    assert.success().stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.not_found",
+        &[("id", "")],
+    )));
 }
 
 /// [session delete via CLI] 创建会话后通过 CLI 删除
@@ -1947,7 +1985,10 @@ fn test_session_delete_via_cli_removes_session() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions deleted");
-    assert.success().stdout(predicate::str::contains("已删除"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.deleted",
+        &[("id", &session_id)],
+    )));
 }
 
 /// [session archive] archive 子命令可正常执行
@@ -1977,9 +2018,10 @@ fn test_session_archive_exits_ok() {
     let assert = c.assert();
 
     info!("Assert: exit 0");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已归档").or(predicate::str::contains("会话不存在")));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.session.archived",
+        &[("id", &session_id)],
+    )));
 }
 
 // ────────────────────── 补充用例：config set 成功路径 ──────────────────────
@@ -2082,7 +2124,10 @@ fn test_user_first_time_setup_init_and_doctor() {
         .stdout(predicate::str::contains("[1/3]"))
         .stdout(predicate::str::contains("[2/3]"))
         .stdout(predicate::str::contains("[3/3]"))
-        .stdout(predicate::str::contains("配置文件已写入"))
+        .stdout(predicate::str::contains(tr(
+            "cli.init.configWritten",
+            &[("path", "")],
+        )))
         .stdout(predicate::str::contains("tomcat code"))
         .stdout(predicate::str::contains("PATH"));
 
@@ -2098,8 +2143,12 @@ fn test_user_first_time_setup_init_and_doctor() {
     );
     doctor_assert
         .success()
-        .stdout(predicate::str::contains("配置合法"))
-        .stdout(predicate::str::contains("内嵌资源已就绪").or(predicate::str::contains("✓")));
+        .stdout(predicate::str::contains(
+            tr("cli.doctor.valid", &[("path", "")])
+                .trim_end_matches(')')
+                .to_owned(),
+        ))
+        .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])));
 }
 
 /// [E2E-CLI-002] 用户修改日志级别
@@ -2160,9 +2209,13 @@ fn test_user_doctor_detects_environment() {
         trunc(&out, 500)
     );
     assert.success().stdout(
-        predicate::str::contains("✓ rquickjs 运行时：可用")
-            .and(predicate::str::contains("配置"))
-            .and(predicate::str::contains("内嵌资源"))
+        predicate::str::contains(tr("cli.doctor.quickJsReady", &[]))
+            .and(predicate::str::contains(
+                tr("cli.doctor.valid", &[("path", "")])
+                    .trim_end_matches(')')
+                    .to_owned(),
+            ))
+            .and(predicate::str::contains(tr("cli.doctor.assetsReady", &[])))
             .and(predicate::str::contains(".env")),
     );
 }
@@ -2266,9 +2319,13 @@ fn test_doctor_reports_all_checks() {
     );
     assert
         .success()
-        .stdout(predicate::str::contains("配置合法"))
-        .stdout(predicate::str::contains("内嵌资源"))
-        .stdout(predicate::str::contains("✓ rquickjs 运行时：可用"));
+        .stdout(predicate::str::contains(
+            tr("cli.doctor.valid", &[("path", "")])
+                .trim_end_matches(')')
+                .to_owned(),
+        ))
+        .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])))
+        .stdout(predicate::str::contains(tr("cli.doctor.quickJsReady", &[])));
 }
 
 /// [E2E-CLI-010] init 幂等：第二次不覆盖配置并给出提示
@@ -2297,9 +2354,10 @@ fn test_init_idempotent() {
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: second init exit 0；actual: {}", trunc(&out, 300));
-    assert.success().stdout(
-        predicate::str::contains("已存在配置文件").or(predicate::str::contains("使用已有配置文件")),
-    );
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.init.configExisting",
+        &[("path", "")],
+    )));
 }
 
 /// [TASK-06] ensure_embedded_assets 准备 assets 目录
@@ -2465,7 +2523,7 @@ fn test_user_asks_pi_technical_question() {
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
-        .write_stdin("用一句话解释什么是 Rust 的所有权系统\n")
+        .write_stdin("Explain Rust ownership in one English sentence using the term ownership.\n")
         .timeout(std::time::Duration::from_secs(60));
     configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
@@ -2473,7 +2531,7 @@ fn test_user_asks_pi_technical_question() {
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
-    let has_ownership = out.contains("所有权") || out.to_lowercase().contains("ownership");
+    let has_ownership = out.to_lowercase().contains("ownership");
     info!(
         "Assert: exit 0 + stdout 含所有权/ownership；actual: {}",
         trunc(&out, 300)
@@ -2613,8 +2671,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
         && (stderr_lower.contains("no such file")
             || stderr_lower.contains("not found")
             || stderr_lower.contains("does not exist")
-            || stderr_lower.contains("os error 2")
-            || stderr.contains("不存在"))
+            || stderr_lower.contains("os error 2"))
         && !stderr.contains("✗ failed");
     if (!success || !contract_ok)
         && maybe_skip_transient_idatatlas_connect_failure(
@@ -2636,8 +2693,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
         stderr_lower.contains("no such file")
             || stderr_lower.contains("not found")
             || stderr_lower.contains("does not exist")
-            || stderr_lower.contains("os error 2")
-            || stderr.contains("不存在"),
+            || stderr_lower.contains("os error 2"),
         "stderr 应包含路径不存在语义，实际: {}",
         trunc(&stderr, 800)
     );
@@ -2719,7 +2775,10 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     BackgroundBashP1RealLlmFixture {
         _home: dir,
@@ -2742,6 +2801,7 @@ fn run_background_bash_autofeed_real_llm_chat(
         .current_dir(&fx.scratch)
         .env("HOME", fx._home.path())
         .env("USERPROFILE", fx._home.path())
+        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .env_remove("TOMCAT_AGENT_ACTIVE")
@@ -2813,6 +2873,7 @@ fn run_background_bash_p1_real_llm_chat(
         .current_dir(&fx.scratch)
         .env("HOME", fx._home.path())
         .env("USERPROFILE", fx._home.path())
+        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .write_stdin(format!("{prompt}\n"))
@@ -3568,7 +3629,10 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     let prompt = format!(
         "请在目录 {} 下创建文件 hello_e2e.txt，内容写 Hello E2E。不要写到其他路径。\n",
@@ -3593,17 +3657,10 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let success = output.status.success();
 
     let hello_path = scratch_canon.join("hello_e2e.txt");
-    let file_or_output_ok = if hello_path.exists() {
-        fs::read_to_string(&hello_path)
-            .map(|content| content.contains("Hello E2E"))
-            .unwrap_or(false)
-    } else {
-        out.contains("写入")
-            || out.contains("write")
-            || out.contains("创建")
-            || out.contains("创建了")
-    };
-    if (!success || !file_or_output_ok)
+    let file_ok = fs::read_to_string(&hello_path)
+        .map(|content| content.contains("Hello E2E"))
+        .unwrap_or(false);
+    if (!success || !file_ok)
         && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_asks_pi_to_write_hello_world_bash",
             &out,
@@ -3614,23 +3671,13 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         return;
     }
     assert.success();
-    if hello_path.exists() {
-        let content = fs::read_to_string(&hello_path).unwrap();
-        assert!(
-            content.contains("Hello E2E"),
-            "hello_e2e.txt 内容应含 'Hello E2E'，实际: {}",
-            trunc(&content, 200)
-        );
-    } else {
-        assert!(
-            out.contains("写入")
-                || out.contains("write")
-                || out.contains("创建")
-                || out.contains("创建了"),
-            "未找到 hello_e2e.txt 时 stdout 应含写入/创建类确认，实际: {}",
-            trunc(&out, 300)
-        );
-    }
+    let content = fs::read_to_string(&hello_path)
+        .expect("the requested file must exist; a model claim is not write evidence");
+    assert!(
+        content.contains("Hello E2E"),
+        "unexpected file contents: {}",
+        trunc(&content, 200)
+    );
 }
 
 // ──────────────────── Story 3: rquickjs 插件系统（E2E-CLI-021~026） ────────────────────
@@ -3939,12 +3986,10 @@ fn test_user_loads_nonexistent_plugin_path_shows_error() {
         "Assert: exit 0 + stdout 含 error 提示；actual: {}",
         trunc(&out, 300)
     );
-    assert.success().stdout(
-        predicate::str::contains("不存在")
-            .or(predicate::str::contains("error"))
-            .or(predicate::str::contains("Error"))
-            .or(predicate::str::contains("找不到")),
-    );
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.pathMissing",
+        &[("path", "/nonexistent/path/to/plugin")],
+    )));
 }
 
 // ──────────────────── Story 4: PackageManager 统一安装（E2E-CLI-027~030） ────────────────────
@@ -3988,10 +4033,14 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
         "Assert install: exit 0 + stdout 含 package 名；actual: {}",
         trunc(&install_out, 240)
     );
-    install_assert.success().stdout(
-        predicate::str::contains("已安装 package")
-            .and(predicate::str::contains("e2e-scope-package")),
-    );
+    install_assert.success().stdout(predicate::str::contains(tr(
+        "cli.package.installed",
+        &[
+            ("name", "e2e-scope-package"),
+            ("version", "0.2.0"),
+            ("visibility", "scope"),
+        ],
+    )));
 
     info!("Act: tomcat packages --scope-root <project>");
     let list_assert = cmd()
@@ -4110,9 +4159,14 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
         "Assert install: exit 0 + stdout 指向 agent；actual: {}",
         trunc(&install_out, 240)
     );
-    install_assert
-        .success()
-        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("agent")));
+    install_assert.success().stdout(predicate::str::contains(tr(
+        "cli.package.installed",
+        &[
+            ("name", "e2e-agent-plugin"),
+            ("version", "0.1.0"),
+            ("visibility", "agent"),
+        ],
+    )));
 
     info!("Act: tomcat packages --visibility agent");
     let list_assert = cmd()
@@ -4206,7 +4260,14 @@ fn test_user_installs_agent_package_survives_scope_switch() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("agent")));
+        .stdout(predicate::str::contains(tr(
+            "cli.package.installed",
+            &[
+                ("name", "e2e-agent-switch-plugin"),
+                ("version", "0.1.0"),
+                ("visibility", "agent"),
+            ],
+        )));
 
     info!("Act: 切到 project-b 后查看 agent 层 packages");
     let list_assert = cmd()
@@ -4286,9 +4347,14 @@ fn test_user_installs_bare_skill_to_global_layer() {
         "Assert install: exit 0 + stdout 指向 global；actual: {}",
         trunc(&install_out, 240)
     );
-    install_assert
-        .success()
-        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("global")));
+    install_assert.success().stdout(predicate::str::contains(tr(
+        "cli.package.installed",
+        &[
+            ("name", "e2e-global-skill"),
+            ("version", "0.0.0"),
+            ("visibility", "global"),
+        ],
+    )));
 
     info!("Act: tomcat packages --visibility global");
     let list_assert = cmd()
@@ -4397,10 +4463,12 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         "Assert uninstall: exit 0 + stdout 含 package 名；actual: {}",
         trunc(&uninstall_out, 260)
     );
-    uninstall_assert.success().stdout(
-        predicate::str::contains("已卸载 package")
-            .and(predicate::str::contains("e2e-uninstall-package")),
-    );
+    uninstall_assert
+        .success()
+        .stdout(predicate::str::contains(tr(
+            "cli.package.uninstalled",
+            &[("name", "e2e-uninstall-package"), ("visibility", "scope")],
+        )));
 
     let scope_agents = scope_root.join(".agents");
     assert!(
@@ -4603,9 +4671,11 @@ fn test_user_creates_new_session() {
         "Assert: exit 0 + stdout 含已创建会话；actual: {}",
         trunc(&out, 200)
     );
-    assert
-        .success()
-        .stdout(predicate::str::contains("已创建会话"));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.session.created", &[("id", ""), ("key", "")])
+            .trim_end()
+            .to_owned(),
+    ));
 }
 
 /// [E2E-CLI-052] 用户查看所有会话
@@ -4708,7 +4778,10 @@ fn test_user_switches_to_nonexistent_session_shows_error() {
         "Assert: exit 0 + stdout 含不存在；actual: {}",
         trunc(&out, 200)
     );
-    assert.success().stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.not_found",
+        &[("id", "")],
+    )));
 }
 
 /// [E2E-CLI-055] 用户删除刚创建的会话
@@ -4740,7 +4813,10 @@ fn test_user_deletes_session() {
         "Assert: exit 0 + stdout 含已删除；actual: {}",
         trunc(&out, 200)
     );
-    assert.success().stdout(predicate::str::contains("已删除"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.deleted",
+        &[("id", &session_id)],
+    )));
 }
 
 /// [E2E-CLI-056] 用户归档会话
@@ -4773,7 +4849,10 @@ fn test_user_archives_session() {
         "Assert: exit 0 + stdout 含已归档；actual: {}",
         trunc(&out, 200)
     );
-    assert.success().stdout(predicate::str::contains("已归档"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.session.archived",
+        &[("id", &session_id)],
+    )));
 }
 
 /// [E2E-CLI-057] 用户按关键词搜索会话
@@ -4864,14 +4943,9 @@ fn test_user_chat_without_api_key_fails_gracefully() {
         trunc(&stdout, 200)
     );
     let combined = format!("{stdout}{stderr}");
+    assert!(!output.status.success(), "missing credentials must fail");
     assert!(
-        combined.contains("error")
-            || combined.contains("Error")
-            || combined.contains("key")
-            || combined.contains("API")
-            || combined.to_lowercase().contains("invalid")
-            || combined.contains("配置")
-            || combined.contains("失败"),
+        combined.contains(common::IDATATLAS_TEST_API_KEY_ENV),
         "chat 无 API Key 时应含错误提示，实际 combined: {}",
         trunc(&combined, 300)
     );
@@ -4963,7 +5037,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         trunc(&combined, 400)
     );
     assert!(
-        combined.contains("已重载") || combined.contains("reload") || combined.contains("reloaded"),
+        combined.contains(&tr("slash.skill.reloaded", &[])),
         "chat output should mention reload, actual: {}",
         trunc(&combined, 400)
     );
@@ -4983,16 +5057,24 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .expect("current_transcript_path")
         .expect("transcript path should exist");
     let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
-    assert!(
-        transcript.contains("<skill name=\\\"secret\\\""),
-        "transcript should contain injected skill body, actual: {}",
-        trunc(&transcript, 800)
-    );
-    assert!(
-        transcript.contains("Current user intent:\\nsummarize current diff"),
-        "transcript should preserve /skill use intent, actual: {}",
-        trunc(&transcript, 800)
-    );
+    let user_message = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|entry| entry["type"] == "message" && entry["message"]["role"] == "user")
+        .expect("user message");
+    let parts = user_message["message"]["content"]
+        .as_array()
+        .expect("typed content parts");
+    assert!(parts.iter().any(|part| part["type"] == "input_reference"
+        && part["ref_kind"] == "skill"
+        && part["resource_id"] == "skill:secret"
+        && part["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("# Skill Body"))));
+    assert!(parts.iter().any(|part| part["type"] == "input_text"
+        && part["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("summarize current diff"))));
     // RAII closes the local service even if an assertion above fails.
     drop(server);
 }
@@ -5069,7 +5151,10 @@ fn test_user_skill_cli_list_reload_e2e() {
     reload
         .success()
         .stdout(predicate::str::contains("lint"))
-        .stdout(predicate::str::contains("diagnostic").or(predicate::str::contains("诊断")));
+        .stdout(predicate::str::contains(tr(
+            "skill.inventory.diagnostics",
+            &[],
+        )));
 }
 
 /// [E2E-CLI-059] 用户查看操作审计记录列表
@@ -5181,7 +5266,10 @@ fn test_user_runs_unknown_command() {
     let _span = info_span!("test_user_runs_unknown_command").entered();
 
     info!("Act: tomcat nonexistent_cmd_e2e");
-    let assert = cmd().arg("nonexistent_cmd_e2e").assert();
+    let assert = cmd()
+        .env("TOMCAT__UI__LANGUAGE", "en")
+        .arg("nonexistent_cmd_e2e")
+        .assert();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr.clone()).to_string();
     info!(
         "Assert: exit 非 0 + stderr 含 error；actual: {}",
@@ -5220,8 +5308,12 @@ fn test_user_init_then_doctor_roundtrip() {
     );
     assert
         .success()
-        .stdout(predicate::str::contains("配置合法"))
-        .stdout(predicate::str::contains("内嵌资源已就绪").or(predicate::str::contains("✓")));
+        .stdout(predicate::str::contains(
+            tr("cli.doctor.valid", &[("path", "")])
+                .trim_end_matches(')')
+                .to_owned(),
+        ))
+        .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])));
 }
 
 // ──────────────────── Story 9 补充: chat --resume 与多轮上下文（E2E-CLI-082~083） ────────────────────
@@ -5435,7 +5527,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "继续",
+            CONTINUE_REQUEST,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -5457,7 +5549,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
     assert!(
         result.new_messages.iter().any(|msg| {
             msg.role == tomcat::core::llm::ChatMessageRole::User
-                && msg.text_content() == Some("继续")
+                && msg.text_content() == Some(CONTINUE_REQUEST)
         }),
         "原输入应作为本轮 user 消息进入续跑结果"
     );
@@ -5493,7 +5585,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         {
             healed_idx = Some(idx);
         }
-        if role == Some("user") && content == Some("继续") {
+        if role == Some("user") && content == Some(CONTINUE_REQUEST) {
             continued_idx = Some(idx);
         }
     }
@@ -5535,7 +5627,7 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "继续一次",
+            CONTINUE_ONCE_REQUEST,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -5564,7 +5656,12 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
         .expect("transcript path should exist");
     let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
     assert_eq!(
-        transcript.matches("\"content\":\"继续一次\"").count(),
+        transcript
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["message"]["role"] == "user"
+                && entry["message"]["content"] == CONTINUE_ONCE_REQUEST)
+            .count(),
         1,
         "原输入只应被消费一次，不应要求用户重输或重复 append；actual transcript: {}",
         trunc(&transcript, 800)
@@ -5665,7 +5762,7 @@ async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_n
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "第一轮会失败但应保留进度",
+            FAILED_REQUEST,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -5687,7 +5784,7 @@ async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_n
         !state
             .messages
             .iter()
-            .any(|msg| msg.text_content() == Some("第一轮会失败但应保留进度")),
+            .any(|msg| msg.text_content() == Some(FAILED_REQUEST)),
         "失败轮的用户输入不应继续留在 context_state，actual messages: {:?}",
         carried_messages
     );
@@ -6016,7 +6113,10 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist web_search tool result");
     let tool_text = tool_msg.text_content().expect("tool result should be text");
     assert!(
-        tool_text.contains("所有后端均不可用"),
+        tool_text.contains(&tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )),
         "shadowed plugin slot declination 应保持 auto exhausted 文案，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6123,7 +6223,7 @@ async fn test_chat_path_surfaces_web_search_tool_error_without_vm_timeout() {
         .expect("should persist web_search tool error");
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
-        tool_text.contains("web_search backend `tavily` 请求超时"),
+        tool_text.contains(&tr("search.timeout", &[("backend", "tavily")])),
         "tool error 应暴露结构化超时文案，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6168,7 +6268,7 @@ async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
         &[("web_search.backend", "webSearchBackend")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
-  throw new Error("synthetic plugin runtime failure");
+  throw new Error("opaque execution failure");
 });
 "#,
     );
@@ -6204,9 +6304,11 @@ pi.registerFunction("webSearchBackend", function () {
             CancellationToken::new(),
         ),
     )
-    .await
-    .expect("run_chat_turn timeout 5s")
-    .expect("run_chat_turn result");
+    .await;
+    end_current_plugin_session(&ctx).await;
+    let outcome = outcome
+        .expect("run_chat_turn timeout 5s")
+        .expect("run_chat_turn result");
 
     let result = match outcome {
         tomcat::AgentRunOutcome::Completed(result) => result,
@@ -6223,21 +6325,26 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist web_search runtime tool error");
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
-        tool_text.contains("web_search backend `mimo` 运行时错误"),
+        tool_text.contains(&tr(
+            "search.runtime",
+            &[("backend", "mimo"), ("detail", "")]
+        )),
         "tool error 应标记为 runtime hard failure，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("synthetic plugin runtime failure"),
+        tool_text.contains("opaque execution failure"),
         "tool error 应保留原始异常文本，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
-        !tool_text.contains("所有后端均不可用"),
+        !tool_text.contains(&tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )) && !tool_text.contains(&tr("search.allUnavailable", &[("query", "reqwest rust")])),
         "runtime hard failure 不应被压扁为 all_backends_unavailable，实际: {}",
         trunc(tool_text, 400)
     );
-    end_current_plugin_session(&ctx).await;
 }
 
 #[tokio::test]
@@ -6331,7 +6438,10 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist degraded auto web_search error");
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
-        tool_text.contains("所有后端均不可用"),
+        tool_text.contains(&tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )),
         "auto 缺 key 应保持可降级 exhausted 文案，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6341,7 +6451,10 @@ pi.registerFunction("webSearchBackend", function () {
         trunc(tool_text, 400)
     );
     assert!(
-        !tool_text.contains("运行时错误"),
+        !tool_text.contains(&tr(
+            "search.runtime",
+            &[("backend", "auto"), ("detail", "")]
+        )),
         "纯缺 key 不应被误升级成 runtime hard failure，实际: {}",
         trunc(tool_text, 400)
     );

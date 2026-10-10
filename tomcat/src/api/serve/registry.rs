@@ -121,11 +121,35 @@ pub struct SessionSummary {
     pub interrupted: bool,
 }
 
+/// Trusted routing context outlives the final live runtime; it never retains a runtime or lock.
+#[derive(Clone)]
+pub(super) struct SessionScope {
+    pub key: String,
+    pub mode: SessionMode,
+    pub cwd: Option<String>,
+}
+
+impl SessionScope {
+    fn from_slot(slot: &SessionSlot) -> Self {
+        Self {
+            key: slot
+                .ctx
+                .session_runtime
+                .session
+                .current_session_key()
+                .to_owned(),
+            mode: slot.mode,
+            cwd: slot.cwd.clone(),
+        }
+    }
+}
+
 /// 进程内 `sessionId -> SessionSlot` 的注册表。
 pub struct ChatContextRegistry {
     slots: DashMap<String, Arc<SessionSlot>>,
     order: Mutex<Vec<String>>,
     active_session_id: RwLock<Option<String>>,
+    last_closed_scope: RwLock<Option<SessionScope>>,
     max_sessions: usize,
 }
 
@@ -135,6 +159,7 @@ impl ChatContextRegistry {
             slots: DashMap::new(),
             order: Mutex::new(Vec::new()),
             active_session_id: RwLock::new(None),
+            last_closed_scope: RwLock::new(None),
             max_sessions,
         }
     }
@@ -187,6 +212,15 @@ impl ChatContextRegistry {
         self.active_session_id.read().clone()
     }
 
+    pub(super) fn current_scope(&self) -> Option<SessionScope> {
+        let active = self.active_session_id.read();
+        active
+            .as_deref()
+            .and_then(|id| self.get(id))
+            .map(|slot| SessionScope::from_slot(&slot))
+            .or_else(|| self.last_closed_scope.read().clone())
+    }
+
     pub fn set_active_session(&self, session_id: &str) -> Result<(), AppError> {
         if !self.slots.contains_key(session_id) {
             return Err(AppError::Config("unknown_session".to_string()));
@@ -196,12 +230,16 @@ impl ChatContextRegistry {
     }
 
     pub fn remove(&self, session_id: &str) -> Option<Arc<SessionSlot>> {
+        let mut active = self.active_session_id.write();
         let removed = self.slots.remove(session_id).map(|(_, slot)| slot);
         if removed.is_some() {
             self.order.lock().retain(|existing| existing != session_id);
-            let mut active = self.active_session_id.write();
             if active.as_deref() == Some(session_id) {
                 *active = self.order.lock().first().cloned();
+                if active.is_none() {
+                    *self.last_closed_scope.write() =
+                        removed.as_ref().map(|slot| SessionScope::from_slot(slot));
+                }
             }
         }
         removed

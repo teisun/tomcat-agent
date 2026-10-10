@@ -12,7 +12,7 @@ pub(in super::super) async fn handle_search_files(
 ) -> Result<String, String> {
     let mut search_args: SearchFilesArgs = match serde_json::from_value(args.clone()) {
         Ok(args) => args,
-        Err(e) => return Err(format!("search_files 参数解析失败: {}", e)),
+        Err(e) => return Err(format!("Could not parse search_files arguments: {e}")),
     };
     // 命中行单独看往往不够判断，模型接着就要 read 那一段——默认带 ±3 行省掉这次往返。
     // 显式传 context=0 可以关掉。

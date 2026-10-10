@@ -18,6 +18,7 @@ use crate::core::permission::{
 use crate::core::tools::contract::confirmation::ConfirmDecision;
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::platform::normalize_path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -61,23 +62,30 @@ impl DefaultPrimitiveExecutor {
                     reason,
                     suggested_root,
                 } => {
-                    let preview = format!(
-                        "[{:?}] {}\n路径: {}\n原因: {}",
-                        op,
-                        op_summary(op),
-                        normalized.display(),
-                        reason
+                    let preview = tr(
+                        "permission.pathPreview",
+                        &[
+                            ("op", &format!("{op:?}")),
+                            ("summary", &op_summary(op)),
+                            ("path", &normalized.display().to_string()),
+                            ("reason", &reason),
+                        ],
                     );
                     let dec = self
                         .confirmation
-                        .confirm_decision(op, &preview, plugin_id, suggested_root.clone())
+                        .confirm_decision(
+                            op,
+                            &preview,
+                            plugin_id,
+                            Some(normalized.clone()),
+                            suggested_root.clone(),
+                        )
                         .await?;
                     match dec {
                         ConfirmDecision::Deny => {
-                            return Err(AppError::Permission(format!(
-                                "用户拒绝授权: {}。下次工具再次访问该路径时会重新弹出 [s]/[w]/[c] 授权选项；也可以执行 `tomcat workspace add {}` 一次性永久授权。",
-                                normalized.display(),
-                                normalized.display()
+                            return Err(AppError::Permission(tr(
+                                "permission.pathDenied",
+                                &[("path", &normalized.display().to_string())],
                             )));
                         }
                         ConfirmDecision::AllowOnce => {
@@ -113,13 +121,13 @@ impl DefaultPrimitiveExecutor {
             PermissionDecision::Allow { grant, scope } => Ok((scope, grant)),
             PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
             PermissionDecision::NeedConfirm { reason, .. } => {
-                let preview = format!(
-                    "[Bash] 危险命令命中确认列表\n命令: {}\n原因: {}",
-                    command, reason
+                let preview = tr(
+                    "permission.bashPreview",
+                    &[("command", command), ("reason", &reason)],
                 );
                 let dec = self
                     .confirmation
-                    .confirm_decision(PrimitiveOperation::Bash, &preview, plugin_id, None)
+                    .confirm_decision(PrimitiveOperation::Bash, &preview, plugin_id, None, None)
                     .await?;
                 match dec {
                     ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
@@ -129,7 +137,7 @@ impl DefaultPrimitiveExecutor {
                         ))
                     }
                     ConfirmDecision::Deny => {
-                        Err(AppError::Permission("用户拒绝 bash 确认".to_string()))
+                        Err(AppError::Permission(tr("permission.bashDenied", &[])))
                     }
                 }
             }

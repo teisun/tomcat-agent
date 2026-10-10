@@ -50,7 +50,7 @@ pub(crate) fn write_preheat_cache(
     transcript_path: &Path,
     result: &CompactionResult,
 ) -> Result<(), AppError> {
-    if transcript_path.as_os_str().is_empty() {
+    if transcript_path.as_os_str().is_empty() || !transcript_path.exists() {
         return Ok(());
     }
     let for_id = result

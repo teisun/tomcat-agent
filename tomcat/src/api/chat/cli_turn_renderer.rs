@@ -44,6 +44,7 @@ use crate::core::llm::ThinkingSource;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::events::{ToolDisplay, ToolDisplayFileStatus};
+use crate::infra::i18n::tr;
 use crate::infra::{wire, EventBus};
 
 fn format_countdown_ms(ms: u64) -> String {
@@ -701,9 +702,12 @@ fn parse_thinking_source(event: &Value) -> Option<ThinkingSource> {
 
 fn tool_call_streaming_summary(args_preview: &Value) -> String {
     if let Some(path) = args_preview.get("path").and_then(|v| v.as_str()) {
-        format!("path={}  receiving args...", expand_path_for_terminal(path))
+        tr(
+            "terminal.receivePathArgs",
+            &[("path", &expand_path_for_terminal(path))],
+        )
     } else {
-        "receiving args...".to_string()
+        tr("terminal.receiveArgs", &[])
     }
 }
 
@@ -781,11 +785,12 @@ pub fn result_summary_for_tool(
             }
         }
         let parsed = parse_tool_result_value(result);
+        let fallback = tr("term.result.failed", &[]);
         let msg = parsed
             .get("error")
             .and_then(|v| v.as_str())
             .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
-            .unwrap_or("failed");
+            .unwrap_or(&fallback);
         return truncate_chars(msg, PATH_MAX_CHARS);
     }
 
@@ -812,10 +817,24 @@ pub fn result_summary_for_tool(
 
     let parsed = parse_tool_result_value(result);
     if let Some(lines) = parsed.get("lines").and_then(|v| v.as_u64()) {
-        return format!("{} lines", lines);
+        return tr(
+            if lines == 1 {
+                "terminal.lines.one"
+            } else {
+                "terminal.lines.other"
+            },
+            &[("count", &lines.to_string())],
+        );
     }
     if let Some(bytes) = parsed.get("bytes").and_then(|v| v.as_u64()) {
-        return format!("{} bytes", bytes);
+        return tr(
+            if bytes == 1 {
+                "terminal.bytes.one"
+            } else {
+                "terminal.bytes.other"
+            },
+            &[("count", &bytes.to_string())],
+        );
     }
     if let Some(s) = parsed
         .get("summary")
@@ -824,7 +843,7 @@ pub fn result_summary_for_tool(
     {
         return truncate_chars(s, DEFAULT_MAX_CHARS);
     }
-    "ok".to_string()
+    tr("term.result.ok", &[])
 }
 
 /// 失败时附加最多 `n` 行的错误细节（取 `stderr` / `error` 字段的前 N 行）。

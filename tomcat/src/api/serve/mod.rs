@@ -18,11 +18,13 @@ pub mod ndjson;
 pub mod registry;
 mod rewind_and_resend;
 pub mod schema;
+mod session_delete;
 mod session_files;
 mod session_job;
 mod slash;
 pub mod stdin;
 pub mod types;
+mod ui_preferences;
 pub mod writer;
 
 #[cfg(test)]
@@ -114,6 +116,8 @@ pub(crate) fn build_shared_model_prefs(cfg: &AppConfig) -> Result<Arc<ModelPrefs
     )?))
 }
 
+use crate::infra::i18n::tr;
+
 pub(crate) fn run_serve(args: ServeCliArgs, cfg: &AppConfig) -> Result<(), AppError> {
     if args.print_schema {
         let out_dir = schema::write_schema_bundle(cfg)?;
@@ -131,13 +135,12 @@ pub(crate) fn run_serve(args: ServeCliArgs, cfg: &AppConfig) -> Result<(), AppEr
 
     match transport {
         crate::ServeTransport::Stdio => {
-            let runtime = tokio::runtime::Runtime::new()
-                .map_err(|error| AppError::Config(format!("创建 serve runtime 失败: {error}")))?;
+            let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+                AppError::Config(tr("serve.runtimeFailed", &[("detail", &error.to_string())]))
+            })?;
             runtime.block_on(run_stdio(cfg.clone()))
         }
-        crate::ServeTransport::Ws => Err(AppError::Config(
-            "serve transport ws is deferred to Phase 2".to_string(),
-        )),
+        crate::ServeTransport::Ws => Err(AppError::Config(tr("serve.wsDeferred", &[]))),
     }
 }
 
@@ -254,11 +257,14 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
 /// 按当前配置构造会话管理器，用于「还没有任何会话」时也需要访问磁盘布局的场合。
 fn scoped_session_manager(state: &ServeState) -> Option<SessionManager> {
     let sessions_dir = resolve_sessions_dir(&state.cfg).ok()?;
-    let session_key = session_key_for_agent(
-        &state.cfg.agent.id,
-        default_mode(&state.cfg).ok()?,
-        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    );
+    let session_key = match state.registry.current_scope() {
+        Some(scope) => scope.key,
+        None => session_key_for_agent(
+            &state.cfg.agent.id,
+            default_mode(&state.cfg).ok()?,
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+    };
     Some(SessionManager::new_scoped(sessions_dir, session_key))
 }
 
@@ -296,21 +302,17 @@ fn resolve_session_paths(
         ));
     };
     if raw_cwd.trim().is_empty() {
-        return Err(AppError::Config(
-            "new_session.cwd 不能为空字符串".to_string(),
-        ));
+        return Err(AppError::Config(tr("serve.cwdEmpty", &[])));
     }
     let supplied = PathBuf::from(raw_cwd);
     if !supplied.is_absolute() {
-        return Err(AppError::Config(
-            "new_session.cwd 必须是绝对目录".to_string(),
-        ));
+        return Err(AppError::Config(tr("serve.cwdAbsolute", &[])));
     }
     let cwd = crate::normalize_path(raw_cwd)?;
     if !cwd.is_dir() {
-        return Err(AppError::Config(format!(
-            "new_session.cwd 必须是存在的目录: {}",
-            cwd.display()
+        return Err(AppError::Config(tr(
+            "serve.cwdMissing",
+            &[("path", &cwd.display().to_string())],
         )));
     }
     Ok((cwd.clone(), Some(crate::core::session::project_root(&cwd))))
@@ -356,7 +358,7 @@ pub(crate) async fn create_session_slot(
             project_root.map(|path| path.to_string_lossy().to_string()),
         )?
     };
-    session_manager.pin_session(&current_entry.session_id);
+    session_manager.pin_session(&current_entry.session_id)?;
 
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()
@@ -528,9 +530,9 @@ struct TurnStateLease {
 impl TurnStateLease {
     fn acquire(slot: Arc<SessionSlot>) -> Result<Self, AppError> {
         let mut guard = slot.turn_state.lock();
-        let state = guard
-            .take()
-            .ok_or_else(|| AppError::Config("serve session turn state missing".to_string()))?;
+        let state = guard.take().ok_or_else(|| {
+            AppError::Config(crate::infra::i18n::tr("serve.turnStateMissing", &[]))
+        })?;
         drop(guard);
         Ok(Self {
             context_state: Some(state.context_state),
@@ -618,12 +620,29 @@ pub(super) async fn cancel_and_wait(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotCleanup {
+    Close,
+    Delete,
+    Shutdown,
+}
+
+impl SlotCleanup {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Close => "close_session",
+            Self::Delete => "delete_session",
+            Self::Shutdown => "serve_stdio_shutdown",
+        }
+    }
+}
+
 pub(crate) async fn cleanup_session_slot(
     state: &ServeState,
     slot: &Arc<SessionSlot>,
-    remove_from_registry: bool,
-    reason: &str,
+    cleanup: SlotCleanup,
 ) -> Result<(), AppError> {
+    let reason = cleanup.as_str();
     slot.ctx.session_runtime.cancel_token.lock().cancel();
     slot.ctx.agent_registry.cascade_abort(&slot.session_id);
     let background_task_listener = { slot.background_task_listener.lock().take() };
@@ -647,6 +666,9 @@ pub(crate) async fn cleanup_session_slot(
                     error = %error,
                     "serve session plugin cleanup failed"
                 );
+                if cleanup == SlotCleanup::Delete {
+                    return Err(error);
+                }
             }
             Err(_) => {
                 tracing::warn!(
@@ -655,6 +677,9 @@ pub(crate) async fn cleanup_session_slot(
                     timeout_ms = SESSION_SHUTDOWN_TIMEOUT.as_millis(),
                     "serve session plugin cleanup timed out"
                 );
+                if cleanup == SlotCleanup::Delete {
+                    return Err(AppError::Config("stop_timeout".into()));
+                }
             }
         }
     }
@@ -679,13 +704,20 @@ pub(crate) async fn cleanup_session_slot(
                     timeout_ms = SESSION_SHUTDOWN_TIMEOUT.as_millis(),
                     "serve session task join timed out; aborting task"
                 );
+                if cleanup == SlotCleanup::Delete {
+                    *slot.run_task.lock() = Some(handle);
+                    return Err(AppError::Config("stop_timeout".into()));
+                }
                 handle.abort();
                 let _ = handle.await;
             }
         }
     }
 
-    drain_checkpoint_record_tasks(&slot.ctx, SESSION_SHUTDOWN_TIMEOUT).await;
+    let drained = drain_checkpoint_record_tasks(&slot.ctx, SESSION_SHUTDOWN_TIMEOUT).await;
+    if !drained && cleanup == SlotCleanup::Delete {
+        return Err(AppError::Config("stop_timeout".into()));
+    }
     event_pump::unregister_session_event_pump(slot);
     state.ask_question.clear_session(&slot.session_id);
     state
@@ -696,7 +728,8 @@ pub(crate) async fn cleanup_session_slot(
         .unregister_session_bus(&slot.session_id);
     slot.ctx.shutdown_completion_subscriber();
     slot.ctx.agent_registry.unregister(&slot.session_id);
-    if remove_from_registry {
+    slot.ctx.session_runtime.session.release_session_usage();
+    if cleanup != SlotCleanup::Shutdown {
         state.registry.remove(&slot.session_id);
     }
     Ok(())

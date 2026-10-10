@@ -144,10 +144,10 @@ async fn session_job_releases_fifo_blocks_mutation_and_is_idle_before_response()
     assert_eq!(response(&buffer, "job").await["success"], true);
     assert!(!a.is_busy() && !a.is_command_job_running());
     assert!(a.run_task.lock().is_none());
-    cleanup_session_slot(&state, &a, true, "test_finished")
+    cleanup_session_slot(&state, &a, super::super::SlotCleanup::Close)
         .await
         .unwrap();
-    cleanup_session_slot(&state, &b, true, "test_finished")
+    cleanup_session_slot(&state, &b, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }
@@ -195,7 +195,7 @@ async fn session_job_panic_and_immediate_completion_clear_handle_and_busy_gate()
     }
     assert!(slot.mark_busy(), "next turn can enter after the response");
     slot.mark_idle();
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }

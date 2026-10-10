@@ -83,6 +83,42 @@ When Tomcat asks a clarification question:
 - switching sessions or reloading the webview keeps your unsubmitted selection;
 - answering, skipping the whole request, interrupting, or losing the host connection produces a distinct history card. A VS Code window / Extension Host restart is an irrecoverable disconnect, while a webview-only reload keeps the live question pending.
 
+## Sessions, Settings and plan review
+
+```text
+Session picker -> pin/unpin | trash -> confirm -> permanent local deletion
+Top gear       -> Settings -> General -> Language
+New plan       -> saved file -> Review plan | Skip and open
+```
+
+### Pin or delete a session
+
+Hover a session row, or reach its buttons with the keyboard, to see the pin and trash icons. Tooltips and accessible names describe each action. Pins are saved for this VS Code workspace; they do not change the session's last-active time or CLI ordering. A failed pin save is reported without automatic rollback; reload to check the persisted state. Pin saves do not block session deletion.
+
+Deletion requires confirmation and does **not** stop a running task for you. Stop it first (including work still using that session in another process). Successful deletion removes that session's local transcript, owned sidecars and exclusive preheat cache, scratchpad, local file baselines, and the extension's draft/queue/pin. It does **not** undo workspace code, delete plan files, erase audit/debug trails, or promise deletion of shared caches/checkpoints or remote uploads. Shared attachments remain available to other sessions. Cleanup warnings mean the record was deleted but some owned files may remain. A lost reply is an **unknown result**: local state is retained until the same-scope disk list can confirm what happened.
+
+### Language and Settings
+
+The top gear opens **Settings → General**, even when a session is busy or a model lacks tool support. The old manual compact button is removed; automatic compaction and terminal `/compact` remain available.
+
+Choose **Auto**, **简体中文**, or **English**. The shared preference is `ui.language = auto | zh-CN | en` in `~/.tomcat/tomcat.config.toml`:
+
+- Auto follows VS Code in the extension and the system locale in a standalone CLI.
+- Saving updates this window's Host, four webviews and Serve in place; other already-running windows/CLI processes read the preference on their next start.
+- Draft text, unsaved form values and existing user/model content are retained. Already emitted timeline notices are not retroactively translated.
+- VS Code's own command/menu contributions follow **VS Code's display language**, independently of the application setting.
+- `TOMCAT__UI__LANGUAGE` overrides the stored preference; Settings shows when an environment override is active. From an independent terminal, `tomcat config set ui.language en` changes the same stored setting.
+
+Technical terms such as Chat, Plan and model IDs may remain English. Model-facing tool guidance and developer diagnostics stay English; third-party descriptions and raw external diagnostics are preserved rather than machine-translated.
+Descriptions explicitly stored in `models.toml` are displayed as saved. New initialization does not copy product descriptions into that file: built-ins without an explicit description use the UI catalog, even when their other settings have overrides. Existing user files are not migrated.
+Saving uses the existing configuration writer: other values are retained, but comments and formatting may change.
+
+### Choose whether to review a plan
+
+After saving a new plan, Tomcat asks in the existing question card whether to review it. Review checks design, dependencies, missing acceptance criteria and over-engineering, and may improve that same saved plan. It **may take several minutes or longer and consumes additional model tokens**; this is not a completion-time guarantee.
+
+**Skip and open** opens the saved plan without starting a reviewer. Leaving the question unanswered neither times out nor silently starts review. Stop or a host disconnect does not remove the saved plan. Skipping review does not mark a plan accepted or complete, and review itself does not begin execution.
+
 ## Files and task progress
 
 The compact **Todos / Files** dock sits above the composer, below any pending question.
@@ -141,7 +177,7 @@ Type / → choose a command (inserts text) → send → notice/error reply
 - `/install './path with spaces' agent` and `/uninstall package-name agent` install/uninstall and synchronize automatically. Specify `current-project` (`scope`), `agent`, or `global`; missing arguments return usage.
 - Uninstall uses the package name listed by `tomcat packages`, not a tool name. Only ledger-managed packages are uninstalled; manually placed directories must be removed from that layer's `plugins/` / `skills/`, then `/reload`.
 - Suggestions open at the start, after whitespace, or on a new line, not inside paths/URLs. Terminal operations are hidden mid-message. Only leading shared operations in text-only drafts execute locally; references/attachments and unknown text remain normal prompts.
-- Send, compact, and Build are disabled while a command reply is pending. No fake user turn is added. Servers that do not advertise the command table keep the old composer behavior.
+- Send and Build are disabled while a command reply is pending. No fake user turn is added. Servers that do not advertise the command table keep the old composer behavior.
 
 ### Project prompt commands, skills and rules
 

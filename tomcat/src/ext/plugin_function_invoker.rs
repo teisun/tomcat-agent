@@ -1,6 +1,7 @@
 use crate::ext::plugin::RegisteredFunction;
 use crate::ext::{HostApiDispatcher, PluginManager};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::wire;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -54,34 +55,36 @@ impl PluginFunctionInvoker {
         session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let session_id = session_id.ok_or_else(|| {
-            AppError::Plugin(format!(
-                "插件宿主函数执行缺少 session_id: {} ({})",
-                function.function, function.point
+            AppError::Plugin(tr(
+                "plugin.functionSession",
+                &[("function", &function.function), ("point", &function.point)],
             ))
         })?;
         let plugin_manager = self
             .plugin_manager
             .upgrade()
-            .ok_or_else(|| AppError::Plugin("plugin manager unavailable".to_string()))?;
+            .ok_or_else(|| AppError::Plugin(tr("plugin.managerUnavailable", &[])))?;
         let dispatcher = self
             .dispatcher
             .lock()
             .upgrade()
-            .ok_or_else(|| AppError::Plugin("host dispatcher unavailable".to_string()))?;
+            .ok_or_else(|| AppError::Plugin(tr("plugin.dispatcherUnavailable", &[])))?;
 
         let plugin_info = plugin_manager
             .get_plugin(&function.plugin_id)
             .ok_or_else(|| {
-                AppError::Plugin(format!("plugin '{}' not loaded", function.plugin_id))
+                AppError::Plugin(tr("plugin.notLoaded", &[("id", &function.plugin_id)]))
             })?;
         if canonicalize_or_keep(&plugin_info.plugin_root)
             != canonicalize_or_keep(&function.plugin_root)
         {
-            return Err(AppError::Plugin(format!(
-                "宿主函数来源已漂移: plugin '{}' expected root '{}' but active root is '{}'",
-                function.plugin_id,
-                function.plugin_root.display(),
-                plugin_info.plugin_root.display()
+            return Err(AppError::Plugin(tr(
+                "plugin.functionSourceChanged",
+                &[
+                    ("id", &function.plugin_id),
+                    ("expected", &function.plugin_root.display().to_string()),
+                    ("actual", &plugin_info.plugin_root.display().to_string()),
+                ],
             )));
         }
 
@@ -116,16 +119,16 @@ impl PluginFunctionInvoker {
 
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
-            Ok(Ok(Err(message))) => Err(AppError::Plugin(message)),
-            Ok(Err(_closed)) => Err(AppError::Plugin(format!(
-                "插件宿主函数执行结果通道关闭: {}",
-                function.function
+            Ok(Ok(Err(message))) => Err(AppError::QuickJS(message)),
+            Ok(Err(_closed)) => Err(AppError::Plugin(tr(
+                "plugin.functionClosed",
+                &[("name", &function.function)],
             ))),
             Err(_) => {
                 dispatcher.drop_command_waiter(&call_id);
-                Err(AppError::Plugin(format!(
-                    "插件宿主函数执行超时: {}",
-                    function.function
+                Err(AppError::Plugin(tr(
+                    "plugin.functionTimeout",
+                    &[("name", &function.function)],
                 )))
             }
         }

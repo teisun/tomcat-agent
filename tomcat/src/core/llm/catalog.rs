@@ -96,6 +96,8 @@ impl ModelEntry {
     }
 }
 
+use crate::infra::i18n::tr;
+
 /// Validate the hard relationship between a model's total context capacity and
 /// its maximum output capacity. Both catalog loading and runtime fallback
 /// resolution call this one helper so configuration errors fail early without
@@ -106,14 +108,16 @@ pub(crate) fn validate_model_limit_values(
     max_output_tokens: Option<usize>,
 ) -> Result<(), AppError> {
     if context_window == 0 {
-        return Err(AppError::Config(format!(
-            "模型 `{model_id}` 的 context_window 必须大于 0。"
+        return Err(AppError::Config(tr(
+            "model.contextPositive",
+            &[("id", model_id)],
         )));
     }
     if let Some(output) = max_output_tokens {
         if output == 0 || output > context_window {
-            return Err(AppError::Config(format!(
-                "模型 `{model_id}` 的 max_output_tokens 必须满足 0 < max_output_tokens <= context_window。"
+            return Err(AppError::Config(tr(
+                "model.outputRange",
+                &[("id", model_id)],
             )));
         }
     }
@@ -145,13 +149,15 @@ pub(crate) fn validate_context_window_options(
 
     if !normalized.is_empty() {
         let Some(default_window) = context_window else {
-            return Err(AppError::Config(format!(
-                "模型 `{model_id}` 设置了 context_window_options，但没有默认 context_window。"
+            return Err(AppError::Config(tr(
+                "model.contextDefaultMissing",
+                &[("id", model_id)],
             )));
         };
         if !normalized.contains(&default_window) {
-            return Err(AppError::Config(format!(
-                "模型 `{model_id}` 的 context_window ({default_window}) 必须是 context_window_options 的一项。"
+            return Err(AppError::Config(tr(
+                "model.contextDefaultInvalid",
+                &[("id", model_id), ("value", &default_window.to_string())],
             )));
         }
     }
@@ -173,9 +179,7 @@ pub(crate) fn validate_supported_speeds(
     normalized.sort_unstable();
     normalized.dedup();
     if !normalized.is_empty() && !matches!(api, "openai" | "openai-responses") {
-        return Err(AppError::Config(format!(
-            "模型 `{model_id}` 的 supported_speeds 当前只支持 openai / openai-responses。"
-        )));
+        return Err(AppError::Config(tr("model.speedApi", &[("id", model_id)])));
     }
     Ok(normalized)
 }
@@ -452,10 +456,12 @@ pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppEr
     }
     let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
     toml::from_str(&content).map_err(|e| {
-        AppError::Config(format!(
-            "解析 models.toml 失败（{}）：{}",
-            path.display(),
-            e
+        AppError::Config(tr(
+            "model.parseFile",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &e.to_string()),
+            ],
         ))
     })
 }
@@ -463,7 +469,7 @@ pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppEr
 pub(crate) fn render_user_models_file(file: &UserModelsFile) -> Result<String, AppError> {
     toml::to_string_pretty(file)
         .map(|text| format!("{text}\n"))
-        .map_err(|e| AppError::Config(format!("序列化 models.toml 失败: {e}")))
+        .map_err(|e| AppError::Config(tr("model.serializeFile", &[("detail", &e.to_string())])))
 }
 
 pub(crate) fn builtin_seed_toml_text() -> &'static str {
@@ -480,7 +486,7 @@ pub(crate) fn builtin_seed_entries_result(
     context: &ContextConfig,
 ) -> Result<Vec<ModelEntry>, AppError> {
     let file = toml::from_str::<UserModelsFile>(BUILTIN_MODELS_TOML)
-        .map_err(|e| AppError::Config(format!("解析内嵌 builtin_models.toml 失败: {e}")))?;
+        .map_err(|e| AppError::Config(tr("model.parseBuiltin", &[("detail", &e.to_string())])))?;
     file.models
         .into_iter()
         .map(|raw| merge_user_model(raw, None, context, false))
@@ -516,17 +522,17 @@ fn merge_user_model(
     if let Some(api) = raw.api {
         merged.api = api;
     } else if merged.api.trim().is_empty() {
-        return Err(AppError::Config(format!(
-            "models.toml 中模型 `{}` 必须显式填写 `api`。",
-            raw.id.trim()
+        return Err(AppError::Config(tr(
+            "model.explicitField",
+            &[("id", raw.id.trim()), ("field", "api")],
         )));
     }
     if let Some(provider) = raw.provider {
         merged.provider = provider;
     } else if merged.provider.trim().is_empty() {
-        return Err(AppError::Config(format!(
-            "models.toml 中模型 `{}` 必须显式填写 `provider`。",
-            raw.id.trim()
+        return Err(AppError::Config(tr(
+            "model.explicitField",
+            &[("id", raw.id.trim()), ("field", "provider")],
         )));
     }
     if let Some(api_key_env) = raw.api_key_env {
@@ -640,10 +646,12 @@ fn apply_partial_capabilities(target: &mut Capabilities, partial: PartialCapabil
 }
 
 fn missing_model_error(model_id: &str, user_path: &Path) -> AppError {
-    AppError::Config(format!(
-        "模型 `{}` 未收录，请补 {} 或切回已收录模型。",
-        model_id.trim(),
-        user_path.display()
+    AppError::Config(tr(
+        "model.notCataloged",
+        &[
+            ("id", model_id.trim()),
+            ("path", &user_path.display().to_string()),
+        ],
     ))
 }
 

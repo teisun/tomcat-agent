@@ -1,12 +1,18 @@
-export function thinkingLevelLabel(value: string | null | undefined): string {
+import { t as defaultT, type Translator } from "../../../src/shared/i18n";
+
+export function thinkingLevelLabel(value: string | null | undefined, t: Translator = defaultT): string {
   const normalized = value?.trim().toLowerCase() ?? "";
   switch (normalized) {
     case "":
       return "";
     case "off":
-      return "Off";
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
     case "xhigh":
-      return "Xhigh";
+    case "max":
+      return t(`term.effort.${normalized}`);
     default:
       return titleCaseToken(normalized);
   }
@@ -28,12 +34,12 @@ export function formatModelLabel({
   modelId: string | null | undefined;
   selectedReasoningLevel?: string | null;
   supportedReasoningLevels?: readonly string[] | null;
-}): string {
+}, t: Translator = defaultT): string {
   const { id, reasoning } = modelLabelParts({
     modelId,
     selectedReasoningLevel,
     supportedReasoningLevels,
-  });
+  }, t);
   return reasoning ? `${id} ${reasoning}` : id;
 }
 
@@ -45,15 +51,15 @@ export function modelLabelParts({
   modelId: string | null | undefined;
   selectedReasoningLevel?: string | null;
   supportedReasoningLevels?: readonly string[] | null;
-}): { id: string; reasoning: string } {
+}, t: Translator = defaultT): { id: string; reasoning: string } {
   const id = modelId?.trim() ?? "";
   if (!id) {
-    return { id: "Model", reasoning: "" };
+    return { id: t("model.label"), reasoning: "" };
   }
   if (!supportedReasoningLevels?.some((level) => level.trim())) {
     return { id, reasoning: "" };
   }
-  const reasoning = thinkingLevelLabel(selectedReasoningLevel);
+  const reasoning = thinkingLevelLabel(selectedReasoningLevel, t);
   return { id, reasoning };
 }
 

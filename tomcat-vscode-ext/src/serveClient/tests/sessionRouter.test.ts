@@ -49,9 +49,10 @@ describe("SessionRouter shared slash commands", () => {
     expect(messenger.request).toHaveBeenCalledWith({type:"run_slash_command", sessionId:"s1", text}, 600_000);
   });
   it("preserves usage errors and rejects invalid payloads or a transport-level busy", async () => {
-    const messenger = {request:vi.fn().mockResolvedValue({success:true, payload:{ok:false, text:"用法"}})};
+    const text = "用法";
+    const messenger = {request:vi.fn().mockResolvedValue({success:true, payload:{ok:false, text}})};
     const router = new SessionRouter(messenger as never, () => undefined);
-    await expect(router.runSlashCommand("s1", "/install")).resolves.toEqual({ok:false, text:"用法"});
+    await expect(router.runSlashCommand("s1", "/install")).resolves.toEqual({ok:false, text});
     messenger.request.mockResolvedValueOnce({success:true, payload:{ok:"true", text:"bad"}});
     await expect(router.runSlashCommand("s1", "/reload")).rejects.toThrow("payload is invalid");
     messenger.request.mockResolvedValueOnce({success:false, error:"busy"});

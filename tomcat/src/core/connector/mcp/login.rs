@@ -1,5 +1,6 @@
 //! Interactive authorization belongs to one source incarnation and one login.
 //! Network work returns a credential; only the current owner may persist it.
+use crate::infra::i18n::tr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -22,9 +23,7 @@ impl Drop for LoginOwner<'_> {
 }
 
 fn superseded() -> AppError {
-    AppError::Tool(
-        "OAuth login cancelled because its source, permission or credential changed".into(),
-    )
+    AppError::Tool(tr("mcp.login.superseded", &[]))
 }
 
 impl McpManager {
@@ -40,7 +39,7 @@ impl McpManager {
             .config
             .url
             .as_deref()
-            .ok_or_else(|| AppError::Tool("MCP source does not use HTTP OAuth".into()))?;
+            .ok_or_else(|| AppError::Tool(tr("mcp.login.notHttp", &[])))?;
         let client = http_client_for(url)?;
         let oauth = server.config.oauth.clone().unwrap_or_default();
         let result = tokio::select! {
@@ -60,9 +59,7 @@ impl McpManager {
                         entry.status.state = ServerState::NeedsAuthorization;
                     }
                 }
-                return Err(AppError::Tool(
-                    "MCP OAuth authorization did not complete".into(),
-                ));
+                return Err(AppError::Tool(tr("mcp.login.incomplete", &[])));
             }
         };
         self.commit_login(&key, generation, &owner.cancel, &expected, token)?;
@@ -91,9 +88,7 @@ impl McpManager {
         }
         if !self.project_trusted_for(&entry.server) {
             entry.status.state = ServerState::AwaitingProjectTrust;
-            return Err(AppError::Tool(
-                "project MCP awaits project trust before OAuth login".into(),
-            ));
+            return Err(AppError::Tool(tr("mcp.login.trustRequired", &[])));
         }
         let expected = self.oauth_store.snapshot(key)?;
         let cancel = Arc::new(CancellationToken::new());

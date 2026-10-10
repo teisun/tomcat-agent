@@ -88,7 +88,7 @@ impl HostApiDispatcher {
         let fetch_client = build_outbound_client(
             options,
             OutboundClientErrorKind::Tool,
-            "创建默认 net.fetch HTTP 客户端失败",
+            "Could not create the default net.fetch HTTP client",
         )
         .expect("create default net.fetch client");
         Self {

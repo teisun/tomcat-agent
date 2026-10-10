@@ -97,8 +97,9 @@ impl<'de> Deserialize<'de> for ThinkingDisplay {
                 "minimal" => Ok(ThinkingDisplay::Minimal),
                 "summary" => Ok(ThinkingDisplay::Summary),
                 "full" => Ok(ThinkingDisplay::Full),
-                other => Err(serde::de::Error::custom(format!(
-                    "unknown thinking display `{other}`; expected minimal|summary|full"
+                other => Err(serde::de::Error::custom(crate::infra::i18n::tr(
+                    "config.thinkingDisplay",
+                    &[("value", other)],
                 ))),
             },
         }

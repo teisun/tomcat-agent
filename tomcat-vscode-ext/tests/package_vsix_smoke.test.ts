@@ -125,6 +125,9 @@ describe("VSIX packaging", () => {
         assertPublishableFiles(fileList);
         expect(fileList).toContain("CHANGELOG.md");
         expect(fileList).toContain("README.md");
+        expect(fileList).toContain("README.zh.md");
+        expect(fileList).toContain("package.nls.json");
+        expect(fileList).toContain("package.nls.zh-cn.json");
         expect(fileList).toContain("LICENSE");
         expect(fileList).toContain("gui/dist/index.js");
         expect(fileList).toContain("media/icon.png");

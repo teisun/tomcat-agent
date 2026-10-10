@@ -1,13 +1,15 @@
 import { memo } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey } from "../../../src/shared/i18n";
 
 import type { WebviewBoundaryBlock } from "../types";
 
 function BoundaryBlockComponent({ item }: { item: WebviewBoundaryBlock }) {
-  const title = item.title ?? (
-    item.coveredCount
-      ? `Earlier history summary (${item.coveredCount} entries)`
-      : "Earlier history summary"
-  );
+  const t = useT();
+  const locale = useLocale();
+  const title = item.title ?? (item.coveredCount
+    ? t(pluralKey(locale, "boundary.entries.other", item.coveredCount), { count: item.coveredCount })
+    : t("boundary.title"));
 
   return (
     <details className="tc-boundary" data-testid="boundary-block">

@@ -29,11 +29,11 @@ pub enum TodoOp {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OpError {
-    #[error("todo 不存在: {0}")]
+    #[error("todo not found: {0}")]
     TodoNotFound(String),
-    #[error("todo id 已存在: {0}")]
+    #[error("todo id already exists: {0}")]
     DuplicateId(String),
-    #[error("最多允许 {MAX_IN_PROGRESS_TODOS} 个 in_progress，本次操作会产生 {count} 个")]
+    #[error("At most {limit} in_progress entries are allowed; this operation would produce {count}", limit = MAX_IN_PROGRESS_TODOS)]
     MultipleInProgress { count: usize },
 }
 

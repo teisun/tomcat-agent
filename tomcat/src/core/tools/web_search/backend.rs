@@ -186,35 +186,44 @@ impl BackendFailure {
 
     pub fn to_tool_error(&self, backend: &str) -> AppError {
         match self {
-            Self::MissingKey { env_name } => AppError::Tool(format!(
-                "web_search backend `{}` 未配置凭证；请设置 `{}`。",
-                backend, env_name
+            Self::MissingKey { env_name } => AppError::Tool(crate::infra::i18n::tr(
+                "search.missingKey",
+                &[("backend", backend), ("env", env_name)],
             )),
             Self::Incompatible { detail } => AppError::Tool(detail.clone()),
-            Self::PluginRuntime { detail } => AppError::Tool(format!(
-                "web_search backend `{}` 运行时错误：{}",
-                backend, detail
+            Self::PluginRuntime { detail } => AppError::Tool(crate::infra::i18n::tr(
+                "search.runtime",
+                &[("backend", backend), ("detail", detail)],
             )),
-            Self::InvalidRequest { status, detail } => AppError::Tool(format!(
-                "web_search backend `{}` 请求不合法（status={}）：{}",
-                backend, status, detail
+            Self::InvalidRequest { status, detail } => AppError::Tool(crate::infra::i18n::tr(
+                "search.invalidRequest",
+                &[
+                    ("backend", backend),
+                    ("status", &status.to_string()),
+                    ("detail", detail),
+                ],
             )),
-            Self::Parse { detail } => AppError::Tool(format!(
-                "web_search backend `{}` 返回解析失败：{}",
-                backend, detail
+            Self::Parse { detail } => AppError::Tool(crate::infra::i18n::tr(
+                "search.parse",
+                &[("backend", backend), ("detail", detail)],
             )),
-            Self::Unauthorized { status } => AppError::Tool(format!(
-                "web_search backend `{}` 鉴权失败（status={}）。",
-                backend, status
+            Self::Unauthorized { status } => AppError::Tool(crate::infra::i18n::tr(
+                "search.auth",
+                &[("backend", backend), ("status", &status.to_string())],
             )),
-            Self::RateLimited { status } | Self::ServerError { status } => AppError::Tool(format!(
-                "web_search backend `{}` 暂不可用（status={}）。",
-                backend, status
+            Self::RateLimited { status } | Self::ServerError { status } => {
+                AppError::Tool(crate::infra::i18n::tr(
+                    "search.unavailable",
+                    &[("backend", backend), ("status", &status.to_string())],
+                ))
+            }
+            Self::Timeout => AppError::Tool(crate::infra::i18n::tr(
+                "search.timeout",
+                &[("backend", backend)],
             )),
-            Self::Timeout => AppError::Tool(format!("web_search backend `{}` 请求超时。", backend)),
-            Self::Transport { detail } => AppError::Tool(format!(
-                "web_search backend `{}` 网络错误：{}",
-                backend, detail
+            Self::Transport { detail } => AppError::Tool(crate::infra::i18n::tr(
+                "search.network",
+                &[("backend", backend), ("detail", detail)],
             )),
         }
     }

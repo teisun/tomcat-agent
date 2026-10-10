@@ -1,6 +1,6 @@
 use super::{
-    extract_target_from_preview, parse_choice, target_in_cwd, unrecognized_choice_message,
-    CwdLazyPrompt, CwdPromptChoice, CWD_PROMPT_CHOICES,
+    parse_choice, target_in_cwd, unrecognized_choice_message, CwdLazyPrompt, CwdPromptChoice,
+    CWD_PROMPT_CHOICES,
 };
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::contract::confirmation::{
@@ -47,9 +47,15 @@ fn prompt_choice_label_matches_supported_choices() {
 #[test]
 fn unrecognized_choice_message_names_supported_choices() {
     let msg = unrecognized_choice_message("a");
-    assert!(msg.contains("未识别的选项"));
+    assert_eq!(
+        msg,
+        crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "terminal.cwd.invalidChoice",
+            &[("choice", "a")],
+        )
+    );
     assert!(msg.contains("[s] / [w] / [c]"));
-    assert!(msg.contains("本次按取消处理"));
 }
 
 // ── target_in_cwd ──
@@ -79,29 +85,6 @@ fn target_in_cwd_outside_is_false() {
         &PathBuf::from("/Users/yan/work-sibling/file"),
         &cwd
     ));
-}
-
-// ── extract_target_from_preview ──
-
-#[test]
-fn extract_target_from_preview_finds_path_line() {
-    let preview = "[Read] 读取\n路径: /Users/yan/work/file.txt\n原因: ...";
-    assert_eq!(
-        extract_target_from_preview(preview),
-        Some(PathBuf::from("/Users/yan/work/file.txt"))
-    );
-}
-
-#[test]
-fn extract_target_from_preview_missing_returns_none() {
-    let preview = "no path here\nsome other content";
-    assert!(extract_target_from_preview(preview).is_none());
-}
-
-#[test]
-fn extract_target_from_preview_blank_returns_none() {
-    let preview = "[Bash] 执行命令\n路径: \n原因: ...";
-    assert!(extract_target_from_preview(preview).is_none());
 }
 
 // ── decorator behavior（异步 + tempdir 集成）──
@@ -139,17 +122,22 @@ async fn forwards_when_target_outside_cwd() {
         SessionGrants::new(),
         PathBuf::new(),
     );
-    let preview = build_preview("/etc/hosts");
+    let preview = build_preview(&cwd.join("misleading.txt").to_string_lossy());
     let dec = prompt
         .confirm_decision(
             PrimitiveOperation::Read,
             &preview,
             "__agent__",
+            Some(PathBuf::from("/etc/hosts")),
             Some(PathBuf::from("/etc")),
         )
         .await
         .unwrap();
     assert_eq!(dec, ConfirmDecision::Deny, "应直接走 inner DenyAll");
+    assert!(
+        !prompt.is_dismissed(),
+        "preview must not select the cwd branch"
+    );
 }
 
 #[tokio::test]
@@ -169,7 +157,13 @@ async fn forwards_when_dismissed() {
     .with_dismissed(dismissed);
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview,
+            "__agent__",
+            Some(cwd.join("foo.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -188,7 +182,7 @@ async fn forwards_for_bash_op() {
     let prompt = CwdLazyPrompt::new(inner, cwd, gate, SessionGrants::new(), PathBuf::new());
     let preview = "[Bash] 危险命令命中确认列表\n命令: rm -rf /\n原因: ...".to_string();
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Bash, &preview, "__agent__", None)
+        .confirm_decision(PrimitiveOperation::Bash, &preview, "__agent__", None, None)
         .await
         .unwrap();
     assert_eq!(dec, ConfirmDecision::Deny, "Bash op 不走 cwd 范围分支");
@@ -210,7 +204,13 @@ async fn forwards_when_cwd_already_authorized() {
     );
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview,
+            "__agent__",
+            Some(cwd.join("foo.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -221,18 +221,27 @@ async fn forwards_when_cwd_already_authorized() {
 }
 
 #[tokio::test]
-async fn forwards_when_preview_lacks_path_line() {
+async fn forwards_without_target_even_when_preview_and_suggested_root_name_cwd() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().to_path_buf();
     let gate = make_gate(&PathBuf::from("/__nowhere__"));
     let inner: Arc<dyn UserConfirmationProvider> = Arc::new(DenyAllConfirmation);
-    let prompt = CwdLazyPrompt::new(inner, cwd, gate, SessionGrants::new(), PathBuf::new());
-    let preview = "config_tool 删除已存在 key 的预览，不带 路径: 行";
+    let grants = SessionGrants::new();
+    let prompt = CwdLazyPrompt::new(inner, cwd.clone(), gate, grants.clone(), PathBuf::new());
+    let preview = format!("Path: {}", cwd.join("file with spaces.txt").display());
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Edit, preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Edit,
+            &preview,
+            "__agent__",
+            None,
+            Some(cwd),
+        )
         .await
         .unwrap();
     assert_eq!(dec, ConfirmDecision::Deny);
+    assert!(!prompt.is_dismissed());
+    assert!(grants.snapshot().is_empty());
 }
 
 // ── apply_choice：[s] / [w] / [c] 三分支副作用 ──
@@ -433,7 +442,13 @@ async fn dismisses_and_forwards_when_stdin_not_tty() {
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     // 测试环境下 stdin 大概率不是 TTY；verify dismissed 路径生效
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview,
+            "__agent__",
+            Some(cwd.join("foo.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(dec, ConfirmDecision::Deny);

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::infra::config::{get_work_dir, resolve_agent_trail_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::AppConfig;
 
 use super::model::PackageVisibility;
@@ -19,8 +20,12 @@ pub struct LayerPaths {
 }
 
 pub fn canonical_scope_root(path: &Path) -> Result<PathBuf, AppError> {
-    path.canonicalize()
-        .map_err(|error| AppError::Config(format!("scope_root 无法 canonicalize: {error}")))
+    path.canonicalize().map_err(|error| {
+        AppError::Config(tr(
+            "package.scopeCanonical",
+            &[("detail", &error.to_string())],
+        ))
+    })
 }
 
 pub fn resolve_layer_paths(
@@ -38,9 +43,8 @@ pub fn resolve_layer_paths(
             Ok(build_layer_paths(visibility, root, None))
         }
         PackageVisibility::Scope => {
-            let scope_root = scope_root.ok_or_else(|| {
-                AppError::Config("scope 安装/查询必须提供 scope_root".to_string())
-            })?;
+            let scope_root =
+                scope_root.ok_or_else(|| AppError::Config(tr("package.scopeRequired", &[])))?;
             let canonical_root = canonical_scope_root(scope_root)?;
             let layer_root = resolve_project_resource_dir(cfg, &canonical_root)?;
             Ok(build_layer_paths(

@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { describe, expect, it, vi } from "vitest";
 
 import { ConnectorsSettingsView } from "./ConnectorsSettingsView";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 import type { SettingsStateSnapshot, VsCodeApiLike } from "../../../src/shared/settingsProtocol";
 
 function state(): SettingsStateSnapshot {
@@ -77,7 +79,51 @@ function renderView(snapshot: SettingsStateSnapshot = state()) {
   return { container: rendered.container, postMessage, rerender: (next: SettingsStateSnapshot) => rendered.rerender(<ConnectorsSettingsView state={next} vscodeApi={vscodeApi} />) };
 }
 
+const upstreamToggleError = "此工具被配置中的批量规则禁用，请打开配置文件修改。";
+
 describe("ConnectorsSettingsView", () => {
+  it("preserves form inputs, validation and card identity across language changes", () => {
+    const snapshot = state();
+    const api = { postMessage: vi.fn() };
+    const view = render(<LocaleProvider locale="en"><ConnectorsSettingsView state={snapshot} vscodeApi={api} /></LocaleProvider>);
+    const card = screen.getByTestId("connector-card-playwright");
+    fireEvent.click(screen.getByTestId("connector-add-open"));
+    fireEvent.click(screen.getByTestId("connector-add-submit"));
+    const validation = screen.getByText(translate("en", "connector.nameRequired"));
+    const command = screen.getByRole("textbox", { name: translate("en", "connector.command") });
+    const name = screen.getByTestId("connector-name");
+    fireEvent.change(name, { target: { value: "my-connector" } });
+    view.rerender(<LocaleProvider locale="zh-CN"><ConnectorsSettingsView state={snapshot} vscodeApi={api} /></LocaleProvider>);
+    expect(screen.getByTestId("connector-name")).toBe(name);
+    expect(name).toHaveProperty("value", "my-connector");
+    expect(screen.getByTestId("connector-card-playwright")).toBe(card);
+    expect(validation.isConnected).toBe(true);
+    expect(screen.getByTestId("connector-command")).toBe(command);
+    fireEvent.click(screen.getByTestId("connector-transport-http"));
+    expect(screen.getByRole("textbox", { name: "URL" })).toBeTruthy();
+    expect(api.postMessage.mock.calls.some(([m]) => m.type === "addConnector")).toBe(false);
+  });
+
+  it("settles login by request identity, never translated status text", () => {
+    const snapshot = state();
+    const configKey = snapshot.connectors![0].configKey;
+    Object.assign(snapshot.connectors![0], { transport: "http", oauthConfigured: true, state: "needs_authorization" });
+    const api = { postMessage: vi.fn() };
+    const view = render(<LocaleProvider locale="en"><ConnectorsSettingsView state={snapshot} vscodeApi={api} /></LocaleProvider>);
+    fireEvent.click(screen.getByTestId("connector-card-playwright"));
+    fireEvent.click(screen.getByTestId("connector-login"));
+    const request = api.postMessage.mock.calls.find(([m]) => m.type === "loginConnector")![0];
+    const authorizing = { ...snapshot, status: "正在授权连接器…", connectorLogin: { configKey, requestId: request.messageId, phase: "authorizing" as const } };
+    view.rerender(<LocaleProvider locale="zh-CN"><ConnectorsSettingsView state={authorizing} vscodeApi={api} /></LocaleProvider>);
+    expect(screen.getByTestId("connector-login")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("connector-cancel-login")).toBeTruthy();
+    view.rerender(<LocaleProvider locale="zh-CN"><ConnectorsSettingsView state={{ ...authorizing, status: "任意状态", connectorLogin: { configKey, requestId: "other", phase: "settled" } }} vscodeApi={api} /></LocaleProvider>);
+    expect(screen.getByTestId("connector-login")).toHaveProperty("disabled", true);
+    view.rerender(<LocaleProvider locale="zh-CN"><ConnectorsSettingsView state={{ ...authorizing, connectorLogin: { configKey, requestId: request.messageId, phase: "settled" } }} vscodeApi={api} /></LocaleProvider>);
+    expect(screen.getByTestId("connector-login")).toHaveProperty("disabled", false);
+    expect(api.postMessage.mock.calls.filter(([m]) => m.type === "loginConnector")).toHaveLength(1);
+  });
+
   it("shows busy before Host replies, sends one Reload, and does not block another source", () => {
     const snapshot = state();
     snapshot.connectors!.push({ ...snapshot.connectors![0], name: "other", configKey: "other" });
@@ -340,12 +386,12 @@ describe("ConnectorsSettingsView", () => {
           enabled: false,
           configSaved: false,
           runtimeApplied: false,
-          error: "此工具被配置中的批量规则禁用，请打开配置文件修改。",
+          error: upstreamToggleError,
         },
       },
     });
 
-    expect(await screen.findByText("此工具被配置中的批量规则禁用，请打开配置文件修改。")).toBeTruthy();
+    expect(await screen.findByText(upstreamToggleError)).toBeTruthy();
     const restoredTool = await screen.findByRole("switch", { name: "browser_click" });
     expect(restoredTool.getAttribute("aria-disabled")).toBe("false");
     expect(screen.getAllByRole("button", { name: "~/.tomcat/mcp.json" })).toHaveLength(2);

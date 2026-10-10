@@ -1318,7 +1318,11 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
     );
     assert_eq!(
         degrade_notices.lock().unwrap().as_slice(),
-        ["本轮附件未被当前端点接受，已按纯文本发送"],
+        [crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "agentLoop.attachmentsDegraded",
+            &[]
+        )],
     );
 
     let recorded = requests.0.lock().unwrap().clone();
@@ -2129,7 +2133,7 @@ async fn truncated_encrypted_thinking_without_visible_text_is_fatal() {
     );
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
     assert!(
-        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("达到上限")),
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "agentLoop.outputTruncated", &[]))),
         "truncated output without plaintext thinking must fail: {outcome:?}"
     );
     assert_eq!(requests.0.lock().unwrap().len(), 1);
@@ -2160,7 +2164,7 @@ async fn hidden_reasoning_exhausts_interactive_budget_with_retry_count() {
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
 
     assert!(
-        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("已自动重试 3 次")),
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "agentLoop.hiddenExhausted", &[("count", "3")]))),
         "the exhausted error must state the actual automatic retry count: {outcome:?}"
     );
     assert_eq!(
@@ -2255,7 +2259,7 @@ async fn responses_max_output_tokens_without_visible_text_is_fatal() {
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
 
     assert!(
-        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("达到上限")),
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "agentLoop.outputTruncated", &[]))),
         "Responses max-output exhaustion without visible text must fail: {outcome:?}"
     );
     assert_eq!(

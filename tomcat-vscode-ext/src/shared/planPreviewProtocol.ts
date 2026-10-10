@@ -43,6 +43,7 @@ export interface PlanPreviewModelInfo {
 }
 
 export interface PlanPreviewStateSnapshot {
+  locale?: import("./i18n").Locale;
   availableModels: string[];
   availableModelDetails: Record<string, PlanPreviewModelInfo>;
   /** 1-based source file line for each line of `bodyMarkdown` (see planDocument). */

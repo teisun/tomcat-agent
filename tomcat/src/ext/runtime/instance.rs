@@ -923,9 +923,8 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
             .run_script(script)
             .expect("same allocation should fit once heap budget is raised");
 
-        let message = err.to_string();
         assert!(
-            message.contains("QuickJS") || message.contains("JS执行错误"),
+            matches!(err, crate::infra::AppError::QuickJS(_)),
             "heap guard should surface a QuickJS-side failure, got: {err}"
         );
     }

@@ -204,7 +204,9 @@ impl CodeReviewSummary {
         Self {
             aborted: true,
             verdict: Some("aborted".into()),
-            summary: "reviewer 子 Agent 将在 P4 接入；当前阶段返回 aborted 占位".into(),
+            summary:
+                "Independent code review is unavailable; this result is an aborted placeholder."
+                    .to_string(),
             changes_summary: "none".into(),
             applied_changes: false,
             findings: Vec::new(),
@@ -253,7 +255,7 @@ impl CodeReviewSummary {
         if self.aborted {
             if self.verdict.as_deref() != Some("aborted") {
                 self.verdict = Some("aborted".into());
-                warnings.push("code review 中止，verdict 已规范化为 aborted".into());
+                warnings.push("code review aborted; verdict normalized to aborted".to_string());
             }
             self.applied_changes = false;
             return warnings;
@@ -265,22 +267,26 @@ impl CodeReviewSummary {
             Some(other) => {
                 self.verdict = Some("aborted".into());
                 warnings.push(format!(
-                    "code review verdict `{other}` 非法，已规范化为 aborted"
+                    "Invalid code review verdict `{other}`; normalized to aborted"
                 ));
             }
             None => {
                 self.verdict = Some("partial".into());
-                warnings.push("code review 未返回 verdict，已规范化为 partial".into());
+                warnings.push("code review returned no verdict; normalized to partial".to_string());
             }
         }
 
         if self.applied_changes {
             self.applied_changes = false;
-            warnings.push("code reviewer 不允许直接改动，applied_changes 已重置为 false".into());
+            warnings.push(
+                "code reviewer may not edit files directly; applied_changes reset to false"
+                    .to_string(),
+            );
         }
         if self.changes_summary.trim().is_empty() {
             self.changes_summary = "none".into();
-            warnings.push("code review 未返回 changes_summary，已规范化为 none".into());
+            warnings
+                .push("code review returned no changes_summary; normalized to none".to_string());
         }
 
         warnings

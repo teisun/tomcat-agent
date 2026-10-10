@@ -6,6 +6,7 @@ use regex::Regex;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::Url;
 
+use crate::infra::i18n::tr;
 use crate::infra::AppError;
 
 static SECRET_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -49,39 +50,49 @@ pub(crate) fn validate_http_url(
 ) -> Result<ValidatedHttpUrl, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Tool(format!(
-            "{}: 缺少必填字段 `url`",
-            options.error_prefix
+        return Err(AppError::Tool(tr(
+            "net.urlRequired",
+            &[("operation", options.error_prefix)],
         )));
     }
     if trimmed.chars().count() > options.max_url_length {
-        return Err(AppError::Tool(format!(
-            "{}: `url` 过长（>{} 字符）",
-            options.error_prefix, options.max_url_length
+        return Err(AppError::Tool(tr(
+            "net.urlLong",
+            &[
+                ("operation", options.error_prefix),
+                ("limit", &options.max_url_length.to_string()),
+            ],
         )));
     }
 
-    let mut url = Url::parse(trimmed)
-        .map_err(|err| AppError::Tool(format!("{}: `url` 非法: {err}", options.error_prefix)))?;
+    let mut url = Url::parse(trimmed).map_err(|err| {
+        AppError::Tool(tr(
+            "net.urlInvalid",
+            &[
+                ("operation", options.error_prefix),
+                ("detail", &err.to_string()),
+            ],
+        ))
+    })?;
     match url.scheme() {
         "http" | "https" => {}
         other => {
-            return Err(AppError::Tool(format!(
-                "{}: `url` 协议非法 `{other}`，仅允许 http/https",
-                options.error_prefix
+            return Err(AppError::Tool(tr(
+                "net.scheme",
+                &[("operation", options.error_prefix), ("scheme", other)],
             )));
         }
     }
     if matches!(options.scheme_policy, HttpSchemePolicy::RequireHttps) && url.scheme() != "https" {
-        return Err(AppError::Tool(format!(
-            "{}: `url` 必须使用 https",
-            options.error_prefix
+        return Err(AppError::Tool(tr(
+            "net.httpsRequired",
+            &[("operation", options.error_prefix)],
         )));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(AppError::Tool(format!(
-            "{}: URL with credentials rejected",
-            options.error_prefix
+        return Err(AppError::Tool(tr(
+            "net.credentials",
+            &[("operation", options.error_prefix)],
         )));
     }
 
@@ -89,31 +100,36 @@ pub(crate) fn validate_http_url(
         .host_str()
         .map(|value| value.trim_end_matches('.').to_ascii_lowercase())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::Tool(format!("{}: `url` 缺少合法 host", options.error_prefix)))?;
+        .ok_or_else(|| {
+            AppError::Tool(tr(
+                "net.hostMissing",
+                &[("operation", options.error_prefix)],
+            ))
+        })?;
 
     let ip_candidate = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = ip_candidate.parse::<IpAddr>() {
         if is_private_or_local_ip(ip) {
-            return Err(AppError::Tool(format!(
-                "{}: private or loopback IP rejected",
-                options.error_prefix
+            return Err(AppError::Tool(tr(
+                "net.privateIp",
+                &[("operation", options.error_prefix)],
             )));
         }
-        return Err(AppError::Tool(format!(
-            "{}: IP literal host rejected",
-            options.error_prefix
+        return Err(AppError::Tool(tr(
+            "net.ipLiteral",
+            &[("operation", options.error_prefix)],
         )));
     }
     if is_reserved_local_hostname(&host) {
-        return Err(AppError::Tool(format!(
-            "{}: local hostname rejected",
-            options.error_prefix
+        return Err(AppError::Tool(tr(
+            "net.localHost",
+            &[("operation", options.error_prefix)],
         )));
     }
     if !host.contains('.') {
-        return Err(AppError::Tool(format!(
-            "{}: single-segment host rejected",
-            options.error_prefix
+        return Err(AppError::Tool(tr(
+            "net.singleHost",
+            &[("operation", options.error_prefix)],
         )));
     }
 
@@ -123,14 +139,20 @@ pub(crate) fn validate_http_url(
     }
 
     url.set_host(Some(&host)).map_err(|err| {
-        AppError::Tool(format!(
-            "{}: `url` host 规范化失败: {err}",
-            options.error_prefix
+        AppError::Tool(tr(
+            "net.normalizeHost",
+            &[
+                ("operation", options.error_prefix),
+                ("detail", &err.to_string()),
+            ],
         ))
     })?;
     if matches!(options.scheme_policy, HttpSchemePolicy::UpgradeToHttps) && url.scheme() == "http" {
         url.set_scheme("https").map_err(|()| {
-            AppError::Tool(format!("{}: `url` 无法升级到 https", options.error_prefix))
+            AppError::Tool(tr(
+                "net.upgradeHttps",
+                &[("operation", options.error_prefix)],
+            ))
         })?;
     }
 
@@ -162,14 +184,15 @@ impl Resolve for PublicIpDnsResolver {
             let addrs = tokio::net::lookup_host((host.as_str(), 0))
                 .await
                 .map_err(|err| {
-                    Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(
-                        format!("dns lookup failed for `{host}`: {err}"),
-                    ))
+                    Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(tr(
+                        "net.dnsFailed",
+                        &[("host", &host), ("detail", &err.to_string())],
+                    )))
                 })?
                 .collect::<Vec<SocketAddr>>();
             if addrs.is_empty() {
                 return Err(Box::<dyn std::error::Error + Send + Sync>::from(
-                    std::io::Error::other(format!("dns lookup returned no addresses for `{host}`")),
+                    std::io::Error::other(tr("net.dnsEmpty", &[("host", &host)])),
                 ));
             }
             if let Some(private_ip) = addrs
@@ -178,8 +201,9 @@ impl Resolve for PublicIpDnsResolver {
                 .find(|ip| is_private_or_local_ip(*ip))
             {
                 return Err(Box::<dyn std::error::Error + Send + Sync>::from(
-                    std::io::Error::other(format!(
-                        "dns lookup for `{host}` resolved to disallowed IP `{private_ip}`"
+                    std::io::Error::other(tr(
+                        "net.dnsPrivate",
+                        &[("host", &host), ("ip", &private_ip.to_string())],
                     )),
                 ));
             }
@@ -215,8 +239,9 @@ pub(crate) async fn read_body_limited(
                 break;
             }
             Err(err) => {
-                return Err(AppError::Tool(format!(
-                    "{error_prefix}: 响应体读取失败: {err}"
+                return Err(AppError::Tool(tr(
+                    "net.bodyRead",
+                    &[("operation", error_prefix), ("detail", &err.to_string())],
                 )));
             }
         }
@@ -267,6 +292,7 @@ mod tests {
     use super::{
         validate_http_url, HttpSchemePolicy, PublicIpDnsResolver, Resolve, UrlValidationOptions,
     };
+    use crate::infra::i18n::{tr_in, Locale};
     use std::str::FromStr;
 
     const MAX_URL_LEN: usize = 2048;
@@ -289,7 +315,14 @@ mod tests {
         ] {
             let err = validate_http_url(url, options(HttpSchemePolicy::RequireHttps))
                 .expect_err("reserved local hostname should be rejected");
-            assert!(err.to_string().contains("local hostname rejected"), "{err}");
+            assert!(
+                err.to_string().contains(&tr_in(
+                    Locale::En,
+                    "net.localHost",
+                    &[("operation", "net_guard_test")]
+                )),
+                "{err}"
+            );
         }
     }
 
@@ -303,7 +336,11 @@ mod tests {
             let err = validate_http_url(url, options(HttpSchemePolicy::RequireHttps))
                 .expect_err("local ip literal should be rejected");
             assert!(
-                err.to_string().contains("private or loopback IP rejected"),
+                err.to_string().contains(&tr_in(
+                    Locale::En,
+                    "net.privateIp",
+                    &[("operation", "net_guard_test")]
+                )),
                 "{err}"
             );
         }
@@ -316,7 +353,11 @@ mod tests {
             options(HttpSchemePolicy::RequireHttps),
         )
         .expect_err("http should be rejected");
-        assert!(err.to_string().contains("必须使用 https"));
+        assert!(err.to_string().contains(&tr_in(
+            Locale::En,
+            "net.httpsRequired",
+            &[("operation", "net_guard_test")]
+        )));
     }
 
     #[test]
@@ -337,6 +378,13 @@ mod tests {
             .await
             .err()
             .expect("localhost should resolve to disallowed local IP");
-        assert!(err.to_string().contains("disallowed IP"));
+        assert!(err.to_string().contains(
+            tr_in(
+                Locale::En,
+                "net.dnsPrivate",
+                &[("host", "localhost"), ("ip", "")]
+            )
+            .trim_end_matches('`')
+        ));
     }
 }

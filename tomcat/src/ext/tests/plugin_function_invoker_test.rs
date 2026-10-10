@@ -590,7 +590,11 @@ async fn plugin_function_invoker_requires_session_id() {
         .await
         .expect_err("missing session_id should fail before runtime access");
     assert!(
-        err.to_string().contains("插件宿主函数执行缺少 session_id"),
+        err.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plugin.functionSession",
+            &[("function", "echo_host"), ("point", "test.echo")]
+        )),
         "error should explain the missing session id: {err}"
     );
 }
@@ -669,7 +673,11 @@ pi.registerFunction("nextCount", function () {
         .await
         .expect_err("hung plugin function should time out");
     assert!(
-        err.to_string().contains("插件宿主函数执行超时: nextCount"),
+        err.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plugin.functionTimeout",
+            &[("name", "nextCount")]
+        )),
         "timeout error should mention the function name: {err}"
     );
     assert_eq!(
@@ -1596,7 +1604,11 @@ async fn ext_plugin_search_invoker_without_registered_provider_stays_incompatibl
 
     match err {
         BackendFailure::Incompatible { detail } => {
-            assert!(detail.contains("未找到名为 `mimo` 的 web_search 插件后端"));
+            assert!(detail.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "plugin.searchMissing",
+                &[("name", "mimo")]
+            )));
         }
         other => panic!("unexpected error: {other:?}"),
     }

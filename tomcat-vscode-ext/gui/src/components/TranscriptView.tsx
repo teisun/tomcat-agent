@@ -1,4 +1,5 @@
 import { Fragment, type RefObject, type ReactNode, useMemo } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 import type {
   AskQuestionResult,
@@ -195,6 +196,7 @@ export function TranscriptView({
   mediaRoots?: WebviewMediaRoot[];
   transcriptRef?: RefObject<HTMLElement | null>;
 }) {
+  const t = useT();
   const messagesWithWrites = useMemo(() => messageIdsWithWritesAfter(timeline), [timeline]);
   const renderedTimeline = useMemo(
     () => injectCheckpointMarkers(timeline, checkpoints),
@@ -235,7 +237,7 @@ export function TranscriptView({
         currentPlanId: planId,
         currentPlanState: planState,
         planTodos,
-      });
+      }, t);
       if (planCard) {
         return (
           <PlanFileCard
@@ -432,7 +434,8 @@ export function TranscriptView({
   return (
     <section
       className="tc-transcript"
-      aria-label="active-session"
+      aria-label={t("chat.transcript")}
+      data-testid="transcript"
       ref={transcriptRef}
     >
       {renderCluster(leadingTimeline, false)}

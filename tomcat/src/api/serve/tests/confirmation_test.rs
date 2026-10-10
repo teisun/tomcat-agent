@@ -71,6 +71,7 @@ async fn serve_confirmation_rejects_wrong_session_and_round_trips_scoped_decisio
                 PrimitiveOperation::Read,
                 "Read package source\n路径: /tmp/source/SKILL.md",
                 "package_install_source",
+                Some(PathBuf::from("/tmp/source/SKILL.md")),
                 Some(PathBuf::from("/tmp/source")),
             )
             .await
@@ -149,6 +150,7 @@ async fn serve_confirmation_denies_persisted_root_that_differs_from_request() {
                 PrimitiveOperation::Read,
                 "Read package source",
                 "package_install_source",
+                Some(PathBuf::from("/tmp/source/SKILL.md")),
                 Some(PathBuf::from("/tmp/source")),
             )
             .await

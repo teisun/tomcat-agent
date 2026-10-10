@@ -983,12 +983,13 @@ async fn session_title_updated_emitted_after_first_user() {
     )
     .expect("init_context_state");
 
+    let user_input = "请帮我整理 transcript UI";
     info!(target: "test", phase = "act", "run_chat_turn 写入首条 user，并等待异步 title event");
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "请帮我整理 transcript UI",
+            user_input,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -1015,10 +1016,7 @@ async fn session_title_updated_emitted_after_first_user() {
     info!(target: "test", phase = "assert", "captured session.title_updated = {:?}", captured.lock().unwrap());
     assert_eq!(
         captured.lock().unwrap().clone(),
-        vec![
-            "请帮我整理 transcript UI".to_string(),
-            "Semantic session title".to_string(),
-        ],
+        vec![user_input.to_string(), "Semantic session title".to_string(),],
         "首条 user 后应先 emit 规则标题，再异步 emit 语义 session 标题"
     );
     assert_eq!(title.call_count(), 1, "title provider 应被调用一次");

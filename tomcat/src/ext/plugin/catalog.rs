@@ -1,6 +1,7 @@
 use super::source_scan::{host_root_plugin_dir, plugin_roots};
 use super::{parse_manifest, PluginManifest};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::AppConfig;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -107,7 +108,7 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
         catalog.unreadable = true;
         catalog.diagnostics.push(PluginCatalogDiagnostic {
             path: root.to_path_buf(),
-            reason: "plugin 根目录不可读取".to_string(),
+            reason: tr("plugin.rootUnreadable", &[]),
         });
         return;
     };
@@ -123,7 +124,7 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
         let Ok(file_type) = entry.file_type() else {
             catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: entry.path(),
-                reason: "无法读取目录项类型".to_string(),
+                reason: tr("resource.entryType", &[]),
             });
             continue;
         };
@@ -236,7 +237,7 @@ fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFil
             catalog.unreadable = true;
             catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: registry_path,
-                reason: format!("读取 plugin registry 失败: {error}"),
+                reason: tr("plugin.registryRead", &[("detail", &error.to_string())]),
             });
             return RegistryFilter::Present(BTreeMap::new());
         }
@@ -247,7 +248,7 @@ fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFil
             catalog.unreadable = true;
             catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: registry_path,
-                reason: format!("plugin registry 解析失败: {error}"),
+                reason: tr("plugin.registryParse", &[("detail", &error.to_string())]),
             });
             return RegistryFilter::Present(BTreeMap::new());
         }

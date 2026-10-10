@@ -9,7 +9,8 @@ import type {
 } from "./connectorsProtocol";
 
 import { isSpeed, type Speed } from "./modelSpeed";
-export type SettingsRoute = "models" | "connectors";
+import { isLanguagePreference, type LanguagePreference } from "./i18n";
+export type SettingsRoute = "general" | "models" | "connectors";
 
 export interface SettingsModelCapabilities {
   files: boolean;
@@ -76,6 +77,7 @@ export interface SettingsModelRemovalReceipt {
 }
 
 export interface SettingsCapabilities {
+  setUiLanguage?: boolean;
   listModels: boolean;
   listProviderKeys: boolean;
   removeModel: boolean;
@@ -126,6 +128,10 @@ export interface SettingsConnectorToolToggleReceipt {
 
 
 export interface SettingsStateSnapshot {
+  locale?: import("./i18n").Locale;
+  uiPreferences?: import("./i18n").UiPreferences | null;
+  languageStatus?: "saving" | "saved" | "failed";
+  hostLocale?: import("./i18n").Locale;
   capabilities: SettingsCapabilities;
   error?: string | null;
   expectedCliVersion?: string | null;
@@ -140,6 +146,7 @@ export interface SettingsStateSnapshot {
   connectorCapabilities?: SettingsConnectorCapabilities;
   connectorTools?: ConnectorToolView[];
   connectorReceipt?: SettingsConnectorReceipt | null;
+  connectorLogin?: { configKey: string; requestId: string; phase: "authorizing" | "settled" } | null;
   connectorReloads?: Record<string, SettingsConnectorReloadReceipt>;
   connectorToolToggles?: Record<string, SettingsConnectorToolToggleReceipt>;
   connectorToolsIdentity?: ConnectorConnectionIdentity | null;
@@ -160,6 +167,7 @@ export type SettingsHostFrame = {
 };
 
 export type SettingsIntent =
+  | { messageId: string; type: "setUiLanguage"; data: { language: LanguagePreference } }
   | {
       messageId: string;
       type: "settings.ready";
@@ -253,7 +261,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isSettingsRoute(value: unknown): value is SettingsRoute {
-  return value === "models" || value === "connectors";
+  return value === "general" || value === "models" || value === "connectors";
 }
 
 function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapabilities {
@@ -312,6 +320,8 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
     return false;
   }
   switch (value.type) {
+    case "setUiLanguage":
+      return isRecord(value.data) && isLanguagePreference(value.data.language);
     case "settings.ready":
       return (
         value.data === undefined ||

@@ -78,10 +78,23 @@ pub struct PlanReviewSummary {
 }
 
 impl PlanReviewSummary {
+    pub fn skipped() -> Self {
+        let mut summary = Self::aborted_with(crate::infra::i18n::tr("plan.review.skipped", &[]));
+        summary.reviewer_stop_reason = "user_skipped".into();
+        summary
+    }
+
+    pub fn interrupted() -> Self {
+        let mut summary =
+            Self::aborted_with(crate::infra::i18n::tr("plan.review.interrupted", &[]));
+        summary.reviewer_stop_reason = "parent_abort".into();
+        summary
+    }
+
     pub fn placeholder_pending() -> Self {
         Self {
             aborted: true,
-            summary: "reviewer 子 Agent 将在 P4 接入；当前阶段返回 aborted 占位".into(),
+            summary: crate::infra::i18n::tr("plan.review.unavailable", &[]),
             changes_summary: "none".into(),
             applied_changes: false,
             findings: Vec::new(),

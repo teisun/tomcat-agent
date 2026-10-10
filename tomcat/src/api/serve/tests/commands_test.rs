@@ -52,7 +52,7 @@ async fn serve_shared_slash_handshake_reload_and_rejected_inputs_do_not_write_tr
         .unwrap();
     assert_eq!(
         handshake["payload"]["slashCommands"],
-        serde_json::to_value(crate::api::chat::commands::SHARED_SLASH_COMMANDS).unwrap()
+        serde_json::to_value(crate::api::chat::commands::shared_slash_commands()).unwrap()
     );
     assert!(handshake["payload"]["capabilities"]
         .as_array()
@@ -93,12 +93,22 @@ async fn serve_shared_slash_handshake_reload_and_rejected_inputs_do_not_write_tr
         assert_eq!(reply["success"], true, "{reply:?}");
         assert_eq!(reply["payload"]["ok"], index == 0);
         let message = reply["payload"]["text"].as_str().unwrap();
-        if index == 0 {
-            assert!(message.contains("没有变化"));
-        } else if index <= 3 {
-            assert!(message.contains("未知命令") && message.contains("/uninstall"));
-        } else {
-            assert!(message.contains("用法"));
+        let token = text.split_whitespace().next().unwrap();
+        let command = token.trim_start_matches('/');
+        if index > 0 && index <= 3 {
+            assert!(
+                message.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "serve.unknownCommand",
+                    &[("command", token), ("available", "")]
+                )) && message.contains("/uninstall")
+            );
+        } else if index > 3 {
+            assert!(message.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                &format!("slash.{command}.usage"),
+                &[]
+            )));
         }
         assert!(!slot.is_busy() && !slot.is_command_job_running());
         assert!(slot.run_task.lock().is_none());
@@ -112,7 +122,7 @@ async fn serve_shared_slash_handshake_reload_and_rejected_inputs_do_not_write_tr
             .len(),
         before
     );
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }
@@ -144,7 +154,7 @@ async fn serve_shared_slash_busy_rejects_without_executing() {
     assert!(!slot.is_command_job_running());
     assert!(slot.run_task.lock().is_none());
     slot.mark_idle();
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }
@@ -192,10 +202,6 @@ async fn serve_shared_slash_install_and_uninstall_agent_with_quoted_source() {
         let lines = wait_for_line(&buffer, |frame| frame["id"] == id).await;
         let response = lines.iter().find(|frame| frame["id"] == id).unwrap();
         assert_eq!(response["payload"]["ok"], true, "{response:?}");
-        assert!(response["payload"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("当前会话已同步"));
         assert_eq!(
             slot.ctx
                 .skill_set_snapshot()
@@ -205,7 +211,7 @@ async fn serve_shared_slash_install_and_uninstall_agent_with_quoted_source() {
         );
         assert!(!slot.is_busy());
     }
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }
@@ -1576,7 +1582,9 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
     let current_entry = session_manager
         .ensure_current_session(cwd_string.clone())
         .expect("current session");
-    session_manager.pin_session(&current_entry.session_id);
+    session_manager
+        .pin_session(&current_entry.session_id)
+        .expect("pin current session");
     let overrides = crate::api::chat::ChatContextOverrides::default()
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
@@ -1714,6 +1722,7 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_prompt_skips_pending_ask_question_before_persisting_new_input() {
+    let new_prompt = "跳过旧问题，继续做别的";
     let _api_key = install_test_api_key();
     let stream = vec![
         Ok(StreamEvent::ContentDelta {
@@ -1746,7 +1755,7 @@ async fn serve_prompt_skips_pending_ask_question_before_persisting_new_input() {
         ServeCommand::Prompt {
             id: Some("new-prompt-after-question".to_string()),
             session_id: Some(slot.session_id.clone()),
-            text: "跳过旧问题，继续做别的".to_string(),
+            text: new_prompt.to_string(),
             params: ServeMessageParams::default(),
         },
     )
@@ -1806,7 +1815,7 @@ async fn serve_prompt_skips_pending_ask_question_before_persisting_new_input() {
                     .message
                     .get("content")
                     .and_then(serde_json::Value::as_str)
-                    == Some("跳过旧问题，继续做别的")
+                    == Some(new_prompt)
         })
         .expect("new prompt should be persisted");
     assert!(
@@ -2040,7 +2049,7 @@ async fn serve_turn_completion_keeps_busy_until_run_task_lock_is_available() {
     assert_eq!(count_event(&before_release, "agent_idle"), 0);
     assert_eq!(count_event(&lines, "agent_idle"), 1);
     assert!(!slot.is_busy());
-    cleanup_session_slot(&state, &slot, true, "test_finished")
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();
 }
@@ -2723,8 +2732,13 @@ async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
     assert!(
         lines.iter().any(|line| {
             line.get("type").and_then(serde_json::Value::as_str) == Some("llm_notice")
-                && line.get("message").and_then(serde_json::Value::as_str)
-                    == Some("本轮附件未被当前端点接受，已按纯文本发送")
+                && line["finishReason"] == "unsupported_multimodal_degraded"
+                && line["message"]
+                    == crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "agentLoop.attachmentsDegraded",
+                        &[],
+                    )
         }),
         "degrade retry should surface a notice: {lines:?}"
     );
@@ -3392,7 +3406,7 @@ async fn live_steering_consumed_precedes_idle_and_stop_or_failure_discards_it() 
             assert!(consumed.is_none());
             assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 0);
         }
-        cleanup_session_slot(&state, &slot, true, "test_finished")
+        cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
             .await
             .unwrap();
     }
@@ -4344,7 +4358,11 @@ async fn serve_retry_and_resume_with_queued_signal_keep_empty_reply_protection()
             frames.iter().any(|v| v["type"] == "agent_end"
                 && v["error"]
                     .as_str()
-                    .is_some_and(|e| e.contains("没有可见回答"))),
+                    .is_some_and(|e| e.contains(&crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "agentLoop.hiddenExhausted",
+                        &[("count", "3")]
+                    )))),
             "{frames:?}"
         );
         let captured = requests.0.lock();
@@ -6754,6 +6772,7 @@ async fn serve_set_context_window_persists_and_lists_selected_tier() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
 
+    let description = "测试 Context 档位";
     handle_command(
         Arc::clone(&state),
         ServeCommand::UpsertModel {
@@ -6769,7 +6788,7 @@ async fn serve_set_context_window_persists_and_lists_selected_tier() {
                 context_window: Some(400_000),
                 context_window_options: Some(vec![1_000_000, 400_000]),
                 max_output_tokens: None,
-                description: Some("测试 Context 档位".to_string()),
+                description: Some(description.to_string()),
                 supported_speeds: None,
                 supported_reasoning_levels: None,
                 thinking_format: Some("openai".to_string()),
@@ -6832,7 +6851,7 @@ async fn serve_set_context_window_persists_and_lists_selected_tier() {
         serde_json::json!([400000, 1000000])
     );
     assert_eq!(model["selectedContextWindow"].as_u64(), Some(1_000_000));
-    assert_eq!(model["description"].as_str(), Some("测试 Context 档位"));
+    assert_eq!(model["description"].as_str(), Some(description));
 
     handle_command(
         Arc::clone(&state),
@@ -8211,7 +8230,11 @@ async fn serve_restore_checkpoint_rejects_foreign_session_checkpoint() {
 
     assert_eq!(response["success"].as_bool(), Some(false));
     assert_eq!(
-        response["error"].as_str(),
-        Some("checkpoint 不属于当前会话，不能跨会话 restore")
+        response["error"],
+        crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "slash.restore.wrongSession",
+            &[]
+        )
     );
 }

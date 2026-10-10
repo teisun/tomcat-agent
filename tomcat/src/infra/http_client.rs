@@ -98,7 +98,12 @@ pub(crate) fn build_outbound_client(
         // Explicit llm.proxy should still honor NO_PROXY/no_proxy from the ambient environment.
         let proxy = reqwest::Proxy::all(proxy_url)
             .map(|proxy| proxy.no_proxy(reqwest::NoProxy::from_env()))
-            .map_err(|err| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, err)))?;
+            .map_err(|err| {
+                AppError::Config(crate::infra::i18n::tr(
+                    "config.proxyInvalid",
+                    &[("detail", &err.without_url().to_string())],
+                ))
+            })?;
         builder = builder.proxy(proxy);
     }
     // If no explicit proxy was configured, leave system proxy discovery enabled.
@@ -106,4 +111,24 @@ pub(crate) fn build_outbound_client(
         OutboundClientErrorKind::Llm => AppError::Llm(format!("{build_error_context}: {err}")),
         OutboundClientErrorKind::Tool => AppError::Tool(format!("{build_error_context}: {err}")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_proxy_diagnostic_does_not_echo_credentials() {
+        let proxy = "http://test-user:PRIVATE_PROXY_SENTINEL@proxy.invalid:bad-port";
+        let error = build_outbound_client(
+            OutboundClientOptions::new(Some(proxy)),
+            OutboundClientErrorKind::Tool,
+            "client fixture",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("URL"), "{error}");
+        assert!(!error.contains("PRIVATE_PROXY_SENTINEL"), "{error}");
+        assert!(!error.contains("test-user"), "{error}");
+    }
 }

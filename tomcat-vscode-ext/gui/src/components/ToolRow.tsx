@@ -1,5 +1,7 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import { isDiffViewable } from "../../../src/shared/diffPresentation";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, getLocale, t as defaultT, type Locale, type Translator } from "../../../src/shared/i18n";
 
 import type {
   AskQuestionAnswer,
@@ -99,7 +101,6 @@ const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS = 5_000;
 const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS = 5_000;
 const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS = 600_000;
 const GENERIC_TOOL_ARGS_MAX_CHARS = 4_000;
-const GENERIC_TOOL_ARGS_TRUNCATED_SUFFIX = "\n… (arguments truncated)";
 
 const EDIT_TOOLS = new Set(["edit", "hashline_edit", "write"]);
 const COMMAND_TOOLS = new Set(["bash", "execute_command", "shell"]);
@@ -189,11 +190,11 @@ export function clampTaskOutputBudget(value: unknown): number {
   );
 }
 
-function formatToolSummary(summary: string | undefined): string | undefined {
+function formatToolSummary(summary: string | undefined, t: Translator = defaultT): string | undefined {
   if (!summary) {
     return undefined;
   }
-  return summary.trim() === "[interrupted]" ? "Interrupted" : summary;
+  return summary.trim() === "[interrupted]" ? t("answer.interrupted") : summary;
 }
 
 function takeUnicodeSafePrefix(text: string, maxCodeUnits: number): string {
@@ -214,7 +215,7 @@ function takeUnicodeSafePrefix(text: string, maxCodeUnits: number): string {
   return text.slice(0, end);
 }
 
-function formatToolArgsForDisplay(item: WebviewToolCard): string | undefined {
+function formatToolArgsForDisplay(item: WebviewToolCard, t: Translator): string | undefined {
   if (!usesGenericToolCard(item.toolName)) {
     return undefined;
   }
@@ -234,10 +235,8 @@ function formatToolArgsForDisplay(item: WebviewToolCard): string | undefined {
   if (serialized.length <= GENERIC_TOOL_ARGS_MAX_CHARS) {
     return serialized;
   }
-  return `${takeUnicodeSafePrefix(
-    serialized,
-    GENERIC_TOOL_ARGS_MAX_CHARS - GENERIC_TOOL_ARGS_TRUNCATED_SUFFIX.length,
-  )}${GENERIC_TOOL_ARGS_TRUNCATED_SUFFIX}`;
+  const suffix = t("tool.argumentsTruncated");
+  return `${takeUnicodeSafePrefix(serialized, GENERIC_TOOL_ARGS_MAX_CHARS - suffix.length)}${suffix}`;
 }
 
 export function toolCategory(toolName: string): ToolCategory {
@@ -273,13 +272,13 @@ export function isActionTool(item: WebviewToolCard): boolean {
   return category === "answer" || category === "command" || category === "edit";
 }
 
-function buildPlanUpdateLabel(item: WebviewToolCard): string {
+function buildPlanUpdateLabel(item: WebviewToolCard, t: Translator): string {
   if (isRunning(item)) {
-    return "Updating plan";
+    return t("tool.updatingPlan");
   }
   const activity = item.planActivity;
   if (!activity || activity.kind !== "update") {
-    return "Updated plan";
+    return t("tool.updatedPlan");
   }
   const hasProgress =
     typeof activity.completed === "number" &&
@@ -292,19 +291,17 @@ function buildPlanUpdateLabel(item: WebviewToolCard): string {
     activity.stateAfter &&
     activity.stateBefore !== activity.stateAfter
   ) {
-    return `Plan: ${activity.stateBefore} → ${activity.stateAfter}${progressSuffix}`;
+    return t("tool.plan.transition", { mode: t("term.mode.plan"), before: t(`term.planState.${activity.stateBefore}`), after: t(`term.planState.${activity.stateAfter}`), progress: progressSuffix });
   }
   if ((activity.checked ?? 0) > 0) {
-    return hasProgress
-      ? `Checked ${activity.checked} · ${activity.completed}/${activity.total}`
-      : `Checked ${activity.checked}`;
+    return t("tool.plan.checked", { count: activity.checked ?? 0, progress: progressSuffix });
   }
   if ((activity.applied ?? 0) > 0) {
     return hasProgress
-      ? `Updated plan · ${activity.completed}/${activity.total}`
-      : "Updated plan";
+      ? t("tool.plan.updatedProgress", { completed: activity.completed ?? 0, total: activity.total ?? 0 })
+      : t("tool.updatedPlan");
   }
-  return "Updated plan";
+  return t("tool.updatedPlan");
 }
 
 function countResults(summary: string | undefined): number | null {
@@ -374,159 +371,81 @@ export function toolIconClass(toolName: string): string {
   }
 }
 
-export function buildFlatLabel(item: WebviewToolCard): string {
+export function buildFlatLabel(item: WebviewToolCard, t: Translator = defaultT, locale: Locale = getLocale(), compactFile = false): string {
   const args = item.args ?? {};
   const running = isRunning(item);
   const category = toolCategory(item.toolName);
-
   if (item.status === "interrupted") {
     switch (category) {
-      case "edit":
-        return item.toolName === "write"
-          ? "Interrupted write"
-          : "Interrupted edit";
-      case "command":
-        return "Interrupted command";
-      case "answer":
-        return "Interrupted question";
-      default:
-        return `Interrupted ${humanizeToolName(item.toolName)}`;
+      case "edit": return t(item.toolName === "write" ? "tool.interruptedWrite" : "tool.interruptedEdit");
+      case "command": return t("tool.interruptedCommand");
+      case "answer": return t("tool.interruptedQuestion");
+      default: return t("tool.interruptedNamed", { name: humanizeToolName(item.toolName) });
     }
   }
-
-  if (item.isError && isPlanTool(item)) {
-    return `${item.toolName} failed`;
-  }
-
+  if (item.isError && isPlanTool(item)) return t("tool.failed", { name: item.toolName });
   switch (item.toolName) {
     case "read":
-    case "read_file":
-      return running ? "Reading file" : "Read file";
-    case "load_skill": {
-      const name = asString(args.name) ?? "skill";
-      return running ? `Loading skill ${name}` : `Loaded skill ${name}`;
-    }
-    case "grep": {
-      const query = asString(args.pattern) ?? asString(args.query) ?? "pattern";
-      return running ? `Searching ${query}` : `Searched ${query}`;
-    }
-    case "search_files": {
-      const query =
-        asString(args.pattern) ??
-        asString(args.query) ??
-        asString(args.path) ??
-        "files";
-      return running
-        ? `Searching files for ${query}`
-        : `Searched files for ${query}`;
-    }
-    case "bash": {
-      const backgroundLabel = backgroundCommandLabel(item);
-      if (backgroundLabel) {
-        return backgroundLabel;
-      }
-      const command = commandText(item);
-      return running ? `Running ${command}` : `Ran ${command}`;
-    }
-    case "task_output":
-      return taskOutputStateLabel(item);
-    case "task_stop": {
-      const taskId = asString(args.task_id) ?? "task";
-      return running ? `Stopping ${taskId}` : `Stopped ${taskId}`;
-    }
-    case "task_list":
-      return running ? "Listing tasks" : "Listed tasks";
-    case "list_dir": {
-      const dir = asString(args.path) ?? "directory";
-      return running ? `Listing ${dir}` : `Listed ${dir}`;
-    }
-    case "web_search": {
-      const query = asString(args.query) ?? "query";
-      return running ? `Searching "${query}"` : `Searched "${query}"`;
-    }
+    case "read_file": return t(running ? compactFile ? "tool.reading" : "tool.readingFile" : compactFile ? "tool.read" : "tool.readFile");
+    case "load_skill": return t(running ? "tool.loadingSkill" : "tool.loadedSkill", { name: asString(args.name) ?? t("tool.skill") });
+    case "grep": return t(running ? "tool.searching" : "tool.searched", { query: asString(args.pattern) ?? asString(args.query) ?? t("tool.pattern") });
+    case "search_files": return t(running ? "tool.searchingFiles" : "tool.searchedFiles", { query: asString(args.pattern) ?? asString(args.query) ?? asString(args.path) ?? t("tool.files") });
+    case "bash": return backgroundCommandLabel(item, t) ?? t(running ? "tool.runningNamed" : "tool.ranNamed", { command: commandText(item, t) });
+    case "task_output": return taskOutputStateLabel(item, t);
+    case "task_stop": return t(running ? "tool.stoppingTask" : "tool.stoppedTask", { id: asString(args.task_id) ?? t("tool.task") });
+    case "task_list": return t(running ? "tool.listingTasks" : "tool.listedTasks");
+    case "list_dir": return t(running ? "tool.listingDirectory" : "tool.listedDirectory", { path: asString(args.path) ?? t("tool.directory") });
+    case "web_search": return t(running ? "tool.searchingQuoted" : "tool.searchedQuoted", { query: asString(args.query) ?? t("tool.query") });
     case "tool_search": {
       const query = asString(args.query);
-      if (query) {
-        return running ? `Searching "${query}"` : `Searched "${query}"`;
-      }
+      if (query) return t(running ? "tool.searchingQuoted" : "tool.searchedQuoted", { query });
       const source = asString(args.source);
-      if (source) {
-        return running ? `Listing ${source} tools` : `Listed ${source} tools`;
-      }
-      return running ? "Listing connectors" : "Listed connectors";
+      return source ? t(running ? "tool.listingSource" : "tool.listedSource", { source }) : t(running ? "tool.listingConnectors" : "tool.listedConnectors");
     }
     case "tool_describe": {
-      const names = Array.isArray(args.names)
-        ? args.names.filter((name): name is string => typeof name === "string")
-        : [];
-      const target = names.length === 1 ? "1 tool" : `${names.length} tools`;
-      return running ? `Describing ${target}` : `Described ${target}`;
+      const count = Array.isArray(args.names) ? args.names.filter(name => typeof name === "string").length : 0;
+      return t(pluralKey(locale, running ? "tool.describing.other" : "tool.described.other", count), { count });
     }
     case "tool_call": {
       const name = asString(args.name);
-      const target = name ? connectorToolShortName(name) : "connector tool";
-      return running ? `Calling ${target}` : `Called ${target}`;
+      return t(running ? "tool.calling" : "tool.called", { name: name ? connectorToolShortName(name) : t("tool.connectorTool") });
     }
-    case "tool_run_code":
-      return running ? "Running connector code" : "Ran connector code";
+    case "tool_run_code": return t(running ? "tool.runningConnectorCode" : "tool.ranConnectorCode");
     case "search_workspace": {
       const query = asString(args.query) ?? asString(args.pattern);
-      if (query) {
-        return running
-          ? `Searching workspace for ${query}`
-          : `Searched workspace for ${query}`;
-      }
-      return running ? "Searching workspace" : "Searched workspace";
+      return query ? t(running ? "tool.searchingWorkspaceFor" : "tool.searchedWorkspaceFor", { query }) : t(running ? "tool.searchingWorkspace" : "tool.searchedWorkspace");
     }
-    case "web_fetch": {
-      const url = asString(args.url) ?? "url";
-      return running ? `Fetching ${url}` : `Fetched ${url}`;
-    }
-    case "config_get": {
-      const key = asString(args.key) ?? "config";
-      return running ? `Reading config ${key}` : `Read config ${key}`;
-    }
-    case "config_set": {
-      const key = asString(args.key) ?? "config";
-      return running ? `Updating config ${key}` : `Updated config ${key}`;
-    }
-    case "create_plan": {
-      return running ? "Creating plan" : "Created plan";
-    }
-    case "update_plan": {
-      return buildPlanUpdateLabel(item);
-    }
-    case "todos":
-      return running ? "Updating todos" : "Updated todos";
-    case "ask_question":
-      return running ? "Asking question" : "Asked question";
+    case "web_fetch": return t(running ? "tool.fetching" : "tool.fetched", { url: asString(args.url) ?? t("term.field.url") });
+    case "config_get": return t(running ? "tool.readingConfig" : "tool.readConfig", { key: asString(args.key) ?? t("tool.config") });
+    case "config_set": return t(running ? "tool.updatingConfig" : "tool.updatedConfig", { key: asString(args.key) ?? t("tool.config") });
+    case "create_plan": return t(running ? "tool.creatingPlan" : "tool.createdPlan");
+    case "update_plan": return buildPlanUpdateLabel(item, t);
+    case "todos": return t(running ? "tool.updatingTodos" : "tool.updatedTodos");
+    case "ask_question": return t(running ? "tool.askingQuestion" : "tool.askedQuestion");
     case "edit":
-    case "hashline_edit":
-      return running ? "Editing file" : "Edited file";
-    case "write":
-      return running ? "Creating file" : "Created file";
-    default:
-      return `${humanizeToolName(item.toolName)}${running ? "…" : ""}`;
+    case "hashline_edit": return t(running ? compactFile ? "tool.editing" : "tool.editingFile" : compactFile ? "tool.edited" : "tool.editedFile");
+    case "write": return t(running ? compactFile ? "tool.creating" : "tool.creatingFile" : compactFile ? "tool.created" : "tool.createdFile");
+    default: return `${humanizeToolName(item.toolName)}${running ? "…" : ""}`;
   }
 }
 
-export function buildGroupTitleFromTool(item: WebviewToolCard): string {
+export function buildGroupTitleFromTool(item: WebviewToolCard, t: Translator = defaultT, locale: Locale = getLocale()): string {
   const filePath = filePathForTool(item);
   if (filePath && (item.toolName === "read" || item.toolName === "read_file")) {
-    return `${buildFlatLabel(item)} ${basename(filePath)}`;
+    return `${buildFlatLabel(item, t, locale)} ${basename(filePath)}`;
   }
   if (filePath && toolCategory(item.toolName) === "edit") {
-    return `${buildFlatLabel(item)} ${basename(filePath)}`;
+    return `${buildFlatLabel(item, t, locale)} ${basename(filePath)}`;
   }
-  return buildFlatLabel(item);
+  return buildFlatLabel(item, t, locale);
 }
 
-export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
+export function buildToolCollectionTitle(tools: WebviewToolCard[], t: Translator = defaultT, locale: Locale = getLocale()): string {
   if (tools.length === 0) {
-    return "Thinking";
+    return t("thinking.title");
   }
   if (tools.length === 1) {
-    return buildGroupTitleFromTool(tools[0]);
+    return buildGroupTitleFromTool(tools[0], t, locale);
   }
 
   if (
@@ -534,26 +453,26 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
       (tool) => tool.toolName === "read" || tool.toolName === "read_file",
     )
   ) {
-    return `Reviewed ${tools.length} files`;
+    return t(pluralKey(locale, "tool.reviewedFiles.other", tools.length), { count: tools.length });
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "context")) {
-    return `Searched ${tools.length} sources`;
+    return t(pluralKey(locale, "tool.searchedSources.other", tools.length), { count: tools.length });
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "command")) {
     return tools.length === 1
-      ? buildGroupTitleFromTool(tools[0])
-      : `Executed ${tools.length} commands`;
+      ? buildGroupTitleFromTool(tools[0], t, locale)
+      : t(pluralKey(locale, "tool.executedCommands.other", tools.length), { count: tools.length });
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "edit")) {
-    return `Edited ${tools.length} files`;
+    return t(pluralKey(locale, "tool.editedFiles.other", tools.length), { count: tools.length });
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "task")) {
     return tools.length === 1
-      ? buildGroupTitleFromTool(tools[0])
-      : "Managed background tasks";
+      ? buildGroupTitleFromTool(tools[0], t, locale)
+      : t("tool.managedTasks");
   }
 
-  return `Used ${tools.length} tools`;
+  return t(pluralKey(locale, "tool.usedTools.other", tools.length), { count: tools.length });
 }
 
 function loadingTextClass(active: boolean): string {
@@ -569,43 +488,44 @@ function isBlockingTaskOutput(item: WebviewToolCard): boolean {
   );
 }
 
-function taskOutputStateLabel(item: WebviewToolCard): string {
+function taskOutputStateLabel(item: WebviewToolCard, t: Translator): string {
   const running = isRunning(item);
   if (isBlockingTaskOutput(item)) {
     if (item.status === "interrupted") {
-      return "Stopped waiting for shell";
+      return t("tool.waitStopped");
     }
-    return running ? "Waiting for shell" : "Waited for shell";
+    return t(running ? "tool.waiting" : "tool.waited");
   }
-  const taskId = asString(item.args?.task_id) ?? "task";
-  return running ? `Reading output ${taskId}` : `Read output ${taskId}`;
+  const taskId = asString(item.args?.task_id) ?? t("tool.task");
+  return t(running ? "tool.readingOutput" : "tool.readOutput", { id: taskId });
 }
 
 function taskOutputCountdownLabel(
   item: WebviewToolCard,
   nowTick: number,
+  t: Translator,
 ): string | null {
   if (!isBlockingTaskOutput(item)) {
     return null;
   }
   const budget = clampTaskOutputBudget(item.args?.wait_ms);
   if (item.status === "interrupted") {
-    return "Stopped waiting for shell";
+    return t("tool.waitStopped");
   }
   if (!isRunning(item)) {
-    return "Waited for shell";
+    return t("tool.waited");
   }
   const startedAt = asNumber(item.startedAt) ?? nowTick;
   const elapsed = Math.max(0, nowTick - startedAt);
   const remaining = Math.max(0, budget - elapsed);
-  return `Waiting up to ${formatCountdown(remaining)} for shell`;
+  return t("tool.waitCountdown", { duration: formatCountdown(remaining) });
 }
 
-export function hasMeaningfulContent(item: WebviewToolCard): boolean {
+export function hasMeaningfulContent(item: WebviewToolCard, t: Translator = defaultT): boolean {
   if (isPlanTool(item) && !item.isError) {
     return false;
   }
-  const summary = formatToolSummary(item.summary);
+  const summary = formatToolSummary(item.summary, t);
   if (item.liveOutput?.trim()) {
     return true;
   }
@@ -667,8 +587,8 @@ function fullCommandText(item: WebviewToolCard): string {
   return `${command} ${argv.map(shellQuoteArg).join(" ")}`;
 }
 
-function commandText(item: WebviewToolCard): string {
-  return firstLine(fullCommandText(item)) ?? "command";
+function commandText(item: WebviewToolCard, t: Translator = defaultT): string {
+  return firstLine(fullCommandText(item)) ?? t("tool.command");
 }
 
 /**
@@ -742,18 +662,18 @@ export function commandBinaries(command: string | undefined): string[] {
 }
 
 /** bash 卡片头的占位动词（summaryTitle 未到时）：中断/运行中/已完成三态。 */
-function commandPlaceholderVerb(item: WebviewToolCard): string {
-  const backgroundLabel = backgroundCommandLabel(item);
+function commandPlaceholderVerb(item: WebviewToolCard, t: Translator): string {
+  const backgroundLabel = backgroundCommandLabel(item, t);
   if (backgroundLabel) {
     return backgroundLabel;
   }
   if (item.status === "interrupted") {
-    return "Interrupted";
+    return t("answer.interrupted");
   }
-  return isRunning(item) ? "Running" : "Ran";
+  return t(isRunning(item) ? "tool.running" : "tool.ran");
 }
 
-function backgroundCommandLabel(item: WebviewToolCard): string | null {
+function backgroundCommandLabel(item: WebviewToolCard, t: Translator): string | null {
   const isBackgroundCommand =
     (item.toolName === "bash" ||
       item.toolName === "shell" ||
@@ -764,22 +684,23 @@ function backgroundCommandLabel(item: WebviewToolCard): string | null {
     return null;
   }
   if (item.backgroundRunning === true) {
-    return "Running in background";
+    return t("tool.background");
   }
   if (
     typeof item.backgroundExitCode === "number" &&
     item.backgroundExitCode !== 0
   ) {
-    return `Ran · exit ${item.backgroundExitCode}`;
+    return t("tool.exit", { code: item.backgroundExitCode });
   }
-  return "Ran";
+  return t("tool.ran");
 }
 
-function commandPurposeLabel(item: WebviewToolCard): string {
+function commandPurposeLabel(item: WebviewToolCard, t: Translator): string {
+  if (item.isError) return t("tool.failed", { name: item.toolName });
   return (
-    backgroundCommandLabel(item) ??
+    backgroundCommandLabel(item, t) ??
     asString(item.summaryTitle) ??
-    commandPlaceholderVerb(item)
+    commandPlaceholderVerb(item, t)
   );
 }
 
@@ -889,6 +810,7 @@ function parseAskQuestionResult(
 function renderPlanActionLink(
   path: string | undefined,
   onOpenPlanFile: ((path: string) => void) | undefined,
+  t: Translator,
 ): ReactNode {
   if (!path || !onOpenPlanFile) {
     return null;
@@ -904,7 +826,7 @@ function renderPlanActionLink(
       }}
       type="button"
     >
-      <span className="tc-tool-row__action-link-text">View Plan</span>
+      <span className="tc-tool-row__action-link-text">{t("plan.view")}</span>
       <span
         aria-hidden="true"
         className="codicon codicon-chevron-right tc-tool-row__action-link-chevron"
@@ -913,12 +835,12 @@ function renderPlanActionLink(
   );
 }
 
-function renderPlainBody(item: WebviewToolCard): ReactNode {
+function renderPlainBody(item: WebviewToolCard, t: Translator = defaultT): ReactNode {
   return (
     <>
       {item.summary ? (
         <pre data-testid="tool-row-result">
-          {formatToolSummary(item.summary)}
+          {formatToolSummary(item.summary, t)}
         </pre>
       ) : null}
       {item.display?.kind === "plan" ? <pre>{item.display.plan}</pre> : null}
@@ -929,9 +851,9 @@ function renderPlainBody(item: WebviewToolCard): ReactNode {
   );
 }
 
-function renderToolArgsSection(args: string | undefined): ReactNode {
+function renderToolArgsSection(args: string | undefined, t: Translator = defaultT): ReactNode {
   return args ? (
-    <pre aria-label="Tool arguments" data-testid="tool-row-args">
+    <pre aria-label={t("tool.args")} data-testid="tool-row-args">
       {args}
     </pre>
   ) : null;
@@ -942,6 +864,8 @@ function renderFlatContent(
   onOpenFile: (path: string) => void,
   onOpenPlanFile?: (path: string) => void,
   nowTick?: number,
+  t: Translator = defaultT,
+  locale: Locale = getLocale(),
 ): ReactNode {
   const args = item.args ?? {};
   const filePath = filePathForTool(item);
@@ -956,7 +880,7 @@ function renderFlatContent(
         return (
           <span className="tc-tool-row__inline">
             <span className={textClassName}>
-              {buildFlatLabel(item).replace(/ file$/, "")}
+              {buildFlatLabel(item, t, locale, true)}
             </span>
             <FileChip onOpenFile={onOpenFile} path={filePath} />
             {diffStat ? (
@@ -981,32 +905,32 @@ function renderFlatContent(
           </span>
         );
       }
-      return <span className={textClassName}>{buildFlatLabel(item)}</span>;
+      return <span className={textClassName}>{buildFlatLabel(item, t, locale)}</span>;
     case "command": {
       // Flat rows have no terminal body to host the command, so keep the command
       // visible inline; the async summaryTitle (when present) leads as the purpose.
       return (
         <span className="tc-tool-row__inline">
           <span className={textClassName} data-testid="tool-row-cmd-purpose">
-            {commandPurposeLabel(item)}
+            {commandPurposeLabel(item, t)}
           </span>
           <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
-            {commandText(item)}
+            {commandText(item, t)}
           </code>
         </span>
       );
     }
     case "answer":
-      return <span className={textClassName}>{buildFlatLabel(item)}</span>;
+      return <span className={textClassName}>{buildFlatLabel(item, t, locale)}</span>;
     case "task": {
       const countdownLabel =
-        nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick);
+        nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick, t);
       return (
         <span
           className={textClassName}
           data-testid="tool-row-task-output-countdown"
         >
-          {countdownLabel ?? buildFlatLabel(item)}
+          {countdownLabel ?? buildFlatLabel(item, t, locale)}
         </span>
       );
     }
@@ -1017,24 +941,24 @@ function renderFlatContent(
         case "update_plan":
           return (
             <span className="tc-tool-row__inline">
-              <span className={textClassName}>{buildFlatLabel(item)}</span>
+              <span className={textClassName}>{buildFlatLabel(item, t, locale)}</span>
               {isRunning(item) || item.isError
                 ? null
-                : renderPlanActionLink(planPath, onOpenPlanFile)}
+                : renderPlanActionLink(planPath, onOpenPlanFile, t)}
             </span>
           );
         case "grep": {
           const resultsCount = countResults(item.summary);
           const suffix =
             !isRunning(item) && resultsCount
-              ? ` · ${resultsCount} results`
+              ? t("tool.resultSuffix", { results: t(pluralKey(locale, "tool.results.other", resultsCount), { count: resultsCount }) })
               : "";
           const glob = asString(args.glob) ?? asString(args.path);
           if (glob) {
             return (
               <span className="tc-tool-row__inline">
                 <span className={textClassName}>
-                  {buildFlatLabel(item)}
+                  {buildFlatLabel(item, t, locale)}
                   {suffix}
                 </span>
                 <FileChip onOpenFile={onOpenFile} path={glob} />
@@ -1044,7 +968,7 @@ function renderFlatContent(
           return (
             <span
               className={textClassName}
-            >{`${buildFlatLabel(item)}${suffix}`}</span>
+            >{`${buildFlatLabel(item, t, locale)}${suffix}`}</span>
           );
         }
         case "read":
@@ -1053,24 +977,25 @@ function renderFlatContent(
             return (
               <span className="tc-tool-row__inline">
                 <span className={textClassName}>
-                  {buildFlatLabel(item).replace(/ file$/, "")}
+                  {buildFlatLabel(item, t, locale, true)}
                 </span>
                 <FileChip onOpenFile={onOpenFile} path={filePath} />
               </span>
             );
           }
-          return <span className={textClassName}>{buildFlatLabel(item)}</span>;
+          return <span className={textClassName}>{buildFlatLabel(item, t, locale)}</span>;
         default:
-          return <span className={textClassName}>{buildFlatLabel(item)}</span>;
+          return <span className={textClassName}>{buildFlatLabel(item, t, locale)}</span>;
       }
     default:
-      return <span className={textClassName}>{buildFlatLabel(item)}</span>;
+      return <span className={textClassName}>{buildFlatLabel(item, t, locale)}</span>;
   }
 }
 
 function renderExpandedBody(
   item: WebviewToolCard,
   genericArgs: string | undefined,
+  t: Translator,
 ): ReactNode {
   const category = toolCategory(item.toolName);
   if (category === "answer") {
@@ -1079,7 +1004,7 @@ function renderExpandedBody(
     if (questions && result) {
       return <AnswerCard questions={questions} result={result} />;
     }
-    return renderPlainBody(item);
+    return renderPlainBody(item, t);
   }
 
   if (category === "command") {
@@ -1088,7 +1013,7 @@ function renderExpandedBody(
         className={`tc-tool-row__terminal${item.isError ? " tc-tool-row__terminal--error" : item.status === "complete" ? " tc-tool-row__terminal--success" : " tc-tool-row__terminal--running"}`}
         data-testid="tool-row-terminal"
       >
-        {renderPlainBody(item)}
+        {renderPlainBody(item, t)}
       </div>
     );
   }
@@ -1111,8 +1036,8 @@ function renderExpandedBody(
 
   return (
     <>
-      {renderToolArgsSection(genericArgs)}
-      {renderPlainBody(item)}
+      {renderToolArgsSection(genericArgs, t)}
+      {renderPlainBody(item, t)}
     </>
   );
 }
@@ -1143,6 +1068,7 @@ function FileEntryRow({
   entry: WebviewToolDisplayFileEntry;
   onOpenFile: (path: string) => void;
 }) {
+  const t = useT();
   const [expanded, setExpanded] = useState(false);
   const iconClass = fileEntryIconClass(entry);
   const hasDiff = (entry.diff?.length ?? 0) > 0;
@@ -1188,7 +1114,7 @@ function FileEntryRow({
         {hasDiff ? (
           <button
             aria-expanded={expanded}
-            aria-label={expanded ? "Collapse diff" : "Expand diff"}
+            aria-label={t(expanded ? "diff.collapse" : "diff.expand")}
             className="tc-tool-row__toggle"
             data-testid="tool-row-file-toggle"
             onClick={() => setExpanded((value) => !value)}
@@ -1207,7 +1133,7 @@ function FileEntryRow({
       ) : null}
       {entry.expired === true ? (
         <div className="tc-diff-view__empty" data-testid="diff-view-expired">
-          Diff 已超过 7 天保留期。
+          {t("diff.expired")}
         </div>
       ) : null}
     </li>
@@ -1232,9 +1158,8 @@ function renderFileEntries(
 }
 
 /** `Edited 5 files` / `Read 3 files`：动词沿用单文件卡片，数量来自 display。 */
-function buildFilesLabel(item: WebviewToolCard, count: number): string {
-  const verb = buildFlatLabel(item).replace(/ files?$/, "");
-  return `${verb} ${count} ${count === 1 ? "file" : "files"}`;
+function buildFilesLabel(item: WebviewToolCard, count: number, t: Translator, locale: Locale): string {
+  return t(pluralKey(locale, "tool.filesLabel.other", count), { action: buildFlatLabel(item, t, locale, true), count });
 }
 
 /**
@@ -1243,6 +1168,8 @@ function buildFilesLabel(item: WebviewToolCard, count: number): string {
  */
 function buildFilesStatusLabel(
   entries: WebviewToolDisplayFileEntry[],
+  t: Translator,
+  locale: Locale,
 ): string | null {
   const counts = entries.reduce(
     (acc, entry) => {
@@ -1255,13 +1182,13 @@ function buildFilesStatusLabel(
   );
   const parts: string[] = [];
   if (counts.applied > 0) {
-    parts.push(`${counts.applied} applied`);
+    parts.push(t(pluralKey(locale, "tool.applied.other", counts.applied), { count: counts.applied }));
   }
   if (counts.failed > 0) {
-    parts.push(`${counts.failed} failed`);
+    parts.push(t(pluralKey(locale, "tool.failedCount.other", counts.failed), { count: counts.failed }));
   }
   if (counts.skipped > 0) {
-    parts.push(`${counts.skipped} skipped`);
+    parts.push(t(pluralKey(locale, "tool.skippedCount.other", counts.skipped), { count: counts.skipped }));
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
@@ -1341,6 +1268,8 @@ function ToolRowComponent({
   onOpenImagePreview,
   variant = "standalone",
 }: ToolRowProps) {
+  const t = useT();
+  const locale = useLocale();
   const category = toolCategory(item.toolName);
   const filesDisplay = item.display?.kind === "files" ? item.display : null;
   const readFiles = (item.toolName === "read" || item.toolName === "read_file") ? filesDisplay : null;
@@ -1351,18 +1280,18 @@ function ToolRowComponent({
       ? item.summary
       : (item.liveOutput ?? item.summary);
   const boundedTerminalText = limitTerminalOutput(terminalText);
-  const genericArgs = formatToolArgsForDisplay(item);
+  const genericArgs = formatToolArgsForDisplay(item, t);
   const imageAttachments = (item.attachments ?? []).filter(attachment => attachment.kind === "image");
   const hasImages = imageAttachments.length > 0;
   const mediaBadge = hasImages ? (
-    <span className="tc-tool-row__media-badge" data-testid="tool-row-media-badge" aria-label={`${imageAttachments.length} image(s)`}>
+    <span className="tc-tool-row__media-badge" data-testid="tool-row-media-badge" aria-label={t("tool.images.other", { count: imageAttachments.length })}>
       <span aria-hidden="true" className="codicon codicon-file-media" />{imageAttachments.length}
     </span>
   ) : null;
   const mediaStrip = hasImages ? <AttachmentStrip readonly attachments={imageAttachments.map(attachment => ({...attachment,label:attachment.filename}))} onOpen={attachment => onOpenImagePreview?.(attachment.id)} /> : null;
   const contentVisible = hasImages || (readFiles
     ? readFiles.files.length > 0
-    : hasMeaningfulContent(item) || Boolean(boundedTerminalText) || Boolean(genericArgs));
+    : hasMeaningfulContent(item, t) || Boolean(boundedTerminalText) || Boolean(genericArgs));
   const alwaysVisibleBody = !hasImages && category === "answer" && contentVisible;
   const canToggle = contentVisible && !alwaysVisibleBody;
   const shouldExpandByDefault = !hasImages && (shouldShowBodyByDefault(item, contentVisible) || Boolean(readFiles && hasFailedFileEntry));
@@ -1438,7 +1367,7 @@ function ToolRowComponent({
     ? sumFilesDiffStat(filesDisplay.files)
     : null;
   const filesStatusLabel = filesDisplay
-    ? buildFilesStatusLabel(filesDisplay.files)
+    ? buildFilesStatusLabel(filesDisplay.files, t, locale)
     : null;
   const usesDisclosureCard =
     (category === "command" && contentVisible) ||
@@ -1469,7 +1398,7 @@ function ToolRowComponent({
               className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}
               data-testid="tool-row-cmd-purpose"
             >
-              {commandPurposeLabel(item)}
+              {commandPurposeLabel(item, t)}
             </span>
             {commandBinaries(fullCommandText(item)).length > 0 ? (
               <span
@@ -1483,7 +1412,7 @@ function ToolRowComponent({
         ) : filesDisplay ? (
           <>
             <span className="tc-tool-row__text">
-              {buildFilesLabel(item, filesDisplay.files.length)}
+              {buildFilesLabel(item, filesDisplay.files.length, t, locale)}
             </span>
             {filesDiffStat ? (
               <span
@@ -1518,7 +1447,7 @@ function ToolRowComponent({
             <span
               className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}
             >
-              {buildFlatLabel(item).replace(/ file$/, "")}
+              {buildFlatLabel(item, t, locale, true)}
             </span>
             {item.display?.kind === "file" ? (
               <FileChip onOpenFile={onOpenFile} path={item.display.file} />
@@ -1530,7 +1459,7 @@ function ToolRowComponent({
       </span>
       {showOpenDiffButton ? (
         <button
-          aria-label="View diff"
+          aria-label={t("diff.view")}
           className="tc-tool-row__action-link"
           data-testid="tool-row-open-diff"
           onClick={(event) => {
@@ -1541,12 +1470,12 @@ function ToolRowComponent({
           type="button"
         >
           <span aria-hidden="true" className="codicon codicon-diff" />
-          <span>View diff</span>
+          <span>{t("diff.view")}</span>
         </button>
       ) : null}
       {showOpenFileButton ? (
         <button
-          aria-label="打开当前文件"
+          aria-label={t("file.openCurrent")}
           className="tc-tool-row__action-link"
           data-testid="tool-row-open-file"
           onClick={(event) => {
@@ -1557,7 +1486,7 @@ function ToolRowComponent({
           type="button"
         >
           <span aria-hidden="true" className="codicon codicon-go-to-file" />
-          <span>打开当前文件</span>
+          <span>{t("file.openCurrent")}</span>
         </button>
       ) : null}
     </div>
@@ -1618,7 +1547,7 @@ function ToolRowComponent({
                     }}
                     type="button"
                   >
-                    Full log
+                    {t("tool.fullLog")}
                   </button>
                 ) : null}
               </>
@@ -1637,7 +1566,7 @@ function ToolRowComponent({
                 {readFiles ? (
                   <>
                     <span className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}>
-                      {buildFilesLabel(item, readFiles.files.length)}
+                      {buildFilesLabel(item, readFiles.files.length, t, locale)}
                     </span>
                     {filesStatusLabel ? (
                       <span className="tc-tool-row__files-status" data-testid="tool-row-files-status">
@@ -1645,14 +1574,14 @@ function ToolRowComponent({
                       </span>
                     ) : null}
                   </>
-                ) : renderFlatContent(item, onOpenFile, onOpenPlanFile, nowTick)}
+                ) : renderFlatContent(item, onOpenFile, onOpenPlanFile, nowTick, t, locale)}
                 {mediaBadge}
               </span>
               {canToggle ? (
                 <button
                   aria-expanded={!collapsed}
                   aria-label={
-                    collapsed ? "Expand tool result" : "Collapse tool result"
+                    t(collapsed ? "tool.expand" : "tool.collapse")
                   }
                   className="tc-tool-row__toggle"
                   data-testid="tool-row-toggle"
@@ -1671,7 +1600,7 @@ function ToolRowComponent({
             {collapsed || !contentVisible ? null : (
               <div className="tc-tool-row__body" data-testid="tool-row-body">
                 {mediaStrip}
-                {readFiles ? renderFileEntries(readFiles.files, onOpenFile) : renderExpandedBody(item, genericArgs)}
+                {readFiles ? renderFileEntries(readFiles.files, onOpenFile) : renderExpandedBody(item, genericArgs, t)}
               </div>
             )}
           </>

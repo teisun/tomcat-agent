@@ -4,6 +4,7 @@ use std::time::Instant;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::{Client, Url};
 
+use crate::infra::i18n::tr;
 use crate::infra::net_guard::read_body_limited;
 use crate::infra::{AppError, ToolsWebFetchConfig};
 
@@ -37,7 +38,7 @@ pub(crate) async fn fetch_url(
                 return Ok(WebFetchOutput::degraded(
                     current_url.to_string(),
                     0,
-                    "Timeout".to_string(),
+                    tr("webFetch.timeout", &[]),
                     String::new(),
                     0,
                     elapsed_ms(start),
@@ -46,9 +47,9 @@ pub(crate) async fn fetch_url(
                 ));
             }
             Err(err) => {
-                return Err(AppError::Tool(format!(
-                    "web_fetch: 请求 {} 失败: {}",
-                    current_url, err
+                return Err(AppError::Tool(tr(
+                    "webFetch.request",
+                    &[("url", current_url.as_str()), ("detail", &err.to_string())],
                 )));
             }
         };
@@ -66,9 +67,9 @@ pub(crate) async fn fetch_url(
 
         if status.is_redirection() {
             if hops >= config.max_redirects {
-                return Err(AppError::Tool(format!(
-                    "web_fetch: redirect loop exceeds {} hops",
-                    config.max_redirects
+                return Err(AppError::Tool(tr(
+                    "webFetch.redirectLimit",
+                    &[("hops", &config.max_redirects.to_string())],
                 )));
             }
             let location = response
@@ -76,15 +77,15 @@ pub(crate) async fn fetch_url(
                 .get(LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| {
-                    AppError::Tool(format!(
-                        "web_fetch: redirect response missing Location for {}",
-                        current_url
+                    AppError::Tool(tr(
+                        "webFetch.locationMissing",
+                        &[("url", current_url.as_str())],
                     ))
                 })?;
             let next = current_url.join(location).map_err(|err| {
-                AppError::Tool(format!(
-                    "web_fetch: redirect Location 非法 `{}`: {}",
-                    location, err
+                AppError::Tool(tr(
+                    "webFetch.locationInvalid",
+                    &[("location", location), ("detail", &err.to_string())],
                 ))
             })?;
             let validated_next = validate_redirect_url(next.as_str())?;
@@ -197,9 +198,9 @@ pub(crate) async fn fetch_url(
         ));
     }
 
-    Err(AppError::Tool(format!(
-        "web_fetch: redirect loop exceeds {} hops",
-        config.max_redirects
+    Err(AppError::Tool(tr(
+        "webFetch.redirectLimit",
+        &[("hops", &config.max_redirects.to_string())],
     )))
 }
 

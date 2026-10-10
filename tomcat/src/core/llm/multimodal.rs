@@ -3,8 +3,10 @@ use std::borrow::Cow;
 use super::catalog::Capabilities;
 use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart};
 
-pub(crate) const UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER: &str = "[图片已省略：当前模型不支持图片输入]";
-pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str = "[文件已省略：当前模型不支持文件输入]";
+pub(crate) const UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER: &str =
+    "[Image omitted: the current model does not support image input]";
+pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str =
+    "[File omitted: the current model does not support file input]";
 
 #[cfg(test)]
 mod tool_media_tests {
