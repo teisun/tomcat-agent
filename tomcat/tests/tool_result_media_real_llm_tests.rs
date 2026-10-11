@@ -314,10 +314,9 @@ async fn probe(api: Api, relay: &'static str, shape: Shape) {
         .ok()
         .filter(|k| !k.trim().is_empty())
     else {
-        outcome.skipped = true;
         outcome.error = Some(format!("missing {}", target.key_env));
         record(&outcome);
-        return;
+        panic!("selected media probe requires {}", target.key_env);
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
@@ -404,7 +403,7 @@ async fn probe(api: Api, relay: &'static str, shape: Shape) {
         && relay == "idatatlas"
         && matches!(outcome.http_status, Some(404 | 405 | 501));
     record(&outcome);
-    if !(api == Api::Chat && shape.native()) && !outcome.skipped {
+    if !(outcome.skipped || api == Api::Chat && shape.native()) {
         assert!(
             outcome.saw_image,
             "probe failed: {} {} {} status={:?} error={:?} answer={:?}",

@@ -1,6 +1,6 @@
 use crate::infra::events::ToolDisplay;
 
-use super::super::{ToolExecCtx, ToolExecOutcome};
+use super::super::{ToolExecCtx, ToolExecOutcome, AGENT_PLUGIN_ID};
 
 pub(in super::super) async fn dispatch_plan_tool(
     ctx: &ToolExecCtx<'_>,
@@ -50,7 +50,31 @@ pub(in super::super) async fn dispatch_plan_tool(
         }
         "update_plan" => {
             match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
-                Ok(a) => plan_tools::update_plan::execute_for_tool(rt, a, ctx.tool_call_id).await,
+                Ok(a) => match plan_tools::update_plan::resolve_target_plan_path(
+                    rt,
+                    a.plan_id.clone(),
+                    a.path.clone(),
+                ) {
+                    Ok(path) => {
+                        let target = path.to_string_lossy();
+                        // Authorize before the file lock/read, and pin that target
+                        // rather than resolving a possibly changed active plan again.
+                        let authorized = tokio::select! {
+                            biased;
+                            _ = ctx.cancel.cancelled() => return ToolExecOutcome::err(
+                                "update_plan cancelled before writing".to_string(),
+                            ),
+                            result = ctx.primitive.authorize_write_path(&target, AGENT_PLUGIN_ID) => result,
+                        };
+                        match authorized {
+                            Ok(path) => plan_tools::update_plan::execute_at_path(rt, a, path).await,
+                            Err(error) => {
+                                return ToolExecOutcome::err(format!("update_plan failed: {error}"))
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                },
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }

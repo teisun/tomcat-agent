@@ -12,6 +12,49 @@ use crate::core::plan_runtime::panels::{
 };
 use tokio::sync::Mutex;
 
+use super::parse_custom_answer;
+
+#[tokio::test]
+async fn cli_custom_answer_counts_characters_not_utf8_bytes() {
+    let question = Question {
+        allow_custom: true,
+        id: "q1".into(),
+        prompt: "Choose".into(),
+        options: vec![
+            QuestionOption {
+                id: "a".into(),
+                label: "A".into(),
+                recommended: true,
+            },
+            QuestionOption {
+                id: "b".into(),
+                label: "B".into(),
+                recommended: false,
+            },
+        ],
+    };
+    for glyph in ["a", "中", "🙂"] {
+        let text = glyph.repeat(500);
+        let answer = parse_custom_answer(
+            &question,
+            &format!("c {text}"),
+            &AskQuestionTermination::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(answer.custom_text.as_deref(), Some(text.as_str()));
+        assert!(parse_custom_answer(
+            &question,
+            &format!("c {}", glyph.repeat(501)),
+            &AskQuestionTermination::default()
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+}
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

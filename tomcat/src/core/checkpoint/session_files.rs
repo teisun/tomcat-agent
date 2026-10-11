@@ -99,11 +99,14 @@ fn turn_dir(transcript: &Path, source: &str) -> Result<PathBuf, AppError> {
     Ok(dir)
 }
 
+/// Baselines paired with the turn directory that owns their backups.
+type BaselineRows = Vec<(PathBuf, Baseline)>;
+
 /// A row's capture time is immutable even when its old owner becomes writable again.
 fn scope_rows(
     transcript: &Path,
     expected: Option<&str>,
-) -> Result<(Option<String>, Vec<(PathBuf, Baseline)>), AppError> {
+) -> Result<(Option<String>, BaselineRows), AppError> {
     let keep = file_baselines::latest_keep(transcript)?;
     let root = file_baselines::session_dir(transcript);
     let entries = match fs::read_dir(&root) {
@@ -221,7 +224,7 @@ fn source_text(source: &RestoreSource) -> Result<String, AppError> {
         RestoreSource::Absent => Ok(String::new()),
         RestoreSource::Backup(path, _) if backup_available(path) => text(path),
         RestoreSource::Backup(..) => Err(error("unavailable")),
-        RestoreSource::Content(bytes) => {
+        RestoreSource::Content(bytes, _) => {
             if bytes.len() > MAX_DIFF_INPUT_BYTES {
                 return Err(error("too_large"));
             }
@@ -246,7 +249,7 @@ fn source_matches(source: &RestoreSource, path: &Path, exists: bool) -> Result<b
         RestoreSource::Absent => Ok(!exists),
         _ if !exists => Ok(false),
         RestoreSource::Backup(backup, _) => Ok(file_baselines::files_equal(backup, path)?),
-        RestoreSource::Content(bytes) => {
+        RestoreSource::Content(bytes, _) => {
             let mut file = fs::File::open(path)?;
             if file.metadata()?.len() != bytes.len() as u64 {
                 return Ok(false);
@@ -276,7 +279,7 @@ fn git(root: &Path) -> Command {
 /// Resolve committed versions once for all consumers. No durable Git bookkeeping.
 fn effective_baselines(
     transcript: &Path,
-    rows: Vec<(PathBuf, Baseline)>,
+    rows: BaselineRows,
 ) -> Result<Vec<(PathBuf, RestoreSource)>, AppError> {
     let mut result: Vec<_> = rows
         .iter()
@@ -419,7 +422,7 @@ fn effective_baselines(
         if !content.status.success() {
             return Err(error("git_baseline_failed"));
         }
-        result[index].1 = RestoreSource::Content(content.stdout);
+        result[index].1 = RestoreSource::Content(content.stdout, rows[index].1.permissions);
     }
     Ok(result)
 }
@@ -519,7 +522,7 @@ pub fn restore(
         )
     };
     let (_, rows) = scope_rows(transcript, Some(source)).map_err(map_error)?;
-    let requested: HashSet<_> = paths.iter().map(|p| Path::new(p)).collect();
+    let requested: HashSet<_> = paths.iter().map(Path::new).collect();
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|(_, r)| requested.contains(r.path.as_path()))

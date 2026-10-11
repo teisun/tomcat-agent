@@ -217,15 +217,18 @@ fn append_preheat_terminal_event(
     if let Some(error) = error {
         extra["error"] = serde_json::Value::String(error);
     }
-    if let Err(error) = append_entry(
-        transcript_path,
-        &TranscriptEntry::Custom(CustomEntry {
-            id: None,
-            parent_id: None,
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            extra,
-        }),
-    ) {
+    let append_result = crate::infra::config::lock::with_config_lock(transcript_path, || {
+        append_entry(
+            transcript_path,
+            &TranscriptEntry::Custom(CustomEntry {
+                id: None,
+                parent_id: None,
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                extra,
+            }),
+        )
+    });
+    if let Err(error) = append_result {
         warn!(%error, transcript = %transcript_path.display(), "failed to persist preheat terminal diagnostic");
     }
 }
@@ -409,6 +412,13 @@ impl Preheat {
         // conversation boundary. Never defer this write into the background task, where
         // intervening message rows would make it a costly mid-file insertion.
         if !transcript_path.as_os_str().is_empty() {
+            let _guard = match crate::infra::config::lock::acquire_config_lock(transcript_path) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    warn!(%error, "could not lock transcript for preheat marker");
+                    return false;
+                }
+            };
             let covered_end_is_latest_message =
                 match read_entries_tail(transcript_path, PREHEAT_TAIL_MESSAGE_SCAN) {
                     Ok(entries) => entries

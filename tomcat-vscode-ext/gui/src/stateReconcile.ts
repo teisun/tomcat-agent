@@ -64,9 +64,10 @@ function reconcileArrayByKey<T>(
   }
   const previousByKey = new Map(previous.map((entry) => [getKey(entry), entry]));
   let changed = previous.length !== next.length;
-  const reconciled = next.map((entry) => {
+  const reconciled = next.map((entry, index) => {
     const prior = previousByKey.get(getKey(entry));
     if (prior && deepEqual(prior, entry)) {
+      changed ||= prior !== previous[index];
       return prior;
     }
     changed = true;

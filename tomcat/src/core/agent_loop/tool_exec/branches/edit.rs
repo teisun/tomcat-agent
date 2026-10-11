@@ -621,6 +621,7 @@ fn failed_entry(file: String, error: String) -> ToolDisplayFileEntry {
 }
 
 fn precheck_file(ctx: &ToolExecCtx<'_>, path: &str) -> Result<(), String> {
+    ctx.enforce_write_path_policy(path)?;
     if crate::core::tools::pipeline::edit_normalize::is_unsupported_structured_file(path) {
         return Err(format!("Notebook: `{path}` is a Jupyter notebook (.ipynb), which edit does not support; use an nbformat tool or export the target cell to .py / .md first"));
     }

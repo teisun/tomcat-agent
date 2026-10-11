@@ -224,21 +224,30 @@ export function linkifyInlineFilePaths(
   }
 }
 
+type MarkdownDecorationOptions = {
+  mediaRoots?: WebviewMediaRoot[];
+  pathResolutions?: ReadonlyMap<string, PathResolution>;
+};
+
 export function buildDecoratedHtml(
   markdown: string,
-  options?: {
-    mediaRoots?: WebviewMediaRoot[];
-    pathResolutions?: ReadonlyMap<string, PathResolution>;
-    sourceLineMap?: number[];
-  },
+  options?: MarkdownDecorationOptions & { sourceLineMap?: number[] },
 ): string {
+  return decorateMarkdownHtml(renderMarkdownHtml(markdown, options?.sourceLineMap), options);
+}
+
+// Both whole-document previews and chat blocks retain the same sanitizer and
+// local-media boundary; parsing a block again would lose document references.
+export function decorateMarkdownHtml(
+  renderedHtml: string,
+  options?: MarkdownDecorationOptions,
+): string {
+  const safeHtml = sanitizeMarkdownHtml(renderedHtml);
   if (typeof document === "undefined") {
-    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown, options?.sourceLineMap));
+    return safeHtml;
   }
   const container = document.createElement("div");
-  container.innerHTML = sanitizeMarkdownHtml(
-    renderMarkdownHtml(markdown, options?.sourceLineMap),
-  );
+  container.innerHTML = safeHtml;
   decorateCodeCards(container);
   rewriteLocalImages(container, options?.mediaRoots ?? []);
   linkifyInlineFilePaths(container, options?.pathResolutions);

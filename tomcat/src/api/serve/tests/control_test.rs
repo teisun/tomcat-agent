@@ -609,6 +609,44 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     assert_eq!(catalog["tools"][0]["enabled"], true);
     assert_eq!(catalog["tools"][1]["rawName"], "status");
     assert_eq!(catalog["tools"][1]["enabled"], false);
+    // A cached registry from another runtime configuration still owns this
+    // project's same credential and must participate in management logout.
+    let mut peer_cfg = state.cfg.clone();
+    peer_cfg.connector.mcp.max_concurrent_calls += 1;
+    let peer =
+        crate::core::connector::ConnectorRegistry::new(&peer_cfg, Some(&workspace_root)).unwrap();
+    let peer_manager = peer.mcp_manager();
+    peer_manager.connect_server(&config_key).await.unwrap();
+    let credentials =
+        crate::core::connector::mcp::oauth::OAuthTokenStore::open(&state.cfg).unwrap();
+    credentials
+        .save_static_bearer(&config_key, "fixture-token".into(), None)
+        .unwrap();
+    assert_eq!(peer_manager.statuses()[0].state.code(), "connected");
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::LogoutConnector {
+            id: Some("logout-shared-connector".into()),
+            config_key: config_key.clone(),
+            context: connector_context.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let frames = wait_for_line(&buffer, |line| line["id"] == "logout-shared-connector").await;
+    let response = frames
+        .iter()
+        .find(|line| line["id"] == "logout-shared-connector")
+        .unwrap();
+    let peer_retired = peer_manager.statuses()[0].state.code() == "disconnected";
+    let removed = credentials.load(&config_key).unwrap().is_none();
+    peer.logout_server(&config_key).unwrap();
+    assert_eq!(response["success"], true);
+    assert_eq!(response["payload"]["loggedOut"], true);
+    assert!(
+        removed && peer_retired,
+        "Serve logout must use the shared registry workflow"
+    );
     session_connector
         .mcp_manager()
         .remove_configured_server(&config_key, &state.cfg)
@@ -950,12 +988,12 @@ async fn shutdown_all_sessions_stops_live_plugin_vms_idempotently() {
     plugin_manager
         .enable_plugin(PLUGIN_ID)
         .expect("enable plugin fixture");
-    plugin_manager
+    let handle = plugin_manager
         .start_session_vm(&slot.session_id, PLUGIN_ID)
         .await
         .expect("start session vm");
 
-    let instance_id = format!("{}/{}", slot.session_id, PLUGIN_ID);
+    let instance_id = handle.instance_id;
     assert!(
         plugin_manager.has_session_vm(&slot.session_id, PLUGIN_ID),
         "fixture should have a live session VM before shutdown"

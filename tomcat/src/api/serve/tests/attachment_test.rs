@@ -331,11 +331,11 @@ async fn ingest_attachment_rejects_mislabelled_bytes() {
     );
 }
 
-// ── 完整发送链 + 零拷贝 ────────────────────────────────────────────────
+// ── 完整发送链 + blob 内容/身份保留 ─────────────────────────────────────
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_bytes() {
+async fn ingest_then_prompt_preserves_blob_bytes_and_identity() {
     let _api_key = install_test_api_key();
     let (state, buffer, temp, slot, requests) =
         build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
@@ -427,7 +427,9 @@ async fn ingest_then_prompt_reaches_transcript_and_provider_without_rewriting_by
     );
     let _ = temp;
 
-    // (3) 零拷贝：blob 文件原地不动
+    // (3) The blob's bytes and identity survive promotion; mtime may be touched.
+    // These assertions do not claim to count write syscalls or memory copies.
+    assert_eq!(std::fs::read(&blob_path).unwrap(), bytes);
     let after = std::fs::metadata(&blob_path).unwrap();
     assert!(
         after.modified().unwrap() >= before_modified,

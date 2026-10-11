@@ -921,17 +921,16 @@ export class TomcatMessenger {
       return;
     }
 
+    const pending = this.pendingControl.get(frame.requestId);
     if (frame.type === "control_cancel") {
       const active = this.activeControlRequests.get(frame.requestId);
-      if (!active) {
-        this.log("debug", `dropping unknown control cancel ${frame.requestId}`);
+      active?.abort();
+      if (!pending) {
+        if (!active) this.log("debug", `dropping unknown control cancel ${frame.requestId}`);
         return;
       }
-      active.abort();
-      return;
     }
 
-    const pending = this.pendingControl.get(frame.requestId);
     if (!pending) {
       this.log("debug", `dropping unknown control frame ${frame.requestId}`);
       return;

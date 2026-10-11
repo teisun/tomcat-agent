@@ -246,7 +246,8 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 }
 
 /// Fingerprints the safe, regular-file-only source tree before confirmation. The
-/// digest records every relative name and every byte, so a changed source cannot
+/// digest frames each relative name and file content with its length and includes
+/// Unix file modes, so name/content boundaries and executable/private bits cannot
 /// be substituted between preparation and staging.
 pub(super) fn source_tree_digest(source: &Path) -> Result<String, AppError> {
     let mut hasher = Sha256::new();
@@ -320,7 +321,9 @@ fn snapshot_tree(
         }
         if file_type.is_dir() {
             hasher.update(b"D\0");
-            hasher.update(child_relative.to_string_lossy().as_bytes());
+            let relative_name = child_relative.to_string_lossy();
+            hasher.update((relative_name.len() as u64).to_le_bytes());
+            hasher.update(relative_name.as_bytes());
             snapshot_tree(
                 &source_path,
                 &child_relative,
@@ -329,7 +332,9 @@ fn snapshot_tree(
             )?;
         } else if file_type.is_file() {
             hasher.update(b"F\0");
-            hasher.update(child_relative.to_string_lossy().as_bytes());
+            let relative_name = child_relative.to_string_lossy();
+            hasher.update((relative_name.len() as u64).to_le_bytes());
+            hasher.update(relative_name.as_bytes());
             copy_regular_file(&source_path, target_path.as_deref(), hasher)?;
         } else {
             return Err(AppError::Permission(tr(
@@ -405,21 +410,44 @@ fn copy_regular_file(
             &[("path", &source.display().to_string())],
         )));
     }
+    hasher.update(metadata.len().to_le_bytes());
+    #[cfg(unix)]
+    hasher.update(metadata.mode().to_le_bytes());
     let mut target_file = target
-        .map(|path| File::create(path).map_err(AppError::Io))
+        .map(|path| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            // Staging bytes stay private until the complete file has its source mode.
+            #[cfg(unix)]
+            options.mode(0o600);
+            options.open(path).map_err(AppError::Io)
+        })
         .transpose()?;
+    let mut copied = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = source_file.read(&mut buffer).map_err(AppError::Io)?;
         if read == 0 {
             break;
         }
+        copied += read as u64;
         hasher.update(&buffer[..read]);
         if let Some(target_file) = target_file.as_mut() {
             target_file
                 .write_all(&buffer[..read])
                 .map_err(AppError::Io)?;
         }
+    }
+    if copied != metadata.len() {
+        return Err(AppError::Permission(tr(
+            "package.sourceChanged",
+            &[("path", &source.display().to_string())],
+        )));
+    }
+    if let Some(target_file) = target_file {
+        target_file
+            .set_permissions(metadata.permissions())
+            .map_err(AppError::Io)?;
     }
     Ok(())
 }

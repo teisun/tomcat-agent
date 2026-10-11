@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use parking_lot::Mutex;
 use serde_json::json;
 use tracing::warn;
 
@@ -127,7 +126,6 @@ pub(crate) struct JsonlFileAppendSink {
     parent_session_id: String,
     subagent_type: SubagentType,
     model: String,
-    write_lock: Mutex<()>,
 }
 
 impl JsonlFileAppendSink {
@@ -144,7 +142,6 @@ impl JsonlFileAppendSink {
             parent_session_id: parent_session_id.to_string(),
             subagent_type,
             model: model.to_string(),
-            write_lock: Mutex::new(()),
         }
     }
 
@@ -156,9 +153,15 @@ impl JsonlFileAppendSink {
         let row_id = forced_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(generate_entry_id);
-        let _guard = self.write_lock.lock();
+        let _guard = match crate::infra::config::lock::acquire_config_lock(&self.path) {
+            Ok(guard) => guard,
+            Err(error) => {
+                warn!(path = %self.path.display(), %error, "subagent transcript lock failed; continuing without persistence");
+                return Ok(row_id);
+            }
+        };
 
-        if let Err(error) = self.ensure_initialized() {
+        if let Err(error) = self.ensure_initialized_while_locked() {
             warn!(
                 path = %self.path.display(),
                 error = %error,
@@ -205,9 +208,9 @@ impl JsonlFileAppendSink {
     }
 
     fn append_custom_entry_internal(&self, extra: serde_json::Value) -> Result<(), AppError> {
-        let _guard = self.write_lock.lock();
+        let _guard = crate::infra::config::lock::acquire_config_lock(&self.path)?;
 
-        self.ensure_initialized()?;
+        self.ensure_initialized_while_locked()?;
 
         let entry = TranscriptEntry::Custom(CustomEntry {
             id: Some(generate_entry_id()),
@@ -219,6 +222,11 @@ impl JsonlFileAppendSink {
     }
 
     fn ensure_initialized(&self) -> Result<(), AppError> {
+        let _guard = crate::infra::config::lock::acquire_config_lock(&self.path)?;
+        self.ensure_initialized_while_locked()
+    }
+
+    fn ensure_initialized_while_locked(&self) -> Result<(), AppError> {
         let needs_init = match std::fs::metadata(&self.path) {
             Ok(meta) => meta.len() == 0,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,

@@ -57,3 +57,6 @@ pub use events::{AgentEvent, ExtensionEvent};
 pub use i18n::tr;
 pub use logging::init_logging;
 pub use platform::{normalize_path, read_file_utf8, write_file_atomic};
+
+#[cfg(test)]
+mod tests;

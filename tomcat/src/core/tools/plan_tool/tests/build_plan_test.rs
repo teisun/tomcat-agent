@@ -337,7 +337,7 @@ fn completed_session_can_build_another_explicit_plan() {
 }
 
 #[test]
-fn default_build_target_prefers_planning_pending_then_path() {
+fn default_build_target_preserves_bound_path_and_rejects_executing() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
 
@@ -372,8 +372,8 @@ fn default_build_target_prefers_planning_pending_then_path() {
     )
     .unwrap();
     assert_eq!(
-        rt.default_build_target().unwrap(),
-        second["plan_id"].as_str().unwrap()
+        std::path::PathBuf::from(rt.default_build_target().unwrap()),
+        plan_path_for_id(second["plan_id"].as_str().unwrap()).unwrap()
     );
     assert_ne!(first["plan_id"], second["plan_id"]);
 
@@ -381,8 +381,11 @@ fn default_build_target_prefers_planning_pending_then_path() {
     write_disk_plan("pending-default", PlanFileState::Pending);
     let pending_path = plan_path_for_id("pending-default").unwrap();
     let pending_plan = read_plan(&pending_path).unwrap();
-    rt.refresh_active_plan_after_write(pending_path, &pending_plan);
-    assert_eq!(rt.default_build_target().unwrap(), "pending-default");
+    rt.refresh_active_plan_after_write(pending_path.clone(), &pending_plan);
+    assert_eq!(
+        std::path::PathBuf::from(rt.default_build_target().unwrap()),
+        pending_path
+    );
 
     let rt = PlanRuntime::new("session-a");
     let external_dir = home.join("external-default");

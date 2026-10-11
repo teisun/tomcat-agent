@@ -134,6 +134,55 @@ describe("StateBroadcaster", () => {
     ]);
   });
 
+  it("reserves a patch sequence before the in-flight flush finishes", async () => {
+    const { clock } = createClock();
+    const plans: StateBroadcasterFlushPlan[] = [];
+    let release!: () => void;
+    let entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const broadcaster = new StateBroadcaster({
+      clock,
+      flush: async plan => {
+        plans.push(plan);
+        if (plans.length === 1) { entered(); await barrier; }
+      },
+    });
+    try {
+      broadcaster.appendPatch("s1", [{ item: messageItem("m1", "hello"), type: "upsert" }]);
+      const pending = broadcaster.forceFlush();
+      await started;
+      broadcaster.appendPatch("s1", [{ id: "m1", text: " world", type: "appendText" }]);
+      release();
+      await pending;
+      await broadcaster.forceFlush();
+      expect(plans.map(plan => plan.sessionPatches[0].seq)).toEqual([1, 2]);
+    } finally {
+      release();
+      broadcaster.dispose();
+    }
+  });
+
+  it("reports a failed flush without poisoning subsequent snapshots", async () => {
+    const { clock } = createClock();
+    let attempts = 0;
+    const broadcaster = new StateBroadcaster({
+      clock,
+      flush: async () => {
+        if (++attempts === 1) throw new Error("view changed during send");
+      },
+    });
+    try {
+      broadcaster.markFullState();
+      await expect(broadcaster.forceFlush()).rejects.toThrow("view changed during send");
+      broadcaster.markFullState();
+      await expect(broadcaster.forceFlush()).resolves.toBeUndefined();
+      expect(attempts).toBe(2);
+    } finally {
+      broadcaster.dispose();
+    }
+  });
+
   it("increments patch seq per flushed session", async () => {
     const plans: StateBroadcasterFlushPlan[] = [];
     const broadcaster = new StateBroadcaster({

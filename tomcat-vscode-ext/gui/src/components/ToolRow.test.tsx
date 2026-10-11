@@ -15,6 +15,11 @@ import {
 } from "./ToolRow";
 
 const backendEditNote = "第 2 段匹配到 3 处";
+const askQuestionArgs = {
+  questions: [{ id: "choice", prompt: "Continue?", options: [
+    { id: "yes", label: "Yes", recommended: true }, { id: "no", label: "No" },
+  ] }],
+};
 
 function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
   return {
@@ -1287,6 +1292,31 @@ describe("ToolRow", () => {
     expect(clampTaskOutputBudget(600001)).toBe(600000);
     expect(formatCountdown(599000)).toBe("9m59s");
     expect(formatCountdown(45000)).toBe("45s");
+  });
+
+  it.each([
+    ["answered", "answer.count.other", false],
+    ["skipped", "answer.skippedRequest", true],
+    ["interrupted", "answer.interrupted", true],
+    ["host_disconnected", "answer.disconnected", true],
+    ["cancelled_unknown", "answer.cancelled", true],
+    [undefined, "answer.cancelled", true],
+  ] as const)("preserves ask_question outcome %s through the tool row", (outcome, labelKey, cancelled) => {
+    render(<ToolRow item={buildTool({
+      toolName: "ask_question", args: askQuestionArgs,
+      summary: JSON.stringify({ answers: [], cancelled, outcome }),
+    })} onOpenFile={vi.fn()} />);
+    expect(screen.getByTestId("answer-card").getAttribute("data-outcome")).toBe(outcome ?? "cancelled_unknown");
+    expect(screen.getByTestId("answer-card-outcome").textContent).toBe(translate("en", labelKey, { count: 0 }));
+  });
+
+  it("keeps an invalid ask_question outcome as plain output instead of guessing a cancellation", () => {
+    render(<ToolRow item={buildTool({
+      toolName: "ask_question", args: askQuestionArgs,
+      summary: JSON.stringify({ answers: [], cancelled: true, outcome: "future-state" }),
+    })} onOpenFile={vi.fn()} />);
+    expect(screen.queryByTestId("answer-card")).toBeNull();
+    expect(screen.getByTestId("tool-row-result").textContent).toContain("future-state");
   });
 
   it("accepts snake_case ask_question results from the transcript", () => {

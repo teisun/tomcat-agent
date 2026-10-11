@@ -7,7 +7,7 @@ Tomcat 支持 GitHub 官方的 Streamable HTTP MCP 服务。最小配置只需�
 在 Tomcat Connectors 设置中选择：
 
 - **Type**：MCP
-- **Scope**：Workspace（默认）
+- **Scope**：Global（默认）；需要项目共享时显式选择 Workspace
 - **Transport**：HTTP
 - **URL**：`https://api.githubcopilot.com/mcp/`
 - **Authentication**：OAuth 2.0
@@ -15,7 +15,7 @@ Tomcat 支持 GitHub 官方的 Streamable HTTP MCP 服务。最小配置只需�
 点击 **Add** 后，Tomcat 会：
 
 ```text
-保存 Workspace/.tomcat/mcp.json
+保存所选范围的 mcp.json（以 UI 显示路径为准）
           │
           ▼
 请求 GitHub MCP → 读取 401 WWW-Authenticate
@@ -35,6 +35,8 @@ GitHub 授权 → 127.0.0.1 临时回调
 
 不需要手工创建 OAuth App，不需要把 GitHub 密码、PAT 或 client secret 填进 Tomcat。只有授权页面由 GitHub 处理登录和权限确认。
 
+Global 配置路径由 `get_work_dir(cfg)/mcp.json` 决定；Workspace 对应 `<项目根>/<workspace.project_resource_dir>/mcp.json`，项目资源目录默认 `.agents`。不要硬编码为 `.tomcat`；未打开项目时 Workspace 不可选。Workspace 来源还须通过下述项目级信任，OAuth 同意不能替代项目信任。
+
 ## 权限边界
 
 1. Tomcat 只请求 MCP authorization server 宣布的 scope；不会自行扩大权限。
@@ -49,9 +51,9 @@ GitHub 授权 → 127.0.0.1 临时回调
 在 Connector 详情中：
 
 - **Login / Re-login**：重新打开 GitHub 授权流程。
-- **Logout**：删除本机该连接器的 OAuth token；不会撤销 GitHub 账号中的其他授权。
+- **Logout**：删除本机该连接器的 OAuth token，并退休同一后端内共享该凭据的缓存连接；不承诺撤销已发送的远端操作、其他后端进程缓存或 GitHub 账号上的授权。
 - **Reload**：重新连接并刷新 `tools/list`。
-- **Remove**：删除 Workspace 连接器配置；如需彻底撤销权限，请同时在 GitHub 的授权设置中撤销。
+- **Remove**：删除所选来源配置并清理对应本机凭据；如需撤销服务商授权，请同时在 GitHub 的授权设置中撤销。
 
 ## 常见问题
 
@@ -73,9 +75,9 @@ GitHub 授权 → 127.0.0.1 临时回调
 
 Tomcat 会优先使用本机保存的 access token，并在存在 refresh token 时尝试一次刷新。刷新被拒绝时，连接器会回到需要授权状态；不要把 PAT 粘贴到 `mcp.json`，直接使用 Login / Re-login。
 
-### 连接器被标为“待确认”
+### 显示“等待项目信任”
 
-Workspace 中的连接器首次出现或启动身份发生变化时，Tomcat 会先等待信任确认。这是为了避免仓库配置被悄悄替换成另一个外部程序或 URL。确认前不会启动对应连接器。
+Workspace 连接器受项目级信任控制：用户确认的是当前项目根，不是逐条命令或 URL 的审批清单。同一未信任项目下的服务共用一个 Trust 入口；信任前不启动，Global 来源不因此被阻塞。项目一旦受信任，配置变更不会自动新增逐命令确认；不要把项目来源的普通配置和 OAuth 授权混为一谈。
 
 ### GitHub 官方远程服务暂时不可用
 

@@ -33,6 +33,26 @@ async function reply(requestId:string, content:Record<string,unknown>) {
 }
 
 describe("inline user-message edit",()=>{
+  it.each([true, false])("settles only the matching send receipt without another mutation (success=%s)", async success => {
+    const { intents, onClose } = setup();
+    await waitFor(() => expect(screen.getByTestId("edit-send-button")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("edit-send-button"));
+    const request = intents().find(intent => intent.type === "rewindAndResend")!;
+    await reply("another-request", { type: "rewindAndResendResult", success: true });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("edit-send-button")).toBeDisabled();
+    const result = { type: "rewindAndResendResult", success, error: success ? undefined : "backend rejected the edit" };
+    await reply(request.messageId, result);
+    await reply(request.messageId, result);
+    if (success) expect(onClose).toHaveBeenCalledOnce();
+    else {
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByText("backend rejected the edit")).toBeInTheDocument();
+      expect(screen.getByTestId("edit-composer-input").textContent).toBe("Original message");
+    }
+    expect(intents().filter(intent => intent.type === "rewindAndResend")).toHaveLength(1);
+  });
+
   it("locks configuration to the running session without disabling the historical draft", async () => {
     const onModeChange = vi.fn(), onModelChange = vi.fn();
     const attached = { ...message, attachments: [{ id: "image", blobSha: "a".repeat(64), filename: "image.png", kind: "image" as const, mimeType: "image/png" }] };

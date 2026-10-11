@@ -1553,7 +1553,7 @@ fn parse_non_stream_response(bytes: &[u8]) -> Result<ChatResponse, AppError> {
         .map_err(|e| map_parse_error(&tr("llm.action.parseResponse", &[]), e))?;
     let mut response: ChatResponse = serde_json::from_value(raw.clone())
         .map_err(|e| map_parse_error(&tr("llm.action.parseResponse", &[]), e))?;
-    if let Some(usage) = raw.get("usage") {
+    if let Some(usage) = raw.get("usage").filter(|usage| !usage.is_null()) {
         let usage: OpenAiUsage = serde_json::from_value(usage.clone())
             .map_err(|e| map_parse_error(&tr("llm.action.parseUsage", &[]), e))?;
         response.usage = Some(usage.into());

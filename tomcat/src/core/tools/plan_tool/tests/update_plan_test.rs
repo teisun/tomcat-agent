@@ -28,6 +28,82 @@ fn rewrite_todos_board_noop_without_markers() {
     assert_eq!(body, original);
 }
 
+#[test]
+fn verify_hint_is_a_prompt_not_a_green_build_contract() {
+    let hint = crate::core::plan_runtime::NextAction::RunVerify.instruction();
+    assert!(hint.contains("load_skill(verify)"));
+    assert!(!hint.contains("green_build"));
+    assert!(!hint.contains("acceptance_commands"));
+}
+
+#[tokio::test]
+async fn nonexecuting_plans_reject_in_progress_updates_without_writing_the_plan() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    let path = plan_path_for_id(&plan_id).unwrap();
+    for state in [
+        PlanFileState::Planning,
+        PlanFileState::Pending,
+        PlanFileState::Completed,
+    ] {
+        let mut plan = read_plan(&path).unwrap();
+        plan.frontmatter.state = state;
+        if state == PlanFileState::Completed {
+            for todo in &mut plan.frontmatter.todos {
+                todo.status = TodoStatus::Completed;
+            }
+        }
+        write_plan(&path, &plan, 2000).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for op in [
+            update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            },
+            update_plan::UpdateOp::Upsert {
+                id: "t1".into(),
+                content: None,
+                status: Some(TodoStatus::InProgress),
+                todo_kind: None,
+            },
+        ] {
+            let err = update_plan::execute(
+                &rt,
+                update_plan::UpdatePlanArgs {
+                    plan_id: Some(plan_id.clone()),
+                    path: None,
+                    replace: false,
+                    ops: vec![
+                        update_plan::UpdateOp::Upsert {
+                            id: "t2".into(),
+                            content: Some("must not be partially written".into()),
+                            status: None,
+                            todo_kind: None,
+                        },
+                        op,
+                    ],
+                },
+            )
+            .await
+            .expect_err("only executing plans may start work");
+            assert!(
+                matches!(err, ToolError::BadArgs(ref message)
+                if message.contains("in_progress") && message.contains(state.as_str())),
+                "{err}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "rejected batch must not change any plan bytes"
+            );
+        }
+    }
+    cleanup_home(&home);
+}
+
 #[tokio::test]
 async fn update_plan_set_status_returns_full_items_snapshot() {
     let _g = home_lock().lock().unwrap();
@@ -288,7 +364,7 @@ async fn update_plan_cross_session_rejected_for_executing() {
     )
     .await
     .expect_err("session-b 不应能写入 session-a 的 executing plan");
-    matches!(err, ToolError::CrossSessionDenied(_));
+    assert!(matches!(err, ToolError::CrossSessionDenied(_)));
     cleanup_home(&home);
 }
 

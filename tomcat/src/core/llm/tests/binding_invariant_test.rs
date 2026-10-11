@@ -21,6 +21,7 @@ fn rel_src(path: &Path, src_root: &Path) -> String {
     path.strip_prefix(src_root)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.display().to_string())
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 fn is_allowed_from_parts_path(rel: &str) -> bool {
@@ -47,13 +48,16 @@ fn from_parts_unchecked_only_appears_in_resolver_and_test_code() {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
-        if text.contains("from_parts_unchecked") {
+        if ["from_parts_unchecked", "from_provider_and_entry_unchecked"]
+            .iter()
+            .any(|name| text.contains(name))
+        {
             offenders.push(rel);
         }
     }
     assert!(
         offenders.is_empty(),
-        "生产路径不得调用 from_parts_unchecked；违规文件: {offenders:?}"
+        "生产路径不得调用 unchecked binding 工厂；违规文件: {offenders:?}"
     );
 }
 

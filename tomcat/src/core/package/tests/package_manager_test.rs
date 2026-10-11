@@ -718,6 +718,137 @@ fn uninstall_uses_package_registry_for_precise_cleanup() {
         .is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn install_preserves_regular_file_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "file-modes",
+        "preserve scripts and private files",
+    );
+    for (name, mode) in [("run.sh", 0o755), ("private.txt", 0o600)] {
+        let path = source.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nprintf installed\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let cfg = test_config(work.path());
+    let manager = PackageManager::new(&cfg);
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    manager.install(prepared).unwrap();
+    let installed = resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path()))
+        .unwrap()
+        .skills_dir
+        .join("file-modes");
+    for (name, mode) in [("run.sh", 0o755), ("private.txt", 0o600)] {
+        assert_eq!(
+            std::fs::metadata(installed.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode,
+            "{name}"
+        );
+    }
+    let output = std::process::Command::new(installed.join("run.sh"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"installed");
+}
+
+#[test]
+fn install_rejects_ambiguous_path_content_substitution() {
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "digest-boundary",
+        "path and content are separate fields",
+    );
+    std::fs::write(source.path().join("a"), "bc").unwrap();
+    let cfg = test_config(work.path());
+    let manager = PackageManager::new(&cfg);
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    std::fs::rename(source.path().join("a"), source.path().join("ab")).unwrap();
+    std::fs::write(source.path().join("ab"), "c").unwrap();
+    let error = manager
+        .install(prepared)
+        .expect_err("a+bc and ab+c must not have the same source digest");
+    assert!(
+        error
+            .to_string()
+            .contains(&tr_in(Locale::En, "package.sourceChanged", &[("path", "")])),
+        "{error}"
+    );
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(!paths.skills_dir.join("digest-boundary").exists());
+    assert!(load_package_registry(&paths.package_registry_path)
+        .unwrap()
+        .packages
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_source_mode_changed_after_preparation() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "changed-mode",
+        "mode changes require a fresh confirmation",
+    );
+    let script = source.path().join("run.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf installed\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let cfg = test_config(work.path());
+    let manager = PackageManager::new(&cfg);
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = manager
+        .install(prepared)
+        .expect_err("confirmed file permissions must not change");
+    assert!(
+        error
+            .to_string()
+            .contains(&tr_in(Locale::En, "package.sourceChanged", &[("path", "")])),
+        "{error}"
+    );
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(!paths.skills_dir.join("changed-mode").exists());
+}
+
 #[test]
 fn install_rejects_a_source_changed_after_preparation() {
     let work_dir = tempfile::tempdir().unwrap();

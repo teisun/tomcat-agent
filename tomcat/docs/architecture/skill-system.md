@@ -630,7 +630,7 @@ pub struct SkillFrontmatter {
 | 字段                         | YAML 类型           | 必填    | 默认      | 适用场景                   | 说明                                                              | 说人话              |
 | -------------------------- | ----------------- | ----- | ------- | ---------------------- | --------------------------------------------------------------- | ---------------- |
 | `name`                     | string            | **是** | —       | 技能身份                   | `[a-z0-9-]+`，≤64 字；唯一性见文首导读 D 状态机（发现去重）；缺失 → 跳过 + diagnostic              | 技能的唯一名字。         |
-| `description`              | string            | **是** | —       | 进 `<available_skills>` | ≤1024 字（prompt 中再按 250 截断）；缺失 → 跳过 + diagnostic                 | 一句话说清这技能干嘛、何时用。  |
+| `description`              | string            | **是** | —       | 进 `<available_skills>` | ≤1024 UTF-8 bytes（与整个 header 的独立 4096-byte 上限分开；prompt 中再按 250 字符截断）；缺失 → 跳过 + diagnostic                 | 一句话说清这技能干嘛、何时用。  |
 | `license`                  | string            | 否     | null    | 元信息                    | 仅记录，不影响装载                                                       | 许可证，存着备查。        |
 | `compatibility`            | string            | 否     | null    | 元信息                    | 仅记录                                                             | 兼容性说明。           |
 | `metadata`                 | map               | 否     | `{}`    | 扩展位                    | 透传保存，未来扩展（emoji/tags 等）                                         | 自定义附加信息。         |

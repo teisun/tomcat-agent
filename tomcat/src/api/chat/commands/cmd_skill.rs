@@ -98,7 +98,7 @@ async fn run_use(ctx: &ChatContext, name: &str, intent: &str) -> ChatCommandOutc
         intent,
     ) {
         Ok(message) => ChatCommandOutcome::UserMessage {
-            message,
+            message: Box::new(message),
             history_line: format!("/skill use {name} {intent}"),
         },
         Err(error) => {

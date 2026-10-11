@@ -91,28 +91,6 @@ fn retry_attempt_budget(unattended_execution: bool, interactive_max_attempts: u3
     }
 }
 
-#[allow(clippy::items_after_test_module)]
-#[cfg(test)]
-mod retry_budget_tests {
-    use super::*;
-
-    #[test]
-    fn unattended_mode_allows_ten_attempts() {
-        assert_eq!(
-            retry_attempt_budget(true, DEFAULT_AGENT_MAX_ATTEMPTS),
-            UNATTENDED_TRANSIENT_MAX_ATTEMPTS
-        );
-        assert_eq!(
-            retry_attempt_budget(false, DEFAULT_AGENT_MAX_ATTEMPTS),
-            DEFAULT_AGENT_MAX_ATTEMPTS
-        );
-        assert_eq!(
-            compute_retry_delay_with_cap_ms(500, 20, 40, UNATTENDED_RETRY_DELAY_CAP_MS),
-            UNATTENDED_RETRY_DELAY_CAP_MS
-        );
-    }
-}
-
 #[cfg(test)]
 pub(super) fn compute_retry_delay_ms(base_delay_ms: u64, attempt: u32, jitter_seed: u64) -> u64 {
     compute_retry_delay_with_cap_ms(
@@ -311,73 +289,6 @@ impl AgentLoop {
             reason,
         )
         .await;
-    }
-}
-
-#[cfg(test)]
-mod unfinished_plan_handoff_tests {
-    use super::hand_back_unfinished_plan_if_needed;
-    use crate::core::plan_runtime::file_store::{
-        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind,
-        TodoStatus,
-    };
-    use crate::core::plan_runtime::PlanRuntime;
-
-    #[tokio::test]
-    async fn run_ended_while_executing_hands_back_visibly() {
-        let directory = tempfile::tempdir().expect("plan directory");
-        let path = directory.path().join("plan.plan.md");
-        let plan = PlanFile {
-            frontmatter: PlanFileFrontmatter {
-                plan_id: "run-exit".into(),
-                goal: "finish remaining work".into(),
-                state: PlanFileState::Executing,
-                session_key: Some("session".into()),
-                session_id: None,
-                created_at: "2026-09-18T00:00:00Z".into(),
-                schema_version: 1,
-                todos: vec![TodoItem {
-                    id: "work".into(),
-                    content: "finish implementation".into(),
-                    status: TodoStatus::Pending,
-                    evidence: Vec::new(),
-                    kind: TodoKind::Work,
-                }],
-                code_review_pass: false,
-                code_review_rounds: 0,
-                code_review_open_findings: Vec::new(),
-                code_review_disputed_findings: Vec::new(),
-                code_review_handoff: false,
-                code_review_handoff_acknowledged: false,
-                code_review_residual_findings: Vec::new(),
-                unknown: Default::default(),
-            },
-            body: String::new(),
-        };
-        write_plan(&path, &plan, 1_000).expect("write plan");
-
-        let runtime = PlanRuntime::new("session");
-        runtime.bind_plan_file_for_test(path.clone());
-        let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
-        {
-            let events = events.clone();
-            runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
-                events.lock().push(event);
-                Ok(())
-            }));
-        }
-
-        hand_back_unfinished_plan_if_needed(true, Some(&runtime), "run_ended_while_executing")
-            .await;
-
-        assert_eq!(
-            read_plan(&path).expect("read plan").frontmatter.state,
-            PlanFileState::Pending
-        );
-        assert!(events.lock().iter().any(|event| {
-            event["event"] == crate::infra::wire::WIRE_PLAN_STALLED
-                && event["reason"] == "run_ended_while_executing"
-        }));
     }
 }
 
@@ -582,6 +493,9 @@ impl AgentLoop {
                     // 保证"谁拥有 attempt 循环谁决定终止"。
                     let overflow_hit = crate::infra::error::is_context_overflow(&e);
                     let overflow_stats = handle_overflow_retry(self, messages, attempt, &e).await;
+                    if self.cancel_token.is_cancelled() {
+                        return Err(self.make_aborted(messages, String::new()));
+                    }
                     // ContextOverflow 只能在 payload 确实缩小后才允许下一次请求。
                     // 否则每次都会发送同一份超限上下文，消耗完 attempt 后才给用户一个
                     // 更晚、更难理解的错误。
@@ -639,3 +553,7 @@ impl AgentLoop {
         })))
     }
 }
+
+#[cfg(test)]
+#[path = "tests/run_test.rs"]
+mod tests;

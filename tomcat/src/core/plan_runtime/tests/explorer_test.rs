@@ -22,7 +22,15 @@ fn explorer_tools_are_read_only() {
             "explorer must not expose {forbidden}"
         );
     }
-    for allowed in ["read", "search_files", "list_dir", "bash"] {
+    for allowed in [
+        "read",
+        "search_files",
+        "list_dir",
+        "bash",
+        "task_output",
+        "task_stop",
+        "task_list",
+    ] {
         assert!(EXPLORER_ALLOWED_TOOLS.contains(&allowed));
     }
 }

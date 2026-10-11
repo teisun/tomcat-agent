@@ -660,7 +660,9 @@ fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>
             new_content,
         })
         .collect();
-    if let Err(err) = rewrite_message_text_entries_by_id(path, &merged) {
+    if let Err(err) = crate::infra::config::lock::with_config_lock(path, || {
+        rewrite_message_text_entries_by_id(path, &merged)
+    }) {
         warn!(error = %err, "mid-turn transcript rewrite failed");
     }
 }
@@ -688,40 +690,51 @@ pub(super) async fn collapse_to_branch_summary(
         transcript_path: (!transcript_path.as_os_str().is_empty())
             .then_some(transcript_path.as_path()),
     };
-    let artifacts = match build_collapse_summary_artifacts(
-        messages,
-        compaction_provider.as_ref(),
-        &agent.config.context_config.compaction_model,
-        request,
-    )
-    .await
-    {
-        Ok(artifacts) => artifacts,
-        Err(error) if agent.config.context_config.compaction_model != session_model => {
-            let reason = super::error_classifier::err_snippet(&error.to_string());
-            agent.emit_event(crate::infra::events::AgentEvent::LlmNotice {
-                finish_reason: "compaction_model_fallback".to_string(),
-                message: crate::infra::i18n::tr(
-                    "agentLoop.compactionFallback",
-                    &[
-                        ("model", &agent.config.context_config.compaction_model),
-                        ("fallback", agent.catalog_id()),
-                        ("reason", &reason),
-                    ],
-                ),
-            });
-            build_collapse_summary_artifacts(
-                messages,
-                agent.llm.as_ref(),
-                &session_model,
-                CollapseSummaryRequest {
-                    resolved_output_limit: None,
-                    ..request
-                },
-            )
-            .await?
-        }
-        Err(error) => return Err(error),
+    let cancel = agent.cancel_token.clone();
+    let summary_request = async {
+        let artifacts = match build_collapse_summary_artifacts(
+            messages,
+            compaction_provider.as_ref(),
+            &agent.config.context_config.compaction_model,
+            request,
+        )
+        .await
+        {
+            Ok(artifacts) => artifacts,
+            Err(error) if agent.config.context_config.compaction_model != session_model => {
+                let reason = super::error_classifier::err_snippet(&error.to_string());
+                agent.emit_event(crate::infra::events::AgentEvent::LlmNotice {
+                    finish_reason: "compaction_model_fallback".to_string(),
+                    message: crate::infra::i18n::tr(
+                        "agentLoop.compactionFallback",
+                        &[
+                            ("model", &agent.config.context_config.compaction_model),
+                            ("fallback", agent.catalog_id()),
+                            ("reason", &reason),
+                        ],
+                    ),
+                });
+                build_collapse_summary_artifacts(
+                    messages,
+                    agent.llm.as_ref(),
+                    &session_model,
+                    CollapseSummaryRequest {
+                        resolved_output_limit: None,
+                        ..request
+                    },
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
+        Ok::<_, AppError>(artifacts)
+    };
+    // Both proactive and overflow compaction share this cancellation boundary.
+    // Once artifacts are ready, join disk/sidecar publication and the memory update.
+    let artifacts = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(AppError::Llm("compaction cancelled".to_string())),
+        result = summary_request => result?,
     };
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(());
@@ -858,6 +871,7 @@ fn maybe_write_collapse_entry(
     if path.as_os_str().is_empty() {
         return Ok(());
     }
+    let _guard = crate::infra::config::lock::acquire_config_lock(path)?;
     // Collapse normally covers through the current durable tail, so its boundary can be appended
     // in O(1), like /compact and Scheme E preheat. Retain anchor insertion only for an extreme
     // interleaving where another transcript entry arrived while the summary LLM call was running.

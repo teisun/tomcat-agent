@@ -1,10 +1,10 @@
 //! SessionManager struct and its implementation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
@@ -290,7 +290,6 @@ pub struct SessionManager {
     /// 这允许磁盘 `current[key]` 继续承担“跨进程默认指针”的角色，同时保证已启动
     /// 的 chat 在会话存活期间始终写回同一个 session_id。
     pinned_session: Arc<parking_lot::RwLock<Option<PinnedSession>>>,
-    transcript_mutexes: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
     append_in_flight: Arc<AtomicUsize>,
 }
 
@@ -301,7 +300,6 @@ impl Clone for SessionManager {
             store_path: self.store_path.clone(),
             session_key: self.session_key.clone(),
             pinned_session: Arc::clone(&self.pinned_session),
-            transcript_mutexes: Arc::clone(&self.transcript_mutexes),
             append_in_flight: Arc::clone(&self.append_in_flight),
         }
     }
@@ -321,7 +319,6 @@ impl SessionManager {
             store_path,
             session_key: session_key.into(),
             pinned_session: Arc::new(parking_lot::RwLock::new(None)),
-            transcript_mutexes: Arc::new(Mutex::new(HashMap::new())),
             append_in_flight: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -383,7 +380,7 @@ impl SessionManager {
         self.collect_live_blob_shas_with_ledger(None)
     }
 
-    /// Compact stale UI diffs without ever blocking a live transcript append.
+    /// Compact stale UI diffs, skipping transcripts already held by another writer.
     ///
     /// This runs only in startup housekeeping. A contended transcript means a turn has already
     /// started, so that session is safely skipped until the next serve startup.
@@ -555,21 +552,9 @@ impl SessionManager {
             let Some(session_id) = session_id_from_transcript_path(&path) else {
                 continue;
             };
-            let lock = self.transcript_mutex_for_path(&path)?;
-            let _guard = match lock.try_lock() {
-                Ok(guard) => guard,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    tracing::debug!(
-                        transcript = %path.display(),
-                        "sessions: skipping busy tool-display sidecar compaction"
-                    );
-                    continue;
-                }
-                Err(std::sync::TryLockError::Poisoned(error)) => {
-                    return Err(AppError::Config(format!(
-                        "tool-display compaction lock failed: {error}"
-                    )));
-                }
+            let Some(_guard) = crate::infra::config::lock::try_acquire_config_lock(&path)? else {
+                tracing::debug!(transcript = %path.display(), "sessions: skipping busy tool-display sidecar compaction");
+                continue;
             };
             let sidecar_path = tool_display_sidecar_path(&path);
             let fingerprint = FileFingerprint::for_path(&sidecar_path)?;
@@ -662,35 +647,13 @@ impl SessionManager {
         })
     }
 
-    pub(crate) fn transcript_mutex_for_path(
-        &self,
-        path: &Path,
-    ) -> Result<Arc<Mutex<()>>, AppError> {
-        let mut registry = self.transcript_mutexes.lock().map_err(|e| {
-            AppError::Config(crate::infra::i18n::tr(
-                "session.transcriptRegistry",
-                &[("detail", &e.to_string())],
-            ))
-        })?;
-        Ok(registry
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone())
-    }
-
+    /// Serialize the complete synchronous mutation, including reads preceding atomic rename.
     fn with_transcript_lock<T>(
         &self,
         path: &Path,
         f: impl FnOnce() -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let lock = self.transcript_mutex_for_path(path)?;
-        let _guard = lock.lock().map_err(|e| {
-            AppError::Config(crate::infra::i18n::tr(
-                "session.transcriptLock",
-                &[("detail", &e.to_string())],
-            ))
-        })?;
-        f()
+        crate::infra::config::lock::with_config_lock(path, f)
     }
 
     /// 当前会话 key。

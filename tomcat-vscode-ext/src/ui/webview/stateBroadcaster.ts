@@ -214,23 +214,22 @@ export class StateBroadcaster {
       return;
     }
     this.timer = this.clock.setTimeout(() => {
-      void this.enqueueFlush();
+      void this.enqueueFlush().catch(error => console.warn("Tomcat state broadcast failed", error));
     }, this.delayMs);
   }
 
   private enqueueFlush(): Promise<void> {
-    this.flushChain = this.flushChain.then(async () => {
+    const flush = this.flushChain.then(async () => {
       this.clearTimer();
       const plan = this.takePlan();
       if (!plan) {
         return;
       }
       await this.options.flush(plan);
-      for (const patch of plan.sessionPatches) {
-        this.patchSeqBySession.set(patch.sessionId, patch.seq);
-      }
     });
-    return this.flushChain;
+    // Preserve this call's failure without leaving the serial lane permanently rejected.
+    this.flushChain = flush.catch(() => undefined);
+    return flush;
   }
 
   private takePlan(): StateBroadcasterFlushPlan | null {
@@ -264,6 +263,11 @@ export class StateBroadcaster {
 
     this.pendingSessionIds.clear();
     this.pendingSessionPatches.clear();
+
+    // New deltas can arrive while the consumer enriches this batch asynchronously.
+    for (const patch of sessionPatches) {
+      this.patchSeqBySession.set(patch.sessionId, patch.seq);
+    }
 
     return {
       fullState: false,

@@ -1966,6 +1966,31 @@ describe("checkpoint intent handling", () => {
     });
   }
 
+  it.each([true, false])("preserves a rewind receipt when history refresh fails (success=%s)", async success => {
+    setLocale("en");
+    const provider = createCheckpointProvider();
+    const host = provider as any;
+    const response = { success, sessionId: "s1", error: success ? undefined : "server committed failure", payload: { committed: !success } };
+    const request = vi.fn().mockResolvedValue(response);
+    host.deps.messenger.request = request;
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ capabilities: ["rewind_and_resend"] });
+    vi.spyOn(host, "refreshSessionHistory").mockRejectedValue(new Error("history read failed"));
+    const events = vi.spyOn(host, "postEvent").mockResolvedValue(undefined);
+    const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+    try {
+      await provider.dispatchTestIntent({ type: "rewindAndResend", messageId: "receipt", data: {
+        sessionId: "s1", messageId: "old", files: "keep", text: "new question", segments: [], attachments: [],
+      } });
+      expect(request).toHaveBeenCalledOnce();
+      expect(events).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        type: "rewindAndResendResult", requestId: "receipt", success, error: response.error,
+      }));
+      expect(warning).toHaveBeenCalledWith(translate("en", "host.historyRefreshFailed", { detail: "history read failed" }));
+    } finally {
+      provider.dispose();
+    }
+  });
+
   it("bridges rewindAndResend without touching the main draft and requests replacement history", async () => {
     const request = vi.fn().mockResolvedValue({success:true,sessionId:"s1",payload:{accepted:true}});
     const provider = new TomcatWebviewViewProvider({extensionUri:vscode.Uri.file("/workspace/extension"),getDefaultCwd:()=>"/workspace",ide:{} as never,

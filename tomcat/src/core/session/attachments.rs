@@ -141,6 +141,10 @@ impl AttachmentBlobStore {
         self.pending_dir().join(session_id)
     }
 
+    fn retention_lock(&self) -> Result<std::fs::File, AppError> {
+        crate::infra::config::lock::acquire_config_lock(&self.root.join("retention"))
+    }
+
     // ── 写入与读取 ────────────────────────────────────────────────────
 
     /// 落盘一份字节，返回它的 sha256。
@@ -149,6 +153,7 @@ impl AttachmentBlobStore {
     /// mtime 是 orphan grace window 的活动信号，不是内容版本。
     pub fn put(&self, bytes: &[u8]) -> Result<String, AppError> {
         let sha = sha256_hex(bytes);
+        let _guard = self.retention_lock()?;
         let path = self.blob_path(&sha);
         if path.exists() {
             touch_blob(&path)?;
@@ -165,6 +170,11 @@ impl AttachmentBlobStore {
     ///
     pub fn get(&self, sha: &str) -> Result<Option<Vec<u8>>, AppError> {
         validate_sha(sha)?;
+        let _guard = self.retention_lock()?;
+        self.get_while_locked(sha)
+    }
+
+    fn get_while_locked(&self, sha: &str) -> Result<Option<Vec<u8>>, AppError> {
         let path = self.blob_path(sha);
         if !path.exists() {
             return Ok(None);
@@ -212,7 +222,19 @@ impl AttachmentBlobStore {
     /// 为某个 session 的未发送字节建立租约。
     pub fn mark_pending(&self, session_id: &str, sha: &str) -> Result<(), AppError> {
         validate_sha(sha)?;
-        let dir = self.session_pending_dir(validate_session_id(session_id)?);
+        validate_session_id(session_id)?;
+        let _guard = self.retention_lock()?;
+        self.mark_pending_while_locked(session_id, sha)
+    }
+
+    fn mark_pending_while_locked(&self, session_id: &str, sha: &str) -> Result<(), AppError> {
+        if !self.blob_path(sha).is_file() {
+            return Err(AppError::Config(crate::infra::i18n::tr(
+                "attachment.blobMissing",
+                &[("sha", sha)],
+            )));
+        }
+        let dir = self.session_pending_dir(session_id);
         std::fs::create_dir_all(&dir).map_err(AppError::Io)?;
         std::fs::write(dir.join(sha), []).map_err(AppError::Io)?;
         Ok(())
@@ -223,10 +245,13 @@ impl AttachmentBlobStore {
     /// 租约不存在时重新建立 —— 草稿仍在但租约已被 GC 回收是可能的，
     /// 只要 blob 还在就应该续上，而不是让下一轮 GC 把它删掉。
     pub fn touch_pending(&self, session_id: &str, sha: &str) -> Result<(), AppError> {
+        validate_sha(sha)?;
+        validate_session_id(session_id)?;
+        let _guard = self.retention_lock()?;
         if !self.exists(sha) {
             return Ok(());
         }
-        self.mark_pending(session_id, sha)
+        self.mark_pending_while_locked(session_id, sha)
     }
 
     fn acquire_pending_marker(&self, session_id: &str, sha: &str) -> Result<bool, AppError> {
@@ -241,6 +266,7 @@ impl AttachmentBlobStore {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if path.is_file() {
+                    touch_blob(&path)?;
                     Ok(false)
                 } else {
                     Err(AppError::Io(std::io::Error::new(
@@ -254,7 +280,7 @@ impl AttachmentBlobStore {
     }
 
     /// 批量为目标会话保留已有 blob 的租约。先验证全部 SHA 与 blob，再写 marker；
-    /// 部分写失败时只回滚本次原子新建的 marker，已有 marker 保持不变。
+    /// 部分写失败时只回滚本次原子新建的 marker；已有 marker 可续期但不会删除。
     pub fn retain_pending_batch(
         &self,
         session_id: &str,
@@ -276,7 +302,10 @@ impl AttachmentBlobStore {
         let shas = shas.into_iter().collect::<std::collections::BTreeSet<_>>();
         for sha in &shas {
             validate_sha(sha)?;
-            if self.get(sha)?.is_none() {
+        }
+        let _guard = self.retention_lock()?;
+        for sha in &shas {
+            if self.get_while_locked(sha)?.is_none() {
                 return Err(AppError::Config(crate::infra::i18n::tr(
                     "attachment.blobMissing",
                     &[("sha", sha)],
@@ -293,7 +322,7 @@ impl AttachmentBlobStore {
                 Ok(false) => {}
                 Err(error) => {
                     for created_sha in &created {
-                        let _ = self.promote(session_id, created_sha);
+                        let _ = self.promote_while_locked(session_id, created_sha);
                     }
                     return Err(error);
                 }
@@ -307,6 +336,12 @@ impl AttachmentBlobStore {
     /// 这就是「零拷贝提升」的全部内容 —— 不读、不写、不复制任何字节。
     pub fn promote(&self, session_id: &str, sha: &str) -> Result<(), AppError> {
         validate_sha(sha)?;
+        validate_session_id(session_id)?;
+        let _guard = self.retention_lock()?;
+        self.promote_while_locked(session_id, sha)
+    }
+
+    fn promote_while_locked(&self, session_id: &str, sha: &str) -> Result<(), AppError> {
         let blob_path = self.blob_path(sha);
         if blob_path.exists() {
             touch_blob(&blob_path)?;
@@ -377,9 +412,10 @@ impl AttachmentBlobStore {
     /// 与 `SessionManager::delete_session` 联动。
     pub fn clear_session(&self, session_id: &str) -> Result<BlobGcReport, AppError> {
         let session_id = validate_session_id(session_id)?;
+        let _guard = self.retention_lock()?;
         let mut report = BlobGcReport::default();
         for sha in self.list_pending(session_id)? {
-            self.promote(session_id, &sha)?;
+            self.promote_while_locked(session_id, &sha)?;
             report.leases_released += 1;
         }
         if let Err(error) = std::fs::remove_dir(self.session_pending_dir(session_id)) {
@@ -394,6 +430,7 @@ impl AttachmentBlobStore {
     ///
     /// Final blob deletion happens in [`Self::sweep_orphan_blobs`] after the grace window.
     pub fn gc_pending(&self, ttl: Duration) -> Result<BlobGcReport, AppError> {
+        let _guard = self.retention_lock()?;
         let pending_root = self.pending_dir();
         if !pending_root.exists() {
             return Ok(BlobGcReport::default());
@@ -419,8 +456,9 @@ impl AttachmentBlobStore {
                 if !is_lease_expired(&lease_path, now, ttl) {
                     continue;
                 }
-                let _ = std::fs::remove_file(&lease_path);
-                report.leases_released += 1;
+                if remove_file_if_present(&lease_path)? {
+                    report.leases_released += 1;
+                }
             }
             let _ = std::fs::remove_dir(&session_dir);
         }
@@ -465,7 +503,7 @@ impl AttachmentBlobStore {
             if total.saturating_sub(freed) <= max_bytes {
                 break;
             }
-            if std::fs::remove_file(&path).is_ok() {
+            if remove_file_if_present(&path)? {
                 freed = freed.saturating_add(len);
             }
         }
@@ -476,12 +514,16 @@ impl AttachmentBlobStore {
     }
 
     /// Delete blobs with neither a transcript reference nor a live draft lease once they
-    /// are older than `grace`. Each orphan thumbnail goes with its source blob.
+    /// are older than `grace`. Collect references while retention mutations are excluded;
+    /// callers must scan here, rather than capture a precomputed transcript snapshot.
     pub fn sweep_orphan_blobs(
         &self,
-        live_shas: &HashSet<String>,
+        collect_live: impl FnOnce() -> Result<HashSet<String>, AppError>,
         grace: Duration,
     ) -> Result<BlobGcReport, AppError> {
+        let _guard = self.retention_lock()?;
+        let mut live_shas = collect_live()?;
+        live_shas.extend(self.collect_pending_blob_shas()?);
         let mut report = BlobGcReport::default();
         let blobs = self.blobs_dir();
         if !blobs.exists() {
@@ -512,12 +554,21 @@ impl AttachmentBlobStore {
             if age < grace {
                 continue;
             }
-            if std::fs::remove_file(entry.path()).is_ok() {
-                let _ = std::fs::remove_file(self.thumb_path(&sha));
+            if remove_file_if_present(&entry.path())? {
+                remove_file_if_present(&self.thumb_path(&sha))?;
                 report.blobs_deleted += 1;
             }
         }
         Ok(report)
+    }
+}
+
+/// Missing files are harmless; other failures must reach the existing GC warning path.
+fn remove_file_if_present(path: &Path) -> Result<bool, AppError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AppError::Io(error)),
     }
 }
 
@@ -757,4 +808,5 @@ fn default_name_for_mime(mime_type: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "tests/attachments_test.rs"]
 mod tests;

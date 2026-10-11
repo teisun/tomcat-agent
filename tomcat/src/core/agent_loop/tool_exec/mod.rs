@@ -159,6 +159,32 @@ struct ToolExecCtx<'a> {
     file_baselines: Option<&'a Arc<crate::core::checkpoint::file_baselines::TurnFileBaselines>>,
 }
 
+impl ToolExecCtx<'_> {
+    /// Check the resolved write target, including reviewer calls without a parent runtime.
+    fn enforce_write_path_policy(&self, path: &str) -> Result<(), String> {
+        use crate::core::agent_loop::types::SubagentType;
+        use crate::core::plan_runtime::safety::{enforce_write_path_policy, SubagentKind};
+        use crate::core::session::manager::AgentMode;
+
+        let subagent = match self.subagent_type {
+            SubagentType::PlanReviewer => SubagentKind::PlanReviewer,
+            SubagentType::CodeReviewer => SubagentKind::CodeReviewer,
+            _ => SubagentKind::Other,
+        };
+        if self.plan_runtime.is_none() && subagent == SubagentKind::Other {
+            return Ok(());
+        }
+        enforce_write_path_policy(
+            self.plan_runtime.map_or(AgentMode::Chat, |rt| rt.mode()),
+            self.plan_runtime
+                .is_some_and(|rt| rt.executing_plan_id().is_some()),
+            subagent,
+            std::path::Path::new(path),
+        )
+        .map_err(|denied| denied.to_string())
+    }
+}
+
 /// 执行单次 tool call 并返回兼容旧测试的 `(输出文本, is_error)`。
 ///
 /// 自由函数设计（**不**接收 `&AgentLoop`）：调用方持有 `Arc<dyn PrimitiveExecutor>`
@@ -224,7 +250,7 @@ pub(super) async fn execute_tool_with_openai_files(
 /// - 在 `write` / `edit` / `hashline_edit` / `delete` 分支触发
 ///   [`crate::core::plan_runtime::safety::enforce_write_path_policy`]（B12）
 ///
-/// `plan_runtime = None` 时这四个工具会返回「PlanRuntime 未注入」错误；写工具策略跳过。
+/// `plan_runtime = None` 时这四个工具会返回「PlanRuntime 未注入」错误；reviewer 写入限制仍生效。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_full(
     primitive: &Arc<dyn PrimitiveExecutor>,
@@ -462,32 +488,16 @@ async fn execute_tool_tuple_full(
             .into_legacy_tuple();
     }
 
-    // B12：write 类工具在主体之前做路径策略守卫。
-    if matches!(
-        tc.name.as_str(),
-        "write" | "edit" | "hashline_edit" | "delete"
-    ) {
-        if let Some(rt) = ctx.plan_runtime {
-            let path_arg = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            if !path_arg.is_empty() {
-                let mode = rt.mode();
-                let subagent_kind = match ctx.subagent_type {
-                    crate::core::agent_loop::types::SubagentType::PlanReviewer => {
-                        crate::core::plan_runtime::safety::SubagentKind::PlanReviewer
-                    }
-                    crate::core::agent_loop::types::SubagentType::CodeReviewer => {
-                        crate::core::plan_runtime::safety::SubagentKind::CodeReviewer
-                    }
-                    _ => crate::core::plan_runtime::safety::SubagentKind::Other,
-                };
-                if let Err(denied) = crate::core::plan_runtime::safety::enforce_write_path_policy(
-                    mode,
-                    rt.executing_plan_id().is_some(),
-                    subagent_kind,
-                    std::path::Path::new(path_arg),
-                ) {
-                    return (denied.to_string(), true, Vec::new());
-                }
+    // edit checks its parsed targets in the shared single/batch precheck, preserving
+    // per-file failures. The remaining write tools each have one top-level target.
+    if matches!(tc.name.as_str(), "write" | "hashline_edit" | "delete") {
+        if let Some(path) = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.is_empty())
+        {
+            if let Err(denied) = ctx.enforce_write_path_policy(path) {
+                return (denied, true, Vec::new());
             }
         }
     }

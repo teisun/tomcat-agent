@@ -10,7 +10,15 @@ use super::{
     DisputedFinding,
 };
 
-pub const CODE_REVIEWER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
+pub const CODE_REVIEWER_ALLOWED_TOOLS: &[&str] = &[
+    "read",
+    "search_files",
+    "list_dir",
+    "bash",
+    "task_output",
+    "task_list",
+    "task_stop",
+];
 
 pub fn code_reviewer_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
     let mut tools = CODE_REVIEWER_ALLOWED_TOOLS.to_vec();
@@ -322,12 +330,19 @@ pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<
     use std::collections::BTreeSet;
 
     let mut changed_files = BTreeSet::new();
-    for line in run_git_lines(
+    for line in run_git_paths(
         workspace_root,
         // `git -C <workspace-subdir>` normally prints paths relative to the
         // repository root. `--relative` keeps them relative to workspace_root,
         // which is the base used below for content reads and reviewer navigation.
-        &["diff", "--relative", "--name-only", "--no-ext-diff", "HEAD"],
+        &[
+            "diff",
+            "--relative",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "HEAD",
+        ],
     )
     .await
     {
@@ -335,9 +350,9 @@ pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<
             changed_files.insert(line);
         }
     }
-    for line in run_git_lines(
+    for line in run_git_paths(
         workspace_root,
-        &["ls-files", "--others", "--exclude-standard"],
+        &["ls-files", "-z", "--others", "--exclude-standard"],
     )
     .await
     {
@@ -361,9 +376,9 @@ pub async fn code_diff_content_fingerprint(workspace_root: &std::path::Path) -> 
         .into_iter()
         .filter(|path| is_code_path(path))
         .collect::<Vec<_>>();
-    let mut untracked_code_files = run_git_lines(
+    let mut untracked_code_files = run_git_paths(
         workspace_root,
-        &["ls-files", "--others", "--exclude-standard"],
+        &["ls-files", "-z", "--others", "--exclude-standard"],
     )
     .await
     .into_iter()
@@ -469,7 +484,7 @@ async fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Opt
     if !output.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 async fn run_git_capture_owned(
@@ -477,6 +492,7 @@ async fn run_git_capture_owned(
     args: &[String],
 ) -> Option<Vec<u8>> {
     let output = tokio::process::Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(workspace_root)
         .args(args)
@@ -486,12 +502,11 @@ async fn run_git_capture_owned(
     output.status.success().then_some(output.stdout)
 }
 
-async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
+async fn run_git_paths(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
     run_git_capture(workspace_root, args)
         .await
         .map(|text| {
-            text.lines()
-                .map(str::trim)
+            text.split('\0')
                 .filter(|line| !line.is_empty())
                 .map(ToOwned::to_owned)
                 .collect()
@@ -500,176 +515,5 @@ async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<S
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{code_diff_content_fingerprint, collect_git_changed_files, is_code_path};
-
-    #[test]
-    fn user_visible_markup_and_styles_trigger_code_review() {
-        for path in [
-            "gui/src/styles.css",
-            "web/app.scss",
-            "web/theme.less",
-            "web/index.html",
-            "WEB/COMPONENT.CSS",
-        ] {
-            assert!(is_code_path(path), "{path} must trigger the code gate");
-        }
-    }
-
-    #[test]
-    fn non_code_assets_do_not_trigger_code_review() {
-        for path in ["README.md", "docs/guide.txt", "assets/logo.png"] {
-            assert!(!is_code_path(path), "{path} must not trigger the code gate");
-        }
-    }
-
-    #[tokio::test]
-    async fn changed_files_include_tracked_diff_and_untracked_files() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let root = workspace.path();
-        std::fs::write(root.join("tracked.rs"), "fn before() {}\n").expect("seed tracked");
-        let init = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .expect("git init");
-        assert!(init.success());
-        let add = std::process::Command::new("git")
-            .args(["add", "tracked.rs"])
-            .current_dir(root)
-            .status()
-            .expect("git add");
-        assert!(add.success());
-        let commit = std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=tomcat-test",
-                "-c",
-                "user.email=tomcat-test@example.invalid",
-                "commit",
-                "-qm",
-                "seed",
-            ])
-            .current_dir(root)
-            .status()
-            .expect("git commit");
-        assert!(commit.success());
-
-        std::fs::write(root.join("tracked.rs"), "fn after() {}\n").expect("modify tracked");
-        std::fs::write(root.join("untracked.rs"), "fn fresh() {}\n").expect("add untracked");
-
-        assert_eq!(
-            collect_git_changed_files(root).await,
-            vec!["tracked.rs".to_string(), "untracked.rs".to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn code_diff_fingerprint_changes_for_code_not_non_code_or_noop_rewrites() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let root = workspace.path();
-        std::fs::write(root.join("tracked.rs"), "fn before() {}\n").expect("seed tracked");
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .expect("git init")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args(["add", "tracked.rs"])
-            .current_dir(root)
-            .status()
-            .expect("git add")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=tomcat-test",
-                "-c",
-                "user.email=tomcat-test@example.invalid",
-                "commit",
-                "-qm",
-                "seed",
-            ])
-            .current_dir(root)
-            .status()
-            .expect("git commit")
-            .success());
-
-        std::fs::write(root.join("tracked.rs"), "fn first_dirty_version() {}\n")
-            .expect("modify tracked");
-        let first = code_diff_content_fingerprint(root)
-            .await
-            .expect("fingerprint");
-
-        std::fs::write(root.join("tracked.rs"), "fn second_dirty_version() {}\n")
-            .expect("modify already dirty file");
-        let second = code_diff_content_fingerprint(root)
-            .await
-            .expect("fingerprint");
-        assert_ne!(
-            first, second,
-            "an edit to an already-dirty code file is meaningful progress"
-        );
-
-        std::fs::write(root.join("README.md"), "non-code change\n").expect("write non-code");
-        let after_non_code = code_diff_content_fingerprint(root)
-            .await
-            .expect("fingerprint");
-        assert_eq!(
-            second, after_non_code,
-            "non-code paths must not reset the completion-guard progress signal"
-        );
-
-        std::fs::write(root.join("tracked.rs"), "fn second_dirty_version() {}\n")
-            .expect("rewrite identical content");
-        assert_eq!(
-            after_non_code,
-            code_diff_content_fingerprint(root)
-                .await
-                .expect("fingerprint"),
-            "a no-op rewrite must not reset the completion-guard progress signal"
-        );
-    }
-
-    #[tokio::test]
-    async fn changed_files_are_relative_to_a_nested_workspace_root() {
-        let repo = tempfile::tempdir().expect("repo");
-        let root = repo.path();
-        let nested = root.join("nested");
-        std::fs::create_dir_all(&nested).expect("nested");
-        std::fs::write(nested.join("tracked.rs"), "fn before() {}\n").expect("seed");
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .expect("git init")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .status()
-            .expect("git add")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=tomcat-test",
-                "-c",
-                "user.email=tomcat-test@example.invalid",
-                "commit",
-                "-qm",
-                "seed",
-            ])
-            .current_dir(root)
-            .status()
-            .expect("git commit")
-            .success());
-        std::fs::write(nested.join("tracked.rs"), "fn after() {}\n").expect("modify");
-
-        assert_eq!(
-            collect_git_changed_files(&nested).await,
-            vec!["tracked.rs".to_string()]
-        );
-    }
-}
+#[path = "tests/code_diff_test.rs"]
+mod tests;

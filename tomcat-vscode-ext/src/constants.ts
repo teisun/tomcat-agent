@@ -2,6 +2,8 @@ export const EXTENSION_ID = "tomcat.tomcat-vscode-ext";
 
 export const TEST_PATH_ENV = "TOMCAT_VSCODE_TEST_PATH";
 export const TEST_DEFAULT_CWD_ENV = "TOMCAT_VSCODE_TEST_DEFAULT_CWD";
+// Test-owned marker in the disposable Host workspace, not a product setting.
+export const TEST_HISTORY_PAGE_GATE_FILE = ".tomcat-e2e-history-pages.hold";
 export const TEST_EXTRA_ARGS_ENV = "TOMCAT_VSCODE_TEST_EXTRA_ARGS";
 export const TEST_INFO_ACTION_ENV = "TOMCAT_VSCODE_TEST_INFO_ACTION";
 export const TEST_SUPPRESS_EXIT_PROMPT_ENV = "TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT";

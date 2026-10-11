@@ -71,7 +71,9 @@ pub(crate) fn register_thinking_persist_listeners(
                     signature,
                 },
             );
-            if let Err(err) = crate::core::session::append_entry(&transcript_path, &entry) {
+            if let Err(err) = crate::infra::config::lock::with_config_lock(&transcript_path, || {
+                crate::core::session::append_entry(&transcript_path, &entry)
+            }) {
                 warn!(error = %err, "append thinking_trace entry failed");
             }
             Ok(())

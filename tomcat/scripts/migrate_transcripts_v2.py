@@ -209,11 +209,14 @@ def existing_sidecar_keys(path: Path) -> set[tuple[str, str]]:
     keys: set[tuple[str, str]] = set()
     if not path.exists():
         return keys
-    with path.open(encoding="utf-8") as source:
-        for raw_line in source:
+    with path.open("rb") as source:
+        for line_number, raw_line in enumerate(source, start=1):
             try:
                 row = json.loads(raw_line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                print(f"warning: {path}:{line_number}: preserving malformed sidecar row", file=sys.stderr)
+                continue
+            if not isinstance(row, dict):
                 continue
             tool_call_id, timestamp = row.get("toolCallId"), row.get("ts")
             if isinstance(tool_call_id, str) and isinstance(timestamp, str):
@@ -237,10 +240,15 @@ def append_sidecar_records(
     if not fresh:
         return
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-    with sidecar_path.open("a", encoding="utf-8") as output:
+    with sidecar_path.open("a+b") as output:
+        # Preserve torn bytes, but never join a new record onto the old tail.
+        if output.tell():
+            output.seek(-1, os.SEEK_END)
+            if output.read(1) != b"\n":
+                output.write(b"\n")
         for record in fresh:
-            output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            output.write("\n")
+            encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            output.write((encoded + "\n").encode("utf-8"))
         output.flush()
         os.fsync(output.fileno())
 
@@ -454,6 +462,47 @@ def self_test() -> int:
     migrate(sessions, dry_run=False, check_serve=False)
     assert transcript.read_bytes() == once
     assert len(sidecar.read_text(encoding="utf-8").splitlines()) == 1
+    prior_record = {
+        "toolCallId": "prior",
+        "ts": old_timestamp,
+        "display": rows[1]["message"]["tool_display"],
+    }
+    prior_bytes = json.dumps(prior_record, ensure_ascii=False).encode("utf-8")
+    for label, tail in [
+        ("partial-json", b'{"toolCallId":"interrupted"'),
+        ("partial-utf8", b'{"toolCallId":"interrupted","display":"\xe5'),
+        ("complete-without-newline", prior_bytes),
+    ]:
+        case = root / label
+        case.mkdir()
+        source = case / "session.jsonl"
+        source.write_bytes(before_dry_run)
+        display_path = tool_display_sidecar_path(source)
+        previous = prior_bytes + b"\n" + tail
+        display_path.write_bytes(previous)
+        blobs = case / "attachments" / "blobs"
+        now = dt.datetime.now(dt.timezone.utc)
+        migrate_file(source, blobs, now, dry_run=True)
+        assert source.read_bytes() == before_dry_run, label
+        assert display_path.read_bytes() == previous, label
+        assert not blobs.exists(), label
+        migrate_file(source, blobs, now, dry_run=False)
+        published = source.read_bytes()
+        sidecar_once = display_path.read_bytes()
+        assert sidecar_once.startswith(previous), label
+        readable = []
+        for line in sidecar_once.split(b"\n"):
+            try:
+                readable.append(json.loads(line))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass  # Match the Rust reader's per-row malformed-data boundary.
+        assert prior_record in readable, label
+        assert sum(row["toolCallId"] == "call-1" for row in readable) == 1, label
+        assert "tool_display" not in json.loads(published.splitlines()[1])["message"], label
+        migrate_file(source, blobs, now, dry_run=False)
+        assert source.read_bytes() == published, label
+        assert display_path.read_bytes() == sidecar_once, label
+        print(f"tail recovery passed: {label}")
     print(f"self-test passed: {root}")
     return 0
 

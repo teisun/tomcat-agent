@@ -19,7 +19,7 @@ pub(super) fn reviewer_allowed_tools_description(
             "read/search_files/list_dir/todos/update_plan/edit".to_string()
         }
         crate::core::agent_loop::types::SubagentType::CodeReviewer => {
-            "read/search_files/list_dir/bash".to_string()
+            crate::core::plan_runtime::code_reviewer::CODE_REVIEWER_ALLOWED_TOOLS.join("/")
         }
         _ => String::new(),
     };
@@ -39,14 +39,12 @@ pub(super) fn explorer_allowed_tools_description() -> String {
 }
 
 pub(super) fn is_verifier_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
-    matches!(
-        name,
-        "read" | "search_files" | "list_dir" | "bash" | "web_fetch"
-    ) || (expose_skills && name == "load_skill")
+    crate::core::plan_runtime::verify::VERIFIER_ALLOWED_TOOLS.contains(&name)
+        || (expose_skills && name == "load_skill")
 }
 
 pub(super) fn verifier_allowed_tools_description(expose_skills: bool) -> String {
-    let mut desc = "read/search_files/list_dir/bash/web_fetch".to_string();
+    let mut desc = crate::core::plan_runtime::verify::VERIFIER_ALLOWED_TOOLS.join("/");
     if expose_skills {
         desc.push_str("/load_skill");
     }

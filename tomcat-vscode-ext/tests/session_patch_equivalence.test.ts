@@ -38,9 +38,8 @@ function createStore(): WebviewStateStore {
     contextRatio: null,
     interrupted: false,
     model: "gpt-5.4",
-    planId: "plan-1",
-    planPath: "/workspace/plan-1.plan.md",
-    planState: "planning",
+    activePlan: { id: "plan-1", path: "/workspace/plan-1.plan.md", state: "planning" },
+    agentMode: "plan",
     sessionId: SESSION_ID,
     thinkingLevel: "high",
   });
@@ -68,7 +67,7 @@ function makeToolArgs(toolName: "bash" | "edit" | "read", step: number): Record<
     case "bash":
       return { command: `echo step-${step}` };
     case "edit":
-      return { file: `/workspace/file-${step}.ts` };
+      return { path: `/workspace/file-${step}.ts` };
     case "read":
       return { path: `/workspace/file-${step}.ts` };
   }
@@ -140,6 +139,7 @@ const BUILDERS: EventBuilder[] = [
         logPath: `/tmp/${taskId}.log`,
         next: "poll task_output",
         startedAtUnixMs: 1_752_000_000_000 + step,
+        state: "running_in_background",
         taskId,
       });
     } else {
@@ -284,7 +284,7 @@ function pickEvent(
   throw new Error(`No event builder could produce step ${step}`);
 }
 
-function runScenario(seed: number, steps: number): void {
+function runScenario(seed: number, steps: number): Set<string> {
   const rng = createRng(seed);
   const store = createStore();
   const scenario: ScenarioState = {
@@ -298,23 +298,50 @@ function runScenario(seed: number, steps: number): void {
 
   let fullState = reconcileStateSnapshot(undefined, store.snapshot());
   let incrementalState = reconcileStateSnapshot(undefined, store.snapshot());
+  expect(fullState.sessionViews[SESSION_ID].activePlan).toMatchObject({ planId: "plan-1", state: "planning" });
+  const reached = new Set<string>();
 
-  for (let step = 1; step <= steps; step += 1) {
-    const event = pickEvent(rng, scenario, step);
+  for (let step = 1; step <= steps + 1; step += 1) {
+    // Close a generated background ticket deterministically; random selection alone
+    // previously never reached its terminal branch for any of the fixed seeds.
+    const event: HostEventFrameContent | null = step <= steps
+      ? pickEvent(rng, scenario, step)
+      : scenario.backgroundTaskId
+        ? { type: "background_task_finished", sessionId: SESSION_ID, taskId: scenario.backgroundTaskId, exitCode: 0 }
+        : null;
+    if (!event) continue;
     const mutation = store.applyEvent(event);
     fullState = reconcileStateSnapshot(fullState, store.snapshot());
     incrementalState = applyIncrementalMutation(incrementalState, store, mutation);
+    const session = fullState.sessionViews[SESSION_ID];
+    if (event.type === "plan.todos") {
+      expect(session.planTodos).toEqual(event.todos);
+      reached.add("plan.todos");
+    }
+    if (event.type === "tool_execution_end" && scenario.backgroundTaskId === `task-${step}`) {
+      const tool = session.timeline.find(item => item.type === "tool" && item.toolCallId === event.toolCallId);
+      expect(tool).toMatchObject({ backgroundTaskId: scenario.backgroundTaskId, backgroundRunning: true });
+      reached.add("background-ticket");
+    }
+    if (event.type === "background_task_finished") {
+      const tool = session.timeline.find(item => item.type === "tool" && item.backgroundTaskId === event.taskId);
+      expect(tool).toMatchObject({ backgroundRunning: false, backgroundExitCode: event.exitCode });
+      reached.add("background-finished");
+    }
     expect(
       JSON.stringify(incrementalState),
       `seed=${seed} step=${step} event=${event.type}`,
     ).toBe(JSON.stringify(fullState));
   }
+  return reached;
 }
 
 describe("session patch equivalence", () => {
   it("keeps incremental patch/session merges byte-equivalent to full snapshots across random event sequences", () => {
+    const reached = new Set<string>();
     for (const seed of [1, 7, 13, 29, 61]) {
-      runScenario(seed, 40);
+      for (const branch of runScenario(seed, 40)) reached.add(branch);
     }
+    expect([...reached].sort()).toEqual(["background-finished", "background-ticket", "plan.todos"]);
   });
 });

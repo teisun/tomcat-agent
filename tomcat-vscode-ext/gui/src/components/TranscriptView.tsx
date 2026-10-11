@@ -353,6 +353,8 @@ export function TranscriptView({
                 key={`${group.preamble.id}-preamble`}
                 mediaRoots={mediaRoots}
                 onOpenFile={onOpenFile}
+                onOpenLink={onOpenLink}
+                resolvePaths={resolvePaths}
                 onOpenImagePreview={onOpenImagePreview}
                 onRecover={onRecoverErrorTurn}
                 onRetry={onRetryUserMessage}

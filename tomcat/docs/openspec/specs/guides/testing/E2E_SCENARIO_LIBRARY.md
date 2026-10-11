@@ -95,6 +95,94 @@
 
 ---
 
+### 安全边界补充（本地真实文件/进程/HTTP 回归）
+
+| 编号 | 验收 | 用例与位置 | 操作 | 必须断言 |
+| --- | --- | --- | --- | --- |
+| E2E-EDIT-POLICY | 自动 | `batch_edit_enforces_plan_policy_per_target`（`src/core/agent_loop/tests/tool_exec_batch_test.rs`） | 临时 HOME 中构造计划与工作区文件，真实 read 后分别以 PLAN / PlanReviewer / 执行中计划调用混合 batch edit；顶层 path 缺失或为空 | 被禁止文件字节不变，允许文件实际修改；逐文件状态正确，不因批量参数绕过已有策略 |
+| E2E-INSTALL-SOURCE | 自动 | `package_install_manifest_authorizes_consumed_tree`（`src/core/tools/config_tool/tests/config_tool_test.rs`） | 使用 SKILL.md / plugin.json / package.json 文件入口，源树含 deny 文件；另验合法入口成功 | deny 在复制和安装前拒绝；未写目标/registry；合法文件入口仍可安装，不改来源检测优先级 |
+| E2E-INSTALL-SNAPSHOT | 自动 | `install_preserves_regular_file_modes` / `install_rejects_ambiguous_path_content_substitution` / `install_rejects_source_mode_changed_after_preparation`（`src/core/package/tests/package_manager_test.rs`） | 安装含 0755 脚本/0600 私有文件的技能；确认后把 `a:bc` 改成 `ab:c` 或只改 mode | 文件权限保留且脚本可直接执行；确认后的路径/内容/权限替换被拒，目标与 registry 不发布 |
+| E2E-READ-WINDOW-STAMP | 自动 | `windowed_and_truncated_reads_hash_only_the_returned_view_and_still_reject_stale_edits`（`src/core/agent_loop/tests/tool_exec_batch_test.rs`） | 显式窗口与默认截断读取大日志，随后外部修改再 edit | partial 指纹仅包含返回视图，不为它读取完整文件；mtime/size 变化仍拒绝 Stale，不覆盖外部修改 |
+| E2E-BASH-FOREGROUND-DROP | 自动 | `bash_foreground_drop_stops_child_with_and_without_shared_registry`（`src/core/tools/primitive/tests/suite_test.rs`） | 在临时与共享 registry 下启动真实命令，确认 ready 后丢弃前台 future | 延迟写入哨兵不得出现；共享任务最终 Stopped；另由已有 foreground_wait_expiry_promotes 测试保证成功后台交接不误杀 |
+| E2E-BASH-STREAM-OWNERSHIP | 自动离线 | `execute_bash_preserves_real_streams_instead_of_parsing_log_labels`（`src/core/tools/primitive/tests/suite_test.rs`） | 真实 stdout 输出字面量 `STDERR: ...`，stderr 输出多行内容；分别走临时 registry 与共享 registry | 返回的 stdout/stderr 按 pipe 身份保持，用户文本不能伪造 stream 前缀；混合 task_output 日志仍可读 |
+| E2E-BASH-WINDOWS-TREE-STOP | Windows 专项 | `BashTaskRegistry::request_stop`（`src/core/tools/primitive/bash_task.rs`） | 前台取消/到期后终止 shell 及其子进程树 | Windows 走 `taskkill /PID /T /F`，wait 任务继续负责 drain/reap；本机非 Windows 只保留静态编译边界，不能冒称跨平台实测 |
+| E2E-PLUGIN-EXEC-SHELL-CONTRACT | 自动 | `src/ext/runtime/tests/instance_test.rs` + 原 Dispatcher 单字符串回归 | 真实 QuickJS bridge：完整 command，省略/空 args 占位，原第三参选项，旧非空 argv | 不重写命令，不发送旧 args；cwd/wait 不错位；不支持的 args 明确拒绝且零 hostcall；不恢复原生 argv 执行 |
+| E2E-PLAN-START-GATE | 自动 | `src/core/tools/plan_tool/tests/update_plan_test.rs` | 非 executing 文件状态 × set_status/upsert 的 in_progress；同批带普通修订 | 全批拒绝且文件字节不变；已完成计划必须先 reopen pending、再 build，不恢复旧自动评审门禁 |
+| E2E-PLAN-PATH-POLICY | 自动 | `src/core/agent_loop/tests/{tool_exec_batch_test,interrupt_test}.rs` | 真实 PermissionGate + Native 分发：deny/readonly、已授权外部路径、未知目录确认/拒绝；真实 AgentLoop 在权限等待中取消 | 拒绝/取消时文件字节不变且不创建锁；已授权目标不重复确认，原路径绑定继续有效 |
+| E2E-PLAN-COMPLETION-ORDER | 自动 | `src/core/tools/plan_tool/tests/update_plan_completion_test.rs` + 原 `update_plan_test.rs` | 真文件锁提交旧 terminal todo 快照；真实 update_plan 接受新 todo；旧调用晚发完成通知 | 后一个成功更新的完整文件字节不变；普通完成/reopen/验收提示仍由现有公开入口回归，无新测试钩子或生产可见性扩大 |
+| E2E-REVIEW-LITERAL-PATHS | 自动 | `src/core/plan_runtime/tests/code_diff_test.rs` | 真实 Git tracked/untracked 的 Unicode、空白、换行及 pathspec 字面文件名 | 清单保持实际路径，各文件内容修改使原指纹改变，nested workspace 仍按工作区相对路径 |
+| E2E-COMPACT-BATCH-FILE-INDEX | 自动 | `src/core/compaction/tests/machine_block_test.rs` | read.paths、edit.files、hashline_edit 混合单路径；重复与坏 JSON | 派生索引补齐全部现有输入形态；沿用去重/上限，不新增历史事实源 |
+| E2E-INSPECTOR-TASK-CONTROLS | 自动 | `src/core/agent_loop/tests/submodules_test.rs` + 原三个角色工具目录测试 | CodeReviewer/Explorer/Verifier 经真实角色执行 task 三件套 | 可跟进本 child registry 的 Bash；不能操作其他 registry 的 task；PlanReviewer 与文件写入权限不扩张 |
+| E2E-FILES-GIT-PERMISSIONS | 自动 | `src/core/checkpoint/tests/session_files_test.rs` | 真实临时 Git：capture → commit 晋级 → 再改动 → 内容 Undo；0755 脚本与 0600 私有文件、缺失目标 | 恢复晋级后的内容，现存目标权限保留，缺失目标使用捕获权限；私有临时文件完成内容和权限后才发布，不新增确认/持久化字段 |
+| E2E-MIGRATION-SIDECAR-TAIL | 自动 | `scripts/migrate_transcripts_v2.py::self_test` + `src/api/serve/tests/commands_test.rs::transcript_migration_preserves_get_messages_image_and_display_semantics` | 仅隔离临时会话：已有侧车有效行后接 JSON/UTF-8 截断尾，或完整末行缺换行，再迁移并复跑 | 原字节保留；新 display 独立可读且不重复；dry-run 不写；真实 GetMessages 仍返回迁移图片和 display；停止写者前提不变，不运行用户数据迁移 |
+| E2E-HISTORY-LOADER-TRUTH | 自动 | `tomcat-vscode-ext/tests/host_fixture_history.test.ts` + Host `assertWebviewGiantGroupLazyLoadFlow` | 在临时 Host 工作区独占创建 hold marker；首屏照常返回，旧页暂扣；真实 renderer 出现 loader 后 finally 释放 | 用有序 get_state 回执证实假服务在等待旧页而非随机 sleep；Host 必须观察 loader 并断言没有半组工具，不能 catch 吞失败；最终完整组仍默认折叠 |
+| E2E-SEARCH-CONTEXT-DENY | 自动离线 | `src/core/tools/primitive/executor/tests/search_test.rs` | 上下文含时间戳冒号或 match 分隔符；同文件显式 deny；旧格式 shim 正控 | 上下文只归入所属命中，不能产生伪路径逃过原 deny 过滤；保留旧格式与正常命中正文 |
+| E2E-LIVE-FAILURE-TRUTH | 离线负控 + 既有显式真模型正控 | `tests/{cli_tests,llm_tests,tool_result_media_real_llm_tests}.rs`；`src/core/agent_loop/tests/current_tail_guard_real_llm_runtime_test.rs` | 无效 key + 拒绝连接的本地代理；缺 catalog/key；旧回复/当前未回答/错误回复 | 选中的真测遇前提失败或重试耗尽明确非零；CLI 必须在本次用户消息后落盘成功助手正文，banner 不算回答；Constraints 断言检查实际摘要 |
+| E2E-CHAT-TURN-WIRING | 自动离线真实 Chat 接线 | `src/api/chat/tests/suite_test.rs` | recording provider 捕获生产 turn 请求；完成预热水位约 0.75；跨轮复用 snapshot | 时机②摘要与 L0 结果实际发给 provider，当前输入仅落盘一次且游标/消息归还；授权只改尾部，Planning 隐藏安装工具并使 snapshot 刷新 |
+| E2E-CLI-WAIT-RECEIPTS | 自动离线 + 既有 CLI-016D/E 真模型 | `tests/cli_tests.rs` | 同任务等待轨迹；逆序 token、异 task/call、提前 stop、stop 失败负控 | 从真实 Bash ticket 起按 tool_call_id 配对，同 task 等待与 offset 续传；规定次数无 token 超时必须发生在 token 之前，最后收到该 task 的成功 stop 回执 |
+| E2E-UI-SCREENSHOT-EVIDENCE | 自动离线 + 原 opt-in 真模型用例 | `tests/ui_acceptance_real_llm_e2e.rs` | 固定旧 PNG + 失败/缺失/错误 ID 的 screenshot end；正常 start/end；实际 headed 每次独占目录 | 仅精确 screenshot 工具调用及同 ID 的成功终态可作为证据，旧文件不使失败变绿；真实截图路径与该调用一致 |
+| E2E-UI-FIXTURE-TIMEOUT | 自动离线（manual binary 的 focused 检查） | `tests/ui_acceptance_real_llm_e2e.rs` | 真实本地 listener：先连接但不发送的客户端保持打开，再由第二客户端请求 healthy 页面，最后 Drop server | 请求有读写上界，空闲客户端不阻塞后续请求或清理；有明确 200/页面正文，不调用模型/浏览器、不放宽付费 opt-in |
+| E2E-GUI-SMOKE-TRUTH | 自动 | `tomcat-vscode-ext/tests/gui_smoke_runner.test.ts` | 隔离安装中运行原脚本，Vite/shot 仅为 runner 协调夹具；另令 Vite 提前退出 | 元数据/日志明确只做 GUI shell smoke，不声称注入未执行回复；启动失败必须非零退出，不能因等错过的 exit 而静默成功。不是 UI 实屏验收 |
+| E2E-PLAN-BOUND-PATH | 自动 | `src/core/tools/plan_tool/tests/build_plan_test.rs` + `tests/resume_hydration_cli_e2e.rs` | 从真实持久化事件恢复外部 pending 计划后无参数 build；默认目录另有同 ID 文件 | 沿用已绑定路径，真实 kickoff→原生 update_plan→最终回复；只完成外部计划，同 ID 全局文件字节不变；终态仍拒绝默认 build |
+| E2E-PLAN-CONSUMER-REGRESSIONS | 自动 | `src/core/plan_runtime/tests/{refresh_signals_test,subagent_provider_binding_test}.rs`；`tests/resume_hydration_cli_e2e.rs`；`src/api/serve/tests/commands_test.rs` | 实际 build→多次 update_plan→已注册 panel；成功 reviewer→child JSONL；真实 CLI 冷恢复盘上 pending→无参 `/plan build`→模型请求收到 kickoff→Native update_plan 完成原文件；Serve compact→Native todo 更新 | panel 快照逐次完整/单调；成功 child 的 meta/assistant/terminal 实际落盘；CLI 不只返回 continuation、必须实际执行并保存最终回复；压缩后原 todo 完成，后续回合无 error、有落盘正文且已 idle。不恢复已退休自动评审门禁或重建平行 harness |
+| E2E-RICH-FIXTURE-OWNERSHIP | 自动 | `tomcat-vscode-ext/tests/host_rich_render_fixtures.test.ts` + 既有 Host rich-render 场景 | 临时工作区放入模拟未提交的同名文件；执行与实际 Host 共用的文件准备流程，正常/场景抛错两条路径 | 原文件字节不变；只清理本次拥有的唯一目录；代码卡/行号/相对链接仍由原 Host 场景验收 |
+| E2E-MANUAL-CONNECTOR-CONTRACT | 自动 | `tomcat-vscode-ext/tests/manual_acceptance_fake_serve.test.ts` | 启动现有 manual fake 子进程，以真实 Host parser 读取 list/tools/reload/toggle | 目录身份/恢复字段完整，reload 回执与随后目录同代，toggle 回执和结果一致；仅证明 UI fixture 有效，不替代真实 Serve/MCP/视觉验收 |
+| E2E-MCP-NAME-COLLISION | 自动 | `src/core/connector/mcp/tests/{naming_test,naming_collision_test}.rs` | 有损字符/分隔符造成的别名；重复目录；最终全局同名 | 正常短名保持；不同身份不被静默覆盖，重复目录和歧义路由拒绝，不任意调用另一来源 |
+| E2E-MCP-LOGOUT-SHARED | 自动 | `logout_revokes_shared_cached_http_clients_without_touching_other_roots`（`tests/connector_http_tests.rs`） | 同一后端两个工作区使用共享凭据建立真实 HTTP 连接；另一个 work-dir 建立独立连接；从管理入口注销共享来源后再调用 | 共享凭据删除且两个缓存调用均拒绝；独立根仍可调用、凭据保留；不把本地假 HTTP 当远端 OAuth 撤销证明 |
+| E2E-MCP-LOGOUT-ORDER | 自动 | `src/core/connector/mcp/tests/login_test.rs`；CLI `src/api/chat/commands/tests/cmd_connector_test.rs`；Serve `src/api/serve/tests/control_test.rs` | 用真实凭据文件锁暂停注销；并行从两端注销；模拟凭据损坏、旧登录晚到及同名项目授权；经过真实 CLI/Serve 路由注销另一个缓存客户端 | 注销期间缓存成员和全部相关连接状态不穿插；固定锁顺序不互锁；旧回调不能覆盖新授权；失败仍停止本地连接并返回错误；同名项目凭据不变；两个管理入口不旁路共享流程 |
+| E2E-MCP-CLI-REMOVE-RELOAD | 自动 | `cmd_connector_add_and_list_round_trips_filtered_tools`（`src/api/chat/commands/tests/cmd_connector_test.rs`）+ `src/core/connector/mcp/tests/config_test.rs` | 真 stdio 服务：显式 reload 停止/健康来源，删除再添加，另一工作区继续尝试调用；损坏凭据后删除再重试；禁用与同名项目来源 | 显式 reload 恢复停止来源且保留健康连接；删除清除凭据及受影响缓存，重加不复用旧 token；持久化错误不伪装成功，已提交配置仍同步，重试可完成清理；Global-only 范围不误删项目 |
+
+### 前端交互补充（现有浏览器验收脚本）
+
+| 编号 | 验收 | 用例与位置 | 操作 | 必须断言 |
+| --- | --- | --- | --- | --- |
+| E2E-UNDO-KEYBOARD | 自动 | `tomcat-vscode-ext/scripts/accept-session-files-ui.mjs` | 打开 Undo；Tab 到 Cancel 后 Enter/Space；重新打开后在 Confirm 按 Enter | 取消零恢复请求，确认恰好一次；保留 Esc、焦点循环；桌面/窄屏 PNG、ARIA、console |
+| E2E-SVG-ONE-DIMENSION | 自动 | `gui/src/attachments/imagePipeline.test.ts` + 附件专项 | SVG 只带 width 或 height，另一维来自 viewBox | 生成源码可被 XML 解析，无重复属性；不以此证明像素内存预算 |
+| E2E-IMAGE-ALLOCATION | 自动 | `gui/src/attachments/imagePipeline.test.ts` / `gui/src/components/Composer.test.tsx` + `accept:image` | 大位图/大 SVG 与同次多图粘贴 | 不再用全尺寸 ImageBitmap 探测；应用画布长边分别 ≤192/2048，导出释放；同批顺序与原件字节不变；真实像素与视觉由现有浏览器专项验证，不推断 Chromium 内部内存峰值 |
+| E2E-SNAPSHOT-ORDER | 自动 | `gui/src/stateReconcile.test.ts` | 同一组 timeline 对象只改变顺序，分别输入 full 和 sessionView | 顺序与新快照一致，未变条目/其他会话仍复用引用 |
+| E2E-PATH-LINE-COLUMN | 自动 | `gui/src/components/markdown/inlinePath.test.ts`、`src/shared/tests/linkTarget.test.ts` | 相对路径/Windows 路径附 `:42:7` 或范围 | 打开的路径不包含行号，起始行是 42 而非 7；内联解析保留 column=7 |
+| E2E-TRANSCRIPT-LINK-CALLBACKS | 自动 | `gui/src/components/TranscriptView.test.tsx` + 现有聊天 Host 富渲染场景 | 普通/含工具的助手消息中打开链接与无扩展名文件；消息内容不变时只替换回调，旧查询迟到 | 两种渲染分支都走现有 Host 路由；使用新回调，迟到旧查询不覆盖当前结果；真实点击与 PNG/ARIA/console 在 Host 视觉验收中补齐，不以组件测试代替 |
+| E2E-MUTATION-REFRESH-RECEIPT | 自动 | `src/ui/webview/tests/provider.test.ts` + `src/ui/settings/SettingsPanel.test.ts` + `gui/src/components/InlineMessageEditor.test.tsx` | rewind 成功/已提交失败后历史读取失败；模型移除成功/拒绝后目录读取失败，成功后聊天目录同步失败 | 不把刷新错误写成新的操作回执，不重试写操作；保持原 success/error/后端 warning，另行提示刷新失败 |
+| E2E-DRAFT-REACT-LIFECYCLE | 自动 | `gui/src/App.sessionFrames.test.tsx` + `gui/src/App.test.tsx` | 引用 event/snapshot 两种先后顺序、迟到重放、删除、已有草稿恢复与会话切换 | 引用不重复、旧快照不复活引用，保留当前输入；快照应用离开 React 提交栈且旧 effect 可取消，不触发 nested flushSync 错误 |
+| E2E-DRAFT-ROOT-RECOVERY | 自动 | `src/shared/tests/composerDraft.test.ts` | 首次创建草稿目录失败，用户之后再次编辑 | 首次错误正常返回，下一次既有保存尝试可成功；不缓存失败 Promise，不增加自动重试 |
+| E2E-DRAFT-RETIREMENT-ORDER | 自动 | `src/shared/tests/composerDraft.test.ts` | 暂停旧稿删除；用户继续输入并 flush 新稿，再释放删除 | 重开 Store 仍读到新稿；复用原写队列，无晚到删除跨越新写。自动 quarantine/orphan 清理失败只诊断，输入仍可用；显式删除继续严格报错 |
+| E2E-DRAFT-CLEANUP-FAILURE | 自动 | `src/shared/tests/composerDraft.test.ts` + `tests/webview_provider_flow.test.ts` | 已持久化草稿在清空/确认提交时删除失败；legacy、立即发送、忙时入队三个消费者 | 仅忽略不存在；报清理警告但保持 accepted/队列与新稿，不能诱导重复发送；临时清理失败不遮蔽原写入错误 |
+| E2E-DRAFT-SHUTDOWN | 自动 | `tests/extension_lifecycle.test.ts` + `src/shared/tests/composerDraft.test.ts` | 实际 activate/deactivate 与实际草稿 Store；400ms 防抖未到即退出，磁盘写入延迟/失败，多会话之一失败 | deactivate 等待写盘并暴露失败；其余会话仍完成保存，恢复可读；只 stub Host 注册与文件系统，不启动真实后端或用户 profile |
+| E2E-RETRY-IMAGE-RENDITION | 自动 | `tests/webview_provider_flow.test.ts` | SVG 原件与 provider PNG 入库；首发被拒绝后重试 | 首次与重试的 userMessageId、原件 blobSha、providerSha 一致，不重复上传或丢失模型可读版本 |
+| E2E-ASK-RESPONSE-ROUTE | 自动 | `tomcat/src/api/serve/tests/ask_question_test.rs` | 真实 EventBus panel 等待时收到坏 envelope、错误 inner requestId、坏 bare result，再送正确回复 | 坏回复不消费路由、不伪造 cancelled；正确 wrapped/bare 回包可完成原 panel，保留既有终态与 session 隔离 |
+| E2E-CONTROL-CANCEL-OUTBOUND | 自动 | `src/serveClient/tests/messenger_control_roundtrip.test.ts` | initialize 等待回执时收到错误 ID / 正确 ID 的 control_cancel | 错 ID 不结算；正确 ID 立即按既有取消回执结算并清理超时，inbound handler 取消保持有效 |
+| E2E-SNAPSHOT-PATCH-BOUNDARY | 自动 | `tests/webview_provider_flow.test.ts` + `src/ui/webview/tests/stateBroadcaster.test.ts` | 流式 append 等待发送时发全量/会话快照；多会话元信息等待期间继续流式输出 | 经既有 broadcaster 串行发送；快照已包含的增量不重复，捕获之后的增量不丢；在途批次后的 seq 连续，失败可见且不毒化后续发送 |
+| E2E-PLAN-PREFERENCE-ACK | 自动 | `src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts` | 计划预览设置 context/effort；成功、传输拒绝、resolved success=false | 只在成功时刷新；失败弹现有错误提示并保留后台原因，不能因 Promise resolved 就当成功；与已支持的 speed 行为一致 |
+| E2E-ASK-RESULT-OUTCOME | 自动 | `gui/src/components/ToolRow.test.tsx` + `AnswerCard.test.tsx` | 工具结果 JSON 经生产 parser 到结果卡片 | answered/skipped/interrupted/host_disconnected/cancelled_unknown 不混同；旧无 outcome 结果兼容，未知 outcome 保留原文而不伪装取消；文案断言取英语源目录 |
+| E2E-TRANSCRIPT-MOUNT-RESIZE | 自动 | `gui/src/useAutoScroll.test.tsx` + `gui/src/App.sessionFrames.test.tsx` + 聊天 Host UI | 初始未挂载后加载；ready 断开/恢复同一历史后只追加文本或图片高度变化 | 旧内容的 ResizeObserver 断开，新 DOM 被观察，增高继续跟随；用户上滚暂停仍有效；实屏滚动归 Host 视觉验收，不将 jsdom 尺寸模拟当布局证据 |
+| E2E-MARKDOWN-REFERENCES | 自动 | `gui/src/components/markdown/ChatMarkdown.test.tsx` / `markdownRuntime.test.ts` + 聊天 Host UI | 引用定义后到/变更，含本地/远端引用图片，流式未闭合及长短围栏 | 引用可点击且更新路由；无关代码节点不替换，旧块不重复高亮；javascript 链接仍净化，远端图片仍不自动加载；复用文档解析结果而非另建引用缓存 |
+| E2E-RICH-WARMUP-FAILURE | 自动 | `gui/src/components/markdown/richRenderRuntime.test.ts` + 聊天 Host UI | 可选 Mermaid 模块预热加载失败 | 预热记录诊断但不产生全局未处理拒绝；按需渲染仍得到明确失败以便显示原始代码，高亮不受影响 |
+| E2E-STOP-SESSION-SWITCH | 自动 | `gui/src/App.sessionFrames.test.tsx` + Host UI | A/B 均 busy，在 A 点 Stop 后切 B 再 Stop | B 按钮可用、请求分别带 A/B sessionId，不重建编辑器；同会话输入草稿仍保持 stopping |
+| E2E-PREVIEW-PACKAGED-CSS | 自动 | `e2e-harness/src/test/image-acceptance.test.ts` + 真实 `guiAssets` 产物解析 | Host 从构建的 image-preview.html 重建页面、打开待发送图预览 | 根容器实际高度等于非零 webview 视口高度；全局布局、焦点、减弱动画/高对比规则经入口 CSS 打包携带；沿用现有图片专项截图并实际读验 |
+| E2E-PREVIEW-SAVE-ERROR | 自动 | `src/ui/imagePreview/ImagePreviewPanel.test.ts` + `accept:image` | 图片不存在、原件 URL 无效、复制失败、Save Dialog 拒绝 | 原因进入 error，savedPath 为 null；成功与用户取消保持原契约，不产生未处理 Promise rejection |
+| E2E-MODEL-DESCRIPTION | 自动 | `gui/src/settings/SettingsApp.test.tsx` + Settings Host 验收 | 逐字输入含空格的模型描述再保存 | 草稿每步保留空格；保存才规范化首尾空白，不改其他模型能力或密钥 |
+
+### 会话/附件并发回归补充（S1/S2/S3）
+- `src/core/session/tests/suite_test.rs`：独立进程验证 display/user/preheat/resume 四类侧车及 subagent 追加遵守稳定文件锁；删除必须等待在途侧车发布、删掉其结果，晚到发布不得复活数据。测试不要求永久独占 session，也不把空锁文件当成用户数据删除。
+- `src/core/session/tests/attachments_test.rs::gc_pending_reports_unlink_failure_instead_of_claiming_a_released_lease` / `failed_live_scan_preserves_orphans_and_releases_the_retention_guard`：真实 unlink 失败必须返回错误而非伪报释放数；live 扫描失败不删除原件且释放锁，不使用可因 root 权限而失效的夹具。
+
+- `tests/session_concurrency_tests.rs::independent_process_transcript_{append,title}_survives_atomic_rewrite`：复用现有子进程 harness，两进程同时共享占用同一 session；父进程在读取旧快照→原子 rename 的边界持稳定文件锁，子进程分别走公开追加/标题重写 API；成功返回的更改不得被旧快照吞掉。辅助 worker 默认 ignored，父用例显式启动，不计为空跑通过。
+
+- `src/core/session/tests/attachments_test.rs::fresh_lease_survives_a_sweep_with_an_earlier_live_snapshot`：GC 已扫描 live set，另一个操作随后为超过宽限期的老 blob 成功创建新草稿租约；清扫不能按旧集合删除仍有效的字节。
+- `src/core/session/tests/attachments_test.rs::retain_pending_batch_deduplicates_and_renews_existing_leases`：重复 retain 去重且续期过期 marker，不更换 marker 内容；紧接着清理过期租约也不能撤销刚成功的保留。
+- `src/core/session/tests/attachments_concurrency_test.rs`：真实独立测试进程验证 retain 先赢时 GC 等待并保留字节、GC 先赢时 retain 等待后拒绝缺失 blob；同一边界覆盖 put/get 损坏隔离/mark/touch/promote/clear/租约过期清理。child fixture 默认 ignored，但父用例必须显式启动并检查退出状态；不单算为通过。
+- `src/api/serve/tests/attachment_test.rs`、`src/api/serve/tests/commands_test.rs::detached_target_retain_and_discard_preserves_source_and_reclaims_target_leases`：沿用 ingest→prompt→历史读取→删除及跨会话 retain/discard 的真实调用链；不把底层锁用例替代协议/生命周期验收。
+
+### 模型协议与验收可信度补充
+- `tests/test_script_tools.py`：仅临时 fixture 和 dry-run，校验 creator 的 4096 UTF-8 字节边界、诊断统计的当前 `isError`/旧 `is_error`、回放器拒绝未实现的持久附件引用且保留旧内联媒体。使用标准库 unittest；creator 依赖原有 PyYAML，缺依赖显式失败而非 skip。精确命令：有 PyYAML 的 Python 执行 `python3 -m unittest discover -s tests -p test_script_tools.py -v`（cwd `tomcat`），不请求模型或读取用户 `.env`。
+
+- `src/core/llm/anthropic/tests/stream_test.rs::partial_usage_frames_preserve_input_and_cache_but_accept_explicit_zero`：message_start 给出输入/缓存计数，后续只给 output_tokens 时保留已有输入；累计输出取最新值而非相加；null/缺失不覆盖，显式零有效；终态只发一条完整 usage。
+- `tests/plan_real_llm_inprocess_tests.rs::inprocess_full_plan_path_with_real_llm`：planning/exec 连接重试耗尽必须保留诊断并失败；不能用提前 return 使未执行的 acceptance 计为通过。环境失败与产品断言失败分开报告。
+- `src/core/llm/tests/admin_test.rs::upsert_user_model_roundtrips_anthropic_files_capability`：既有 Anthropic document wire 支持对应 `files=true` 可保存并重载，也可显式关闭；未知 API 仍拒绝。
+- `src/core/llm/tests/openai_provider_test.rs::openai_non_stream_usage_accepts_absent_and_null_but_rejects_malformed`：非流式 usage 缺失/null 均允许；格式错误仍失败，正常对象沿用缓存计数测试。
+- `src/core/agent_loop/tests/metrics_test.rs::responses_without_usage_accumulate_on_top_of_the_previous_sample`：预置上轮 usage，本轮纯文本/工具调用均不发送 usage；新增文本、工具参数与工具结果全部进入 post-usage delta；本轮有 usage 的已有用例仍不得重复计数。
+- `src/core/agent_loop/tests/interrupt_test.rs::run_interrupt_during_overflow_collapse_returns_promptly`：本地估算未超预算，主模型真实请求返回 context overflow，摘要 provider 阻塞后取消；主请求恰好一次且及时 Interrupted。与主动压缩取消共用摘要阶段边界，进入 transcript/sidecar 提交后不丢弃提交 future。
+
 ## Story 3 — 插件管理 CLI（6 条）
 
 > **验收**：021–025 与 §4 人工验收「插件加载/卸载、错误隔离」对齐，建议在**本机真实插件路径**下补验；026 以自动化断言为主。
@@ -129,12 +217,14 @@
 
 ---
 
-## Story 4 — rquickjs 插件运行时与兼容层（5 条）
+## Story 4 — rquickjs 插件运行时与兼容层（7 条）
 
 > 主验收入口为 `tests/quickjs_e2e_tests.rs` 与 `tests/long_lived_vm_tests.rs`；对应架构入口见 [plugin-system-overview.md](../../../../architecture/plugin-system-overview.md)，运行时细节见 [plugin-system/runtime-and-sandbox.md](../../../../architecture/plugin-system/runtime-and-sandbox.md)。事件语义补充见 [plugin-system/events.md](../../../../architecture/plugin-system/events.md)。
 
 | 编号          | 验收 | 用例名                                  | 用户意图                                   | 操作序列                                                                 | 必须断言                                                                 |
 | ----------- | -- | ------------------------------------ | -------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-QJS-INSTANCE-BINDING | 自动 | `src/ext/plugin/tests/suite_test.rs` | 旧实例不能借用同名新实例的权限或清理其资源 | 启动 A→退役→修改 catalog 权限→移除 A→启动同 key B→延迟 A hostcall/cleanup | A 缺失与被替换时均 fail closed；B 权限仍有效；旧 cleanup 不删 B 通道；其他会话旧 birth 保持既有契约 |
+| E2E-QJS-AGENT-BUDGET | 自动 | `src/ext/runtime/tests/instance_test.rs` | 运行代码不能自行延长额度 | agent snippet 循环调用插件预算重置/恢复入口，并探测 idle-wait 控制 | 时间与 interrupt 两种预算均实际终止忙循环；agent 不获得插件重置/idle API；真实 host-await 仍不计作 JS 执行，普通插件 idle 行为不变 |
 | E2E-QJS-001 | 自动 | `run_script_console`                 | 插件脚本可在 rquickjs 中使用 `console` / microtask / timer | `PluginEngine.create_instance()` → `run_script()` 执行 `console.log/error`、`Promise.resolve()`、`setTimeout()` | host binding 收到 `log/error/microtask/timer` 四类日志；脚本无崩溃 |
 | E2E-QJS-002 | 自动 | `pi_readfile_llm`                    | 插件通过 `pi.readFile()` 与 `pi.complete()` 走宿主 bridge | `start_session_vm` → `dispatch_session_event(session_start)`，脚本内 `await pi.readFile()` + `await pi.complete()` | VM 保持 `Running/Idle`；`readFile` 返回 mock 内容；LLM 返回 mock `"hi"` |
 | E2E-QJS-003 | 自动 | `shims_and_crypto_work_in_session_vm` | Tier-A 垫片与同步 crypto 在 session VM 内可用 | `start_session_vm` → `dispatch_session_event(session_start)`，脚本验证 `path/util/events/Buffer/crypto` | `sha256/hmac/randomBytes` 正常；VM 健康；`end_session` 后 RuntimeManager 为空 |

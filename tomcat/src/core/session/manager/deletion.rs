@@ -68,6 +68,8 @@ impl SessionDeletion<'_> {
     pub fn commit(self, trail_dir: Option<&Path>) -> Result<DeleteSessionOutcome, AppError> {
         let mut warnings = Vec::new();
         if let Some(entry) = &self.entry {
+            let transcript = self.manager.transcript_path(&self.id);
+            let _transcript_guard = crate::infra::config::lock::acquire_config_lock(&transcript)?;
             self.manager.with_store_mut(|store| {
                 if store
                     .sessions
@@ -80,15 +82,23 @@ impl SessionDeletion<'_> {
                 SessionManager::repoint_current_after_removal(store, &entry.session_key, &self.id);
                 Ok(())
             })?;
-            let transcript = self.manager.transcript_path(&self.id);
+            record_cleanup(
+                std::fs::remove_file(&transcript),
+                &transcript,
+                &mut warnings,
+            );
             let preheat = crate::core::session::preheat_cache::preheat_cache_path(&transcript);
             for path in [
-                &transcript,
                 &user_message_sidecar_path(&transcript),
                 &tool_display_sidecar_path(&transcript),
                 &preheat,
             ] {
-                record_cleanup(std::fs::remove_file(path), path, &mut warnings);
+                // Remove the parent first, then serialize with each sidecar writer. A writer
+                // that arrives later rechecks the missing parent before it can publish bytes.
+                match crate::infra::config::lock::acquire_config_lock(path) {
+                    Ok(_guard) => record_cleanup(std::fs::remove_file(path), path, &mut warnings),
+                    Err(error) => warnings.push(error.to_string()),
+                }
             }
             if let Err(error) = remove_resume_index(&transcript) {
                 warnings.push(error.to_string());
@@ -109,27 +119,16 @@ impl SessionDeletion<'_> {
             if let Err(error) = store.clear_session(&self.id) {
                 warnings.push(error.to_string());
             }
-            match self.manager.collect_live_blob_shas() {
-                Ok(mut live) => {
-                    if let Err(error) =
-                        store.gc_pending(crate::core::session::attachments::PENDING_BLOB_TTL)
-                    {
-                        warnings.push(error.to_string());
-                    }
-                    match store.collect_pending_blob_shas() {
-                        Ok(pending) => {
-                            live.refresh_pending_blob_shas(pending);
-                            if let Err(error) = store.sweep_orphan_blobs(
-                                &live.shas,
-                                crate::core::session::attachments::ORPHAN_BLOB_GRACE,
-                            ) {
-                                warnings.push(error.to_string());
-                            }
-                        }
-                        Err(error) => warnings.push(error.to_string()),
-                    }
-                }
-                Err(error) => warnings.push(error.to_string()),
+            if let Err(error) =
+                store.gc_pending(crate::core::session::attachments::PENDING_BLOB_TTL)
+            {
+                warnings.push(error.to_string());
+            }
+            if let Err(error) = store.sweep_orphan_blobs(
+                || self.manager.collect_live_blob_shas().map(|live| live.shas),
+                crate::core::session::attachments::ORPHAN_BLOB_GRACE,
+            ) {
+                warnings.push(error.to_string());
             }
         }
         if let Some(guard) = self.guard {

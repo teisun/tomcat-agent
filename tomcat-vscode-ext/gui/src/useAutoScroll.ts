@@ -53,6 +53,8 @@ type UseAutoScrollOptions = {
   containerRef: RefObject<HTMLElement | null>;
   contentRef: RefObject<HTMLElement | null>;
   contentKey: string;
+  // Follow the caller's actual content branch, not the stable ref object's identity.
+  contentMounted?: boolean;
   latestUserMessageId: string | null;
   oldestItemKey: string | null;
   resetKey: string | null;
@@ -123,6 +125,7 @@ export function useAutoScroll({
   containerRef,
   contentRef,
   contentKey,
+  contentMounted = true,
   latestUserMessageId,
   oldestItemKey,
   resetKey,
@@ -424,9 +427,10 @@ export function useAutoScroll({
   }, [containerRef, oldestItemKey]);
 
   useLayoutEffect(() => {
+    if (!contentMounted) return;
     updateAutoScrollLayout();
     previousScrollHeightRef.current = containerRef.current?.scrollHeight ?? 0;
-  }, [contentKey]);
+  }, [contentKey, contentMounted]);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -526,7 +530,7 @@ export function useAutoScroll({
   useEffect(() => {
     const container = containerRef.current;
     const content = contentRef.current;
-    if (!container || !content || typeof ResizeObserver === "undefined") {
+    if (!contentMounted || !container || !content || typeof ResizeObserver === "undefined") {
       return;
     }
 
@@ -570,7 +574,7 @@ export function useAutoScroll({
     return () => {
       observer.disconnect();
     };
-  }, [containerRef, contentKey, contentRef]);
+  }, [containerRef, contentKey, contentMounted, contentRef]);
 
   useEffect(() => {
     const container = containerRef.current;

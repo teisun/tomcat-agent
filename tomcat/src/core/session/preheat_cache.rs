@@ -53,6 +53,11 @@ pub(crate) fn write_preheat_cache(
     if transcript_path.as_os_str().is_empty() || !transcript_path.exists() {
         return Ok(());
     }
+    let path = preheat_cache_path(transcript_path);
+    let _guard = crate::infra::config::lock::acquire_config_lock(&path)?;
+    if !transcript_path.exists() {
+        return Ok(());
+    }
     let for_id = result
         .transcript_compaction_entry_id
         .clone()
@@ -69,7 +74,6 @@ pub(crate) fn write_preheat_cache(
         estimated_tokens_saved: result.estimated_tokens_saved,
         preheat_elapsed_ms: result.preheat_elapsed_ms,
     };
-    let path = preheat_cache_path(transcript_path);
     write_file_atomic_with(&path, |writer| {
         serde_json::to_writer(&mut *writer, &record)?;
         writer.write_all(b"\n").map_err(AppError::Io)?;

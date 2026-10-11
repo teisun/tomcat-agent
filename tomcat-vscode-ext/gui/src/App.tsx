@@ -1514,6 +1514,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       (item) => item.type === "approval" && !item.resolved && item.live,
     ).length ?? 0;
   const activeTimeline = activeSession?.timeline ?? [];
+  const hasTranscriptContent = Boolean(activeSession && (
+    activeTimeline.length || activeApprovalCount || activeSession.historyLoading || activeSession.hasMoreHistory
+  ));
   const messagesWithWrites = useMemo(() => messageIdsWithWritesAfter(activeSession?.timeline ?? []), [activeSession?.timeline]);
   const oldestTimelineItemId = activeTimeline[0]?.id ?? null;
   const bootstrapFillRef = useRef<{ requestCount: number; sessionId: string | null }>({
@@ -1566,6 +1569,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     containerRef: streamRef,
     contentRef: transcriptRef,
     contentKey: streamContentKey,
+    contentMounted: state.ready && hasTranscriptContent,
     latestUserMessageId,
     oldestItemKey: oldestTimelineItemId,
     resetKey: activeSession?.sessionId ?? null,
@@ -1613,85 +1617,91 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [activeSession?.sessionId]);
 
   useEffect(() => {
-    const sessionId = activeSession?.sessionId;
-    const composer = composerRef.current;
-    if (!sessionId || !composer) {
-      return;
-    }
-    const backendDraft = activeSession.composerDraft;
-    const backendComposerDraft: ComposerDraft = {
-      hasContent:
-        backendDraft?.segments.some(
-          (segment) => segment.type !== "text" || segment.text.trim().length > 0,
-        ) === true || (backendDraft?.text.trim().length ?? 0) > 0,
-      segments: backendDraft?.segments ?? [],
-      text: backendDraft?.text ?? "",
-    };
-    const localDraft = localComposerDraftsRef.current.get(sessionId);
-    const previousBackendDraft = hostComposerDraftsRef.current.get(sessionId);
-    if (backendDraft) {
-      hostComposerDraftsRef.current.set(sessionId, backendComposerDraft);
-    }
-    let nextDraft = localDraft ?? backendComposerDraft;
+    let cancelled = false;
+    // Reference node views flush React synchronously; leave the current effect stack first.
+    queueMicrotask(() => {
+      if (cancelled) return;
+      const sessionId = activeSession?.sessionId;
+      const composer = composerRef.current;
+      if (!sessionId || !composer) {
+        return;
+      }
+      const backendDraft = activeSession.composerDraft;
+      const backendComposerDraft: ComposerDraft = {
+        hasContent:
+          backendDraft?.segments.some(
+            (segment) => segment.type !== "text" || segment.text.trim().length > 0,
+          ) === true || (backendDraft?.text.trim().length ?? 0) > 0,
+        segments: backendDraft?.segments ?? [],
+        text: backendDraft?.text ?? "",
+      };
+      const localDraft = localComposerDraftsRef.current.get(sessionId);
+      const previousBackendDraft = hostComposerDraftsRef.current.get(sessionId);
+      if (backendDraft) {
+        hostComposerDraftsRef.current.set(sessionId, backendComposerDraft);
+      }
+      let nextDraft = localDraft ?? backendComposerDraft;
 
-    // A received snapshot establishes the baseline used when the user later clears it.
-    // A locally edited session remains locally authoritative until send handling retires it.
-    if (!localDraft && backendDraft) {
-      syncedDraftRef.current.set(sessionId, composerDraftSignature(backendComposerDraft));
-    }
+      // A received snapshot establishes the baseline used when the user later clears it.
+      // A locally edited session remains locally authoritative until send handling retires it.
+      if (!localDraft && backendDraft) {
+        syncedDraftRef.current.set(sessionId, composerDraftSignature(backendComposerDraft));
+      }
 
-    if (localDraft && backendDraft) {
-      const localReferenceIds = new Set(
-        localDraft.segments.filter(isWebviewReference).map(referenceIdentity),
-      );
-      const previousHostReferenceIds = new Set(
-        previousBackendDraft?.segments.filter(isWebviewReference).map(referenceIdentity),
-      );
-      const missingReferences = backendDraft.segments
-        .filter(isWebviewReference)
-        .filter(
-          (reference) =>
-            !localReferenceIds.has(referenceIdentity(reference))
-            && !previousHostReferenceIds.has(referenceIdentity(reference))
-            && (!reference.occurrenceId || !receivedReferenceIdsRef.current.get(sessionId)?.has(reference.occurrenceId)),
+      if (localDraft && backendDraft) {
+        const localReferenceIds = new Set(
+          localDraft.segments.filter(isWebviewReference).map(referenceIdentity),
         );
-      if (missingReferences.length > 0) {
+        const previousHostReferenceIds = new Set(
+          previousBackendDraft?.segments.filter(isWebviewReference).map(referenceIdentity),
+        );
+        const missingReferences = backendDraft.segments
+          .filter(isWebviewReference)
+          .filter(
+            (reference) =>
+              !localReferenceIds.has(referenceIdentity(reference))
+              && !previousHostReferenceIds.has(referenceIdentity(reference))
+              && (!reference.occurrenceId || !receivedReferenceIdsRef.current.get(sessionId)?.has(reference.occurrenceId)),
+          );
+        if (missingReferences.length > 0) {
+          applyingBackendDraftRef.current = true;
+          try {
+            if (!draftsEqual(composer.getDraft(), localDraft)) {
+              composer.replaceDraft(localDraft);
+            }
+            composer.insertReferences(missingReferences);
+            nextDraft = composer.getDraft();
+            localComposerDraftsRef.current.set(sessionId, nextDraft);
+            if (pendingDraftSyncRef.current.has(sessionId)) {
+              pendingDraftSyncRef.current.set(sessionId, nextDraft);
+            }
+          } finally {
+            applyingBackendDraftRef.current = false;
+          }
+        }
+      }
+
+      const seenIds = receivedReferenceIdsRef.current.get(sessionId) ?? new Set<string>();
+      for (const segment of backendDraft?.segments ?? []) {
+        if (segment.type !== "text" && segment.occurrenceId) seenIds.add(segment.occurrenceId);
+      }
+      receivedReferenceIdsRef.current.set(sessionId, seenIds);
+      const signature = composerDraftSignature(nextDraft);
+      const applied = appliedComposerDraftRef.current;
+      if (applied?.sessionId === sessionId && applied.signature === signature) {
+        return;
+      }
+      appliedComposerDraftRef.current = { sessionId, signature };
+      if (!draftsEqual(composer.getDraft(), nextDraft)) {
         applyingBackendDraftRef.current = true;
         try {
-          if (!draftsEqual(composer.getDraft(), localDraft)) {
-            composer.replaceDraft(localDraft);
-          }
-          composer.insertReferences(missingReferences);
-          nextDraft = composer.getDraft();
-          localComposerDraftsRef.current.set(sessionId, nextDraft);
-          if (pendingDraftSyncRef.current.has(sessionId)) {
-            pendingDraftSyncRef.current.set(sessionId, nextDraft);
-          }
+          composer.replaceDraft(nextDraft);
         } finally {
           applyingBackendDraftRef.current = false;
         }
       }
-    }
-
-    const seenIds = receivedReferenceIdsRef.current.get(sessionId) ?? new Set<string>();
-    for (const segment of backendDraft?.segments ?? []) {
-      if (segment.type !== "text" && segment.occurrenceId) seenIds.add(segment.occurrenceId);
-    }
-    receivedReferenceIdsRef.current.set(sessionId, seenIds);
-    const signature = composerDraftSignature(nextDraft);
-    const applied = appliedComposerDraftRef.current;
-    if (applied?.sessionId === sessionId && applied.signature === signature) {
-      return;
-    }
-    appliedComposerDraftRef.current = { sessionId, signature };
-    if (!draftsEqual(composer.getDraft(), nextDraft)) {
-      applyingBackendDraftRef.current = true;
-      try {
-        composer.replaceDraft(nextDraft);
-      } finally {
-        applyingBackendDraftRef.current = false;
-      }
-    }
+    });
+    return () => { cancelled = true; };
   }, [activeSession?.composerDraft, activeSession?.sessionId]);
 
   useEffect(() => {
@@ -2593,6 +2603,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [flushComposerDraft]);
 
   const composerProps: ComposerSurfaceProps = {
+    sessionId: state.activeSessionId,
     availableModelDetails: state.availableModelDetails,
     availableModelReasoningLevels: state.availableModelReasoningLevels,
     availableModels: state.availableModels,
@@ -2759,10 +2770,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               </p>
             </div>
           ) : activeSession ? (
-            activeSession.timeline.length ||
-            activeApprovalCount ||
-            activeSession.historyLoading ||
-            activeSession.hasMoreHistory ? (
+            hasTranscriptContent ? (
               <TranscriptView
                 onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending && !queueEditingItem
                   ? handleEditUserMessage : undefined}

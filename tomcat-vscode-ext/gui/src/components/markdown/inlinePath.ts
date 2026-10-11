@@ -171,7 +171,7 @@ export function splitInlinePathLocation(value: string): InlineFilePathMatch | nu
     };
   }
 
-  const colonMatch = trimmed.match(/^(.*):(\d+)(?::(\d+))?(?:-(\d+)(?::(\d+))?)?$/u);
+  const colonMatch = trimmed.match(/^(.*?):(\d+)(?::(\d+))?(?:-(\d+)(?::(\d+))?)?$/u);
   if (colonMatch) {
     const path = colonMatch[1];
     if (path.length > 1 && looksLikeFilePathToken(path)) {

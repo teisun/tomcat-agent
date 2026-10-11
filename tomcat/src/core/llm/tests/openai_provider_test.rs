@@ -767,7 +767,7 @@ fn transport_messages_degrades_uploaded_parts_when_files_adapter_missing() {
     assert_eq!(content[1]["text"], UNSUPPORTED_FILE_INPUT_PLACEHOLDER);
 }
 
-/// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
+/// Cached token details are read from the provider's non-stream wire shape.
 #[test]
 fn openai_non_stream_usage_reports_cached_tokens() {
     let response = parse_non_stream_response(
@@ -788,6 +788,25 @@ fn openai_non_stream_usage_reports_cached_tokens() {
     assert_eq!(usage.prompt_tokens, 120);
     assert_eq!(usage.cache_read_tokens, Some(96));
     assert_eq!(usage.cache_write_tokens, None);
+}
+
+#[test]
+fn openai_non_stream_usage_accepts_absent_and_null_but_rejects_malformed() {
+    let mut raw = serde_json::json!({
+        "id": "chatcmpl-optional-usage",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+    });
+    for usage in [None, Some(serde_json::Value::Null)] {
+        if let Some(usage) = usage {
+            raw["usage"] = usage;
+        }
+        let response =
+            parse_non_stream_response(&serde_json::to_vec(&raw).unwrap()).expect("optional usage");
+        assert!(response.usage.is_none());
+        assert_eq!(response.choices.len(), 1);
+    }
+    raw["usage"] = serde_json::json!({"prompt_tokens": "bad", "completion_tokens": 1});
+    assert!(parse_non_stream_response(&serde_json::to_vec(&raw).unwrap()).is_err());
 }
 
 #[test]

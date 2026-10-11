@@ -622,6 +622,31 @@ applied_changes: false
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].model, "gpt-5.6-sol");
     assert_eq!(reqs[0].thinking_level, Some(ThinkingLevel::Off));
+    let child_path = fx
+        .agent_trail_dir
+        .join("subagent-sessions")
+        .join(format!("{}.jsonl", summary.child_session_id));
+    let raw = std::fs::read_to_string(child_path).expect("successful reviewer child transcript");
+    let rows = raw
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("valid child JSONL");
+    assert!(
+        rows.iter()
+            .any(|row| row["event"] == "subagent.transcript.meta"),
+        "{raw}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["type"] == "message"
+                && row["message"]["role"] == "assistant"
+                && row["message"]["content"]
+                    .to_string()
+                    .contains("summary: ok")
+        }),
+        "successful reviewer output must persist in the child's own transcript: {raw}"
+    );
     let _ = fx.home;
 }
 

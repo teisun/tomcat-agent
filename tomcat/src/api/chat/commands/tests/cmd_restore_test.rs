@@ -276,9 +276,10 @@ impl CheckpointStore for DiffSpyStore {
 #[test]
 #[serial(env_lock)]
 fn effective_restore_paths_defaults_to_current_session_changed_paths() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_TEST_KEY";
 
@@ -443,9 +444,10 @@ fn effective_restore_paths_warns_when_auto_narrowing_fails() {
 #[test]
 #[serial(env_lock)]
 fn other_session_restore_conflicts_detect_overlapping_paths() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_CONFLICT_TEST_KEY";
 
@@ -516,9 +518,10 @@ fn other_session_restore_conflicts_detect_overlapping_paths() {
 #[test]
 #[serial(env_lock)]
 fn other_session_restore_conflicts_include_other_scopes() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_SCOPE_CONFLICT_TEST_KEY";
 
@@ -601,9 +604,10 @@ fn other_session_restore_conflicts_include_other_scopes() {
 #[test]
 #[serial(env_lock)]
 fn restore_keeps_other_session_owned_paths_untouched() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_ISOLATION_TEST_KEY";
 
@@ -698,9 +702,10 @@ fn restore_keeps_other_session_owned_paths_untouched() {
 #[serial(home_env_lock)]
 fn restore_core_discards_keeps_only_when_reverting_files() {
     use crate::core::checkpoint::{file_baselines, session_files};
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     for revert in [false, true] {
         let home = tempfile::tempdir().unwrap();
@@ -784,9 +789,10 @@ fn restore_core_discards_keeps_only_when_reverting_files() {
 #[test]
 #[serial(home_env_lock)]
 fn restore_core_without_reverting_files_truncates_transcript_only() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_CORE_TEST_KEY";
 
@@ -915,9 +921,10 @@ fn restore_core_without_reverting_files_truncates_transcript_only() {
 #[test]
 #[serial(home_env_lock)]
 fn restore_core_without_reverting_files_skips_cross_session_conflict_warnings() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_DONT_REVERT_WARNINGS_TEST_KEY";
 

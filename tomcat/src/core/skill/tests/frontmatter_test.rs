@@ -16,6 +16,24 @@ description: Create a git commit.
 }
 
 #[test]
+fn description_limit_counts_utf8_bytes_at_the_boundary() {
+    for description in ["a".repeat(1024), format!("{}a", "界".repeat(341))] {
+        assert_eq!(description.len(), 1024);
+        let text = format!("---\nname: sample\ndescription: {description}\n---\nInstructions.\n");
+        assert!(
+            text.len() < 4096,
+            "the independent header byte limit must not mask this check"
+        );
+        assert_eq!(parse(&text).unwrap().description, description);
+        let too_long = text.replace(&description, &format!("{description}a"));
+        assert!(matches!(
+            parse(&too_long),
+            Err(SkillParseError::InvalidDescription { .. })
+        ));
+    }
+}
+
+#[test]
 fn unknown_keys_ignored() {
     let text = r#"---
 name: commit

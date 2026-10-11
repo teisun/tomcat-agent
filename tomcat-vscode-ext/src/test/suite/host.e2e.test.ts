@@ -1,4 +1,6 @@
 import * as assert from "node:assert/strict";
+import * as path from "node:path";
+import { captureWorkbenchArtifacts } from "./support/workbenchFindDriver";
 
 import {
   assertPlanPreviewCustomEditorFlow,
@@ -47,6 +49,20 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  teardown(async function () {
+    const directory = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
+    if (this.currentTest?.state !== "failed" || !directory) return;
+    // Preserve the original assertion failure; a broken DOM bridge still needs
+    // real renderer evidence, collected through the existing CDP capture path.
+    const target = path.join(directory, `failure-${Date.now()}.png`);
+    try {
+      await captureWorkbenchArtifacts(target);
+      console.log(`Failure artifacts for ${this.currentTest.fullTitle()}: ${target}`);
+    } catch (error) {
+      console.warn(`Secondary failure-artifact error (original failure retained): ${String(error)}`);
+    }
+  });
+
   test("session pins and language: gear, bilingual controls, deletion and fixed review choices", async function () {
     this.timeout(180_000);
     await assertSessionSettingsLanguageFlow(await getTomcatExtensionApi());

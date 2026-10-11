@@ -17,6 +17,7 @@ mod resume_index_test;
 mod scope_test;
 mod store_test;
 mod subagent_transcript_test;
+mod suite_test;
 mod transcript_header_test;
 mod transcript_lookup_test;
 mod transcript_mutate_test;

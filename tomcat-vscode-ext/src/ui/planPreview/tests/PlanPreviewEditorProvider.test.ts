@@ -22,6 +22,7 @@ import type {
   PlanPreviewStateSnapshot,
 } from "../../../shared/planPreviewProtocol";
 import { ContextSearchService } from "../../webview/contextSearch";
+import { translate } from "../../../shared/i18n";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -468,9 +469,12 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
     } finally { toast.mockRestore(); }
   });
 
-  it("reports failed plan-picker preference updates instead of silently reverting", async () => {
-    const sendSetContextWindow = vi.fn().mockRejectedValue(new Error("invalid tier"));
-    const sendSetThinkingLevel = vi.fn().mockRejectedValue(new Error("unsupported effort"));
+  it.each(["accepted", "negative-ack", "transport"] as const)("handles plan-picker preference updates (%s)", async (mode) => {
+    const reply = (error: string) => mode === "transport"
+      ? vi.fn().mockRejectedValue(new Error(error))
+      : vi.fn().mockResolvedValue({ success: mode === "accepted", error: mode === "accepted" ? null : error });
+    const sendSetContextWindow = reply("invalid tier");
+    const sendSetThinkingLevel = reply("unsupported effort");
     const deps = makeDeps({
       ensureSession: vi.fn().mockResolvedValue("session-1"),
       messenger: {
@@ -506,9 +510,14 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
 
       expect(sendSetContextWindow).toHaveBeenCalledWith("session-1", "gpt-5.6", 1_000_000);
       expect(sendSetThinkingLevel).toHaveBeenCalledWith("session-1", "gpt-5.6", "xhigh");
-      expect(toastSpy).toHaveBeenCalledWith("Context tier was not changed: invalid tier");
-      expect(toastSpy).toHaveBeenCalledWith("Effort was not changed: unsupported effort");
-      expect(postState).not.toHaveBeenCalled();
+      if (mode === "accepted") {
+        expect(toastSpy).not.toHaveBeenCalled();
+        expect(postState).toHaveBeenCalledTimes(2);
+      } else {
+        expect(toastSpy).toHaveBeenCalledWith(translate("en", "plan.host.contextError", { detail: "invalid tier" }));
+        expect(toastSpy).toHaveBeenCalledWith(translate("en", "plan.host.effortError", { detail: "unsupported effort" }));
+        expect(postState).not.toHaveBeenCalled();
+      }
     } finally {
       toastSpy.mockRestore();
     }

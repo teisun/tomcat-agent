@@ -3,8 +3,9 @@
 //! These intentionally exercise `tomcat serve --stdio`, never the interactive
 //! chat CLI. They require a vision-capable OpenAI-compatible model and are
 //! excluded from default CI (`scripts/test-groups.sh` does not list this
-//! binary; each case is `#[ignore]` and also requires `TOMCAT_REAL_LLM_E2E=1`):
+//! binary; live cases use `#[ignore]` and require `TOMCAT_REAL_LLM_E2E=1`):
 //! `TOMCAT_REAL_LLM_E2E=1 cargo test --test ui_acceptance_real_llm_e2e -- --ignored`
+//! Offline fixture guards can be run by name without enabling the paid cases.
 
 mod common;
 
@@ -56,7 +57,20 @@ impl UiFixtureServer {
         let thread = thread::spawn(move || {
             while !stop_for_thread.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((stream, _)) => respond_fixture(stream, &interactive_fixture),
+                    Ok((stream, _)) => {
+                        if let Err(error) = respond_fixture(stream, &interactive_fixture) {
+                            assert!(
+                                matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock
+                                        | std::io::ErrorKind::TimedOut
+                                        | std::io::ErrorKind::BrokenPipe
+                                        | std::io::ErrorKind::ConnectionReset
+                                ),
+                                "UI fixture request failed: {error}"
+                            );
+                        }
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -82,12 +96,42 @@ impl Drop for UiFixtureServer {
     }
 }
 
-fn respond_fixture(mut stream: TcpStream, interactive_fixture: &str) {
-    stream
-        .set_nonblocking(false)
-        .expect("make accepted UI fixture socket blocking");
+#[test]
+fn fixture_server_recovers_from_idle_connection_and_stops() {
+    let server = UiFixtureServer::start();
+    let address = server.base_url.strip_prefix("http://").unwrap();
+    // TCP's accept queue puts this silent connection ahead of the real request.
+    let idle = TcpStream::connect(address).unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client
+        .write_all(b"GET /healthy.html HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    let read = client.read_to_string(&mut response);
+    // Release sockets before asserting so the unfixed blocking server can exit.
+    drop(idle);
+    drop(client);
+    drop(server);
+    assert!(
+        read.is_ok(),
+        "an idle client must not block the next request: {read:?}"
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.ends_with(HEALTHY_FIXTURE));
+}
+
+fn respond_fixture(mut stream: TcpStream, interactive_fixture: &str) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     let mut request = [0; 1024];
-    let read = stream.read(&mut request).expect("read fixture request");
+    let read = stream.read(&mut request)?;
+    if read == 0 {
+        return Ok(());
+    }
     let target = std::str::from_utf8(&request[..read])
         .expect("UTF-8 request")
         .split_whitespace()
@@ -107,9 +151,7 @@ fn respond_fixture(mut stream: TcpStream, interactive_fixture: &str) {
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream
-        .write_all(response.as_bytes())
-        .expect("write fixture response");
+    stream.write_all(response.as_bytes())
 }
 
 struct RealLlmTarget {
@@ -554,7 +596,65 @@ fn tool_names(frames: &[Value]) -> Vec<String> {
         .collect()
 }
 
-fn assert_deferred_playwright_navigate_click_screenshot(frames: &[Value]) {
+#[test]
+fn screenshot_evidence_rejects_stale_png_and_failed_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let stale = dir.path().join("headed-interaction.png");
+    std::fs::write(
+        &stale,
+        include_bytes!("fixtures/llm_multimodal/sample_image.png"),
+    )
+    .unwrap();
+    let mut valid = Vec::new();
+    for (index, name) in [
+        "tool_search",
+        "tool_describe",
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_take_screenshot",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tool = if name.starts_with("mcp__") {
+            "tool_call"
+        } else {
+            name
+        };
+        valid.push(json!({"type":"tool_execution_start", "toolName":tool,
+            "toolCallId":format!("call-{index}"), "args":{"name":name,
+            "arguments":{"filename":stale.to_string_lossy()}}}));
+        valid.push(json!({"type":"tool_execution_end", "toolName":tool,
+            "toolCallId":format!("call-{index}"), "isError":false, "result":{}}));
+    }
+    assert_deferred_playwright_navigate_click_screenshot(&valid);
+    for problem in ["failed", "missing", "other-id", "early"] {
+        let mut frames = valid.clone();
+        match problem {
+            "failed" => frames.last_mut().unwrap()["isError"] = json!(true),
+            "missing" => {
+                frames.pop();
+            }
+            "other-id" => frames.last_mut().unwrap()["toolCallId"] = json!("unrelated"),
+            "early" => {
+                let end = frames.pop().unwrap();
+                frames.insert(0, end);
+            }
+            _ => unreachable!(),
+        }
+        assert!(stale.is_file());
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_deferred_playwright_navigate_click_screenshot(&frames);
+            })
+            .is_err(),
+            "an old PNG must not validate a {problem} screenshot result"
+        );
+    }
+}
+
+fn assert_deferred_playwright_navigate_click_screenshot(frames: &[Value]) -> &Value {
     let names = tool_names(frames);
     let joined = names.join(", ");
     assert!(
@@ -571,22 +671,44 @@ fn assert_deferred_playwright_navigate_click_screenshot(frames: &[Value]) {
     );
     let connector_calls = frames
         .iter()
-        .filter(|frame| {
+        .enumerate()
+        .filter(|(_, frame)| {
             frame.get("type").and_then(Value::as_str) == Some("tool_execution_start")
                 && frame.get("toolName").and_then(Value::as_str) == Some("tool_call")
         })
-        .map(Value::to_string)
         .collect::<Vec<_>>();
-    let calls = connector_calls.join("\n");
+    let calls = connector_calls
+        .iter()
+        .map(|(_, frame)| frame.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // A start is only an attempt. Join its own later terminal receipt, allowing
+    // a failed attempt to be followed by a successful retry with another ID.
+    let connector_calls = connector_calls
+        .into_iter()
+        .filter(|(index, start)| {
+            let Some(id) = start["toolCallId"].as_str() else {
+                return false;
+            };
+            frames[index + 1..]
+                .iter()
+                .find(|end| {
+                    end["type"] == "tool_execution_end" && end["toolCallId"].as_str() == Some(id)
+                })
+                .is_some_and(|end| end["toolName"] == "tool_call" && end["isError"] == false)
+        })
+        .collect::<Vec<_>>();
     let navigate_index = connector_calls
         .iter()
-        .position(|frame| frame.contains("browser_navigate"))
+        .position(|(_, frame)| frame["args"]["name"] == "mcp__playwright__browser_navigate")
         .unwrap_or_else(|| panic!("agent must call browser_navigate via tool_call; calls={calls}"));
     let click_index = connector_calls
         .iter()
         .enumerate()
         .skip(navigate_index + 1)
-        .find_map(|(index, frame)| frame.contains("browser_click").then_some(index))
+        .find_map(|(index, (_, frame))| {
+            (frame["args"]["name"] == "mcp__playwright__browser_click").then_some(index)
+        })
         .unwrap_or_else(|| {
             panic!("agent must call browser_click after browser_navigate; calls={calls}")
         });
@@ -594,8 +716,9 @@ fn assert_deferred_playwright_navigate_click_screenshot(frames: &[Value]) {
         .iter()
         .enumerate()
         .skip(click_index + 1)
-        .find_map(|(index, frame)| {
-            (frame.contains("browser_snapshot") || frame.contains("browser_get_visible_text"))
+        .find_map(|(index, (_, frame))| {
+            (frame["args"]["name"] == "mcp__playwright__browser_snapshot"
+                || frame["args"]["name"] == "mcp__playwright__browser_get_visible_text")
                 .then_some(index)
         })
         .unwrap_or_else(|| {
@@ -607,15 +730,20 @@ fn assert_deferred_playwright_navigate_click_screenshot(frames: &[Value]) {
         .iter()
         .enumerate()
         .skip(post_click_snapshot_index + 1)
-        .find_map(|(index, frame)| frame.contains("browser_take_screenshot").then_some(index))
+        .find_map(|(index, (_, frame))| (frame["args"]["name"] == "mcp__playwright__browser_take_screenshot").then_some(index))
         .unwrap_or_else(|| {
             panic!("agent must call browser_take_screenshot after textual post-click evidence; calls={calls}")
         });
 
     eprintln!(
         "[real-llm-e2e] confirmed deferred Playwright MCP sequence: {}",
-        connector_calls[navigate_index..=screenshot_index].join(" -> ")
+        connector_calls[navigate_index..=screenshot_index]
+            .iter()
+            .map(|(_, frame)| frame.to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ")
     );
+    connector_calls[screenshot_index].1
 }
 
 fn screenshot_events(frames: &[Value]) -> Vec<Value> {
@@ -899,7 +1027,14 @@ fn e2e_4_real_llm_drives_a_headed_playwright_browser_through_deferred_tools() {
         !mcp_config.contains("--headless"),
         "headed E2E must omit --headless: {mcp_config}"
     );
-    let screenshot_path = headed_e2e_screenshot_dir().join("headed-interaction.png");
+    let screenshot_root = headed_e2e_screenshot_dir();
+    std::fs::create_dir_all(&screenshot_root).expect("create retained screenshot root");
+    let screenshot_path = tempfile::Builder::new()
+        .prefix("headed-")
+        .tempdir_in(&screenshot_root)
+        .expect("reserve a fresh screenshot directory")
+        .keep()
+        .join("headed-interaction.png");
     assert!(
         mcp_config.contains(headed_e2e_screenshot_dir().to_string_lossy().as_ref()),
         "headed E2E must configure the retained screenshot directory: {mcp_config}"
@@ -932,7 +1067,12 @@ fn e2e_4_real_llm_drives_a_headed_playwright_browser_through_deferred_tools() {
             && !tool_names(&frames).iter().any(|name| name == "bash"),
         "headed deferred-MCP E2E must use connectors but not the verification workflow: {frames:?}"
     );
-    assert_deferred_playwright_navigate_click_screenshot(&frames);
+    let screenshot_call = assert_deferred_playwright_navigate_click_screenshot(&frames);
+    assert_eq!(
+        screenshot_call["args"]["arguments"]["filename"].as_str(),
+        screenshot_path.to_str(),
+        "the successful screenshot receipt must belong to this run's requested artifact"
+    );
     assert!(
         screenshot_path.is_file(),
         "headed MCP screenshot was not saved to {}; tools={:?}; screenshot_events={:?}; stderr={}",

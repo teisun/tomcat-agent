@@ -837,24 +837,25 @@ fn upsert_user_model_rejects_unknown_api() {
 
 #[test]
 #[serial(env_lock)]
-fn upsert_user_model_rejects_anthropic_files_capability() {
+fn upsert_user_model_roundtrips_anthropic_files_capability() {
     clear_managed_credentials_for_test();
     let (_work_dir, cfg) = temp_cfg();
-    let error = upsert_user_model(
-        &cfg,
-        ModelEntryInput {
+    for files in [true, false] {
+        let input = ModelEntryInput {
             capabilities: Capabilities {
-                files: true,
+                files,
                 ..Default::default()
             },
             ..custom_claude_input()
-        },
-    )
-    .expect_err("anthropic files capability must fail");
-    assert!(
-        error.to_string().contains("files"),
-        "error should mention unsupported files capability, got: {error}"
-    );
+        };
+        let saved = upsert_user_model(&cfg, input).expect("Anthropic supports document inputs");
+        assert_eq!(saved.model.capabilities.files, files);
+        let catalog = ModelCatalog::load(&cfg).expect("reload persisted capability");
+        assert_eq!(
+            catalog.lookup("custom-claude").unwrap().capabilities.files,
+            files
+        );
+    }
 }
 
 #[test]

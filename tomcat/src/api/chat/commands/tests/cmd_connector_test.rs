@@ -139,6 +139,19 @@ async fn cmd_connector_add_and_list_round_trips_filtered_tools() {
         .tool_defs("fake");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].raw_name, "capture");
+    let own_manager = ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .unwrap()
+        .mcp_manager();
+    let healthy_generation = own_manager.statuses()[0].generation.clone();
+    run(&ctx, ConnectorCommand::Reload).await;
+    assert_eq!(
+        own_manager.statuses()[0].generation,
+        healthy_generation,
+        "explicit reload must retain an unchanged healthy connection"
+    );
 
     let outcome = run(&ctx, ConnectorCommand::List).await;
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
@@ -149,4 +162,112 @@ async fn cmd_connector_add_and_list_round_trips_filtered_tools() {
     let outcome = run(&ctx, ConnectorCommand::TrustProject).await;
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
     assert!(store.is_trusted(root).unwrap());
+
+    let other_workspace = temp.path().join("other-workspace");
+    std::fs::create_dir_all(&other_workspace).unwrap();
+    let other =
+        crate::core::connector::ConnectorRegistry::new(&cfg, Some(&other_workspace)).unwrap();
+    let manager = other.mcp_manager();
+    manager.connect_server("fake").await.unwrap();
+    let key = manager.configured_server("fake").unwrap().config_key;
+    let credentials = crate::core::connector::mcp::oauth::OAuthTokenStore::open(&cfg).unwrap();
+    credentials
+        .save_static_bearer(&key, "fixture-token".into(), None)
+        .unwrap();
+    assert!(!manager.tool_defs(&key).is_empty());
+    let outcome = run(
+        &ctx,
+        ConnectorCommand::Logout {
+            name: "fake".into(),
+        },
+    )
+    .await;
+    let other_retired = manager.statuses()[0].state
+        == crate::core::connector::mcp::manager::ServerState::Disconnected;
+    let removed = credentials.load(&key).unwrap().is_none();
+    other.logout_server(&key).unwrap();
+    assert!(matches!(outcome, ChatCommandOutcome::Handled));
+    assert!(
+        removed && other_retired,
+        "CLI logout must use the shared registry workflow"
+    );
+
+    // Explicit reload is not the same as post-save reconciliation: it must
+    // resume an unchanged stopped source. Removal must revoke, not just edit JSON.
+    manager.reconnect_server(&key).await.unwrap();
+    let model_name = manager.tool_defs(&key)[0].model_name.clone();
+    run(&ctx, ConnectorCommand::Reload).await;
+    let current_registry = ctx.global_services.connector_registry.as_ref().unwrap();
+    let explicitly_reconnected = current_registry.mcp_manager().statuses()[0].state
+        == crate::core::connector::mcp::manager::ServerState::Ready;
+    credentials
+        .save_static_bearer(&key, "remove-fixture-token".into(), None)
+        .unwrap();
+    run(
+        &ctx,
+        ConnectorCommand::Remove {
+            name: "fake".into(),
+        },
+    )
+    .await;
+    let credentials_removed = credentials.load(&key).unwrap().is_none();
+    let other_call_rejected = manager
+        .call_tool(&key, &model_name, serde_json::json!({}))
+        .await
+        .is_err();
+    run(
+        &ctx,
+        ConnectorCommand::Add {
+            name: "fake".into(),
+            command: "node".into(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+        },
+    )
+    .await;
+    let readd_has_no_old_token = credentials.load(&key).unwrap().is_none();
+    // Also clean both contexts on the pre-fix path before reporting failures.
+    current_registry.logout_server("fake").unwrap();
+    assert!(explicitly_reconnected && credentials_removed && other_call_rejected && readd_has_no_old_token,
+        "reload_connected={explicitly_reconnected}, token_removed={credentials_removed}, removed_source_rejected={other_call_rejected}, readd_token_absent={readd_has_no_old_token}");
+
+    current_registry
+        .mcp_manager()
+        .reconnect_server("fake")
+        .await
+        .unwrap();
+    manager.reload_configuration(&cfg).unwrap();
+    manager.reconnect_server("fake").await.unwrap();
+    credentials
+        .save_static_bearer(&key, "partial-removal-fixture".into(), None)
+        .unwrap();
+    let credential_path = get_work_dir(&cfg).unwrap().join("connector-oauth.json");
+    let original = std::fs::read(&credential_path).unwrap();
+    std::fs::write(&credential_path, "invalid-json").unwrap();
+    run(
+        &ctx,
+        ConnectorCommand::Remove {
+            name: "fake".into(),
+        },
+    )
+    .await;
+    assert!(current_registry
+        .mcp_manager()
+        .configured_server("fake")
+        .is_none());
+    assert!(
+        manager.configured_server("fake").is_none(),
+        "a credential error after the config commit must still reconcile other clients"
+    );
+    std::fs::write(&credential_path, original).unwrap();
+    run(
+        &ctx,
+        ConnectorCommand::Remove {
+            name: "fake".into(),
+        },
+    )
+    .await;
+    assert!(
+        credentials.load(&key).unwrap().is_none(),
+        "retry must finish credential cleanup"
+    );
 }

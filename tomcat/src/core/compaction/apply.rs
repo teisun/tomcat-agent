@@ -309,6 +309,7 @@ fn append_completed_summary_text(
                 "completed preheat is missing its transcript marker id; refusing to leak summary as a message",
             )
         })?;
+    let _guard = crate::infra::config::lock::acquire_config_lock(&state.transcript_path)?;
     // This O(1) tail check is sufficient while applying a result writes its body before any
     // later transcript append: polling consumes the result and moves Preheat to Idle, and
     // hydrate restores cache only when no body exists. If a future path can append between body

@@ -593,6 +593,8 @@ export const en = {
   "host.file.selected": "the selected files",
   "host.file.dirty": "Save or revert unsaved changes in {name}, then try again.",
   "host.deliveryBusy": "A previous request is still running. Wait for it to finish or stop the current task before retrying.",
+  "host.draftCleanupFailed": "The saved draft could not be cleared and may reappear after reopening: {detail}",
+  "host.historyRefreshFailed": "Couldn't refresh the conversation: {detail}. Reopen the session to see its current state.",
   "host.recoveryStale": "This error card is out of date and cannot be retried. Refresh the session and enter your request again.",
   "host.recoveryIncomplete": "No complete tool result is available to resume. Enter your request again.",
   "settings.title": "Settings",

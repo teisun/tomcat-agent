@@ -68,6 +68,8 @@ type PreviewDomSnapshot = {
   copyIconClass?: string | null;
   downloadIconFontFamily?: string | null;
   position: number;
+  rootClientHeight: number;
+  viewportHeight: number;
   stageClientWidth: number;
   /** 0 when the picture on the stage failed to decode. */
   stageNaturalWidth: number;
@@ -1255,6 +1257,12 @@ suite("Tomcat image attachment visual acceptance", () => {
           },
           keyboardRemoval: {
             passed: clearedByKeyboard.pendingAttachmentItemCount === 0,
+          },
+          previewRootLayout: {
+            rootClientHeight: pendingPreview.rootClientHeight,
+            viewportHeight: pendingPreview.viewportHeight,
+            passed: pendingPreview.viewportHeight > 0 &&
+              pendingPreview.rootClientHeight === pendingPreview.viewportHeight,
           },
           previewCodiconFont: {
             fontFamily: copiedPreview.downloadIconFontFamily ?? null,

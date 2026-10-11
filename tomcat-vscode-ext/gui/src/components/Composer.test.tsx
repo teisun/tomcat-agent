@@ -7,6 +7,7 @@ import type { ModelPickerModel } from "./ModelPicker";
 import type { Speed } from "../../../src/shared/modelSpeed";
 import type { SharedSlashCommand } from "../../../src/serveClient/wire";
 import { LocaleProvider } from "../i18n/LocaleProvider";
+import { prepareAttachment } from "../attachments/imagePipeline";
 import { translate, type Locale } from "../../../src/shared/i18n";
 
 type DraftChange = (draft: {
@@ -1199,6 +1200,42 @@ describe("Composer", () => {
       expect.objectContaining({ filename: "one.png", mimeType: "image/png" }),
       expect.objectContaining({ filename: "brief.pdf", mimeType: "application/pdf" }),
     ]);
+  });
+
+  it("prepares pasted attachments serially while preserving their order", async () => {
+    const prepare = vi.mocked(prepareAttachment);
+    const original = prepare.getMockImplementation()!;
+    let release!: () => void;
+    const firstReady = new Promise<void>((resolve) => { release = resolve; });
+    let active = 0;
+    let peak = 0;
+    prepare.mockClear();
+    prepare.mockImplementation(async (raw) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      if (raw.filename === "one.png") await firstReady;
+      try { return await original(raw); } finally { active -= 1; }
+    });
+    const onAttachFiles = vi.fn();
+    try {
+      renderComposer({ onAttachFiles });
+      const files = [pastedFile([1], "one.png", "image/png"), pastedFile([2], "two.png", "image/png")];
+      fireEvent.paste(screen.getByTestId("composer-input"), {
+        clipboardData: {
+          getData: () => "",
+          items: files.map((file) => ({ getAsFile: () => file, kind: "file", type: file.type })),
+        },
+      });
+      await waitFor(() => expect(prepare).toHaveBeenCalled());
+      expect(prepare).toHaveBeenCalledTimes(1);
+      release();
+      await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
+      expect(peak).toBe(1);
+      expect(onAttachFiles.mock.calls[0][0].map((item: { filename: string }) => item.filename)).toEqual(["one.png", "two.png"]);
+    } finally {
+      await act(async () => { release(); await firstReady; });
+      prepare.mockImplementation(original);
+    }
   });
 
   it("preserves a clipboard file path when Chromium exposes one", async () => {

@@ -1,40 +1,18 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useT } from "../../i18n/LocaleProvider";
 
-import { buildDecoratedHtml, flashCopyButton, setCopyButtonCopiedState } from "./markdownDecorators";
-import { renderMermaidBlocks, splitTopLevelBlocks } from "./markdownRuntime";
+import { decorateMarkdownHtml, flashCopyButton, setCopyButtonCopiedState } from "./markdownDecorators";
+import { renderMermaidBlocks, renderMarkdownBlocks } from "./markdownRuntime";
 import { logRichRender } from "./richRenderRuntime";
 import type { PathResolution, WebviewMediaRoot } from "../../types";
 
-function closeOpenFenceIfNeeded(markdown: string): string {
-  const lines = markdown.split("\n");
-  const fenceStack: string[] = [];
-  for (const line of lines) {
-    const match = line.match(/^[ \t]*(`{3,}|~{3,})/u);
-    if (!match) {
-      continue;
-    }
-    const fence = match[1];
-    const current = fenceStack.at(-1);
-    if (current === fence[0]) {
-      fenceStack.pop();
-    } else {
-      fenceStack.push(fence[0]);
-    }
-  }
-  if (fenceStack.length === 0) {
-    return markdown;
-  }
-  return `${markdown}\n${fenceStack.map((char) => char.repeat(3)).join("\n")}`;
-}
-
 const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
   mediaRoots,
-  raw,
+  renderedHtml,
   resolvePaths,
 }: {
   mediaRoots?: WebviewMediaRoot[];
-  raw: string;
+  renderedHtml: string;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
 }) {
   const t = useT();
@@ -44,11 +22,11 @@ const ChatMarkdownBlock = memo(function ChatMarkdownBlock({
   );
   const html = useMemo(
     () =>
-      buildDecoratedHtml(closeOpenFenceIfNeeded(raw), {
+      decorateMarkdownHtml(renderedHtml, {
         mediaRoots,
         pathResolutions,
       }),
-    [mediaRoots, pathResolutions, raw],
+    [mediaRoots, pathResolutions, renderedHtml],
   );
   // Keep the HTML wrapper stable: a locale-only render must not replace live code/diagram nodes.
   const htmlMarkup = useMemo(() => ({ __html: html }), [html]);
@@ -145,7 +123,7 @@ function ChatMarkdownComponent({
   const t = useT();
   const tRef = useRef(t);
   tRef.current = t;
-  const blocks = useMemo(() => splitTopLevelBlocks(markdown), [markdown]);
+  const blocks = useMemo(() => renderMarkdownBlocks(markdown), [markdown]);
 
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -206,11 +184,11 @@ function ChatMarkdownComponent({
       data-testid="chat-markdown"
       onClick={handleClick}
     >
-      {blocks.map((raw, index) => (
+      {blocks.map((renderedHtml, index) => (
         <ChatMarkdownBlock
           key={index}
           mediaRoots={mediaRoots}
-          raw={raw}
+          renderedHtml={renderedHtml}
           resolvePaths={resolvePaths}
         />
       ))}

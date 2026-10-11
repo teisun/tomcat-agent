@@ -38,9 +38,12 @@ async function availablePort() {
   });
 }
 
-async function waitForPage(url) {
+async function waitForPage(url, child) {
   let lastError;
   for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Vite exited before becoming ready: ${child.signalCode ?? child.exitCode}`);
+    }
     try {
       const response = await fetch(url);
       if (response.ok) return;
@@ -52,9 +55,10 @@ async function waitForPage(url) {
   throw new Error(`Vite GUI never became ready at ${url}: ${lastError ?? "unknown error"}`);
 }
 
-export async function runGuiAcceptance({ scenario, simulatedReplies }) {
+export async function runGuiRenderSmoke({ scenario }) {
+  console.log(`[${scenario}] GUI shell render smoke, not feature acceptance; no host replies are injected.`);
   await access(verifyShot);
-  const outputPrefix = `tomcat-accept-${scenario}-`;
+  const outputPrefix = `tomcat-smoke-${scenario}-`;
   const outDir = process.env.TOMCAT_ACCEPT_OUT
     ?? await mkdtemp(path.join(os.tmpdir(), outputPrefix));
   const port = await availablePort();
@@ -69,31 +73,33 @@ export async function runGuiAcceptance({ scenario, simulatedReplies }) {
     ],
     { cwd: guiRoot, stdio: ["ignore", "pipe", "pipe"] },
   );
+  // Register before any await: a failed Vite may already be gone when finally runs.
+  const viteExited = new Promise((resolve) => vite.once("exit", resolve));
   let viteError = "";
   vite.stderr.on("data", (chunk) => { viteError += chunk.toString(); });
 
   try {
-    await waitForPage(url);
+    await waitForPage(url, vite);
     for (const [name, viewport] of [["desktop", "1440x900"], ["mobile", "390x844"]]) {
       await run(process.execPath, [
         verifyShot,
         url,
         "--out", outDir,
-        "--name", `${scenario}-${name}`,
+        "--name", `${scenario}-shell-${name}`,
         "--viewport", viewport,
         "--wait", "selector:#root",
       ], { cwd: extensionRoot, stdio: "inherit" });
     }
-    await writeFile(path.join(outDir, `${scenario}.host-reply-simulation.json`), `${JSON.stringify({
-      hostReply: "simulated",
-      limitation: "The Vite GUI has no VS Code extension host; this evidence proves page rendering only.",
-      simulatedReplies,
+    await writeFile(path.join(outDir, `${scenario}.gui-shell-smoke.json`), `${JSON.stringify({
+      scope: "gui-shell-render-smoke",
+      hostReply: "not-injected",
+      limitation: "Only the standalone GUI shell was rendered. No feature panel interaction, host reply, installation or path migration was exercised.",
       viewports: ["1440x900", "390x844"],
     }, null, 2)}\n`);
-    console.log(`[${scenario}] wrote PNG/ARIA/console evidence to ${outDir}`);
+    console.log(`[${scenario}] wrote shell PNG/ARIA/console evidence to ${outDir} (not feature acceptance)`);
   } finally {
     vite.kill("SIGTERM");
-    await new Promise((resolve) => vite.once("exit", resolve));
+    await viteExited;
     if (vite.exitCode && viteError) console.error(viteError);
   }
 }

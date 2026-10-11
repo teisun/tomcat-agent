@@ -284,33 +284,34 @@ export class ImagePreviewPanel {
   private async handleSave(attachmentId: string): Promise<void> {
     const pic = this.pictureMap.get(attachmentId);
     if (!pic) {
-      this.sendSaveResult(false, t("preview.notFound"));
+      this.sendSaveResult(false, undefined, t("preview.notFound"));
       return;
     }
 
-    const defaultUri = vscode.Uri.file(path.join(vscode.workspace.rootPath ?? (process.env.HOME || "."), pic.filename));
-    const uri = await vscode.window.showSaveDialog({
-      defaultUri,
-      filters: {
-        [t("preview.imageFilter")]: ["png", "jpg", "jpeg", "gif", "webp", "svg"],
-      },
-    });
-    if (!uri) {
-      this.sendSaveResult(false, undefined, undefined, true);
-      return;    }
-
     try {
+      const defaultUri = vscode.Uri.file(path.join(vscode.workspace.rootPath ?? (process.env.HOME || "."), pic.filename));
+      const uri = await vscode.window.showSaveDialog({
+        defaultUri,
+        filters: {
+          [t("preview.imageFilter")]: ["png", "jpg", "jpeg", "gif", "webp", "svg"],
+        },
+      });
+      if (!uri) {
+        this.sendSaveResult(false, undefined, undefined, true);
+        return;
+      }
+
       // Copy straight from the blob store. Saving is the one operation that legitimately
       // needs the bytes in the host process, and it needs them exactly once, on demand.
       const source = this.blobUriFor(pic);
       if (!source) {
-        this.sendSaveResult(false, t("preview.bytesMissing"));
+        this.sendSaveResult(false, undefined, t("preview.bytesMissing"));
         return;
       }
       await vscode.workspace.fs.copy(source, uri, { overwrite: true });
       this.sendSaveResult(true, uri.fsPath);
     } catch (error) {
-      this.sendSaveResult(false, String(error));
+      this.sendSaveResult(false, undefined, String(error));
     }
   }
 

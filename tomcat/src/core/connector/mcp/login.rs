@@ -161,122 +161,54 @@ impl McpManager {
     }
 
     pub fn logout_server(&self, identifier: &str) -> Result<bool, AppError> {
+        self.logout_server_with_peers(identifier, Vec::new())
+    }
+
+    /// Lock order: registry cache (when present), sorted manager entries, then
+    /// the credential store. No network wait or cache lookup occurs inside.
+    pub(crate) fn logout_server_with_peers(
+        &self,
+        identifier: &str,
+        mut peers: Vec<Arc<McpManager>>,
+    ) -> Result<bool, AppError> {
         let key = self.resolve_key(identifier)?;
         self.ensure_runnable(&key)?;
-        self.cancel_login(&key);
-        let mut entries = self.entries.write();
-        let entry = entries.get_mut(&key).ok_or_else(superseded)?;
-        entry.retire_connection();
-        entry.generation = self.invalidate_generation(&key);
-        entry.suspended = true;
-        entry.budget = None;
-        entry.status.state = ServerState::Disconnected;
-        // Even logout with no stored token invalidates in-flight authorization
-        // snapshots (including other managers sharing this credential store).
+        peers.push(self.self_weak.upgrade().ok_or_else(superseded)?);
+        peers.sort_unstable_by_key(Arc::as_ptr);
+        peers.dedup_by(|first, second| Arc::ptr_eq(first, second));
+        let owner = peers
+            .iter()
+            .position(|manager| std::ptr::eq(manager.as_ref(), self))
+            .ok_or_else(superseded)?;
+        let mut entries: Vec<_> = peers
+            .iter()
+            .map(|manager| manager.entries.write())
+            .collect();
+        if entries[owner]
+            .get(&key)
+            .is_none_or(|entry| entry.status.overridden)
+        {
+            return Err(superseded());
+        }
+        for (manager, entries) in peers.iter().zip(&mut entries) {
+            let Some(entry) = entries.get_mut(&key) else {
+                continue;
+            };
+            if let Some((_, cancel)) = manager.oauth_cancellations.remove(&key) {
+                cancel.cancel();
+            }
+            entry.retire_connection();
+            entry.generation = manager.invalidate_generation(&key);
+            entry.suspended = true;
+            entry.budget = None;
+            entry.status.state = ServerState::Disconnected;
+        }
+        // Preserve fail-closed local retirement even when persistence fails.
+        // Empty-store logout still fences older cross-process login snapshots.
         self.oauth_store.remove(&key)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn fixture() -> (tempfile::TempDir, Arc<McpManager>, crate::AppConfig, String) {
-        let temp = tempfile::tempdir().unwrap();
-        let mut cfg = crate::AppConfig::default();
-        cfg.storage.work_dir = Some(temp.path().to_string_lossy().into_owned());
-        crate::core::connector::mcp::config::add_global_server(
-            &cfg,
-            "login".into(),
-            serde_json::from_value(
-                serde_json::json!({"url":"http://127.0.0.1:9/mcp", "auth":"none"}),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let manager = McpManager::new(&cfg, None).unwrap();
-        let key = manager.configured_server("login").unwrap().config_key;
-        (temp, manager, cfg, key)
-    }
-    fn token(value: &str) -> StoredOAuthToken {
-        serde_json::from_value(serde_json::json!({"accessToken":value,"tokenEndpoint":"http://127.0.0.1/token","clientId":"fixture"})).unwrap()
-    }
-
-    #[tokio::test]
-    async fn older_login_cannot_save_erase_cancel_or_reconnect_a_newer_login() {
-        let (_temp, manager, _, key) = fixture();
-        let (_, generation, old_snapshot, old) = manager.begin_login(&key).unwrap();
-        let (_, current_generation, current_snapshot, current) = manager.begin_login(&key).unwrap();
-        assert!(old.is_cancelled());
-        manager
-            .commit_login(
-                &key,
-                current_generation,
-                &current,
-                &current_snapshot,
-                token("new"),
-            )
-            .unwrap();
-        assert!(manager
-            .commit_login(&key, generation, &old, &old_snapshot, token("late-old"))
-            .is_err());
-        assert!(manager
-            .reconnect_after_login(&key, generation, old.clone())
-            .await
-            .is_err());
-        drop(LoginOwner {
-            manager: &manager,
-            key: key.clone(),
-            cancel: old,
-        });
-        assert!(!current.is_cancelled());
-        assert!(manager
-            .oauth_cancellations
-            .get(&key)
-            .is_some_and(|value| Arc::ptr_eq(value.value(), &current)));
-        assert_eq!(
-            manager
-                .oauth_store
-                .load(&key)
-                .unwrap()
-                .unwrap()
-                .access_token,
-            "new"
-        );
-    }
-
-    #[test]
-    fn revoke_and_replacement_do_not_resurrect_or_erase_credentials() {
-        for action in ["logout", "remove-readd"] {
-            let (_temp, manager, cfg, key) = fixture();
-            let (definition, generation, expected, cancel) = manager.begin_login(&key).unwrap();
-            match action {
-                "logout" => {
-                    assert!(!manager.logout_server(&key).unwrap());
-                }
-                _ => {
-                    manager.remove_configured_server(&key, &cfg).unwrap();
-                    crate::core::connector::mcp::config::add_global_server(
-                        &cfg,
-                        "login".into(),
-                        definition.config,
-                    )
-                    .unwrap();
-                    manager.reload_configuration(&cfg).unwrap();
-                }
-            }
-            manager.oauth_store.save(&key, token("new-owner")).unwrap();
-            assert!(manager
-                .commit_login(&key, generation, &cancel, &expected, token("late-old"))
-                .is_err());
-            assert_eq!(
-                manager
-                    .oauth_store
-                    .load(&key)
-                    .unwrap()
-                    .unwrap()
-                    .access_token,
-                "new-owner"
-            );
-        }
-    }
-}
+#[path = "tests/login_test.rs"]
+mod tests;

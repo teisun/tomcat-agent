@@ -66,6 +66,8 @@ pub struct EventEnvelope {
 /// 供外部（RuntimeManager / PluginManager）持有的 VM actor 句柄。
 #[derive(Debug, Clone)]
 pub struct VmActorHandle {
+    /// Concrete VM identity, distinct from the reusable session/plugin lookup key.
+    pub(crate) instance_id: String,
     pub cmd_tx: tokio::sync::mpsc::Sender<VmCommand>,
     pub state: Arc<AtomicU8>,
 }
@@ -123,6 +125,7 @@ impl VmActor {
         let state = Arc::new(AtomicU8::new(VmActorState::Created as u8));
 
         let handle = VmActorHandle {
+            instance_id: instance.plugin_id().to_owned(),
             cmd_tx,
             state: state.clone(),
         };

@@ -356,6 +356,12 @@ fn resolve_internal_tools_filters_code_allowed_tools() {
     assert!(names.contains("search_files"));
     assert!(names.contains("list_dir"));
     assert!(names.contains("bash"));
+    for tool in ["task_output", "task_stop", "task_list"] {
+        assert!(
+            names.contains(tool),
+            "code reviewer cannot finish its own Bash work without {tool}"
+        );
+    }
     assert!(!names.contains("todos"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("edit"));

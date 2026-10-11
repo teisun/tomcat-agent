@@ -36,3 +36,6 @@ pub(super) use task_stop::handle_task_stop;
 pub(super) use web_fetch::handle_web_fetch;
 pub(super) use web_search::handle_web_search;
 pub(super) use write::handle_write;
+
+#[cfg(test)]
+mod tests;

@@ -235,7 +235,7 @@ async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
     manager.set_catalog_fingerprint("retiring", 1);
     let a = manager.start_session_vm("A", "retiring").await.unwrap();
     let b = manager.start_session_vm("B", "retiring").await.unwrap();
-    assert!(manager.is_instance_current("A/retiring"));
+    assert!(manager.is_instance_current(&a.instance_id));
     assert!(manager.is_instance_current("retiring")); // legacy initialization stays legal
     manager.retire_plugin("retiring").unwrap();
     assert_eq!(
@@ -243,17 +243,17 @@ async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
         2,
         "retire must not stop another session's VM"
     );
-    assert!(!manager.is_instance_current("A/retiring"));
-    assert!(dispatcher.get_event_sender("B/retiring").is_some());
+    assert!(!manager.is_instance_current(&a.instance_id));
+    assert!(dispatcher.get_event_sender(&b.instance_id).is_some());
     assert_eq!(
-        manager.instance_manifest("B/retiring").unwrap().id,
+        manager.instance_manifest(&b.instance_id).unwrap().id,
         "retiring"
     );
     manager
         .register_catalog_plugin(fixture.path(), manifest)
         .unwrap();
     manager.set_catalog_fingerprint("retiring", 2);
-    assert!(!manager.is_instance_current("A/retiring"));
+    assert!(!manager.is_instance_current(&a.instance_id));
     assert_eq!(manager.stop_stale_session_vms("A").await.unwrap(), 1);
     assert!(manager.has_session_vm("B", "retiring"));
     assert!(!manager.has_session_vm("A", "retiring"));
@@ -267,6 +267,157 @@ async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_instance_cannot_borrow_replacement_authority_or_channels() {
+    let fixture = plugin_fixture(
+        "replaced",
+        serde_json::json!([]),
+        PluginActivation::Lazy,
+        "pi.on('noop', function(){});",
+    );
+    let (manager, dispatcher, _, _) = manager_with_runtime();
+    let manager = Arc::new(manager);
+    let dispatcher = Arc::new(
+        (*dispatcher)
+            .clone()
+            .with_plugin_manager(Arc::downgrade(&manager)),
+    );
+    manager.set_host_dispatcher(dispatcher.clone());
+    let mut manifest =
+        parse_manifest(&std::fs::read_to_string(fixture.path().join("plugin.json")).unwrap())
+            .unwrap();
+    manager
+        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .unwrap();
+    manager.set_catalog_fingerprint("replaced", 1);
+    let old = manager.start_session_vm("A", "replaced").await.unwrap();
+    let other_session = manager.start_session_vm("B", "replaced").await.unwrap();
+    let old_id = dispatcher
+        .session_instance_ids("A")
+        .into_iter()
+        .next()
+        .unwrap();
+    manager.retire_plugin("replaced").unwrap();
+    manifest.required_permissions = vec!["net:fetch".into()];
+    manifest.allowed_hosts = vec!["example.com".into()];
+    manager
+        .register_catalog_plugin(fixture.path(), manifest)
+        .unwrap();
+    manager.set_catalog_fingerprint("replaced", 2);
+    manager.stop_stale_session_vms("A").await.unwrap();
+    let removed_manifest = manager.instance_manifest(&old_id);
+    let removed_is_current = manager.is_instance_current(&old_id);
+
+    let replacement = manager.start_session_vm("A", "replaced").await.unwrap();
+    let replacement_id = dispatcher
+        .session_instance_ids("A")
+        .into_iter()
+        .next()
+        .unwrap();
+    // A delayed host request must not use the replacement's stronger manifest.
+    // HTTP is rejected before network I/O even if the authorization check is broken.
+    let request = || crate::ext::HostRequest {
+        module: "net".into(),
+        method: "fetch".into(),
+        params: serde_json::json!({"url":"http://example.com"}),
+        call_id: None,
+    };
+    let old_response = dispatcher.dispatch_async(&old_id, request()).await.unwrap();
+    let new_response = dispatcher
+        .dispatch_async(&replacement_id, request())
+        .await
+        .unwrap();
+    let context_request = || crate::ext::HostRequest {
+        module: "context".into(),
+        method: "getCwd".into(),
+        params: serde_json::json!({}),
+        call_id: None,
+    };
+    let old_context = dispatcher
+        .dispatch_async(&old_id, context_request())
+        .await
+        .unwrap();
+    let live_older_context = dispatcher
+        .dispatch_async(&other_session.instance_id, context_request())
+        .await
+        .unwrap();
+    let live_older_manifest = manager.instance_manifest(&other_session.instance_id);
+    let old_is_current = manager.is_instance_current(&old_id);
+    let new_is_current = manager.is_instance_current(&replacement_id);
+    let retired_wait = dispatcher
+        .dispatch(
+            &old_id,
+            crate::ext::HostRequest {
+                module: "__session".into(),
+                method: "waitForEvent".into(),
+                params: serde_json::json!({"timeoutMs":10}),
+                call_id: None,
+            },
+        )
+        .unwrap();
+    dispatcher.cleanup_instance(&old_id);
+    let replacement_channel_survived = dispatcher.get_event_sender(&replacement_id).is_some();
+    manager.end_session("A").await.unwrap();
+    manager.end_session("B").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !matches!(
+            old.current_state(),
+            crate::ext::VmActorState::Stopped | crate::ext::VmActorState::Error
+        ) || !matches!(
+            replacement.current_state(),
+            crate::ext::VmActorState::Stopped | crate::ext::VmActorState::Error
+        ) || !matches!(
+            other_session.current_state(),
+            crate::ext::VmActorState::Stopped | crate::ext::VmActorState::Error
+        ) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        removed_manifest.is_none(),
+        "retired VM must not fall back to the new catalog"
+    );
+    assert!(
+        !removed_is_current && !old_is_current,
+        "missing/replaced VM is never current"
+    );
+    assert!(new_is_current);
+    assert!(retired_wait.ok);
+    assert_eq!(retired_wait.data.unwrap()["type"], "__shutdown");
+    assert_eq!(
+        [
+            old.current_state(),
+            replacement.current_state(),
+            other_session.current_state()
+        ],
+        [crate::ext::VmActorState::Stopped; 3]
+    );
+    assert!(
+        !old_context.ok,
+        "all late hostcalls from a removed runtime are rejected"
+    );
+    assert!(
+        live_older_context.ok,
+        "catalog retirement must not stop another live session"
+    );
+    assert!(live_older_manifest.unwrap().required_permissions.is_empty());
+    assert!(
+        !old_response.ok
+            && old_response
+                .error
+                .unwrap()
+                .contains("runtime is unavailable")
+    );
+    assert!(!new_response.ok && new_response.error.unwrap().contains("ssrf_rejected"));
+    assert!(
+        replacement_channel_survived,
+        "late old cleanup must not delete the replacement's channel"
+    );
 }
 
 #[test]
@@ -632,7 +783,7 @@ pi.on("cleanup_evt", function () {});
     );
 
     let vm_key = PluginRuntimeKey::new("suite-session", "cleanup-plugin");
-    manager
+    let vm = manager
         .start_session_vm("suite-session", "cleanup-plugin")
         .await
         .expect("start session vm for cleanup test");
@@ -677,7 +828,7 @@ pi.on("cleanup_evt", function () {});
         "unload_plugin should evict all session runtimes for the plugin"
     );
     assert!(
-        dispatcher.get_event_sender(&vm_key.to_string()).is_none(),
+        dispatcher.get_event_sender(&vm.instance_id).is_none(),
         "unload_plugin should drop plugin event channels"
     );
 }
@@ -810,15 +961,17 @@ async fn start_session_vm_opportunistically_reaps_expired_runtime() {
         "stale runtime should exist before opportunistic reap"
     );
 
+    // Checking the current catalog must not renew an otherwise idle VM's TTL.
+    let retired_by_catalog = manager
+        .stop_stale_session_vms("stale-session")
+        .await
+        .unwrap();
     manager
         .start_session_vm("fresh-session", "fresh-plugin")
         .await
         .expect("start fresh session vm");
 
-    assert!(
-        !runtime_manager.contains(&stale_key),
-        "starting another plugin session should opportunistically reap expired runtimes"
-    );
+    let reaped = !runtime_manager.contains(&stale_key);
 
     manager
         .end_session("fresh-session")
@@ -828,4 +981,9 @@ async fn start_session_vm_opportunistically_reaps_expired_runtime() {
         .end_session("stale-session")
         .await
         .expect("cleanup stale session");
+    assert_eq!(retired_by_catalog, 0, "the plugin catalog is unchanged");
+    assert!(
+        reaped,
+        "catalog inspection must not prevent opportunistic idle reaping"
+    );
 }

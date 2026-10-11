@@ -147,6 +147,8 @@ pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
 pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {
     if target.starts_with("idatatlas/") {
         IDATATLAS_TEST_API_KEY_ENV
+    } else if target.starts_with("fcodex/") {
+        FCODEX_TEST_API_KEY_ENV
     } else if openai_target_uses_builtin_responses_key(target) {
         "OPENAI_API_KEY"
     } else {
@@ -186,6 +188,8 @@ pub fn apply_openai_app_config(cfg: &mut AppConfig) {
     let model_id = e2e_openai_model();
     if model_id.starts_with("idatatlas/") {
         apply_idatatlas_responses_app_config(cfg, &model_id);
+    } else if model_id.starts_with("fcodex/") {
+        apply_fcodex_responses_app_config(cfg, &model_id);
     } else {
         cfg.llm.default_model = model_id;
         cfg.context.compaction_model = cfg.llm.default_model.clone();

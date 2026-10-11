@@ -1,14 +1,9 @@
-//! `create_plan` 工具实现（plan-runtime.md §P2 / [create-plan.md]）。
+//! `create_plan`：Plan 模式保存计划，并在明确同意后进行 advisory review。
 //!
-//! 语义：
-//! - 仅 Plan 会话模式可用；Chat 会话模式调用会收到可操作的拒绝。
-//! - 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md`；runtime 拼 frontmatter（state/session/created_at/schema_version）。
-//! - P4 前 `review` 字段返回 `aborted: true` 占位（reviewer 子 Agent 在 P4 接入）。
-//! - 写盘后 PlanRuntime 内存切换为 `Planning`（已是 Planning 时不变），保持 active_plan_id。
-//!
-//! 注意：本 P2 PR-PLB 实现尚**不**直接在 `tool_exec.rs` 注册分发；将在 P6 PR-PLC
-//! 把 4 个 plan 工具同时接入 LLM tool_call 路径。当前仅作为 PlanRuntime 内部 API
-//! 给 §9.3B / §9.4 单测与集成测调用。
+//! `execute` 校验并带锁写入 PlanFile，刷新 ActivePlan，记录创建/待办事件；
+//! 产品入口 `execute_for_tool` 在释放文件锁后通过现有问答面板征求评审同意。
+//! 跳过、中断和评审失败都保留已保存计划，不构成 `/plan build` 门禁。
+//! 待办增量修改由 `update_plan` 负责，本工具不接收指定 plan_id 重写旧计划。
 
 use serde::Deserialize;
 
@@ -122,15 +117,8 @@ pub fn derive_plan_id(goal: &str) -> String {
     format!("plan_{slug}_{hash:08x}")
 }
 
-/// `create_plan` 执行体；返回 ToolResult 内容 JSON：
-///
-/// ```json
-/// { "plan_id": "...", "path": "...", "state": "planning",
-///   "review": { "aborted": true, "summary": "P4 接入" } }
-/// ```
-/// `create_plan` 同步执行（不派发 reviewer）；返回写盘成功后的核心信息。
-/// 当 PlanRuntime 注入了 `PlanReviewerDispatcher` 时，调用方应使用
-/// [`execute_with_reviewer`] 以获得真实的 review summary。
+/// 仅保存计划并返回核心信息与未派发的 review 占位。
+/// 产品交互入口使用 [`execute_for_tool`]，在保存后征求同意，再决定是否评审。
 pub fn execute(
     runtime: &PlanRuntime,
     args: CreatePlanArgs,

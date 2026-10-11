@@ -91,7 +91,7 @@ import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 
 export type { WebviewIntent } from "./ui/webview/protocol";
 
-let disposeRuntime: (() => void) | undefined;
+let disposeRuntime: (() => Promise<void>) | undefined;
 const execFileAsync = promisify(execFile);
 const SETUP_TERMINAL_NAME = "Tomcat Setup";
 const START_SETUP_ACTION: MessageKey = "host.action.startSetup";
@@ -1415,6 +1415,7 @@ export async function activate(
     supervisor.dispose();
     webviewProvider.dispose();
     ide.dispose();
+    return webviewProvider.flushDrafts();
   };
 
   const api: TomcatExtensionApi = {
@@ -1603,6 +1604,7 @@ export async function activate(
 }
 
 export async function deactivate(): Promise<void> {
-  disposeRuntime?.();
+  const dispose = disposeRuntime;
   disposeRuntime = undefined;
+  await dispose?.();
 }

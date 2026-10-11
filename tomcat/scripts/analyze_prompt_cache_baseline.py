@@ -145,7 +145,7 @@ def read_events(path: Path, baseline: Baseline) -> None:
         name = event_name(event)
         if name in {"tool_execution_end", "toolexecutionend"}:
             baseline.total_tool_calls += 1
-            if event.get("is_error") is True:
+            if event.get("isError", event.get("is_error")) is True:
                 baseline.rejected_tool_calls += 1
         elif name in {"context_metrics_update", "contextmetricsupdate"}:
             value = event.get("context_utilization_ratio")

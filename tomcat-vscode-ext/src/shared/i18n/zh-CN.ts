@@ -590,6 +590,8 @@ export const zhCN = {
   "host.file.selected": "所选文件",
   "host.file.dirty": "请先保存或还原 {name} 中未保存的更改，然后重试。",
   "host.deliveryBusy": "上一条请求仍在处理中。请等待完成，或先停止当前任务后再试。",
+  "host.draftCleanupFailed": "已保存的草稿清理失败，重新打开后可能再次出现：{detail}",
+  "host.historyRefreshFailed": "会话显示刷新失败：{detail}。请重新打开此会话以查看当前状态。",
   "host.recoveryStale": "这张错误卡已经过期，无法重试。请刷新会话后重新输入。",
   "host.recoveryIncomplete": "没有完整的工具结果可继续。请重新输入你的请求。",
   "settings.title": "设置",

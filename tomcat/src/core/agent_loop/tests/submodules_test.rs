@@ -1210,8 +1210,29 @@ async fn tool_exec_verifier_bash_uses_tracked_registry_when_available() {
         name: "task_output".to_string(),
         arguments: format!(r#"{{"task_id":"{}","block":true,"wait_ms":5000}}"#, task_id),
     };
-    let (out_msg, out_err, _) = execute_tool(&primitive, &None, &registry_opt, None, &out_tc).await;
-    assert!(!out_err, "verifier task_output 必须可用: {}", out_msg);
+    let output = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    let out_msg = output.model_text;
+    assert!(
+        !output.is_error,
+        "verifier task_output 必须可用: {}",
+        out_msg
+    );
     let chunk: serde_json::Value = serde_json::from_str(&out_msg).expect("chunk json");
     assert!(
         chunk["content"]
@@ -1221,6 +1242,84 @@ async fn tool_exec_verifier_bash_uses_tracked_registry_when_available() {
         "task_output 应拿到后台输出: {}",
         out_msg
     );
+}
+
+#[tokio::test]
+async fn inspector_task_controls_use_only_their_own_registry() {
+    use crate::core::agent_loop::{tool_exec::execute_tool_full, types::SubagentType};
+    use crate::core::tools::primitive::BashTaskRegistry;
+    let dir = tempfile::tempdir().unwrap();
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    for role in [
+        SubagentType::CodeReviewer,
+        SubagentType::Explorer,
+        SubagentType::Verifier,
+    ] {
+        let parent = BashTaskRegistry::new(dir.path().join("parent"));
+        let foreign = parent.spawn("sleep 30".into(), None).await.unwrap();
+        let child = Arc::new(BashTaskRegistry::new(dir.path().join("child")));
+        let own = child.spawn("sleep 30".into(), None).await.unwrap();
+        let registry = Some(child.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut results = Vec::new();
+        for (name, arguments) in [
+            ("task_list", serde_json::json!({})),
+            (
+                "task_output",
+                serde_json::json!({"task_id":own.task_id,"block":false}),
+            ),
+            ("task_stop", serde_json::json!({"task_id":foreign.task_id})),
+            ("task_stop", serde_json::json!({"task_id":own.task_id})),
+        ] {
+            results.push(
+                execute_tool_full(
+                    &primitive,
+                    &None,
+                    &registry,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    role,
+                    &cancel,
+                    &ToolCallInfo {
+                        id: name.into(),
+                        name: name.into(),
+                        arguments: arguments.to_string(),
+                    },
+                    None,
+                    None,
+                )
+                .await,
+            );
+        }
+        let foreign_still_running = matches!(
+            parent.get_info(&foreign.task_id).unwrap().status,
+            crate::core::tools::primitive::BashTaskStatus::Running
+        );
+        // Cleanup precedes assertions, including the expected pre-fix denial path.
+        child.stop(&own.task_id).await.unwrap();
+        parent.stop(&foreign.task_id).await.unwrap();
+        for index in [0, 1, 3] {
+            assert!(
+                !results[index].is_error,
+                "{role:?}: {}",
+                results[index].model_text
+            );
+        }
+        assert!(results[0].model_text.contains(&own.task_id));
+        assert!(!results[0].model_text.contains(&foreign.task_id));
+        assert!(
+            results[2].is_error,
+            "another registry's task must not be addressable"
+        );
+        assert!(
+            foreign_still_running,
+            "{role:?} stopped another registry's process"
+        );
+    }
 }
 
 /// 起后台 → 拉输出 → stop → list：bash.md §2.4.4 验收的端到端路径，
@@ -1244,6 +1343,9 @@ async fn tool_exec_bash_background_full_lifecycle() {
         execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
     assert!(!start_err, "起后台必须成功：{}", start_msg);
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).expect("ticket 应为合法 JSON");
+    assert!(ticket["logPath"].as_str().is_some());
+    assert!(ticket["startedAtUnixMs"].as_u64().is_some());
+    assert_eq!(ticket["state"], "running_in_background");
     let task_id = ticket["taskId"]
         .as_str()
         .expect("ticket 含 taskId")

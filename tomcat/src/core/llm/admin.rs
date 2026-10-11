@@ -534,12 +534,6 @@ fn validate_mutable_model_entry(entry: &ModelEntry) -> Result<(), AppError> {
             ],
         )));
     }
-    if entry.api == "anthropic-messages" && entry.capabilities.files {
-        return Err(AppError::Config(tr(
-            "model.filesUnsupported",
-            &[("id", &entry.id)],
-        )));
-    }
     Ok(())
 }
 

@@ -498,14 +498,14 @@ export const workspace = {
     async readFile(uri: Uri): Promise<Uint8Array> {
       const entry = files.get(uri.toString());
       if (!entry) {
-        throw new FileSystemError(`File not found: ${uri.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${uri.toString()}`), { code: "FileNotFound" });
       }
       return Buffer.from(entry.text, "utf8");
     },
     async stat(uri: Uri): Promise<{ size: number; type: number }> {
       const entry = files.get(uri.toString());
       if (!entry) {
-        throw new FileSystemError(`File not found: ${uri.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${uri.toString()}`), { code: "FileNotFound" });
       }
       return { size: entry.text.length, type: entry.type };
     },
@@ -520,7 +520,7 @@ export const workspace = {
     },
     async delete(uri: Uri): Promise<void> {
       if (!files.delete(uri.toString())) {
-        throw new FileSystemError(`File not found: ${uri.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${uri.toString()}`), { code: "FileNotFound" });
       }
     },
     async rename(
@@ -530,10 +530,10 @@ export const workspace = {
     ): Promise<void> {
       const entry = files.get(source.toString());
       if (!entry) {
-        throw new FileSystemError(`File not found: ${source.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${source.toString()}`), { code: "FileNotFound" });
       }
       if (files.has(target.toString()) && options?.overwrite !== true) {
-        throw new FileSystemError(`File exists: ${target.toString()}`);
+        throw Object.assign(new FileSystemError(`File exists: ${target.toString()}`), { code: "FileExists" });
       }
       files.delete(source.toString());
       files.set(target.toString(), entry);
@@ -541,10 +541,10 @@ export const workspace = {
     async copy(source: Uri, target: Uri, options?: { overwrite?: boolean }): Promise<void> {
       const entry = files.get(source.toString());
       if (!entry) {
-        throw new FileSystemError(`File not found: ${source.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${source.toString()}`), { code: "FileNotFound" });
       }
       if (files.has(target.toString()) && options?.overwrite !== true) {
-        throw new FileSystemError(`File exists: ${target.toString()}`);
+        throw Object.assign(new FileSystemError(`File exists: ${target.toString()}`), { code: "FileExists" });
       }
       files.set(target.toString(), { ...entry });
     },

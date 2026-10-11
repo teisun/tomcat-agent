@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as vscode from "vscode";
+import { translate } from "../../shared/i18n";
 
 const mocks = vi.hoisted(() => {
   const posted: unknown[] = [];
@@ -136,6 +138,25 @@ describe("ImagePreviewPanel host", () => {
     );
     panel.updateSections([]);
     expect(mocks.panel.dispose).toHaveBeenCalled();
+  });
+
+  it.each(["not-found", "missing-bytes", "copy-failed", "dialog-failed"])("reports %s as an error, never as a saved path", async (failure) => {
+    const panel = ImagePreviewPanel.getInstance({ fsPath: "/ext" } as any, ATTACHMENT_ROOT);
+    const picture = failure === "missing-bytes" ? { ...pictures[0], fullUri: "https://webview.local/missing" } : pictures[0];
+    panel.reveal([{ label: "Pending", pictures: [picture] }], "one");
+    mocks.saveUri = { fsPath: "/tmp/one.png" };
+    if (failure === "copy-failed") mocks.copy.mockRejectedValueOnce(new Error("copy failed"));
+    if (failure === "dialog-failed") vi.mocked(vscode.window.showSaveDialog).mockRejectedValueOnce(new Error("dialog failed"));
+    const error = failure === "not-found" ? translate("en", "preview.notFound")
+      : failure === "missing-bytes" ? translate("en", "preview.bytesMissing")
+      : failure === "dialog-failed" ? "Error: dialog failed" : "Error: copy failed";
+    await mocks.messageHandler?.({
+      type: "preview.save", data: { attachmentId: failure === "not-found" ? "missing" : "one" },
+    });
+    await vi.waitFor(() => expect(mocks.posted.at(-1)).toEqual({
+      type: "preview.saveResult", data: { cancelled: false, error, savedPath: null, success: false },
+    }));
+    expect(mocks.copy).toHaveBeenCalledTimes(failure === "copy-failed" ? 1 : 0);
   });
 
   it("reports Save As cancellation without an error and copies the blob on success", async () => {

@@ -4,6 +4,9 @@
 //! sha 自校验、单张上限边界、TTL GC 三分支、delete_session 联动、session id 不变量、
 //! 以及零依赖魔术字节校验的正反例。
 
+#[path = "attachments_concurrency_test.rs"]
+mod concurrency;
+
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -55,6 +58,42 @@ fn count_blobs(store: &AttachmentBlobStore) -> usize {
         return 0;
     }
     std::fs::read_dir(dir).unwrap().count()
+}
+
+// ── GC 失败不得伪报成功或删除未验证的字节 ──────────────────────────
+
+#[test]
+fn gc_pending_reports_unlink_failure_instead_of_claiming_a_released_lease() {
+    let (_tmp, store) = setup();
+    let bytes = minimal_png();
+    let sha = store.put(&bytes).unwrap();
+    // A directory occupying a marker path makes unlink fail on every platform,
+    // without permission tests that silently pass when the runner is root.
+    std::fs::create_dir_all(store.session_pending_dir("blocked").join(&sha)).unwrap();
+    assert!(
+        matches!(
+            store.gc_pending(Duration::ZERO),
+            Err(crate::AppError::Io(_))
+        ),
+        "failed removal must not be reported as a released lease"
+    );
+    assert_eq!(store.get(&sha).unwrap(), Some(bytes));
+}
+
+#[test]
+fn failed_live_scan_preserves_orphans_and_releases_the_retention_guard() {
+    let (_tmp, store) = setup();
+    let bytes = minimal_png();
+    let sha = store.put(&bytes).unwrap();
+    age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
+    let error = store
+        .sweep_orphan_blobs(
+            || Err(crate::AppError::Config("scan fixture failed".into())),
+            ORPHAN_BLOB_GRACE,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("scan fixture failed"));
+    assert_eq!(store.get(&sha).unwrap(), Some(bytes));
 }
 
 // ── 内容寻址与去重 ────────────────────────────────────────────────────
@@ -345,13 +384,19 @@ fn touch_pending_ignores_missing_blob() {
 }
 
 #[test]
-fn retain_pending_batch_deduplicates_and_is_idempotent() {
+fn retain_pending_batch_deduplicates_and_renews_existing_leases() {
     let (_tmp, store) = setup();
     let blob_sha = store.put(b"original rendition").unwrap();
     let provider_sha = store.put(b"provider rendition").unwrap();
     store.mark_pending("source", &blob_sha).unwrap();
     store.mark_pending("target", &blob_sha).unwrap();
     let existing_path = store.root().join("pending/target").join(&blob_sha);
+    age_lease(
+        &store,
+        "target",
+        &blob_sha,
+        PENDING_BLOB_TTL + Duration::from_secs(60),
+    );
     let existing_mtime = std::fs::metadata(&existing_path)
         .unwrap()
         .modified()
@@ -367,14 +412,17 @@ fn retain_pending_batch_deduplicates_and_is_idempotent() {
     expected.sort();
     assert_eq!(retained, expected);
     assert_eq!(store.list_pending("target").unwrap(), expected);
-    assert_eq!(
-        std::fs::metadata(existing_path)
+    assert!(
+        std::fs::metadata(&existing_path)
             .unwrap()
             .modified()
-            .unwrap(),
-        existing_mtime,
-        "幂等 retain 不得重写已有 marker"
+            .unwrap()
+            > existing_mtime,
+        "a successful retain renews an existing lease without replacing its marker"
     );
+    assert!(std::fs::read(&existing_path).unwrap().is_empty());
+    store.gc_pending(PENDING_BLOB_TTL).unwrap();
+    assert_eq!(store.list_pending("target").unwrap(), expected);
     assert_eq!(
         store.list_pending("source").unwrap(),
         vec![blob_sha],
@@ -444,13 +492,40 @@ fn gc_releases_expired_lease_without_deleting_blob() {
 }
 
 #[test]
+fn fresh_lease_survives_a_sweep_with_an_earlier_live_snapshot() {
+    let (_tmp, store) = setup();
+    let bytes = minimal_png();
+    let sha = store.put(&bytes).unwrap();
+    age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
+    let earlier_live_set = store.collect_pending_blob_shas().unwrap();
+    assert!(earlier_live_set.is_empty());
+
+    store
+        .retain_pending_batch("new-draft", vec![sha.clone()])
+        .unwrap();
+    assert_eq!(store.list_pending("new-draft").unwrap(), vec![sha.clone()]);
+    let report = store
+        .sweep_orphan_blobs(|| Ok(earlier_live_set), ORPHAN_BLOB_GRACE)
+        .unwrap();
+
+    assert_eq!(
+        store.get(&sha).unwrap(),
+        Some(bytes),
+        "a successful fresh lease must protect bytes from an earlier GC snapshot"
+    );
+    assert_eq!(report.blobs_deleted, 0);
+}
+
+#[test]
 fn sweep_keeps_expired_but_transcript_referenced_blob() {
     let (_tmp, store) = setup();
     let sha = store.put(&minimal_png()).unwrap();
     age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
     let mut live = std::collections::HashSet::new();
     live.insert(sha.clone());
-    let report = store.sweep_orphan_blobs(&live, ORPHAN_BLOB_GRACE).unwrap();
+    let report = store
+        .sweep_orphan_blobs(|| Ok(live), ORPHAN_BLOB_GRACE)
+        .unwrap();
 
     assert_eq!(report.blobs_deleted, 0);
     assert_eq!(report.blobs_retained, 1);
@@ -477,7 +552,9 @@ fn sweep_keeps_blob_still_live_from_another_session_lease() {
     age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
     let mut live = std::collections::HashSet::new();
     live.insert(sha.clone());
-    let report = store.sweep_orphan_blobs(&live, ORPHAN_BLOB_GRACE).unwrap();
+    let report = store
+        .sweep_orphan_blobs(|| Ok(live), ORPHAN_BLOB_GRACE)
+        .unwrap();
 
     assert_eq!(report.blobs_deleted, 0);
     assert_eq!(report.blobs_retained, 1);
@@ -496,14 +573,14 @@ fn sweep_obeys_grace_window_then_deletes_orphan_and_thumbnail() {
     );
 
     let early = store
-        .sweep_orphan_blobs(&std::collections::HashSet::new(), ORPHAN_BLOB_GRACE)
+        .sweep_orphan_blobs(|| Ok(std::collections::HashSet::new()), ORPHAN_BLOB_GRACE)
         .unwrap();
     assert_eq!(early.blobs_deleted, 0, "59 分钟的孤儿仍在宽限期");
     assert!(store.exists(&sha));
 
     age_blob(&store, &sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
     let late = store
-        .sweep_orphan_blobs(&std::collections::HashSet::new(), ORPHAN_BLOB_GRACE)
+        .sweep_orphan_blobs(|| Ok(std::collections::HashSet::new()), ORPHAN_BLOB_GRACE)
         .unwrap();
     assert_eq!(late.blobs_deleted, 1, "61 分钟的孤儿应被回收");
     assert!(!store.exists(&sha));

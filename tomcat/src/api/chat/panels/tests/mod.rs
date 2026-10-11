@@ -1,2 +1,1 @@
 mod ask_question_wire_test;
-mod cli_ask_question_panel_test;

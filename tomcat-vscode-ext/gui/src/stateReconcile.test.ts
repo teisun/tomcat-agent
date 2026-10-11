@@ -184,6 +184,21 @@ describe("stateReconcile", () => {
     expect(reconciled.sessions).toBe(previous.sessions);
   });
 
+  it("keeps order-only timeline updates while reusing unchanged entries", () => {
+    const previous = snapshot();
+    const next = snapshot();
+    next.sessionViews.s1.timeline.reverse();
+    for (const reconciled of [
+      reconcileStateSnapshot(previous, next),
+      mergeSessionViewSnapshot(previous, { sessionId: "s1", view: next.sessionViews.s1 }),
+    ]) {
+      expect(reconciled.sessionViews.s1.timeline.map(item => item.id)).toEqual(["s1-m2", "s1-m1"]);
+      expect(reconciled.sessionViews.s1.timeline[0]).toBe(previous.sessionViews.s1.timeline[1]);
+      expect(reconciled.sessionViews.s1.timeline[1]).toBe(previous.sessionViews.s1.timeline[0]);
+      expect(reconciled.sessionViews.s2).toBe(previous.sessionViews.s2);
+    }
+  });
+
   it("only swaps the streaming tail reference when the tail text changes", () => {
     const previous = snapshot();
     const next = snapshot();

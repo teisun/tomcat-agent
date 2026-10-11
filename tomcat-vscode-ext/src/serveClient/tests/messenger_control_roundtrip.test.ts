@@ -39,6 +39,30 @@ function askFrame(requestId: string, sessionId: string) {
 }
 
 describe("TomcatMessenger control roundtrip", () => {
+  it("settles an outbound initialize cancellation immediately without cancelling another ID", async () => {
+    vi.useFakeTimers();
+    const child = new FakeChildProcess();
+    const messenger = new TomcatMessenger({ executable: "tomcat", spawnFactory: createSpawnFactory(child) });
+    const rejected = vi.fn();
+    const observed = initializeServe(messenger, 1_000).catch(rejected);
+    const command = readLatestCommand(child);
+    try {
+      child.emitStdout(`${JSON.stringify({ type: "control_cancel", requestId: "unrelated" })}\n`);
+      await Promise.resolve();
+      expect(rejected).not.toHaveBeenCalled();
+      child.emitStdout(`${JSON.stringify({ type: "control_cancel", requestId: command.requestId })}\n`);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(rejected).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("initialize was cancelled") }));
+      expect(vi.getTimerCount()).toBe(0);
+      await observed;
+    } finally {
+      messenger.dispose();
+      await observed;
+      vi.useRealTimers();
+    }
+  });
+
   it("completes initialize handshake via control_response", async () => {
     const child = new FakeChildProcess();
     const messenger = new TomcatMessenger({

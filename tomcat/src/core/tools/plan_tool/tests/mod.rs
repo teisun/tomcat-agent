@@ -2,7 +2,7 @@
 
 mod ask_question_test;
 mod build_plan_test;
-mod common;
+pub(super) mod common;
 mod create_plan_test;
 mod delivery_flow_test;
 mod lifecycle_test;

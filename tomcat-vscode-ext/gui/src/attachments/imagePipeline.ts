@@ -8,10 +8,9 @@
  *
  * Two jobs:
  *
- * 1. Downsample to a thumbnail at decode time. `createImageBitmap` with `resizeWidth`
- *    lets Chromium downsample *during* decoding, so a 4000x3000 JPEG never
- *    materialises as a 48MB bitmap. Decode-then-resize — which is what an image
- *    library on the Rust side would do — has to pay that 48MB first.
+ * 1. Render thumbnails into a bounded canvas. Natural dimensions come from `<img>`;
+ *    do not allocate an extra full-size ImageBitmap just to discover its dimensions.
+ *    Browser-internal decoding memory remains implementation-dependent.
  *
  * 2. Rasterise SVG to PNG for the model. Providers do not accept `image/svg+xml`.
  *    Rendering happens through `<img>`, which the HTML spec puts in *secure static
@@ -26,6 +25,9 @@ import { t } from "../../../src/shared/i18n";
 
 /** Longest edge of a generated thumbnail, in CSS pixels. */
 export const THUMBNAIL_MAX_EDGE = 192;
+
+/** Bound the derived SVG raster sent to providers; the original vector bytes stay intact. */
+const SVG_PROVIDER_MAX_EDGE = 2048;
 
 /**
  * Upper bound on SVG source we are willing to inline as text for the model.
@@ -129,8 +131,11 @@ export function svgWithExplicitSize(source: string): {
   if (widthMatch && heightMatch) {
     return { height, source, width };
   }
-  // Inject the dimensions we just derived so the browser has an intrinsic size.
-  const patched = source.replace(/<svg\b/i, `<svg width="${width}" height="${height}"`);
+  // Fill absent root attributes only: duplicating even one makes the SVG invalid XML.
+  const root = /<svg\b[^>]*>/i.exec(source)?.[0] ?? "";
+  const missingWidth = /\swidth\s*=/i.test(root) ? "" : ` width="${width}"`;
+  const missingHeight = /\sheight\s*=/i.test(root) ? "" : ` height="${height}"`;
+  const patched = source.replace(/<svg\b/i, `<svg${missingWidth}${missingHeight}`);
   return { height, source: patched, width };
 }
 
@@ -195,7 +200,7 @@ function canvasToBlob(
   mimeType: string,
   quality?: number,
 ): Promise<Blob> {
-  return new Promise((resolve, reject) => {
+  return new Promise<Blob>((resolve, reject) => {
     try {
       canvas.toBlob(
         (blob) => (blob ? resolve(blob) : reject(new Error("canvas produced no blob"))),
@@ -208,6 +213,10 @@ function canvasToBlob(
       // has to be caught rather than assumed away.
       reject(error instanceof Error ? error : new Error(String(error)));
     }
+  }).finally(() => {
+    // Release backing pixels before preparing another attachment, not at a later GC.
+    canvas.width = 0;
+    canvas.height = 0;
   });
 }
 
@@ -238,8 +247,9 @@ export async function rasterizeSvgToPng(bytes: ArrayBuffer): Promise<Blob> {
     new Blob([sized.source], { type: "image/svg+xml" }),
     sized,
   );
+  const target = fitWithin(loaded.width, loaded.height, SVG_PROVIDER_MAX_EDGE);
   return canvasToBlob(
-    drawToCanvas(loaded.image, loaded.width, loaded.height),
+    drawToCanvas(loaded.image, target.width, target.height),
     "image/png",
   );
 }
@@ -247,9 +257,8 @@ export async function rasterizeSvgToPng(bytes: ArrayBuffer): Promise<Blob> {
 /**
  * Produce a thumbnail whose longest edge is at most {@link THUMBNAIL_MAX_EDGE}.
  *
- * Prefers `createImageBitmap` with both resize dimensions so the downsampling happens
- * inside the decoder. Falls back to draw-then-export where that is unsupported —
- * notably for SVG, which `createImageBitmap` does not accept.
+ * Share the secure `<img>` path with SVG and allocate only the output-sized canvas.
+ * This bounds our canvas, not Chromium's internal decoder/cache allocations.
  */
 export async function makeThumbnail(
   bytes: ArrayBuffer,
@@ -257,29 +266,6 @@ export async function makeThumbnail(
 ): Promise<Blob> {
   const blob = new Blob([bytes], { type: mimeType });
 
-  if (mimeType !== "image/svg+xml" && typeof createImageBitmap === "function") {
-    // Probe the natural size first so the aspect ratio survives. Passing resizeWidth
-    // alone would squash anything portrait-shaped.
-    const probe = await createImageBitmap(blob);
-    const target = fitWithin(probe.width, probe.height, THUMBNAIL_MAX_EDGE);
-    probe.close?.();
-    const bitmap = await createImageBitmap(blob, {
-      resizeHeight: target.height,
-      resizeQuality: "high",
-      resizeWidth: target.width,
-    });
-    try {
-      return await canvasToBlob(
-        drawToCanvas(bitmap, bitmap.width, bitmap.height),
-        "image/png",
-      );
-    } finally {
-      bitmap.close?.();
-    }
-  }
-
-  // SVG path: render through <img> straight at thumbnail size, so no full-size raster
-  // is ever allocated.
   const sized =
     mimeType === "image/svg+xml"
       ? svgWithExplicitSize(new TextDecoder("utf-8").decode(bytes))
@@ -305,8 +291,8 @@ export async function makeThumbnail(
  *
  * Bytes come over the resource protocol rather than the message channel, so nothing large
  * crosses a process boundary. The compressed file does land on the JS heap for the length
- * of this call, but only the compressed form: `makeThumbnail` resizes inside the decoder,
- * so the full-size bitmap is never allocated.
+ * of this call. Derived canvases are bounded; browser decoding may still need the
+ * original bitmap internally.
  */
 export async function makeThumbnailFromUrl(
   url: string,

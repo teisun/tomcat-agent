@@ -31,6 +31,8 @@
  * either the previous draft or the new one, never a half-written file. A file that
  * fails to parse is quarantined rather than deleted — the user gets an empty composer
  * they can immediately type into, and the bad file is still on disk to look at.
+ * Graceful deactivation waits for scheduled/in-flight writes and reports failure.
+ * Keystrokes are not individually durable: a forced exit can still lose the debounce window.
  */
 import * as vscode from "vscode";
 import { withOccurrence } from "./composerOccurrences";
@@ -209,7 +211,7 @@ function cloneDraft(draft: ComposerDraft): ComposerDraft {
 
 function isMissingFileError(error: unknown): boolean {
   return error instanceof vscode.FileSystemError
-    && (error.code === "FileNotFound" || /not found/iu.test(error.message));
+    && error.code === "FileNotFound";
 }
 
 /**
@@ -276,7 +278,10 @@ export class ComposerDraftStore {
   private async ensureRoot(): Promise<void> {
     this.rootReady ??= (async () => {
       await vscode.workspace.fs.createDirectory(this.root);
-    })();
+    })().catch(error => {
+      this.rootReady = null;
+      throw error;
+    });
     await this.rootReady;
   }
 
@@ -315,7 +320,9 @@ export class ComposerDraftStore {
     const loading = (async (): Promise<ComposerDraft> => {
       if (isKnownSession && !(await isKnownSession(sessionId))) {
         if (stillCurrent()) {
-          await this.discard(sessionId);
+          await this.discard(sessionId).catch(error => {
+            console.warn("Tomcat could not remove an orphaned draft", error);
+          });
         }
         return this.currentDraft(sessionId);
       }
@@ -336,7 +343,9 @@ export class ComposerDraftStore {
       if (!draft) {
         // Do not move aside a file that a newer update is about to replace.
         if (stillCurrent()) {
-          await this.quarantine(sessionId, uri, startedAt);
+          await this.quarantine(sessionId, uri, startedAt).catch(error => {
+            console.warn("Tomcat could not quarantine an unreadable draft", error);
+          });
         }
         return this.currentDraft(sessionId);
       }
@@ -416,7 +425,11 @@ export class ComposerDraftStore {
         await vscode.workspace.fs.writeFile(temp, bytes);
         await vscode.workspace.fs.rename(temp, target, { overwrite: true });
       } catch (error) {
-        await this.deleteFile(temp);
+        try {
+          await this.deleteFile(temp);
+        } catch (cleanupError) {
+          console.warn("Tomcat could not remove a temporary draft", cleanupError);
+        }
         throw error;
       }
     });
@@ -431,10 +444,10 @@ export class ComposerDraftStore {
   }
 
   /**
-   * Drop a draft from memory and disk.
+   * Drop a draft from memory, then remove its disk backup.
    *
-   * Called once the backend has acknowledged the send — not before. Clearing on
-   * optimism means a failed send loses the message the user was trying to send.
+   * Deletion failures propagate after memory retirement. Callers must not reinterpret
+   * an already acknowledged send as a failed submission when only cleanup fails.
    */
   async discard(sessionId: string): Promise<void> {
     this.assertSessionId(sessionId);
@@ -445,13 +458,14 @@ export class ComposerDraftStore {
     }
     this.bumpRevision(sessionId);
     this.drafts.delete(sessionId);
-    await this.inFlight.get(sessionId)?.catch(() => undefined);
-    await this.deleteFile(this.draftUri(sessionId));
+    // Persist retirement in the write lane; a late delete must not erase a newer save.
+    await this.writeNow(sessionId);
   }
 
   /**
    * Clear only if no draft mutation happened after the caller captured `expectedRevision`.
    * This turns send acknowledgement into an identity check rather than a content comparison.
+   * Disk errors propagate after in-memory retirement; newer revisions remain untouched.
    */
   async discardIfRevision(sessionId: string, expectedRevision: number): Promise<boolean> {
     this.assertSessionId(sessionId);
@@ -465,12 +479,8 @@ export class ComposerDraftStore {
     }
     const retirementRevision = this.bumpRevision(sessionId);
     this.drafts.delete(sessionId);
-    await this.inFlight.get(sessionId)?.catch(() => undefined);
-    if (this.revision(sessionId) !== retirementRevision) {
-      return false;
-    }
-    await this.deleteFile(this.draftUri(sessionId));
-    return true;
+    await this.writeNow(sessionId);
+    return this.revision(sessionId) === retirementRevision;
   }
 
   /** Revision of the current in-memory draft, for acknowledgement identity checks. */
@@ -480,9 +490,8 @@ export class ComposerDraftStore {
   }
 
   /**
-   * Transactional counterpart to `discard`: only "already absent" is ignored. A permission or
-   * I/O failure remains observable so fork compensation cannot claim success while target state
-   * is still durable on disk.
+   * Transactional counterpart to `discard`: preserve memory until disk removal succeeds,
+   * so failed fork compensation retains the target state for diagnosis/recovery.
    */
   async discardStrict(sessionId: string): Promise<void> {
     this.assertSessionId(sessionId);
@@ -493,11 +502,7 @@ export class ComposerDraftStore {
     }
     this.bumpRevision(sessionId);
     await this.inFlight.get(sessionId);
-    try {
-      await vscode.workspace.fs.delete(this.draftUri(sessionId), { useTrash: false });
-    } catch (error) {
-      if (!isMissingFileError(error)) throw error;
-    }
+    await this.deleteFile(this.draftUri(sessionId));
     this.drafts.delete(sessionId);
   }
 
@@ -575,20 +580,23 @@ export class ComposerDraftStore {
     }
   }
 
-  /** Await every scheduled write. Used before send and on deactivate. */
+  /** Await writes scheduled or in flight at call time; graceful deactivation awaits this. */
   async flush(sessionId?: string): Promise<void> {
-    const ids = sessionId ? [sessionId] : [...this.pendingWrites.keys()];
-    for (const id of ids) {
+    const ids = sessionId ? [sessionId] : [...new Set([...this.pendingWrites.keys(), ...this.inFlight.keys()])];
+    // One session's disk error must not let the host exit before other saves settle.
+    const results = await Promise.allSettled(ids.map(async id => {
       const pending = this.pendingWrites.get(id);
       if (pending) {
         clearTimeout(pending);
         this.pendingWrites.delete(id);
         await this.writeNow(id);
+      } else {
+        await this.inFlight.get(id);
       }
-    }
-    await Promise.all(
-      sessionId ? [this.inFlight.get(sessionId)] : [...this.inFlight.values()],
-    );
+    }));
+    const errors: unknown[] = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "Failed to flush composer drafts");
   }
 
   /** Session ids that currently have a draft in memory. */
@@ -599,23 +607,23 @@ export class ComposerDraftStore {
   private async deleteFile(uri: vscode.Uri): Promise<void> {
     try {
       await vscode.workspace.fs.delete(uri, { useTrash: false });
-    } catch {
-      // Already gone is the desired end state.
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
     }
   }
 
   /**
    * Move an unreadable draft aside instead of deleting it.
    *
-   * The user gets a working composer immediately; the bad file stays on disk so the
-   * failure can actually be diagnosed rather than guessed at from a log line.
+   * Prefer a corrupt backup for diagnosis. If moving fails, try deleting the invalid
+   * file; hydration diagnoses cleanup failures without blocking the composer.
    */
   private async quarantine(
     sessionId: string,
     uri: vscode.Uri,
     expectedRevision: number,
   ): Promise<void> {
-    // Join the same per-session I/O lane as writes and deletes. A new update may arrive while
+    // Join the per-session write lane. A new update may arrive while
     // the corrupt file is being moved, but its write will run afterward instead of racing this
     // rename against a fresh file at the same path.
     const previous = this.inFlight.get(sessionId) ?? Promise.resolve();

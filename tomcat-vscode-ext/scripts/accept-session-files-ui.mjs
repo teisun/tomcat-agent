@@ -53,6 +53,15 @@ try {
           await undo.click();await page.getByTestId("undo-files-dialog").waitFor();
           const actions=await page.evaluate(()=>window.__intents.filter(i=>i.type==="openSessionFileDiff" || i.type==="restoreSessionFiles"));assert.equal(actions.length,0,"Undo opens confirmation, not diff or mutation");
           await page.keyboard.press("Escape");await row.getByTestId("session-file-diff").focus();assert.equal(await undo.evaluate(button=>getComputedStyle(button).opacity),"1");
+          for (const key of ["Enter", "Space"]) {
+            await undo.click();await page.getByTestId("undo-files-dialog").waitFor();
+            assert.equal(await page.getByTestId("undo-files-undo").evaluate(button=>button===document.activeElement),true);
+            await page.keyboard.press("Tab");
+            assert.equal(await page.getByTestId("undo-files-cancel").evaluate(button=>button===document.activeElement),true);
+            if (key === "Enter") await capture("undo-cancel-focused");
+            await page.keyboard.press(key);await page.getByTestId("undo-files-dialog").waitFor({state:"detached"});
+            assert.equal(await page.evaluate(()=>window.__intents.filter(i=>i.type==="restoreSessionFiles").length),0,"Cancel keyboard activation must never restore files");
+          }
         }
         if(scenario.long){await page.getByTestId("session-files-list").evaluate(list=>{list.scrollTop=list.scrollHeight;});await page.getByTestId("session-file-row").last().scrollIntoViewIfNeeded();await page.getByTestId("session-files-list").evaluate(list=>{list.scrollTop=0;});}
       }
@@ -97,7 +106,10 @@ try {
         await page.getByTestId("files-toggle").click();
         await page.evaluate(()=>{window.__state.sessionViews.s1.sessionFiles={sourceTurnId:"u4",files:[{path:"/workspace/new.ts",status:"added",added:3,removed:0,restorable:true}]};window.__emit();});
         await page.getByText("new.ts",{exact:true}).waitFor();assert.equal(await page.getByTestId("session-file-row").count(),1);assert.equal(await page.getByTestId("session-files-list").evaluate(list=>list.scrollTop),0);
-        await page.getByTestId("undo-all-files").click();await page.getByRole("button",{name:/Undo File/}).click();await page.getByTestId("files-dock").waitFor({state:"detached"});
+        await page.getByTestId("undo-all-files").click();await page.getByTestId("undo-files-dialog").waitFor();
+        assert.equal(await page.getByTestId("undo-files-undo").evaluate(button=>button===document.activeElement),true);
+        await capture("undo-confirm-focused");await page.keyboard.press("Enter");await page.getByTestId("files-dock").waitFor({state:"detached"});
+        assert.equal(await page.evaluate(()=>window.__intents.filter(i=>i.type==="restoreSessionFiles").length),1,"Confirm Enter must restore exactly once");
         await page.evaluate(()=>window.__emit());assert.equal(await page.getByTestId("files-dock").count(),0);assert.equal(await page.evaluate(()=>window.__editor===document.querySelector('[data-testid="composer-input"]')),true);
         await capture("undo-empty");results.push({scenario:"question-retention-switch-and-undo",passed:true});
       }

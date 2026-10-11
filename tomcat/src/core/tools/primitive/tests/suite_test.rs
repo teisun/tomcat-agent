@@ -628,6 +628,43 @@ async fn execute_bash_single_command_runs_node_script_and_shell_composition() {
     assert_eq!(result.stdout, "node-shell-ok\n:pipeline");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn execute_bash_preserves_real_streams_instead_of_parsing_log_labels() {
+    for shared in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut exec = DefaultPrimitiveExecutor::new(
+            temp_primitive_config(dir.path()),
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            make_gate(dir.path()),
+        );
+        if shared {
+            exec.bash_task_registry = Some(Arc::new(BashTaskRegistry::new(
+                dir.path().join("tool-results"),
+            )));
+        }
+        let result = exec
+            .execute_bash(
+                "printf 'STDERR: literal stdout\\n'; printf 'first error\\nsecond error\\n' >&2",
+                Some(dir.path().to_str().unwrap()),
+                "p1",
+                None,
+            )
+            .await
+            .expect("foreground command completes");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout, "STDERR: literal stdout\n",
+            "shared={shared}: stdout text must not be interpreted as a stream label"
+        );
+        assert_eq!(
+            result.stderr, "first error\nsecond error\n",
+            "shared={shared}: every stderr byte must retain its original stream"
+        );
+    }
+}
+
 #[tokio::test]
 async fn execute_bash_marks_child_as_nested_agent() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1086,6 +1123,55 @@ async fn build_bash_task_registry_applies_wait_policy_and_guard() {
         registry.list().is_empty(),
         "deny should leave no tracked task"
     );
+}
+
+/// Dropping a foreground caller must not leave the tracked child writing after cancellation.
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_foreground_drop_stops_child_with_and_without_shared_registry() {
+    for shared in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("logs")));
+        let mut exec = DefaultPrimitiveExecutor::new(
+            temp_primitive_config(dir.path()),
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            make_gate(dir.path()),
+        )
+        .with_bash_persist_dir(dir.path().join("logs"));
+        if shared {
+            exec = exec.with_bash_task_registry(registry.clone());
+        }
+        let mut call = Box::pin(exec.execute_bash(
+            "printf ready > ready; sleep 1; printf escaped > escaped",
+            Some(&cwd),
+            "p1",
+            None,
+        ));
+        tokio::select! {
+            result = &mut call => panic!("foreground returned before cancellation: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !dir.path().join("ready").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }) => result.expect("child must start before dropping its caller"),
+        }
+        drop(call);
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(
+            !dir.path().join("escaped").exists(),
+            "cancelled foreground child kept writing (shared={shared})"
+        );
+        if shared {
+            let tasks = registry.list();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(
+                tasks[0].status,
+                crate::core::tools::primitive::BashTaskStatus::Stopped
+            );
+        }
+    }
 }
 
 /// Without a shared registry, foreground wait expiry must stop the process tree locally rather

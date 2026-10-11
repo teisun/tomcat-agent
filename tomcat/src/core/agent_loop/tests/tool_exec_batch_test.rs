@@ -13,7 +13,9 @@ use std::sync::Arc;
 use crate::core::agent_loop::tool_exec::execute_tool_full;
 use crate::core::agent_loop::types::SubagentType;
 use crate::core::agent_loop::ToolCallInfo;
-use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+use crate::core::permission::{
+    DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, PermissionDecision, SessionGrants,
+};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
 use crate::core::AllowAllConfirmation;
@@ -40,6 +42,140 @@ fn make_executor(dir: &std::path::Path) -> Arc<dyn PrimitiveExecutor> {
         Arc::new(TracingAuditRecorder),
         gate,
     ))
+}
+
+#[tokio::test]
+async fn update_plan_respects_explicit_denied_path() {
+    assert_plan_path_rule(Some(PathRuleMode::Deny), true, true).await;
+}
+
+#[tokio::test]
+async fn update_plan_respects_explicit_readonly_path() {
+    assert_plan_path_rule(Some(PathRuleMode::Readonly), true, true).await;
+}
+
+#[tokio::test]
+async fn update_plan_allows_authorized_external_path_without_another_confirmation() {
+    assert_plan_path_rule(None, true, false).await;
+}
+
+#[tokio::test]
+async fn update_plan_refuses_unknown_scope_when_permission_is_declined() {
+    assert_plan_path_rule(None, false, false).await;
+}
+
+#[tokio::test]
+async fn update_plan_uses_existing_permission_grant_for_unknown_scope() {
+    assert_plan_path_rule(None, false, true).await;
+}
+
+async fn assert_plan_path_rule(mode: Option<PathRuleMode>, in_scope: bool, consent: bool) {
+    use crate::core::plan_runtime::file_store::read_plan;
+    use crate::core::plan_runtime::PlanRuntime;
+    use crate::core::tools::contract::confirmation::{
+        DenyAllConfirmation, UserConfirmationProvider,
+    };
+    use crate::core::tools::primitive::PrimitiveOperation;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guarded.plan.md");
+    let original = "---\nplan_id: guarded\ngoal: fixture\nstate: planning\ncreated_at: 2026-01-01T00:00:00Z\nschema_version: 1\ntodos:\n- id: t1\n  content: original\n  status: pending\n---\n## Plan\nfixture body\n";
+    std::fs::write(&path, original).unwrap();
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: if in_scope {
+                dir.path().to_path_buf()
+            } else {
+                dir.path().join("definition")
+            },
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: mode
+                .map(|mode| PathRule::new(path.to_string_lossy(), mode))
+                .into_iter()
+                .collect(),
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let decision = gate
+        .check(PrimitiveOperation::Write, &path.to_string_lossy())
+        .unwrap();
+    assert!(match decision {
+        PermissionDecision::Deny { .. } => mode.is_some(),
+        PermissionDecision::Allow { .. } => mode.is_none() && in_scope,
+        PermissionDecision::NeedConfirm { .. } => mode.is_none() && !in_scope,
+    });
+    let confirmation: Arc<dyn UserConfirmationProvider> = if consent {
+        Arc::new(AllowAllConfirmation)
+    } else {
+        Arc::new(DenyAllConfirmation)
+    };
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        confirmation,
+        Arc::new(TracingAuditRecorder),
+        gate,
+    ));
+    let state = Arc::new(ReadFileState::new());
+    if in_scope {
+        let ordinary_read = run(
+            &primitive,
+            &state,
+            &make_tc("read", serde_json::json!({"path": path})),
+        )
+        .await;
+        assert_eq!(ordinary_read.is_error, mode == Some(PathRuleMode::Deny));
+    }
+
+    let runtime = PlanRuntime::new("guard-session");
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        Some(&state),
+        None,
+        None,
+        None,
+        Some(&runtime),
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &make_tc(
+            "update_plan",
+            serde_json::json!({
+                "path": path,
+                "ops": [{"kind": "upsert", "id": "t1", "content": "must not be written"}]
+            }),
+        ),
+        None,
+        None,
+    )
+    .await;
+    if mode.is_none() && (in_scope || consent) {
+        assert!(
+            !outcome.is_error,
+            "authorized update failed: {}",
+            outcome.model_text
+        );
+        let saved = read_plan(&path).unwrap();
+        assert_eq!(saved.frontmatter.todos[0].content, "must not be written");
+        assert!(saved.body.contains("fixture body"));
+    } else {
+        assert!(
+            outcome.is_error && std::fs::read_to_string(&path).unwrap() == original,
+            "native update_plan bypassed {mode:?}: {}",
+            outcome.model_text
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "rejection must precede even lock-file creation"
+        );
+    }
 }
 
 fn make_tc(name: &str, args: serde_json::Value) -> ToolCallInfo {
@@ -92,6 +228,60 @@ fn status_of(entries: &[ToolDisplayFileEntry], suffix: &str) -> Option<ToolDispl
 }
 
 // ---------------------------------------------------------------- batch read
+
+#[tokio::test]
+async fn windowed_and_truncated_reads_hash_only_the_returned_view_and_still_reject_stale_edits() {
+    use crate::core::tools::pipeline::read_state::hash_content;
+    use crate::core::tools::primitive::ReadResult;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let path = root.join("large.log");
+    let primitive = make_executor(&root);
+    let original = format!("target\n{}", "filler\n".repeat(20_000));
+    for windowed in [true, false] {
+        std::fs::write(&path, &original).unwrap();
+        let state = Arc::new(ReadFileState::new());
+        let (offset, limit) = if windowed {
+            (Some(2), Some(1))
+        } else {
+            (None, None)
+        };
+        let outcome = run(&primitive, &state, &make_tc("read", serde_json::json!({
+            "path": path, "offset": offset, "limit": limit, "line_numbers": false, "hashline": false
+        }))).await;
+        assert!(!outcome.is_error, "{}", outcome.model_text);
+        let ReadResult::Text(view) = primitive
+            .read(path.to_str().unwrap(), offset, limit, false, false, "agent")
+            .await
+            .unwrap()
+        else {
+            panic!("text view")
+        };
+        let stamp = state.get(&path).expect("read stamp");
+        assert!(view.truncated);
+        assert_eq!(
+            stamp.content_hash,
+            hash_content(view.content.as_bytes()),
+            "a partial view must not hash unread file bytes"
+        );
+        assert_ne!(stamp.content_hash, hash_content(original.as_bytes()));
+        let updated = format!("{original}external edit\n");
+        std::fs::write(&path, &updated).unwrap();
+        let edit = run(
+            &primitive,
+            &state,
+            &make_tc(
+                "edit",
+                serde_json::json!({
+                    "path": path, "old_content": "target", "new_content": "overwritten"
+                }),
+            ),
+        )
+        .await;
+        assert!(edit.model_text.contains("Stale"), "{}", edit.model_text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+    }
+}
 
 #[tokio::test]
 async fn batch_read_keeps_request_order_and_labels_each_section() {
@@ -292,6 +482,116 @@ async fn seed_read(
         "seed read failed: {}",
         outcome.model_text
     );
+}
+
+/// The public dispatcher must guard every batch target, not just `args.path`.
+#[tokio::test]
+#[serial_test::serial(env_lock)]
+#[allow(clippy::await_holding_lock)] // HOME is process-global; this fixture holds the shared test lock.
+async fn batch_edit_enforces_plan_policy_per_target() {
+    use crate::core::plan_runtime::PlanRuntime;
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home.path());
+    let plans = home.path().join(".tomcat/plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    let plan = plans.join("guard.plan.md");
+    let source = home.path().join("source.txt");
+    let primitive = make_executor(home.path());
+
+    for (case, subagent, executing) in [
+        ("planning", SubagentType::User, false),
+        ("reviewer", SubagentType::PlanReviewer, false),
+        ("executing", SubagentType::User, true),
+    ] {
+        for empty_top_path in [false, true] {
+            let original_plan = "---\nplan_id: guard\ngoal: guard\nstate: executing\ncreated_at: 2026-01-01T00:00:00Z\nschema_version: 1\ntodos: []\n---\n## Plan\noriginal body\n";
+            std::fs::write(&plan, original_plan).unwrap();
+            std::fs::write(&source, "original body\n").unwrap();
+            let state = Arc::new(ReadFileState::new());
+            seed_read(&primitive, &state, &plan).await;
+            seed_read(&primitive, &state, &source).await;
+            // Reviewer authority must not depend on a parent runtime being supplied.
+            let runtime = (subagent == SubagentType::User).then(|| {
+                let rt = PlanRuntime::new("guard-session");
+                if executing {
+                    rt.bind_plan_file_for_test(plan.clone());
+                } else {
+                    rt.enter_plan().unwrap();
+                }
+                rt
+            });
+            let mut args = serde_json::json!({"files": [
+                {"path": plan, "edits": [{"old_content": "original body", "new_content": "changed body"}]},
+                {"path": source, "edits": [{"old_content": "original body", "new_content": "changed body"}]}
+            ]});
+            if empty_top_path {
+                args["path"] = serde_json::json!("");
+            }
+            let outcome = execute_tool_full(
+                &primitive,
+                &None,
+                &None,
+                Some(&state),
+                None,
+                None,
+                None,
+                runtime.as_ref(),
+                None,
+                subagent,
+                &tokio_util::sync::CancellationToken::new(),
+                &make_tc("edit", args),
+                None,
+                None,
+            )
+            .await;
+            let entries = files_display(&outcome);
+            let (allowed, denied) = if executing {
+                (&source, &plan)
+            } else {
+                (&plan, &source)
+            };
+            assert_eq!(
+                status_of(&entries, allowed.file_name().unwrap().to_str().unwrap()),
+                Some(ToolDisplayFileStatus::Applied),
+                "{case}: {}",
+                outcome.model_text
+            );
+            assert_eq!(
+                status_of(&entries, denied.file_name().unwrap().to_str().unwrap()),
+                Some(ToolDisplayFileStatus::Failed),
+                "{case}: {}",
+                outcome.model_text
+            );
+            assert!(std::fs::read_to_string(allowed)
+                .unwrap()
+                .contains("changed body"));
+            assert_eq!(
+                std::fs::read_to_string(denied).unwrap(),
+                if executing {
+                    original_plan
+                } else {
+                    "original body\n"
+                }
+            );
+            assert!(
+                outcome.model_text.contains("failed without writing: 1"),
+                "{}",
+                outcome.model_text
+            );
+        }
+    }
 }
 
 #[tokio::test]

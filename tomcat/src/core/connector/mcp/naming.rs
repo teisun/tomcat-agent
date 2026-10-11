@@ -3,12 +3,18 @@ use sha2::{Digest, Sha256};
 const MAX_TOOL_NAME_LEN: usize = 64;
 
 pub fn to_model_name(server: &str, raw_tool: &str) -> String {
-    let readable = format!(
-        "mcp__{}__{}",
-        sanitize_component(server),
-        sanitize_component(raw_tool)
-    );
-    if readable.len() <= MAX_TOOL_NAME_LEN {
+    let server_part = sanitize_component(server);
+    let tool_part = sanitize_component(raw_tool);
+    let readable = format!("mcp__{server_part}__{tool_part}");
+    // Preserve normal names, but do not let lossy replacement or the separator
+    // collapse different (server, tool) identities into the same short name.
+    let unambiguous = server_part == server
+        && tool_part == raw_tool
+        && !server.contains("__")
+        && !raw_tool.contains("__")
+        && !server.ends_with('_')
+        && !raw_tool.starts_with('_');
+    if readable.len() <= MAX_TOOL_NAME_LEN && unambiguous {
         return readable;
     }
 
@@ -50,39 +56,5 @@ fn truncate_ascii(value: &str, len: usize) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::to_model_name;
-
-    #[test]
-    fn short_names_remain_readable() {
-        assert_eq!(
-            to_model_name("playwright", "browser_take_screenshot"),
-            "mcp__playwright__browser_take_screenshot"
-        );
-    }
-
-    #[test]
-    fn long_names_keep_a_readable_head_and_unique_hash() {
-        let name = to_model_name(
-            "playwright",
-            "navigate_and_wait_for_network_idle_then_capture_full_screenshot",
-        );
-        assert!(name.starts_with("mcp__playwright__navigate_and_wait"));
-        assert_eq!(name.len(), 64);
-        assert_ne!(
-            name,
-            to_model_name(
-                "playwright",
-                "navigate_and_wait_for_network_idle_then_capture_viewport_screenshot",
-            )
-        );
-    }
-
-    #[test]
-    fn underscore_in_server_and_tool_names_is_preserved() {
-        assert_eq!(
-            to_model_name("browser_tools", "take_screenshot"),
-            "mcp__browser_tools__take_screenshot"
-        );
-    }
-}
+#[path = "tests/naming_test.rs"]
+mod tests;

@@ -24,6 +24,72 @@ use crate::infra::{DefaultEventBus, EventContext};
 
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
+#[tokio::test]
+async fn responses_without_usage_accumulate_on_top_of_the_previous_sample() {
+    let mut observed = Vec::new();
+    for with_tool in [false, true] {
+        let mut first = vec![Ok(StreamEvent::ContentDelta {
+            delta: "a".repeat(400),
+        })];
+        if with_tool {
+            first.push(Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("read-1".into()),
+                name: Some("read".into()),
+                arguments_delta: Some(r#"{"path":"/tmp/metrics"}"#.into()),
+            }));
+        }
+        first.push(Ok(StreamEvent::FinishReason {
+            reason: if with_tool { "tool_calls" } else { "stop" }.into(),
+        }));
+        let mut streams = vec![first];
+        if with_tool {
+            streams.push(vec![
+                Ok(StreamEvent::ContentDelta {
+                    delta: "done".into(),
+                }),
+                Ok(StreamEvent::FinishReason {
+                    reason: "stop".into(),
+                }),
+            ]);
+        }
+        let mut agent = AgentLoop::new(
+            test_binding(Arc::new(MockLlmProvider::new(streams)), "gpt-4"),
+            Arc::new(MockPrimitiveExecutor),
+            Arc::new(DefaultEventBus::new()),
+            AgentLoopConfig::default(),
+            CancellationToken::new(),
+        );
+        let mut state = ContextState {
+            messages: vec![],
+            estimate_context_chars: 4_000,
+            context_budget_chars: 100_000,
+            context_budget_tokens: 25_000,
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            transcript_path: Default::default(),
+            latest_plan_event: None,
+            resume_control: Default::default(),
+            preheat: crate::core::compaction::preheat::Preheat::new(),
+            session_obs: Default::default(),
+            live: Default::default(),
+        };
+        state.update_api_usage(900, 100);
+        agent.set_context_state(Some(state));
+        agent
+            .run(vec![ChatMessage::user("continue")])
+            .await
+            .unwrap();
+        let state = agent.context_state.as_ref().unwrap();
+        let appended = state.estimate_context_chars - 4_000;
+        assert!(appended >= 400);
+        assert_eq!(state.last_api_usage.as_ref().unwrap().prompt_tokens, 900);
+        observed.push((with_tool, state.post_usage_appended_chars, appended));
+    }
+    assert!(observed.iter().all(|(_, actual, appended)| actual == appended),
+        "without a fresh usage sample every appended byte must contribute to the delta: {observed:?}");
+}
+
 /// 工具轮场景：provider usage 到达后，水位必须在工具开始执行前可见。
 #[tokio::test]
 async fn provider_usage_metric_is_emitted_before_tool_execution() {

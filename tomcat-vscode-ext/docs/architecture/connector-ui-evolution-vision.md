@@ -43,7 +43,7 @@ Connector
 │                 CLI: local executable / managed process
 ├── auth          none | bearer | OAuth | device-code | QR
 ├── capabilities  tools / resources / actions
-├── scope         Workspace（默认）| User
+├── scope         Global（默认）| Workspace（显式选择）
 └── runtime       installed / connecting / connected / failed / revoked
 ```
 
@@ -60,7 +60,7 @@ CLI + 本地进程 + 二维码授权
 
 这使未来 CLI 连接器可以复用列表、详情、授权状态和错误处理，而不必把 MCP 特有字段散落在整个 UI 中。
 
-## 3. 当前版本：Workspace 优先的 MCP 基座
+## 3. 当前版本：Global 默认、Workspace 显式选择的 MCP 基座
 
 ### 3.1 列表页
 
@@ -80,12 +80,12 @@ CLI + 本地进程 + 二维码授权
 │                │ Needs confirmation / Failed                 │
 │                │ ┌─────────────────────────────────────────┐ │
 │                │ │ ○ repo-tools   [MCP] [Workspace] [Trust]│ │
-│                │ │   Command changed — review before use   │ │
+│                │ │   Awaiting project trust               │ │
 │                │ └─────────────────────────────────────────┘ │
 └────────────────┴─────────────────────────────────────────────┘
 ```
 
-默认范围是 **Workspace**：项目连接器跟随项目配置，便于团队共享；User 仍保留给个人全局连接器。
+默认添加范围是 **Global**，Workspace 用于显式选择的项目共享配置，未打开项目时不可选。Workspace 来源共用项目根级信任入口；不提供“每次命令/URL 改动重新审批”的保证，Global 不受另一个项目的信任状态阻塞。源码事实源是 `gui/src/settings/ConnectorsSettingsView.tsx::{openAdd,requestProjectTrust}`，路径由后端 `connectorConfigPaths` 提供。
 
 ### 3.2 添加流程
 
@@ -93,14 +93,14 @@ CLI + 本地进程 + 二维码授权
 点击 + Add Connector
         │
         ├─ Type: MCP（CLI/A2A 预留）
-        ├─ Scope: Workspace（默认）
+        ├─ Scope: Global（默认）/ Workspace
         ├─ Transport: stdio / HTTP
         └─ HTTP 时才出现 Auth: none / Bearer / OAuth
         │
         ▼
 点击 Add
         │
-        ├─ 写入 Workspace/.tomcat/mcp.json
+        ├─ 写入所选范围的 mcp.json（UI 展示实际路径）
         ├─ HTTP + OAuth → 立即启动 login_connector
         ├─ 打开浏览器或返回受控授权 URL
         └─ Modal 保持打开，显示授权中 → 连接中 → 已连接/失败
@@ -121,7 +121,7 @@ CLI + 本地进程 + 二维码授权
 │ ● Connected · MCP · HTTP                      │
 ├──────────────────────────────────────────────┤
 │ SOURCE                                        │
-│ Workspace/.tomcat/mcp.json                    │
+│ <project>/.agents/mcp.json（默认目录）       │
 │                                              │
 │ TRANSPORT                                     │
 │ HTTP  https://api.githubcopilot.com/mcp/     │
@@ -205,9 +205,9 @@ CLI 与 MCP 共用 `ConnectorView`、状态机和授权状态，但 CLI 需要�
 
 ### 5.1 配置层
 
-- Workspace：`<workspace>/.tomcat/mcp.json`。
-- User：`~/.tomcat/mcp.json`。
-- 同名 Workspace 配置覆盖 User 配置。
+- Workspace：`<project>/<workspace.project_resource_dir>/mcp.json`，项目资源目录默认 `.agents`。
+- Global：`get_work_dir(cfg)/mcp.json`；两个路径均以 Settings 展示的实际配置路径为准。
+- 同名 Workspace 配置覆盖 Global 配置。
 - `mcp.json` 保存声明；运行时连接、工具目录和 OAuth 状态不混写进配置。
 
 ### 5.2 授权层
@@ -249,7 +249,7 @@ tool_call(name, args)      调用真实工具
 ### Phase 1：当前交付
 
 - Settings → Connectors。
-- Workspace 默认范围。
+- Global 默认范围；Workspace 显式选择并遵守项目级信任。
 - 手工添加 MCP stdio/HTTP。
 - HTTP 认证：无认证、Bearer、OAuth/PKCE。
 - Add HTTP+OAuth 直接启动授权。
@@ -294,7 +294,7 @@ Connectors
 1. 用户点击授权前能看到连接器身份与权限说明。
 2. 未授权或授权失败的 connector 不伪装成已连接。
 3. 配置已保存与连接已成功分别展示。
-4. Workspace 是添加默认范围，User 必须是明确选择。
+4. Global 是添加默认范围；Workspace 必须显式选择，信任以项目根为单位而非逐命令审批。
 5. UI 不回显密码、PAT、refresh token、access token 或 client secret。
 6. 外部 URL 只在用户确认的授权流程中打开；未知域名、异常权限和非标准回调必须停止。
 7. MCP/CLI/A2A 共用通用 Connector API，不把 MCP 字段硬编码到通用列表和状态组件。
@@ -303,3 +303,4 @@ Connectors
 ## 8. 变更记录
 
 - 2026-09：建立文档；纳入 Workspace 默认、Add 直接授权、MCP/CLI 分层、fake server 主验收和未来 Marketplace 方向。
+- 2026-10 审查纠错：默认添加范围、项目资源目录和项目信任边界对齐现行实现；后续路线图仍是愿景，不作为当前已交付能力。

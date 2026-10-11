@@ -16,6 +16,12 @@ import type {
 } from "../src/serveClient/sessionRouter";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 import type { IdeHost } from "../src/ui/webview/types";
+import type { HostToWebviewFrame, WebviewSessionSnapshot, WebviewStateSnapshot } from "../src/ui/webview/protocol";
+import type { StateBroadcaster } from "../src/ui/webview/stateBroadcaster";
+import { mergeSessionViewSnapshot, reconcileStateSnapshot } from "../gui/src/stateReconcile";
+import { applySessionPatchFrame } from "../gui/src/statePatch";
+import { getLocale, setLocale } from "../src/shared/i18n";
+import { en } from "../src/shared/i18n/en";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -153,6 +159,12 @@ class FakeMessenger {
       const mimeType = String(attachment.mimeType ?? "image/png");
       mkdirSync(path.join(this.attachmentRoot, "blobs"), { recursive: true });
       writeFileSync(path.join(this.attachmentRoot, "blobs", blobSha), bytes);
+      let providerSha: string | null = null;
+      if (typeof attachment.providerBase64 === "string") {
+        const providerBytes = Buffer.from(attachment.providerBase64, "base64");
+        providerSha = createHash("sha256").update(providerBytes).digest("hex");
+        writeFileSync(path.join(this.attachmentRoot, "blobs", providerSha), providerBytes);
+      }
       return {
         payload: {
           blobSha,
@@ -160,7 +172,7 @@ class FakeMessenger {
           filename,
           hasThumb: typeof attachment.thumbBase64 === "string",
           mimeType,
-          providerSha: null,
+          providerSha,
         },
         sessionId,
         success: true,
@@ -456,10 +468,198 @@ function buildProvider(options: BuildProviderOptions = {}) {
   return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState };
 }
 
+type BroadcastInternals = {
+  stateBroadcaster: StateBroadcaster;
+  handleServeEvent(event: Record<string, unknown>): Promise<void>;
+  postState(): Promise<void>;
+  postSessionView(sessionId: string): Promise<void>;
+  enrichPlanSession(view: WebviewSessionSnapshot): Promise<WebviewSessionSnapshot>;
+};
+
+async function prepareBroadcastProvider(options: BuildProviderOptions = {}) {
+  const { provider, messenger } = buildProvider({ historyMessages: [], ...options });
+  // Resolve attachment roots before the document's ready handshake, as production does.
+  await provider.dispatchTestIntent({ messageId: "prime-broadcast", type: "ready" });
+  const postedFrames: HostToWebviewFrame[] = [];
+  provider.resolveWebviewView({
+    onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+    show() {}, visible: true,
+    webview: {
+      asWebviewUri: (uri: vscode.Uri) => uri,
+      cspSource: "vscode-test-webview", html: "", options: {},
+      onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+      postMessage: async (frame: HostToWebviewFrame) => { postedFrames.push(frame); return true; },
+    },
+  } as unknown as vscode.WebviewView);
+  await provider.dispatchTestIntent({ messageId: "ready-broadcast", type: "ready" });
+  const internals = provider as unknown as BroadcastInternals;
+  return { provider, messenger, postedFrames, internals };
+}
+
+function stream(internals: BroadcastInternals, sessionId: string, text: string) {
+  return internals.handleServeEvent({
+    assistantMessageEvent: { delta: text, kind: "content_delta" },
+    assistantMessageId: `assistant-${sessionId}`, message: {}, sessionId, type: "message_update",
+  });
+}
+
+function replayFrames(frames: HostToWebviewFrame[]): WebviewStateSnapshot {
+  let state: WebviewStateSnapshot | undefined;
+  for (const frame of frames) {
+    if (frame.channel === "state") {
+      state = reconcileStateSnapshot(state, frame.content);
+    } else if (frame.channel === "sessionView") {
+      if (!state) throw new Error("session view arrived before initial state");
+      state = mergeSessionViewSnapshot(state, frame.content);
+    } else if (frame.channel === "sessionPatch") {
+      if (!state) throw new Error("patch arrived before initial state");
+      const result = applySessionPatchFrame(state, frame.content);
+      if (!result.ok) throw new Error(result.error);
+      state = result.state;
+    }
+  }
+  if (!state) throw new Error("no initial state frame");
+  return state;
+}
+
 /** sha256 of the "png-bytes" fixture, i.e. the name the backend gives it. */
 const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
 
 describe("webview provider integration", () => {
+  it.each([
+    { messageQueueSupported: false, busy: false },
+    { messageQueueSupported: true, busy: false },
+    { messageQueueSupported: true, busy: true },
+  ])("preserves accepted input when draft cleanup fails (queue=$messageQueueSupported, busy=$busy)", async ({ messageQueueSupported, busy }) => {
+    const { provider, messenger, postedFrames } = await prepareBroadcastProvider({ messageQueueSupported, sessionState: { busy } });
+    const previousLocale = getLocale();
+    setLocale("en");
+    const text = "accepted despite local cleanup error";
+    try {
+      await provider.dispatchTestIntent({ type: "syncComposerDraft", messageId: "draft", data: { sessionId: "session-1", text, segments: [] } });
+      await provider.flushDrafts();
+      const originalDelete = vscode.workspace.fs.delete.bind(vscode.workspace.fs);
+      const deletion = vi.spyOn(vscode.workspace.fs, "delete").mockImplementation(async (uri, options) => {
+        if (uri.path.endsWith("/session-1.json")) throw new Error("permission denied");
+        await originalDelete(uri, options);
+      });
+      const warning = vi.spyOn(vscode.window, "showWarningMessage");
+      await provider.dispatchTestIntent({ type: "prompt", messageId: "submit", data: { sessionId: "session-1", text, segments: [], userMessageId: "submitted" } });
+      expect(deletion).toHaveBeenCalled();
+      expect(warning).toHaveBeenCalledWith(en["host.draftCleanupFailed"].replace("{detail}", "permission denied"));
+      const view = replayFrames(postedFrames).sessionViews["session-1"];
+      expect(view.composerDraft.text).toBe("");
+      if (busy) {
+        expect(view.messageQueue?.items).toEqual([expect.objectContaining({ text })]);
+        expect(messenger.requestCalls.filter(call => call.type === "prompt")).toHaveLength(0);
+      } else {
+        expect(messenger.requestCalls.filter(call => call.type === "prompt")).toHaveLength(1);
+        const message = view.timeline.find(item => item.type === "message" && item.kind === "user" && item.text === text);
+        expect(message).toBeDefined();
+        expect(message).not.toHaveProperty("deliveryState", "failed");
+        expect(message).not.toHaveProperty("deliveryError");
+      }
+      if (messageQueueSupported) expect(postedFrames).toContainEqual(expect.objectContaining({
+        channel: "event", content: expect.objectContaining({ type: "composerSubmissionResult", accepted: true, userMessageId: "submitted" }),
+      }));
+    } finally {
+      setLocale(previousLocale);
+      provider.dispose();
+    }
+  });
+
+  it("preserves the original and provider rendition when retrying a rejected image", async () => {
+    let attempts = 0;
+    const { messenger, provider } = buildProvider({
+      requestImpl: async command => command.type === "prompt" && ++attempts === 1
+        ? { success: false, error: "busy" }
+        : { success: true, payload: { accepted: true } },
+    });
+    const original = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
+    // The fake backend treats bytes as opaque; rasterization is covered by imagePipeline.
+    const rendition = Buffer.from("distinct provider png bytes");
+    const providerSha = createHash("sha256").update(rendition).digest("hex");
+    try {
+      await provider.dispatchTestIntent({ type: "ready", messageId: "ready-svg-retry" });
+      await provider.dispatchTestIntent({
+        type: "attachFiles", messageId: "attach-svg-retry",
+        data: { sessionId: "session-1", files: [{
+          filename: "retry.svg", mimeType: "image/svg+xml", dataBase64: original.toString("base64"),
+          providerBase64: rendition.toString("base64"), providerMimeType: "image/png",
+        }] },
+      });
+      await provider.dispatchTestIntent({
+        type: "prompt", messageId: "prompt-svg-retry", data: { sessionId: "session-1", text: "describe the drawing" },
+      });
+      const first = messenger.requestCalls.find(call => call.type === "prompt")!;
+      const params = first.params as { userMessageId: string; attachments: unknown[] };
+      expect(params.attachments).toEqual([expect.objectContaining({
+        blobSha: createHash("sha256").update(original).digest("hex"), providerSha,
+      })]);
+      await provider.dispatchTestIntent({
+        type: "retryUserMessage", messageId: "retry-svg", data: { sessionId: "session-1", messageId: params.userMessageId },
+      });
+      const requests = messenger.requestCalls.filter(call => call.type === "prompt");
+      expect(requests).toHaveLength(2);
+      expect(requests[1].params).toMatchObject({ userMessageId: params.userMessageId, attachments: params.attachments });
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it.each(["state", "session"] as const)("does not replay pending appendText after an immediate %s snapshot", async (kind) => {
+    vi.useFakeTimers();
+    const { postedFrames, provider, internals } = await prepareBroadcastProvider();
+    try {
+      await stream(internals, "s1", "hello");
+      await internals.stateBroadcaster.forceFlush();
+      postedFrames.length = 0;
+      await internals.postState();
+      await stream(internals, "s1", " world");
+      if (kind === "state") await internals.postState();
+      else await internals.postSessionView("s1");
+      await internals.stateBroadcaster.forceFlush();
+      expect(replayFrames(postedFrames).sessionViews.s1.timeline.find(item => item.type === "message")?.text).toBe("hello world");
+    } finally {
+      provider.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("captures every session snapshot before awaiting another session's plan metadata", async () => {
+    vi.useFakeTimers();
+    const { postedFrames, provider, internals } = await prepareBroadcastProvider();
+    const barrier = deferred<void>();
+    const started = deferred<void>();
+    const original = internals.enrichPlanSession.bind(internals);
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await stream(internals, "s1", "one");
+      await stream(internals, "s2", "two");
+      await internals.stateBroadcaster.forceFlush();
+      postedFrames.length = 0;
+      await internals.postState();
+      spy = vi.spyOn(internals, "enrichPlanSession").mockImplementation(async view => {
+        if (view.sessionId === "s1") { started.resolve(); await barrier.promise; }
+        return original(view);
+      });
+      internals.stateBroadcaster.markSession("s1");
+      internals.stateBroadcaster.markSession("s2");
+      const pending = internals.stateBroadcaster.forceFlush();
+      await started.promise;
+      await stream(internals, "s2", " +");
+      barrier.resolve();
+      await pending;
+      await internals.stateBroadcaster.forceFlush();
+      expect(replayFrames(postedFrames).sessionViews.s2.timeline.find(item => item.type === "message")?.text).toBe("two +");
+    } finally {
+      barrier.resolve();
+      spy?.mockRestore();
+      provider.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("projects durable pins without changing last-active or calling the backend", async () => {
     const values = new Map<string, unknown>();
     const storage = {

@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 import {
   EXTENSION_ID,
   TEST_DEFAULT_CWD_ENV,
+  TEST_HISTORY_PAGE_GATE_FILE,
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
 } from "../../../constants";
@@ -20,6 +21,7 @@ import type { SettingsIntent } from "../../../shared/settingsProtocol";
 import { en } from "../../../shared/i18n/en";
 import { translate } from "../../../shared/i18n";
 import { captureWorkbenchArtifacts, SettingsFrameDriver, WorkbenchFindDriver } from "./workbenchFindDriver";
+import { withRichRenderFixtures, type RichRenderFixturePaths } from "./richRenderFixtures";
 
 
 function requireEnv(name: string): string {
@@ -4376,50 +4378,53 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     );
   }
 
-  await api.__testing.reloadWebview();
-  const reloaded = await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.activeSessionId === sessionId &&
-      snapshot.messageTexts.some((text) =>
-        text.includes("hello from fake tomcat"),
-      ) &&
-      snapshot.toolRowCount === 0
-        ? snapshot
-        : undefined,
-    20_000,
-  );
-  assert.equal(
-    reloaded.toolRowCount,
-    0,
-    "expected no partial tool rows to render before the user expands the recovered group",
-  );
+  const historyGate = path.join(requireEnv(TEST_DEFAULT_CWD_ENV), TEST_HISTORY_PAGE_GATE_FILE);
+  // Hold older pages until the real renderer has exposed its pending state.
+  // Exclusive creation avoids taking ownership of another run's marker.
+  await fs.writeFile(historyGate, "held", { flag: "wx" });
+  try {
+    await api.__testing.reloadWebview();
+    const reloaded = await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId &&
+        snapshot.messageTexts.some((text) =>
+          text.includes("hello from fake tomcat"),
+        ) &&
+        snapshot.toolRowCount === 0
+          ? snapshot
+          : undefined,
+      20_000,
+    );
+    assert.equal(
+      reloaded.toolRowCount,
+      0,
+      "expected no partial tool rows to render before the user expands the recovered group",
+    );
 
-  await api.__testing.sendWebviewDomAction({
-    edge: "top",
-    kind: "scrollToEdge",
-    testId: "stream-container",
-  });
-  const loading = await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.activeSessionId === sessionId &&
-      snapshot.historyLoaderVisible &&
-      snapshot.toolRowCount === 0
-        ? snapshot
-        : undefined,
-    5_000,
-  ).catch(() => undefined);
-  if (loading) {
-    assert.ok(
-      loading.historyLoaderVisible,
-      "expected the subtle top loader while chasing the giant group",
+    await api.__testing.sendWebviewDomAction({
+      edge: "top",
+      kind: "scrollToEdge",
+      testId: "stream-container",
+    });
+    const loading = await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId && snapshot.historyLoaderVisible
+          ? snapshot
+          : undefined,
+      5_000,
     );
     assert.equal(
       loading.toolRowCount,
       0,
       "expected no partial tool rows while older pages are still loading",
     );
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await captureTranscriptVisual("giant-history-loading");
+    }
+  } finally {
+    await fs.rm(historyGate, { force: true });
   }
 
   const restored = await waitForWebviewDomSnapshot(
@@ -4445,6 +4450,9 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     0,
     "expected the recovered giant group to remain folded instead of rendering a half-loaded subset",
   );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await captureTranscriptVisual("giant-history-restored");
+  }
 }
 
 export async function assertWebviewInstructionInvocationFlow(api: TomcatExtensionApi): Promise<void> {
@@ -5433,6 +5441,8 @@ async function captureTranscriptVisual(
     | "file-drop-reference"
     | "file-drop-reference-hover"
     | "file-chip"
+    | "giant-history-loading"
+    | "giant-history-restored"
     | "model-config-open"
     | "model-dropdown-open"
     | "progress"
@@ -5746,40 +5756,19 @@ export async function assertTranscriptRichRenderingFlow(
     "expected a workspace root for transcript rich-render E2E",
   );
 
-  const richFilePath = path.join(
-    workspaceRoot,
-    "src",
-    "test",
-    "fixtures",
-    "rich-render.ts",
+  await withRichRenderFixtures(workspaceRoot, (files) =>
+    assertTranscriptRichRenderingFiles(api, sessionId, workspaceRoot, files),
   );
-  const inlineLinkPath = path.join(
-    workspaceRoot,
-    "src",
-    "test",
-    "fixtures",
-    "inline-link.ts",
-  );
-  await fs.mkdir(path.dirname(richFilePath), { recursive: true });
-  await fs.writeFile(
-    richFilePath,
-    [
-      "export function richRenderFixture() {",
-      '  return "line two";',
-      "}",
-      "",
-      "export function otherLine() {",
-      "  return 42;",
-      "}",
-      "",
-    ].join("\n"),
-    "utf8",
-  );
-  await fs.writeFile(
-    inlineLinkPath,
-    "export const inlineLink = true;\n",
-    "utf8",
-  );
+}
+
+async function assertTranscriptRichRenderingFiles(
+  api: TomcatExtensionApi,
+  sessionId: string,
+  workspaceRoot: string,
+  { richFilePath, inlineLinkPath }: RichRenderFixturePaths,
+): Promise<void> {
+  const richRelativePath = path.relative(workspaceRoot, richFilePath).split(path.sep).join("/");
+  const inlineRelativePath = path.relative(workspaceRoot, inlineLinkPath).split(path.sep).join("/");
 
   await api.__testing.hydrateWebviewHistory({
     messages: [
@@ -5802,8 +5791,8 @@ export async function assertTranscriptRichRenderingFlow(
 
   const contentDeltas = [
     "## Fix ",
-    "plan\n\nStart with `src/test/fixtures/inline-link.ts:1`, ",
-    "then compare the snippet below.\n\n```ts src/test/fixtures/rich-render.ts:6\n",
+    `plan\n\nStart with \`${inlineRelativePath}:1\`, `,
+    `then compare the snippet below.\n\n\`\`\`ts ${richRelativePath}:6\n`,
     "export function otherLine() {\n  return 42;\n}\n```\n\n```text\n",
     "A --> B --> C\n```\n\n```mermaid\nflowchart LR\n",
     "  Start --> Finish\n```",
@@ -5888,15 +5877,9 @@ export async function assertTranscriptRichRenderingFlow(
   );
   assert.match(snapshot.html, /assistant-code-copy/u);
   assert.match(snapshot.html, />rich-render\.ts:6</u);
-  assert.match(
-    snapshot.html,
-    /title="src\/test\/fixtures\/rich-render\.ts:6"/u,
-  );
+  assert.ok(snapshot.html.includes(`title="${richRelativePath}:6"`));
   assert.match(snapshot.html, />inline-link\.ts:1</u);
-  assert.match(
-    snapshot.html,
-    /title="src\/test\/fixtures\/inline-link\.ts:1"/u,
-  );
+  assert.ok(snapshot.html.includes(`title="${inlineRelativePath}:1"`));
   assert.match(snapshot.html, /A --&gt; B --&gt; C/u);
   assert.match(snapshot.html, /tc-code-card--bare/u);
   assert.doesNotMatch(snapshot.html, /tc-code-card__lang/u);

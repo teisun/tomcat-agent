@@ -279,6 +279,22 @@ describe("ComposerDraftStore hydration", () => {
     expect(__testing.readFile(draftPath())).toContain("new after corrupt read");
   });
 
+  it.each([false, true])("keeps hydration usable when automatic cleanup fails (orphan=%s)", async orphan => {
+    const raw = orphan ? JSON.stringify({ schemaVersion: 2, segments: [], text: "orphan" }) : "{ broken json";
+    __testing.registerFile(draftPath(), raw);
+    const error = new Error("cleanup denied");
+    if (!orphan) vi.spyOn(vscode.workspace.fs, "rename").mockRejectedValueOnce(error);
+    const deletion = vi.spyOn(vscode.workspace.fs, "delete").mockRejectedValueOnce(error);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const store = newStore();
+    await expect(store.hydrate(SESSION, orphan ? () => false : undefined)).resolves.toEqual(EMPTY_DRAFT);
+    expect(deletion).toHaveBeenCalledOnce();
+    expect(__testing.readFile(draftPath())).toBe(raw);
+    expect(warning).toHaveBeenCalledWith(expect.any(String), error);
+    await store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "newly typed" });
+    expect(__testing.readFile(draftPath())).toContain("newly typed");
+  });
+
   it("quarantines an unreadable draft and still hands back a usable composer", async () => {
     __testing.registerFile(draftPath(), "{ this is not json");
 
@@ -353,6 +369,88 @@ describe("ComposerDraftStore hydration", () => {
 });
 
 describe("ComposerDraftStore lifecycle", () => {
+  it("can save a later edit after draft directory creation recovers", async () => {
+    const store = newStore(400);
+    const createDirectory = vi.spyOn(vscode.workspace.fs, "createDirectory").mockRejectedValueOnce(new Error("directory unavailable"));
+    store.update(SESSION, draft => ({ ...draft, text: "first edit" }));
+    await expect(store.flush(SESSION)).rejects.toThrow("directory unavailable");
+    store.update(SESSION, draft => ({ ...draft, text: "later edit" }));
+    await store.flush(SESSION);
+    expect(createDirectory).toHaveBeenCalledTimes(2);
+    expect((await newStore().hydrate(SESSION)).text).toBe("later edit");
+  });
+
+  it.each([false, true])("does not delete a newer persisted draft during delayed retirement (revisionChecked=%s)", async revisionChecked => {
+    const store = newStore(400);
+    await store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "accepted" });
+    let started!: () => void;
+    let release!: () => void;
+    const deleting = new Promise<void>(resolve => { started = resolve; });
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const originalDelete = vscode.workspace.fs.delete.bind(vscode.workspace.fs);
+    vi.spyOn(vscode.workspace.fs, "delete").mockImplementationOnce(async (uri, options) => {
+      started();
+      await barrier;
+      await originalDelete(uri, options);
+    });
+    const retiring = revisionChecked ? store.discardIfRevision(SESSION, store.currentRevision(SESSION)) : store.discard(SESSION);
+    await deleting;
+    store.update(SESSION, draft => ({ ...draft, text: "newer draft" }));
+    const saving = store.flush(SESSION);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      release();
+      await Promise.all([retiring, saving]);
+    }
+    expect((await newStore().hydrate(SESSION)).text).toBe("newer draft");
+  });
+
+  it.each(["discard", "acknowledged", "empty"])("does not hide durable draft deletion errors (%s)", async operation => {
+    const store = newStore(400);
+    await store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "previously saved" });
+    vi.spyOn(vscode.workspace.fs, "delete").mockRejectedValueOnce(new Error("permission denied"));
+    const removing = operation === "discard" ? store.discard(SESSION)
+      : operation === "acknowledged" ? store.discardIfRevision(SESSION, store.currentRevision(SESSION))
+      : (store.update(SESSION, () => EMPTY_DRAFT), store.flush());
+    await expect(removing).rejects.toThrow("permission denied");
+    expect(__testing.readFile(draftPath())).toContain("previously saved");
+  });
+
+  it("does not treat permission errors containing 'not found' as missing files", async () => {
+    const store = newStore();
+    await store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "preserved target" });
+    const error = Object.assign(new vscode.FileSystemError("not found or permission denied"), { code: "NoPermissions" });
+    vi.spyOn(vscode.workspace.fs, "delete").mockRejectedValueOnce(error);
+    await expect(store.discardStrict(SESSION)).rejects.toBe(error);
+    expect(store.peek(SESSION).text).toBe("preserved target");
+  });
+
+  it("preserves the write error when temporary draft cleanup also fails", async () => {
+    const store = newStore(400);
+    await store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "previously saved" });
+    vi.spyOn(vscode.workspace.fs, "rename").mockRejectedValueOnce(new Error("write failed"));
+    vi.spyOn(vscode.workspace.fs, "delete").mockRejectedValueOnce(new Error("cleanup blocked"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(store.replaceAndFlush(SESSION, { attachments: [], segments: [], text: "new" })).rejects.toThrow("write failed");
+    expect(__testing.readFile(draftPath())).toContain("previously saved");
+    expect(warning).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ message: "cleanup blocked" }));
+  });
+
+  it("flushes every scheduled session before reporting a write failure", async () => {
+    const store = newStore(400);
+    store.update(SESSION, draft => ({ ...draft, text: "first" }));
+    store.update("sid_other", draft => ({ ...draft, text: "second" }));
+    const originalWrite = vscode.workspace.fs.writeFile.bind(vscode.workspace.fs);
+    vi.spyOn(vscode.workspace.fs, "writeFile").mockImplementation(async (uri, bytes) => {
+      if (uri.path.endsWith(`${SESSION}.json.tmp`)) throw new Error("first write failed");
+      await originalWrite(uri, bytes);
+    });
+    await expect(store.flush()).rejects.toThrow("first write failed");
+    expect(__testing.readFile(draftPath("sid_other"))).toContain('"text":"second"');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("survives a host shutdown before the send is acknowledged", async () => {
     const store = newStore(400);
     store.update(SESSION, (draft) => ({

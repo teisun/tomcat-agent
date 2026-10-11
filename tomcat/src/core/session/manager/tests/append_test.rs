@@ -168,9 +168,9 @@ fn compaction_skips_a_busy_session_until_a_later_housekeeping_run() {
     )
     .unwrap();
 
-    let lock = manager.transcript_mutex_for_path(&transcript).unwrap();
-    let guard = lock.lock().unwrap();
-    assert_eq!(manager.compact_tool_display_sidecars().unwrap(), 0);
+    let guard = crate::infra::config::lock::acquire_config_lock(&transcript).unwrap();
+    let other = SessionManager::new(manager.sessions_dir().to_path_buf());
+    assert_eq!(other.compact_tool_display_sidecars().unwrap(), 0);
     drop(guard);
 
     assert_eq!(manager.compact_tool_display_sidecars().unwrap(), 1);

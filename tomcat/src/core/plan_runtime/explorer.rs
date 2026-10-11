@@ -18,8 +18,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 
-/// Explorer 可见工具：只读。写工具不在列表里，`tool_exec` 还会再拦一道。
-pub const EXPLORER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
+/// Explorer 只读工具与自身 Bash 的任务控制；写工具不在列表里，`tool_exec` 还会再拦一道。
+pub const EXPLORER_ALLOWED_TOOLS: &[&str] = &[
+    "read",
+    "search_files",
+    "list_dir",
+    "bash",
+    "task_output",
+    "task_list",
+    "task_stop",
+];
 
 /// 一次 `dispatch_agent` 里最多并行派发的 Explorer 数量。
 /// 上限不是性能考量而是可读性：超过 6 份结论回到主上下文就不再是"省 token"了。

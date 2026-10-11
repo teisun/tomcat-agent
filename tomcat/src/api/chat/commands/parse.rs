@@ -97,7 +97,7 @@ pub(crate) enum ChatCommandOutcome {
         history_line: Option<String>,
     },
     UserMessage {
-        message: crate::core::llm::ChatMessage,
+        message: Box<crate::core::llm::ChatMessage>,
         history_line: String,
     },
     /// Command was fully handled locally; skip the current turn.

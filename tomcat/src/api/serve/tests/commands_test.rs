@@ -3578,6 +3578,15 @@ async fn transcript_migration_preserves_get_messages_image_and_display_semantics
     .unwrap();
 
     let sessions_dir = transcript.parent().unwrap();
+    // Re-running after a torn sidecar append must not hide the migrated display.
+    let sidecar =
+        crate::core::session::tool_display_sidecar::tool_display_sidecar_path(&transcript);
+    std::fs::write(
+        &sidecar,
+        b"{\"toolCallId\":\"interrupted\",\"display\":\"\xe5",
+    )
+    .unwrap();
+
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/migrate_transcripts_v2.py");
     let migration = StdCommand::new("python3")
@@ -7902,19 +7911,61 @@ async fn serve_restore_rearms_a_question_unpaired_by_the_restore_boundary() {
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
+    use crate::core::plan_runtime::file_store;
     let _api_key = install_test_api_key();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
     let temp = tempfile::tempdir().expect("tempdir");
-    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
-    let provider: Arc<dyn LlmProvider> = Arc::new(CompactOnlyProvider::with_streams(vec![vec![
-        Ok(StreamEvent::ContentDelta {
-            delta: "the compacted session can continue".to_string(),
-        }),
-        Ok(StreamEvent::FinishReason {
-            reason: "stop".to_string(),
-        }),
-    ]]));
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.workspace
+        .workspace_roots
+        .push(workspace.path().to_string_lossy().into_owned());
+    let plan_path = workspace.path().join("compacted.plan.md");
+    let plan = file_store::PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id": "compact-plan", "goal": "continue the plan after compaction",
+            "state": "pending", "created_at": chrono::Utc::now().to_rfc3339(),
+            "schema_version": file_store::PLAN_FILE_SCHEMA_VERSION,
+            "todos": [{"id": "t1", "content": "continue after compaction", "status": "pending"}]
+        }))
+        .unwrap(),
+        body: "## Plan\nContinue the same plan after compaction.\n".into(),
+    };
+    file_store::write_plan(&plan_path, &plan, 2_000).unwrap();
+    let provider: Arc<dyn LlmProvider> = Arc::new(CompactOnlyProvider::with_streams(vec![
+        vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("compact-plan-progress".into()),
+                name: Some("update_plan".into()),
+                arguments_delta: Some(
+                    serde_json::json!({"ops": [{
+                        "kind": "set_status", "id": "t1", "status": "completed",
+                        "evidence": ["test:post-compaction-native-update"]
+                    }]})
+                    .to_string(),
+                ),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".into(),
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "the compacted session can continue".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ],
+    ]));
     let (state, buffer, _temp, slot) =
         build_initialized_state_with_provider(temp, cfg, provider).await;
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .build_plan(&plan_path.to_string_lossy(), Some(slot.session_id.clone()))
+        .unwrap();
     let large_history = format!("historical detail {}", "x".repeat(32_000));
     append_history_message(&slot, "user", &large_history);
     append_history_message(&slot, "assistant", &large_history);
@@ -8029,24 +8080,53 @@ async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
             && line.get("sessionId").and_then(serde_json::Value::as_str)
                 == Some(slot.session_id.as_str())
+            && !slot.is_busy()
     })
     .await;
+    let end = lines
+        .iter()
+        .find(|line| line["type"] == "agent_end" && line["sessionId"] == slot.session_id)
+        .expect("the next prompt must finish after manual compaction");
     assert!(
-        lines.iter().any(|line| {
-            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line.get("sessionId").and_then(serde_json::Value::as_str)
-                    == Some(slot.session_id.as_str())
-        }),
-        "the next prompt must complete after manual compaction: {lines:?}"
+        end["error"].is_null(),
+        "agent_end must not hide a failed turn: {end:?}"
     );
+    assert!(
+        !slot.is_busy(),
+        "the follow-up must finish persistence before inspection"
+    );
+    assert!(
+        session_message_entries(&slot)
+            .iter()
+            .any(|entry| entry.message["role"] == "assistant"
+                && entry.message["content"] == "the compacted session can continue"),
+        "the successful follow-up body must actually reach the transcript"
+    );
+    let completed = file_store::read_plan(&plan_path).unwrap();
+    assert_eq!(
+        completed.frontmatter.state,
+        file_store::PlanFileState::Completed
+    );
+    assert_eq!(
+        completed.frontmatter.todos[0].status,
+        file_store::TodoStatus::Completed
+    );
+    assert_eq!(
+        completed.frontmatter.session_id.as_deref(),
+        Some(slot.session_id.as_str())
+    );
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_restore_checkpoint_reverts_files_and_reports_payload() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     let _api_key = install_test_api_key();
     let workspace = tempfile::tempdir().expect("workspace tempdir");

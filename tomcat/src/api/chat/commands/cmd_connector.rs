@@ -97,7 +97,7 @@ pub(crate) async fn run(ctx: &ChatContext, command: ConnectorCommand) -> ChatCom
             command,
             args,
         } => add(ctx, name, command, args).await,
-        ConnectorCommand::Remove { name } => remove(ctx, &name).await,
+        ConnectorCommand::Remove { name } => remove(ctx, &name),
         ConnectorCommand::TrustProject => trust_project(ctx),
         ConnectorCommand::Test { name } => test(ctx, &name).await,
         ConnectorCommand::Login { name } => login(ctx, &name).await,
@@ -258,30 +258,50 @@ async fn add(
     ChatCommandOutcome::Handled
 }
 
-async fn remove(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
-    match remove_global_server(&ctx.config, name) {
-        Ok(true) => {
-            println!("{}", tr("slash.connector.removed", &[("name", name)]));
-            if let Some(registry) = registry(ctx) {
-                if let Err(error) = registry.reload().await {
-                    println!(
-                        "{}",
-                        tr(
-                            "slash.connector.removePartial",
-                            &[("detail", &error.to_string())]
-                        )
-                    );
-                }
+fn remove(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
+    let result = remove_global_server(&ctx.config, name);
+    // Disk mutation may have succeeded before credential cleanup failed. Also
+    // retire cached clients in other workspaces; do not create/start a manager.
+    let synchronized = ConnectorRegistry::synchronize_cached_config_change(
+        &ctx.config,
+        crate::core::connector::mcp::config::McpConfigSource::Global,
+        None,
+    );
+    match result {
+        Ok(removed) => {
+            println!(
+                "{}",
+                tr(
+                    if removed {
+                        "slash.connector.removed"
+                    } else {
+                        "slash.connector.missing"
+                    },
+                    &[("name", name)]
+                )
+            );
+            if let Err(error) = synchronized {
+                println!(
+                    "{}",
+                    tr(
+                        "slash.connector.removePartial",
+                        &[("detail", &error.to_string())]
+                    )
+                );
             }
         }
-        Ok(false) => println!("{}", tr("slash.connector.missing", &[("name", name)])),
-        Err(error) => println!(
-            "{}",
-            tr(
-                "slash.connector.removeFailed",
-                &[("detail", &error.to_string())]
-            )
-        ),
+        Err(error) => {
+            println!(
+                "{}",
+                tr(
+                    "slash.connector.removeFailed",
+                    &[("detail", &error.to_string())]
+                )
+            );
+            if let Err(error) = synchronized {
+                tracing::warn!(error = %error, "MCP cache reconciliation also failed after removal error");
+            }
+        }
     }
     ChatCommandOutcome::Handled
 }
@@ -355,7 +375,7 @@ fn logout(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
         println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
-    match registry.mcp_manager().logout_server(name) {
+    match registry.logout_server(name) {
         Ok(true) => println!("{}", tr("slash.connector.loggedOut", &[("name", name)])),
         Ok(false) => println!("{}", tr("slash.connector.noCredentials", &[("name", name)])),
         Err(error) => println!(
@@ -374,7 +394,7 @@ async fn reload(ctx: &ChatContext) -> ChatCommandOutcome {
         println!("{}", tr("slash.connector.disabled", &[]));
         return ChatCommandOutcome::Handled;
     };
-    match registry.reload().await {
+    match registry.reload_and_reconnect().await {
         Ok(()) => println!("{}", tr("slash.connector.reloaded", &[])),
         Err(error) => println!(
             "{}",

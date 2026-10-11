@@ -649,6 +649,97 @@ async fn package_install_honors_a_denied_source_child_path_rule_before_confirmat
     assert!(!dir.path().join("agents/main/skills/blocked-skill").exists());
 }
 
+/// A readable manifest cannot confer Read authority over its consumed sibling tree.
+#[tokio::test]
+async fn package_install_manifest_authorizes_consumed_tree() {
+    for manifest in ["SKILL.md", "plugin.json", "package.json"] {
+        for denied in [true, false] {
+            let dir = TempDir::new().unwrap();
+            let config_path = empty_config(&dir);
+            let source = dir.path().join("source");
+            std::fs::create_dir_all(&source).unwrap();
+            let (resource, destination) = match manifest {
+                "package.json" => {
+                    std::fs::write(source.join(manifest), r#"{"name":"source-package","version":"1.0.0","tomcat":{"skills":["skill"]}}"#).unwrap();
+                    let skill = source.join("skill");
+                    std::fs::create_dir_all(&skill).unwrap();
+                    (skill, ".agents/skills/checked-source")
+                }
+                "plugin.json" => {
+                    std::fs::write(source.join(manifest), r#"{"id":"checked-source","name":"Checked source","version":"1.0.0","description":"test","author":"tests","main":"main.js","requiredPermissions":[],"requiredApiVersion":"1.0","tags":[]}"#).unwrap();
+                    std::fs::write(source.join("main.js"), "// fixture\n").unwrap();
+                    (source.clone(), ".agents/plugins/checked-source")
+                }
+                _ => (source.clone(), ".agents/skills/checked-source"),
+            };
+            if manifest != "plugin.json" {
+                std::fs::write(
+                    resource.join("SKILL.md"),
+                    "---\nname: checked-source\ndescription: checked source\n---\n# Skill\n",
+                )
+                .unwrap();
+            }
+            let sibling = resource.join("private.txt");
+            std::fs::write(&sibling, "private sentinel\n").unwrap();
+            let gate = DefaultPermissionGate::new(
+                GateConfig {
+                    agent_definition_dir: dir.path().to_path_buf(),
+                    workspace_roots: vec![],
+                    agent_trail_readonly_dirs: vec![],
+                    user_path_rules: if denied {
+                        vec![PathRule::new(
+                            sibling.to_string_lossy().to_string(),
+                            PathRuleMode::Deny,
+                        )]
+                    } else {
+                        vec![]
+                    },
+                    user_bash_forbidden: vec![],
+                    user_bash_approval: vec![],
+                    auto_confirm: false,
+                },
+                SessionGrants::new(),
+            )
+            .into_arc();
+            let backend = ChatPackageInstallBackend {
+                ctx: PackageInstallContext::new(
+                    load_config(Some(&config_path)).unwrap(),
+                    dir.path().to_path_buf(),
+                    Some(dir.path().to_path_buf()),
+                    Arc::new(AllowAllConfirmation),
+                )
+                .with_gate(gate),
+            };
+            let result = backend
+                .install(
+                    PackageInstallRequest::parse(&serde_json::json!({
+                        "source": source.join(manifest), "scope": "scope",
+                    }))
+                    .unwrap(),
+                )
+                .await;
+            if denied {
+                let error = result.expect_err("denied sibling must block installation");
+                assert!(
+                    matches!(error, AppError::Permission(_)),
+                    "{manifest}: {error}"
+                );
+                assert!(error.to_string().contains("private.txt"), "{error}");
+                assert!(!dir.path().join(destination).exists());
+                assert!(!dir.path().join(".agents/packages/registry.json").exists());
+            } else {
+                let installed = result.unwrap_or_else(|error| panic!("{manifest}: {error}"));
+                assert_eq!(installed.status, PackageInstallStatus::Installed);
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join(destination).join("private.txt"))
+                        .unwrap(),
+                    "private sentinel\n"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn package_install_rejects_symlink_and_special_files_in_source_tree() {

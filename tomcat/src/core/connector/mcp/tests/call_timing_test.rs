@@ -1,6 +1,6 @@
 //! Exact virtual-clock checks for Tomcat's production per-call runner. HTTP
 //! and stdio integration cases separately exercise the same runner over I/O.
-use super::call::{CallFailure, CallRuntime, McpCallContext};
+use super::super::call::{CallFailure, CallRuntime, McpCallContext};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ClientRequest,
     ProgressNotificationParam, ProgressToken, Request, ServerCapabilities, ServerConfig,

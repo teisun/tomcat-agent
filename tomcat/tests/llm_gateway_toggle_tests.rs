@@ -123,6 +123,7 @@ fn openai_target_env_override_switches_back_to_builtin_openai() {
     }
 }
 
+#[test]
 #[serial(env_lock)]
 fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
     for model_id in ["gpt-5.5", "gpt-5.6"] {
@@ -149,6 +150,43 @@ fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
             std::env::remove_var("OPENAI_API_KEY");
         }
     }
+}
+
+#[test]
+#[serial(env_lock)]
+fn responses_target_override_keeps_fcodex_provider_and_credential_mapping() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().into_owned());
+    std::env::set_var(
+        common::OPENAI_TEST_MODEL_ENV,
+        common::FCODEX_TEST_DEFAULT_MODEL,
+    );
+    std::env::set_var(common::FCODEX_TEST_API_KEY_ENV, "fcodex-stub");
+    common::apply_openai_app_config(&mut cfg);
+    let catalog = Arc::new(ModelCatalog::load(&cfg).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, common::model_prefs_for(&cfg));
+    let resolved = resolver
+        .resolve(LlmScene::Main, None)
+        .map(|call| vec![call.provider, call.api, call.model, call.key_source])
+        .map_err(|error| error.to_string());
+    std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
+    std::env::remove_var(common::FCODEX_TEST_API_KEY_ENV);
+    assert_eq!(
+        (
+            common::openai_test_api_key_env_for_model(common::FCODEX_TEST_DEFAULT_MODEL),
+            resolved
+        ),
+        (
+            common::FCODEX_TEST_API_KEY_ENV,
+            Ok(vec![
+                "fcodex".into(),
+                "openai-responses".into(),
+                "gpt-5.6-sol".into(),
+                common::FCODEX_TEST_API_KEY_ENV.into(),
+            ])
+        ),
+    );
 }
 
 #[tokio::test]
@@ -189,6 +227,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
 
     let resolved = resolve_main_call(&cfg);
     assert_eq!(resolved.model, "gpt-5.4");
+    assert_eq!(resolved.base_url.as_deref(), Some(server.base_url.as_str()));
 
     let mut request = ChatRequest {
         messages: vec![ChatMessage::user("Say ok")],
@@ -205,15 +244,18 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         tools: None,
     };
     resolved.apply_resolved_output_limit(&mut request);
-    let mut stream = resolved
-        .provider_impl
-        .chat_stream(request)
-        .await
-        .expect("start chat stream");
-
-    while let Some(item) = stream.next().await {
-        item.expect("stream item");
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut stream = resolved
+            .provider_impl
+            .chat_stream(request)
+            .await
+            .expect("start chat stream");
+        while let Some(item) = stream.next().await {
+            item.expect("stream item");
+        }
+    })
+    .await
+    .expect("local gateway fixture must complete within 20 seconds");
 
     let request = server
         .captured_requests()

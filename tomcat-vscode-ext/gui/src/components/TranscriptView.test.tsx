@@ -76,6 +76,67 @@ afterEach(() => {
 });
 
 describe("TranscriptView", () => {
+  it.each([false, true])("keeps assistant link and path callbacks live (grouped=%s)", async (grouped) => {
+    const timeline: WebviewTimelineItem[] = [{
+      type: "message",
+      kind: "assistant",
+      id: "linked-message",
+      assistantMessageId: "linked-turn",
+      text: "[Guide](https://example.com/guide) and `docs/review`.",
+    }];
+    if (grouped) {
+      timeline.push({
+        type: "tool",
+        id: "read-tool",
+        assistantMessageId: "linked-turn",
+        toolCallId: "read-call",
+        toolName: "read",
+        args: { path: "docs/review" },
+        status: "complete",
+        isError: false,
+        summary: "read",
+      });
+    }
+    const props = {
+      busy: false,
+      canBuildPlan: false,
+      timeline,
+      onAnswer: vi.fn(),
+      onBuildPlan: vi.fn(),
+      onOpenFile: vi.fn(),
+      onOpenPlanFile: vi.fn(),
+    };
+    let finishOldLookup!: (paths: PathResolution[]) => void;
+    const oldResolver = vi.fn(() => new Promise<PathResolution[]>((resolve) => {
+      finishOldLookup = resolve;
+    }));
+    const oldOpen = vi.fn();
+    const nextOpen = vi.fn();
+    const nextResolver = vi.fn(async (): Promise<PathResolution[]> => [
+      { kind: "file", path: "docs/review", resolvedPath: "/next/docs/review" },
+    ]);
+    const view = render(<TranscriptView {...props} onOpenLink={oldOpen} resolvePaths={oldResolver} />);
+    await waitFor(() => expect(oldResolver).toHaveBeenCalledWith(["docs/review"]));
+    fireEvent.click(screen.getByRole("link", { name: "Guide" }));
+    expect(oldOpen).toHaveBeenCalledTimes(1);
+
+    // Only this callback changes; keep the message and every other prop stable.
+    view.rerender(<TranscriptView {...props} onOpenLink={nextOpen} resolvePaths={oldResolver} />);
+    fireEvent.click(screen.getByRole("link", { name: "Guide" }));
+    expect(nextOpen).toHaveBeenCalledWith("https://example.com/guide");
+    expect(oldOpen).toHaveBeenCalledTimes(1);
+
+    view.rerender(<TranscriptView {...props} onOpenLink={nextOpen} resolvePaths={nextResolver} />);
+    const path = await screen.findByTestId("assistant-clickable-path");
+    fireEvent.click(path);
+    expect(props.onOpenFile).toHaveBeenLastCalledWith("/next/docs/review", undefined);
+    await act(async () => finishOldLookup([
+      { kind: "file", path: "docs/review", resolvedPath: "/old/docs/review" },
+    ]));
+    fireEvent.click(screen.getByTestId("assistant-clickable-path"));
+    expect(props.onOpenFile).toHaveBeenLastCalledWith("/next/docs/review", undefined);
+  });
+
   it("keeps a high-signal edit tool visible as a standalone row", () => {
     const timeline: WebviewTimelineItem[] = [
       {

@@ -13,10 +13,6 @@ use crate::core::connector::mcp::call::CLEANUP_GRACE;
 use crate::core::connector::mcp::failure::{FailureKind, McpFailure};
 use crate::core::connector::mcp::recovery::{stable, RecoveryBudget, RecoveryRun, MAX_ATTEMPTS};
 
-#[cfg(test)]
-#[path = "lifecycle_tests.rs"]
-mod tests;
-
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReloadReceipt {
@@ -507,3 +503,7 @@ async fn drain_attempt(
     attempt.cleanup.wait().await;
     Err(error)
 }
+
+#[cfg(test)]
+#[path = "tests/lifecycle_test.rs"]
+mod tests;

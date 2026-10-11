@@ -310,49 +310,253 @@ fn resume_after_healed_dangling_tool_call_waits_for_user_input() {
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
-#[test]
-fn working_messages_keep_compacted_history_and_current_input_at_tail() {
-    let summary =
-        crate::ChatMessage::compaction_summary("summary replaces old history", "summary-id");
-    let mut placeholder = crate::ChatMessage::tool(
-        "old-tool-call",
-        "[Previous tool result replaced to save context space]",
-    );
-    placeholder.msg_id = Some("placeholder-id".to_string());
-    let mut messages = vec![summary, placeholder];
-    let mut current_input = crate::ChatMessage::user("current user input");
-    current_input.msg_id = Some("current-input-id".to_string());
-    messages.push(current_input.clone());
+/// Capture the actual provider boundary; request assembly remains production code.
+#[derive(Default)]
+struct ChatTurnRecorder {
+    requests: Mutex<Vec<crate::ChatRequest>>,
+}
 
-    assert_eq!(messages.len(), 3);
-    assert_eq!(
-        messages[0].text_content(),
-        Some("summary replaces old history"),
-        "the rebuilt working list must begin with compacted history"
+#[async_trait::async_trait]
+impl crate::core::llm::LlmProvider for ChatTurnRecorder {
+    fn provider_name(&self) -> &str {
+        "chat-turn-recorder"
+    }
+
+    async fn chat(
+        &self,
+        _request: crate::ChatRequest,
+    ) -> Result<crate::core::llm::ChatResponse, AppError> {
+        Ok(crate::core::llm::ChatResponse {
+            id: None,
+            choices: vec![crate::core::llm::ChatResponseChoice {
+                index: 0,
+                message: crate::ChatMessage::assistant("Recorded title"),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        request: crate::ChatRequest,
+    ) -> Result<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<crate::core::llm::StreamEvent, AppError>>
+                + Send
+                + Unpin,
+        >,
+        AppError,
+    > {
+        self.requests.lock().unwrap().push(request);
+        Ok(Box::new(tokio_stream::iter(vec![
+            Ok(crate::core::llm::StreamEvent::ContentDelta {
+                delta: "Recorded reply".into(),
+            }),
+            Ok(crate::core::llm::StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }),
+        ])))
+    }
+
+    fn count_tokens(&self, _messages: &[crate::ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+struct ChatTurnResolver {
+    catalog: Arc<crate::core::llm::ModelCatalog>,
+    recorder: Arc<ChatTurnRecorder>,
+}
+
+impl crate::core::llm::LlmResolver for ChatTurnResolver {
+    fn resolve(
+        &self,
+        _scene: crate::core::llm::LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<crate::core::llm::ResolvedCall, AppError> {
+        let entry = self
+            .catalog
+            .lookup_explicit(session_override.unwrap_or("gpt-5.4"))?;
+        Ok(
+            crate::core::llm::ResolvedCall::from_provider_and_entry_unchecked(
+                self.recorder.clone(),
+                &entry,
+            ),
+        )
+    }
+}
+
+fn install_chat_turn_recorder(ctx: &mut ChatContext) -> Arc<ChatTurnRecorder> {
+    let recorder = Arc::new(ChatTurnRecorder::default());
+    ctx.global_services.llm_resolver = Arc::new(ChatTurnResolver {
+        catalog: ctx.global_services.model_catalog.snapshot(),
+        recorder: recorder.clone(),
+    });
+    ctx.session_runtime.suppress_cli_output = true;
+    recorder
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn working_messages_keep_compacted_history_and_current_input_at_tail() {
+    use crate::core::session::{BranchSummaryEntry, TranscriptEntry};
+    const ENV_KEY: &str = "TOMCAT_CHAT_TIMING2_WIRING_TEST_KEY";
+    let _key = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    ctx.config.context.keep_recent_turns = 1;
+    ctx.config.context.layer0_single_result_max_chars = 500;
+    ctx.config.context.layer0_placeholder_threshold_chars = 100;
+    let old_result = "old-result-".repeat(25);
+    let history = vec![
+        crate::ChatMessage::user("covered user"),
+        crate::ChatMessage::assistant("old full history"),
+        crate::ChatMessage::user("old tool turn"),
+        crate::ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![json!({
+                "id":"old-tool-call", "type":"function",
+                "function":{"name":"read", "arguments":"{\"path\":\"old-tool.txt\"}"}
+            })],
+        ),
+        crate::ChatMessage::tool("old-tool-call", &old_result),
+        crate::ChatMessage::assistant("old tool completed"),
+        crate::ChatMessage::user("latest completed turn"),
+        crate::ChatMessage::assistant("latest completed reply"),
+    ];
+    let ids = history
+        .iter()
+        .map(|message| {
+            ctx.session_runtime
+                .session
+                .append_message(serde_json::to_value(message).unwrap())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let budget = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, None)
+        .unwrap()
+        .limits
+        .input_budget_tokens
+        * 4;
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    state.apply_limits(
+        &ctx.resolve_call(crate::core::llm::LlmScene::Main, None)
+            .unwrap()
+            .limits,
     );
-    assert_eq!(
-        messages[1].text_content(),
-        Some("[Previous tool result replaced to save context space]"),
-        "the rebuild must use the L0-rewritten context, not stale source text"
-    );
-    assert_eq!(
-        messages.last().and_then(crate::ChatMessage::text_content),
-        Some("current user input"),
-        "the already-persisted current user input must remain at the tail"
-    );
-    assert_eq!(
-        messages
-            .last()
-            .and_then(|message| message.msg_id.as_deref()),
-        Some("current-input-id"),
-        "the working list must reuse the persisted message rather than append a duplicate"
-    );
+    // Below the hard guard: a later over-budget recovery must not hide a broken timing-2 wire.
+    state.update_api_usage((state.context_budget_tokens * 3 / 4) as u32, 0);
+    assert!((0.70..0.80).contains(&state.usage_ratio()));
+    let marker_id = format!("ready-summary-{}", ids[1]);
+    crate::core::session::transcript::append_entry(
+        &transcript_path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(ids[0].clone()),
+            covered_end_id: Some(ids[1].clone()),
+            covered_count: Some(2),
+            is_boundary: Some(false),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+            superseded: false,
+        }),
+    )
+    .unwrap();
+    state
+        .preheat
+        .restore_completed(crate::core::session::manager::CompactionResult {
+            summary_text: "summary replaces old history".into(),
+            covered_start_id: ids[0].clone(),
+            covered_end_id: ids[1].clone(),
+            covered_count: 2,
+            transcript_compaction_entry_id: Some(marker_id),
+            estimated_covered_tokens_before: Some(50),
+            estimated_summary_tokens: Some(5),
+            estimated_tokens_saved: Some(45),
+            preheat_elapsed_ms: 0,
+        });
+    let outcome = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+        &ctx,
+        Some(crate::ChatMessage::user("current user input")),
+        &mut snapshot,
+        &mut state,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert!(
-        messages
-            .iter()
-            .all(|message| message.text_content() != Some("old full history")),
-        "covered history must not reappear in the working list"
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "{outcome:?}"
     );
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    assert!(messages.iter().any(|message| message.kind
+        == crate::core::llm::MessageKind::CompactionSummary
+        && message.text_content() == Some("summary replaces old history")));
+    assert!(messages.iter().any(|message| message.text_content()
+        == Some("[Previous tool result replaced to save context space]")));
+    assert!(messages
+        .iter()
+        .all(|message| message.text_content() != Some("old full history")
+            && message.text_content() != Some(old_result.as_str())));
+    assert_eq!(
+        messages.last().unwrap().kind,
+        crate::core::llm::MessageKind::EphemeralTail
+    );
+    let current = &messages[messages.len() - 2];
+    assert_eq!(current.text_content(), Some("current user input"));
+    let entries = ctx.session_runtime.session.get_entries(64).unwrap();
+    let persisted = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(entry)
+                if entry.message["role"] == "user"
+                    && entry.message["content"] == "current user input" =>
+            {
+                Some(entry)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted.len(),
+        1,
+        "compaction must not append the current input twice"
+    );
+    assert_eq!(current.msg_id, persisted[0].id);
+    assert_eq!(state.session_obs.compaction_count, 1);
+    assert!(state
+        .messages
+        .iter()
+        .any(|message| message.text_content() == Some("summary replaces old history")));
+    assert_eq!(
+        state
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content),
+        Some("Recorded reply")
+    );
+    assert!(state
+        .messages
+        .iter()
+        .all(|message| message.kind != crate::core::llm::MessageKind::EphemeralTail));
 }
 
 #[test]
@@ -571,125 +775,140 @@ async fn mcp_connection_lifecycle_keeps_prompt_snapshot_until_source_removed() {
 }
 
 #[tokio::test]
+#[serial(env_lock)]
 async fn request_prefix_is_byte_identical_across_turns() {
     const ENV_KEY: &str = "TOMCAT_RUNTIME_TAIL_PREFIX_TEST_KEY";
-    let (dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
-    let budget = crate::infra::config::compute_context_budget_chars(&ctx.config.context);
-    let snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
-    let tail_provider = crate::api::chat::run_loop::runtime_tail_provider(&ctx);
-    let stable_history = vec![
-        crate::ChatMessage::system(snapshot.system_text()),
-        crate::ChatMessage::user("first user request"),
-    ];
-    let capture = |history: &[crate::ChatMessage]| {
-        let mut messages = history.to_vec();
-        let mut tail = crate::ChatMessage::user(tail_provider.render_ephemeral_tail());
-        tail.kind = crate::core::llm::MessageKind::EphemeralTail;
-        messages.push(tail);
-        crate::ChatRequest {
-            messages,
-            model: "gpt-5.4".to_string(),
-            temperature: None,
-            max_tokens: None,
-            resolved_output_limit: None,
-            diagnostic_request_id: None,
-            stream: Some(true),
-            model_override: None,
-            speed: None,
-            thinking_level: None,
-            cache_key: Some("prefix-test:main".to_string()),
-            tools: Some(snapshot.tool_definitions().to_vec()),
+    let _key = EnvGuard::set(ENV_KEY, "stub");
+    let (dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let budget = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, None)
+        .unwrap()
+        .limits
+        .input_budget_tokens
+        * 4;
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    for (index, input) in ["first request", "after grant", "in plan", "after plan"]
+        .into_iter()
+        .enumerate()
+    {
+        match index {
+            1 => {
+                ctx.session_runtime.session_grants.add(
+                    dir.path().join("granted-after-turn-start"),
+                    crate::core::permission::GrantTrigger::UserConfirm,
+                );
+            }
+            2 => {
+                ctx.session_runtime.plan_runtime.enter_plan().unwrap();
+            }
+            3 => {
+                ctx.session_runtime.plan_runtime.exit_plan().unwrap();
+            }
+            _ => {}
         }
-    };
-
-    let initial = capture(&stable_history);
-    ctx.session_runtime.session_grants.add(
-        dir.path().join("granted-after-turn-start"),
-        crate::core::permission::GrantTrigger::UserConfirm,
-    );
-    let after_grant = capture(&stable_history);
-    ctx.session_runtime
-        .plan_runtime
-        .enter_plan()
-        .expect("enter Plan mode");
-    let in_plan = capture(&stable_history);
-    ctx.session_runtime
-        .plan_runtime
-        .exit_plan()
-        .expect("return to Chat mode");
-    ctx.session_runtime.plan_runtime.seed_active_plan_for_test(
-        "executing-prefix-test".to_string(),
-        crate::core::plan_runtime::file_store::PlanFileState::Executing,
-    );
-    let executing = capture(&stable_history);
-    let mut appended_history = stable_history.clone();
-    appended_history.push(crate::ChatMessage::assistant("first response"));
-    appended_history.push(crate::ChatMessage::user("second user request"));
-    let after_history_append = capture(&appended_history);
-
-    for request in [&after_grant, &in_plan, &executing, &after_history_append] {
-        assert_eq!(
-            serde_json::to_string(&initial.tools).expect("serialize tools"),
-            serde_json::to_string(&request.tools).expect("serialize tools"),
-            "runtime state must not alter the tools cache prefix"
-        );
-        assert_eq!(
-            initial.messages[0].text_content(),
-            request.messages[0].text_content(),
-            "runtime state must not alter the system cache prefix"
-        );
-        assert_eq!(
-            request.messages.last().map(|message| message.kind),
-            Some(crate::core::llm::MessageKind::EphemeralTail)
+        let outcome = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+            &ctx,
+            Some(crate::ChatMessage::user(input)),
+            &mut snapshot,
+            &mut state,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, AgentRunOutcome::Completed(_)),
+            "{outcome:?}"
         );
     }
-    for request in [&after_grant, &in_plan, &executing] {
-        assert_eq!(
-            serde_json::to_string(&request.messages[..stable_history.len()])
-                .expect("serialize stable history"),
-            serde_json::to_string(&initial.messages[..stable_history.len()])
-                .expect("serialize stable history"),
-            "permissions and plan lifecycle may only change the ephemeral tail"
-        );
-    }
-    assert_ne!(
-        initial
-            .messages
-            .last()
-            .and_then(crate::ChatMessage::text_content),
-        after_grant
-            .messages
-            .last()
-            .and_then(crate::ChatMessage::text_content)
-    );
-    assert_ne!(
-        after_grant
-            .messages
-            .last()
-            .and_then(crate::ChatMessage::text_content),
-        in_plan
-            .messages
-            .last()
-            .and_then(crate::ChatMessage::text_content)
-    );
-    assert_ne!(
-        in_plan
-            .messages
-            .last()
-            .and_then(crate::ChatMessage::text_content),
-        executing
-            .messages
-            .last()
-            .and_then(crate::ChatMessage::text_content)
-    );
+    let requests = recorder.requests.lock().unwrap();
     assert_eq!(
-        serde_json::to_string(&after_history_append.messages[..stable_history.len()])
-            .expect("serialize persisted prefix"),
-        serde_json::to_string(&initial.messages[..stable_history.len()])
-            .expect("serialize persisted prefix"),
-        "appending a turn must retain the original persisted prefix byte-for-byte"
+        requests.len(),
+        4,
+        "each actual Chat turn must reach the provider"
     );
-    unsafe { std::env::remove_var(ENV_KEY) };
+    let initial = &requests[0];
+    for (index, request) in requests.iter().enumerate().skip(1) {
+        let previous = &requests[index - 1];
+        // A grant only changes the tail. Planning deliberately changes tool docs too;
+        // exclude that system message, not the durable conversation, in that case.
+        let start = usize::from(previous.tools != request.tools);
+        let stable_len = previous.messages.len() - 1;
+        assert!(
+            serde_json::to_vec(&previous.messages[start..stable_len]).unwrap()
+                == serde_json::to_vec(&request.messages[start..stable_len]).unwrap(),
+            "turn {index}: the existing history/prefix changed"
+        );
+        assert_eq!(
+            request.messages.last().unwrap().kind,
+            crate::core::llm::MessageKind::EphemeralTail
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .filter(|message| message.kind == crate::core::llm::MessageKind::EphemeralTail)
+                .count()
+                == 1
+        );
+        assert_eq!(request.cache_key, initial.cache_key);
+    }
+    assert!(
+        initial.cache_key.is_some(),
+        "exercise the production cache-key wiring"
+    );
+    assert_eq!(initial.tools, requests[1].tools);
+    assert_eq!(initial.tools, requests[3].tools);
+    assert_eq!(
+        initial.messages[0].text_content(),
+        requests[3].messages[0].text_content()
+    );
+    assert_ne!(
+        initial.messages.last().unwrap().text_content(),
+        requests[1].messages.last().unwrap().text_content()
+    );
+    assert_ne!(
+        requests[1].messages.last().unwrap().text_content(),
+        requests[2].messages.last().unwrap().text_content()
+    );
+    let has_install = |request: &crate::ChatRequest| {
+        request
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "package_install")
+    };
+    assert!(has_install(initial));
+    assert!(
+        !has_install(&requests[2]),
+        "Planning changes the actual tool surface: refresh the shared snapshot"
+    );
+    assert!(has_install(&requests[3]));
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text_content() == Some("Recorded reply")),
+        "history appended by the previous real turn must reach the next request"
+    );
+    assert!(
+        !fs::read_to_string(transcript_path)
+            .unwrap()
+            .contains("<workspace_state>"),
+        "runtime workspace state is ephemeral, not durable history"
+    );
+    assert!(state
+        .messages
+        .iter()
+        .all(|message| message.kind != crate::core::llm::MessageKind::EphemeralTail));
 }
 
 #[test]
@@ -2543,14 +2762,11 @@ async fn cleanup_plugin_sessions_on_session_end_releases_current_session_vm() {
         .current_session_id()
         .expect("current session id query")
         .expect("current session id");
-    let instance_id = format!("{session_id}/{PLUGIN_ID}");
-
-    if !plugin_manager.has_session_vm(&session_id, PLUGIN_ID) {
-        plugin_manager
-            .start_session_vm(&session_id, PLUGIN_ID)
-            .await
-            .expect("start session vm");
-    }
+    let instance_id = plugin_manager
+        .start_session_vm(&session_id, PLUGIN_ID)
+        .await
+        .expect("start or reuse session vm")
+        .instance_id;
 
     assert!(
         plugin_manager.has_session_vm(&session_id, PLUGIN_ID),

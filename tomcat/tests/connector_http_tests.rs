@@ -173,6 +173,123 @@ async fn fake_streamable_http_oauth_round_trips_without_a_human() {
     child.kill().await.expect("stop fake server");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logout_revokes_shared_cached_http_clients_without_touching_other_roots() {
+    use tomcat::core::connector::mcp::config::add_global_server;
+    use tomcat::core::connector::mcp::manager::ServerState;
+    use tomcat::core::connector::ConnectorRegistry;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (mut child, address) = start_fake_server(temp.path(), None, false).await;
+    let url = format!("http://{address}/mcp");
+    let first_workspace = temp.path().join("first");
+    let second_workspace = temp.path().join("second");
+    let shared_root = temp.path().join("shared");
+    let other_root = temp.path().join("other");
+    for dir in [
+        &first_workspace,
+        &second_workspace,
+        &shared_root,
+        &other_root,
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(shared_root.to_string_lossy().into_owned());
+    let mut other_cfg = cfg.clone();
+    other_cfg.storage.work_dir = Some(other_root.to_string_lossy().into_owned());
+    for config in [&cfg, &other_cfg] {
+        add_global_server(
+            config,
+            "shared".into(),
+            serde_json::from_value(json!({"url":url, "auth":"bearer"})).unwrap(),
+        )
+        .unwrap();
+    }
+    let first = ConnectorRegistry::new(&cfg, Some(&first_workspace)).unwrap();
+    let second = ConnectorRegistry::new(&cfg, Some(&second_workspace)).unwrap();
+    let other = ConnectorRegistry::new(&other_cfg, None).unwrap();
+    let managers = [
+        first.mcp_manager(),
+        second.mcp_manager(),
+        other.mcp_manager(),
+    ];
+    assert!(!std::sync::Arc::ptr_eq(&managers[0], &managers[1]));
+    for manager in [&managers[0], &managers[2]] {
+        manager
+            .save_static_bearer("shared", "fake-access-token".into(), Some(url.clone()))
+            .unwrap();
+    }
+    for manager in &managers {
+        manager.connect_server("shared").await.unwrap();
+    }
+    let name = managers[0].tool_defs("shared")[0].model_name.clone();
+    let key = managers[0].configured_server("shared").unwrap().config_key;
+    let other_key = managers[2].configured_server("shared").unwrap().config_key;
+    for manager in &managers {
+        let result = manager
+            .call_tool("shared", &name, json!({"message":"before-logout"}))
+            .await
+            .unwrap();
+        assert!(result.to_string().contains("before-logout"));
+    }
+
+    let removed = first.logout_server("shared").unwrap();
+    let states: Vec<_> = managers[..2]
+        .iter()
+        .map(|manager| {
+            manager
+                .statuses()
+                .into_iter()
+                .find(|status| status.config_key == key)
+                .unwrap()
+                .state
+        })
+        .collect();
+    let shared_token_removed = OAuthTokenStore::open(&cfg)
+        .unwrap()
+        .load(&key)
+        .unwrap()
+        .is_none();
+    let first_result = managers[0]
+        .call_tool("shared", &name, json!({"message":"after-logout"}))
+        .await;
+    let second_result = managers[1]
+        .call_tool("shared", &name, json!({"message":"after-logout"}))
+        .await;
+    let other_result = managers[2]
+        .call_tool("shared", &name, json!({"message":"unrelated-root"}))
+        .await;
+    let other_token_preserved = OAuthTokenStore::open(&other_cfg)
+        .unwrap()
+        .load(&other_key)
+        .unwrap()
+        .is_some();
+    // Clean the pre-fix surviving connection before asserting the regression.
+    let repeated_removed = second.logout_server("shared").unwrap();
+    other.logout_server("shared").unwrap();
+    child.kill().await.unwrap();
+
+    assert!(removed && shared_token_removed);
+    assert!(first_result.is_err());
+    assert!(
+        second_result.is_err(),
+        "another workspace still used a deleted credential: {second_result:?}"
+    );
+    assert!(
+        states
+            .iter()
+            .all(|state| *state == ServerState::Disconnected),
+        "{states:?}"
+    );
+    assert!(
+        !repeated_removed,
+        "logout remains idempotent without stored credentials"
+    );
+    assert!(other_result.unwrap().to_string().contains("unrelated-root"));
+    assert!(other_token_preserved);
+}
+
 #[tokio::test]
 async fn valid_oauth_token_survives_transient_discovery_failure() {
     let temp = tempfile::tempdir().expect("temp dir");

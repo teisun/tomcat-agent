@@ -4,6 +4,7 @@ use assert_cmd::Command;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tomcat::{
     init_context_state, load_config_toml_file, resolve_agent_trail_dir, resolve_sessions_dir,
     ContextConfig, SessionManager, TranscriptEntry,
@@ -50,7 +51,7 @@ fn setup_fixture() -> Fixture {
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     common::apply_idatatlas_app_config(&mut cfg);
     // This fixture asserts the primary hydrated request. Keep the title scene from
-    // consuming the single local mock-server response first.
+    // consuming the main-flow local mock-server responses first.
     cfg.llm.title_model = Some("test-title-disabled".to_string());
     std::fs::write(
         &config_path,
@@ -125,61 +126,86 @@ fn parse_content_length(headers: &str) -> Option<usize> {
 }
 
 fn spawn_capturing_openai_stream_server(
-    reply: &'static str,
-) -> (
-    String,
-    Arc<Mutex<Option<String>>>,
-    std::thread::JoinHandle<()>,
-) {
+    replies: Vec<serde_json::Value>,
+) -> (String, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
     let addr = listener.local_addr().expect("local addr");
-    let captured_body = Arc::new(Mutex::new(None));
+    listener.set_nonblocking(true).expect("nonblocking accept");
+    let captured_body = Arc::new(Mutex::new(Vec::new()));
     let captured_body_clone = Arc::clone(&captured_body);
     let handle = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-            .expect("set read timeout");
-
-        let mut raw = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let mut header_end = None;
-        let mut content_len = None;
-        loop {
-            let read = stream.read(&mut chunk).expect("read request bytes");
-            if read == 0 {
-                break;
-            }
-            raw.extend_from_slice(&chunk[..read]);
-            if header_end.is_none() {
-                if let Some(end) = find_header_end(&raw) {
-                    header_end = Some(end);
-                    let headers = String::from_utf8_lossy(&raw[..end]);
-                    content_len = parse_content_length(&headers);
+        for reply in replies {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "CLI did not send the expected model request"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept model request: {error}"),
                 }
-            }
-            if let (Some(end), Some(len)) = (header_end, content_len) {
-                if raw.len() >= end + len {
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking request reads");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .expect("set read timeout");
+
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_len = None;
+            loop {
+                let read = stream.read(&mut chunk).expect("read request bytes");
+                if read == 0 {
                     break;
                 }
+                raw.extend_from_slice(&chunk[..read]);
+                if header_end.is_none() {
+                    if let Some(end) = find_header_end(&raw) {
+                        header_end = Some(end);
+                        let headers = String::from_utf8_lossy(&raw[..end]);
+                        content_len = parse_content_length(&headers);
+                    }
+                }
+                if let (Some(end), Some(len)) = (header_end, content_len) {
+                    if raw.len() >= end + len {
+                        break;
+                    }
+                }
             }
+
+            let body = if let (Some(end), Some(len)) = (header_end, content_len) {
+                String::from_utf8_lossy(&raw[end..end + len]).to_string()
+            } else {
+                String::new()
+            };
+            captured_body_clone.lock().unwrap().push(body);
+
+            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+            let finish_reason = if reply.get("tool_calls").is_some() {
+                "tool_calls"
+            } else {
+                "stop"
+            };
+            let first = format!(
+                "data: {}\n\n",
+                serde_json::json!({"choices": [{"delta": reply}]})
+            );
+            let finish = format!(
+                "data: {}\n\n",
+                serde_json::json!({"choices": [{"finish_reason": finish_reason}]})
+            );
+            stream.write_all(headers.as_bytes()).expect("write headers");
+            stream.write_all(first.as_bytes()).expect("write delta");
+            stream.write_all(finish.as_bytes()).expect("write finish");
+            stream.flush().expect("flush response");
         }
-
-        let body = if let (Some(end), Some(len)) = (header_end, content_len) {
-            String::from_utf8_lossy(&raw[end..end + len]).to_string()
-        } else {
-            String::new()
-        };
-        *captured_body_clone.lock().unwrap() = Some(body);
-
-        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
-        let first =
-            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n");
-        let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-        stream.write_all(headers.as_bytes()).expect("write headers");
-        stream.write_all(first.as_bytes()).expect("write delta");
-        stream.write_all(finish.as_bytes()).expect("write finish");
-        stream.flush().expect("flush response");
     });
     (format!("http://{addr}"), captured_body, handle)
 }
@@ -482,8 +508,9 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
     }
     let _ = init_context_state(&fx.session, &ContextConfig::default(), "sys").unwrap();
 
-    let (base_url, captured_body, server_handle) =
-        spawn_capturing_openai_stream_server("RESUME_BODY_OK");
+    let (base_url, captured_body, server_handle) = spawn_capturing_openai_stream_server(vec![
+        serde_json::json!({"content": "RESUME_BODY_OK"}),
+    ]);
     write_mock_models_toml(&fx.home_path, &base_url);
 
     let mut command = cmd();
@@ -516,7 +543,8 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
     let request_body = captured_body
         .lock()
         .unwrap()
-        .clone()
+        .first()
+        .cloned()
         .expect("mock server should capture upstream request body");
     let request_json: serde_json::Value =
         serde_json::from_str(&request_body).expect("request body should be valid JSON");
@@ -528,5 +556,140 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
     assert!(
         !messages_json.contains("old-turn-0") && !messages_json.contains("old-answer-1099"),
         "upstream request should exclude boundary-pruned history: {messages_json}"
+    );
+}
+
+#[test]
+fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
+    use tomcat::core::plan_runtime::{file_store, PlanRuntime};
+
+    common::setup_logging();
+    let fx = setup_fixture();
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &fx.workdir);
+    let session_id = fx.session.current_session_id().unwrap().unwrap();
+    let plan_path = fx.workdir.join("resume-bound.plan.md");
+    let plan = file_store::PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id": "resume-bound", "goal": "resume the bound plan",
+            "state": "pending", "created_at": chrono::Utc::now().to_rfc3339(),
+            "schema_version": file_store::PLAN_FILE_SCHEMA_VERSION,
+            "todos": [{"id": "t1", "content": "complete resumed work", "status": "pending"}]
+        }))
+        .unwrap(),
+        body: "## Plan\nComplete the resumed work.\n".into(),
+    };
+    file_store::write_plan(&plan_path, &plan, 2_000).unwrap();
+    let shadow_path = fx.home_path.join(".tomcat/plans/resume-bound.plan.md");
+    std::fs::create_dir_all(shadow_path.parent().unwrap()).unwrap();
+    file_store::write_plan(&shadow_path, &plan, 2_000).unwrap();
+    let shadow_before = std::fs::read(&shadow_path).unwrap();
+    // Persist via real runtime events and the real session writer, not bind_for_test.
+    {
+        let runtime = PlanRuntime::new(session_key);
+        let transcript = fx.session.clone();
+        runtime.attach_transcript_appender(Arc::new(move |event| {
+            transcript
+                .append_custom_entry(event)
+                .expect("persist runtime plan event");
+            Ok(())
+        }));
+        runtime
+            .build_plan(&plan_path.to_string_lossy(), Some(session_id.clone()))
+            .unwrap();
+        runtime.park_executing_plan().unwrap();
+    }
+    assert_eq!(
+        file_store::read_plan(&plan_path).unwrap().frontmatter.state,
+        file_store::PlanFileState::Pending
+    );
+    let config_path = fx.home_path.join(".tomcat/tomcat.config.toml");
+    let mut cfg = load_config_toml_file(&config_path).unwrap();
+    cfg.workspace
+        .workspace_roots
+        .push(fx.workdir.to_string_lossy().into_owned());
+    std::fs::write(&config_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    let (base_url, requests, server) = spawn_capturing_openai_stream_server(vec![
+        serde_json::json!({"role": "assistant", "tool_calls": [{
+            "index": 0, "id": "finish-resumed-plan", "type": "function",
+            "function": {"name": "update_plan", "arguments": serde_json::json!({
+                "ops": [{"kind": "set_status", "id": "t1", "status": "completed", "evidence": ["test:resumed-kickoff"]}]
+            }).to_string()}
+        }]}),
+        serde_json::json!({"content": "RESUMED_PLAN_DONE"}),
+    ]);
+    write_mock_models_toml(&fx.home_path, &base_url);
+    let output = cmd()
+        .current_dir(&fx.workdir)
+        .args(["code", "--resume"])
+        .env("HOME", &fx.home_path)
+        .env("SHELL", "/bin/zsh")
+        .env("OPENAI_API_KEY", "stub")
+        .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", "mock-local")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .timeout(Duration::from_secs(40))
+        .write_stdin("/plan build\n")
+        .output()
+        .expect("run resumed CLI");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        server.join().is_ok(),
+        "CLI model requests={}, stdout={} stderr={}",
+        requests.lock().unwrap().len(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one native-tool roundtrip, no extra model turn"
+    );
+    let first: serde_json::Value = serde_json::from_str(&requests[0]).unwrap();
+    assert!(
+        first["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user"
+                && message["content"].to_string().contains("start building")
+                && message["content"]
+                    .to_string()
+                    .contains(plan_path.to_string_lossy().as_ref())),
+        "the real CLI loop must consume its build continuation, not merely return it"
+    );
+    assert_eq!(
+        std::fs::read(&shadow_path).unwrap(),
+        shadow_before,
+        "resuming an external plan must not mutate the default-directory plan with the same ID"
+    );
+    let completed = file_store::read_plan(&plan_path).unwrap();
+    assert_eq!(
+        completed.frontmatter.state,
+        file_store::PlanFileState::Completed
+    );
+    assert_eq!(
+        completed.frontmatter.todos[0].status,
+        file_store::TodoStatus::Completed
+    );
+    assert_eq!(
+        completed.frontmatter.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert!(
+        fx.session
+            .get_entries(32)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry,
+        TranscriptEntry::Message(message) if message.message["role"] == "assistant"
+            && message.message["content"] == "RESUMED_PLAN_DONE")),
+        "the resumed session must persist the successful final model reply"
     );
 }

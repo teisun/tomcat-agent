@@ -1474,7 +1474,8 @@ impl PlanRuntime {
                 file_store::PlanFileState::Planning | file_store::PlanFileState::Pending
             )
         }) {
-            return Ok(plan.id);
+            // Identity alone can resolve to a different file in the default directory.
+            return Ok(plan.path.to_string_lossy().into_owned());
         }
         Err(PlanRuntimeError::BuildBlocked(tr(
             "planRuntime.targetRequired",

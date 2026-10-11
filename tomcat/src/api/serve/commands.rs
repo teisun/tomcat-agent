@@ -1987,7 +1987,18 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let removed = match manager.remove_configured_server(&config_key, &state.cfg) {
+            let removal = manager.remove_configured_server(&config_key, &state.cfg);
+            // Removal may have saved the file before credential cleanup failed.
+            // Reconcile every affected cache even on that partial failure.
+            let synchronized = ConnectorRegistry::synchronize_cached_config_change(
+                &state.cfg,
+                source,
+                manager.workspace_root(),
+            );
+            if let Err(error) = &synchronized {
+                warn!(error = %error, "MCP cache reconciliation failed after removal");
+            }
+            let removed = match removal {
                 Ok(removed) => removed,
                 Err(error) => {
                     send_error(
@@ -1999,13 +2010,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            if removed {
-                ConnectorRegistry::synchronize_cached_config_change(
-                    &state.cfg,
-                    source,
-                    manager.workspace_root(),
-                )?;
-            }
+            synchronized?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
@@ -2117,7 +2122,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let removed = connector.mcp_manager().logout_server(&config_key)?;
+            let removed = connector.logout_server(&config_key)?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),

@@ -9,6 +9,26 @@ use crate::core::llm::{
 };
 
 #[test]
+fn tool_owned_media_nonvisual_downgrade_is_text_only_and_does_not_mutate_archive() {
+    let mut tool = ChatMessage::tool("one", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("result"),
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+    ]));
+    let input = vec![tool];
+    let before = serde_json::to_value(&input).unwrap();
+    let degraded = degrade_unsupported_multimodal(&input, &Capabilities::default());
+    assert!(degraded[0]
+        .first_text()
+        .unwrap()
+        .contains(UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER));
+    assert!(!serde_json::to_string(degraded.as_ref())
+        .unwrap()
+        .contains("image_b64"));
+    assert_eq!(serde_json::to_value(&input).unwrap(), before);
+}
+
+#[test]
 fn degrade_unsupported_multimodal_returns_borrowed_when_all_parts_supported() {
     let messages = vec![ChatMessage::user_with_parts(vec![
         ChatMessageContentPart::text("before "),

@@ -30,6 +30,13 @@ describe("linkTarget", () => {
     });
   });
 
+  it.each(["src/app.ts", "C:\\work\\app.ts"])("separates line and column from %s", (path) => {
+    for (const suffix of [":42:7", ":42:7-50:9"]) {
+      expect(splitPathLocation(`${path}${suffix}`)).toEqual({ path, line: 42 });
+      expect(classifyLink(`${path}${suffix}`)).toEqual({ kind: "file", path, line: 42 });
+    }
+  });
+
   it("strips a regular local Markdown anchor without treating it as a line", () => {
     expect(classifyLink("docs/design.md#overview")).toEqual({
       kind: "file",

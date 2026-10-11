@@ -50,28 +50,15 @@ fn real_models_path() -> PathBuf {
         })
 }
 
-fn inject_model_api_key_or_skip(models_path: &Path, model_id: &str) -> Option<()> {
-    let contents = match std::fs::read_to_string(models_path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            eprintln!(
-                "skipping current_tail_guard_real_llm_runtime: cannot read {}: {error}",
-                models_path.display()
-            );
-            return None;
-        }
-    };
-    let document: toml::Value = match toml::from_str(&contents) {
-        Ok(document) => document,
-        Err(error) => {
-            eprintln!(
-                "skipping current_tail_guard_real_llm_runtime: cannot parse {}: {error}",
-                models_path.display()
-            );
-            return None;
-        }
-    };
-    let Some(entry) = document
+fn require_model_api_key(models_path: &Path, model_id: &str) {
+    let contents = std::fs::read_to_string(models_path).unwrap_or_else(|error| {
+        panic!(
+            "selected real guard test requires {}: {error}",
+            models_path.display()
+        )
+    });
+    let document: toml::Value = toml::from_str(&contents).expect("valid real guard model catalog");
+    let entry = document
         .get("models")
         .and_then(toml::Value::as_array)
         .and_then(|models| {
@@ -79,26 +66,18 @@ fn inject_model_api_key_or_skip(models_path: &Path, model_id: &str) -> Option<()
                 .iter()
                 .find(|entry| entry.get("id").and_then(toml::Value::as_str) == Some(model_id))
         })
-    else {
-        eprintln!(
-            "skipping current_tail_guard_real_llm_runtime: model {model_id} is absent from {}",
-            models_path.display()
-        );
-        return None;
-    };
-    let Some(api_key_env) = entry.get("api_key_env").and_then(toml::Value::as_str) else {
-        eprintln!(
-            "skipping current_tail_guard_real_llm_runtime: model {model_id} has no api_key_env"
-        );
-        return None;
-    };
+        .unwrap_or_else(|| panic!("model {model_id} is absent from {}", models_path.display()));
+    let api_key_env = entry
+        .get("api_key_env")
+        .and_then(toml::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| panic!("model {model_id} requires api_key_env"));
     if std::env::var(api_key_env)
         .ok()
         .is_some_and(|value| !value.trim().is_empty())
     {
-        return Some(());
+        return;
     }
-
     let env_path = models_path
         .parent()
         .map(|parent| parent.join("assets/.env"))
@@ -110,66 +89,42 @@ fn inject_model_api_key_or_skip(models_path: &Path, model_id: &str) -> Option<()
                 .filter_map(Result::ok)
                 .find_map(|(key, value)| (key == api_key_env).then_some(value))
         })
-        .filter(|value| !value.trim().is_empty());
-    let Some(key) = key else {
-        eprintln!(
-            "skipping current_tail_guard_real_llm_runtime: {api_key_env} is not exported or set in {}",
-            env_path.display()
-        );
-        return None;
-    };
-    // The ignored test is serialised because this process-wide environment value may be consumed
-    // by the provider constructor. Never overwrite a value supplied by the caller.
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "selected real guard test requires {api_key_env} exported or set in {}",
+                env_path.display()
+            )
+        });
+    // The explicitly selected ignored test is serialised; never overwrite a caller's key.
     unsafe { std::env::set_var(api_key_env, key) };
-    Some(())
 }
 
-fn resolve_terra_binding_or_skip(model_id: &str) -> Option<ResolvedCall> {
-    if !matches!(model_id, "idatatlas/gpt-5.6-terra" | "fcodex/gpt-5.6-terra") {
-        eprintln!(
-            "skipping current_tail_guard_real_llm_runtime: {MODEL_ENV} must select one of the two gpt-5.6-terra relays"
-        );
-        return None;
-    }
+fn resolve_terra_binding(model_id: &str) -> ResolvedCall {
+    assert!(
+        matches!(model_id, "idatatlas/gpt-5.6-terra" | "fcodex/gpt-5.6-terra"),
+        "{MODEL_ENV} must select one of the two gpt-5.6-terra relays"
+    );
     let models_path = real_models_path();
-    inject_model_api_key_or_skip(&models_path, model_id)?;
-
+    require_model_api_key(&models_path, model_id);
     let mut config = AppConfig::default();
     config.llm.default_model = model_id.to_string();
     config.context.compaction_model = model_id.to_string();
-    let catalog = match ModelCatalog::load_from_path(&config, models_path) {
-        Ok(catalog) => Arc::new(catalog),
-        Err(error) => {
-            eprintln!(
-                "skipping current_tail_guard_real_llm_runtime: model catalog failed: {error}"
-            );
-            return None;
-        }
-    };
+    let catalog = Arc::new(
+        ModelCatalog::load_from_path(&config, models_path).expect("load real guard model catalog"),
+    );
     let prefs_path = std::env::temp_dir().join(format!(
         "tomcat-current-tail-real-llm-prefs-{}-{}.json",
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
-    let prefs = match ModelPrefsStore::load(prefs_path, ThinkingLevel::High) {
-        Ok(prefs) => Arc::new(prefs),
-        Err(error) => {
-            eprintln!(
-                "skipping current_tail_guard_real_llm_runtime: model preferences failed: {error}"
-            );
-            return None;
-        }
-    };
-    let resolver = DefaultLlmResolver::new(config, catalog, prefs);
-    match resolver.resolve(LlmScene::Main, Some(model_id)) {
-        Ok(binding) => Some(binding),
-        Err(error) => {
-            eprintln!(
-                "skipping current_tail_guard_real_llm_runtime: provider resolve failed: {error}"
-            );
-            None
-        }
-    }
+    let prefs = Arc::new(
+        ModelPrefsStore::load(prefs_path, ThinkingLevel::High)
+            .expect("load real guard model preferences"),
+    );
+    DefaultLlmResolver::new(config, catalog, prefs)
+        .resolve(LlmScene::Main, Some(model_id))
+        .expect("resolve selected real guard provider")
 }
 
 fn make_agent(binding: ResolvedCall, config: ContextConfig, trail_dir: &Path) -> AgentLoop {
@@ -230,9 +185,7 @@ async fn require_successful_preheat(agent: &mut AgentLoop) {
 async fn real_terra_preheat_apply_and_resume_first_request_guard() {
     let _ = crate::infra::logging::init_logging(&LogConfig::default(), None);
     let model_id = selected_model();
-    let Some(binding) = resolve_terra_binding_or_skip(&model_id) else {
-        return;
-    };
+    let binding = resolve_terra_binding(&model_id);
     let temp = tempfile::tempdir().expect("create real-llm test directory");
     let context_config = ContextConfig {
         current_tail_compactable_min_chars: 1,
@@ -319,7 +272,7 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
         "the first raw entry after a preheat summary must begin the next complete tool round"
     );
     assert!(
-        !messages[1]
+        !messages[0]
             .text_content()
             .unwrap_or_default()
             .contains("## Constraints & Preferences"),

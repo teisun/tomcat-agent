@@ -12,15 +12,15 @@ use crate::ext::PluginEngine;
 use crate::infra::i18n::{tr_in, Locale};
 use crate::infra::AppConfig;
 
-use super::backend::{
+use super::super::backend::{
     discover_hosted_candidate, pick_backend, BackendFailure, BackendMode, BackendPlan,
     WebSearchBackend,
 };
-use super::cache::CacheKey;
-use super::openai_server::{build_hosted_request_body, parse_server_tool_blocks};
-use super::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
-use super::types::{normalize_hits, RawHit, WebSearchArgs};
-use super::WebSearchRuntime;
+use super::super::cache::CacheKey;
+use super::super::openai_server::{build_hosted_request_body, parse_server_tool_blocks};
+use super::super::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
+use super::super::types::{normalize_hits, RawHit, WebSearchArgs};
+use super::super::WebSearchRuntime;
 
 struct RecordingPluginInvoker {
     calls: Mutex<Vec<(String, serde_json::Value, String)>>,
@@ -164,8 +164,8 @@ pi.registerFunction = function () {{}};
     actual
 }
 
-fn basic_web_search_request() -> super::types::WebSearchRequest {
-    super::types::WebSearchRequest::from_tool_args(
+fn basic_web_search_request() -> super::super::types::WebSearchRequest {
+    super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust".into(),
             count: None,
@@ -187,7 +187,7 @@ async fn plugin_backend_maps_missing_key_warning_to_backend_failure() {
         "warnings": ["__missing_key__:TAVILY_API_KEY"]
     }))]);
     let backend = PluginWebSearchBackend::new(invoker, "tavily", "test-session");
-    let request = super::types::WebSearchRequest::from_tool_args(
+    let request = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust".into(),
             count: None,
@@ -274,7 +274,7 @@ async fn plugin_backend_maps_unauthorized_warning_to_backend_failure() {
         "warnings": ["__unauthorized__:403"]
     }))]);
     let backend = PluginWebSearchBackend::new(invoker, "brave", "test-session");
-    let request = super::types::WebSearchRequest::from_tool_args(
+    let request = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust".into(),
             count: None,
@@ -531,7 +531,7 @@ fn normalize_hits_filters_private_hosts_and_domain_rules() {
 #[test]
 fn cache_key_tracks_allowed_and_blocked_domains() {
     let cfg = AppConfig::default();
-    let req_a = super::types::WebSearchRequest::from_tool_args(
+    let req_a = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust async".into(),
             count: Some(5),
@@ -545,7 +545,7 @@ fn cache_key_tracks_allowed_and_blocked_domains() {
     .expect("request a");
     let mut cfg_b = cfg.clone();
     cfg_b.tools.web_search.blocked_domains = vec!["docs.rs".into()];
-    let req_b = super::types::WebSearchRequest::from_tool_args(
+    let req_b = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust async".into(),
             count: Some(5),
@@ -567,7 +567,7 @@ fn cache_key_tracks_allowed_and_blocked_domains() {
 
 #[test]
 fn build_hosted_request_body_includes_filters_and_location() {
-    let request = super::types::WebSearchRequest::from_tool_args(
+    let request = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust async".into(),
             count: Some(5),

@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::infra::platform::write_file_atomic;
 use crate::AppError;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -56,7 +55,7 @@ impl BackupPermissions {
             }
         }
     }
-    fn restore(self, path: &Path) -> std::io::Result<()> {
+    fn restore(self, file: &fs::File) -> std::io::Result<()> {
         #[cfg(unix)]
         let permissions = {
             use std::os::unix::fs::PermissionsExt;
@@ -64,11 +63,11 @@ impl BackupPermissions {
         };
         #[cfg(not(unix))]
         let permissions = {
-            let mut p = fs::metadata(path)?.permissions();
+            let mut p = file.metadata()?.permissions();
             p.set_readonly(self.readonly);
             p
         };
-        fs::set_permissions(path, permissions)
+        file.set_permissions(permissions)
     }
 }
 
@@ -415,7 +414,7 @@ pub(crate) fn require_regular_path(path: &Path) -> Result<(), AppError> {
 
 pub(crate) enum RestoreSource {
     Backup(PathBuf, Option<BackupPermissions>),
-    Content(Vec<u8>),
+    Content(Vec<u8>, Option<BackupPermissions>),
     Absent,
 }
 
@@ -447,17 +446,24 @@ impl RestoreFiles {
                 }
                 match backup {
                     RestoreSource::Backup(backup, permissions) => match fs::read(backup) {
-                        Ok(bytes) => {
-                            write_file_atomic(path, &bytes)?;
-                            if let Some(permissions) = permissions {
-                                permissions.restore(path)?;
-                            }
-                            Ok(())
-                        }
+                        Ok(bytes) => write_restored_file(path, &bytes, *permissions),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                         Err(e) => Err(e.into()),
                     },
-                    RestoreSource::Content(bytes) => write_file_atomic(path, bytes),
+                    RestoreSource::Content(bytes, captured_permissions) => {
+                        // Git supplies content, not private filesystem permissions. Keep
+                        // the live path's permissions, or its capture if it was deleted.
+                        let permissions = match fs::metadata(path) {
+                            Ok(metadata) => {
+                                Some(BackupPermissions::capture(metadata.permissions()))
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                *captured_permissions
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
+                        write_restored_file(path, bytes, permissions)
+                    }
                     RestoreSource::Absent => match fs::remove_file(path) {
                         Ok(()) => Ok(()),
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -471,6 +477,27 @@ impl RestoreFiles {
         }
         Ok(())
     }
+}
+
+/// Publish bytes and permissions together. NamedTempFile starts private, so a
+/// saved 0600 file is never exposed through a default-mode temporary file.
+fn write_restored_file(
+    path: &Path,
+    bytes: &[u8],
+    permissions: Option<BackupPermissions>,
+) -> Result<(), AppError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("platform.noParent", &[])))?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    if let Some(permissions) = permissions {
+        permissions.restore(temporary.as_file())?;
+    }
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// `turns` is in canonical transcript order, starting at the selected live user.

@@ -139,40 +139,35 @@ impl ServeAskQuestionBridge {
             );
             return Ok(false);
         }
+        // Decode with the panel's wire contract before consuming its only response route.
+        let payload = if payload.get("requestId").is_some() || payload.get("request_id").is_some() {
+            payload.clone()
+        } else {
+            serde_json::json!({ "requestId": request_id, "result": payload })
+        };
+        let parsed = match serde_json::from_value::<AskQuestionWireResponse>(payload) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                tracing::warn!(request_id, %error, "dropping malformed ask_question response");
+                return Ok(false);
+            }
+        };
+        if parsed.request_id != *request_id {
+            tracing::warn!(
+                request_id,
+                "dropping ask_question response with mismatched inner identity"
+            );
+            return Ok(false);
+        }
+        let response = serde_json::to_value(parsed).map_err(|error| {
+            AppError::Config(crate::infra::i18n::tr(
+                "serve.questionResponseSerialize",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
         drop(entry);
         let Some((_, pending)) = self.pending.remove(request_id) else {
             return Ok(false);
-        };
-        let response = if let Ok(parsed) =
-            serde_json::from_value::<AskQuestionWireResponse>(payload.clone())
-        {
-            serde_json::to_value(parsed).map_err(|error| {
-                AppError::Config(crate::infra::i18n::tr(
-                    "serve.questionResponseSerialize",
-                    &[("detail", &error.to_string())],
-                ))
-            })?
-        } else if payload
-            .get("requestId")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-        {
-            payload.clone()
-        } else {
-            serde_json::to_value(AskQuestionWireResponse {
-                request_id: request_id.clone(),
-                result: serde_json::from_value(payload.clone()).unwrap_or(
-                    crate::api::chat::panels::AskQuestionResult::terminal(
-                        crate::api::chat::panels::AskQuestionOutcome::CancelledUnknown,
-                    ),
-                ),
-            })
-            .map_err(|error| {
-                AppError::Config(crate::infra::i18n::tr(
-                    "serve.questionResponseSerialize",
-                    &[("detail", &error.to_string())],
-                ))
-            })?
         };
         pending.event_bus.emit_sync(
             &pending.response_event,

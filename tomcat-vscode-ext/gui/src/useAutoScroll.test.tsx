@@ -14,9 +14,9 @@ class ResizeObserverMock {
     ResizeObserverMock.instances.push(this);
   }
 
-  disconnect() {}
+  disconnect = vi.fn();
 
-  observe() {}
+  observe = vi.fn();
 
   static latest(): ResizeObserverMock {
     const latest = ResizeObserverMock.instances.at(-1);
@@ -33,12 +33,14 @@ class ResizeObserverMock {
 
 function Fixture({
   contentKey,
+  mounted = true,
   latestUserMessageId,
   oldestItemKey = "earlier-1",
   resetKey,
   userMessageCount,
 }: {
   contentKey: string;
+  mounted?: boolean;
   latestUserMessageId: string | null;
   oldestItemKey?: string | null;
   resetKey: string | null;
@@ -56,6 +58,7 @@ function Fixture({
     containerRef,
     contentRef,
     contentKey,
+    contentMounted: mounted,
     latestUserMessageId,
     oldestItemKey,
     resetKey,
@@ -65,7 +68,7 @@ function Fixture({
   return (
     <>
       <div ref={containerRef} data-testid="scroll-root">
-        <div ref={contentRef} data-testid="scroll-content">
+        {mounted ? <div ref={contentRef} data-testid="scroll-content">
           <div data-message-kind="assistant">earlier</div>
           <div data-message-id="user-1" data-message-kind="user" data-testid="user-anchor">
             user
@@ -76,7 +79,7 @@ function Fixture({
             data-testid="transcript-spacer"
             style={{ height: `${bottomSpacerHeight}px` }}
           />
-        </div>
+        </div> : null}
       </div>
       <span data-testid="spacer-height">{bottomSpacerHeight}</span>
       <span data-testid="scroll-state">{userHasScrolled ? "paused" : "following"}</span>
@@ -97,6 +100,36 @@ describe("useAutoScroll", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it.each([false, true])("observes remounted transcript content without a text change (initially mounted=%s)", (initiallyMounted) => {
+    const props = {
+      contentKey: "unchanged",
+      latestUserMessageId: null,
+      resetKey: "same-session",
+      userMessageCount: 0,
+    };
+    const view = render(<Fixture {...props} mounted={initiallyMounted} />);
+    const oldObserver = initiallyMounted ? ResizeObserverMock.latest() : null;
+    if (initiallyMounted) {
+      view.rerender(<Fixture {...props} mounted={false} />);
+      expect(oldObserver!.disconnect).toHaveBeenCalledOnce();
+    }
+    view.rerender(<Fixture {...props} mounted />);
+    const root = screen.getByTestId("scroll-root");
+    const content = screen.getByTestId("scroll-content");
+    const observer = ResizeObserverMock.latest();
+    expect(observer).not.toBe(oldObserver);
+    expect(observer.observe).toHaveBeenCalledWith(root);
+    expect(observer.observe).toHaveBeenCalledWith(content);
+
+    // An image/layout change alone must still trigger follow-bottom.
+    Object.defineProperty(root, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(root, "scrollHeight", { configurable: true, value: 500 });
+    act(() => observer.callback([], {} as ResizeObserver));
+    expect(root.scrollTop).toBe(400);
+    fireEvent.wheel(root, { deltaY: -1 });
+    expect(screen.getByTestId("scroll-state").textContent).toBe("paused");
   });
 
   it("keeps sticky hidden while the newest user message remains visible in the viewport", () => {

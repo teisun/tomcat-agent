@@ -1251,13 +1251,18 @@ export class SettingsPanel implements vscode.Disposable {
         warnings,
       };
       this.postState();
-      await this.refreshState(
-        error,
-        status,
-        warnings,
-        null,
-        modelRemovalReceipt,
-      );
+      try {
+        await this.refreshState(error, status, warnings, null, modelRemovalReceipt);
+        if (success) await this.deps.onModelCatalogChanged?.();
+      } catch (refreshError) {
+        // Catalog reads cannot revoke either a successful or rejected delete receipt.
+        const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        this.state = {
+          ...this.state,
+          warnings: [...(this.state.warnings ?? []), `${t("settings.host.modelsLoadFailed")} ${detail}`],
+        };
+        this.postState();
+      }
     };
     const failed = async (error: unknown) => {
       const warnings = buildPreferenceCleared
@@ -1301,7 +1306,6 @@ export class SettingsPanel implements vscode.Disposable {
         warnings,
         true,
       );
-      await this.deps.onModelCatalogChanged?.();
     } catch (error) {
       await failed(error);
     }

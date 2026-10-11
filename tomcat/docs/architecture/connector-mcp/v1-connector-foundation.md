@@ -163,7 +163,7 @@ PreSpawn 信任检查（spawn 前唯一关卡，默认无感放行）
 | MCP server | 一个对外暴露工具/资源的外部进程，讲 JSON-RPC（MCP 协议）；是 MCP 连接器连接的目标。 | `core/connector/mcp/config.rs::McpServerConfig` | 本期仅 stdio 子进程；由 MCP 连接器作为**客户端**连它。 | 别人写的「工具服务器」，MCP 连接器去连它。 |
 | stdio 传输 | 用子进程的 stdin/stdout 传 JSON-RPC 帧。 | `core/connector/mcp/transport.rs`（经 `rmcp` crate） | Tomcat 明确执行 `env_clear` 后只注入 config `env` + `PATH`/`HOME`；子进程 Drop 语义、协议帧限制交给 `rmcp`，本仓未另设 8MiB 单行上限。 | 通过管道跟子进程一问一答，环境清干净但留下能找到 node 的必需项。 |
 | McpManager | MCP 连接与工具目录的运行时唯一事实源。 | `core/connector/mcp/manager.rs::McpManager`，注入 `GlobalServices` | 持有每 server 的连接状态与工具缓存；`list_tools()` / `call_tool()`。 | 管所有 MCP 连接的总管。 |
-| 工具名映射 | 模型可见名 `mcp__{server}__{tool}` ↔ 协议原始 `(server, raw_tool)`。 | `core/connector/mcp/naming.rs` | 双下划线分隔；**常态原样保留完整可读名**，仅当超 provider 名长上限（OpenAI 64）时才消毒 + 截断可读头 + 短哈希后缀；**原始名单独存对照表供 `tools/call`**（哈希不可逆）。 | 常态给模型完整可读名；太长才截断加小尾巴，调用时查表翻回真名。 |
+| 工具名映射 | 模型可见名 `mcp__{server}__{tool}` ↔ 协议原始 `(server, raw_tool)`。 | `core/connector/mcp/naming.rs` | 双下划线分隔；**合法且无歧义的短名保留原样**；超长、清洗有损、空组件或组件分隔歧义时保留可读头并加短哈希；**原始名单独存对照表供 `tools/call`**（哈希不可逆）。 | 常态给模型完整可读名；超长或有歧义时加消歧后缀，调用时查表翻回真名。 |
 | ToolSurface | 发给模型的工具定义合集（builtin + plugin + MCP）。 | `core/llm/system_prompt.rs::ToolSurface` | MCP 工具**和插件一样注册进 `ToolRegistry`**（Option B，§3.1 R4），经 `observe_tool_surface` 的 `list_tools` **自动并入** surface（不需为 MCP 单独合并）；只读子 agent（code reviewer / verifier）走 `plan_runtime::review.rs::resolve_internal_tools` 按 **builtin 目录**白名单过滤，MCP/插件都不在 builtin 目录里，**天然不泄漏给子 agent**。 | 模型「看得见哪些工具」的那张清单；MCP 像插件一样自动进来，子 agent 看不到。 |
 | follow_up_parts | 工具执行后追加到「下一条 user 消息」的多模态内容。 | `core/agent_loop/tool_exec/mod.rs::ToolExecOutcome.follow_up_parts` | 承载 `ChatMessageContentPart::InputImage`；由 `tool_dispatcher` 注入。 | 工具产出的图片，塞进下一条消息给模型看。 |
 | InputImage 回流 | 把图片（base64 内联或 Files API 上传）变成模型可见 vision 内容。 | `core/llm/types.rs::ChatMessageContentPart` + `core/llm/openai_files.rs` | MCP 单独完成 base64 解码与结果分流，复用 `upload_decision_by_size` / `OpenAiFilesRuntime` / `ChatMessageContentPart` 这些共享原语；不是调用 `read.rs`。 | 「让模型真正看见图」的现成零件直接复用，不复制上传策略。 |
@@ -213,7 +213,7 @@ PreSpawn 信任检查（spawn 前唯一关卡，默认无感放行）
 | **R-C0 连接器抽象** | 直接做 MCP 客户端，还是抽象成「连接器」框架？ | **采用** `Connector` trait + `ConnectorType {Mcp,Cli,A2a}` + `ConnectorRegistry`；**本期只实现 MCP 连接器**，CLI/A2A 预留为未来类型 | Tomcat：本仓 `skill`/`plugin` 子系统的「注册表 + 多实现」模式（`core/skill`、`ext/plugin`）；外部：`codex codex-mcp`（MCP 连接分层）、`hermes-agent tools/mcp_tool.py`（连接器式工具注册） | 设计：`ConnectorRegistry` 按已知配置源构造连接器（本期 `mcp.json`→MCP 连接器；未来 CLI/A2A 各有配置源，`type` 在代码侧而非强推进 MCP 配置，见 R10），工具注册进 `ToolRegistry` 后由 `CompositeToolExecutor` 按 `plugin_id`（`mcp:`/`cli:`/`a2a:`）路由（Option B，R4）；MCP 是首个实现。理由：MCP/CLI/A2A 都是「接入外部能力→暴露工具→回流结果」的同构问题，统一抽象避免将来各写一套；本期只填 MCP，抽象成本极低。 | 未入选：只做 `McpManager` 不抽象。拒因：CLI/A2A 迟早要接，届时重构工具面/命令面成本更高；现在留好接缝更省。 | 把「接外部能力」做成统一插座，本期只插上 MCP，CLI/A2A 以后即插即用。 |
 | **R1 传输库** | 手写 stdio JSON-RPC 还是用官方 `rmcp` crate？ | **采用** `rmcp` crate 做 stdio 传输与 JSON-RPC；**拒绝** 手写传输 | Tomcat：新增 `core/connector/mcp/transport.rs` 薄封装；外部：`codex/codex-rs/rmcp-client/src/rmcp_client.rs::RmcpClient` 用 `rmcp` | 设计：`rmcp` 提供 `Transport<RoleClient>`、initialize 握手、分页 `tools/list`；封装成 `McpTransport`。理由：Codex 生产验证；握手/框架/超时无需自维护，代价是 +1 依赖树。 | 未入选：pi_agent_rust `src/mcp/transport.rs` **手写 NDJSON 传输**。拒因：JSON-RPC 编解码/握手/取消全自维护，纯负债，除非 rmcp 不可用。 | 用官方 Rust MCP 库，别自己手搓协议。 |
 | **R2 MCP 传输范围** | MCP 连接器本期实现哪些传输？ | **框架传输可插拔（代码 `McpTransport` trait）；本期只实现 stdio**；**Streamable HTTP（2026-07-28 单端点）+ OAuth 写进设计、列为紧跟子阶段**（P8）；不做已废弃的 legacy HTTP+SSE | Tomcat：`McpTransport` trait（`StdioTransport` 本期 / `HttpTransport` 预留）——`mcp.json` **无 `transport` 字段**：有 `command` 即 stdio、P8 以 `url` 键区分 HTTP（生态惯例，同 Cursor/Claude）；外部：`codex rmcp-client`（`rmcp` 同一 crate 支持 stdio + streamable http）、`@playwright/mcp`（默认 stdio，`--port` 启 HTTP）、MCP 规范 2026-07-28（stdio + Streamable HTTP 两种一等传输，HTTP+SSE 已废弃） | 设计：`McpTransport` trait 后面挂 `StdioTransport`（本期）与 `HttpTransport`（P8）；`@playwright/mcp` 默认 stdio，视觉验收零网络零 OAuth。理由：**纠正"MCP=HTTP"误解**——stdio 是本地 server 的一等且最常见传输；Streamable HTTP 是给远程/托管 server 的，`rmcp` 已支持故增量小，但 OAuth（认证远程）最重，单列不 front-load。 | 未入选：(a) 本期就做 HTTP/SSE/OAuth 全套——拒因：驱动本期的 playwright 只需 stdio，OAuth 拖成大工程；(b) 只做 stdio 且不给 HTTP 留接缝——拒因：远程 MCP 是真实未来需求，`McpTransport` trait 留好接缝几乎零成本。 | 本地连接用 stdio（本期），远程 HTTP/OAuth 设计好、紧跟做；别被"MCP 都是 HTTP"带偏。 |
-| **R3 工具命名** | 模型看到的工具名怎么起？ | **采用** `mcp__{server}__{tool}`（双下划线）；**仅当超 provider 名长上限时**才「消毒 + 截断保留可读头 + 短哈希后缀」（非整名变哈希）；原始 `(server,tool)` 另存对照表 | Tomcat：新增 `core/connector/mcp/naming.rs`；外部：`codex/codex-rs/codex-mcp/src/tools.rs:226,265-285`（`MAX=128`，`truncate_name+append_hash_suffix`）、`cline/.../mcp/name-transform.ts:4-34`（`MAX=64`，`${baseName}_${hash}`）、`pi_agent_rust::mounted_name`（64 cap+SHA256）、`hermes-agent` `mcp__` | 设计：双下划线定界最不易与模型名/服务名冲突；**常态原样保留完整可读名**（`@playwright/mcp` 的 `browser_*` 都 <64，永不触发兜底）；仅超 64/含非法字符时截断可读头 + 短哈希去重；`tools/call` 一律查 `McpToolDef` 对照表取原始名（哈希单向不可反解，故必须另存）。理由：OpenAI 硬限 function name 64 字符是真实约束，4 家 agent 都这么兜底，可读性由「保留可读头」保住。 | 未入选：(a) cline/continue/opencode 的单下划线 `server_tool`——拒因：名字内含下划线时定界歧义；(b) 超长时整名变纯哈希（初稿举的坏例子）——拒因：可读性差，改为保留可读头。 | 常态就是完整可读名 `mcp__playwright__browser_click`；只有名字长到超 API 上限才截断+加小尾巴，且尽量留可读头；调用时靠对照表翻回真名。 |
+| **R3 工具命名** | 模型看到的工具名怎么起？ | **采用** `mcp__{server}__{tool}`（双下划线）；**超 provider 名长上限、清洗有损或分隔歧义时**才「消毒 + 截断保留可读头 + 短哈希后缀」（非整名变哈希）；原始 `(server,tool)` 另存对照表 | Tomcat：新增 `core/connector/mcp/naming.rs`；外部：`codex/codex-rs/codex-mcp/src/tools.rs:226,265-285`（`MAX=128`，`truncate_name+append_hash_suffix`）、`cline/.../mcp/name-transform.ts:4-34`（`MAX=64`，`${baseName}_${hash}`）、`pi_agent_rust::mounted_name`（64 cap+SHA256）、`hermes-agent` `mcp__` | 设计：双下划线分隔普通组件；**合法且无歧义的短名保留原样**（`@playwright/mcp` 的 `browser_*` 都 <64，永不触发兜底）；超 64、清洗有损、空组件或分隔歧义时保留可读头 + 短哈希消歧，最终重名再由目录/查找拒绝；`tools/call` 一律查 `McpToolDef` 对照表取原始名（哈希单向不可反解，故必须另存）。理由：OpenAI 硬限 function name 64 字符是真实约束，4 家 agent 都这么兜底，可读性由「保留可读头」保住。 | 未入选：(a) cline/continue/opencode 的单下划线 `server_tool`——拒因：名字内含下划线时定界歧义；(b) 超长时整名变纯哈希（初稿举的坏例子）——拒因：可读性差，改为保留可读头。 | 常态就是完整可读名 `mcp__playwright__browser_click`；超长或存在歧义才加后缀（必要时截断），且尽量留可读头；调用时靠对照表翻回真名。 |
 | **R4 工具面接入 + 执行路径** | MCP 工具独立走 `mcp__` 前缀分支，还是统一进 `ToolRegistry`？ | **采用 Option B**：MCP 工具**注册进 `ToolRegistry`**（`plugin_id="mcp:{server}"`，由 `CompositeToolExecutor` 按 `plugin_id` 路由到 `McpManager`）；`list_tools` 自动并入工具面；`tool_dispatcher` 的 registry 分支用向后兼容的**工具结果媒体转换器**把 `content[].type=="image"` 变成 `follow_up_parts`（纯文本插件 no-op）。**拒绝**独立 `mcp__` 前缀分支。 | Tomcat：`core/tools/contract/registry.rs::{ToolExecutor,ToolRegistry}`（`DefaultToolRegistry` 持单个 `executor: Arc<dyn ToolExecutor>`、`call_tool` 的边界是 JSON）、`tool_dispatcher.rs::extract_tool_result_media`、`run_loop/mod.rs::observe_tool_surface`、`ext/plugin_tool_executor.rs`；外部：`codex convert_mcp_content_to_items`（JSON image→input_image 转换器范式）、`pi_agent_rust` 把 MCP 挂成原生 `Tool`。 | 注册表/插件契约是 JSON-only（`execute -> serde_json::Value`，因插件是 rquickjs JS-VM），原来没有承载原生图片 parts 的通道（是「无通道」非「清空」）。Option B 的三件事：(1) `McpToolExecutor` 包 `McpManager`，`CompositeToolExecutor` 按 `tool.plugin_id` 路由；(2) `ConnectorRegistry` 在 Ready 后把工具登记进 `DefaultToolRegistry`；(3) dispatcher 用 `extract_tool_result_media()` 将 text 写进 `model_text`、将 image 块转 `follow_up_parts`。它复用上传/内容类型的共享原语，不调用 `read.rs` 的流程；对纯文本插件 no-op。 | 未入选：(a) surface-only + `mcp__` 前缀分支——可见/执行两条路不对称、靠字符串前缀路由有抢注隐患；(b) 注册进 registry 但不加转换器——图片仍回流不了。 | 让 MCP 和插件走同一条注册表路；出口加一个「JSON 图片→图片」的小转换器，MCP 截图就能回来，纯文本插件不受影响。 |
 | **R5 图片回流** | MCP 返回的 image 块怎么进模型？ | **采用** `follow_up_parts` + `InputImage`（小图内联、大图 Files API）；**拒绝**新建一套上传策略。 | Tomcat：`tool_dispatcher.rs::mcp_image_part`、`core/llm/types.rs::ChatMessageContentPart::{image_base64_data,image_file_id}`、`openai_files.rs::upload_decision_by_size`；外部：`codex/.../models.rs::convert_mcp_content_to_items`（image→input_image）、`cline::toToolResultImagePart`。 | MCP 路径单独解 base64 和组装结果；base64 块小图调 `image_base64_data(mime,b64)`，大图落临时文件后调 `OpenAiFilesRuntime::resolve_or_upload_path`，文本块进 `model_text`，非 vision 由 `degrade_unsupported_multimodal` 降级。共享的是大小策略、Files API 和消息类型，不是假称调用 `read.rs`。 | 未入选：continue `callTool.ts` 把 image 当不支持类型报错**丢弃**；pi_agent_rust 图片入 `details` 不回流。拒因：视觉验收场景丢图 = 功能失效。 | 图片会进模型能看见的 InputImage；上传规则共用，流程不复制。 |
 | **R6 配置位置与作用域** | MCP server 声明放哪、怎么分层？ | **采用** `~/.tomcat/mcp.json`（全局）+ 项目级 `<workspace>/.tomcat/mcp.json`（覆盖同名 server）+ 主配置 `[connector] enabled` 总开关；init 物化 curated 默认；**形状见 R10** | Tomcat：`infra/config/types/skills.rs::SkillsConfig` 分层、`skill/builtin.rs::materialize_builtin_skills` 物化；外部：**Cursor `~/.cursor/mcp.json`(user) + 项目 `.cursor/mcp.json`**、`vscode` `mcp.json`(user/workspace)、Claude Desktop `claude_desktop_config.json` | 设计：user + workspace 两层，workspace 覆盖同名 server；`~/.tomcat/mcp.json` 缺失时物化含 `@playwright/mcp` 的默认；总开关在主配置 `[connector] enabled`。理由：与 Cursor/VS Code/Claude 的 user+workspace 分层完全一致，用户心智零迁移；server 列表独立于主配置便于整文件分享/复制粘贴。 | 未入选：全塞进主 `tomcat.config.toml` 的 `[mcp.servers]`（codex 式）。拒因：server 列表频繁增删、且要能整段从生态复制粘贴，独立文件更合适。 | server 清单放独立的 `mcp.json`，全局一份、项目可覆盖，自带一条 playwright。 |
@@ -301,6 +301,27 @@ Settings 不保存第二份开关配置；`tool_catalog_snapshot` 与模型可�
 
 > **HTTP/OAuth 已实现**：`core/connector/mcp/transport.rs::HttpTransport` 使用 rmcp 的 Streamable HTTP client，支持无认证、Bearer 与 custom headers；`core/connector/mcp/oauth.rs` 实现 protected-resource → authorization-server/OIDC metadata discovery、动态 client registration、PKCE、token refresh 与安全文件存储；`oauth_callback.rs` 绑定 `127.0.0.1:0` 并校验 state。
 
+#### 注销与共享凭据（当前契约）
+
+```text
+CLI / Serve 注销同一来源
+    → ConnectorRegistry 找到同一 work_dir 的缓存 manager
+    → 固定顺序锁住相关 entries，取消旧登录并退休连接
+    → OAuthTokenStore 删除凭据、沿用现有 revision 防止迟到写回
+```
+
+连接建立时，HTTP 客户端会持有 token 的内存副本，所以只删 `connector-oauth.json` 不足以注销。`ConnectorRegistry::logout_server` 是两个管理入口共用的完整流程：按规范化配置根筛选缓存，再按稳定 `configKey` 处理同一来源；同名项目覆盖项与独立 work_dir 不受影响。状态仍由各 `McpManager` 持有，不新增缓存代际、通知总线或文件监听器。
+
+锁顺序为现有缓存读锁 → 按 Arc 地址排序的 entries 写锁 → 现有凭据文件锁；持锁期间没有网络等待。注销返回前，相关本地客户端不再接收新调用，旧登录不能写回；新登录在此之后仍可正常进行。凭据删除失败会返回错误，同时保留原有“先停止本地连接”的行为，不宣称凭据已删除。注销不删除 `mcp.json`，不代表远端 OAuth 撤销，不回滚已发送的远程动作，也不保证立即停止另一个独立后端进程的内存客户端。
+
+回归落点：`src/core/connector/mcp/tests/login_test.rs` 的锁交错/并发/失败/项目隔离，`tests/connector_http_tests.rs::logout_revokes_shared_cached_http_clients_without_touching_other_roots` 的真实本地 HTTP 调用，以及既有 CLI/Serve 连接器管理场景。只删存储或仅逐个无协调地退休客户端不足以覆盖交错；只有将来明确承诺跨后端立即注销或实测锁竞争有问题时，再重审协调范围。
+
+#### CLI 删除与显式重载
+
+- `/connector remove <name>` 保持 **Global-only**：与 manager 的项目删除共用配置删除/凭据清理边界，即使来源或 connector 被禁用也可管理；同名项目来源不受影响。CLI/Serve 在清理凭据失败时也尝试同步已保存的配置，错误仍对用户可见，不把多文件操作描述为可回滚事务。CLI 重复按名称删除会补做凭据清理，不要求为了删除先创建运行时或启动连接。
+- 保存 Add/工具过滤后的 `ConnectorRegistry::reload` 只协调变更，不复活已注销来源。用户显式 `/connector reload` 使用 `reload_and_reconnect`：保留未变的 Ready 连接，对其它有效来源复用 `reconnect_server` 及其现有恢复预算/项目信任检查。
+- 回归：CLI 真 stdio 管理场景、`mcp/tests/config_test.rs` 的禁用/同名项目和部分失败重试，以及既有 Serve 管理、HTTP 迟到启动/队列授权边界。
+
 #### 完整调用并发与时限
 
 ```text
@@ -367,27 +388,29 @@ HTTP底层：POST额度 H=N；SSE打开可释放H，不释放完整调用名额N
 ### 4.2 工具名映射
 
 ```text
-常态（99% 情况，名字没超限）—— 模型看到的是【完整可读名】
+常态（合法、无歧义、未超限）—— 模型看到的是【完整可读名】
   server="playwright", tool="browser_take_screenshot"
     ──►  "mcp__playwright__browser_take_screenshot"   （40 字符，未超 64，原样保留）
   调用：用模型名查 McpToolDef 对照表 → (playwright, browser_take_screenshot) → tools/call
 
-罕见兜底（仅当拼出来 > provider 名长上限，如 OpenAI 64 字符 / 或含非法字符）
+兜底（超 64 字符、清洗有损、空组件、server 内含 __ / 末尾 _、tool 以 _ 开头）
   借 cline name-transform.ts / codex tools.rs 的做法：
   【保留可读头 + 只加短哈希后缀】，不是"整名变哈希"
   server="playwright", tool="navigate_and_wait_for_networkidle_then_capture_full_screenshot"
     ──►  "mcp__playwright__navigate_and_wait_for_networkidle_the_a1b2c3d4"
                          └──────── 尽量保留原名（截断） ───────┘ └短哈希┘
-  → 头部仍可读，短哈希只为"不同长名不撞车"
+  → 可读头 + 对原始二元组的短哈希；最终冲突仍必须拒绝
 ```
 
 单一事实源：`core/connector/mcp/naming.rs::to_model_name`；原始 `(server, raw_tool)` 存于 `McpToolDef` 对照表，模型名仅用于暴露与查表分派。
 
 > **为什么必须"另存原始名"**：常态下显示名含完整工具名，本可直接拆前缀反解；但**兜底路径截断/哈希后，显示名已丢失完整原名、且哈希单向不可逆**，无法从显示名反推真名。所以统一在 `McpToolDef` 存一张「显示名 → (server, 原始 tool)」对照表，`tools/call` 一律查表取原始名，不依赖反解析。
 >
-> **可读性说明（回应"哈希伤可读性"）**：短哈希**只在超 provider 名长上限时**出现，且**保留可读头**（对齐 `cline/name-transform.ts:26-34` 的 `${baseName}_${hash}`、`codex/codex-rs/codex-mcp/src/tools.rs:265-285` 的 `truncate_name + append_hash_suffix`）。我们的首要目标 `@playwright/mcp` 工具名都很短（`browser_click` 等），**永不触发兜底**——模型始终看到完整可读名。这是一条 API 正确性的安全网（OpenAI 硬限 64 字符），不是常态。
+> **可读性说明（回应"哈希伤可读性"）**：短哈希**在超长或名字存在歧义时**出现，且**保留可读头**（对齐 `cline/name-transform.ts:26-34` 的 `${baseName}_${hash}`、`codex/codex-rs/codex-mcp/src/tools.rs:265-285` 的 `truncate_name + append_hash_suffix`）。我们的首要目标 `@playwright/mcp` 工具名都很短（`browser_click` 等），**永不触发兜底**——模型始终看到完整可读名。这是一条 API 正确性的安全网（OpenAI 硬限 64 字符），不是常态。
 
-> **`mcp__` 前缀是命名约定（Option B 下不参与路由）**：路由靠注册表 `plugin_id`（`mcp:{server}`）而非字符串前缀，故不存在「抢注前缀→误路由」；前缀只用于给模型一个带命名空间的可读名、并降低与 builtin/插件撞名的概率。真正的撞名由 `DefaultToolRegistry::register_tool_local` 的 builtin/跨-plugin 重名校验兜底。
+> **当前 v2 调用边界**：目录归 `McpManager`，不依赖已退役的注册表 MCP 挂载做去重。`parse_tools` 拒绝同一来源的重复最终名；全局模型名查找必须只命中一个可见工具，歧义时返回未知/不可调用，不随遍历顺序挑一个来源。原始名仍存 `McpToolDef`，不从模型名反解。不增加持久命名表，普通 `mcp__playwright__browser_click` 保持不变；受影响旧别名需重新 `tool_search` 获取。
+>
+> 回归：`src/core/connector/mcp/tests/naming_test.rs` 与 `naming_collision_test.rs`；覆盖清洗、组件边界、长名、重复目录及跨来源最终同名。哈希不是绝不碰撞的保证，重复拒绝才是安全边界。
 
 ### 4.3 结果转换（MCP CallToolResult → 模型消息）
 
@@ -545,7 +568,7 @@ image 块解码失败 / 超 IMAGE_MAX_BYTES → 跳过该图 + 文本注明 `[MC
 | 大截图撑爆上下文/写放大 | 中 | `upload_decision_by_size` 大图走 Files API 不内联；`IMAGE_MAX_BYTES` 上限；超限跳过 + 文本注明 | 大图走上传通道，别把上下文塞爆。 |
 | 非 vision 模型收到图片 | 低 | `degrade_unsupported_multimodal` 占位替换，不报错 | 模型看不了图就换成占位说明。 |
 | server 启动慢阻塞首轮 / 首轮看不到工具 | 低 | **后台启动期连接（非阻塞）**，不 block 首轮；就绪前工具缺席 surface、就绪后下一轮自动出现；`startup_timeout_ms` 兜底；失败 server 缺席工具面不阻塞主循环。**不采用"首次调用才连接"**——那会让模型看不到工具、无从调起 | 后台连、不卡对话；连上了下一轮工具就出现，别等到调用才连。 |
-| schema 破坏（provider 工具名 64/128 字符限制） | 低 | 常态原样保留；仅超限时消毒 + 截断可读头 + 短哈希（R3），单测 `long_name_keeps_readable_head_plus_short_hash` 锁死 | 常态是完整可读名；太长才截断加小尾巴，不撞协议限制。 |
+| schema 破坏（provider 工具名 64/128 字符限制） | 低 | 合法无歧义短名保留；超长/有损/分隔歧义加后缀，最终冲突拒绝（R3）；单测 `long_names_keep_a_readable_head_and_unique_hash` 与 `model_lookup_refuses_an_ambiguous_final_name` | 常态是完整可读名；超长或有歧义时加消歧后缀，不撞协议限制。 |
 | 同一 server 并发 `tools/call` 的归属与资源上限 | 中 | 所有来源默认16个完整调用名额；rmcp 保证stdio帧写入与JSON-RPC request id路由，不用跨越整个回答期的独占锁；显式`maxConcurrentCalls: 1`才串行 | 共享同一连接，但不互相等答案；谁先返回不影响答案属于谁。 |
 | server 运行时改工具集（`tools/list_changed`） | 低 | 首期**不处理** `notifications/tools/list_changed`（`@playwright/mcp` 工具集静态）；工具集变化在下次连接/刷新时生效——列为非目标，与持久缓存一起做 fast-follow（R12；cline/vscode 有现成 debounced 刷新范式） | playwright 工具是固定的，暂不追它的动态变更通知。 |
 | MCP 工具名与插件/builtin 重名 | 低 | Option B 下路由靠注册与 `plugin_id`（非字符串前缀），不会误路由；重名由 `register_tool_local` 的 builtin/跨-plugin 重名校验拒绝；`mcp__` 前缀本身也让撞名概率极低 | 靠登记路由不靠猜前缀；重名直接被注册校验挡下。 |

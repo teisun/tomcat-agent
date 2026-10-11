@@ -20,11 +20,15 @@
 **作为用户**，我希望Agent能通过4原语安全地操作文件、执行命令，所有操作可控、可追溯。
 **验收标准**：
 - [ ] 内置 `read` / `write` / `edit` / `bash` 原语 API 规范完整、行为稳定
+- [ ] 分窗/截断 `read` 的指纹不得另行读取未展示的整份文件；已有 mtime/size 陈旧检查不放宽，完整无窗口读取才可用全文件哈希识别内容未变的 touch。
+- [ ] 前台 Bash 等待被取消时停止其进程树；只有成功交接后台任务票据后才允许继续运行，不因前台 caller 退出而留下无主写入。
 - [ ] 实现路径授权根机制：`agent_definition_dir` 为默认允许根，`workspace.workspace_roots` / 会话授权用于扩大外部目录访问，`primitive.path_rules` 提供 deny / readonly 规则；`agent_workspace_dir` 只作为当前目录语义来源，不自动授权
 - [ ] 实现bash命令管控：`bash_forbidden` 直接拦截，`bash_approval_required` 需用户确认，路径 token 与 `NAME=/path` assignment RHS 都必须进入同一套路径权限预检
 - [ ] `search_files` 收到空 `type` / 空 `glob` 时按“未传”处理，不得把空字符串继续透传到 `rg` / fallback，也不得再出现 `rg: unrecognized file type:` 这类占位空串导致的伪错误
 - [ ] `bash.cwd` 收到空字符串时按“未传”处理；若路径不存在或不是目录，必须在 `spawn` 前返回可定位错误，文案同时包含解析后路径与原始输入；`$HOME/...` 这类 shell 变量写法只给提示“不自动展开”，不能误伤客观存在的字面目录名
 - [ ] write/edit操作前自动备份原文件，支持回滚，操作前显示diff预览与用户确认
+- [ ] Git 提交晋级后的内容 Undo 不应把现存目标的可执行/私有权限重置为默认值；目标已删除时沿用捕获的权限。权限必须在原子发布前设置，失败不能发布权限错误的目标；这不是恢复 Git 不保存的完整文件元数据。
+- [ ] 单文件与批量 `edit` 对每个实际写入路径使用同一计划/子 Agent 策略：PLAN 和 PlanReviewer 不得编辑计划目录外文件，执行中的计划不得 raw edit；批量仍逐文件报告允许项落盘、拒绝项不变。
 - [ ] 所有4原语操作完整记录审计日志，包含操作内容、用户确认状态、执行结果、时间戳
 - [ ] 支持全局配置自动确认策略；legacy `path_whitelist` / `bash_whitelist` / `auto_confirm_whitelist` 配置字段已删除
 - [ ] `tomcat audit list` 可列出历史审计记录；`tomcat audit show <id>` 查看单条详情；`tomcat audit export <file>` 导出完整日志文件
@@ -52,7 +56,10 @@
 **作为用户**，我希望能通过统一的安装入口管理 package、bare plugin 与 bare skill，并明确控制它们对当前项目、当前 agent 或全局环境的可见范围。
 **验收标准**：
 - [ ] `tomcat install` / `tomcat uninstall` / `tomcat packages` 与会话内 `/install` 共享同一套安装核心，支持 package、bare plugin、bare skill 三类本地 source
+- [ ] 原生 `package_install` 接受目录或 manifest 文件时，均须在读取、哈希和复制前检查实际源树的 Read 权限；允许读取 manifest 不代表允许读取其兄弟文件，deny 不可被安装确认覆盖。
+- [ ] 本地安装保留普通文件权限（例如 0755 脚本、0600 私有文件）；源快照须区分路径与文件内容边界，并将普通文件的 Unix mode 纳入确认后变化检查，变化时拒绝发布目标或 registry。
 - [ ] 支持 `scope` / `agent` / `global` 三层可见范围；未显式指定时交互式入口可选择目标层，非交互 shell 默认落到当前 project(scope)
+- [ ] creator 校验器按 UTF-8 字节计算可发现头部的 4096 字节预算；多字节字符不得使超限技能误报可安装，不因此扩大运行时的既有发现边界。
 - [ ] 安装后按层写入 `packages/registry.json`，plugin 同步维护同层 `plugins/registry.json`；registry 损坏时必须返回显式错误，不得静默当成空账本
 - [ ] `tomcat packages` 与 `tomcat plugin list/enable/disable/unload` 能正确反映 layered 视图与启用状态；被禁用 plugin 不得继续出现在 runtime discovery 结果中
 - [ ] host-facing `functions[]` 插件与普通 plugin 复用同一套 `scope > agent > global` 安装层与发现层；不得再存在“只认宿主根”的单独来源规则
@@ -105,6 +112,7 @@
 **作为插件开发者**，我希望在插件中使用 `async/await` 调用宿主 API（如 `await pi.exec("ls")`），耗时操作不阻塞插件执行，与宿主异步 Hostcall 模型一致。
 **验收标准**：
 - [ ] `pi.exec()`、`pi.createChatCompletion()` 等耗时 API 返回 Promise，插件可用 `await` 消费
+- [ ] `pi.exec`/`tomcat.exec` 只执行完整 shell command，不提供独立 argv 模式；保留第三参 options 的位置，第二参仅允许省略或空数组占位。废弃的非空/错误 args 在提交前明确拒绝，不静默执行裸程序名。
 - [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞插件 VM，宿主后台异步处理
 - [ ] 长轮询 async Hostcall 在 pending→poll→ready 路径中持续刷新 QuickJS interrupt budget，不得因预算耗尽误杀正常请求
 - [ ] 返回值格式与 ExtensionAPI 约定一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
@@ -123,8 +131,13 @@
 - [ ] `/model current|list|use <id>` 可查看当前模型、列出 catalog，并把当前会话模型选择持久化到 session；程序重启或 `--resume` 后仍生效，且不覆盖全局 `default_model`
 - [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] Agent 可在对话中调用内置 `web_search` / `web_fetch` 工具完成联网检索与单 URL 抓取：搜索结果需结构归一并做域/SSRF 过滤，抓取结果需返回正文或 `tool-results/` 落盘路径；对应场景见 `E2E-CLI-064` / `E2E-CLI-065`
+- [ ] CLI `/connector logout` 与 Serve 的连接器注销走同一管理入口：删除所选来源的本地凭据，并停用当前后端中共享该凭据的工作区缓存连接/在途登录；其他 work-dir 和不同项目来源不受影响。重复注销幂等，注销完成后的调用不得继续借用旧连接中的 bearer。
+- [ ] 上述注销是本地凭据与当前后端缓存的边界，不承诺远端撤销 token、其他进程已缓存 bearer 即时失效或撤回已被远端接受的副作用；既有跨进程 credential snapshot 防止较早登录/刷新迟到后复活凭据。
+- [ ] CLI `/connector remove <name>` 仍只删除 Global 配置（包括禁用来源），同时清理该来源凭据并同步当前后端受影响缓存；同名项目配置/凭据不变。凭据清理失败须报告错误，已保存的配置仍同步；再次按名称删除可补完清理，不承诺跨文件回滚。
+- [ ] CLI 显式 `/connector reload` 重试未就绪来源并保留未变的健康连接；Add/工具过滤等保存后的配置同步不得自动复活已注销来源。
 - [x] Skill 系统可在 chat 会话中完成发现 / 披露 / 按名装载闭环：首轮 prompt 注入 `<available_skills>` 元数据，模型可按名调用 `load_skill`；用户可用 `/skill list|reload|use <name> "intent..."` 与外层 `tomcat skill list|reload` 管理技能；`disable-model-invocation` 的技能不出现在 prompt 但仍可被 `/skill use` 显式点名；对应场景见 `E2E-CLI-066` / `E2E-CLI-067` / `E2E-CLI-068`
 - [ ] 实现会话管理功能，支持创建、切换、归档、删除、搜索会话，历史持久化不丢失
+- [ ] 离线 v2 转录迁移中断后可复跑：侧车末行缺换行、JSON 截断或 UTF-8 截断不得吞掉后续新增记录；旧字节保留并报告坏行，完整侧车记录持久化后才移除转录内联显示。沿用备份、dry-run 与停止所有写者的前提，不承诺在线并发迁移。
 - [ ] CLI prompt 与实际模式一致：user 端显示 `u[Chat|<model>]>` / `u[Plan:planning|<model>]>` / `u[Plan:executing|<model>]>` / `u[Plan:pending|<model>]>` / `u[Plan:completed|<model>]>`，agent 端显示 `agent.<id>[Plan:planning]>` / `agent.<id>[Plan:executing]>` / `agent.<id>[Plan:pending]>` / `agent.<id>[Plan:completed]>`；普通聊天维持 `agent.<id>>`
 - [ ] `/plan build <plan_id/path>` 成功后立即自动进入首个 EXEC 回合，CLI 可见 `u[Plan:executing]> start building <path>`，无需用户再手动补一句触发执行
 - [ ] 非 EXEC 状态下 `ask_question` 交互为单选 + 自定义 + `skip` 当前题：非法输入只重试当前题，`c` 与 `c <文本>` 都可录入自定义答案，返回结果显式携带 `skipped: true`
@@ -178,6 +191,9 @@
 - [ ] participant 持有会话时，webview 作为观察端仍能通过 `plan.enter` / `plan.build` / `plan.pending` / `plan.complete` / `plan.exit` 与终态 `get_state` reconcile 保持 plan footer、plan 卡与后端当前真相一致
 - [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
 - [ ] webview composer 的 `+` 智能选取可将图片 / PDF 作为待发送附件，将工作区文件 / 目录作为 reference chips；发送时附件走 `prompt.params.attachments[]`，reference 作为可恢复消息段保留在 transcript
+- [ ] Host 草稿继续防抖保存，正常退出等待当时已排队/在写的草稿并报告写盘错误；某个会话失败不放弃其他会话，不承诺强杀进程时逐键持久。
+- [ ] 后端或队列已接受输入后，仅退休对应草稿版本；保存稿删除失败提示旧稿可能再出现，不把输入改成发送失败、不重发写请求，也不声称磁盘清理成功。自动清理损坏/孤立草稿失败只记录诊断，不阻止用户重新输入。
+- [ ] 历史编辑重发与模型移除保留后端原回执；后续视图/目录刷新失败单独提示，不覆盖原成功或失败原因，不自动重复已经提交的操作。
 - [ ] 编辑器 `Add Selection to Tomcat Chat` 与 Shift 拖放文件上下文都可把引用加入 composer；重复文件引用需去重，reload / 历史回放后仍保留正确的文件名与行号标签
 - [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
 
@@ -188,6 +204,8 @@
 - [ ] 同一条 assistant message 的 thinking + 多个 tool_calls 折叠为一组（ThinkingGroup）；折叠 header 显示 LLM 生成的 `summaryTitle`（如 "Reviewed 3 files"），streaming 且标题未就绪时 shimmer；折叠态不创建 tool DOM（懒渲染）
 - [ ] tool 行渲染为扁平行（ToolRow），非大卡片；read/grep 行含 FileChip 点击 `openFile`；bash 行显示 `Ran <cmd>` 可展开看输出，无"打开终端"按钮；完成态默认折叠、streaming 默认展开
 - [ ] plan executing 或 chat 有 in_progress session todo 时，live cluster 末尾显示进度行 `(current/total) title`；PlanFileCard 同步渲染 planTodos
+- [ ] `update_plan` 的完成状态与本批 todos 在同一次文件锁更新中提交；迟到的完成事件不能重新写入旧快照、覆盖另一条已成功的待办更新。不恢复自动 Code Review/Verifier 门禁。
+- [ ] 原生 `update_plan` 对路径的显式 deny/readonly 与普通文件工具一致，拒绝时不读改计划或创建锁文件；已授权外部计划仍可正常推进，未知目录复用既有权限确认，等待审批后不得改用另一份 active plan。
 - [ ] 后端 `LlmScene::Title`（默认 `utility-flash`）异步生成 turn 折叠标题与 session 标题；占位优先 + 失败静默回退规则摘要，不阻塞 UI
 - [ ] wire 事件：`TurnEnd.summaryTitle`、`session.title_updated`、`plan.todos`、`session.todos`；`get_state` 含 planTodos/sessionTodos
 - [ ] 切会话 / reload / 跨 owner 观察三条路径下，plan 卡始终按 `path` 唯一；`Ctx%`、plan footer 状态与 review/verify notice 能通过 `get_state` + `get_messages` 重建，且终态事件后 state 以当前真相为准，不得出现重复卡或 completed/pending 漂移

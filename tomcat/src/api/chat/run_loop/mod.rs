@@ -38,6 +38,9 @@ mod session_title;
 mod thinking_persist;
 mod workspace_state;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 pub(crate) use self::persist::drain_checkpoint_record_tasks;
@@ -578,7 +581,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                         message,
                         history_line,
                     } => {
-                        instruction_message = Some(message);
+                        instruction_message = Some(*message);
                         (history_line.clone(), Some(history_line))
                     }
                     command_outcome @ (ChatCommandOutcome::Handled

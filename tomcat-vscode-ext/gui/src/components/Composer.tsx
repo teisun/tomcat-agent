@@ -462,6 +462,8 @@ export interface ComposerProps {
   header?: ReactNode;
   beforeEditor?: ReactNode;
   instanceId?: string;
+  /** Bounds transient Stop feedback to the selected session without remounting the editor. */
+  sessionId?: string | null;
   initialDraft?: ComposerDraft;
   onCancelEdit?(): void;
   allowBusyInput?: boolean;
@@ -515,6 +517,7 @@ export interface ComposerProps {
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
   instanceId = "",
+  sessionId,
   header,
   beforeEditor,
   initialDraft,
@@ -577,10 +580,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
-    if (!busy) {
-      setStopping(false);
-    }
-  }, [busy]);
+    setStopping(false);
+  }, [busy, sessionId]);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -766,20 +767,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           if (hint) {
             setCapabilityHint(hint);
           }
-          // Downsample and rasterise here, before the bytes leave the webview. This is
-          // the only process in the system with a decoder that can resize during decode,
-          // so a 4000x3000 paste is turned into a 192px thumbnail without ever
-          // allocating the 48MB full-size bitmap.
-          const preparation = Promise.all(
-            attachmentFiles.map(async (file) =>
-              prepareAttachment({
+          // Keep the existing click-time handoff, but avoid decoding every image in
+          // one paste concurrently. Original bytes and attachment order are unchanged.
+          const preparation = (async () => {
+            const prepared = [];
+            for (const file of attachmentFiles) {
+              prepared.push(await prepareAttachment({
                 bytes: await file.arrayBuffer(),
                 filename: file.name || null,
                 mimeType: file.type,
                 sourcePath: extractFileSourcePath(file),
-              }),
-            ),
-          );
+              }));
+            }
+            return prepared;
+          })();
           if (latestAttachmentHandlersRef.current.onPrepareAttachments) {
             // Registration happens synchronously, before any File.arrayBuffer() resolves,
             // so a New Session click can establish a correct click-time cutoff.

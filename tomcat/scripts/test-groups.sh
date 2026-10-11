@@ -52,6 +52,7 @@ TOMCAT_INTEGRATION_FEATURE_TESTS=(
 
 # Deliberately manual: performance/browser bootstrap or additional paid providers.
 TOMCAT_INTEGRATION_MANUAL_TESTS=(
+  single_list_real_llm_long_session_e2e
   current_tail_guard_real_llm_e2e
   resume_hydration_perf
   verify_skill_browser_scripts
@@ -91,7 +92,6 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
 # run-integration-tests.sh 默认跳过本组，用户/CI 需要时按需
 # `./scripts/run-integration-tests.sh integration-real-llm` 显式触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
-  single_list_real_llm_long_session_e2e
   openai_responses_integration_tests
 
   plan_real_llm_inprocess_tests

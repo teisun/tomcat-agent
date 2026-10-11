@@ -2,6 +2,7 @@ import * as os from "node:os";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { TEST_DEFAULT_CWD_ENV, TEST_HISTORY_PAGE_GATE_FILE } from "../src/constants";
 
 export interface HostE2eFixture {
   attachmentRootDir: string;
@@ -2738,10 +2739,22 @@ function handleCommand(frame) {
         success: true,
         type: "response",
       };
-      if (Number.isInteger(requestedCursor) && requestedCursor > 0 && historyPageDelayMs > 0) {
-        setTimeout(() => send(response), historyPageDelayMs);
+      const olderPage = Number.isInteger(requestedCursor) && requestedCursor > 0;
+      const gatePath = path.join(
+        process.env[${JSON.stringify(TEST_DEFAULT_CWD_ENV)}] || process.cwd(),
+        ${JSON.stringify(TEST_HISTORY_PAGE_GATE_FILE)},
+      );
+      const sendWhenReleased = () => {
+        if (olderPage && fs.existsSync(gatePath)) {
+          setTimeout(sendWhenReleased, 20);
+        } else {
+          send(response);
+        }
+      };
+      if (olderPage && historyPageDelayMs > 0) {
+        setTimeout(sendWhenReleased, historyPageDelayMs);
       } else {
-        send(response);
+        sendWhenReleased();
       }
       break;
     }

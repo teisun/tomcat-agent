@@ -95,34 +95,93 @@ fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-fn is_transient_idatatlas_connect_failure(stderr: &str) -> bool {
-    [
-        "connection closed via error",
-        "error sending request for url (https://sub2api.idatatlas.com",
-        "retryable_llm_transport_stage",
-        "stage=Some(Connect)",
-    ]
-    .iter()
-    .any(|needle| stderr.contains(needle))
+fn assert_current_cli_reply(config_path: &Path, work_dir: &Path) -> String {
+    let mut cfg = tomcat::load_config_toml_file(config_path).expect("load isolated CLI config");
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    let session = SessionManager::new_scoped(
+        tomcat::resolve_sessions_dir(&cfg).unwrap(),
+        current_code_session_key(),
+    );
+    let messages = session
+        .get_entries(256)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            tomcat::core::session::TranscriptEntry::Message(entry) => Some(
+                serde_json::from_value::<ChatMessage>(entry.message).expect("durable chat message"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let user = messages
+        .iter()
+        .rposition(|message| message.role == tomcat::core::llm::ChatMessageRole::User)
+        .expect("the CLI must persist this turn's user input");
+    messages[user + 1..].iter().rev().find_map(|message| {
+        (message.role == tomcat::core::llm::ChatMessageRole::Assistant
+            && message.error_message.is_none() && message.error_code.is_none()
+            && message.finish_reason.as_deref() != Some("error")
+            && message.tool_calls.as_ref().is_none_or(Vec::is_empty))
+            .then(|| message.text_content()).flatten()
+            .filter(|text| !text.trim().is_empty()).map(str::to_owned)
+    }).expect("the current user input requires a successful assistant reply; a banner, old answer or error is not a reply")
 }
 
-fn maybe_skip_transient_idatatlas_connect_failure(
-    test_name: &str,
-    stdout: &str,
-    stderr: &str,
-    contract: &str,
-) -> bool {
-    if !is_transient_idatatlas_connect_failure(stderr) {
-        return false;
+#[test]
+fn cli_reply_evidence_rejects_old_missing_and_failed_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().display().to_string());
+    let config_path = dir.path().join("config.toml");
+    fs::write(&config_path, toml::to_string(&cfg).unwrap()).unwrap();
+    let key = current_code_session_key();
+    let session =
+        SessionManager::new_scoped(tomcat::resolve_sessions_dir(&cfg).unwrap(), key.clone());
+    session.create_session(&key, None).unwrap();
+    for message in [
+        ChatMessage::user("old input"),
+        ChatMessage::assistant("old valid answer"),
+        ChatMessage::user("current input"),
+    ] {
+        session
+            .append_message(serde_json::to_value(message).unwrap())
+            .unwrap();
     }
-    eprintln!(
-        "skipping {test_name}: transient idatatlas connect failure prevented validating {contract}"
+    assert!(
+        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
     );
-    if !stdout.is_empty() {
-        eprintln!("stdout: {}", trunc(stdout, 400));
-    }
-    eprintln!("stderr: {}", trunc(stderr, 1200));
-    true
+    let intent = ChatMessage::assistant_with_tool_calls(
+        Some("I'll try a tool"),
+        vec![json!({
+            "id":"unfinished-call", "type":"function", "function":{"name":"read", "arguments":"{}"}
+        })],
+    );
+    session
+        .append_message(serde_json::to_value(intent).unwrap())
+        .unwrap();
+    assert!(
+        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
+    );
+    session
+        .append_message(
+            serde_json::to_value(ChatMessage::tool("unfinished-call", "tool finished")).unwrap(),
+        )
+        .unwrap();
+    let mut failed = ChatMessage::assistant("connection closed via error");
+    failed.error_message = Some("request failed".into());
+    session
+        .append_message(serde_json::to_value(failed).unwrap())
+        .unwrap();
+    assert!(
+        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
+    );
+    session
+        .append_message(serde_json::to_value(ChatMessage::assistant("fresh reply")).unwrap())
+        .unwrap();
+    assert_eq!(
+        assert_current_cli_reply(&config_path, dir.path()),
+        "fresh reply"
+    );
 }
 
 fn current_code_session_key() -> String {
@@ -704,65 +763,6 @@ fn write_host_root_function_plugin(
         functions,
         script,
     );
-}
-
-fn assistant_tool_calls_from_transcript(transcript: &str) -> Vec<(String, Value)> {
-    let mut calls = Vec::new();
-    for line in transcript.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
-            continue;
-        };
-        for tool_call in tool_calls {
-            let Some(function) = tool_call.get("function") else {
-                continue;
-            };
-            let name = function
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let arguments = function
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("{}");
-            let parsed = serde_json::from_str::<Value>(arguments).unwrap_or_else(|err| {
-                panic!("tool arguments should be valid json: {arguments}; err: {err}");
-            });
-            calls.push((name, parsed));
-        }
-    }
-    calls
-}
-
-fn tool_results_from_transcript(transcript: &str) -> Vec<Value> {
-    let mut results = Vec::new();
-    for line in transcript.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("tool") {
-            continue;
-        }
-        let Some(content) = message.get("content").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Ok(parsed) = serde_json::from_str::<Value>(content) {
-            results.push(parsed);
-        }
-    }
-    results
 }
 
 fn seed_dangling_tool_round(session: &SessionManager, tool_call_id: &str) {
@@ -1801,8 +1801,10 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let api_key =
         real_llm_api_key("test_chat_with_valid_config_and_api_key_starts_and_produces_output");
 
+    let config_path = dir.path().join(".tomcat/tomcat.config.toml");
     let mut c = cmd();
     c.arg("chat")
+        .env("TOMCAT__CONFIG_PATH", &config_path)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("hi\n")
         .timeout(std::time::Duration::from_secs(60));
@@ -1815,6 +1817,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
 
     info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
     assert.success();
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         out_str.contains(&tr(
             "terminal.welcome",
@@ -2486,6 +2489,7 @@ fn test_user_asks_pi_a_question() {
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert.success();
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "AI 应输出非空回复，实际 stdout 为空"
@@ -2536,17 +2540,7 @@ fn test_user_asks_pi_technical_question() {
         "Assert: exit 0 + stdout 含所有权/ownership；actual: {}",
         trunc(&out, 300)
     );
-    if (!success || !has_ownership)
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_asks_pi_technical_question",
-            &out,
-            &stderr,
-            "Rust ownership explanation",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     assert!(
         has_ownership,
         "stdout 应含 '所有权' 或 'ownership'，实际: {}",
@@ -2601,17 +2595,7 @@ fn test_user_asks_pi_to_run_bash_command() {
         "Assert: exit 0 + stdout 含 hello_from_pi；actual: {}",
         trunc(&out, 300)
     );
-    if (!success || !ran_echo)
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_asks_pi_to_run_bash_command",
-            &out,
-            &stderr,
-            "bash tool execution",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     assert!(
         ran_echo,
         "stdout 应含 'hello_from_pi'（工具 execute_bash 被调用），实际: {}",
@@ -2667,23 +2651,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
         trunc(&stderr, 1200)
     );
     let stderr_lower = stderr.to_ascii_lowercase();
-    let contract_ok = stderr.contains("[tool] read")
-        && (stderr_lower.contains("no such file")
-            || stderr_lower.contains("not found")
-            || stderr_lower.contains("does not exist")
-            || stderr_lower.contains("os error 2"))
-        && !stderr.contains("✗ failed");
-    if (!success || !contract_ok)
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_sees_read_failure_reason_in_tool_line",
-            "",
-            &stderr,
-            "read failure rendering",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     assert!(
         stderr.contains("[tool] read"),
         "stderr 应出现 [tool] read 行，实际: {}",
@@ -2975,14 +2943,6 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
         if core_ok {
             return;
         }
-        if maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_background_bash_autofeed_real_llm_cli",
-            &stdout,
-            &stderr,
-            "background bash auto-feed",
-        ) {
-            return;
-        }
         failures.push(format!(
             "attempt {attempt}: success={} bg_done={:?} marker={:?} stdout={} stderr={}",
             run.success,
@@ -2997,6 +2957,171 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
         "background bash auto-feed must complete the strict tool sequence in one of three independent real-LLM attempts:\n{}",
         failures.join("\n---\n"),
     );
+}
+
+fn assert_background_wait_trace(transcript: &str, token: &str, minimum_tokenless: usize) {
+    // Walk chronological messages and pair each result with its actual call.
+    // Counting independent call/result bags cannot prove one task's wait order.
+    let mut pending: Option<(String, String)> = None;
+    let mut task_id: Option<String> = None;
+    let mut next_offset = 0;
+    let mut tokenless = 0;
+    let mut saw_token = false;
+    for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
+        let entry: Value = serde_json::from_str(line).expect("valid transcript JSONL");
+        let message = &entry["message"];
+        if message["role"] == "assistant" {
+            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                let name = call["function"]["name"].as_str().unwrap_or_default();
+                if !matches!(name, "bash" | "task_output" | "task_stop") {
+                    continue;
+                }
+                assert!(
+                    pending.is_none(),
+                    "wait for the preceding task receipt before another task operation"
+                );
+                let args: Value = serde_json::from_str(
+                    call["function"]["arguments"]
+                        .as_str()
+                        .expect("call arguments"),
+                )
+                .unwrap();
+                if name == "bash" {
+                    assert!(task_id.is_none(), "the scenario may start only one task");
+                    assert_eq!(args["run_in_background"], true);
+                } else {
+                    let task = task_id
+                        .as_deref()
+                        .expect("a successful Bash ticket must precede task control");
+                    assert_eq!(args["task_id"].as_str(), Some(task));
+                    if name == "task_output" {
+                        assert_eq!(args["block"], true);
+                        assert_eq!(args["wait_ms"], 5000);
+                        assert_eq!(
+                            args["since"].as_u64().unwrap_or(0),
+                            next_offset,
+                            "follow the previous nextOffset"
+                        );
+                    } else {
+                        assert!(saw_token, "task_stop must follow the token-bearing result");
+                    }
+                }
+                pending = Some((
+                    call["id"].as_str().expect("tool call id").into(),
+                    name.into(),
+                ));
+            }
+        } else if message["role"] == "tool" {
+            if message["tool_call_id"].as_str() != pending.as_ref().map(|(id, _)| id.as_str()) {
+                continue;
+            }
+            let (_, name) = pending.take().expect("matching outstanding call");
+            let content = message["content"].as_str().expect("tool result text");
+            if name == "task_stop" {
+                assert_eq!(
+                    content,
+                    format!("Stopped: {}", task_id.as_deref().unwrap()),
+                    "task_stop must succeed for this task"
+                );
+                return;
+            }
+            let result: Value =
+                serde_json::from_str(content).expect("successful Bash/task_output JSON");
+            if name == "bash" {
+                assert_eq!(result["state"], "running_in_background");
+                let task = result["taskId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .expect("ticket taskId");
+                assert!(result["logPath"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty()));
+                assert!(result["startedAtUnixMs"].as_u64().is_some());
+                task_id = Some(task.into());
+            } else {
+                assert_eq!(result["taskId"].as_str(), task_id.as_deref());
+                assert_eq!(result["wakeReason"], "wait_window_elapsed");
+                assert_eq!(result["finished"], false);
+                assert_eq!(result["startOffset"].as_u64(), Some(next_offset));
+                let next = result["nextOffset"].as_u64().expect("output nextOffset");
+                assert!(next >= next_offset);
+                next_offset = next;
+                if result["content"]
+                    .as_str()
+                    .expect("output content")
+                    .contains(token)
+                {
+                    assert!(tokenless >= minimum_tokenless, "need {minimum_tokenless} tokenless waits BEFORE the token, got {tokenless}");
+                    saw_token = true;
+                } else if !saw_token {
+                    tokenless += 1;
+                }
+            }
+        }
+    }
+    panic!("missing successful stop receipt after the token: task={task_id:?}, tokenless={tokenless}, saw_token={saw_token}");
+}
+
+#[test]
+fn background_wait_trace_rejects_wrong_order_task_and_stop() {
+    let wait_args = json!({"task_id":"job", "block":true, "wait_ms":5000, "since":0});
+    let empty = json!({"taskId":"job", "wakeReason":"wait_window_elapsed", "finished":false,
+        "content":"", "startOffset":0, "nextOffset":0});
+    let steps = vec![
+        json!({"name":"bash", "args":{"command":"sleep 30; echo TOKEN", "run_in_background":true},
+            "result":{"state":"running_in_background", "taskId":"job", "logPath":"/fixture/job.log", "startedAtUnixMs":1}}),
+        json!({"name":"task_output", "args":wait_args, "result":empty}),
+        json!({"name":"task_output", "args":wait_args, "result":empty}),
+        json!({"name":"task_output", "args":wait_args, "result":{"taskId":"job",
+            "wakeReason":"wait_window_elapsed", "finished":false, "content":"TOKEN", "startOffset":0, "nextOffset":5}}),
+        json!({"name":"task_stop", "args":{"task_id":"job"}, "result":"Stopped: job"}),
+    ];
+    let transcript = |steps: &[Value]| {
+        steps.iter().enumerate().flat_map(|(index, step)| {
+        let id = format!("call-{index}");
+        let content = step["result"].as_str().map(str::to_owned).unwrap_or_else(|| step["result"].to_string());
+        [json!({"type":"message", "message":{"role":"assistant", "tool_calls":[{
+            "id":id, "type":"function", "function":{"name":step["name"], "arguments":step["args"].to_string()}}]}}).to_string(),
+         json!({"type":"message", "message":{"role":"tool", "tool_call_id":id, "content":content}}).to_string()]
+    }).collect::<Vec<_>>().join("\n")
+    };
+    assert_background_wait_trace(&transcript(&steps), "TOKEN", 2);
+    assert_background_wait_trace(
+        &transcript(&[steps[0].clone(), steps[3].clone(), steps[4].clone()]),
+        "TOKEN",
+        0,
+    );
+    for problem in [
+        "wrong-task",
+        "early-token",
+        "stop-failed",
+        "early-stop",
+        "wrong-call",
+    ] {
+        let mut altered = steps.clone();
+        match problem {
+            "wrong-task" => {
+                altered[2]["args"]["task_id"] = json!("other");
+                altered[2]["result"]["taskId"] = json!("other");
+            }
+            "early-token" => altered.swap(1, 3),
+            "stop-failed" => altered[4]["result"] = json!("task_stop: unknown task"),
+            "early-stop" => altered.swap(3, 4),
+            "wrong-call" => {}
+            _ => unreachable!(),
+        }
+        let mut text = transcript(&altered);
+        if problem == "wrong-call" {
+            text = text.replace(
+                "\"tool_call_id\":\"call-2\"",
+                "\"tool_call_id\":\"unrelated\"",
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| assert_background_wait_trace(&text, "TOKEN", 2)).is_err(),
+            "the real acceptance oracle must reject {problem}"
+        );
+    }
 }
 
 /// [E2E-CLI-016D] `task_output(block=true)` wait-slice 真 LLM 黑盒回归
@@ -3051,17 +3176,6 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
     }
-    let core_ok = run.success && done_path.exists() && stdout.contains("BLOCKWAIT_OK");
-    if !core_ok
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_background_bash_blocking_waitslice_real_llm_cli",
-            &stdout,
-            &stderr,
-            "blocking wait-slice background bash",
-        )
-    {
-        return;
-    }
     assert!(
         run.success,
         "tomcat chat 应 exit 0；stderr: {}",
@@ -3091,42 +3205,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 
     // transcript 级硬断言：必须能看到真实 `task_output(block=true)` + `task_stop`。
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
-    let tool_calls = assistant_tool_calls_from_transcript(&transcript);
-    let task_output_calls: Vec<_> = tool_calls
-        .iter()
-        .filter(|(name, _)| name == "task_output")
-        .collect();
-    assert!(
-        !task_output_calls.is_empty(),
-        "transcript 中 task_output 次数应至少为 1（证明真 LLM 走了 block=true 等待路径），实际 {}；transcript: {}",
-        task_output_calls.len(),
-        trunc(&transcript, 1500)
-    );
-    for (_, args) in &task_output_calls {
-        assert!(
-            args.get("block").and_then(Value::as_bool) == Some(true)
-                && args.get("wait_ms").and_then(Value::as_u64) == Some(5000),
-            "task_output 调用参数应固定为 block=true + wait_ms=5000，实际 args={args}"
-        );
-    }
-    let tool_results = tool_results_from_transcript(&transcript);
-    assert!(
-        tool_results.iter().any(|result| {
-            result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed")
-                && result
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(|content| content.contains("TOKEN_WAITSLICE"))
-                    .unwrap_or(false)
-        }),
-        "transcript 应能看到 wait-slice 唤醒后的 token；actual: {}",
-        trunc(&transcript, 1500)
-    );
-    assert!(
-        tool_calls.iter().any(|(name, _)| name == "task_stop"),
-        "transcript 应含 task_stop（收尾后台任务），actual: {}",
-        trunc(&transcript, 1500)
-    );
+    assert_background_wait_trace(&transcript, "TOKEN_WAITSLICE", 0);
 }
 
 /// [E2E-CLI-016E] 真 LLM 多次 wait-window 重试
@@ -3181,17 +3260,6 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2600));
     }
-    let core_ok = run.success && done_path.exists() && stdout.contains("MULTI_TIMEOUT_OK");
-    if !core_ok
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_background_bash_multiple_timeout_slices_real_llm_cli",
-            &stdout,
-            &stderr,
-            "multiple timeout slices background bash",
-        )
-    {
-        return;
-    }
     assert!(
         run.success,
         "tomcat chat 应 exit 0；stderr: {}",
@@ -3220,68 +3288,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     );
 
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
-    let tool_calls = assistant_tool_calls_from_transcript(&transcript);
-    let tool_results = tool_results_from_transcript(&transcript);
-
-    let mut task_output_calls = 0usize;
-    let mut wait_window_elapsed_results = 0usize;
-    let mut tokenless_wait_window_results = 0usize;
-    let mut saw_wait_window_token = false;
-    let mut saw_task_stop = false;
-    for (name, args) in &tool_calls {
-        if name == "task_output" {
-            task_output_calls += 1;
-            assert!(
-                args.get("block").and_then(Value::as_bool) == Some(true)
-                    && args.get("wait_ms").and_then(Value::as_u64) == Some(5000),
-                "task_output 调用参数应固定为 block=true + wait_ms=5000，实际 args={args}"
-            );
-        } else if name == "task_stop" {
-            saw_task_stop = true;
-        }
-    }
-    for result in &tool_results {
-        let is_wait_window =
-            result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed");
-        let includes_token = result
-            .get("content")
-            .and_then(Value::as_str)
-            .map(|content| content.contains("TOKEN_MULTI_TIMEOUT"))
-            .unwrap_or(false);
-        if is_wait_window {
-            wait_window_elapsed_results += 1;
-        }
-        if is_wait_window && !includes_token {
-            tokenless_wait_window_results += 1;
-        }
-        if is_wait_window && includes_token {
-            saw_wait_window_token = true;
-        }
-    }
-
-    assert!(
-        task_output_calls >= 3,
-        "transcript 中 task_output 次数应至少为 3（至少两次 wait-window + 一次带 token 的 wait-window），实际 {}；transcript: {}",
-        task_output_calls,
-        trunc(&transcript, 1800)
-    );
-    assert!(
-        tokenless_wait_window_results >= 2,
-        "transcript 中 token 出现前的 wait-window 次数应至少为 2，实际 {}（总 wait-window {}）；transcript: {}",
-        tokenless_wait_window_results,
-        wait_window_elapsed_results,
-        trunc(&transcript, 1800)
-    );
-    assert!(
-        saw_wait_window_token,
-        "transcript 中应看到包含 TOKEN_MULTI_TIMEOUT 的 wait-window 结果；actual: {}",
-        trunc(&transcript, 1800)
-    );
-    assert!(
-        saw_task_stop,
-        "transcript 应含 task_stop（收尾后台任务），actual: {}",
-        trunc(&transcript, 1800)
-    );
+    assert_background_wait_trace(&transcript, "TOKEN_MULTI_TIMEOUT", 2);
 }
 
 /// [E2E-CLI-016F] midturn batch boundary auto-feed 真 LLM 黑盒回归
@@ -3336,21 +3343,6 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
     info!("[tomcat chat stdout] {}", trunc(&stdout, 2000));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2400));
-    }
-    let core_ok = run.success
-        && stdout.contains("MIDTURN_FOLLOWUP_OK")
-        && !stdout.contains("MIDTURN_MISSED_FOLLOWUP")
-        && bg_done.exists()
-        && fg_done.exists();
-    if !core_ok
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_background_bash_midturn_followup_real_llm_cli",
-            &stdout,
-            &stderr,
-            "midturn follow-up background bash",
-        )
-    {
-        return;
     }
     assert!(
         run.success,
@@ -3485,17 +3477,6 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
-    }
-    let core_ok = run.success && stdout.contains("HUNG_TIMEOUT_BOUNDED_OK");
-    if !core_ok
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli",
-            &stdout,
-            &stderr,
-            "bounded timeout snapshot background bash",
-        )
-    {
-        return;
     }
     assert!(
         run.success,
@@ -3657,20 +3638,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let success = output.status.success();
 
     let hello_path = scratch_canon.join("hello_e2e.txt");
-    let file_ok = fs::read_to_string(&hello_path)
-        .map(|content| content.contains("Hello E2E"))
-        .unwrap_or(false);
-    if (!success || !file_ok)
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_asks_pi_to_write_hello_world_bash",
-            &out,
-            &stderr,
-            "workspace file creation",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     let content = fs::read_to_string(&hello_path)
         .expect("the requested file must exist; a model claim is not write evidence");
     assert!(
@@ -4568,17 +4536,8 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         "Assert: exit 0 + stdout 含 AI 回复；actual: {}",
         trunc(&out, 300)
     );
-    if (!success || out.trim().is_empty())
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_chats_with_llm_gets_streaming_response",
-            &out,
-            &stderr,
-            "streaming chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "LLM 应输出非空流式回复，实际 stdout 为空"
@@ -4625,17 +4584,8 @@ fn test_user_receives_nonempty_llm_response() {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
-    if (!success || out.trim().is_empty())
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_receives_nonempty_llm_response",
-            &out,
-            &stderr,
-            "nonempty chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "LLM 应输出非空回复，实际 stdout 为空"
@@ -5354,20 +5304,8 @@ fn test_user_chat_resumes_last_session() {
         .timeout(std::time::Duration::from_secs(60));
     configure_idatatlas_real_llm(&mut first_round, &api_key, &work_dir);
     let first_assert = first_round.assert();
-    let first_output = first_assert.get_output();
-    let first_stdout = String::from_utf8_lossy(&first_output.stdout).to_string();
-    let first_stderr = String::from_utf8_lossy(&first_output.stderr).to_string();
-    if !first_output.status.success()
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_chat_resumes_last_session",
-            &first_stdout,
-            &first_stderr,
-            "initial chat round before --resume",
-        )
-    {
-        return;
-    }
     first_assert.success();
+    assert_current_cli_reply(&config_path, &work_dir);
 
     info!("Act: 第二轮 tomcat chat --resume，恢复会话");
     let mut c = cmd();
@@ -5384,17 +5322,8 @@ fn test_user_chat_resumes_last_session() {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
-    if (!success || out.trim().is_empty())
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_chat_resumes_last_session",
-            &out,
-            &stderr,
-            "resume chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "--resume 后 AI 应有回复，实际 stdout 为空"
@@ -7247,17 +7176,8 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         "Assert: exit 0，stdout 含 AI 回复（非空）；actual stdout 前 300 chars: {}",
         out_str.chars().take(300).collect::<String>()
     );
-    if (!success || out_str.trim().is_empty())
-        && maybe_skip_transient_idatatlas_connect_failure(
-            "test_user_chat_non_interactive_with_prompt_flag",
-            &out_str,
-            &stderr,
-            "non-interactive chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out_str.trim().is_empty(),
         "AgentLoop 应输出非空 AI 回复，实际 stdout 为空"

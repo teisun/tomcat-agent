@@ -8,9 +8,10 @@ mod common;
 
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::serve::{setup_serve_fixture, spawn_serve_child, ServeChild, ServeFixture};
+use common::serve::{setup_serve_fixture, spawn_serve_child_with_env, ServeChild, ServeFixture};
 use serde_json::{json, Value};
 use serial_test::serial;
 use tomcat::load_config_toml_file;
@@ -28,9 +29,12 @@ fn selected_model() -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
-fn configure_real_model(fixture: &ServeFixture, model_id: &str) -> String {
-    let models_toml = common::real_models_toml_path();
-    let runtime_env = common::real_runtime_env_path();
+fn configure_real_model(
+    fixture: &ServeFixture,
+    model_id: &str,
+    models_toml: &Path,
+    runtime_env: &Path,
+) -> (String, String) {
     let config_path = fixture.home_path.join(".tomcat/tomcat.config.toml");
     let mut config = load_config_toml_file(&config_path).expect("load generated test config");
     config.storage.work_dir = Some(fixture.home_path.join(".tomcat").display().to_string());
@@ -41,13 +45,9 @@ fn configure_real_model(fixture: &ServeFixture, model_id: &str) -> String {
     config.context.output_reserve_tokens = Some(8_000);
     config.skills.enabled = false;
 
-    let wire_model = common::apply_models_toml_entry_app_config(
-        &mut config,
-        &models_toml,
-        &runtime_env,
-        model_id,
-    )
-    .unwrap_or_else(|error| panic!("configure real model `{model_id}`: {error}"));
+    let wire_model =
+        common::apply_models_toml_entry_app_config(&mut config, models_toml, runtime_env, model_id)
+            .unwrap_or_else(|error| panic!("configure real model `{model_id}`: {error}"));
 
     // Keep the real endpoint, provider, capability and credential mapping verbatim, but make
     // the context small enough to exercise compaction within a bounded local test budget.
@@ -61,6 +61,11 @@ fn configure_real_model(fixture: &ServeFixture, model_id: &str) -> String {
         .and_then(|models| models.first_mut())
         .and_then(toml::Value::as_table_mut)
         .expect("one copied model entry");
+    let api_key_env = model
+        .get("api_key_env")
+        .and_then(toml::Value::as_str)
+        .expect("copied model credential mapping")
+        .to_string();
     model.insert("context_window".to_string(), toml::Value::Integer(40_000));
     model.insert(
         "context_window_options".to_string(),
@@ -77,7 +82,12 @@ fn configure_real_model(fixture: &ServeFixture, model_id: &str) -> String {
         toml::to_string_pretty(&config).expect("serialize constrained config"),
     )
     .expect("write constrained config");
-    wire_model
+    (wire_model, api_key_env)
+}
+
+fn spawn_real_agent(fixture: &ServeFixture, api_key_env: &str) -> ServeChild {
+    let key = std::env::var(api_key_env).expect("configured model credential");
+    spawn_serve_child_with_env(fixture, &[(api_key_env, key.as_str())])
 }
 
 fn initialize(child: &mut ServeChild) -> String {
@@ -170,6 +180,69 @@ fn get_messages(child: &mut ServeChild, session_id: &str) -> Vec<Value> {
         .expect("get_messages payload")
 }
 
+// The live runner must use its copied model's credential rather than the offline
+// child's dummy keys. Exercise the same configure/spawn path against local HTTP.
+#[test]
+#[serial]
+fn single_list_child_receives_selected_model_credential() {
+    use common::serve::{
+        response, spawn_scripted_openai_stream_server_with_auto_title, sse_delta, sse_done,
+        sse_finish,
+    };
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
+        sse_delta("credential-probe-complete"),
+        sse_finish("stop"),
+        sse_done(),
+    ])]);
+    let source = tempfile::tempdir().unwrap();
+    let models = source.path().join("models.toml");
+    let credentials = source.path().join("sentinel.env");
+    let key_env = format!("TOMCAT_SINGLE_LIST_{}_API_KEY", std::process::id());
+    fs::write(
+        &models,
+        format!(
+            r#"[[models]]
+id = "local-sentinel"
+model_name = "gpt-5.4"
+api = "openai"
+provider = "openai"
+api_key_env = "{key_env}"
+base_url = "{}"
+capabilities = {{ tools = true }}
+"#,
+            server.base_url
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &credentials,
+        format!("{key_env}=single-list-credential-sentinel\n"),
+    )
+    .unwrap();
+    let fixture = setup_serve_fixture(&server.base_url);
+    let (wire, selected_key) =
+        configure_real_model(&fixture, "local-sentinel", &models, &credentials);
+    assert_eq!(wire, "gpt-5.4");
+    assert_eq!(selected_key, key_env);
+    let mut child = spawn_real_agent(&fixture, &selected_key);
+    std::env::remove_var(&key_env);
+    let session_id = initialize(&mut child);
+    child.send_value(
+        &json!({"type":"prompt", "id":"credential-probe", "sessionId":session_id, "text":"Say ok"}),
+    );
+    let frames = child.recv_until(Duration::from_secs(30), |frame| {
+        frame["type"] == "agent_idle"
+    });
+    let requests = server.captured_requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.lines().any(|line| line
+                .eq_ignore_ascii_case("authorization: Bearer single-list-credential-sentinel"))),
+        "selected credential never reached the local provider: {frames:?}"
+    );
+}
+
 #[test]
 #[ignore = "manual: real 40K serve session validates the single-list refactor"]
 #[serial]
@@ -182,7 +255,12 @@ fn real_terra_long_session_exercises_single_list_handoffs() {
     common::setup_logging();
     let model_id = selected_model();
     let fixture = setup_serve_fixture("http://127.0.0.1:1");
-    let wire_model = configure_real_model(&fixture, &model_id);
+    let (wire_model, api_key_env) = configure_real_model(
+        &fixture,
+        &model_id,
+        &common::real_models_toml_path(),
+        &common::real_runtime_env_path(),
+    );
 
     for index in 1..=12 {
         let line = format!("SENTINEL-{index:02} durable file index\n");
@@ -193,7 +271,7 @@ fn real_terra_long_session_exercises_single_list_handoffs() {
         .expect("write long context fixture");
     }
 
-    let mut child = spawn_serve_child(&fixture);
+    let mut child = spawn_real_agent(&fixture, &api_key_env);
     let session_id = initialize(&mut child);
     let mut all_frames = Vec::new();
     let mut marker_seen = false;

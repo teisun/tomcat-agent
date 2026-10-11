@@ -49,7 +49,7 @@ impl RuntimeEntry {
     }
 }
 
-/// 插件 VM 实例的唯一标识：会话 + 插件。
+/// 插件 VM 的逻辑查找键；具体运行实例另有不可复用的 instance_id。
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct PluginRuntimeKey {
     pub session_id: String,
@@ -98,6 +98,11 @@ impl PluginRuntimeManager {
         })
     }
 
+    /// Inspect ownership without treating a retirement scan as VM activity.
+    pub(crate) fn peek(&self, key: &PluginRuntimeKey) -> Option<VmActorHandle> {
+        self.handles.get(key).map(|entry| entry.handle.clone())
+    }
+
     pub fn contains(&self, key: &PluginRuntimeKey) -> bool {
         self.handles.contains_key(key)
     }
@@ -113,6 +118,16 @@ impl PluginRuntimeManager {
 
     pub fn birth(&self, key: &PluginRuntimeKey) -> Option<VmBirth> {
         self.handles.get(key).and_then(|entry| entry.birth.clone())
+    }
+    /// Resolve authority only for the concrete instance, never its replacement.
+    pub(crate) fn birth_for_instance(&self, instance_id: &str) -> Option<VmBirth> {
+        let (session, rest) = instance_id.split_once('/')?;
+        let plugin = rest.rsplit('/').next()?;
+        let entry = self.handles.get(&PluginRuntimeKey::new(session, plugin))?;
+        if entry.handle.instance_id != instance_id {
+            return None;
+        }
+        entry.birth.clone()
     }
 
     pub fn session_keys(&self, session_id: &str) -> Vec<PluginRuntimeKey> {
@@ -142,27 +157,37 @@ impl PluginRuntimeManager {
     pub fn remove(&self, key: &PluginRuntimeKey) -> Option<VmActorHandle> {
         self.handles.remove(key).map(|(_, entry)| entry.handle)
     }
+    /// A delayed owner must not remove the replacement at the same logical key.
+    pub(crate) fn remove_instance(
+        &self,
+        key: &PluginRuntimeKey,
+        instance_id: &str,
+    ) -> Option<VmActorHandle> {
+        self.handles
+            .remove_if(key, |_, entry| entry.handle.instance_id == instance_id)
+            .map(|(_, entry)| entry.handle)
+    }
 
     /// 移除指定 session 下的所有 VM actor，返回被移除的 key + handle 列表。
     pub fn remove_session_entries(
         &self,
         session_id: &str,
     ) -> Vec<(PluginRuntimeKey, VmActorHandle)> {
+        // Keep a borrowed start gate until its current callers have left; replacing
+        // it now would allow two starts for the same key to bypass each other.
         self.start_gates
-            .retain(|key, _| key.session_id != session_id);
-        let keys_to_remove: Vec<PluginRuntimeKey> = self
+            .retain(|key, gate| key.session_id != session_id || Arc::strong_count(gate) > 1);
+        let candidates: Vec<_> = self
             .handles
             .iter()
             .filter(|entry| entry.key().session_id == session_id)
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), entry.handle.instance_id.clone()))
             .collect();
-
-        keys_to_remove
+        candidates
             .into_iter()
-            .filter_map(|key| {
-                self.handles
-                    .remove(&key)
-                    .map(|(_, entry)| (key, entry.handle))
+            .filter_map(|(key, instance_id)| {
+                self.remove_instance(&key, &instance_id)
+                    .map(|handle| (key, handle))
             })
             .collect()
     }
@@ -177,19 +202,17 @@ impl PluginRuntimeManager {
 
     /// 移除指定插件在所有 session 下的 VM actor，返回被移除的 key + handle。
     pub fn remove_plugin(&self, plugin_id: &str) -> Vec<(PluginRuntimeKey, VmActorHandle)> {
-        let keys_to_remove: Vec<PluginRuntimeKey> = self
+        let candidates: Vec<_> = self
             .handles
             .iter()
             .filter(|entry| entry.key().plugin_id == plugin_id)
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), entry.handle.instance_id.clone()))
             .collect();
-
-        keys_to_remove
+        candidates
             .into_iter()
-            .filter_map(|key| {
-                self.handles
-                    .remove(&key)
-                    .map(|(_, entry)| (key, entry.handle))
+            .filter_map(|(key, instance_id)| {
+                self.remove_instance(&key, &instance_id)
+                    .map(|handle| (key, handle))
             })
             .collect()
     }
@@ -197,18 +220,19 @@ impl PluginRuntimeManager {
     /// 回收空闲超过 TTL 的运行时实例。
     pub fn reap_idle(&self, ttl: Duration) -> Vec<(PluginRuntimeKey, VmActorHandle)> {
         let now = now_ms();
-        let keys_to_remove: Vec<PluginRuntimeKey> = self
+        let candidates: Vec<_> = self
             .handles
             .iter()
             .filter(|entry| entry.value().idle_for(now) >= ttl)
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), entry.handle.instance_id.clone()))
             .collect();
-
-        keys_to_remove
+        candidates
             .into_iter()
-            .filter_map(|key| {
+            .filter_map(|(key, instance_id)| {
                 self.handles
-                    .remove(&key)
+                    .remove_if(&key, |_, entry| {
+                        entry.handle.instance_id == instance_id && entry.idle_for(now) >= ttl
+                    })
                     .map(|(_, entry)| (key, entry.handle))
             })
             .collect()

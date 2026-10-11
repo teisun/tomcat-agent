@@ -9,10 +9,6 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use std::sync::{Arc, OnceLock};
-
-use dashmap::DashMap;
-use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
 use serde::{Deserialize, Serialize};
@@ -29,18 +25,6 @@ const SIDECAR_MESSAGE_TYPE: &str = "message";
 const SIDECAR_SCHEMA_VERSION: u32 = 2;
 const STABLE_REBUILD_ATTEMPTS: usize = 2;
 const REVERSE_CHUNK_BYTES: usize = 64 * 1024;
-/// `write_file_atomic_with` 使用固定临时文件名；同一进程中同一路径并发重建会争抢该文件。
-/// 侧车每个路径一把锁，锁等待发生在 `spawn_blocking` 线程而不影响 Tokio worker。
-static REBUILD_LOCKS: OnceLock<DashMap<PathBuf, Arc<Mutex<()>>>> = OnceLock::new();
-
-fn rebuild_lock(path: &Path) -> Arc<Mutex<()>> {
-    REBUILD_LOCKS
-        .get_or_init(DashMap::new)
-        .entry(path.to_path_buf())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
-}
-
 /// 用户输入侧车路径与 transcript 同目录、同 session id。
 pub(crate) fn user_message_sidecar_path(transcript_path: &Path) -> PathBuf {
     let stem = transcript_path
@@ -60,8 +44,8 @@ pub(crate) fn ensure_user_message_sidecar(transcript_path: &Path) -> Result<Path
     }
 
     let sidecar_path = user_message_sidecar_path(transcript_path);
-    let lock = rebuild_lock(&sidecar_path);
-    let _guard = lock.lock();
+    // Rebuild and deletion use this same stable lock, including across processes.
+    let _guard = crate::infra::config::lock::acquire_config_lock(&sidecar_path)?;
     for attempt in 0..STABLE_REBUILD_ATTEMPTS {
         let expected = transcript_fingerprint(transcript_path)?;
         if read_sidecar_fingerprint(&sidecar_path)?.as_ref() == Some(&expected) {

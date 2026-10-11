@@ -28,7 +28,7 @@ export function splitPathLocation(value: string): { line?: number; path: string 
   if (hashMatch) {
     return { line: Number(hashMatch[2]), path: hashMatch[1] };
   }
-  const colonMatch = trimmed.match(/^(.*):(\d+)(?::(\d+))?(?:-(\d+)(?::(\d+))?)?$/u);
+  const colonMatch = trimmed.match(/^(.*?):(\d+)(?::(\d+))?(?:-(\d+)(?::(\d+))?)?$/u);
   if (colonMatch && colonMatch[1].length > 1) {
     return { line: Number(colonMatch[2]), path: colonMatch[1] };
   }

@@ -245,7 +245,19 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
             return Err(AppError::Config(tr("install.symlinkRoot", &[])));
         }
         let source_path = std::fs::canonicalize(&request.source).map_err(AppError::Io)?;
-        self.check_source_tree(&source_path).await?;
+        // A manifest selects a package/skill/plugin directory, not just one file.
+        // Authorize that whole tree before prepare_install reads manifests or hashes it;
+        // keep the original entry point so manifest-selection precedence is unchanged.
+        let source_root = if source_metadata.is_file()
+            && matches!(
+                source_path.file_name().and_then(|name| name.to_str()),
+                Some("package.json" | "plugin.json" | "SKILL.md")
+            ) {
+            source_path.parent().expect("canonical file has a parent")
+        } else {
+            source_path.as_path()
+        };
+        self.check_source_tree(source_root).await?;
 
         let scope_root = match request.visibility {
             crate::core::package::PackageVisibility::Scope => self

@@ -10,7 +10,7 @@
 #   ./scripts/run-integration-tests.sh clippy               # 仅 cargo clippy --all-targets -- -D warnings
 #   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（cargo test --lib）
 #   ./scripts/run-integration-tests.sh doctest              # 仅文档测试（cargo test --doc）
-#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + serial 兜底空组）
+#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + 六个 serial 目标）
 #   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（nextest 4 并发，含原串行组已放开的 binary）
 #   ./scripts/run-integration-tests.sh integration-parallel -E 'test(=case_name)' # 聚焦重跑；后续参数原样传给 nextest
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（也支持 nextest 过滤参数）
@@ -42,6 +42,10 @@ export GIT_PAGER=cat
 # Script preflight and Rust helpers must use the same exported credential set.
 # Direct cargo tests may still opt into their documented dotenv discovery.
 export TOMCAT_TEST_EXPORTED_ENV_ONLY=1
+# Local HTTP fixtures must not be routed through a developer's outbound proxy.
+# Preserve existing exclusions and all proxy settings for real remote providers.
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
 
 NEXTTEST_INSTALL_HINT="cargo install cargo-nextest --locked"
 
@@ -101,6 +105,10 @@ missing_required_envs_for_real_llm() {
   openai_key_env="$(openai_responses_key_env)"
   if [ -z "${!openai_key_env}" ]; then
     printf '%s\n' "$openai_key_env"
+  fi
+  # CLI/LLM/plan delivery fixtures deliberately remain on IDATATLAS.
+  if [ "$openai_key_env" != "IDATATLAS_OPENAI_API_KEY" ] && [ -z "${IDATATLAS_OPENAI_API_KEY:-}" ]; then
+    printf '%s\n' "IDATATLAS_OPENAI_API_KEY"
   fi
 }
 
@@ -196,7 +204,7 @@ run_integration_real_llm() {
     return 2
   fi
   ensure_nextest
-  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；需 ${openai_key_env}）"
+  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；target key=${openai_key_env}，delivery key=IDATATLAS_OPENAI_API_KEY）"
   PI_LIVE_OPENAI_RESPONSES=1 cargo nextest run --profile real-llm --no-fail-fast
   local status=$?
   log_phase "结束 integration-real-llm"

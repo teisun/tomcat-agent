@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   fitWithin,
+  makeThumbnail,
+  rasterizeSvgToPng,
   prepareAttachment,
   svgSourceIsUninformative,
   svgWithExplicitSize,
@@ -59,11 +61,17 @@ describe("svgWithExplicitSize", () => {
     expect(result.source).toContain('width="512"');
   });
 
-  it("fills in only the missing dimension", () => {
-    const result = svgWithExplicitSize('<svg width="80" viewBox="0 0 80 40"><rect/></svg>');
+  it.each([
+    '<svg width="80" viewBox="0 0 80 40"><rect/></svg>',
+    '<svg height="40" viewBox="0 0 80 40"><rect/></svg>',
+  ])("fills in only the missing dimension without duplicating XML attributes: %s", (source) => {
+    const result = svgWithExplicitSize(source);
     expect(result.width).toBe(80);
     expect(result.height).toBe(40);
-    expect(result.source).toContain('height="40"');
+    const document = new DOMParser().parseFromString(result.source, "image/svg+xml");
+    expect(document.querySelector("parsererror")).toBeNull();
+    expect(document.documentElement.getAttribute("width")).toBe("80");
+    expect(document.documentElement.getAttribute("height")).toBe("40");
   });
 
   it("does not choke on a real design-tool export", () => {
@@ -216,29 +224,44 @@ describe("prepareAttachment degradation", () => {
     expect(prepared.warnings.join(" ")).toContain("thumbnail unavailable");
   });
 
-  it("asks the decoder to resize, with both dimensions", async () => {
-    // Guards the memory-critical detail: the resize must be requested *of the decoder*
-    // and must carry both dimensions, so a 4000x3000 source never becomes a full-size
-    // bitmap and never gets squashed.
+  it.each([
+    { mimeType: "image/png", expected: [192, 144] },
+    { mimeType: "image/svg+xml", expected: [2048, 1536] },
+  ])("bounds application-owned canvases without a full-size bitmap probe: $mimeType", async ({ mimeType, expected }) => {
     const close = vi.fn();
-    const createImageBitmap = vi
-      .fn()
-      .mockResolvedValueOnce({ close, height: 3000, width: 4000 })
-      .mockResolvedValueOnce({ close, height: 144, width: 192 });
-    vi.stubGlobal("createImageBitmap", createImageBitmap);
-
-    await prepareAttachment({
-      bytes: bytesOf("pretend png"),
-      filename: "big.png",
-      mimeType: "image/png",
+    const bitmap = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
+      close,
+      height: options?.resizeHeight ?? 3000,
+      width: options?.resizeWidth ?? 4000,
+    }));
+    vi.stubGlobal("createImageBitmap", bitmap);
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:test"),
+      revokeObjectURL: vi.fn(),
     });
-
-    expect(createImageBitmap).toHaveBeenCalledTimes(2);
-    expect(createImageBitmap.mock.calls[1]?.[1]).toEqual({
-      resizeHeight: 144,
-      resizeQuality: "high",
-      resizeWidth: 192,
+    vi.stubGlobal("Image", class {
+      naturalWidth = 4000;
+      naturalHeight = 3000;
+      onload: (() => void) | null = null;
+      set src(_value: string) { queueMicrotask(() => this.onload?.()); }
     });
-    vi.unstubAllGlobals();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+    const dimensions: number[][] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function (this: HTMLCanvasElement, callback: BlobCallback) {
+      dimensions.push([this.width, this.height]);
+      callback(new Blob(["png"], { type: "image/png" }));
+    });
+    try {
+      const bytes = bytesOf('<svg width="4000" height="3000"/>');
+      const result = mimeType === "image/svg+xml"
+        ? await rasterizeSvgToPng(bytes)
+        : await makeThumbnail(bytes, mimeType);
+      expect(result.type).toBe("image/png");
+      expect(dimensions).toEqual([expected]);
+      expect(bitmap).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
   });
 });

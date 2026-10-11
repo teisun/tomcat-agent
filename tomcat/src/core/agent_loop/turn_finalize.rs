@@ -134,7 +134,12 @@ pub(super) async fn finalize_turn_after_text_with_usage(
 ) -> Result<TurnOutcome, crate::infra::error::AppError> {
     let has_error_code = error_code.is_some();
     if let Some(ref mut ctx_state) = agent.context_state {
-        ctx_state.on_assistant_message_appended(content_buf.len());
+        if usage.is_some() {
+            ctx_state.on_assistant_message_appended(content_buf.len());
+        } else {
+            // An earlier turn's usage does not include this response.
+            ctx_state.on_message_appended(content_buf.len());
+        }
     }
     let forced_id = agent.take_or_mint_pending_assistant_entry_id();
     let assistant_message_id = agent.push_message_with_forced_id(

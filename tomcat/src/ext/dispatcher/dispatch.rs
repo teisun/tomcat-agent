@@ -108,6 +108,35 @@ impl HostApiDispatcher {
         ids.into_iter().collect()
     }
 
+    fn retired_instance_response(
+        &self,
+        instance_id: &str,
+        request: &HostRequest,
+    ) -> Option<HostResponse> {
+        // Logging carries no plugin capability; keep late shutdown diagnostics.
+        if matches!(
+            (request.module.as_str(), request.method.as_str()),
+            ("log" | "agent", "log") | ("agent", "info" | "warn" | "error" | "debug")
+        ) {
+            return None;
+        }
+        // Catalog retirement may leave another session's old VM alive. Reject
+        // only a removed/replaced runtime, not a still-live older fingerprint.
+        let retired = instance_id.contains('/')
+            && self.plugin_manager.as_ref().is_some_and(|weak| {
+                weak.upgrade()
+                    .is_none_or(|manager| manager.instance_manifest(instance_id).is_none())
+            });
+        retired.then(|| {
+            if request.module == "__session" && request.method == "waitForEvent" {
+                // Retirement is a normal loop exit, just like a closed event channel.
+                HostResponse::ok(serde_json::json!({"type":"__shutdown"}))
+            } else {
+                HostResponse::err("plugin runtime is unavailable: retired instance")
+            }
+        })
+    }
+
     /// 同步分发入口：
     /// - `request.call_id` 非空且 module != "__async" → 异步提交（spawn Tokio 任务，立即返回 `{pending: true}`）
     /// - 否则 → 同步路径（block_on dispatch_async）
@@ -116,6 +145,10 @@ impl HostApiDispatcher {
         instance_id: &str,
         request: HostRequest,
     ) -> Result<HostResponse, AppError> {
+        if let Some(response) = self.retired_instance_response(instance_id, &request) {
+            return Ok(response);
+        }
+
         if request.module == "__session" && request.method == "waitForEvent" {
             return self.do_wait_for_event(instance_id, &request.params);
         }
@@ -366,6 +399,11 @@ impl HostApiDispatcher {
         instance_id: &str,
         request: HostRequest,
     ) -> Result<HostResponse, AppError> {
+        // A submitted task can start after its originating VM has been removed.
+        if let Some(response) = self.retired_instance_response(instance_id, &request) {
+            return Ok(response);
+        }
+
         let module = request.module.clone();
         let method = request.method.clone();
         let params = request.params.clone();

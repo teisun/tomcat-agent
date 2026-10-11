@@ -21,7 +21,7 @@ pub(super) fn message(
 fn invoke(ctx: &ChatContext, id: &str, intent: &str, history_line: String) -> ChatCommandOutcome {
     match message(ctx, id, InstructionKind::Command, intent) {
         Ok(message) => ChatCommandOutcome::UserMessage {
-            message,
+            message: Box::new(message),
             history_line,
         },
         Err(error) => {

@@ -1,8 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { highlightToHtml } from "./richRenderRuntime";
+vi.mock("mermaid", () => { throw new Error("mermaid unavailable"); });
+
+import { getMermaid, highlightToHtml, warmRichRenderModules } from "./richRenderRuntime";
 
 describe("highlightToHtml", () => {
+  it("keeps optional warmup failures local while on-demand failures remain observable", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(warmRichRenderModules()).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("warmup: FAIL"));
+      await expect(getMermaid()).rejects.toThrow();
+      expect(highlightToHtml("const answer = 42;", "typescript").language).toBe("typescript");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("highlights registered languages synchronously", () => {
     const result = highlightToHtml("const answer = 42;\n", "typescript");
 

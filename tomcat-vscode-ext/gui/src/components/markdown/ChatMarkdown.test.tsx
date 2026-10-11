@@ -241,6 +241,43 @@ describe("ChatMarkdown", () => {
     expect(onOpenLink).toHaveBeenCalledWith("https://example.com/docs");
   });
 
+  it("resolves document references and updates a completed block when a definition arrives or changes", () => {
+    const onOpenFile = vi.fn();
+    const onOpenLink = vi.fn();
+    const prefix = "See [the guide][docs].\n\n```ts\nconst stable = 1;\n```\n\n";
+    const view = render(<ChatMarkdown markdown={prefix} onOpenFile={onOpenFile} onOpenLink={onOpenLink} />);
+    expect(screen.queryByRole("link", { name: "the guide" })).toBeNull();
+    const card = screen.getByTestId("assistant-code-card");
+
+    view.rerender(<ChatMarkdown markdown={`${prefix}[docs]: https://example.com/first \"Guide\"`} onOpenFile={onOpenFile} onOpenLink={onOpenLink} />);
+    const link = screen.getByRole("link", { name: "the guide" });
+    expect(link.getAttribute("href")).toBe("https://example.com/first");
+    expect(link.getAttribute("title")).toBe("Guide");
+    fireEvent.click(link);
+    expect(onOpenLink).toHaveBeenLastCalledWith("https://example.com/first");
+    expect(screen.getByTestId("assistant-code-card")).toBe(card);
+
+    view.rerender(<ChatMarkdown markdown={`${prefix}[docs]: https://example.com/second`} onOpenFile={onOpenFile} onOpenLink={onOpenLink} />);
+    fireEvent.click(screen.getByRole("link", { name: "the guide" }));
+    expect(onOpenLink).toHaveBeenLastCalledWith("https://example.com/second");
+    expect(screen.getByTestId("assistant-code-card")).toBe(card);
+
+    view.rerender(<ChatMarkdown markdown={`${prefix}[docs]: javascript:alert(1)`} onOpenFile={onOpenFile} onOpenLink={onOpenLink} />);
+    expect(screen.getByTestId("chat-markdown").querySelector('a[href^="javascript:"]')).toBeNull();
+  });
+
+  it("keeps reference images on the existing local-media boundary", () => {
+    render(<ChatMarkdown
+      mediaRoots={ROOTS}
+      markdown={"![local][pic]\n\n![remote][net]\n\n[pic]: /workspace/image.png\n[net]: https://example.com/image.png"}
+      onOpenFile={vi.fn()}
+    />);
+    const images = screen.getByTestId("chat-markdown").querySelectorAll("img");
+    expect(images).toHaveLength(1);
+    expect(images[0].getAttribute("src")).toBe("vscode-webview://workspace/image.png");
+    expect(screen.getByRole("link", { name: "https://example.com/image.png" }).getAttribute("href")).toBe("https://example.com/image.png");
+  });
+
   it("keeps non-path inline code as plain code", () => {
     render(
       <ChatMarkdown

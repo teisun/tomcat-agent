@@ -54,7 +54,7 @@ def main() -> None:
     end = text.find("\n---\n", 4)
     if end < 0:
         fail("SKILL.md frontmatter is not closed by a complete delimiter line")
-    header_bytes = raw[: end + 5]
+    header_bytes = text[: end + 5].encode("utf-8")
     if len(header_bytes) > HEADER_LIMIT:
         fail(f"SKILL.md frontmatter exceeds {HEADER_LIMIT} UTF-8 bytes")
     try:
@@ -75,8 +75,8 @@ def main() -> None:
         fail(f"directory name {root.name!r} must match frontmatter name {name!r}")
     if not isinstance(description, str) or not description.strip() or "\n" in description:
         fail("description must be a non-empty single-line YAML string")
-    if len(description) > DESCRIPTION_LIMIT:
-        fail(f"description exceeds {DESCRIPTION_LIMIT} characters")
+    if len(description.encode("utf-8")) > DESCRIPTION_LIMIT:
+        fail(f"description exceeds {DESCRIPTION_LIMIT} UTF-8 bytes")
     license_value = header.get("license")
     if license_value is not None and not isinstance(license_value, str):
         fail("license must be a YAML string when provided")

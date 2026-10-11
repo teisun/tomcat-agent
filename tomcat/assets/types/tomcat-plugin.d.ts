@@ -7,7 +7,8 @@ type TomcatJsonValue =
   | number
   | string
   | TomcatJsonValue[]
-  | { [key: string]: TomcatJsonValue };
+  // The bridge omits undefined object properties when serializing JSON.
+  | { [key: string]: TomcatJsonValue | undefined };
 
 type TomcatRole = "system" | "user" | "assistant" | "tool" | string;
 
@@ -178,7 +179,11 @@ interface TomcatPluginAPI {
   emit(eventName: string, payload?: TomcatJsonValue): unknown;
   once(eventName: string, handler: (data: TomcatJsonValue, ctx: TomcatPluginContext) => void): number;
 
-  exec(command: string, args?: string[], options?: { cwd?: string; foregroundWaitMs?: number }): Promise<{
+  /** Execute a complete shell command (Unix sh -c / Windows cmd /C).
+   * args is only an empty placeholder for the existing third-argument options;
+   * separate argv is unsupported and rejected before submitting the command.
+   */
+  exec(command: string, args?: [], options?: { cwd?: string; foregroundWaitMs?: number }): Promise<{
     stdout?: string;
     stderr?: string;
     exitCode?: number;

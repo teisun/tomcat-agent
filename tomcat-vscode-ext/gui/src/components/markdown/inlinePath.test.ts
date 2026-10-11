@@ -28,6 +28,13 @@ describe("inlinePath helpers", () => {
     });
   });
 
+  it.each(["src/app.ts", "C:\\work\\app.ts"])("separates line and column from %s", (path) => {
+    for (const suffix of [":42:7", ":42:7-50:9"]) {
+      const originalText = `${path}${suffix}`;
+      expect(splitInlinePathLocation(originalText)).toEqual({ path, line: 42, column: 7, originalText });
+    }
+  });
+
   it("parses hash-style line suffixes", () => {
     expect(splitInlinePathLocation("a.rs#L9")).toEqual({
       line: 9,

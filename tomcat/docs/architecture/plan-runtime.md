@@ -68,6 +68,10 @@ update_plan
 打开，状态回到 `pending`。`park_executing_plan` 只把 lifecycle 降为 `pending`，不会
 篡改任意 todo 状态。
 
+无参数 `/plan build` 续跑当前绑定的 `planning/pending` 文件：使用绑定中已有的真实路径，
+不把路径降成 ID 后重新去默认目录查找。工作区里的计划与默认目录的同 ID 文件不能串改；
+显式 ID/路径入口及 `executing/completed` 拒绝规则保持不变。
+
 ## 最终验收
 
 final acceptance 是提示词驱动的：

@@ -378,6 +378,8 @@ fn read_sidecar_raw(transcript_path: &Path) -> Result<Option<ResumeIndex>, AppEr
 
 fn write_sidecar(transcript_path: &Path, index: &ResumeIndex) -> Result<(), AppError> {
     let path = resume_index_path(transcript_path);
+    let _guard = crate::infra::config::lock::acquire_config_lock(&path)?;
+    fs::metadata(transcript_path).map_err(AppError::Io)?;
     let body = serde_json::to_vec_pretty(index)?;
     write_file_atomic(&path, &body)
 }
@@ -662,6 +664,8 @@ pub(crate) fn refresh_resume_index_after_nonstructural_rewrite(
 }
 
 pub(crate) fn remove_resume_index(transcript_path: &Path) -> Result<(), AppError> {
+    let _guard =
+        crate::infra::config::lock::acquire_config_lock(&resume_index_path(transcript_path))?;
     match fs::remove_file(resume_index_path(transcript_path)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

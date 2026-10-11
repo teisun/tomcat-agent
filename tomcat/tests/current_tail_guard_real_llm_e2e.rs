@@ -201,10 +201,7 @@ async fn real_terra_agent_loop_applies_preheat_during_build_task() {
         &model_id,
     ) {
         Ok(wire_model) => wire_model,
-        Err(error) => {
-            eprintln!("skipping real current-tail E2E: {error}");
-            return;
-        }
+        Err(error) => panic!("real current-tail E2E requires its model catalog: {error}"),
     };
     app_config.llm.default_model = model_id.clone();
     app_config.context.compaction_model = model_id.clone();

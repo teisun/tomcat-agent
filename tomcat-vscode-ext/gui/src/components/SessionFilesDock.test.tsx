@@ -32,6 +32,20 @@ it("Keep is disabled when busy or empty, but does not require restorable paths",
   view.rerender(<SessionFilesDock sessionId="s" files={{sourceTurnId:"u",files:[],error:"failed"}} busy={false} onIntent={onIntent} />);
   expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", true);
 });
+it("Enter on Cancel never dispatches Undo", () => {
+  const onIntent = vi.fn();
+  render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
+  fireEvent.click(screen.getByTestId("undo-all-files"));
+  const cancel = screen.getByTestId("undo-files-cancel");
+  cancel.focus();
+  expect(fireEvent.keyDown(cancel, { key: "Enter" })).toBe(true);
+  expect(onIntent).not.toHaveBeenCalled();
+  // jsdom does not synthesize native keyboard clicks; the browser harness does.
+  fireEvent.click(cancel);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(onIntent).not.toHaveBeenCalled();
+});
+
 it("collapsed Undo All cancels without mutation and confirms only eligible exact paths", () => {
   const onIntent = vi.fn(); render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
   fireEvent.click(screen.getByRole("button", { name: "Undo All" })); expect(screen.getByRole("button", { name: "Expand files" })).toBeTruthy();

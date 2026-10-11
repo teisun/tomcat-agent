@@ -689,11 +689,10 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 None,
                 true,
             );
-            eprintln!(
-                "skipping inprocess_full_plan_path_with_real_llm: idatatlas connect failures persisted after {} attempts during planning",
+            panic!(
+                "real-llm environment failure: idatatlas connect failures persisted after {} attempts during planning; acceptance did not run to completion",
                 TRANSIENT_LLM_MAX_ATTEMPTS
             );
-            return;
         }
         match &outcome {
             AgentRunOutcome::Completed(_) => {}
@@ -773,12 +772,11 @@ async fn inprocess_full_plan_path_with_real_llm() {
                     None,
                     true,
                 );
-                eprintln!(
-                "skipping inprocess_full_plan_path_with_real_llm: idatatlas connect failures persisted after {} attempts during exec round {}",
+                panic!(
+                    "real-llm environment failure: idatatlas connect failures persisted after {} attempts during exec round {}; acceptance did not run to completion",
                     TRANSIENT_LLM_MAX_ATTEMPTS,
                     exec_rounds
                 );
-                return;
             }
             if matches!(outcome, AgentRunOutcome::Failed(_)) {
                 dump_diagnostic(

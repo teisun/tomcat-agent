@@ -1284,10 +1284,16 @@ describe("SettingsApp", () => {
     expect(
       within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
     ).toBe("64000");
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: "Description" }),
-      { target: { value: "Edited local profile" } },
-    );
+    const description = within(dialog).getByRole("textbox", { name: translate("en", "models.descriptionField") }) as HTMLInputElement;
+    fireEvent.change(description, { target: { value: "" } });
+    // Append each character to the controlled value, as real typing does. Whole-value
+    // fireEvent.change would miss a trim that eats the space before the next word.
+    let typed = "";
+    for (const character of "Edited local profile ") {
+      typed += character;
+      fireEvent.change(description, { target: { value: description.value + character } });
+      expect(description.value).toBe(typed);
+    }
     fireEvent.change(
       within(dialog).getByRole("textbox", {
         name: /supported effort levels/i,

@@ -4,12 +4,12 @@
 
 ## 1. 目标与原则
 
-`bash` 同时解决四件事：命令先经过权限与 AST 检查、所有模式共用一次 spawn、输出实时可见且有界、长命令不会占住一次工具调用。
+`bash` 同时解决四件事：命令先经过权限/确认/审计、所有模式共用一次 spawn、输出实时可见且有界、长命令不会占住一次工具调用。AST 检查是可选接线，当前生产 `ChatContext` 明确禁用，不能算作始终存在的安全保障。
 
 ```text
 LLM 调用 bash
     │
-    ├─ permission gate + BashAstChecker
+    ├─ permission gate（AST hook 当前生产禁用）
     │
     └─ unified spawn（新进程组）
           │
@@ -56,7 +56,7 @@ bash -> { task_id, log_path }
 前台观察和显式后台都经过同一 spawn 基础设施：
 
 1. 解析并校验 `cwd`；
-2. `BashAstChecker` 检查复合命令与 deny 规则；
+2. 可选 `BashAstChecker` 接线（仅显式启用才检查；当前生产禁用）；
 3. permission gate / confirmation / audit；
 4. 创建独立 process group 并 spawn；
 5. stdout、stderr reader 持续泵流；
@@ -123,7 +123,9 @@ AppConfig.tools.bash
 
 ## 6. AST、权限与审计
 
-`BashAstChecker` 在 permission gate 之前执行：顶层 `;`、`&`、换行、`&&`、`||`、`|` 会按段检查；引号、命令替换和子 shell 内分隔符不会误切。deny 命中与不支持的 heredoc / 流程控制会在 spawn 前拒绝。AST 不替代现有 permission gate；未命中 allow/deny 的命令继续走 gate、confirmation 与审计。
+当前 `src/api/chat/context.rs::from_config_with_mode_and_overrides` 用 `BashAstChecker::new(false, vec![], vec![])` 装配 primitive 与后台 registry。组件仍保留，但默认产品链路不执行其命令片段检查；不能把组件级测试等同于生产 AST 保护，也不能声称默认拒绝所有 heredoc / 流程控制。
+
+实际生产边界仍由 permission gate 的命令/路径规则、confirmation 和 audit 承担。显式启用 AST 的调用方可额外使用该组件；它不替代原权限流程，也不把 shell 变成文件系统只读沙箱。本次仅纠正文档，不恢复旧 AST 启用策略。
 
 成功、拒绝、spawn 失败和 stop 都保留审计信息；后台任务额外携带 `task_id`，便于把命令、日志与终态关联起来。
 

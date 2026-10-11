@@ -184,20 +184,13 @@ pub(super) async fn run_reasoning_loop(
         if agent.cancel_token.is_cancelled() {
             return Err(agent.make_aborted(messages, final_text));
         }
-        // Compaction is cancellable; unlike a tool disk commit it has not begun a
-        // native mutation that must be joined before a rewind can touch files.
-        let reduced = {
-            let cancel = agent.cancel_token.clone();
-            tokio::select! {
-                biased;
-                result = current_tail_guard::maybe_reduce_before_next_llm(agent, messages) => Some(result),
-                _ = cancel.cancelled() => None,
-            }
-        };
-        match reduced {
-            Some(result) => result.map_err(LoopError::Fatal)?,
-            None => return Err(agent.make_aborted(messages, final_text)),
+        // The collapse helper cancels only summary generation. Once publication
+        // starts, join it to avoid cancellation between disk and memory updates.
+        let reduced = current_tail_guard::maybe_reduce_before_next_llm(agent, messages).await;
+        if agent.cancel_token.is_cancelled() {
+            return Err(agent.make_aborted(messages, final_text));
         }
+        reduced.map_err(LoopError::Fatal)?;
         validate_request_shape(messages)?;
 
         if let Some(ref mut ctx_state) = agent.context_state {

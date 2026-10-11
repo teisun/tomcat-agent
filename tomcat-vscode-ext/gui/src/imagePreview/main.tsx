@@ -3,6 +3,7 @@ import { LocaleProvider } from "../i18n/LocaleProvider";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@vscode/codicons/dist/codicon.css";
+import "./preview.css";
 
 import { PreviewPanel } from "./PreviewPanel";
 

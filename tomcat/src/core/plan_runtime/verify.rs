@@ -29,8 +29,16 @@ use crate::infra::event_bus::EventBus;
 pub const VERIFIER_MAX_TURNS: u32 = 64;
 
 /// verifier 子 Agent allowed tools 硬白名单。
-pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] =
-    &["read", "search_files", "list_dir", "bash", "web_fetch"];
+pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] = &[
+    "read",
+    "search_files",
+    "list_dir",
+    "bash",
+    "task_output",
+    "task_list",
+    "task_stop",
+    "web_fetch",
+];
 
 pub(crate) fn verifier_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
     let mut tools = VERIFIER_ALLOWED_TOOLS.to_vec();

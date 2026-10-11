@@ -288,11 +288,19 @@ async fn read_one(
         if let Ok(meta) = std::fs::metadata(&resolved) {
             if !meta.is_dir() {
                 let hash_input: Vec<u8> = match result {
-                    // `Text::content` 是准备给模型显示的文本，可能带行号等展示格式；
-                    // mutation guard 的 content_hash 必须是原始文件字节，才能在 mtime
-                    // 变动时可靠判断内容是否仍相同。
-                    crate::core::tools::primitive::ReadResult::Text(t) => {
+                    // Only complete, unwindowed reads can use a raw-file hash for the
+                    // mutation guard's touch-only fallback. A partial view hashes its
+                    // returned text; never load the unread remainder just for diagnostics.
+                    crate::core::tools::primitive::ReadResult::Text(t)
+                        if offset.is_none()
+                            && limit.is_none()
+                            && t.start_line == 1
+                            && !t.truncated =>
+                    {
                         std::fs::read(&resolved).unwrap_or_else(|_| t.content.as_bytes().to_vec())
+                    }
+                    crate::core::tools::primitive::ReadResult::Text(t) => {
+                        t.content.as_bytes().to_vec()
                     }
                     crate::core::tools::primitive::ReadResult::Image(b)
                     | crate::core::tools::primitive::ReadResult::Pdf(b) => {

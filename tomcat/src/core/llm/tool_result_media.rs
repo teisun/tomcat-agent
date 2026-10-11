@@ -54,25 +54,3 @@ pub(crate) fn tool_result_text(message: &ChatMessage) -> String {
         text
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_result_media_defaults_follow_verified_api_contracts() {
-        assert_eq!(
-            tool_result_media_mode("anthropic-messages"),
-            ToolResultMediaMode::Native
-        );
-        assert_eq!(
-            tool_result_media_mode("openai-responses"),
-            ToolResultMediaMode::Native
-        );
-        assert_eq!(tool_result_media_mode("openai"), ToolResultMediaMode::Split);
-        assert_eq!(
-            tool_result_media_mode("unknown"),
-            ToolResultMediaMode::Split
-        );
-    }
-}

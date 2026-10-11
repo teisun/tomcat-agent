@@ -1890,9 +1890,7 @@ export function SettingsApp({
                               onChange={(event) =>
                                 setForm((current) => ({
                                   ...current,
-                                  description: normalizeOptionalText(
-                                    event.target.value,
-                                  ),
+                                  description: event.target.value,
                                 }))
                               }
                               placeholder={t("models.descriptionOptional")}

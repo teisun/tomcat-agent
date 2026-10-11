@@ -541,6 +541,7 @@ function displayRecoveryError(error: unknown): string {
 function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
   return {
     blobSha: attachment.blobSha,
+    providerSha: attachment.providerSha,
     bytes: attachment.bytes ?? 0,
     filename: attachment.filename,
     hasThumb: attachment.hasThumb,
@@ -858,6 +859,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         void this.broadcastFullState({ force: true });
       }
     });
+  }
+
+  /** Await pending draft persistence after synchronous disposal stops new UI input. */
+  flushDrafts(): Promise<void> {
+    return this.draftStore.flush();
   }
 
   async waitUntilReady(timeoutMs = 15_000): Promise<void> {
@@ -1376,6 +1382,20 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
+  /** Retire accepted input; return current memory emptiness, not a disk-success receipt. */
+  private async retireSubmittedDraft(sessionId: string, revision: number): Promise<boolean> {
+    try {
+      await this.draftStore.discardIfRevision(sessionId, revision);
+    } catch (error) {
+      console.warn("Tomcat could not clear an accepted draft", error);
+      void vscode.window.showWarningMessage(t("host.draftCleanupFailed", {
+        detail: error instanceof Error ? error.message : String(error),
+      }));
+    }
+    // A newer edit can arrive during disk IO and must retain its own attachment projection.
+    return isDraftEmpty(this.draftStore.peek(sessionId));
+  }
+
   private async submitQueuedComposer(sessionId: string, intent: Extract<WebviewIntent, { type: "prompt" | "steer" }>): Promise<void> {
     const claimed = await this.draftCoordinator.run(sessionId, async () => {
       const draft = this.draftStore.peek(sessionId);
@@ -1391,7 +1411,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const content: QueueContent = { userMessageId: intent.data.userMessageId ?? randomUUID(), text: intent.data.text,
         segments: intent.data.segments ?? [], attachments };
       const submission = this.messageQueue.submit(sessionId, content);
-      if (submission.queued && revision !== null && await this.draftStore.discardIfRevision(sessionId, revision)) {
+      if (submission.queued && revision !== null && await this.retireSubmittedDraft(sessionId, revision)) {
         this.stateStore.clearPendingAttachments(sessionId);
       }
       return { ...submission, revision, userMessageId: content.userMessageId };
@@ -1400,7 +1420,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const accepted = await claimed.completion;
     if (!claimed.queued && accepted && claimed.revision !== null) {
       await this.draftCoordinator.run(sessionId, async () => {
-        if (await this.draftStore.discardIfRevision(sessionId, claimed.revision!)) this.stateStore.clearPendingAttachments(sessionId);
+        if (await this.retireSubmittedDraft(sessionId, claimed.revision!)) this.stateStore.clearPendingAttachments(sessionId);
       });
       await this.syncImagePreviewPanel(sessionId);
     }
@@ -1437,7 +1457,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       : null;
 
     let submittedRevision: number | null = null;
-    // The prompt payload is the authoritative compose snapshot. Persist it before waiting for
+    // The prompt payload is the authoritative compose snapshot. Capture it before waiting for
     // the acknowledgement: on a failed request it remains available, and on success we can
     // prove whether anything changed after submission. Retried history is deliberately not
     // written over a newer compose box.
@@ -1500,7 +1520,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (
           submitKind === "prompt"
           && submittedRevision !== null
-          && await this.draftStore.discardIfRevision(sessionId, submittedRevision)
+          && await this.retireSubmittedDraft(sessionId, submittedRevision)
         ) {
           // The acknowledgement clears only the exact draft revision that it sent.
           // Returning to identical text later is still a new user edit and must remain.
@@ -2296,17 +2316,25 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           const committed = !response.success && response.payload !== null && typeof response.payload === "object"
             && "committed" in response.payload && response.payload.committed === true;
           if (intent.type === "rewindAndResend" && (response.success || response.error === "rewind_target_stale" || committed)) {
-            await this.refreshSessionHistory(sessionId, { strict: true, replace: obsoleteIds });
-            await this.refreshSessionState(sessionId, { trustBusy: true });
-            await this.refreshCheckpoints(sessionId);
-            if (committed) {
-              this.stateStore.appendMessage(
-                sessionId,
-                "error",
-                t("host.rewindCommitted", { detail: rewindErrorDetail(response.error, response.payload) ?? response.error ?? t("error.unknown") }),
-              );
+            try {
+              await this.refreshSessionHistory(sessionId, { strict: true, replace: obsoleteIds });
+              await this.refreshSessionState(sessionId, { trustBusy: true });
+              await this.refreshCheckpoints(sessionId);
+              if (committed) {
+                this.stateStore.appendMessage(
+                  sessionId,
+                  "error",
+                  t("host.rewindCommitted", { detail: rewindErrorDetail(response.error, response.payload) ?? response.error ?? t("error.unknown") }),
+                );
+              }
+              await this.postState();
+            } catch (error) {
+              // A failed read cannot replace the already received mutation result.
+              console.warn("Tomcat could not refresh the conversation after rewind", error);
+              void vscode.window.showWarningMessage(t("host.historyRefreshFailed", {
+                detail: error instanceof Error ? error.message : String(error),
+              }));
             }
-            await this.postState();
           }
           const preview = intent.type === "previewRewind" && isPreviewRewindResponse(response.payload) ? response.payload : undefined;
           await this.postEvent({
@@ -2948,14 +2976,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.postStateFrame();
       return;
     }
-    for (const sessionId of plan.sessionIds) {
-      await this.postSessionView(sessionId);
-    }
+    await this.postSessionViews([
+      ...plan.sessionIds,
+      ...(this.sessionPatchFramesEnabled ? [] : plan.sessionPatches.map(patch => patch.sessionId)),
+    ]);
+    if (!this.sessionPatchFramesEnabled) return;
     for (const patch of plan.sessionPatches) {
-      if (!this.sessionPatchFramesEnabled) {
-        await this.postSessionView(patch.sessionId);
-        continue;
-      }
       await this.postSessionPatch(
         patch.sessionId,
         patch.seq,
@@ -3030,7 +3056,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async postState(): Promise<void> {
-    await this.postStateFrame();
+    if (!this.view || !this.isReady) return;
+    await this.broadcastFullState({ force: true });
   }
 
   private async postStateFrame(): Promise<void> {
@@ -3048,24 +3075,32 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async postSessionView(sessionId: string): Promise<void> {
-    if (!this.view || !this.isReady) {
-      return;
+    if (!this.view || !this.isReady) return;
+    await this.broadcastSession(sessionId, { force: true });
+  }
+
+  private async postSessionViews(sessionIds: readonly string[]): Promise<void> {
+    if (!this.view || !this.isReady) return;
+    // Capture the entire batch before metadata IO: later deltas belong to the next
+    // patch, not both that patch and a snapshot captured halfway through this batch.
+    const snapshots = sessionIds.map(sessionId => ({
+      sessionId,
+      view: this.stateStore.snapshotSession(sessionId),
+      tab: this.stateStore.snapshotSessionTab(sessionId),
+    }));
+    for (const { sessionId, view, tab } of snapshots) {
+      if (!view) continue;
+      const enriched = await this.enrichPlanSession(view);
+      await this.postMessage({
+        channel: "sessionView",
+        content: {
+          sessionId,
+          tab: tab ? { ...(this.sessionPins ? this.sessionPins.project(tab) : tab), deleting: this.pendingDeletions.has(sessionId) } : null,
+          view: this.projectCurrentDraft(sessionId, enriched),
+        },
+        messageId: createHostFrameMessageId("session-view"),
+      });
     }
-    const view = this.stateStore.snapshotSession(sessionId);
-    if (!view) {
-      return;
-    }
-    const tab = this.stateStore.snapshotSessionTab(sessionId);
-    const enriched = await this.enrichPlanSession(view);
-    await this.postMessage({
-      channel: "sessionView",
-      content: {
-        sessionId,
-        tab: tab ? { ...(this.sessionPins ? this.sessionPins.project(tab) : tab), deleting: this.pendingDeletions.has(sessionId) } : null,
-        view: this.projectCurrentDraft(sessionId, enriched),
-      },
-      messageId: createHostFrameMessageId("session-view"),
-    });
   }
 
   private async postSessionPatch(

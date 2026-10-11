@@ -16,6 +16,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Until a result is handed back, dropping the caller must stop its process tree.
+/// Background tasks only outlive this guard after a successful ticket handoff.
+struct ForegroundStopGuard<'a> {
+    registry: &'a BashTaskRegistry,
+    task_id: &'a str,
+    armed: bool,
+}
+
+impl Drop for ForegroundStopGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self.registry.request_stop(self.task_id) {
+                tracing::warn!(task_id = self.task_id, %error, "foreground Bash cancellation failed");
+            }
+        }
+    }
+}
+
 fn resolve_foreground_wait_ms(executor: &DefaultPrimitiveExecutor, value: Option<u64>) -> u64 {
     value.unwrap_or(executor.bash_foreground_wait_ms).clamp(
         crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
@@ -134,6 +152,11 @@ pub(super) async fn execute_bash_impl(
     let ticket = registry
         .spawn_tracked_unchecked(command.to_string(), cwd.clone(), false)
         .await?;
+    let mut stop_guard = ForegroundStopGuard {
+        registry: &registry,
+        task_id: &ticket.task_id,
+        armed: true,
+    };
     let wait_ms = resolve_foreground_wait_ms(executor, foreground_wait_ms);
     let finished = tokio::select! {
         result = registry.wait_for_finish(&ticket.task_id) => { result?; true }
@@ -201,6 +224,7 @@ pub(super) async fn execute_bash_impl(
         )
         .await?
     };
+    stop_guard.armed = false;
     executor.audit.record_primitive(PrimitiveAuditEntry {
         operation: AuditPrimitiveOp::Bash,
         path_or_cmd: audit_cmd,
@@ -239,6 +263,7 @@ async fn finalize_foreground_result(
 ) -> Result<BashResult, AppError> {
     registry.wait_for_finish(task_id).await?;
     let chunk = registry.read_output(task_id, Some(0)).await?;
+    let (raw_stdout, raw_stderr) = registry.read_stream_outputs(task_id).await?;
     let final_state = match registry.get_info(task_id).map(|info| info.status) {
         Some(crate::core::tools::primitive::BashTaskStatus::Stopped) => BashExecutionState::Stopped,
         Some(crate::core::tools::primitive::BashTaskStatus::Finished { .. })
@@ -247,7 +272,6 @@ async fn finalize_foreground_result(
         | None => BashExecutionState::Finished,
     };
     registry.remove_foreground(task_id);
-    let (raw_stdout, raw_stderr) = split_log_streams(&chunk.content);
     let stdout_outcome = super::output_accum::accumulate_with_persist(
         &raw_stdout,
         executor.bash_max_output_chars,
@@ -277,28 +301,4 @@ async fn finalize_foreground_result(
         persisted_output_path,
         ..Default::default()
     })
-}
-
-fn split_log_streams(log: &str) -> (String, String) {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    for line in log.split_inclusive('\n') {
-        if let Some(value) = line.strip_prefix("STDERR: ") {
-            stderr.push(value);
-        } else {
-            stdout.push(line);
-        }
-    }
-    (stdout.concat(), stderr.concat())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn foreground_wait_clamps_to_contract() {
-        struct Values;
-        assert_eq!(crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS, 8_000);
-        assert_eq!(crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS, 16_000);
-        let _ = Values;
-    }
 }

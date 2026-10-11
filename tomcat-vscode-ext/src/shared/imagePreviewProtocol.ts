@@ -131,6 +131,9 @@ export interface ImagePreviewDomSnapshot {
   copyIconClass?: string | null;
   downloadIconFontFamily?: string | null;
   position: number;
+  /** Raw layout measurements catch styles lost when Host reconstructs the document. */
+  rootClientHeight: number;
+  viewportHeight: number;
   stageClientWidth: number;
   /**
    * Intrinsic width of the picture on the stage, or 0 if it did not decode.

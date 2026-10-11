@@ -3,6 +3,7 @@ import { isDiffViewable } from "../../../src/shared/diffPresentation";
 import { useLocale, useT } from "../i18n/LocaleProvider";
 import { pluralKey, getLocale, t as defaultT, type Locale, type Translator } from "../../../src/shared/i18n";
 
+import { ASK_QUESTION_OUTCOMES } from "../types";
 import type {
   AskQuestionAnswer,
   AskQuestionResult,
@@ -736,6 +737,7 @@ function parseAskQuestionResult(
     const parsed = JSON.parse(summary) as {
       answers?: unknown[];
       cancelled?: unknown;
+      outcome?: unknown;
     };
     if (
       !parsed ||
@@ -745,6 +747,10 @@ function parseAskQuestionResult(
       return null;
     }
     if (typeof parsed.cancelled !== "boolean") {
+      return null;
+    }
+    const outcome = ASK_QUESTION_OUTCOMES.find((value) => value === parsed.outcome);
+    if (parsed.outcome !== undefined && outcome === undefined) {
       return null;
     }
     const answers: Array<AskQuestionAnswer | null> = parsed.answers.map(
@@ -802,6 +808,7 @@ function parseAskQuestionResult(
         (entry): entry is AskQuestionAnswer => entry !== null,
       ),
       cancelled: parsed.cancelled,
+      outcome,
     };
   } catch {
     return null;

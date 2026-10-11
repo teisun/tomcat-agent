@@ -420,6 +420,19 @@ impl ReadResult {
 /// 4 原语执行引擎 Trait（与 design CODE_BLOCK_P1_006 一致）。
 #[async_trait]
 pub trait PrimitiveExecutor: Send + Sync + 'static {
+    /// Authorize a native read-modify-write without reading or replacing the file.
+    /// The caller must use the returned path and retain its own atomic transaction.
+    /// Executors without a permission implementation fail closed.
+    async fn authorize_write_path(
+        &self,
+        _path: &str,
+        _plugin_id: &str,
+    ) -> Result<std::path::PathBuf, AppError> {
+        Err(AppError::Permission(
+            "write-path authorization is not supported by this executor".into(),
+        ))
+    }
+
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError>;
 
     /// PR-RB（T1）read 工具入口：分页读 + metadata 阶段大小预检 + 二进制结构化提示。

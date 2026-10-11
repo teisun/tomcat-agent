@@ -7,6 +7,7 @@ use std::time::Duration;
 fn make_stub_handle() -> VmActorHandle {
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
     VmActorHandle {
+        instance_id: uuid::Uuid::new_v4().to_string(),
         cmd_tx: tx,
         state: Arc::new(AtomicU8::new(VmActorState::Created as u8)),
     }
@@ -27,6 +28,42 @@ fn remove_returns_handle() {
     mgr.insert(key.clone(), make_stub_handle());
     assert!(mgr.remove(&key).is_some());
     assert!(mgr.get(&key).is_none());
+}
+
+#[test]
+fn delayed_removal_does_not_remove_a_replacement_at_the_same_key() {
+    let mgr = PluginRuntimeManager::new();
+    let key = PluginRuntimeKey::new("s1", "p1");
+    let old = make_stub_handle();
+    let replacement = make_stub_handle();
+    mgr.insert(key.clone(), old.clone());
+    // Another start wins before the delayed old owner removes its entry.
+    mgr.insert(key.clone(), replacement.clone());
+    assert!(mgr.remove_instance(&key, &old.instance_id).is_none());
+    assert_eq!(mgr.get(&key).unwrap().instance_id, replacement.instance_id);
+    assert!(mgr
+        .remove_instance(&key, &replacement.instance_id)
+        .is_some());
+    assert!(mgr.get(&key).is_none());
+}
+
+#[test]
+fn session_cleanup_does_not_replace_a_borrowed_start_gate() {
+    let mgr = PluginRuntimeManager::new();
+    let key = PluginRuntimeKey::new("s1", "p1");
+    let gate = mgr.start_gate(&key);
+    mgr.remove_session("s1");
+    assert!(
+        Arc::ptr_eq(&gate, &mgr.start_gate(&key)),
+        "pending starts must keep sharing the same mutex"
+    );
+    drop(gate);
+    mgr.remove_session("s1");
+    assert_eq!(
+        mgr.start_gate_count(),
+        0,
+        "unborrowed gates are still reclaimable"
+    );
 }
 
 #[test]

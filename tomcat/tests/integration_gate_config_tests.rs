@@ -143,6 +143,10 @@ fn every_integration_binary_has_one_explicit_classification() {
             offline.contains(&format!("binary({binary})")),
             "manual target in default: {binary}"
         );
+        assert!(
+            !profile_real_llm_filter(&config).contains(&format!("binary({binary})")),
+            "manual target must not be presented as ordinary live coverage: {binary}"
+        );
     }
     for case in parse_shell_array(&groups, "TOMCAT_INTEGRATION_MANUAL_CASES") {
         let (binary, name) = case.split_once("::").unwrap();
@@ -165,7 +169,12 @@ fn every_integration_binary_has_one_explicit_classification() {
 
 #[test]
 fn missing_live_credentials_is_not_a_successful_skip() {
-    for target in ["", "gpt-5.4", "gpt-5.4_litellm-sunmi"] {
+    for target in [
+        "",
+        "gpt-5.4",
+        "gpt-5.4_litellm-sunmi",
+        common::FCODEX_TEST_DEFAULT_MODEL,
+    ] {
         let effective = if target.is_empty() {
             common::OPENAI_TEST_DEFAULT_MODEL
         } else {
@@ -177,6 +186,7 @@ fn missing_live_credentials_is_not_a_successful_skip() {
             .env("TOMCAT_E2E_OPENAI_TARGET", target)
             .env_remove("OPENAI_API_KEY")
             .env_remove("LITELLM_SUNMI_API_KEY")
+            .env_remove("FCODEX_OPENAI_API_KEY")
             .env_remove(common::openai_test_api_key_env_for_model(effective))
             .output()
             .expect("run preflight without credentials");
@@ -186,6 +196,67 @@ fn missing_live_credentials_is_not_a_successful_skip() {
             log.contains(common::openai_test_api_key_env_for_model(effective)),
             "{log}"
         );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+    for (target_key, delivery_key) in [(true, false), (false, true), (true, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = dir.path().join("cargo-calls");
+        let cargo = bin.join("cargo");
+        // Record dispatch only: preflight must never contact a real provider.
+        std::fs::write(
+            &cargo,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TOMCAT_GATE_CARGO_LOG\"\nprintf '%s\\n' \"NO_PROXY=$NO_PROXY\" \"no_proxy=$no_proxy\" \"HTTP_PROXY=$HTTP_PROXY\" >> \"$TOMCAT_GATE_CARGO_LOG\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(repo_root().join("scripts/run-integration-tests.sh"))
+            .arg("integration-real-llm")
+            .env("HOME", dir.path())
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("TOMCAT_GATE_CARGO_LOG", &log)
+            .env("NO_PROXY", "existing.example")
+            .env("no_proxy", "other.example")
+            .env("HTTP_PROXY", "http://proxy.invalid:9000")
+            .env("TOMCAT_E2E_OPENAI_TARGET", "gpt-5.4")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("IDATATLAS_OPENAI_API_KEY");
+        if target_key {
+            cmd.env("OPENAI_API_KEY", "selected-target-stub");
+        }
+        if delivery_key {
+            cmd.env("IDATATLAS_OPENAI_API_KEY", "fixed-delivery-stub");
+        }
+        let output = cmd.output().expect("run isolated gate preflight");
+        if target_key && delivery_key {
+            assert!(output.status.success(), "{output:?}");
+            let dispatch = std::fs::read_to_string(log).unwrap();
+            assert!(dispatch.contains("nextest run --profile real-llm"));
+            assert!(dispatch.contains("NO_PROXY=existing.example,127.0.0.1,localhost,::1"));
+            assert!(dispatch.contains("no_proxy=other.example,127.0.0.1,localhost,::1"));
+            assert!(dispatch.contains("HTTP_PROXY=http://proxy.invalid:9000"));
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            let missing = if target_key {
+                "IDATATLAS_OPENAI_API_KEY"
+            } else {
+                "OPENAI_API_KEY"
+            };
+            assert!(String::from_utf8_lossy(&output.stderr).contains(missing));
+            assert!(
+                !log.exists(),
+                "missing credentials must prevent test dispatch"
+            );
+        }
     }
 }
 

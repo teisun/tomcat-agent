@@ -8,6 +8,7 @@ import * as vscode from "vscode";
 import { SettingsPanel } from "./SettingsPanel";
 import type { InitializeResult } from "../../serveClient/initialize";
 import type { SettingsIntent } from "../../shared/settingsProtocol";
+import { translate } from "../../shared/i18n";
 
 describe("settings panel html asset resolution", () => {
   const tempDirs: string[] = [];
@@ -508,6 +509,38 @@ describe("settings panel model management flow", () => {
     });
     expect(snapshot.status).toContain("Connector saved, but connection was not started.");
     expect(snapshot.status).toContain("trust store is temporarily unavailable");
+  });
+
+  it.each([
+    { failure: "catalog", success: true },
+    { failure: "chat", success: true },
+    { failure: "catalog", success: false },
+  ])("preserves the removal receipt after $failure refresh fails (success=$success)", async ({ failure, success }) => {
+    let responded = false;
+    const detail = `${failure} refresh failed`;
+    const removeModel = vi.fn(async () => {
+      responded = true;
+      return { success, error: success ? undefined : "remove rejected", payload: { warnings: ["backend cleanup note"] } };
+    });
+    const { panel } = createPanel({
+      ensureInitialized: async () => {
+        if (responded && failure === "catalog") throw new Error(detail);
+        return { attachmentRoot: null, protocolVersion: 1, serverVersion: "test", sessionId: null, capabilities: ["remove_model", "list_models"] };
+      },
+      messenger: { sendRemoveModel: removeModel },
+      onModelCatalogChanged: async () => { if (failure === "chat") throw new Error(detail); },
+    });
+    try {
+      await expect(panel.__testingDispatchIntent({ type: "removeModel", messageId: "remove", data: { modelId: "relay/remove-me" } })).resolves.toBeUndefined();
+      expect(removeModel).toHaveBeenCalledExactlyOnceWith("relay/remove-me");
+      expect(panel.__testingSnapshot().state).toMatchObject({
+        error: success ? null : "remove rejected",
+        modelRemovalReceipt: { modelId: "relay/remove-me", success, warnings: success ? ["backend cleanup note"] : [] },
+        warnings: [...(success ? ["backend cleanup note"] : []), `${translate("en", "settings.host.modelsLoadFailed")} ${detail}`],
+      });
+    } finally {
+      panel.dispose();
+    }
   });
 
   it("clears the matching Build preference before deletion and forwards warning receipts", async () => {

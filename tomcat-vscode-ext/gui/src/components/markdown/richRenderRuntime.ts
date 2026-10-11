@@ -177,7 +177,7 @@ export function warmRichRenderModules(): Promise<void> {
           "warn",
         );
         warmupPromise = null;
-        throw error;
+        // Prefetch is optional; getMermaid still rejects for on-demand renderers.
       });
   }
   return warmupPromise;

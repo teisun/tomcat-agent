@@ -566,10 +566,10 @@ impl PluginManager {
             ))
         })?;
 
-        for (expired_key, expired_handle) in runtime_manager.reap_configured_idle() {
+        for (_, expired_handle) in runtime_manager.reap_configured_idle() {
             let _ = expired_handle.shutdown().await;
             if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                dispatcher.cleanup_instance(&expired_key.to_string());
+                dispatcher.cleanup_instance(&expired_handle.instance_id);
             }
         }
 
@@ -581,9 +581,12 @@ impl PluginManager {
                     return Ok(existing);
                 }
                 VmActorState::ShuttingDown | VmActorState::Stopped | VmActorState::Error => {
-                    let _ = runtime_manager.remove(&key);
-                    if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                        dispatcher.cleanup_instance(&key.to_string());
+                    if let Some(removed) =
+                        runtime_manager.remove_instance(&key, &existing.instance_id)
+                    {
+                        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+                            dispatcher.cleanup_instance(&removed.instance_id);
+                        }
                     }
                 }
             }
@@ -597,7 +600,7 @@ impl PluginManager {
             AppError::Plugin(tr("plugin.notConfigured", &[("field", "plugin_engine")]))
         })?;
 
-        let instance_id = key.to_string();
+        let instance_id = format!("{session_id}/{}/{plugin_id}", uuid::Uuid::new_v4());
         let mut plugin_vm_instance = engine.create_instance(&instance_id)?;
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -647,7 +650,7 @@ impl PluginManager {
         // Install authority before JS initialization can issue any hostcall.
         runtime_manager.insert_with_birth(key.clone(), handle.clone(), birth);
         if let Err(error) = handle.dispatch(VmCommand::Init).await {
-            let _ = self.stop_vm_entry(&key).await;
+            let _ = self.stop_vm_entry(&key, &handle.instance_id).await;
             return Err(error);
         }
         let timeout_ms = engine.config().call_timeout_ms;
@@ -663,7 +666,7 @@ impl PluginManager {
             Err(_) => Some("plugin initialization timed out".to_string()),
         };
         if let Some(error) = error {
-            self.stop_vm_entry(&key).await?;
+            self.stop_vm_entry(&key, &handle.instance_id).await?;
             return Err(AppError::Plugin(error));
         }
         self.sync_registered_capabilities(plugin_id);
@@ -687,13 +690,17 @@ impl PluginManager {
         context: serde_json::Value,
     ) -> Result<(), AppError> {
         let key = PluginRuntimeKey::new(session_id, plugin_id);
+        let mut instance_id = key.to_string();
         if let Some(runtime_manager) = &self.plugin_runtime_manager {
             if let Some(handle) = runtime_manager.get(&key) {
                 match handle.current_state() {
                     VmActorState::Error | VmActorState::Stopped | VmActorState::ShuttingDown => {
-                        let _ = runtime_manager.remove(&key);
-                        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                            dispatcher.cleanup_instance(&key.to_string());
+                        if let Some(removed) =
+                            runtime_manager.remove_instance(&key, &handle.instance_id)
+                        {
+                            if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+                                dispatcher.cleanup_instance(&removed.instance_id);
+                            }
                         }
                         return Err(AppError::Plugin(tr(
                             "plugin.runtimeUnhealthy",
@@ -702,6 +709,7 @@ impl PluginManager {
                     }
                     VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
                         let _ = runtime_manager.touch(&key);
+                        instance_id = handle.instance_id.clone();
                     }
                 }
             }
@@ -711,7 +719,6 @@ impl PluginManager {
             AppError::Plugin(tr("plugin.notConfigured", &[("field", "host_dispatcher")]))
         })?;
 
-        let instance_id = key.to_string();
         dispatcher.deliver_event(
             &instance_id,
             EventEnvelope {
@@ -743,8 +750,10 @@ impl PluginManager {
             let _ = handle.shutdown().await;
         }
 
-        let mut instance_ids: BTreeSet<String> =
-            removed.iter().map(|(key, _)| key.to_string()).collect();
+        let mut instance_ids: BTreeSet<String> = removed
+            .iter()
+            .map(|(_, handle)| handle.instance_id.clone())
+            .collect();
 
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             instance_ids.extend(dispatcher.session_instance_ids(session_id));
@@ -818,7 +827,7 @@ impl PluginManager {
     }
 
     pub fn is_instance_current(&self, instance_id: &str) -> bool {
-        let Some((session, plugin)) = instance_id.rsplit_once('/') else {
+        let Some((_, plugin)) = instance_id.rsplit_once('/') else {
             return true;
         };
         let map = self.plugins.read();
@@ -827,19 +836,17 @@ impl PluginManager {
         };
         self.plugin_runtime_manager
             .as_ref()
-            .and_then(|runtime| runtime.birth(&PluginRuntimeKey::new(session, plugin)))
-            .is_none_or(|birth| birth.fingerprint == current.fingerprint)
+            .and_then(|runtime| runtime.birth_for_instance(instance_id))
+            .is_some_and(|birth| birth.fingerprint == current.fingerprint)
     }
 
     pub fn instance_manifest(&self, instance_id: &str) -> Option<Arc<PluginManifest>> {
-        if let Some((session, plugin)) = instance_id.rsplit_once('/') {
-            if let Some(birth) = self
+        if instance_id.contains('/') {
+            return self
                 .plugin_runtime_manager
                 .as_ref()
-                .and_then(|runtime| runtime.birth(&PluginRuntimeKey::new(session, plugin)))
-            {
-                return Some(birth.manifest);
-            }
+                .and_then(|runtime| runtime.birth_for_instance(instance_id))
+                .map(|birth| birth.manifest);
         }
         let plugin = instance_id.rsplit('/').next()?;
         self.plugins
@@ -855,23 +862,29 @@ impl PluginManager {
         let mut count = 0;
         // Only invoked while this session is idle, never from another session's reload.
         for key in runtime.session_keys(session_id) {
-            if !self.is_instance_current(&key.to_string()) {
-                count += usize::from(self.stop_vm_entry(&key).await?);
+            if let Some(handle) = runtime.peek(&key) {
+                if !self.is_instance_current(&handle.instance_id) {
+                    count += usize::from(self.stop_vm_entry(&key, &handle.instance_id).await?);
+                }
             }
         }
         Ok(count)
     }
 
-    async fn stop_vm_entry(&self, key: &PluginRuntimeKey) -> Result<bool, AppError> {
+    async fn stop_vm_entry(
+        &self,
+        key: &PluginRuntimeKey,
+        instance_id: &str,
+    ) -> Result<bool, AppError> {
         let Some(runtime) = &self.plugin_runtime_manager else {
             return Ok(false);
         };
-        let Some(handle) = runtime.remove(key) else {
+        let Some(handle) = runtime.remove_instance(key, instance_id) else {
             return Ok(false);
         };
         let _ = handle.shutdown().await;
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-            dispatcher.cleanup_instance(&key.to_string());
+            dispatcher.cleanup_instance(&handle.instance_id);
         }
         Ok(true)
     }
@@ -910,8 +923,8 @@ impl PluginManager {
         if let Some(runtime_manager) = &self.plugin_runtime_manager {
             let removed = runtime_manager.remove_plugin(plugin_id);
             if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                for (key, _handle) in removed {
-                    dispatcher.cleanup_instance(&key.to_string());
+                for (_, handle) in removed {
+                    dispatcher.cleanup_instance(&handle.instance_id);
                 }
             }
         }

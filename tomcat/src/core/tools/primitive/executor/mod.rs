@@ -1,10 +1,10 @@
-//! # 4+1 原语执行引擎（DefaultPrimitiveExecutor）
+//! # 文件 / Shell 原语执行引擎（DefaultPrimitiveExecutor）
 //!
-//! 实现 [`super::PrimitiveExecutor`] trait，是 Agent 与文件系统 / Shell
-//! 的 **唯一受信通道**：任何 LLM 工具调用最终都要落到这 5 个方法上，安全策略
-//! （`PermissionGate` 三层决策 / 用户确认 / 备份 / 原子写 / 审计）全部在此横切。
+//! 实现 [`super::PrimitiveExecutor`] trait，统一文件 / Shell 原语的路径权限、
+//! 用户确认、备份、原子写和审计。拥有专用事务的原生工具可通过
+//! `authorize_write_path` 复用路径授权；该入口不读写文件，事务仍由调用方提交。
 //!
-//! ## 5 个原语 + 共享安全流水
+//! ## 主要原语与共享安全流水
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────┐
@@ -278,6 +278,19 @@ impl DefaultPrimitiveExecutor {
 
 #[async_trait]
 impl PrimitiveExecutor for DefaultPrimitiveExecutor {
+    async fn authorize_write_path(
+        &self,
+        path: &str,
+        plugin_id: &str,
+    ) -> Result<std::path::PathBuf, AppError> {
+        if let Some(error) = helpers::url_like_fs_miss(path) {
+            return Err(error);
+        }
+        self.gate_check_path(PrimitiveOperation::Write, path, plugin_id)
+            .await
+            .map(|(path, ..)| path)
+    }
+
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError> {
         read::read_file_impl(self, path, plugin_id).await
     }

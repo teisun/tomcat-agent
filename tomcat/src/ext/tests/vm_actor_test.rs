@@ -35,12 +35,41 @@ fn handle_state_check() {
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
     let state = Arc::new(AtomicU8::new(VmActorState::Created as u8));
     let handle = VmActorHandle {
+        instance_id: "state-check".to_string(),
         cmd_tx: tx,
         state: state.clone(),
     };
     assert_eq!(handle.current_state(), VmActorState::Created);
     state.store(VmActorState::Running as u8, Ordering::Relaxed);
     assert_eq!(handle.current_state(), VmActorState::Running);
+}
+
+/// Component-level command transport test; real actor lifecycle is exercised
+/// through PluginManager in long_lived_vm_tests, without exposing handle identity.
+#[tokio::test]
+async fn test_vm_actor_handle_dispatch_event_command() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let handle = VmActorHandle {
+        instance_id: "dispatch-commands".into(),
+        cmd_tx: tx,
+        state: Arc::new(AtomicU8::new(VmActorState::Running as u8)),
+    };
+    handle.dispatch(VmCommand::Init).await.unwrap();
+    handle
+        .dispatch(VmCommand::DispatchEvent {
+            event_type: "test_event".into(),
+            data: serde_json::json!({"seq": 1}),
+            context: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    handle.shutdown().await.unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), VmCommand::Init));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        VmCommand::DispatchEvent { .. }
+    ));
+    assert!(matches!(rx.try_recv().unwrap(), VmCommand::Shutdown));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

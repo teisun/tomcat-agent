@@ -78,20 +78,16 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
                 }
                 Ok(Err(err)) => {
                     let detail = format!("{err:?}");
-                    if is_transient_connect_failure_text(&detail) {
-                        if attempt < TRANSIENT_LLM_MAX_ATTEMPTS {
-                            eprintln!(
+                    if is_transient_connect_failure_text(&detail)
+                        && attempt < TRANSIENT_LLM_MAX_ATTEMPTS
+                    {
+                        eprintln!(
                                 "[real-llm retry] test_llm_provider_chat_real_request_returns_ok transient connect failure; retrying attempt {}/{}",
                                 attempt + 1,
                                 TRANSIENT_LLM_MAX_ATTEMPTS
                             );
-                            tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
-                            continue;
-                        }
-                        eprintln!(
-                            "skipping test_llm_provider_chat_real_request_returns_ok: idatatlas connect failures persisted: {detail}"
-                        );
-                        return Ok(());
+                        tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
+                        continue;
                     }
                     return Err(Box::new(err) as Box<dyn std::error::Error>);
                 }
@@ -155,20 +151,16 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
                 }
                 Ok(Err(err)) => {
                     let detail = format!("{err:?}");
-                    if is_transient_connect_failure_text(&detail) {
-                        if attempt < TRANSIENT_LLM_MAX_ATTEMPTS {
-                            eprintln!(
+                    if is_transient_connect_failure_text(&detail)
+                        && attempt < TRANSIENT_LLM_MAX_ATTEMPTS
+                    {
+                        eprintln!(
                                 "[real-llm retry] test_llm_provider_chat_stream_real_request_yields_events transient connect failure; retrying attempt {}/{}",
                                 attempt + 1,
                                 TRANSIENT_LLM_MAX_ATTEMPTS
                             );
-                            tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
-                            continue;
-                        }
-                        eprintln!(
-                            "skipping test_llm_provider_chat_stream_real_request_yields_events: idatatlas connect failures persisted: {detail}"
-                        );
-                        return Ok(());
+                        tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
+                        continue;
                     }
                     return Err(Box::new(err) as Box<dyn std::error::Error>);
                 }
@@ -182,16 +174,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => events.push(event),
-            Err(err) => {
-                let detail = format!("{err:?}");
-                if events.is_empty() && is_transient_connect_failure_text(&detail) {
-                    eprintln!(
-                        "skipping test_llm_provider_chat_stream_real_request_yields_events: transient connect failure while consuming initial stream events: {detail}"
-                    );
-                    return Ok(());
-                }
-                return Err(Box::new(err) as Box<dyn std::error::Error>);
-            }
+            Err(err) => return Err(Box::new(err) as Box<dyn std::error::Error>),
         }
     }
     tracing::info!("Assert: 至少产生一个 StreamEvent");

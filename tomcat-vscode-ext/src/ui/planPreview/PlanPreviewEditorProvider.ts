@@ -703,11 +703,14 @@ export class PlanPreviewEditorProvider
         const sessionId = (await this.deps.ensureSession?.()) ?? null;
         if (!sessionId) return;
         try {
-          await this.deps.messenger.sendSetContextWindow(
+          const response = await this.deps.messenger.sendSetContextWindow(
             sessionId,
             intent.data.modelId,
             intent.data.contextWindow,
           );
+          if (!response.success) {
+            throw new Error(response.error ?? t("error.unknown"));
+          }
         } catch (error) {
           await vscode.window.showErrorMessage(
             error instanceof Error
@@ -723,11 +726,14 @@ export class PlanPreviewEditorProvider
         const sessionId = (await this.deps.ensureSession?.()) ?? null;
         if (!sessionId) return;
         try {
-          await this.deps.messenger.sendSetThinkingLevel(
+          const response = await this.deps.messenger.sendSetThinkingLevel(
             sessionId,
             intent.data.modelId,
             intent.data.level,
           );
+          if (!response.success) {
+            throw new Error(response.error ?? t("error.unknown"));
+          }
         } catch (error) {
           await vscode.window.showErrorMessage(
             error instanceof Error

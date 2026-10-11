@@ -48,6 +48,7 @@ mod run_basic_test;
 mod session_envelope_test;
 mod signal_completion_test;
 mod steering_followup_test;
+mod steering_injection_test;
 mod stream_handler_test;
 mod submodules_test;
 mod tool_call_arguments_test;

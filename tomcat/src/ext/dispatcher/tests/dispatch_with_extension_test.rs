@@ -57,7 +57,7 @@ async fn stale_instance_rejects_capability_writes_but_keeps_logging() {
             .await
             .unwrap();
         assert!(!response.ok);
-        assert!(response.error.unwrap().contains("stale"));
+        assert!(response.error.unwrap().contains("retired instance"));
     }
     assert!(
         dispatcher

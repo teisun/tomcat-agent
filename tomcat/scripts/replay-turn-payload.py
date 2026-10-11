@@ -16,6 +16,8 @@ This is a debugging helper for attachment/request-shape incidents. It rebuilds a
 By default the script prints a sanitized request/response summary and never
 prints inline bytes. It is intentionally focused on replaying the request shape
 that matters for attachment and stream-terminal-error debugging.
+Stored attachment references (input_image_ref/blob_sha) are not rehydrated by
+this helper; they are rejected instead of silently replaying a text-only request.
 
 Examples:
   python3 scripts/replay-turn-payload.py \
@@ -255,6 +257,11 @@ def user_content_parts(content: Any) -> list[dict[str, Any]]:
         if not isinstance(part, dict):
             continue
         part_type = part.get("type")
+        if part_type == "input_image_ref" or "blob_sha" in part:
+            raise SystemExit(
+                "Stored attachment references are unsupported by this replay helper; "
+                "only inline media can be replayed."
+            )
         if part_type == "input_text":
             text = part.get("text")
             if isinstance(text, str):

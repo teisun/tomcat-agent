@@ -241,6 +241,82 @@ async fn native_write_interrupt_cancels_confirmation_without_registering_baselin
     assert!(!manifest.exists());
 }
 
+#[tokio::test]
+async fn native_update_plan_interrupt_cancels_permission_without_touching_plan() {
+    use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+    use crate::core::plan_runtime::PlanRuntime;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("permission.plan.md");
+    let original = "---\nplan_id: permission\ngoal: fixture\nstate: planning\ncreated_at: 2026-01-01T00:00:00Z\nschema_version: 1\ntodos: []\n---\n## Plan\nkeep this body\n";
+    std::fs::write(&path, original).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: temp.path().join("definition"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let primitive = crate::core::DefaultPrimitiveExecutor::new(
+        crate::infra::PrimitiveConfig::default(),
+        Arc::new(InterruptWriteConfirmation(entered.clone())),
+        Arc::new(crate::infra::TracingAuditRecorder),
+        gate,
+    );
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("plan-1".into()),
+            name: Some("update_plan".into()),
+            arguments_delta: Some(
+                serde_json::json!({
+                    "path": path,
+                    "ops": [{"kind": "upsert", "id": "new", "content": "must not be added"}]
+                })
+                .to_string(),
+            ),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(primitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            plan_runtime: Some(PlanRuntime::new("permission-session")),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+    let task =
+        tokio::spawn(async move { agent.run(vec![ChatMessage::user("update the plan")]).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted(), "{outcome:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::read_dir(temp.path()).unwrap().count(),
+        1,
+        "no lock file before permission"
+    );
+}
+
 fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
     let recent = messages
         .iter()
@@ -807,6 +883,15 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
 
 #[tokio::test]
 async fn run_interrupt_during_blocking_collapse_returns_promptly() {
+    assert_interrupt_during_collapse(false).await;
+}
+
+#[tokio::test]
+async fn run_interrupt_during_overflow_collapse_returns_promptly() {
+    assert_interrupt_during_collapse(true).await;
+}
+
+async fn assert_interrupt_during_collapse(reactive: bool) {
     struct BlockingCompactionLlm {
         entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
@@ -845,10 +930,19 @@ async fn run_interrupt_during_blocking_collapse_returns_promptly() {
     let compaction_provider: Arc<dyn LlmProvider> = Arc::new(BlockingCompactionLlm {
         entered: Mutex::new(Some(entered_tx)),
     });
-    let main_provider = Arc::new(MockLlmProvider::new(vec![]));
+    let streams = if reactive {
+        vec![vec![Err(crate::infra::error::llm_http_status_error(
+            "openai",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))]]
+    } else {
+        vec![]
+    };
+    let (main_provider, requests) = super::mocks::RecordingStreamLlmProvider::new(streams);
     let cancel = CancellationToken::new();
     let mut agent = AgentLoop::new(
-        test_binding(main_provider, "gpt-4"),
+        test_binding(Arc::new(main_provider), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -870,8 +964,8 @@ async fn run_interrupt_during_blocking_collapse_returns_promptly() {
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 8_000,
-        context_budget_chars: 200,
-        context_budget_tokens: 50,
+        context_budget_chars: if reactive { 100_000 } else { 200 },
+        context_budget_tokens: if reactive { 25_000 } else { 50 },
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
@@ -890,9 +984,18 @@ async fn run_interrupt_during_blocking_collapse_returns_promptly() {
         cancel_after_collapse_started.cancel();
     });
 
-    let outcome = tokio::time::timeout(Duration::from_secs(1), agent.run(vec![user, assistant]))
-        .await
-        .expect("outer cancel boundary must not wait for a non-cancellable collapse");
+    let input = if reactive {
+        vec![user]
+    } else {
+        vec![user, assistant]
+    };
+    let result = tokio::time::timeout(Duration::from_secs(1), agent.run(input)).await;
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        usize::from(reactive),
+        "reactive collapse must follow a real main-model overflow, not the proactive guard"
+    );
+    let outcome = result.expect("cancel boundary must not wait for a non-cancellable collapse");
     assert!(
         outcome.is_interrupted(),
         "blocking collapse should finish as Interrupted, got {outcome:?}"

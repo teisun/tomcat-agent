@@ -4,6 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  normalizeConnectorView,
+  parseConnectorProject,
+  parseConnectorReloadReceipt,
+  parseConnectorToolCatalog,
+  parseSetConnectorToolEnabledResponse,
+} from "../src/shared/connectorsProtocol";
 
 type ResponseFrame = {
   error?: string;
@@ -111,6 +118,51 @@ async function startFakeServe(): Promise<ManualAcceptanceFakeServe> {
   runningFakes.push(fake);
   return fake;
 }
+
+describe("manual acceptance fake serve connector contract", () => {
+  it.each(["list", "tools", "reload", "toggle"] as const)("emits current %s payloads accepted by the real Host parser", async (operation) => {
+    const fake = await startFakeServe();
+    const initialized = await fake.request("initialize", {
+      requestId: "initialize", subtype: "initialize", type: "control_request",
+    });
+    const listed = await fake.request("list", { id: "list", type: "list_connectors" });
+    const payload = listed.payload as { connectors: Array<{ configKey: string; generation: string }>; project: unknown };
+    expect(payload.connectors).toHaveLength(1);
+    const connector = payload.connectors[0];
+    const configKey = connector.configKey;
+
+    if (operation === "list") {
+      const view = normalizeConnectorView(connector);
+      expect(view).not.toBeNull();
+      expect(view?.compatibilityError).toBeUndefined();
+      expect(view).toMatchObject({ generation: "1", attempt: 1, recovery: null });
+      expect(parseConnectorProject(payload.project)).toBeNull();
+      return;
+    }
+    if (operation === "reload") {
+      const reloaded = await fake.request("reload", { id: "reload", type: "reload_connector", configKey });
+      const receipt = parseConnectorReloadReceipt(reloaded.payload, configKey);
+      expect(receipt.generation).not.toBe(connector.generation);
+      const refreshed = await fake.request("refreshed", { id: "refreshed", type: "list_connectors" });
+      const current = (refreshed.payload as typeof payload).connectors[0];
+      expect(normalizeConnectorView(current)).toMatchObject({ generation: receipt.generation, compatibilityError: undefined });
+      const tools = await fake.request("tools", { id: "tools", type: "list_connector_tools", configKey });
+      expect(parseConnectorToolCatalog(tools.payload, configKey).generation).toBe(receipt.generation);
+      return;
+    }
+    if (operation === "toggle") {
+      const change = { configKey, rawName: "connector_probe", enabled: false };
+      const toggled = await fake.request("toggle", { id: "toggle", type: "set_connector_tool_enabled", ...change });
+      expect(parseSetConnectorToolEnabledResponse(toggled.payload, change)).toMatchObject({ configSaved: true, runtimeApplied: true });
+      expect((initialized.payload as { capabilities: string[] }).capabilities).toContain("set_connector_tool_enabled");
+    }
+    const tools = await fake.request("tools", { id: "tools", type: "list_connector_tools", configKey });
+    const catalog = parseConnectorToolCatalog(tools.payload, configKey);
+    expect(catalog).toMatchObject({ configKey, generation: connector.generation, attempt: 1 });
+    expect(catalog.tools).toHaveLength(1);
+    expect(catalog.tools[0]).toMatchObject({ rawName: "connector_probe", enabled: operation !== "toggle" });
+  });
+});
 
 describe("manual acceptance fake serve attachment leases", () => {
   it("advertises and implements the retain_attachment_leases wire contract", async () => {

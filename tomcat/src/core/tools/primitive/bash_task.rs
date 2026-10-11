@@ -449,8 +449,8 @@ pub struct BashTaskOutputChunk {
 
 struct BashTask {
     info: RwLock<BashTaskInfo>,
-    /// 子进程 PID（spawn 后立即记录）；stop 路径 `libc::killpg(pid, SIGKILL)`
-    /// 杀整组，**不**依赖 `Child` 句柄（句柄已 move 进 wait 任务独占 await）。
+    /// 子进程 PID（spawn 后立即记录）；stop 路径在 Unix 用 `killpg`，在 Windows 用
+    /// `taskkill /T /F` 杀整组；句柄已 move 进 wait 任务独占 await。
     pid: Option<u32>,
     /// P1：每 task 一份 `Notify`。pump 任务每 flush 一次后 `notify_waiters()`；
     /// wait 任务把 status 翻成 `Finished` / `Stopped` 时也 `notify_waiters()`。
@@ -466,6 +466,21 @@ struct BashTask {
     preview_flush_required: bool,
     preview_flushed: AtomicBool,
     preview_flush_notify: Arc<Notify>,
+    /// Separate raw stream files preserve stdout/stderr ownership while the user-facing log
+    /// remains one append-only mixed stream for task_output.
+    stream_output_paths: (PathBuf, PathBuf),
+}
+
+impl BashTask {
+    fn cleanup_stream_output_files(&self) {
+        for path in [&self.stream_output_paths.0, &self.stream_output_paths.1] {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(path = %path.display(), %error, "failed to remove bash stream capture");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -713,6 +728,24 @@ impl BashTaskRegistry {
             .await
             .map_err(AppError::Io)?;
         let log_writer = Arc::new(AsyncMutex::new(log_file));
+        let stdout_path = log_path.with_extension("stdout");
+        let stderr_path = log_path.with_extension("stderr");
+        let stdout_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stdout_path)
+            .await
+            .map_err(AppError::Io)?;
+        let stderr_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stderr_path)
+            .await
+            .map_err(AppError::Io)?;
+        let stdout_writer = Arc::new(AsyncMutex::new(stdout_file));
+        let stderr_writer = Arc::new(AsyncMutex::new(stderr_file));
 
         #[cfg(unix)]
         let (shell, arg) = ("sh", "-c");
@@ -770,6 +803,7 @@ impl BashTaskRegistry {
             preview_flush_required,
             preview_flushed: AtomicBool::new(!preview_flush_required),
             preview_flush_notify: Arc::new(Notify::new()),
+            stream_output_paths: (stdout_path.clone(), stderr_path.clone()),
         });
         self.tasks.write().insert(task_id.clone(), task.clone());
         if let (Some(guard), Some((scope, grant))) =
@@ -795,6 +829,7 @@ impl BashTaskRegistry {
         let stdout_pump = spawn_pump(
             stdout,
             log_writer.clone(),
+            stdout_writer,
             "",
             BashOutputStream::Stdout,
             task.clone(),
@@ -803,6 +838,7 @@ impl BashTaskRegistry {
         let stderr_pump = spawn_pump(
             stderr,
             log_writer.clone(),
+            stderr_writer,
             "STDERR: ",
             BashOutputStream::Stderr,
             task.clone(),
@@ -897,6 +933,9 @@ impl BashTaskRegistry {
                     command: command_for_wait,
                 });
             }
+            if should_emit {
+                task_for_wait.cleanup_stream_output_files();
+            }
             task_for_wait.notify.notify_waiters();
         });
 
@@ -930,7 +969,26 @@ impl BashTaskRegistry {
 
     /// Remove a foreground-completed task after its final output has been collected.
     pub fn remove_foreground(&self, task_id: &str) {
-        self.tasks.write().remove(task_id);
+        if let Some(task) = self.tasks.write().remove(task_id) {
+            task.cleanup_stream_output_files();
+        }
+    }
+
+    /// Read the exact per-stream captures after the child and both pumps have drained.
+    pub async fn read_stream_outputs(&self, task_id: &str) -> Result<(String, String), AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        let (stdout_path, stderr_path) = &task.stream_output_paths;
+        let stdout = tokio::fs::read(stdout_path).await.map_err(AppError::Io)?;
+        let stderr = tokio::fs::read(stderr_path).await.map_err(AppError::Io)?;
+        Ok((
+            String::from_utf8_lossy(&stdout).into_owned(),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        ))
     }
 
     /// 拉日志增量：`since=None` 从头读；返回 `[start_offset, next_offset)` 的字节窗口
@@ -1050,18 +1108,49 @@ impl BashTaskRegistry {
     /// terminal transition: it drains both output pumps and waits for the preview barrier before
     /// publishing `Stopped` and waking finish waiters.
     pub async fn stop(&self, task_id: &str) -> Result<(), AppError> {
+        self.request_stop(task_id)
+    }
+
+    /// Synchronous cancellation entry for foreground Drop; the existing waiter still
+    /// owns reaping, output drain and the terminal transition.
+    pub(super) fn request_stop(&self, task_id: &str) -> Result<(), AppError> {
         let task = self
             .tasks
             .read()
             .get(task_id)
             .cloned()
             .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        if matches!(
+            task.info.read().status,
+            BashTaskStatus::Finished { .. } | BashTaskStatus::Stopped
+        ) {
+            return Ok(());
+        }
         task.stop_requested.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(pid) = task.pid {
             // SAFETY: POSIX signal API; ESRCH is harmless if the child already exited.
             unsafe {
                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        if let Some(pid) = task.pid {
+            let pid = pid.to_string();
+            match std::process::Command::new("taskkill")
+                .args(["/PID", pid.as_str(), "/T", "/F"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    tracing::warn!(task_id, code = ?status.code(), "taskkill failed for bash process tree")
+                }
+                Err(error) => {
+                    tracing::warn!(task_id, %error, "failed to start taskkill for bash process tree")
+                }
             }
         }
         Ok(())
@@ -1214,6 +1303,7 @@ impl BashTaskRegistry {
 fn spawn_pump<R>(
     reader: Option<R>,
     writer: Arc<AsyncMutex<tokio::fs::File>>,
+    stream_writer: Arc<AsyncMutex<tokio::fs::File>>,
     prefix: &'static str,
     stream: BashOutputStream,
     task: Arc<BashTask>,
@@ -1234,11 +1324,14 @@ where
                 Ok(n) => {
                     // Serialize log writes so the preview event order matches the durable log order.
                     let mut f = writer.lock().await;
+                    let mut stream_file = stream_writer.lock().await;
                     if !prefix.is_empty() {
                         let _ = f.write_all(prefix.as_bytes()).await;
                     }
                     let _ = f.write_all(&buf[..n]).await;
                     let _ = f.flush().await;
+                    let _ = stream_file.write_all(&buf[..n]).await;
+                    let _ = stream_file.flush().await;
                     let event = {
                         let mut preview = task.preview.lock();
                         let mut durable = Vec::with_capacity(prefix.len() + n);

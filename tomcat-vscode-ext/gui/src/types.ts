@@ -289,12 +289,15 @@ export interface AskQuestionAnswer {
   skipped?: boolean;
 }
 
-export type AskQuestionOutcome =
-  | "answered"
-  | "skipped"
-  | "interrupted"
-  | "host_disconnected"
-  | "cancelled_unknown";
+export const ASK_QUESTION_OUTCOMES = [
+  "answered",
+  "skipped",
+  "interrupted",
+  "host_disconnected",
+  "cancelled_unknown",
+] as const;
+
+export type AskQuestionOutcome = (typeof ASK_QUESTION_OUTCOMES)[number];
 
 export interface AskQuestionResult {
   answers: AskQuestionAnswer[];

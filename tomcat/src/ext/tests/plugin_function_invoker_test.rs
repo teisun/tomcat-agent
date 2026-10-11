@@ -261,7 +261,7 @@ async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
         call_id: None,
     };
     let error = dispatcher
-        .dispatch_async("old/birth-fetch", fetch())
+        .dispatch_async(&old_handle.instance_id, fetch())
         .await
         .unwrap()
         .error
@@ -278,14 +278,14 @@ async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
         .await
         .unwrap();
     let error = dispatcher
-        .dispatch_async("old/birth-fetch", fetch())
+        .dispatch_async(&old_handle.instance_id, fetch())
         .await
         .unwrap()
         .error
         .unwrap();
     assert!(error.contains("ssrf_rejected"), "{error}");
     let error = dispatcher
-        .dispatch_async("new/birth-fetch", fetch())
+        .dispatch_async(&new_handle.instance_id, fetch())
         .await
         .unwrap()
         .error
@@ -890,9 +890,14 @@ async fn official_web_search_backend_function_returns_missing_key_sentinel_for_t
         .iter()
         .any(|name| name == "TAVILY_API_KEY"));
 
+    let instance_id = manager
+        .start_session_vm("s1", "tomcat.web-search-backends")
+        .await
+        .expect("start session VM for preflight")
+        .instance_id;
     let preflight = dispatcher
         .dispatch_async(
-            "s1/tomcat.web-search-backends",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1089,10 +1094,15 @@ async fn net_fetch_hostcall_denies_plugins_without_permission() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin without net:fetch");
+    let instance_id = manager
+        .start_session_vm("s1", "no-net-permission")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/no-net-permission",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1105,6 +1115,7 @@ async fn net_fetch_hostcall_denies_plugins_without_permission() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(response
         .error
@@ -1129,6 +1140,11 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with net:fetch policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-policy")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let cases = vec![
         (
@@ -1178,7 +1194,7 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
     for (params, expected_code) in cases {
         let response = dispatcher
             .dispatch_async(
-                "s1/net-fetch-policy",
+                &instance_id,
                 HostRequest {
                     module: "net".to_string(),
                     method: "fetch".to_string(),
@@ -1199,6 +1215,7 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
             response.error
         );
     }
+    manager.end_session("s1").await.expect("end session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1229,10 +1246,15 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with redirect policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-redirect")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/net-fetch-redirect",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1245,6 +1267,7 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(
         response
@@ -1282,10 +1305,15 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with size limit");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-large-body")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/net-fetch-large-body",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1298,6 +1326,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(
         response
@@ -1335,10 +1364,15 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with timeout policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-timeout")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/net-fetch-timeout",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1351,6 +1385,7 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(response.error.as_deref().unwrap_or("").contains("timeout"));
 }
@@ -1380,6 +1415,11 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with concurrency policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-concurrency")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let request = HostRequest {
         module: "net".to_string(),
@@ -1393,21 +1433,23 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
     let dispatcher_b = dispatcher.clone();
     let request_first = request.clone();
     let request_second = request;
+    let first_instance_id = instance_id.clone();
     let first = tokio::spawn(async move {
         dispatcher_a
-            .dispatch_async("s1/net-fetch-concurrency", request_first)
+            .dispatch_async(&first_instance_id, request_first)
             .await
             .expect("first hostcall response")
     });
     let second = tokio::spawn(async move {
         dispatcher_b
-            .dispatch_async("s1/net-fetch-concurrency", request_second)
+            .dispatch_async(&instance_id, request_second)
             .await
             .expect("second hostcall response")
     });
 
     let first = first.await.expect("join first");
     let second = second.await.expect("join second");
+    manager.end_session("s1").await.expect("end session");
     assert!(
         first.ok,
         "first request should succeed, got {:?}",

@@ -19,6 +19,5 @@ export function UndoFilesConfirmDialog({ files, skipped, onCancel, onConfirm, bu
     body={skippedText ? `${text} ${skippedText}` : text}
     actions={[{ id: "undo", label: single ? t("undo.file") : t(pluralKey(locale, "undo.count.other", files.length), { count: files.length }),
       disabled: busy, reason: busy ? t("files.stopBeforeUndo") : undefined, shortcut: "↵", tone: "primary" }]}
-    primaryActionId="undo" onCancel={onCancel} onAction={onConfirm}
-    onKeyDown={event => { if (event.key === "Enter" && !busy) { event.preventDefault(); event.stopPropagation(); onConfirm(); } }} />;
+    primaryActionId="undo" onCancel={onCancel} onAction={onConfirm} />;
 }

@@ -76,10 +76,13 @@ function lexMarkdownTokens(markdown: string): TokenWithSourceLine[] {
   return markedInstance.lexer(markdown) as Tokens.Generic[] as TokenWithSourceLine[];
 }
 
-export function splitTopLevelBlocks(markdown: string): string[] {
+// Lex the whole document once so reference definitions resolve across blocks.
+// Equal rendered strings keep React's block memo stable without a second cache.
+export function renderMarkdownBlocks(markdown: string): string[] {
   return lexMarkdownTokens(markdown)
     .filter((token) => token.type !== "space" && token.raw.trim() !== "")
-    .map((token) => token.raw);
+    .map((token) => markedInstance.parser([token]))
+    .filter((html) => html.trim() !== "");
 }
 
 function countNewlines(raw: string): number {

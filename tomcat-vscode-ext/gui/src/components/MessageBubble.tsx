@@ -272,6 +272,8 @@ function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbl
     prev.hasFileWrites === next.hasFileWrites &&
     prev.item === next.item &&
     prev.onOpenFile === next.onOpenFile &&
+    prev.onOpenLink === next.onOpenLink &&
+    prev.resolvePaths === next.resolvePaths &&
     prev.onOpenImagePreview === next.onOpenImagePreview &&
     prev.onRecover === next.onRecover &&
     prev.onRetry === next.onRetry &&

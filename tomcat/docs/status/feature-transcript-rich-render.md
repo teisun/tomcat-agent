@@ -1,8 +1,23 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-20 14:11 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-10-11 22:45 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
-### ✅ DONE (已完成/进行中)
+### CURRENT REVIEW (2026-10-11)
+
+- Full branch review is complete for the frozen `develop..feature/transcript-rich-render` range: 1123/1123 paths, 147 commits. This is review coverage, not acceptance.
+- M3 fixes and test-layout remediation are still being closed. Confirmed focused fixes include permission enforcement, restore/GC/session concurrency, connector lifecycle, plan completion ordering, real-LLM false-green guards, `search_files` context/deny parsing, MCP naming, Clippy cleanups, and relocation of inline/standalone Rust tests without widening production visibility.
+- Latest focused evidence: task `1791753190770-i1eht5` relocated/layout subset had 64/68 tests pass; the four failures were filesystem `ENOSPC`, not behavior. After disk recovery, the same four web-search JS tests passed; task `1791757817219-qhp3x3` passed Rust compile, three Bash stream/foreground cases, Clippy targets, and `git diff --check`. Missing real catalog negative control now fails explicitly with exit 101 in task `1791758514211-aaxony`.
+- Newly closed in this M3 pass: Bash stdout/stderr keeps pipe identity instead of parsing user text prefixes; Windows stop uses `taskkill /PID /T /F` (Windows execution remains untested on this macOS host); selected live/current-tail prerequisites fail instead of silently skipping. The E2E scenario library and review findings record these boundaries.
+- **Not yet delivered:** focused commits, Rust/extension full gates, real provider positive acceptance, UI PNG/ARIA/console acceptance, merge to `develop`, status integration, or remote push. No release/tag has been made.
+
+### BLOCKED (当前风险)
+
+- Windows process-tree cancellation remains a required Windows-runner/manual boundary; the implementation is present but this host cannot claim Windows runtime evidence.
+- Paid real-model positive acceptance and visual Host/VS Code acceptance remain unverified until M4; missing credentials, rejected connections, missing catalogs, and stale screenshots are explicit failures, never passes.
+
+
+### ✅ DONE (历史已完成记录)
+
 - [✓] **[P0] 内部诊断目录的 Bash 排障权限已收口**：`DefaultPermissionGate` 仅对 `~/.tomcat/agents/<agent-id>/{sessions,logs,audit}/**` 的 Bash 访问跳过 readonly 拦截；路径按组件匹配，`deny` 仍优先，原生 Write/Edit 和敏感凭据保护不变。前台 executor、后台任务与插件 `executeBash` 都已用临时 JSONL 真实读取回归覆盖。CLI `0.1.55 → 0.1.56`、扩展 `0.1.69 → 0.1.70`、bundled CLI 同步；版本脚本的镜像检查和 19 项自身测试已通过。提交阶段依用户指令不额外运行测试，Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] 通用真实 LLM 验收统一迁移到 idatatlas Terra**：通用 Responses、CLI、计划、skill、checkpoint/resume 与长会话 fixture 统一按 `idatatlas/gpt-5.6-terra` 及完整 catalog capabilities 解析；DeepSeek / Sunmi 专项路径保留隔离。计划真测现真实发现并公布 `verify` skill，最终 acceptance 确实调用 `load_skill(verify)`；批量 read 的 CLI 工具行也保留单文件失败原因，不再只显示“读取失败”计数。验证：`integration-real-llm` 29/29、ignored idatatlas 长会话 E2E、`cargo fmt --check`、`git diff --check` 均通过。Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] Plan 交付收口已去 runtime-owned gate**：计划不再追加 review / acceptance todo，也不再维护 `acceptance_commands` 或 green-build 证据。LLM 可写一个最终 `kind=acceptance` todo；运行时仅在它进入 `in_progress` 时提示 `load_skill(verify)`，且所有 todo 终态即完成。旧 gate kind 容错映射为 `Unknown`，不会保留旧行为；暂停和恢复不再改写 todo 状态。提示词、verify skill、工具契约、架构文档、schema fixture 与交付流测试同步完成。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets`、`cargo test -p tomcat --lib core::skill::`（25 passed）和 `cargo test -p tomcat --lib core::prompts::`（28 passed）。@2026-09-20

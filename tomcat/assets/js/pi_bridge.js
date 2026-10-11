@@ -171,12 +171,15 @@
     },
 
     // =========================================================================
-    // 4 Primitives — async, aligned with pi-mono Promise-returning signatures
+    // 4 Primitives — async hostcalls; exec accepts a complete shell command
     // =========================================================================
     exec: function (command, args, options) {
+      // Preserve the existing third-argument options position, not the retired argv mode.
+      if (args !== undefined && (!Array.isArray(args) || args.length !== 0)) {
+        return Promise.reject(new Error('exec requires a complete shell command; args must be omitted or empty'));
+      }
       return hostCallAsync('fs', 'executeBash', {
         command: command,
-        args: args,
         cwd: options && options.cwd,
         foreground_wait_ms: options && options.foregroundWaitMs
       }).then(function (r) {

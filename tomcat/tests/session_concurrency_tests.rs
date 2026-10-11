@@ -10,10 +10,10 @@ use tomcat::{SessionManager, TranscriptEntry};
 
 /// A separate process exercises OS file locks rather than a second Rust mutex in this process.
 #[test]
+#[ignore = "subprocess fixture, explicitly invoked by session concurrency tests"]
 fn session_process_worker() {
-    let Ok(mode) = std::env::var("TOMCAT_SESSION_LOCK_TEST_MODE") else {
-        return;
-    };
+    let mode = std::env::var("TOMCAT_SESSION_LOCK_TEST_MODE")
+        .expect("session process fixture requires an explicit mode");
     let root = std::path::PathBuf::from(std::env::var_os("TOMCAT_SESSION_LOCK_TEST_ROOT").unwrap());
     let manager = SessionManager::new(root);
     if mode == "hold" {
@@ -31,7 +31,38 @@ fn session_process_worker() {
             std::fs::write(&ready, next).unwrap();
         }
         manager.release_session_usage();
+    } else if mode == "append" || mode == "rewrite" {
+        let id = std::env::var("TOMCAT_SESSION_LOCK_TEST_ID").unwrap();
+        manager.pin_session(&id).unwrap();
+        let ready =
+            std::path::PathBuf::from(std::env::var_os("TOMCAT_SESSION_LOCK_TEST_READY").unwrap());
+        std::fs::write(&ready, b"ready").unwrap();
+        if mode == "append" {
+            manager
+                .append_custom_entry(serde_json::json!({"customType": "cross_process_append"}))
+                .unwrap();
+        } else {
+            let message_id = manager
+                .get_entries(16)
+                .unwrap()
+                .into_iter()
+                .find_map(|entry| match entry {
+                    TranscriptEntry::Message(message) if message.message["role"] == "assistant" => {
+                        message.id
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                manager
+                    .rewrite_message_summary_title_in_session(&id, &message_id, "after")
+                    .unwrap(),
+                1
+            );
+        }
+        std::fs::write(ready.with_extension("done"), b"done").unwrap();
     } else {
+        assert_eq!(mode, "create", "unknown session worker mode");
         for _ in 0..25 {
             manager.new_current_session(None).unwrap();
         }
@@ -53,7 +84,12 @@ fn spawn_session_worker(
 ) -> SessionWorker {
     SessionWorker(
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "session_process_worker", "--nocapture"])
+            .args([
+                "--exact",
+                "session_process_worker",
+                "--ignored",
+                "--nocapture",
+            ])
             .env("TOMCAT_SESSION_LOCK_TEST_MODE", mode)
             .env("TOMCAT_SESSION_LOCK_TEST_ROOT", root)
             .env("TOMCAT_SESSION_LOCK_TEST_ID", id)
@@ -139,6 +175,81 @@ fn independent_process_store_rmw_keeps_all_sessions_across_atomic_renames() {
     assert!(second.0.wait().unwrap().success());
     let manager = SessionManager::new(temp.path().into());
     assert_eq!(manager.list_sessions().unwrap().len(), 50);
+}
+
+#[test]
+fn independent_process_transcript_append_survives_atomic_rewrite() {
+    assert_transcript_write_survives_rewrite("append");
+}
+
+#[test]
+fn independent_process_transcript_title_survives_atomic_rewrite() {
+    assert_transcript_write_survives_rewrite("rewrite");
+}
+
+fn assert_transcript_write_survives_rewrite(mode: &str) {
+    let temp = TempDir::new().unwrap();
+    let manager = SessionManager::new(temp.path().to_path_buf());
+    let entry = manager.new_current_session(None).unwrap();
+    manager.pin_session(&entry.session_id).unwrap();
+    manager
+        .append_message(serde_json::json!({"role": "user", "content": "question"}))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "assistant", "content": "reply", "summary_title": "before",
+        }))
+        .unwrap();
+    let path = manager.transcript_path(&entry.session_id);
+    let ready = temp.path().join("write-ready");
+    let mut child;
+
+    // An external writer uses the documented stable <transcript>.lock namespace.
+    // Public SessionManager operations must serialize with this real OS lock.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_file_name(format!(
+            "{}.lock",
+            path.file_name().unwrap().to_string_lossy()
+        )))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    {
+        let snapshot = std::fs::read(&path).unwrap();
+        child = spawn_session_worker(temp.path(), mode, &entry.session_id, &ready);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer did not become ready"
+            );
+            assert!(child.0.try_wait().unwrap().is_none(), "writer exited early");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Before the fix the writer can finish here, then the older snapshot erases it.
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !ready.with_extension("done").exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        tomcat::infra::write_file_atomic(&path, &snapshot).unwrap();
+    }
+    drop(lock);
+    assert!(child.0.wait().unwrap().success());
+    let entries = manager.get_entries(16).unwrap();
+    if mode == "append" {
+        assert!(entries.iter().any(|entry| matches!(entry,
+            TranscriptEntry::Custom(custom) if custom.extra["customType"] == "cross_process_append")),
+            "an acknowledged cross-process append was lost by atomic rename");
+    } else {
+        assert!(
+            entries.iter().any(|entry| matches!(entry,
+            TranscriptEntry::Message(message) if message.message["summary_title"] == "after")),
+            "an acknowledged cross-process title rewrite was overwritten by an older snapshot"
+        );
+    }
 }
 
 #[test]

@@ -350,6 +350,58 @@ fn session_file_git_paths_with_spaces_are_literal() {
     );
 }
 
+#[cfg(unix)]
+fn assert_git_content_restore_preserves_permissions(mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (captured_mode, removed) in [(mode, false), (mode, true), (0o644, false)] {
+        let f = Fixture::new();
+        f.git(&["init", "-q"]);
+        let path = f.dir.join("owned.txt");
+        fs::write(&path, b"v0").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(captured_mode)).unwrap();
+        f.commit();
+        f.edit("u1", "owned.txt", b"committed v1");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        f.commit();
+        f.edit("u1", "owned.txt", b"uncommitted v2");
+        if removed {
+            fs::remove_file(&path).unwrap();
+        }
+        assert_eq!(
+            baseline(&f.transcript, "s", "u1", path.to_str().unwrap())
+                .unwrap()
+                .text,
+            "committed v1"
+        );
+        restore(
+            &f.transcript,
+            "s",
+            "u1",
+            &[path.to_string_lossy().into_owned()],
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"committed v1");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            mode,
+            "Git content restore changed mode (removed={removed})"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn session_file_git_content_restore_preserves_executable_permissions() {
+    assert_git_content_restore_preserves_permissions(0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_file_git_content_restore_preserves_private_permissions() {
+    assert_git_content_restore_preserves_permissions(0o600);
+}
+
 #[test]
 fn session_file_branch_switch_uses_branch_version() {
     let f = Fixture::new();

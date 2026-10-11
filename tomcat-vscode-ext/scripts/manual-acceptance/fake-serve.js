@@ -62,6 +62,9 @@ let assistantMessageCounter = 1;
 let historyCounter = 1;
 let sessionCounter = 1;
 let nextPromptScript = null;
+// Presentation-only connector state; this fake is not an MCP recovery engine.
+let connectorGeneration = 1;
+let connectorToolEnabled = true;
 
 function normalizePromptScript(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -1175,14 +1178,15 @@ function handleCommand(frame) {
               "list_connector_tools",
               "add_connector",
               "remove_connector",
-              "set_connector_trust",
+              "set_connector_tool_enabled",
               "test_connector",
               "login_connector",
               "cancel_login_connector",
               "logout_connector",
               "reload_connector",
               "set_connector_tool_filter",
-            ],            protocolVersion: 2,
+            ],
+            protocolVersion: 2,
             sessionId,
           },
           requestId: frame.requestId,
@@ -1198,6 +1202,7 @@ function handleCommand(frame) {
       send({
         id: frame.id,
         payload: {
+          project: null,
           configPaths: {
             global: { display: "~/.tomcat/mcp.json", raw: "~/.tomcat/mcp.json" },
             workspace: { display: ".agents/mcp.json", raw: ".agents/mcp.json" },
@@ -1207,6 +1212,9 @@ function handleCommand(frame) {
               auth: "none",
               command: "node",
               configKey: "mcp:manual-global",
+              generation: String(connectorGeneration),
+              attempt: 1,
+              recovery: null,
               configPath: "~/.tomcat/mcp.json",
               configPathRaw: "~/.tomcat/mcp.json",
               name: "manual-global",
@@ -1216,7 +1224,6 @@ function handleCommand(frame) {
               state: "connected",
               toolCount: 1,
               transport: "stdio",
-              trust: { state: "trusted" },
               url: null,
             },
           ],
@@ -1231,13 +1238,44 @@ function handleCommand(frame) {
         id: frame.id,
         payload: {
           configKey: frame.configKey,
+          generation: String(connectorGeneration),
+          attempt: 1,
           tools: [{
             description: "Manual acceptance connector probe",
-            enabled: true,
+            enabled: connectorToolEnabled,
             label: "connector_probe",
             modelName: "mcp__manual_global__connector_probe",
             rawName: "connector_probe",
           }],
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "reload_connector":
+      connectorGeneration += 1;
+      send({
+        id: frame.id,
+        payload: {
+          configKey: frame.configKey,
+          accepted: true,
+          generation: String(connectorGeneration),
+          recoveryTimeoutMs: 60_000,
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "set_connector_tool_enabled":
+      connectorToolEnabled = frame.enabled;
+      send({
+        id: frame.id,
+        payload: {
+          configKey: frame.configKey,
+          rawName: frame.rawName,
+          enabled: connectorToolEnabled,
+          configSaved: true,
+          runtimeApplied: true,
         },
         success: true,
         type: "response",
@@ -1257,12 +1295,10 @@ function handleCommand(frame) {
       });
       return;
     case "remove_connector":
-    case "set_connector_trust":
     case "test_connector":
     case "login_connector":
     case "cancel_login_connector":
     case "logout_connector":
-    case "reload_connector":
     case "set_connector_tool_filter":
       send({
         id: frame.id,

@@ -105,7 +105,13 @@ fn tool_owned_media_gc_keeps_subagent_only_refs_and_namespaces_cached_ids() {
         second.live_blob_references.shas
     );
     mgr.attachment_store()
-        .sweep_orphan_blobs(&second.live_blob_references.shas, std::time::Duration::ZERO)
+        .sweep_orphan_blobs(
+            || {
+                mgr.run_incremental_attachment_housekeeping()
+                    .map(|mark| mark.live_blob_references.shas)
+            },
+            std::time::Duration::ZERO,
+        )
         .unwrap();
     assert!(mgr.attachment_store().exists(&child));
     std::fs::remove_file(children.join("same.jsonl")).unwrap();
@@ -408,7 +414,10 @@ fn malformed_transcript_row_is_skipped_without_stopping_blob_gc() {
         "malformed rows cannot manufacture a live blob reference"
     );
     mgr.attachment_store()
-        .sweep_orphan_blobs(&live.shas, std::time::Duration::from_secs(3600))
+        .sweep_orphan_blobs(
+            || mgr.collect_live_blob_shas().map(|live| live.shas),
+            std::time::Duration::from_secs(3600),
+        )
         .unwrap();
 
     assert!(

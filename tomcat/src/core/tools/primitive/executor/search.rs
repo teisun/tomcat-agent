@@ -87,6 +87,14 @@ const RG_FIELD_MATCH_SEP: &str = "\u{1f}";
 const RG_FIELD_CONTEXT_SEP: &str = "\u{1e}";
 
 fn parse_rg_match_line(line: &str) -> Option<SearchFileMatch> {
+    // The first configured separator identifies the row kind. Context text may
+    // itself contain colons or match separators; neither makes it another hit.
+    if line.find(RG_FIELD_CONTEXT_SEP).is_some_and(|context_at| {
+        line.find(RG_FIELD_MATCH_SEP)
+            .is_none_or(|match_at| context_at < match_at)
+    }) {
+        return None;
+    }
     // 分隔符是我们要求 rg 用的，但只要它没照做（旧版本、被 shim 顶替），
     // 按分隔符切就会一条都切不出来 —— 那会以「没有匹配」的样子返回，
     // 比解析失败更糟。切不动就退回 rg 的默认 `:` 格式。
@@ -1010,56 +1018,5 @@ pub(super) async fn search_files_impl(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn hit(path: &str, line: u64, col: u64, text: &str) -> String {
-        format!("{path}\u{1f}{line}\u{1f}{col}\u{1f}{text}")
-    }
-
-    fn ctx(path: &str, line: u64, text: &str) -> String {
-        format!("{path}\u{1e}{line}\u{1e}{text}")
-    }
-
-    #[test]
-    fn content_output_attaches_context_around_each_hit() {
-        let stdout = [
-            ctx("a.txt", 1, "before one"),
-            ctx("a.txt", 2, "before two"),
-            hit("a.txt", 3, 1, "needle"),
-            ctx("a.txt", 4, "after one"),
-            "--".to_string(),
-            ctx("b.txt", 9, "b before"),
-            hit("b.txt", 10, 1, "needle again"),
-        ]
-        .join("\n");
-
-        let matches = parse_rg_content_output(&stdout);
-
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].path, "a.txt");
-        assert_eq!(matches[0].line, 3);
-        assert_eq!(matches[0].before, vec!["before one", "before two"]);
-        assert_eq!(matches[0].after, vec!["after one"]);
-        // `--` 是 rg 的组边界：跨组的上下文不能粘到上一条命中行上。
-        assert_eq!(matches[1].path, "b.txt");
-        assert_eq!(matches[1].before, vec!["b before"]);
-        assert!(matches[1].after.is_empty());
-    }
-
-    #[test]
-    fn content_output_survives_paths_containing_colons_and_dashes() {
-        let stdout = [
-            ctx("weird:name-1.txt", 4, "ctx"),
-            hit("weird:name-1.txt", 5, 2, "needle"),
-        ]
-        .join("\n");
-
-        let matches = parse_rg_content_output(&stdout);
-
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].path, "weird:name-1.txt");
-        assert_eq!(matches[0].line, 5);
-        assert_eq!(matches[0].before, vec!["ctx"]);
-    }
-}
+#[path = "tests/search_test.rs"]
+mod tests;

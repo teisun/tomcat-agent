@@ -297,6 +297,12 @@ fn verifier_allowed_tools_do_not_include_write_paths() {
     assert!(names.contains("list_dir"));
     assert!(names.contains("bash"));
     assert!(names.contains("web_fetch"));
+    for tool in ["task_output", "task_stop", "task_list"] {
+        assert!(
+            names.contains(tool),
+            "verifier cannot finish its own Bash work without {tool}"
+        );
+    }
     assert!(!names.contains("create_plan"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("write"));

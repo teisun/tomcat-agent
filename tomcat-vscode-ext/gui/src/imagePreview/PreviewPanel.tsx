@@ -405,6 +405,8 @@ export function PreviewPanel() {
               "::before",
             ).fontFamily || null,
           position: state?.position ?? 0,
+          rootClientHeight: document.getElementById("root")?.clientHeight ?? 0,
+          viewportHeight: window.innerHeight,
           stageClientWidth: stageRef.current?.clientWidth ?? 0,
           stageNaturalWidth:
             document.querySelector<HTMLImageElement>(

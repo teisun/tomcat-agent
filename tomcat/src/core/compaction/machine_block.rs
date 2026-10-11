@@ -211,14 +211,13 @@ pub fn collect_recent_files(messages: &[ChatMessage]) -> (Vec<String>, Vec<Strin
                 .pointer("/function/name")
                 .or_else(|| tool_call.get("name"))
                 .and_then(serde_json::Value::as_str);
-            let Some(path) = tool_call_path(tool_call) else {
-                continue;
+            let (target, batch_key) = match tool_name {
+                Some("read") => (&mut reads, Some("paths")),
+                Some("edit") => (&mut modified, Some("files")),
+                Some("write" | "hashline_edit") => (&mut modified, None),
+                _ => continue,
             };
-            match tool_name {
-                Some("read") => reads.push(path),
-                Some("edit" | "write") => modified.push(path),
-                _ => {}
-            }
+            target.extend(tool_call_paths(tool_call, batch_key));
         }
     }
 
@@ -230,20 +229,32 @@ pub fn collect_recent_files(messages: &[ChatMessage]) -> (Vec<String>, Vec<Strin
     )
 }
 
-fn tool_call_path(tool_call: &serde_json::Value) -> Option<String> {
-    let arguments = tool_call
+fn tool_call_paths(tool_call: &serde_json::Value, batch_key: Option<&str>) -> Vec<String> {
+    let Some(arguments) = tool_call
         .pointer("/function/arguments")
-        .or_else(|| tool_call.get("arguments"))?;
+        .or_else(|| tool_call.get("arguments"))
+    else {
+        return Vec::new();
+    };
     let arguments = match arguments {
-        serde_json::Value::String(raw) => serde_json::from_str(raw).ok()?,
+        serde_json::Value::String(raw) => match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        },
         value => value.clone(),
     };
-    arguments
-        .get("path")
-        .and_then(serde_json::Value::as_str)
+    let entries = batch_key
+        .and_then(|key| arguments.get(key))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(&arguments));
+    entries
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(serde_json::Value::as_str))
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(str::to_owned)
+        .collect()
 }
 
 /// Preserve chronological order while keeping the most recent occurrence of each path.

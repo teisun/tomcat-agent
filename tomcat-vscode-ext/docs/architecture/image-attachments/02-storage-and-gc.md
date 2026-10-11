@@ -179,6 +179,7 @@ TOMCAT_E2E_GREP='keeps multiple Tomcat webview sessions isolated' \
   sessions/attachments/
     blobs/<sha256>                  全部图片字节，内容寻址，不可变
     thumbs/<源sha256>               192px 缩略图，纯派生
+    retention.lock                 字节/租约/GC 共用的稳定文件锁
     pending/<sessionId>/<sha256>    租约标记（空文件）
 ```
 
@@ -236,8 +237,8 @@ TOMCAT_E2E_GREP='keeps multiple Tomcat webview sessions isolated' \
   ingest   → put(bytes) 落 blob
              + mark_pending(sid, sha) 建租约
   打字     → 完全不碰这里（草稿文本在扩展层）
-  hydrate  → touch_pending 续期，证明这份草稿还活着
-             （租约已被 GC 回收但 blob 还在时会重新建立，不是报错）
+  续租     → touch_pending / retain_pending_batch 保留已有 blob
+             （marker 可重新建立；已有 marker 续期，缺失字节不能凭空重建）
   send     → promote(sid, sha) 只删租约标记，blob 原地不动
   GC       → 租约超过 TTL 后只删租约
              随后一次 mark-and-sweep：
@@ -247,8 +248,8 @@ TOMCAT_E2E_GREP='keeps multiple Tomcat webview sessions isolated' \
 
 ### 4.3 三条 GC 分支
 
-`gc_pending(ttl, is_referenced)` 只负责释放过期租约；它不直接删除 blob。随后
-`sweep_orphan_blobs(live_shas, grace)` 用同一份在用名单执行实际删除：
+`gc_pending(ttl)` 只负责释放过期租约；它不直接删除 blob。随后
+`sweep_orphan_blobs(collect_live, grace)` 在持锁期间收集引用，再执行实际删除：
 
 | 租约是否超期 | 是否仍被 transcript 引用 | 是否还有别的 session 租着 | 动作 |
 |---|---|---|---|
@@ -257,17 +258,18 @@ TOMCAT_E2E_GREP='keeps multiple Tomcat webview sessions isolated' \
 | 是 | 是 | — | 只删租约；名单保留 blob |
 | 是 | 否 | 是 | 只删租约；pending 名单保留 blob |
 
-在用名单由 `SessionManager::collect_live_blob_shas()` 一次流式扫描构建：
+在用名单来自 transcript 与有效草稿租约；启动路径复用已有的可丢弃 `HousekeepingLedger` 指纹缓存，变更/缺失项回退扫描。transcript 仍是权威，不增加引用计数数据库。
 
 ```text
-pending/<session>/<sha>  ─┐
-                          ├── HashSet<sha> ──► gc_pending / sweep_orphan_blobs
-所有主 transcript 的 blob_sha ─┘
+已有字节被新草稿保留 ─┐
+上传 / 续租 / 提升    ├─ attachments/retention.lock ─ 相互串行
+GC: 收集引用 → 删除 ─┘                 |
+                         成功 retain 后，GC 不能按旧名单删字节
 ```
 
-不维护 `referenced.json` 或引用计数。它们会引入崩溃时的双写一致性和修复路径；
-transcript 已经是权威事实，低频后台扫描更简单可靠。若 sessions 目录超过 1GB 或扫描超过
-2 秒，再增加可从 transcript 重建的每会话 `<session>.blob_refs` 派生文件。
+复用 `infra/config/lock.rs` 的 OS 文件锁，覆盖同一附件根目录内、遵守该锁约定的进程。锁从引用采集之前持有到删除结束；在检查 blob 存在后、发布租约之前也不释放。不能只在删文件前再检查一次。已有 marker 续期但不重写内容；失败只回滚本次新建 marker。锁文件不能在使用期间删除，否则不同进程可能锁到不同文件。旧二进制或外部文件操作不在 advisory lock 的保证内。
+
+持锁 I/O 会串行，尚不承诺固定延迟；只有实测交互阻塞需要时才重新评估更细粒度协调。GC 仍是 best-effort，失败由已有调用链报告，不增加重试/补偿状态机。
 
 ### 4.4 TTL 取 7 天
 
@@ -275,11 +277,11 @@ transcript 已经是权威事实，低频后台扫描更简单可靠。若 sessi
 pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 ```
 
-判据：足够覆盖「周五写了草稿、周一回来接着写」，又不至于让被遗忘的草稿字节长期占盘。而且 hydrate 会 touch 续期，所以只要用户还偶尔打开那个 session，租约就不会过期。
+判据：覆盖「周五写了草稿、周一回来接着写」。成功恢复/保留已有字节会续期；若原件已过期且无历史引用而被回收，不承诺凭草稿元数据重建原件。
 
 ### 4.5 超预算淘汰：判据是「能不能重建」
 
-`evict_rebuildable_over_budget(max_bytes, _)` 只把缩略图压到 256MB 以内，按最近最少使用淘汰。
+`evict_rebuildable_over_budget(max_bytes)` 尝试把缩略图压到 256MB 以内，按最近最少使用淘汰。
 
 关键是判据不是「在哪个目录」，而是**这份字节能不能重新造出来**：
 
@@ -297,9 +299,9 @@ pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 ```text
   serve 启动时     run_attachment_housekeeping()（serve/mod.rs）
                      ├ discard_legacy_draft_dir()  丢弃旧版后端草稿目录
-                     ├ collect_live_blob_shas()（一次流式扫描）
-                     ├ gc_pending(7 天 TTL) + sweep_orphan_blobs(1 小时宽限)
-                     └ evict_rebuildable_over_budget(256MB，仅 thumbs)
+                     ├ gc_pending(7 天 TTL)
+                     ├ evict_rebuildable_over_budget(256MB，仅 thumbs)
+                     └ sweep 持锁 → 增量采集引用 → 删除孤儿（1 小时宽限）
   delete_session   释放本会话租约后，再构建一次名单并 sweep
   物化历史图之后    只检查缩略图的 256MB 预算（commands.rs）
 ```
@@ -425,7 +427,9 @@ pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 **「磁盘占用太大」**
 
 ```text
-  安全删：thumbs/ 全部、被 transcript 引用的 blobs/（都会自动重建）
-  别删：  pending/ 里还在租约期内的 sha 对应的 blobs/（那是未发送内容的唯一副本）
-  或者直接等 GC —— 它在每次 serve 启动时跑。
+  仅可重建缓存：thumbs/ 缩略图（保留原件时可重新生成）。
+  不要手删：blobs/ 原件与 provider rendition；被 transcript 引用的原件可能是唯一副本。
+  草稿保护有期限：pending/ 租约默认 7 天，hydrate 会续期，并非永久保留。
+  清理交给现有 GC：回收没有 transcript 引用和有效草稿租约、且超过宽限期的孤儿。
+  256 MiB 容量淘汰只针对缩略图，不针对已发送原件。
 ```

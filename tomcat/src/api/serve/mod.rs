@@ -189,26 +189,6 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
             std::time::SystemTime::now(),
         );
     }
-    let mut live = match manager.run_incremental_attachment_housekeeping() {
-        Ok(mark) => {
-            if mark.compacted_displays > 0 {
-                tracing::info!(
-                    "serve: compacted {} expired tool-display sidecar record(s)",
-                    mark.compacted_displays
-                );
-            }
-            mark.live_blob_references
-        }
-        Err(error) => {
-            tracing::warn!("serve: startup attachment housekeeping mark pass failed: {error}");
-            return;
-        }
-    };
-    tracing::debug!(
-        bytes_scanned = live.bytes_scanned,
-        transcripts_scanned = live.transcripts_scanned,
-        "serve: refreshed changed transcript references for attachment housekeeping"
-    );
     let store = manager.attachment_store();
     match store.gc_pending(crate::core::session::attachments::PENDING_BLOB_TTL) {
         Ok(report) if report.leases_released > 0 => {
@@ -219,16 +199,6 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
         }
         Ok(_) => {}
         Err(error) => tracing::warn!("serve: attachment gc failed: {error}"),
-    }
-    // `gc_pending` may have released expired leases. Re-read just the lease directory
-    // (not every transcript) and rebuild the live set, so stale markers do not
-    // artificially extend an orphan's grace period by one more startup.
-    match store.collect_pending_blob_shas() {
-        Ok(pending) => live.refresh_pending_blob_shas(pending),
-        Err(error) => {
-            tracing::warn!("serve: could not refresh live attachment leases: {error}");
-            return;
-        }
     }
 
     match store
@@ -241,13 +211,27 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
         Err(error) => tracing::warn!("serve: attachment eviction failed: {error}"),
     }
     match store.sweep_orphan_blobs(
-        &live.shas,
+        || {
+            let mark = manager.run_incremental_attachment_housekeeping()?;
+            if mark.compacted_displays > 0 {
+                tracing::info!(
+                    "serve: compacted {} expired tool-display sidecar record(s)",
+                    mark.compacted_displays
+                );
+            }
+            let live = mark.live_blob_references;
+            tracing::debug!(
+                bytes_scanned = live.bytes_scanned,
+                transcripts_scanned = live.transcripts_scanned,
+                "serve: refreshed changed transcript references for attachment housekeeping"
+            );
+            Ok(live.shas)
+        },
         crate::core::session::attachments::ORPHAN_BLOB_GRACE,
     ) {
         Ok(report) if report.blobs_deleted > 0 => tracing::info!(
-            "serve: attachment sweep reclaimed {} orphan blob(s) after scanning {} bytes",
-            report.blobs_deleted,
-            live.bytes_scanned
+            "serve: attachment sweep reclaimed {} orphan blob(s)",
+            report.blobs_deleted
         ),
         Ok(_) => {}
         Err(error) => tracing::warn!("serve: attachment orphan sweep failed: {error}"),
