@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::agent_loop::tool_dispatcher::run_tool_calls;
+use crate::core::agent_loop::tool_dispatcher::{run_tool_calls, run_tool_calls_with_usage};
 use crate::core::agent_loop::tool_exec::{
     execute_tool, persisted_tool_call_arguments, NORMALIZED_TOOL_CALL_ARGUMENTS,
 };
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, TokenUsage};
 use crate::core::session::manager::ContextState;
 use crate::core::tools::contract::registry::{DefaultToolRegistry, Tool, ToolRegistry};
 use crate::core::tools::primitive::PrimitiveExecutor;
@@ -355,7 +355,7 @@ async fn tool_dispatch_counts_assistant_only_in_fallback_estimate() {
     state.update_api_usage(1_000, (assistant_chars / 4) as u32);
     agent.set_context_state(Some(state));
 
-    run_tool_calls(
+    run_tool_calls_with_usage(
         &mut agent,
         &mut messages,
         &tool_calls,
@@ -367,6 +367,11 @@ async fn tool_dispatch_counts_assistant_only_in_fallback_estimate() {
         None,
         None,
         None,
+        Some(TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: (assistant_chars / 4) as u32,
+            ..Default::default()
+        }),
     )
     .await
     .expect("tool dispatch should succeed");
@@ -431,7 +436,7 @@ async fn tool_dispatch_does_not_double_count_large_tool_call_arguments() {
     state.update_api_usage(1_000, (assistant_chars / 4) as u32);
     agent.set_context_state(Some(state));
 
-    run_tool_calls(
+    run_tool_calls_with_usage(
         &mut agent,
         &mut messages,
         &tool_calls,
@@ -443,6 +448,11 @@ async fn tool_dispatch_does_not_double_count_large_tool_call_arguments() {
         None,
         None,
         None,
+        Some(TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: (assistant_chars / 4) as u32,
+            ..Default::default()
+        }),
     )
     .await
     .expect("large tool call should succeed");

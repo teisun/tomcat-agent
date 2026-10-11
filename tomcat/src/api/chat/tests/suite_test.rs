@@ -409,7 +409,7 @@ async fn working_messages_keep_compacted_history_and_current_input_at_tail() {
     ctx.config.context.layer0_single_result_max_chars = 500;
     ctx.config.context.layer0_placeholder_threshold_chars = 100;
     let old_result = "old-result-".repeat(25);
-    let history = vec![
+    let history = [
         crate::ChatMessage::user("covered user"),
         crate::ChatMessage::assistant("old full history"),
         crate::ChatMessage::user("old tool turn"),
