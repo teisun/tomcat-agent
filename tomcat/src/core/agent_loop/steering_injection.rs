@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, MessageKind};
 use crate::core::session::manager::estimate_msg_chars;
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
@@ -132,6 +132,7 @@ pub(super) fn inject_steering_messages(
             }
         }
         agent.push_message(messages, input.provider)?;
+        agent.silent_reply_allowed = false;
         if let Some(ctx_state) = agent.context_state.as_mut() {
             ctx_state
                 .on_message_appended(estimate_msg_chars(messages.last().expect("just appended")));
@@ -160,6 +161,9 @@ pub(super) fn inject_follow_up_messages(
         q.drain(..).collect::<Vec<_>>()
     };
     for msg in drained {
+        if msg.kind != MessageKind::Signal {
+            agent.silent_reply_allowed = false;
+        }
         if let Some(ctx_state) = agent.context_state.as_mut() {
             ctx_state.on_message_appended(estimate_msg_chars(&msg));
         }

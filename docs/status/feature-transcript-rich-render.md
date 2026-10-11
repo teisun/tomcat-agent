@@ -1,8 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-10-11 00:21 +0800 | ACTIVE | feature/transcript-rich-render | - |
+| tomcat | 2026-10-11 12:43 +0800 | ACTIVE | feature/transcript-rich-render | - |
 
 ### DONE
+
+- Implemented silent completion after a visible normal answer: confirm the first hidden/thinking-only silent reply with identical input, accept consecutive silence or the last attempt, and retain the original plan handback behavior. Real input and new runs revoke permission; tools, Signal, completion-guard Nudge and compaction preserve it. The shared `clean_stop` predicate avoids duplicating the acceptance conditions.
+- Simplified notice/warn rendering to icon-and-text status lines without duplicate kind headers; real error cards and error labels remain. Auto-retry progress stays in the transcript rather than the webview timeline, while exhausted retries still surface the final error card. Updated component/state regressions, the image acceptance harness and both language catalogs without adding a protocol.
+- Aligned agent-loop and stream-terminal-error documentation with the permission lifecycle, confirmation rule, incident evidence and frontend retry presentation.
 
 - [✓] Fixed Files registration after full context collapse, including the first batch that immediately creates a file. Ownership is selected after persisting that batch's assistant reply: normal user message, then the existing turn owner, then this assistant reply. Rewind restores and removes backup pages for all affected message roles; no transcript scan or historical backfill was added.
 - [✓] External Build/Retry runs release a stopped or failed-send queue's pause; queued prompts wait for idle and are sent once. A late start for the queue's own prompt does not accidentally resume it.
@@ -16,9 +20,11 @@
 - [✓] General adopts a new connection's language snapshot while retaining successful saves within the same connection. Reconnecting disables saving; existing drafts, model overrides and environment-override semantics are preserved.
 - [✓] Removed model/developer-only translation entries and unnecessary mechanisms while preserving safety checks. Extended the shared anti-overengineering guidance with concise reader, ownership and evidence rules rather than an implementation diary.
 - [✓] Retained prior branch Files/Keep/Undo, tool-owned media, volatile queue, rewind, provider routing and MCP work. Earlier implementation history remains in Git; accepted scope and retention boundaries were not broadened.
-- [✓] Ran the project version script once: CLI `0.1.70 → 0.1.71`, extension `0.1.84 → 0.1.85`, bundled CLI declaration `0.1.70 → 0.1.71`. Only the five version files' version fields changed relative to the pre-bump workspace; dependency contents, private GUI version and existing work were preserved.
+- Preserved the existing single patch upgrade, as explicitly confirmed by the user: CLI `0.1.71 → 0.1.72`, extension `0.1.85 → 0.1.86`, bundled CLI declaration `0.1.71 → 0.1.72`. The five version files only change version fields; dependency contents and the private GUI manifest are unchanged. Project-script consistency checks passed; this preparation does not execute a second bump.
 
 ### INTERFACE
+
+- Silent completion uses two run-local AgentLoop facts, not persisted receipts or history scans. Auto-retry event/wire shapes and transcript diagnostics are unchanged; only extension presentation suppresses retry-progress rows. Notice/warn icon ARIA labels remain localized, and final error recovery behavior is preserved.
 
 - This remediation adds no wire shape, storage format or configuration switch. Existing LlmNotice reports `compaction_model_fallback`; persisted assistant-message IDs can own file baselines when no normal user message remains, and rewind includes those IDs.
 
@@ -26,9 +32,11 @@
 - Serve `delete_session` reports cleanup warnings after committed deletion. Pin preferences stay in extension workspace state. Session deletion does not erase workspace files, plans, shared checkpoints, audit trails or remote uploads; sidecar cleanup remains best-effort and empty lock-file residue is allowed.
 - Review uses the existing question request/response and `allowCustom: false`; stable option IDs, not translated strings, decide whether to run the reviewer. Stop/disconnect and parent-tool identity protections remain intact; no separate modal protocol was added.
 - Rust schema/d.ts fixtures and extension wire types include the new capabilities. Existing Files/Keep and tool-media contracts remain intact.
-- Current declared CLI/bundled CLI `0.1.71` and extension `0.1.85` versions are unchanged. This commit does not bump, build, install or publish versions. The previously verified pure VSIX remains a historical `0.1.84` artifact.
+- Current declared CLI/bundled CLI is `0.1.72`, extension `0.1.86`; the commit includes the existing synchronized patch upgrade. Declarations are not evidence of built, bundled or installed binaries. No new CLI binary or VSIX is produced during this preparation.
 
 ### BLOCKED
+
+- This request explicitly skips tests, compilation and visual recapture. Earlier silent-completion acceptance predates the subsequent `clean_stop` consolidation and notice/retry-presentation changes; it is historical evidence, not a fresh all-green check of this staged snapshot. Original-session and real-model confirmation still require CLI deployment; a pure plugin package alone does not deploy the Rust fix.
 
 - Development acceptance is closed within the user-approved isolated/low-cost scope. The real-model probe exercised a 401 fallback before the first-write ownership fix; 402 is covered by regression tests. The fix was verified by production-dispatcher/real-file regressions, not a second paid probe. Original failed-session Retry remains for the user after deployment; no recovery of that session is claimed. New icon visual acceptance was not run during commit preparation.
 - Whole-workspace formatting also has four previously recorded failures in untouched `machine_block_test.rs`, `openai_responses_test.rs`, `types_test.rs` and `append_message_chain_test.rs`; focused formatting of the changed Rust files passed before this commit request.
@@ -40,6 +48,9 @@
 - Local screenshots, logs, disposable host profiles, acceptance reports and VSIX files remain ignored; `docs/status/feature-transcript-rich-render.bak` is excluded. Per the user's commit-only request, no tests, coverage collection, build, packaging, installation, restart, publication or push are run during this preparation. Cov% remains unmeasured (`-`), so no coverage value is fabricated.
 
 ### VERIFICATION
+
+- This commit preparation runs only version consistency, Git scope/status/message and whitespace checks; no test suite, coverage, build, package, install, restart or push. `node scripts/release-version.mjs check` passed twice with CLI/bundled CLI `0.1.72` and extension `0.1.86` (`1791693629584-i5vtzu`), and version-file whitespace checks passed. No second bump or lockfile regeneration was performed.
+- Historical silent-completion evidence is retained in `.agents/acceptance/silent-completion-20261011.md`: the incident failed on old code, then signal_completion 12 + completion_guard 19 + run_basic 80 passed; the prior full library run passed 3178 / zero failed / three ignored using process-only loopback NO_PROXY (`1791677277496-aldp8z`). Clippy reported the known unchanged-file findings. The earlier desktop/narrow production-component captures used simulated events and showed the previous notice presentation; they do not validate the newly staged flat status lines or hidden retry rows.
 
 - Remediation evidence is reused from `.agents/acceptance/opus-remediation-20261010.md`: Opus records Rust library 3176 passed / three ignored after the ownership fix. The subsequent focused ownership/media batch passed 8/8, with changed-file Rust formatting and Git whitespace checks passing (`1791648906691-qrsv4p`, `1791648955614-uy57xe`). This commit request does not rerun these checks.
 - Earlier remediation frontend checks passed: extension core 719, ToolRow 71, App/TranscriptView/ThinkingGroup 118; typechecks, GUI build and extension compile passed. Eight bilingual desktop/narrow browser scenarios and the isolated real VS Code Stop -> Build/failed-card journey passed using fake Serve/injected events, not the original failed session.

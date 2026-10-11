@@ -2649,21 +2649,42 @@ span.tc-attachment-strip__file-chip {
   color: var(--vscode-textLink-activeForeground, var(--vscode-focusBorder));
 }
 
+.tc-message--notice,
+.tc-message--warn {
+  align-items: flex-start;
+  border: 0;
+  flex-direction: row;
+  font-size: 12px;
+  gap: 8px;
+  line-height: 20px;
+  padding: 0;
+}
+
 .tc-message--notice {
-  border-color: transparent;
-  border-left-color: var(--vscode-inputValidation-infoBorder, #3794ff);
-  border-left-width: 3px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-message--notice .message-text,
+.tc-message--warn .message-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tc-message__icon {
+  flex: 0 0 16px;
+  font-size: 16px;
+  line-height: 1;
+  margin-top: 2px;
+  text-align: center;
+}
+
+.tc-message--warn .tc-message__icon {
+  color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
 .tc-message--error {
   border-color: transparent;
   border-left-color: var(--vscode-errorForeground, #f14c4c);
-  border-left-width: 3px;
-}
-
-.tc-message--warn {
-  border-color: transparent;
-  border-left-color: var(--vscode-inputValidation-warningBorder, #cca700);
   border-left-width: 3px;
 }
 

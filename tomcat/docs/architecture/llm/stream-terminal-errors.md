@@ -5,14 +5,74 @@
 ## 内部通知的正常空终态
 
 ```text
-主动 Stopped → UI 保留终态，不再进入模型 follow-up
-正常收尾 + 实际取出的整批均为 Signal → 只许可下一次接受的响应静默
-新提问 / Retry / Resume / 工具轮中途的通知 → 默认空答保护
+本轮收下一条可见、正常 stop、无工具且无错误的答复 → 开启静默许可
+  │
+  ├─ 真人插话 / 非 Signal 追加输入 / 新运行入口 → 关闭许可，保留原空答保护
+  └─ 后台 Signal / 完成守卫 Nudge / 工具调用 / 压缩 → 许可不变
+       │
+       └─ 正常 stop、无正文、无工具或畸形调用、无截断和错误
+            ├─ 上一条不是静默，且还有额度 → 原样重发一次，排除偶发故障
+            └─ 上一条也是静默，或已到最后额度 → 收下，走原 finalize
+                 ├─ 计划还有待办 → 原守卫催促；连续两次无进展则交还计划
+                 └─ 无待办 → 正常结束，不产生空回复红色错误
+
+主动 Stopped → UI 保留终态，不再进入模型 follow-up（原行为不变）
 ```
 
-`AgentLoop::silent_reply_allowed` 仅在 `run_inner` 正常完成、completion guard 放行且未耗尽工具轮预算后，从实际注入的新批次产生。入口清零；自动重试同一批输入时保留；任何响应一被接受就清零，后续工具结果与 Nudge 不继承许可。只有正常 `stop/end_turn`、无正文、无工具或畸形调用、未截断且无终局错误时可豁免 hidden/thinking-only 判定；仍走原 finalize 保留用量、continuity、持久化、completion guard 和 TurnEnd。
+`AgentLoop::silent_reply_allowed` 表示本轮已经收下一条可见答复、之后没有真人新输入。许可在 `reasoning_loop` 收下有正文、正常 `stop/end_turn`、无工具和错误的回复时打开，即使随后完成守卫继续催促也保留；`run_inner` 入口关闭，`inject_steering_messages` 实际注入消息后关闭，`inject_follow_up_messages` 取出非 Signal 消息时关闭。工具结果、Nudge、纯 Signal、被收下的静默和压缩不再撤销许可，删除原先 `run_inner` 的「整批纯 Signal 才授权」逻辑。
 
-不从历史最后一条 assistant 或 `start_idx` 推断完成责任：压缩可将未完成真人任务折入摘要；Retry/Resume 在 run 入口追加通知前已经复制/恢复真人工作，尾部仅见 Signal 不能证明无需回答。CLI 空闲 auto_drain 入口本期不授权，静默仍可能重试报错；出现该类反馈时才在可信注入点扩展授权，不增加持久回执或改回历史猜测。若未来 Signal 要求行动，需结构化子类型限定许可；普通用户 reasoning-only 的保护不随本修复放宽。
+`last_reply_silent` 记录上一条模型回复是否为正常停止、无正文、无工具或畸形调用、未截断且无错误；每次解析完回复后更新，包含被拒绝重发的回复，传输失败没有新回复则不刷新。收下条件为 `silent_reply && silent_reply_allowed && (last_reply_silent || attempt >= max_attempts)`：第一条静默先确认一次，连续第二条才收下；额度只剩最后一次时直接收下（覆盖 `max_attempts=1` 和之前网络错误耗尽额度）。不能用 `attempt > 1` 代替连续静默，因为 attempt 是整段推理循环共用的预算。运行入口无需清零 `last_reply_silent`：许可已关闭，能重新开启许可的可见答复会先将它刷新为 false。
+
+本规则只调整已有 hidden/thinking-only 空答检查的豁免条件，不重写其它纯空或终局处理。被收下的静默仍走原 finalize，保留 usage、reasoning continuation、finish reason、持久化、completion guard 和 TurnEnd；首次失败重发不插入催促，不改变输入消息。完成守卫、重试预算和等待间隔、催促文案及界面代码不改。
+
+不从历史最后一条 assistant 或 `start_idx` 推断完成责任：压缩可将答复或未完成真人任务折入摘要；Retry/Resume 在 run 入口追加通知前已经复制/恢复真人工作，尾部仅见 Signal 不能证明无需回答。两个状态位只在可信的回复接收或输入注入点更新，不持久化、不倒推历史。CLI 空闲 auto_drain 入口本期仍不授权；普通真人新输入的 reasoning-only 保护不放宽。
+
+### 事故与统计证据
+
+```text
+本次：最终答复 → 守卫催促 → update_plan → 连续静默
+旧实现：许可已撤销 → 相同请求重发 9 次 → 约 8 分钟后报红错
+新实现：首次静默确认一次 → 收下持续静默 → 原守卫继续催或交还计划
+```
+
+原整改计划的调查快照覆盖 279 个会话、16 次 hidden-output 空回合（这里按故障回合计数，不把每个重试请求当成一次）：
+
+| 情形 | 回合数 | 每回合连续空回复 | 后续结果 |
+| --- | ---: | --- | --- |
+| 干活中途偶发静默 | 10 | 1 次 | 原样重发一次即恢复：7 次继续工具、3 次正文 |
+| 答复后收到后台通知，再静默 | 4 | 4 次 | 旧实现重发到上限；10-05 的 `b7895282` 已增加 Signal 例外 |
+| 答复后被催、调用工具，再静默 | 2 | 6 次、10 次 | 旧实现重发到上限仍失败 |
+
+这 10 次偶发故障前，本轮也都已有过文字答复，不能用「给过答复」单独区分主动收尾和偶发故障。选择原样确认一次，是因为这份快照中的偶发故障都只空一次，而持续静默均连续四次以上；这只是当前样本证据，不保证以后永远不会连续偶发两次。统计来源：`~/.cursor/plans/交卷后静默收尾_2e84c13d.plan.md` 的「根因与证据」；本修复不新增真实模型请求。
+
+本次会话 `1791639220943_02bdb744c9d5ba65` 的 transcript 第 485–505 行记录十次静默和九次重发。第 487 行是第二次请求的推理摘要（不是对用户的可见答复），其中明确写着 “keep the final response blank since the current task call will be complete”。其余九次没有可见推理摘要。该证据说明本次持续静默包含模型主动收尾的信号，不把隐藏推理的存在本身当作回答，也不把每次空答都归为上游故障。
+
+09-12 的反例见 `1789145285030_4935347d04eeb062.jsonl`：第 1468、1927、1940、2006、2013、2021 行是六次偶发 hidden_output，均只需原样重发一次。原复盘在对应运行中计入六次守卫催促；若一见静默就直接收下，偶发故障也会占用守卫额度，合计十二次超过八次上限，08:37 那次偶发静默就可能提前让计划暂停。确认重发让恢复的偶发故障留在重试路径，不占守卫催促或空转计数。
+
+### 参考实现与取舍
+
+以下路径以同级工作区仓库为基准，已查证对应代码；不把参考实现引入 Tomcat 的依赖。
+
+| 实现 | 查证位置 | 处理方式 |
+| --- | --- | --- |
+| Codex | `../codex/codex-rs/core/src/stream_events_utils.rs:270` 的 `finalize_non_tool_response_item`；`../codex/codex-rs/core/src/session/turn.rs:653` 的 `!needs_follow_up` 分支 | 空正文将最后答复置为 None；没有后续工作时进入正常收尾 |
+| OpenCode | `../opencode/packages/opencode/src/session/prompt.ts:1081` 的 `runLoop`，尤其 1111–1129、1295–1307 | 正常停止且没有工具就退出；内容过滤另报错误，不用可见正文作为正常退出的必要条件 |
+| Claude Code fork | `../cc-fork-01/src/services/api/claude.ts:2337-2350` 的 `stopReason` 守卫 | 已有 end_turn 的空正文是合法空响应，不等同于流未完成 |
+| 反例 Cline | `../cline/sdk/packages/llms/src/providers/middleware/retry-empty-response.ts:97` 的 `DEFAULT_EMPTY_RESPONSE_MAX_ATTEMPTS` | 保留空响应重试中间件，默认共三次尝试（第一次加两次重试） |
+
+Tomcat 没有照搬「空正文一律结束」：真人任务还没得到答复时保留现有保护；已经给过答复后用一次原样重发排除偶发故障，再把确认的静默交给既有完成守卫。代价是主动静默时多一个通常命中提示词缓存的请求，而不是九次重试后报错。重试过程只记入 transcript，扩展界面不展示；重试耗尽时由最终的错误卡片告知用户。
+
+### 回归边界与推翻条件
+
+`tomcat/src/core/agent_loop/tests/signal_completion_test.rs` 覆盖计划执行中的答复→工具→静默、一次相同输入确认、偶发恢复、最后额度、元数据保留、工具中途真人插话、静默时插话、新运行及压缩。事故用例先在旧实现上重试耗尽，再验证修复后 Completed、五个请求、各一条 `empty_turn`/`auto_retry_start`、`plan.stalled(reason=idle_nudges)` 和计划停放为 pending。它只用读取工具、不制造计划进度；真实 `update_plan` 改动会由原守卫认定为进展，可能再多一次催促，不改变首次静默只确认一次的规则。
+
+新提问、Signal 入场但尚未答复、真人插话后的空答，以及截断、未知终态、畸形工具调用和推理泄漏，仍按已有保护处理。压缩后继续使用接收时记录的许可；不扫描历史猜测。`completion_guard_test.rs`、`run_basic_test.rs` 及 serve `commands_test.rs` 的既有守卫、预算和 hidden-output 边界继续回归。
+
+出现以下证据时再推翻本次选择，不预先增加计数器、通知子类型协议或守卫新分支：
+
+1. 偶发静默连续两次，被误收下并导致中途交还计划：将确认重发次数从一次提高到两次。
+2. 后台通知实际需要用户等待结果汇报，却被静默收尾：按通知子类型收窄许可。
+3. 完成守卫面对已确认静默仍反复空催成为常态：考虑确认静默后直接交还计划。
 
 ## 1. 说人话版
 

@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "%extension.description%",
-  "version": "0.1.85",
+  "version": "0.1.86",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/teisun/tomcat-agent.git"
   },
   "tomcat": {
-    "bundledCliVersion": "0.1.71"
+    "bundledCliVersion": "0.1.72"
   },
   "categories": [
     "AI",

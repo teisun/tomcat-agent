@@ -1118,7 +1118,6 @@ suite("Tomcat image attachment visual acceptance", () => {
         api,
         (snapshot) =>
           snapshot.activeSessionId === retryNoticeSessionId
-            && snapshot.messageTexts.some((text) => text.includes("Retrying after error:"))
             && snapshot.messageTexts.some((text) =>
               text.includes(degradation.message),
             )
@@ -1126,7 +1125,11 @@ suite("Tomcat image attachment visual acceptance", () => {
             : undefined,
         20_000,
       );
-      screenshots.push(await captureScreenshot("15-retry-and-degrade-notices.png"));
+      // fake-serve emits the retry before the degrade notice, so it has already been applied here.
+      const retryDetail = "Invalid value: 'input_file'";
+      const retryHidden = !retryNoticeSnapshot.messageTexts.some((text) => text.includes(retryDetail));
+      assert.ok(retryHidden, "auto retry progress must stay out of the timeline");
+      screenshots.push(await captureScreenshot("15-retry-hidden-degrade-notice.png"));
       await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "agent_end" });
       const retrySuccessSnapshot = await waitForDom(
         api,
@@ -1392,11 +1395,9 @@ suite("Tomcat image attachment visual acceptance", () => {
                 (text) => text === "Gateway rejected the attachment payload",
               ).length === 1,
           },
-          retryNoticeAndDegradeState: {
+          retryHiddenDegradeShown: {
             passed:
-              retryNoticeSnapshot.messageTexts.some((text) =>
-                text.includes("Retrying after error:"),
-              ) &&
+              retryHidden &&
               retryNoticeSnapshot.messageTexts.some((text) =>
                 text.includes(degradation.message),
               ),

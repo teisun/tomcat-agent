@@ -55,8 +55,9 @@ function MessageBubbleComponent({
     item.kind === "error" && item.recoveryAction && typeof onRecover === "function"
       ? item.recoveryAction
       : null;
-  const showHeader =
-    item.kind !== "user" && item.kind !== "assistant" && recoveryAction === null;
+  const showHeader = item.kind === "error" && recoveryAction === null;
+  const statusIcon =
+    item.kind === "notice" ? "codicon-info" : item.kind === "warn" ? "codicon-warning" : null;
   const rawErrorDetail =
     item.kind === "error" && typeof item.detailText === "string" && item.detailText.trim().length > 0
       ? item.detailText
@@ -119,9 +120,17 @@ function MessageBubbleComponent({
       ) : null}
       {showHeader ? (
         <div className="tc-message__header">
-          <strong>{t(`message.label.${item.kind}`)}</strong>
-          <span>{item.label ?? t(`message.kind.${item.kind}`)}</span>
+          <strong>{t("message.label.error")}</strong>
+          {item.label ? <span>{item.label}</span> : null}
         </div>
+      ) : null}
+      {statusIcon ? (
+        <span
+          aria-label={t(`message.label.${item.kind}`)}
+          className={`tc-message__icon codicon ${statusIcon}`}
+          role="img"
+          title={t(`message.label.${item.kind}`)}
+        />
       ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">
         {item.kind === "assistant" ? (

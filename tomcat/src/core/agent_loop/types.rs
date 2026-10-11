@@ -390,8 +390,11 @@ pub struct AgentLoop {
     /// completion guard 连续注入次数。模型一旦重新调用工具就归零；
     /// 触顶后停止注入并交还用户，避免在同一个坎上无限打转。
     pub(super) completion_guard_injections: u32,
-    /// Granted only to the next accepted response after a completed turn drains pure Signals.
+    /// A visible normal terminal answer was accepted in this run; real input revokes it.
     pub(super) silent_reply_allowed: bool,
+    /// Whether the last model reply was a normal, error-free stop with no text or tools.
+    /// Updated for accepted and retried replies alike; transport failures are not replies.
+    pub(super) last_reply_silent: bool,
 }
 
 pub(super) fn unix_ts_ms() -> i64 {

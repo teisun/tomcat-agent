@@ -273,16 +273,11 @@ impl AgentLoop {
                         messages: vec![],
                         error: None,
                     });
-                    let batch_start = messages.len();
                     if let Err(err) = inject_steering_messages(self, messages)
                         .and_then(|_| inject_follow_up_messages(self, messages))
                     {
                         return AgentRunOutcome::Failed(err);
                     }
-                    self.silent_reply_allowed = messages.len() > batch_start
-                        && messages[batch_start..]
-                            .iter()
-                            .all(|m| m.kind == crate::core::llm::MessageKind::Signal);
                     continue;
                 }
                 Err(LoopError::Aborted {

@@ -432,15 +432,17 @@ pub(super) async fn run_reasoning_loop(
             .as_ref()
             .and_then(|continuation| continuation.provider_refs.as_ref())
             .and_then(|refs| refs.openai_response_id.as_deref());
-        let silent_signal_reply = agent.silent_reply_allowed
-            && tool_calls.is_empty()
+        let clean_stop = tool_calls.is_empty()
             && !has_malformed_tool_call
-            && has_no_visible_output
-            && !output_truncated
             && error_code.is_none()
             && error_message.is_none()
             && is_normal_stop_finish_reason(finish_reason.as_deref());
-        let empty_turn_failure = !silent_signal_reply
+        let silent_reply = clean_stop && has_no_visible_output;
+        let silent_reply_accepted = silent_reply
+            && agent.silent_reply_allowed
+            && (agent.last_reply_silent || attempt >= max_attempts);
+        agent.last_reply_silent = silent_reply;
+        let empty_turn_failure = !silent_reply_accepted
             && tool_calls.is_empty()
             && (has_malformed_tool_call
                 || thinking_only_or_truncated
@@ -515,7 +517,9 @@ pub(super) async fn run_reasoning_loop(
             )));
         }
 
-        agent.silent_reply_allowed = false;
+        if clean_stop && !has_no_visible_output {
+            agent.silent_reply_allowed = true;
+        }
 
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。

@@ -3279,21 +3279,9 @@ export class WebviewStateStore {
         );
         return sessionRenderMutation(session.sessionId);
       case "auto_retry_start":
-        pushMessage(
-          session,
-          "notice",
-          t("state.retrying", { detail: frame.errorMessage }),
-        );
-        return sessionRenderMutation(session.sessionId);
       case "auto_retry_end":
-        if (!frame.success) {
-          pushMessage(
-            session,
-            "notice",
-            frame.finalError == null ? t("state.retryFailedUnknown") : t("state.retryFailed", { detail: frame.finalError }),
-          );
-        }
-        return sessionRenderMutation(session.sessionId);
+        // Transcript-only diagnostics; an exhausted retry surfaces as agent_end's error card.
+        return NO_SESSION_RENDER_MUTATION;
       case "sub_agent_start":
         if (frame.subagentType !== "code_reviewer") {
           pushMessage(

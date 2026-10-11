@@ -1,4 +1,4 @@
-//! Signal-only follow-up completion, and the boundaries that must remain protected.
+//! Silent completion after a visible answer, and the boundaries that must remain protected.
 use super::mocks::{
     test_binding, MockPrimitiveExecutor, RecordedStreamRequests, RecordingStreamLlmProvider,
 };
@@ -131,10 +131,16 @@ fn fixture(
 }
 
 #[tokio::test]
-async fn completed_answer_then_signal_allows_hidden_or_visible_reasoning_noop_and_keeps_metadata() {
+async fn completed_answer_then_signal_confirms_silence_once_and_keeps_metadata() {
     for visible in [false, true] {
-        let (mut agent, requests, sink, bus) =
-            fixture(vec![text(), hidden(Some("stop"), visible)], vec![signal()]);
+        let (mut agent, requests, sink, bus) = fixture(
+            vec![
+                text(),
+                hidden(Some("stop"), visible),
+                hidden(Some("stop"), visible),
+            ],
+            vec![signal()],
+        );
         let turns = Arc::new(AtomicUsize::new(0));
         let observed = turns.clone();
         bus.on(
@@ -148,7 +154,7 @@ async fn completed_answer_then_signal_allows_hidden_or_visible_reasoning_noop_an
         let AgentRunOutcome::Completed(result) = outcome else {
             panic!("{outcome:?}")
         };
-        assert_eq!(requests.0.lock().unwrap().len(), 2);
+        assert_eq!(requests.0.lock().unwrap().len(), 3);
         assert_eq!(turns.load(Ordering::SeqCst), 2);
         let reply = result.new_messages.last().unwrap();
         assert_eq!(reply.text_content(), Some(""));
@@ -156,32 +162,77 @@ async fn completed_answer_then_signal_allows_hidden_or_visible_reasoning_noop_an
         assert!(reply.reasoning_continuation.is_some());
         assert_eq!(reply.finish_reason.as_deref(), Some("stop"));
         let rows = sink.rows.lock().unwrap();
-        assert!(!rows
-            .iter()
-            .any(|row| row["event"] == "empty_turn" || row["event"] == "auto_retry_start"));
+        for event in ["empty_turn", "auto_retry_start"] {
+            assert_eq!(rows.iter().filter(|row| row["event"] == event).count(), 1);
+        }
         assert!(rows.iter().any(|row| row["kind"] == "signal"));
-        assert!(!agent.silent_reply_allowed);
+        assert!(agent.silent_reply_allowed);
+        assert!(agent.last_reply_silent);
     }
 }
 
 #[tokio::test]
-async fn signal_authorization_survives_transport_retry_but_not_accepted_tool_call() {
-    let (mut agent, requests, sink, _) = fixture(
-        vec![
-            text(),
-            vec![Err(crate::llm_http_status_error("mock", 503, "retry"))],
-            hidden(Some("end_turn"), false),
-        ],
-        vec![signal()],
-    );
-    assert!(agent.run(vec![ChatMessage::user("question")]).await.is_ok());
-    assert_eq!(requests.0.lock().unwrap().len(), 3);
-    assert!(!sink
-        .rows
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|row| row["event"] == "empty_turn"));
+async fn post_answer_silence_on_last_attempt_is_accepted() {
+    for transport_error in [false, true] {
+        let mut streams = vec![text()];
+        if transport_error {
+            streams.push(vec![Err(crate::llm_http_status_error(
+                "mock", 503, "retry",
+            ))]);
+        }
+        streams.push(hidden(Some("end_turn"), false));
+        let (mut agent, requests, sink, _) = fixture(streams, vec![signal()]);
+        agent.config.max_attempts = if transport_error { 2 } else { 1 };
+        assert!(agent.run(vec![ChatMessage::user("question")]).await.is_ok());
+        assert_eq!(
+            requests.0.lock().unwrap().len(),
+            if transport_error { 3 } else { 2 }
+        );
+        assert!(!sink
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"] == "empty_turn"));
+        assert!(agent.silent_reply_allowed);
+    }
+}
+
+#[tokio::test]
+async fn post_answer_silence_is_confirmed_by_one_identical_retry() {
+    for recovers in [true, false] {
+        let (mut agent, requests, sink, _) = fixture(
+            vec![
+                text(),
+                call(),
+                hidden(Some("stop"), false),
+                if recovers {
+                    text()
+                } else {
+                    hidden(Some("stop"), false)
+                },
+            ],
+            vec![signal()],
+        );
+        assert!(agent.run(vec![ChatMessage::user("question")]).await.is_ok());
+        let requests = requests.0.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            serde_json::to_value(&requests[2].messages).unwrap(),
+            serde_json::to_value(&requests[3].messages).unwrap(),
+            "confirmation must resend the same messages, without a nudge"
+        );
+        let rows = sink.rows.lock().unwrap();
+        for event in ["empty_turn", "auto_retry_start"] {
+            assert_eq!(rows.iter().filter(|row| row["event"] == event).count(), 1);
+        }
+        assert!(agent.silent_reply_allowed);
+        assert_eq!(agent.last_reply_silent, !recovers);
+    }
+}
+
+#[tokio::test]
+async fn steering_during_post_answer_tool_work_revokes_silent_permission() {
     let (mut agent, requests, sink, _) = fixture(
         vec![
             text(),
@@ -191,17 +242,35 @@ async fn signal_authorization_survives_transport_retry_but_not_accepted_tool_cal
         ],
         vec![signal()],
     );
+    let reads = Arc::new(AtomicUsize::new(0));
+    agent.primitive = Arc::new(super::mocks::SteerableMockPrimitive {
+        steering_queue: agent.steering_queue.clone(),
+        read_count: reads.clone(),
+    });
     assert!(agent
         .run(vec![ChatMessage::user("question")])
         .await
         .is_err());
-    assert_eq!(requests.0.lock().unwrap().len(), 4);
-    assert!(sink
-        .rows
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|row| row["event"] == "empty_turn"));
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let requests = requests.0.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[2]
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Steering)
+            .count(),
+        1
+    );
+    assert_eq!(
+        sink.rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row["event"] == "empty_turn")
+            .count(),
+        2
+    );
     assert!(!agent.silent_reply_allowed);
 }
 
@@ -339,7 +408,12 @@ async fn mixed_steering_and_signal_after_text_receives_no_silent_permission() {
 #[tokio::test]
 async fn steering_arriving_during_authorized_noop_is_consumed_by_next_protected_request() {
     let (mut agent, requests, _, bus) = fixture(
-        vec![text(), hidden(Some("stop"), false), text()],
+        vec![
+            text(),
+            hidden(Some("stop"), false),
+            hidden(Some("stop"), false),
+            text(),
+        ],
         vec![signal()],
     );
     let queue = agent.steering_queue.clone();
@@ -347,7 +421,7 @@ async fn steering_arriving_during_authorized_noop_is_consumed_by_next_protected_
     bus.on(
         wire::WIRE_MESSAGE_END,
         Box::new(move |_: EventContext| {
-            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            if calls.fetch_add(1, Ordering::SeqCst) == 2 {
                 queue
                     .lock()
                     .push(ChatMessage::steering("new real question"));
@@ -357,13 +431,15 @@ async fn steering_arriving_during_authorized_noop_is_consumed_by_next_protected_
     );
     assert!(agent.run(vec![ChatMessage::user("question")]).await.is_ok());
     let requests = requests.0.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(!requests[1]
-        .messages
-        .iter()
-        .any(|m| m.kind == MessageKind::Steering));
+    assert_eq!(requests.len(), 4);
+    for request in &requests[1..3] {
+        assert!(!request
+            .messages
+            .iter()
+            .any(|m| m.kind == MessageKind::Steering));
+    }
     assert_eq!(
-        requests[2]
+        requests[3]
             .messages
             .iter()
             .filter(|m| m.text_content() == Some("new real question"))
@@ -371,13 +447,14 @@ async fn steering_arriving_during_authorized_noop_is_consumed_by_next_protected_
         1
     );
     assert!(agent.steering_queue.lock().is_empty());
-    assert!(!agent.silent_reply_allowed);
+    // The real input revoked permission; its own visible answer opens it again.
+    assert!(agent.silent_reply_allowed);
 }
 
 #[tokio::test]
-async fn accepted_signal_noop_does_not_authorize_completion_guard_nudge() {
+async fn post_answer_silence_after_tool_hands_back_stalled_plan() {
     use crate::core::plan_runtime::{
-        file_store::{write_plan, PlanFile, PlanFileFrontmatter},
+        file_store::{read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState},
         PlanRuntime,
     };
     let temp = tempfile::tempdir().unwrap();
@@ -395,33 +472,35 @@ async fn accepted_signal_noop_does_not_authorize_completion_guard_nudge() {
     )
     .unwrap();
     let runtime = PlanRuntime::new("signal-test");
-    runtime.bind_plan_file_for_test(path);
-    let (mut agent, requests, sink, _) = fixture(
-        vec![hidden(Some("stop"), false), hidden(Some("stop"), false)],
-        vec![],
-    );
+    runtime.bind_plan_file_for_test(path.clone());
+    // Enough silent responses to exhaust the old EXEC retry budget, rather than
+    // fail because the mock runs out. The fixed loop must consume only three.
+    let mut streams = vec![text(), call()];
+    streams.extend((0..10).map(|_| hidden(Some("stop"), false)));
+    let (mut agent, requests, sink, _) = fixture(streams, vec![]);
+    let events = sink.clone();
+    runtime.attach_transcript_appender(Arc::new(move |event| events.append_custom_entry(event)));
     agent.config.plan_runtime = Some(runtime);
-    agent.silent_reply_allowed = true;
-    let mut messages = vec![signal()];
-    let result =
-        super::super::reasoning_loop::run_reasoning_loop(&mut agent, &mut messages, 1, 2).await;
-    assert!(matches!(
-        result,
-        Err(super::super::types::LoopError::Retryable(_))
-    ));
-    let requests = requests.0.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[1].messages.last().unwrap().kind,
-        MessageKind::Nudge
+    let outcome = agent.run(vec![ChatMessage::user("finish the plan")]).await;
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "{outcome:?}"
     );
-    assert!(!agent.silent_reply_allowed);
-    assert!(sink
-        .rows
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|row| row["event"] == "empty_turn"));
+    assert_eq!(requests.0.lock().unwrap().len(), 5);
+    let rows = sink.rows.lock().unwrap();
+    for event in ["empty_turn", "auto_retry_start"] {
+        assert_eq!(rows.iter().filter(|row| row["event"] == event).count(), 1);
+    }
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["event"] == wire::WIRE_PLAN_STALLED && row["reason"] == "idle_nudges")
+            .count(),
+        1
+    );
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.state,
+        PlanFileState::Pending
+    );
 }
 
 #[tokio::test]
@@ -538,7 +617,7 @@ async fn compacting_completed_answer_does_not_revoke_existing_permission() {
     agent.start_idx = start;
     agent.set_context_state(Some(state));
     assert!(
-        super::super::reasoning_loop::run_reasoning_loop(&mut agent, &mut messages, 1, 2)
+        super::super::reasoning_loop::run_reasoning_loop(&mut agent, &mut messages, 2, 2)
             .await
             .is_ok()
     );
@@ -549,5 +628,5 @@ async fn compacting_completed_answer_does_not_revoke_existing_permission() {
         .unwrap()
         .iter()
         .any(|row| row["event"] == "empty_turn"));
-    assert!(!agent.silent_reply_allowed);
+    assert!(agent.silent_reply_allowed);
 }

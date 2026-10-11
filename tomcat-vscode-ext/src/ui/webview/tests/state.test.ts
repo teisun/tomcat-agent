@@ -282,27 +282,34 @@ describe("WebviewStateStore wire routing", () => {
     expect(message?.label).toBeUndefined();
   });
 
-  it("renders auto_retry_start as a notice instead of an error bubble", () => {
+  it("keeps auto retry progress out of the timeline", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
+    const messages = () =>
+      store
+        .snapshot()
+        .sessionViews.s1.timeline.filter((item): item is WebviewMessageBlock => item.type === "message");
 
+    store.applyEvent({ sessionId: "s1", type: "agent_start" });
     store.applyEvent({
       attempt: 2,
       delayMs: 1000,
       errorMessage: "boom",
-      maxAttempts: 4,
+      maxAttempts: 2,
       sessionId: "s1",
       type: "auto_retry_start",
     } as never);
+    store.applyEvent({
+      attempt: 2,
+      finalError: "boom",
+      sessionId: "s1",
+      success: false,
+      type: "auto_retry_end",
+    } as never);
+    expect(messages()).toEqual([]);
 
-    const message = store
-      .snapshot()
-      .sessionViews.s1.timeline.find((item): item is WebviewMessageBlock => item.type === "message");
-    expect(message).toMatchObject({
-      kind: "notice",
-      text: "Retrying after error: boom",
-      type: "message",
-    });
+    store.applyEvent({ error: "boom", messages: [], sessionId: "s1", type: "agent_end" } as never);
+    expect(messages()).toEqual([expect.objectContaining({ kind: "error", text: "boom" })]);
   });
 
   it("upserts plan.todos and session.todos", () => {

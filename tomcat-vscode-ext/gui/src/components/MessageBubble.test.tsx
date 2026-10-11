@@ -106,43 +106,31 @@ describe("MessageBubble", () => {
     expect(onOpenLink).toHaveBeenCalledWith("https://example.com/docs");
   });
 
-  it("keeps left border for error and notice", () => {
+  it("renders notice and warn as flat status lines while error keeps its card", () => {
+    const header = () => screen.getByTestId("message-block").querySelector(".tc-message__header");
     const { rerender } = render(
-      <MessageBubble
-        item={{
-          id: "e1",
-          kind: "error",
-          text: "boom",
-          type: "message",
-        }}
-      />,
+      <MessageBubble item={{ id: "n1", kind: "notice", text: "note", type: "message" }} />,
     );
-    expect(screen.getByTestId("message-block").className).toContain("tc-message--error");
+    expect(header()).toBeNull();
+    expect(screen.getByRole("img", { name: "Notice" }).className).toContain("codicon-info");
+    expect(screen.queryByText("Notice")).toBeNull();
+    expect(screen.queryByText("notice")).toBeNull();
+
+    rerender(<MessageBubble item={{ id: "w1", kind: "warn", text: "careful", type: "message" }} />);
+    expect(header()).toBeNull();
+    expect(screen.getByRole("img", { name: "Warn" }).className).toContain("codicon-warning");
+
+    rerender(<MessageBubble item={{ id: "e1", kind: "error", text: "boom", type: "message" }} />);
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(header()?.querySelector("strong")?.textContent).toBe("Error");
+    expect(header()?.querySelector("span")).toBeNull();
 
     rerender(
       <MessageBubble
-        item={{
-          id: "n1",
-          kind: "notice",
-          text: "note",
-          type: "message",
-        }}
+        item={{ id: "e2", kind: "error", label: "rate_limit", text: "slow down", type: "message" }}
       />,
     );
-    expect(screen.getByTestId("message-block").className).toContain("tc-message--notice");
-
-    rerender(
-      <MessageBubble
-        item={{
-          id: "w1",
-          kind: "warn",
-          text: "careful",
-          type: "message",
-        }}
-      />,
-    );
-    expect(screen.getByTestId("message-block").className).toContain("tc-message--warn");
-    expect(screen.getByText("Warn")).toBeTruthy();
+    expect(header()?.querySelector("span")?.textContent).toBe("rate_limit");
   });
 
   it("renders failed user status with retry", () => {
