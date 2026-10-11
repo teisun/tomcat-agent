@@ -205,7 +205,10 @@ fn resume_tail_predicate_ignores_trailing_tool_media() {
         transcript_message("user", mk_user("inspect")),
         transcript_message("assistant", mk_assistant_tc(&["call-1"])),
         transcript_message("tool", mk_tool("call-1")),
-        transcript_message("media", serde_json::json!({"role":"user","kind":"tool_media","content":[]})),
+        transcript_message(
+            "media",
+            serde_json::json!({"role":"user","kind":"tool_media","content":[]}),
+        ),
     ];
     assert!(has_complete_tail_tool_results(&complete));
     complete.push(transcript_message("new-user", mk_user("new request")));

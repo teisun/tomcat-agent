@@ -117,7 +117,11 @@ fn tool_owned_media_responses_native_split_preserves_anchor_and_file_id() {
         ),
         first,
         second,
-        { let mut tail = ChatMessage::user("current runtime"); tail.kind = MessageKind::EphemeralTail; tail },
+        {
+            let mut tail = ChatMessage::user("current runtime");
+            tail.kind = MessageKind::EphemeralTail;
+            tail
+        },
     ];
     let before = serde_json::to_value(&messages).unwrap();
     for mode in [ToolResultMediaMode::Native, ToolResultMediaMode::Split] {
@@ -2438,7 +2442,11 @@ async fn responses_stream_eof_mid_frame_is_interrupted() {
         assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
         let summary = llm_summary(&error).expect("interruption summary");
         assert!(
-            summary.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.responsesClosed", &[("bytes", &discarded_bytes.to_string())])),
+            summary.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.responsesClosed",
+                &[("bytes", &discarded_bytes.to_string())]
+            )),
             "{summary}"
         );
         assert!(!summary.contains("raw="), "{summary}");
@@ -2493,7 +2501,14 @@ async fn responses_stream_eof_between_frames_is_interrupted() {
             summary.contains("stream closed before response.completed"),
             "{summary}"
         );
-        assert!(summary.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.responsesClosed", &[("bytes", "0")])), "{summary}");
+        assert!(
+            summary.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.responsesClosed",
+                &[("bytes", "0")]
+            )),
+            "{summary}"
+        );
         assert!(stream.next().await.is_none());
         assert!(stream.next().await.is_none());
     }
@@ -2742,7 +2757,15 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.idleTimeout", &[("seconds", "3")])), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "llm.idleTimeout",
+                    &[("seconds", "3")]
+                )),
+                "unexpected msg: {}",
+                msg
+            );
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
                 "unexpected msg: {}",
@@ -2902,9 +2925,21 @@ async fn responses_stream_post_once_header_read_timeout_maps_to_retryable_read_t
     assert!(OpenAiResponsesProvider::is_retriable(&err));
     let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
     assert!(
-        msg.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.headersTimeout", &[
-            ("action", &crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.action.streamRequest", &[])), ("seconds", "1"),
-        ])),
+        msg.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "llm.headersTimeout",
+            &[
+                (
+                    "action",
+                    &crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "llm.action.streamRequest",
+                        &[]
+                    )
+                ),
+                ("seconds", "1"),
+            ]
+        )),
         "错误文案应说明卡在响应头阶段，实际: {}",
         msg
     );
@@ -3343,7 +3378,11 @@ async fn responses_chat_stream_after_first_delta_body_read_error_is_not_retried(
     assert!(
         llm_summary(&err)
             .unwrap_or_else(|| err.to_string())
-            .contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.action.readStream", &[])),
+            .contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.action.readStream",
+                &[]
+            )),
         "错误摘要应保留流读取失败语义，实际: {}",
         err
     );

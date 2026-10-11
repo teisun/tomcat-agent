@@ -7,7 +7,6 @@
 //! - `ChatRequest` 序列化为 snake_case JSON。
 //! - `TokenUsage::default` / `StreamEvent::ContentDelta` 序列化默认值。
 
-use crate::infra::i18n::{tr_in, Locale};
 use super::super::types::{
     ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
     ChatMessageContentPart, ChatMessageRole, ChatRequest, ContextRefKind, ContextReference,
@@ -17,6 +16,7 @@ use super::super::types::{
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
 use crate::infra::events::ToolDisplay;
+use crate::infra::i18n::{tr_in, Locale};
 
 #[test]
 fn tool_media_kind_roundtrips_without_claiming_user_input() {
@@ -25,12 +25,26 @@ fn tool_media_kind_roundtrips_without_claiming_user_input() {
     assert_eq!(media.kind, MessageKind::ToolMedia);
     assert!(!media.kind.is_normal());
     assert!(media.kind.is_replay_input());
-    assert!(media.starts_logical_turn(), "stage A preserves existing transport windows");
+    assert!(
+        media.starts_logical_turn(),
+        "stage A preserves existing transport windows"
+    );
     let persisted = serde_json::to_value(&media).unwrap();
     assert_eq!(persisted["kind"], "tool_media");
-    assert_eq!(serde_json::from_value::<ChatMessage>(persisted).unwrap().kind, MessageKind::ToolMedia);
-    assert_eq!(MessageKind::from_persisted(Some("tool_media")), MessageKind::ToolMedia);
-    assert_eq!(ChatMessage::user_with_parts(parts).kind, MessageKind::Normal);
+    assert_eq!(
+        serde_json::from_value::<ChatMessage>(persisted)
+            .unwrap()
+            .kind,
+        MessageKind::ToolMedia
+    );
+    assert_eq!(
+        MessageKind::from_persisted(Some("tool_media")),
+        MessageKind::ToolMedia
+    );
+    assert_eq!(
+        ChatMessage::user_with_parts(parts).kind,
+        MessageKind::Normal
+    );
 }
 
 #[test]
@@ -622,7 +636,11 @@ fn content_part_serde_roundtrip_file_id() {
 fn image_base64_data_rejects_invalid_base64() {
     let err = ChatMessageContentPart::image_base64_data("image/png", "***not-base64***")
         .expect_err("非法 base64 应拒绝");
-    assert!(err.to_string().contains(&tr_in(Locale::En, "media.decodeFailed", &[("operation", "image_base64_data"), ("detail", "")])));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "media.decodeFailed",
+        &[("operation", "image_base64_data"), ("detail", "")]
+    )));
 }
 
 #[test]
@@ -634,9 +652,15 @@ fn image_base64_data_rejects_non_whitelisted_mime() {
 
 #[test]
 fn image_b64_rejects_missing_path() {
-    let expected = tr_in(Locale::En, "media.statFailed", &[
-        ("operation", "image_b64"), ("path", "/nonexistent/never-here-xyzz.png"), ("detail", ""),
-    ]);
+    let expected = tr_in(
+        Locale::En,
+        "media.statFailed",
+        &[
+            ("operation", "image_b64"),
+            ("path", "/nonexistent/never-here-xyzz.png"),
+            ("detail", ""),
+        ],
+    );
     let err = ChatMessageContentPart::image_b64("image/png", "/nonexistent/never-here-xyzz.png")
         .expect_err("路径不存在应拒绝");
     let s = err.to_string();
@@ -711,9 +735,15 @@ fn content_part_serde_rejects_input_file_with_no_source() {
 
 #[test]
 fn file_b64_rejects_missing_path() {
-    let expected = tr_in(Locale::En, "media.statFailed", &[
-        ("operation", "file_b64"), ("path", "/nonexistent/never-here-xyzz.pdf"), ("detail", ""),
-    ]);
+    let expected = tr_in(
+        Locale::En,
+        "media.statFailed",
+        &[
+            ("operation", "file_b64"),
+            ("path", "/nonexistent/never-here-xyzz.pdf"),
+            ("detail", ""),
+        ],
+    );
     let err = ChatMessageContentPart::file_b64(
         "a.pdf",
         "application/pdf",
@@ -736,7 +766,11 @@ fn file_b64_rejects_oversize() {
 #[test]
 fn image_file_id_rejects_empty() {
     let err = ChatMessageContentPart::image_file_id("   ").expect_err("空 file_id 应拒绝");
-    assert!(err.to_string().contains(&tr_in(Locale::En, "media.fileIdEmpty", &[("operation", "image_file_id")])));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "media.fileIdEmpty",
+        &[("operation", "image_file_id")]
+    )));
 }
 
 #[tokio::test]
@@ -766,5 +800,9 @@ async fn file_upload_rejects_empty_bytes_before_network() {
     let err = ChatMessageContentPart::file_upload(&client, "a.pdf", "application/pdf", &[])
         .await
         .expect_err("空字节应在发请求前失败");
-    assert!(err.to_string().contains(&tr_in(Locale::En, "media.emptyUpload", &[("operation", "file_upload")])));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "media.emptyUpload",
+        &[("operation", "file_upload")]
+    )));
 }
