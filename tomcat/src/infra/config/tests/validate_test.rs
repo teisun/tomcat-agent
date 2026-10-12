@@ -17,10 +17,93 @@ fn validate_config_accepts_valid() {
 }
 
 #[test]
+fn mcp_runtime_validation_rejects_bad_values_and_accepts_bounds() {
+    for (name, invalid) in [
+        ("startup_timeout_ms", 0),
+        ("startup_timeout_ms", u64::MAX),
+        ("call_timeout_ms", 0),
+        ("call_timeout_ms", u64::MAX),
+    ] {
+        let mut cfg = AppConfig::default();
+        match name {
+            "startup_timeout_ms" => cfg.connector.mcp.startup_timeout_ms = invalid,
+            _ => cfg.connector.mcp.call_timeout_ms = invalid,
+        }
+        assert!(validate_config(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains(name));
+    }
+    for invalid in [0, 65] {
+        let mut cfg = AppConfig::default();
+        cfg.connector.mcp.max_concurrent_calls = invalid;
+        assert!(validate_config(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("max_concurrent_calls"));
+    }
+    for valid in [1, 64] {
+        let mut cfg = AppConfig::default();
+        cfg.connector.mcp.max_concurrent_calls = valid;
+        assert!(validate_config(&cfg).is_ok());
+    }
+    for invalid in [
+        "[connector.mcp]\ncall_timeout_ms = -1\n",
+        "[connector.mcp]\nmax_concurrent_calls = \"many\"\n",
+    ] {
+        assert!(toml::from_str::<AppConfig>(invalid).is_err());
+    }
+}
+
+#[test]
 fn validate_config_rejects_invalid_session_default_mode() {
     let mut cfg = AppConfig::default();
     cfg.session.default_mode = "invalid".to_string();
     assert!(validate_config(&cfg).is_err());
+}
+
+#[test]
+fn project_resource_dir_allows_only_project_relative_non_legacy_paths() {
+    let project = tempfile::tempdir().unwrap();
+    let cfg = AppConfig::default();
+    assert_eq!(
+        resolve_project_resource_dir(&cfg, project.path()).unwrap(),
+        project.path().join(".agents")
+    );
+
+    let mut nested = AppConfig::default();
+    nested.workspace.project_resource_dir = "tools/agents".to_string();
+    assert_eq!(
+        resolve_project_resource_dir(&nested, project.path()).unwrap(),
+        project.path().join("tools/agents")
+    );
+
+    for invalid in [
+        "",
+        " ",
+        ".",
+        "..",
+        "./agents",
+        "tools/./agents",
+        "../agents",
+        "/tmp/agents",
+        "~/agents",
+        ".tomcat",
+        ".tomcat/skills",
+        ".tomcat\\skills",
+        "tools/.tomcat",
+    ] {
+        let mut cfg = AppConfig::default();
+        cfg.workspace.project_resource_dir = invalid.to_string();
+        assert!(
+            validate_config(&cfg).is_err(),
+            "{invalid:?} must be rejected"
+        );
+        assert!(
+            resolve_project_resource_dir(&cfg, project.path()).is_err(),
+            "resolver must not bypass validation for {invalid:?}"
+        );
+    }
 }
 
 #[test]
@@ -74,8 +157,22 @@ fn validate_config_rejects_invalid_checkpoint_retention() {
 fn validate_config_rejects_invalid_proxy() {
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();
-    cfg.llm.proxy = Some("socks5://127.0.0.1:1080".to_string());
-    assert!(validate_config(&cfg).is_err());
+    for url in [
+        "socks5://127.0.0.1:1080",
+        "ftp://user:PRIVATE_PROXY_SENTINEL@proxy.example.com",
+    ] {
+        cfg.llm.proxy = Some(url.to_string());
+        let error = validate_config(&cfg).expect_err("unsupported scheme must fail");
+        assert!(matches!(error, crate::AppError::Config(_)));
+        assert!(error.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "config.urlScheme",
+            &[("field", "llm.proxy")],
+        )));
+        assert!(!error.to_string().contains(url));
+        assert!(!error.to_string().contains("PRIVATE_PROXY_SENTINEL"));
+        assert_eq!(cfg.llm.proxy.as_deref(), Some(url));
+    }
     cfg.llm.proxy = Some("http://127.0.0.1:7890".to_string());
     assert!(validate_config(&cfg).is_ok());
     cfg.llm.proxy = Some("https://proxy.example.com".to_string());

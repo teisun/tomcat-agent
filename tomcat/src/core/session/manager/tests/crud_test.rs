@@ -13,6 +13,41 @@
 
 use super::super::*;
 use super::mocks::temp_sessions_dir;
+use crate::core::session::user_message_sidecar::user_message_sidecar_path;
+
+#[test]
+fn delete_session_discards_only_its_file_baselines_and_preheat_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(temp.path().to_path_buf());
+    let first = manager.new_current_session(None).unwrap();
+    let second = manager.new_current_session(None).unwrap();
+    let first_dir = crate::core::checkpoint::file_baselines::session_dir(
+        &manager.transcript_path(&first.session_id),
+    );
+    let second_dir = crate::core::checkpoint::file_baselines::session_dir(
+        &manager.transcript_path(&second.session_id),
+    );
+    for dir in [&first_dir, &second_dir] {
+        std::fs::create_dir_all(dir.join("u")).unwrap();
+        std::fs::write(dir.join("u/baselines.jsonl"), "fixture").unwrap();
+    }
+    let first_cache = crate::core::session::preheat_cache::preheat_cache_path(
+        &manager.transcript_path(&first.session_id),
+    );
+    let second_cache = crate::core::session::preheat_cache::preheat_cache_path(
+        &manager.transcript_path(&second.session_id),
+    );
+    std::fs::write(&first_cache, "private summary").unwrap();
+    std::fs::write(&second_cache, "other summary").unwrap();
+    manager.delete_session(&first.session_id).unwrap();
+    assert!(!first_dir.exists());
+    assert!(second_dir.join("u/baselines.jsonl").exists());
+    assert!(!first_cache.exists());
+    assert_eq!(
+        std::fs::read_to_string(&second_cache).unwrap(),
+        "other summary"
+    );
+}
 
 #[test]
 fn create_session_and_list() {
@@ -28,6 +63,83 @@ fn create_session_and_list() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].0, entry.session_id);
     assert_eq!(list[0].1.session_key, key);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn project_root_roundtrips_through_store_and_transcript() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let entry = mgr
+        .create_session_with_project_root(
+            mgr.current_session_key(),
+            Some("/workspace/src".to_string()),
+            Some("/workspace".to_string()),
+        )
+        .unwrap();
+
+    assert_eq!(entry.project_root.as_deref(), Some("/workspace"));
+    assert_eq!(
+        mgr.get_session_by_id(&entry.session_id)
+            .unwrap()
+            .and_then(|stored| stored.project_root),
+        Some("/workspace".to_string())
+    );
+    let header =
+        crate::core::session::transcript::read_header(&mgr.transcript_path(&entry.session_id))
+            .unwrap();
+    assert_eq!(header.project_root.as_deref(), Some("/workspace"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn detached_session_is_listable_without_changing_durable_or_pinned_current() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let current = mgr
+        .new_current_session(Some("/tmp/source".to_string()))
+        .unwrap();
+    mgr.pin_session(&current.session_id).unwrap();
+    let durable_before = mgr
+        .load_store()
+        .unwrap()
+        .current
+        .get(mgr.current_session_key())
+        .cloned();
+    let pinned_before = mgr.current_session_id().unwrap();
+
+    let detached = mgr
+        .create_detached_session(mgr.current_session_key(), Some("/tmp/source".to_string()))
+        .unwrap();
+
+    assert_ne!(detached.session_id, current.session_id);
+    assert_eq!(
+        mgr.load_store()
+            .unwrap()
+            .current
+            .get(mgr.current_session_key())
+            .cloned(),
+        durable_before,
+    );
+    assert_eq!(mgr.current_session_id().unwrap(), pinned_before);
+    assert!(mgr
+        .list_session_ids()
+        .unwrap()
+        .contains(&detached.session_id));
+    assert!(mgr.transcript_path(&detached.session_id).exists());
+    let sidecar_path = user_message_sidecar_path(&mgr.transcript_path(&detached.session_id));
+    std::fs::write(&sidecar_path, "sidecar cache").unwrap();
+    assert!(
+        !mgr.list_session_ids()
+            .unwrap()
+            .contains(&format!("{}.user_messages", detached.session_id)),
+        "派生 sidecar 不得被列为独立 session"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -93,7 +205,54 @@ fn load_store_empty_when_no_file() {
 }
 
 #[test]
-fn ensure_current_session_rebuilds_legacy_store_without_init() {
+fn managers_sharing_a_store_path_wait_for_the_same_write_lock() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let first = SessionManager::new(dir.clone());
+    first
+        .create_session(first.current_session_key(), None)
+        .expect("create current session");
+    let second = SessionManager::new(dir.clone());
+    let session_key = second.current_session_key().to_string();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal worker start");
+        let result = second.update_session(&session_key, |entry| {
+            entry.title = Some("must survive selection cleanup".to_string());
+        });
+        done_tx.send(result).expect("send mutation result");
+    });
+
+    crate::core::session::store::with_store_write_lock(first.store_path(), || {
+        started_rx.recv().expect("worker starts while lock is held");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            done_rx.try_recv().is_err(),
+            "a second manager must not write this sessions.json while its shared lock is held"
+        );
+        Ok(())
+    })
+    .expect("hold store lock");
+
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("worker proceeds after lock release")
+        .expect("worker update succeeds");
+    worker.join().expect("join worker");
+    assert_eq!(
+        first
+            .current_session_entry()
+            .expect("read current session")
+            .and_then(|entry| entry.title),
+        Some("must survive selection cleanup".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ensure_current_session_rejects_legacy_store_without_overwriting() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -110,25 +269,20 @@ fn ensure_current_session_rebuilds_legacy_store_without_init() {
     .unwrap();
 
     let mgr = SessionManager::new(dir.clone());
-    let entry = mgr
+    let error = mgr
         .ensure_current_session(Some("/tmp/new".to_string()))
-        .expect("ensure current session");
-    let store = mgr.load_store().expect("load rebuilt store");
-
+        .expect_err("legacy store must not be reset during a normal read");
+    assert!(matches!(error, crate::AppError::Config(_)));
     assert_eq!(
-        store
-            .current
-            .get(mgr.current_session_key())
-            .map(String::as_str),
-        Some(entry.session_id.as_str())
-    );
-    assert_eq!(store.sessions.len(), 1, "legacy data should be replaced");
-    assert_eq!(
-        store
-            .sessions
-            .get(&entry.session_id)
-            .and_then(|entry| entry.cwd.as_deref()),
-        Some("/tmp/new")
+        std::fs::read_to_string(dir.join("sessions.json")).unwrap(),
+        r#"{
+  "agent:main:main": {
+    "sessionId": "legacy_1",
+    "updatedAt": 42,
+    "cwd": "/tmp/project"
+  }
+}"#,
+        "the unreadable legacy bytes must remain available for manual recovery"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -158,9 +312,15 @@ fn delete_session_removes_from_store() {
     let mgr = SessionManager::new(dir.clone());
     let key = mgr.current_session_key();
     let entry = mgr.create_session(key, None).unwrap();
+    let sidecar_path = user_message_sidecar_path(&mgr.transcript_path(&entry.session_id));
+    std::fs::write(&sidecar_path, "sidecar cache").unwrap();
     assert_eq!(mgr.list_sessions().unwrap().len(), 1);
     mgr.delete_session(&entry.session_id).unwrap();
     assert!(mgr.list_sessions().unwrap().is_empty());
+    assert!(
+        !sidecar_path.exists(),
+        "删除 session 必须删除同目录的用户输入 sidecar"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -349,7 +509,7 @@ fn pin_only_applies_to_the_manager_scope_key() {
 
     let code_mgr = SessionManager::new_scoped(dir.clone(), "agent:test:code".to_string());
     let code_entry = code_mgr.new_current_session(None).expect("code session");
-    code_mgr.pin_session(&code_entry.session_id);
+    code_mgr.pin_session(&code_entry.session_id).unwrap();
 
     let claw_mgr = SessionManager::new_scoped(dir.clone(), "agent:test:claw".to_string());
     let claw_entry = claw_mgr.new_current_session(None).expect("claw session");
@@ -374,7 +534,7 @@ fn clone_shares_pin_and_ignores_external_repoint() {
         .new_current_session(Some("/tmp/original".to_string()))
         .expect("original session");
     let clone = mgr.clone();
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -409,7 +569,7 @@ fn append_message_stays_on_pinned_transcript_after_external_repoint() {
 
     let mgr = SessionManager::new(dir.clone());
     let original = mgr.new_current_session(None).expect("original session");
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -447,7 +607,7 @@ fn switch_current_model_updates_pinned_session_after_external_repoint() {
 
     let mgr = SessionManager::new(dir.clone());
     let original = mgr.new_current_session(None).expect("original session");
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -499,7 +659,7 @@ fn new_current_session_updates_pin_when_manager_is_already_pinned() {
     let first = mgr
         .new_current_session(Some("/tmp/one".to_string()))
         .expect("first session");
-    mgr.pin_session(&first.session_id);
+    mgr.pin_session(&first.session_id).unwrap();
 
     let second = mgr
         .new_current_session(Some("/tmp/two".to_string()))
@@ -527,7 +687,7 @@ fn switch_current_to_session_id_updates_pin_when_manager_is_already_pinned() {
     let mgr = SessionManager::new(dir.clone());
     let first = mgr.new_current_session(None).expect("first session");
     let second = mgr.new_current_session(None).expect("second session");
-    mgr.pin_session(&second.session_id);
+    mgr.pin_session(&second.session_id).unwrap();
 
     let switched = mgr
         .switch_current_to_session_id(&first.session_id)

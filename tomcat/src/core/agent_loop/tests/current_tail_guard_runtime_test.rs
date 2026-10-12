@@ -6,8 +6,9 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
+use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::MockPrimitiveExecutor;
+use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
@@ -22,7 +23,9 @@ use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     estimate_msg_chars, ApiUsage, ContextState, PlanEventKind, PlanEventRef,
 };
-use crate::core::session::transcript::{append_entry, MessageEntry, TranscriptEntry};
+use crate::core::session::transcript::{
+    append_entry, read_entries_tail, MessageEntry, ToolResultsCompactedEntry, TranscriptEntry,
+};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::DefaultEventBus;
@@ -68,14 +71,13 @@ impl LlmProvider for ChatOnlyMockLlm {
 }
 
 #[tokio::test]
-async fn mid_turn_guard_reduced_tail_survives_reload() {
+async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(dir.path().to_path_buf());
     let key = mgr.current_session_key();
     mgr.create_session(key, None).unwrap();
     let transcript = mgr.current_transcript_path().unwrap().unwrap();
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("read everything");
     user.msg_id = Some("u1".to_string());
     let mut assistant = assistant_with_tool_calls(&[
@@ -99,9 +101,9 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         append_transcript_message(&transcript, tool);
     }
 
-    let mut messages = vec![system, user, assistant];
+    let mut messages = vec![user, assistant];
     messages.append(&mut tools);
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let config = ContextConfig {
         current_tail_compactable_min_chars: 1,
@@ -109,9 +111,12 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         ..Default::default()
     };
     let mut agent = AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm {
-            summary_text: "unused".to_string(),
-        }),
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "unused".to_string(),
+            }),
+            "gpt-4",
+        ),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -122,8 +127,7 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -136,6 +140,7 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         post_usage_appended_chars: tail_chars,
         transcript_path: transcript.clone(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -145,6 +150,26 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         .await
         .unwrap();
 
+    let persisted_entries = read_entries_tail(&transcript, 32).unwrap();
+    assert!(
+        persisted_entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Message(message)
+                    if message.id.as_deref() == Some("tr2")
+                        && message.message["content"]
+                            .as_str()
+                            .is_some_and(|content| content == "y".repeat(8_000))
+            )
+        }),
+        "placeholder compaction must retain the original JSONL result"
+    );
+    assert!(
+        !persisted_entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::ToolResultsCompacted(_))),
+        "placeholder compaction must not persist runtime-only markers"
+    );
     let reloaded = init_context_state(&mgr, &config, "sys").unwrap();
     let texts: Vec<_> = reloaded
         .messages
@@ -154,10 +179,109 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
     assert!(texts
         .iter()
         .any(|text| text.starts_with("[Tool result persisted:")));
-    assert!(texts.contains(&TOOL_RESULT_PLACEHOLDER));
     assert!(
-        !texts.iter().any(|text| text == &"x".repeat(12_000)),
-        "reload should keep the rewritten preview instead of reviving the original tail"
+        texts.iter().any(|text| text == &"y".repeat(8_000)),
+        "reload should restore raw results that were only placeholdered in memory"
+    );
+    assert!(
+        !texts.contains(&TOOL_RESULT_PLACEHOLDER),
+        "without a persisted marker, reload must not preserve runtime placeholders"
+    );
+}
+
+#[test]
+fn legacy_tool_results_compacted_marker_is_ignored_on_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+
+    let mut user = ChatMessage::user("read the file");
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = assistant_with_tool_calls(&[("tc1", "read")]);
+    assistant.msg_id = Some("a1".to_string());
+    let tool = tool_message("tr1", "tc1", &"raw result".repeat(2_000));
+    append_transcript_message(&transcript, &user);
+    append_transcript_message(&transcript, &assistant);
+    append_transcript_message(&transcript, &tool);
+    append_entry(
+        &transcript,
+        &TranscriptEntry::ToolResultsCompacted(ToolResultsCompactedEntry {
+            id: Some("legacy-marker".to_string()),
+            parent_id: None,
+            timestamp: "2026-05-30T16:00:01Z".to_string(),
+            message_ids: vec!["tr1".to_string()],
+        }),
+    )
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    let texts: Vec<_> = state
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .collect();
+    assert!(
+        texts.iter().any(|text| *text == "raw result".repeat(2_000)),
+        "legacy markers are accepted for transcript compatibility but ignored by hydrate"
+    );
+    assert!(!texts.contains(&TOOL_RESULT_PLACEHOLDER));
+}
+
+#[tokio::test]
+async fn resume_without_marker_reduces_before_first_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+
+    let mut user = ChatMessage::user("continue the oversized resumed turn");
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = assistant_with_tool_calls(&[("tc1", "write")]);
+    assistant.msg_id = Some("a1".to_string());
+    let tool = tool_message("tr1", "tc1", &"raw resumed output\n".repeat(1_000));
+    append_transcript_message(&transcript, &user);
+    append_transcript_message(&transcript, &assistant);
+    append_transcript_message(&transcript, &tool);
+
+    let config = ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        ..Default::default()
+    };
+    let mut state = init_context_state(&mgr, &config, "sys").unwrap();
+    state.context_budget_chars = 4_000;
+    state.context_budget_tokens = 1_000;
+    let mut messages = state.messages.clone();
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "collapsed resumed context".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "resume-no-marker".to_string(),
+            agent_trail_dir: dir.path().to_string_lossy().to_string(),
+            context_config: config,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 0;
+    agent.set_context_state(Some(state));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert!(
+        !agent.context_state.as_ref().unwrap().is_over_budget(),
+        "the raw transcript must be reduced before its first resumed request"
     );
 }
 
@@ -173,11 +297,15 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
                 id: "t1".to_string(),
                 content: "step pending".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             },
             TodoItem {
                 id: "t2".to_string(),
                 content: "step active".to_string(),
                 status: TodoStatus::InProgress,
+                evidence: Vec::new(),
+                kind: Default::default(),
             },
         ],
     );
@@ -192,14 +320,14 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
             id: "sid".to_string(),
             timestamp: "2026-05-30T16:00:00Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
 
     let plan_runtime = PlanRuntime::new("sess-plan-exec");
-    plan_runtime.set_executing_for_test(plan_id.clone());
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());
     let mut assistant = ChatMessage::assistant("a".repeat(4_000));
@@ -207,13 +335,16 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     append_transcript_message(&transcript, &user);
     append_transcript_message(&transcript, &assistant);
 
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm {
-            summary_text: "continue with execution".to_string(),
-        }),
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "continue with execution".to_string(),
+            }),
+            "gpt-4",
+        ),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -223,8 +354,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -238,6 +368,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
             plan_id: plan_id.clone(),
             path: plan_path.clone(),
         }),
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -247,10 +378,13 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
         .await
         .unwrap();
 
-    let summary = &messages[1];
+    let summary = &messages[0];
     let text = summary.text_content().unwrap_or("");
     assert_eq!(summary.kind, MessageKind::CompactionSummary);
-    assert!(text.contains("- mode: executing"));
+    assert!(text.starts_with("<control_state>"));
+    assert!(text.contains("mode: chat"));
+    assert!(text.contains("plan_file_state: executing"));
+    // Progress 由计划文件渲染，模型说什么都覆盖不掉。
     assert!(text.contains("step active"));
     assert!(text.contains("step pending"));
 
@@ -269,29 +403,34 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
                 id: "t1".to_string(),
                 content: "first pending".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             },
             TodoItem {
                 id: "t2".to_string(),
                 content: "second pending".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             },
         ],
     );
 
     let plan_runtime = PlanRuntime::new("sess-plan-pending");
-    plan_runtime.set_executing_for_test(plan_id.clone());
-    plan_runtime.set_mode_pending(plan_id.clone());
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));
     let assistant = ChatMessage::assistant("a".repeat(4_000));
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm {
-            summary_text: "continue with pending work".to_string(),
-        }),
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "continue with pending work".to_string(),
+            }),
+            "gpt-4",
+        ),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -301,8 +440,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -312,6 +450,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -321,11 +460,65 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         .await
         .unwrap();
 
-    let text = messages[1].text_content().unwrap_or("");
-    assert!(text.contains("- mode: pending"));
-    assert!(text.contains("current_step: first pending"));
+    let text = messages[0].text_content().unwrap_or("");
+    assert!(text.contains("mode: chat"));
+    assert!(text.contains("plan_file_state: pending"));
+    assert!(text.contains("first pending"));
 
     cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_without_plan_runtime() {
+    let user = ChatMessage::user("u".repeat(4_000));
+    let assistant = ChatMessage::assistant("a".repeat(4_000));
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
+
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "child summary".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "sess-collapse-child".to_string(),
+            subagent_type: SubagentType::CodeReviewer,
+            plan_runtime: None,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 0;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: tail_chars,
+        context_budget_chars: 200,
+        context_budget_tokens: 50,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    let text = messages[0].text_content().unwrap_or("");
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert!(
+        !text.starts_with("<control_state>"),
+        "child agent should not inherit parent plan snapshot: {text}"
+    );
+    assert!(!text.contains("plan_file_state:"));
 }
 
 fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> ChatMessage {
@@ -399,6 +592,13 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             created_at: "2026-05-31T00:00:00Z".to_string(),
             schema_version: 1,
             todos,
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## body\n".to_string(),

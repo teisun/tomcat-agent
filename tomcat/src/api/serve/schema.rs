@@ -11,13 +11,17 @@ use crate::infra::events::WireEvent;
 use crate::{resolve_agent_trail_dir, AppConfig, AppError};
 
 use super::types::{
-    ControlFrame, ListModelsPayload, ListProviderKeysPayload, OutFrame, RemoveModelResponse,
-    ResponseFrame, ServeCommand, SetProviderKeyResponse, UpsertModelResponse,
+    ConnectorRecoveryProgress, ConnectorReloadReceipt, ControlFrame, IngestAttachmentResponse,
+    ListConnectorToolsPayload, ListModelsPayload, ListProviderKeysPayload, OutFrame,
+    ProjectTrustPayload, RemoveModelResponse, ResponseFrame, RetainAttachmentLeasesResponse,
+    ServeCommand, SetConnectorToolEnabledResponse, SetProviderKeyResponse, UpsertModelResponse,
 };
 use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
 
 #[derive(Serialize)]
 pub(crate) struct ServeSchemaBundle {
+    ui_preferences: schemars::schema::RootSchema,
+    delete_session_outcome: schemars::schema::RootSchema,
     serve_command: schemars::schema::RootSchema,
     control_frame: schemars::schema::RootSchema,
     response_frame: schemars::schema::RootSchema,
@@ -31,6 +35,23 @@ pub(crate) struct ServeSchemaBundle {
     remove_model_response: schemars::schema::RootSchema,
     set_provider_key_response: schemars::schema::RootSchema,
     list_provider_keys_payload: schemars::schema::RootSchema,
+    connector_reload_receipt: schemars::schema::RootSchema,
+    connector_recovery_progress: schemars::schema::RootSchema,
+    list_connector_tools_payload: schemars::schema::RootSchema,
+    project_trust_payload: schemars::schema::RootSchema,
+    set_connector_tool_enabled_response: schemars::schema::RootSchema,
+    /// 响应方向也必须纳入生成 —— 否则 TS 侧只能靠 `as any` 加手写 parser，
+    /// 而漂移风险最大的恰恰是响应方向。
+    ingest_attachment_response: schemars::schema::RootSchema,
+    retain_attachment_leases_response: schemars::schema::RootSchema,
+    preview_rewind_response: schemars::schema::RootSchema,
+    session_files_response: schemars::schema::RootSchema,
+    session_file_baseline_response: schemars::schema::RootSchema,
+    session_files_restore_response: schemars::schema::RootSchema,
+    session_files_keep_response: schemars::schema::RootSchema,
+    shared_slash_command: schemars::schema::RootSchema,
+    slash_reply: schemars::schema::RootSchema,
+    instruction_card: schemars::schema::RootSchema,
 }
 
 pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -42,6 +63,8 @@ pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 
 pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
     ServeSchemaBundle {
+        ui_preferences: schema_for!(crate::infra::config::ui::UiPreferences),
+        delete_session_outcome: schema_for!(crate::core::session::manager::DeleteSessionOutcome),
         serve_command: schema_for!(ServeCommand),
         control_frame: schema_for!(ControlFrame),
         response_frame: schema_for!(ResponseFrame),
@@ -55,6 +78,29 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         remove_model_response: schema_for!(RemoveModelResponse),
         set_provider_key_response: schema_for!(SetProviderKeyResponse),
         list_provider_keys_payload: schema_for!(ListProviderKeysPayload),
+        connector_reload_receipt: schema_for!(ConnectorReloadReceipt),
+        connector_recovery_progress: schema_for!(ConnectorRecoveryProgress),
+        list_connector_tools_payload: schema_for!(ListConnectorToolsPayload),
+        project_trust_payload: schema_for!(ProjectTrustPayload),
+        set_connector_tool_enabled_response: schema_for!(SetConnectorToolEnabledResponse),
+        ingest_attachment_response: schema_for!(IngestAttachmentResponse),
+        retain_attachment_leases_response: schema_for!(RetainAttachmentLeasesResponse),
+        preview_rewind_response: schema_for!(super::types::PreviewRewindResponse),
+        session_files_response: schema_for!(
+            crate::core::checkpoint::session_files::SessionFilesResponse
+        ),
+        session_file_baseline_response: schema_for!(
+            crate::core::checkpoint::session_files::SessionFileBaselineResponse
+        ),
+        session_files_restore_response: schema_for!(
+            crate::core::checkpoint::session_files::SessionFilesRestoreResponse
+        ),
+        session_files_keep_response: schema_for!(
+            crate::core::checkpoint::session_files::SessionFilesKeepResponse
+        ),
+        shared_slash_command: schema_for!(crate::api::chat::commands::SharedSlashCommand),
+        slash_reply: schema_for!(crate::api::chat::commands::SlashReply),
+        instruction_card: schema_for!(crate::core::project_instructions::InstructionCard),
     }
 }
 
@@ -65,8 +111,12 @@ pub fn write_schema_bundle(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     let dts_path = out_dir.join("serve.d.ts");
     std::fs::write(
         &schema_path,
-        serde_json::to_vec_pretty(&build_schema_bundle())
-            .map_err(|error| AppError::Config(format!("serialize serve schema failed: {error}")))?,
+        serde_json::to_vec_pretty(&build_schema_bundle()).map_err(|error| {
+            AppError::Config(crate::infra::i18n::tr(
+                "serve.schemaSerialize",
+                &[("detail", &error.to_string())],
+            ))
+        })?,
     )
     .map_err(AppError::Io)?;
     std::fs::write(&dts_path, serve_dts()).map_err(AppError::Io)?;
@@ -83,7 +133,26 @@ pub fn read_schema_fixture(path: &Path) -> Result<String, AppError> {
 
 fn render_typescript(bundle: &ServeSchemaBundle) -> String {
     let root_schemas = [
+        ("UiPreferences", &bundle.ui_preferences),
+        ("DeleteSessionOutcome", &bundle.delete_session_outcome),
         ("ServeCommand", &bundle.serve_command),
+        ("PreviewRewindResponse", &bundle.preview_rewind_response),
+        ("SessionFilesResponse", &bundle.session_files_response),
+        (
+            "SessionFileBaselineResponse",
+            &bundle.session_file_baseline_response,
+        ),
+        (
+            "SessionFilesRestoreResponse",
+            &bundle.session_files_restore_response,
+        ),
+        (
+            "SessionFilesKeepResponse",
+            &bundle.session_files_keep_response,
+        ),
+        ("SharedSlashCommand", &bundle.shared_slash_command),
+        ("SlashReply", &bundle.slash_reply),
+        ("InstructionCard", &bundle.instruction_card),
         ("ControlFrame", &bundle.control_frame),
         ("ResponseFrame", &bundle.response_frame),
         ("WireEvent", &bundle.wire_event),
@@ -95,9 +164,31 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("UpsertModelResponse", &bundle.upsert_model_response),
         ("RemoveModelResponse", &bundle.remove_model_response),
         ("SetProviderKeyResponse", &bundle.set_provider_key_response),
+        ("ConnectorReloadReceipt", &bundle.connector_reload_receipt),
+        (
+            "ConnectorRecoveryProgress",
+            &bundle.connector_recovery_progress,
+        ),
+        (
+            "ListConnectorToolsPayload",
+            &bundle.list_connector_tools_payload,
+        ),
+        ("ProjectTrustPayload", &bundle.project_trust_payload),
+        (
+            "SetConnectorToolEnabledResponse",
+            &bundle.set_connector_tool_enabled_response,
+        ),
         (
             "ListProviderKeysPayload",
             &bundle.list_provider_keys_payload,
+        ),
+        (
+            "IngestAttachmentResponse",
+            &bundle.ingest_attachment_response,
+        ),
+        (
+            "RetainAttachmentLeasesResponse",
+            &bundle.retain_attachment_leases_response,
         ),
     ];
 

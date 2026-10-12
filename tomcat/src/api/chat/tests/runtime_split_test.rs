@@ -215,7 +215,11 @@ pi.registerTool({
     let message = err.to_string();
     assert!(
         message.contains("QuickJS")
-            || message.contains("JS执行错误")
+            || message.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "error.prefix.quickjs",
+                &[]
+            ))
             || message.to_ascii_lowercase().contains("memory"),
         "heap limit failure should surface as a QuickJS-side error, got: {err}"
     );
@@ -486,7 +490,7 @@ fn write_project_function_plugin(
     script: &str,
 ) {
     write_function_plugin_dir(
-        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        &workspace.join(".agents").join("plugins").join(plugin_id),
         plugin_id,
         functions,
         script,
@@ -580,7 +584,7 @@ fn write_plugin_fixture_with_permissions_and_events(
     events: &[&str],
     script: &str,
 ) {
-    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    let plugin_dir = workspace.join(".agents").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let tool_defs = tools
         .iter()
@@ -782,9 +786,12 @@ pi.registerTool({
     let next = ctx1
         .session_runtime
         .session
-        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
-        .expect("create second session");
-    let ctx2 = ChatContext::from_config(cfg).expect("ctx2");
+        .new_current_session_with_project_root(
+            Some(workspace.path().to_string_lossy().to_string()),
+            Some(workspace.path().to_string_lossy().to_string()),
+        )
+        .expect("create second project-bound session");
+    let ctx2 = ChatContext::from_config(cfg.clone()).expect("ctx2");
     let session2 = current_session_id(&ctx2);
     assert_ne!(
         session1, session2,
@@ -831,6 +838,21 @@ pi.registerTool({
             &ctx2.session_runtime.read_file_state
         ),
         "session 级运行态仍应隔离"
+    );
+
+    // A matching cwd is discovery metadata, not permission to inherit the
+    // explicitly bound Workspace connector scope of either project session.
+    ctx1.session_runtime
+        .session
+        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
+        .expect("create rootless session with the same cwd");
+    let rootless = ChatContext::from_config(cfg).expect("rootless context");
+    assert!(
+        !Arc::ptr_eq(
+            &ctx1.global_services.tool_registry,
+            &rootless.global_services.tool_registry
+        ),
+        "an unbound session must not inherit a project-bound scope container"
     );
 }
 
@@ -1160,10 +1182,20 @@ pi.registerTool({
     let session1 = current_session_id(&ctx1);
     ctx1.session_runtime
         .session
-        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
-        .expect("create second session");
+        .new_current_session_with_project_root(
+            Some(workspace.path().to_string_lossy().to_string()),
+            Some(workspace.path().to_string_lossy().to_string()),
+        )
+        .expect("create second project-bound session");
     let ctx2 = ChatContext::from_config(cfg).expect("ctx2");
     let session2 = current_session_id(&ctx2);
+    assert!(
+        Arc::ptr_eq(
+            &ctx1.global_services.tool_registry,
+            &ctx2.global_services.tool_registry
+        ),
+        "shared scope must share the registry, not just return identical tool names"
+    );
     let tools1 = list_tool_names(&ctx1).await;
     let tools2 = list_tool_names(&ctx2).await;
     assert_eq!(tools1, vec!["shared_registry_tool".to_string()]);
@@ -1772,7 +1804,7 @@ async fn function_override_scope_wins_over_agent_and_global() {
     assert_eq!(targets[0].plugin_id, "project-function");
     assert!(
         targets[0].plugin_root.ends_with(
-            Path::new(".tomcat")
+            Path::new(".agents")
                 .join("plugins")
                 .join("project-function")
         ),
@@ -1877,9 +1909,10 @@ async fn function_override_same_layer_conflict_first_wins_with_warning() {
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
     let warnings = ctx
-        .refresh_plugin_catalog_inventory()
+        .sync_resource_inventory()
         .await
-        .expect("refresh plugin catalog");
+        .expect("refresh plugin catalog")
+        .warnings;
     let targets = function_targets(&ctx, "test.echo");
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].plugin_id, "alpha-function");
@@ -1922,7 +1955,7 @@ async fn function_override_recomputes_winner_on_refresh_after_higher_layer_added
         &[("test.echo", "projectEcho")],
         r#"pi.registerFunction("projectEcho", function () { return { source: "project" }; });"#,
     );
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog");
 
@@ -1951,7 +1984,7 @@ async fn function_override_lower_layer_reemerges_after_higher_layer_removed() {
     );
     let project_plugin_dir = workspace
         .path()
-        .join(".tomcat")
+        .join(".agents")
         .join("plugins")
         .join("project-function");
     write_project_function_plugin(
@@ -1968,7 +2001,7 @@ async fn function_override_lower_layer_reemerges_after_higher_layer_removed() {
     );
 
     fs::remove_dir_all(&project_plugin_dir).expect("remove higher-layer plugin");
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog");
 
@@ -2128,10 +2161,10 @@ async fn catalog_refresh_does_not_duplicate_function_entries() {
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
     assert_eq!(function_targets(&ctx, "test.echo").len(), 1);
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog");
-    ctx.refresh_plugin_catalog_inventory()
+    ctx.sync_resource_inventory()
         .await
         .expect("refresh plugin catalog twice");
     assert_eq!(

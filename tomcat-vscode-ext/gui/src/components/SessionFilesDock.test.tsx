@@ -1,0 +1,70 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { SessionFilesDock } from "./SessionFilesDock";
+import type { SessionFileView } from "../../../src/shared/sessionFiles";
+const rows: SessionFileView[] = [{ path: "/src/app.ts", status: "modified", restorable: true }, { path: "/logo.png", status: "added", restorable: true }, { path: "/skip", status: "modified", restorable: false }];
+afterEach(cleanup);
+it("Keep All precedes Undo All, skips confirmation, and correlates pending results", () => {
+  const onIntent = vi.fn();
+  const view = render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
+  const keep = screen.getByTestId("keep-all-files");
+  expect(keep.compareDocumentPosition(screen.getByTestId("undo-all-files")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(keep);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  const intent = onIntent.mock.calls[0][0];
+  expect(intent).toMatchObject({ type: "keepSessionFiles", data: { sessionId: "s", sourceTurnId: "u" } });
+  expect(keep).toHaveProperty("disabled", true);
+  expect(screen.getByTestId("undo-all-files")).toHaveProperty("disabled", true);
+  fireEvent(window, new MessageEvent("message", { data: { channel: "event", content: { type: "keepSessionFilesResult", ...intent.data, success: false, error: "disk full" } } }));
+  expect(screen.getByRole("alert").textContent).toBe("disk full");
+  expect(keep).toHaveProperty("disabled", false);
+  fireEvent.click(keep);
+  view.rerender(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "keep-1", files: [] }} busy={false} onIntent={onIntent} />);
+  expect(screen.queryByTestId("files-dock")).toBeNull();
+});
+it("Keep is disabled when busy or empty, but does not require restorable paths", () => {
+  const onIntent = vi.fn();
+  const files = { sourceTurnId: "u", files: [rows[2]] };
+  const view = render(<SessionFilesDock sessionId="s" files={files} busy onIntent={onIntent} />);
+  expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", true);
+  view.rerender(<SessionFilesDock sessionId="s" files={files} busy={false} onIntent={onIntent} />);
+  expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", false);
+  view.rerender(<SessionFilesDock sessionId="s" files={{sourceTurnId:"u",files:[],error:"failed"}} busy={false} onIntent={onIntent} />);
+  expect(screen.getByTestId("keep-all-files")).toHaveProperty("disabled", true);
+});
+it("Enter on Cancel never dispatches Undo", () => {
+  const onIntent = vi.fn();
+  render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
+  fireEvent.click(screen.getByTestId("undo-all-files"));
+  const cancel = screen.getByTestId("undo-files-cancel");
+  cancel.focus();
+  expect(fireEvent.keyDown(cancel, { key: "Enter" })).toBe(true);
+  expect(onIntent).not.toHaveBeenCalled();
+  // jsdom does not synthesize native keyboard clicks; the browser harness does.
+  fireEvent.click(cancel);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(onIntent).not.toHaveBeenCalled();
+});
+
+it("collapsed Undo All cancels without mutation and confirms only eligible exact paths", () => {
+  const onIntent = vi.fn(); render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
+  fireEvent.click(screen.getByRole("button", { name: "Undo All" })); expect(screen.getByRole("button", { name: "Expand files" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /Cancel/ })); expect(onIntent).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Undo All" }));
+  expect(screen.getByTestId("undo-files-body").textContent).toContain("1 file cannot be undone");
+  fireEvent.click(screen.getByRole("button", { name: /Undo 2 Files/ }));
+  expect(onIntent).toHaveBeenCalledWith(expect.objectContaining({ type: "restoreSessionFiles", data: expect.objectContaining({ sessionId: "s", sourceTurnId: "u", paths: ["/src/app.ts", "/logo.png"] }) }));
+  expect(screen.getByTestId("undo-all-files")).toHaveProperty("disabled", true);
+});
+it("folding preserves in-flight restoration; wrong-source replies do not settle; errors remain visible collapsed", () => {
+  const onIntent = vi.fn(); render(<SessionFilesDock sessionId="s" files={{ sourceTurnId: "u", files: rows }} busy={false} onIntent={onIntent} />);
+  fireEvent.click(screen.getByRole("button", { name: "Expand files" }));
+  fireEvent.click(screen.getAllByTestId("undo-file")[0]); fireEvent.click(screen.getByRole("button", { name: /Undo File/ }));
+  const requestId = onIntent.mock.calls.at(-1)![0].data.requestId;
+  fireEvent.click(screen.getByRole("button", { name: "Collapse files" }));
+  fireEvent(window, new MessageEvent("message", { data: { channel: "event", content: { type: "restoreSessionFilesResult", sessionId: "s", sourceTurnId: "old", requestId, success: true } } }));
+  expect(screen.getByTestId("undo-all-files")).toHaveProperty("disabled", true);
+  fireEvent(window, new MessageEvent("message", { data: { channel: "event", content: { type: "restoreSessionFilesResult", sessionId: "s", sourceTurnId: "u", requestId, success: false, error: "failed" } } }));
+  expect(screen.getByRole("alert").textContent).toBe("failed");
+  expect(screen.getByTestId("undo-all-files")).toHaveProperty("disabled", false);
+});

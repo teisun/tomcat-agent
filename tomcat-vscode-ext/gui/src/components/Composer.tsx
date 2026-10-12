@@ -1,11 +1,13 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
   useState,
   type DragEvent,
+  type ReactNode,
 } from "react";
 
 import { Node as TiptapNode, type JSONContent } from "@tiptap/core";
@@ -19,10 +21,12 @@ import {
   type NodeViewProps,
 } from "@tiptap/react";
 
+import { prepareAttachment, type PreparedAttachment } from "../attachments/imagePipeline";
 import { referenceIdentity } from "../contextReferences";
+import { isSupportedAttachmentMime } from "../../../src/shared/attachmentProtocol";
 import type {
   ContextSearchMatch,
-  WebviewPlanState,
+  WebviewPlanFileState,
   WebviewMessageSegment,
   WebviewReference,
 } from "../types";
@@ -30,31 +34,34 @@ import {
   ContextSearchDropdown,
   type ContextSearchDropdownHandle,
 } from "./ContextSearchDropdown";
+import type { Speed } from "../../../src/shared/modelSpeed";
+import { buildPickerModels } from "./buildPickerModels";
 import { createMentionSuggestion } from "./mentionSuggestion";
+import type { SharedSlashCommand } from "../../../src/serveClient/wire";
+import { buildSlashMenuSections } from "../slashMenu";
+import { SlashCommandMenu, type SlashCommandMenuHandle } from "./SlashCommandMenu";
+import { createSlashCommandSuggestion, type SlashSuggestionState } from "./slashCommandSuggestion";
 import { ReferenceChip } from "./ReferenceChip";
+import { InvocationNode, instructionFromAttrs } from "./InvocationNode";
+import { withOccurrence } from "../../../src/shared/composerOccurrences";
+import { ModelPicker, type ModelPickerModel } from "./ModelPicker";
+import { useT } from "../i18n/LocaleProvider";
+import type { MessageKey, Translator } from "../../../src/shared/i18n";
 
-function formatPlanStatus(planState?: WebviewPlanState | null): string | null {
-  if (!planState || planState === "chat") {
+function formatPlanStatus(planState: WebviewPlanFileState | null | undefined, t: Translator): string | null {
+  if (!planState) {
     return null;
   }
-  return `Plan: ${planState}`;
+  return `${t("term.mode.plan")}: ${t(`term.planState.${planState}`)}`;
 }
 
 const REFERENCE_NODE_NAME = "reference";
 const DROP_URI_SCHEMES = /^(file|vscode-file|vscode-remote):/i;
-const DEFAULT_PROMPT_PLACEHOLDER = "Message Tomcat (Enter to send, Shift+Enter for newline)";
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 const TEST_SET_COMPOSER_VALUE_EVENT = "tomcat:test:set-composer-value";
 const MODE_OPTIONS = [
-  { label: "Chat", value: "chat" },
-  { label: "Plan", value: "plan" },
-] as const;
-const THINKING_LEVEL_OPTIONS = [
-  { label: "Effort", value: "" },
-  { label: "Low", value: "low" },
-  { label: "Medium", value: "medium" },
-  { label: "High", value: "high" },
-  { label: "Xhigh", value: "xhigh" },
+  { labelKey: "term.mode.chat", value: "chat" },
+  { labelKey: "term.mode.plan", value: "plan" },
 ] as const;
 
 function hasCapability(capabilities: string[], capability: "files" | "vision"): boolean {
@@ -74,7 +81,7 @@ function extractUriExtension(uri: string): string | null {
   }
 }
 
-function buildPickerHint(capabilities?: string[]): string | null {
+function buildPickerHint(capabilities?: string[]): MessageKey | null {
   if (!capabilities) {
     return null;
   }
@@ -84,15 +91,15 @@ function buildPickerHint(capabilities?: string[]): string | null {
     return null;
   }
   if (!supportsVision && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；图片/PDF 会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.pickBoth";
   }
   if (!supportsVision) {
-    return "当前模型不支持图片附件；图片会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.pickImage";
   }
-  return "当前模型不支持 PDF 附件；PDF 会先加入待发送列表，发送时会提示切换模型。";
+  return "composer.hint.pickPdf";
 }
 
-function buildDropHint(capabilities: string[] | undefined, uris: string[]): string | null {
+function buildDropHint(capabilities: string[] | undefined, uris: string[]): MessageKey | null {
   if (!capabilities) {
     return null;
   }
@@ -107,23 +114,58 @@ function buildDropHint(capabilities: string[] | undefined, uris: string[]): stri
   });
   const includesPdf = uris.some((uri) => extractUriExtension(uri) === ".pdf");
   if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.dropBoth";
   }
   if (includesImage && !supportsVision) {
-    return "当前模型不支持图片附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.dropImage";
   }
   if (includesPdf && !supportsFiles) {
-    return "当前模型不支持 PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
+    return "composer.hint.dropPdf";
   }
   return null;
 }
 
-function modeLabel(value: "chat" | "plan"): string {
-  return MODE_OPTIONS.find((option) => option.value === value)?.label ?? "Chat";
+function buildPasteHint(capabilities: string[] | undefined, files: File[]): MessageKey | null {
+  if (!capabilities) {
+    return null;
+  }
+  const supportsVision = hasCapability(capabilities, "vision");
+  const supportsFiles = hasCapability(capabilities, "files");
+  if (supportsVision && supportsFiles) {
+    return null;
+  }
+  const includesImage = files.some((file) => file.type.startsWith("image/"));
+  const includesPdf = files.some((file) => file.type === "application/pdf");
+  if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
+    return "composer.hint.pasteBoth";
+  }
+  if (includesImage && !supportsVision) {
+    return "composer.hint.pasteImage";
+  }
+  if (includesPdf && !supportsFiles) {
+    return "composer.hint.pastePdf";
+  }
+  return null;
 }
 
-function thinkingLevelLabel(value: "" | "high" | "low" | "medium" | "xhigh"): string {
-  return THINKING_LEVEL_OPTIONS.find((option) => option.value === value)?.label ?? "Effort";
+type FileWithSourcePath = File & {
+  path?: string;
+  sourcePath?: string;
+};
+
+function extractFileSourcePath(file: File): string | null {
+  const withSourcePath = file as FileWithSourcePath;
+  if (typeof withSourcePath.sourcePath === "string" && withSourcePath.sourcePath.trim()) {
+    return withSourcePath.sourcePath;
+  }
+  if (typeof withSourcePath.path === "string" && withSourcePath.path.trim()) {
+    return withSourcePath.path;
+  }
+  return null;
+}
+
+function modeLabel(value: "chat" | "plan", t: Translator): string {
+  return t(value === "plan" ? "term.mode.plan" : "term.mode.chat");
 }
 
 export interface ComposerDraft {
@@ -137,6 +179,7 @@ export interface ComposerHandle {
   closeMention(): void;
   getDraft(): ComposerDraft;
   insertReference(reference: WebviewReference): void;
+  insertReferences(references: readonly WebviewReference[]): void;
   replaceDraft(draft: ComposerDraft): void;
 }
 
@@ -158,6 +201,7 @@ function normalizeReferenceAttrs(attrs: Record<string, unknown>): WebviewReferen
   }
   return {
     kind: attrs.kind,
+    occurrenceId: typeof attrs.occurrenceId === "string" ? attrs.occurrenceId : undefined,
     label: attrs.label,
     lineEnd: typeof attrs.lineEnd === "number" ? attrs.lineEnd : null,
     lineStart: typeof attrs.lineStart === "number" ? attrs.lineStart : null,
@@ -203,6 +247,11 @@ function walkContentNode(
     appendProjectionText(projection, "\n");
     return;
   }
+  if (node.type === "instruction" && node.attrs) {
+    const instruction = instructionFromAttrs(node.attrs);
+    if (instruction) { segments.push(instruction); appendProjectionText(projection, instruction.label); }
+    return;
+  }
   if (node.type === REFERENCE_NODE_NAME && node.attrs) {
     const reference = normalizeReferenceAttrs(node.attrs as Record<string, unknown>);
     if (reference) {
@@ -231,7 +280,7 @@ export function serializeComposerDocument(
   });
   return {
     hasContent: segments.some(
-      (segment) => segment.type === "reference" || segment.text.trim().length > 0,
+      (segment) => segment.type !== "text" || segment.text.trim().length > 0,
     ),
     segments,
     text: projection.join(""),
@@ -263,8 +312,8 @@ function createComposerDocument(segments: WebviewMessageSegment[]): JSONContent 
       return;
     }
     paragraphContent.push({
-      attrs: segment,
-      type: REFERENCE_NODE_NAME,
+      attrs: withOccurrence(segment),
+      type: segment.type === "instruction" ? "instruction" : REFERENCE_NODE_NAME,
     });
   });
   return {
@@ -345,6 +394,7 @@ const ReferenceNode = TiptapNode.create({
   selectable: false,
   addAttributes() {
     return {
+      occurrenceId: { default: null, parseHTML: () => crypto.randomUUID() },
       kind: {
         default: "file",
       },
@@ -399,15 +449,46 @@ const EMPTY_DRAFT: ComposerDraft = {
   text: "",
 };
 
-interface ComposerProps {
+function sameDraft(left: ComposerDraft, right: ComposerDraft): boolean {
+  return (
+    left.hasContent === right.hasContent &&
+    left.text === right.text &&
+    JSON.stringify(left.segments) === JSON.stringify(right.segments)
+  );
+}
+
+export interface ComposerProps {
+  /** Optional presentation only; all compose locations keep the same surface. */
+  header?: ReactNode;
+  beforeEditor?: ReactNode;
+  instanceId?: string;
+  /** Bounds transient Stop feedback to the selected session without remounting the editor. */
+  sessionId?: string | null;
+  initialDraft?: ComposerDraft;
+  onCancelEdit?(): void;
+  allowBusyInput?: boolean;
+  submitAriaLabel?: string;
+  hideDragHint?: boolean;
+  submitDisabled?: boolean;
+  hasAttachments?: boolean;
+  attachmentsPending?: boolean;
+  availableModelDetails?: Record<string, ModelPickerModel>;
+  availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
+  slashCommands?: readonly SharedSlashCommand[];
+  instructionCatalog?: readonly import("../../../src/serveClient/wire").InstructionCard[];
+  onSlashOpen?(): void;
+  commandPending?: boolean;
   busy?: boolean;
   canInterrupt: boolean;
   canPrompt: boolean;
+  /** Real session configuration permission, independent of an editor's submit/Stop state. */
+  canChangeConfig?: boolean;
   contextSearchLoading: boolean;
   contextSearchMatches: ContextSearchMatch[];
   contextSearchQuery: string;
   contextSearchTruncated: boolean;
+  contextWindowValue?: number | null;
   contextLabel: string;
   modelCapabilities?: string[] | undefined;
   modeValue: "chat" | "plan";
@@ -415,35 +496,65 @@ interface ComposerProps {
   onContextSearchClose(): void;
   onContextSearchOpen(): void;
   onContextSearchQueryChange(query: string): void;
-  thinkingLevelValue: "" | "high" | "low" | "medium" | "xhigh";
+  supportedReasoningLevels?: string[] | undefined;
+  thinkingLevelValue: string;
+  onAttachFiles?(files: PreparedAttachment[]): void;
+  /** Called synchronously when paste preparation starts so App can bind it to the source session. */
+  onPrepareAttachments?(work: Promise<PreparedAttachment[]>): void;
   onPickContext(): void;
+  onContextWindowChange(modelId: string, contextWindow: number): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
   onModelChange(value: string): void;
   onOpenModelSettings?(): void;
   onResolveDrop(uris: string[]): void;
-  onThinkingLevelChange(value: "high" | "low" | "medium" | "xhigh" | ""): void;
+  onThinkingLevelChange(modelId: string, value: string): void;
+  onSpeedChange(modelId: string, speed: Speed): void;
   onInterrupt?(): void;
   onSubmit(): void;
-  planState?: WebviewPlanState | null;
+  planState?: WebviewPlanFileState | null;
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
+  instanceId = "",
+  sessionId,
+  header,
+  beforeEditor,
+  initialDraft,
+  onCancelEdit,
+  availableModelDetails,
+  availableModelReasoningLevels,
   availableModels,
   busy = false,
+  canChangeConfig: configAllowed = !busy,
+  allowBusyInput = false,
+  submitAriaLabel,
+  hideDragHint = false,
+  submitDisabled = false,
+  hasAttachments = false,
+  attachmentsPending = false,
+  slashCommands = [],
+  instructionCatalog = [],
+  onSlashOpen,
+  commandPending = false,
   canInterrupt,
   canPrompt,
   contextSearchLoading,
   contextSearchMatches,
   contextSearchQuery,
   contextSearchTruncated,
+  contextWindowValue,
   contextLabel,
   modelCapabilities,
   modeValue,
   modelValue,
+  onAttachFiles,
+  onPrepareAttachments,
   onContextSearchClose,
   onContextSearchOpen,
   onContextSearchQueryChange,
+  supportedReasoningLevels,
+  onContextWindowChange,
   thinkingLevelValue,
   onPickContext,
   onDraftChange,
@@ -452,25 +563,53 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onOpenModelSettings,
   onResolveDrop,
   onThinkingLevelChange,
+  onSpeedChange,
   onInterrupt,
   onSubmit,
   planState,
 }, ref) {
-  const planStatus = formatPlanStatus(planState);
-  const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
+  const testId = (name: string) => instanceId ? `${instanceId}-${name}` : name;
+  const canChangeConfig = canPrompt && configAllowed;
+  const configHint = !configAllowed ? t("composer.configBusy") : undefined;
+  const planStatus = formatPlanStatus(planState, t);
+  const [capabilityHint, setCapabilityHint] = useState<MessageKey | null>(null);
   const [dropActive, setDropActive] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
+  useEffect(() => {
+    setStopping(false);
+  }, [busy, sessionId]);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
-  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
+  const [slashState, setSlashState] = useState<SlashSuggestionState | null>(null);
+  const isSlashOpenRef = useRef(false);
+  const slashMenuRef = useRef<SlashCommandMenuHandle | null>(null);
+  const slashCommandsRef = useRef(slashCommands);
+  slashCommandsRef.current = slashCommands;
+  const catalogRef = useRef(instructionCatalog);
+  catalogRef.current = instructionCatalog;
+  const slashOpenHandlerRef = useRef(onSlashOpen);
+  slashOpenHandlerRef.current = onSlashOpen;
+  const previousSlashState = useRef<SlashSuggestionState | null>(null);
   const isComposingRef = useRef(false);
   const isMentionOpenRef = useRef(false);
   const contextSearchDropdownRef = useRef<ContextSearchDropdownHandle | null>(null);
   const draftRef = useRef<ComposerDraft>(EMPTY_DRAFT);
-  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modeMenuRef = useRef<HTMLDivElement | null>(null);
-  const effortMenuRef = useRef<HTMLDivElement | null>(null);
+  const latestAttachmentHandlersRef = useRef({
+    modelCapabilities,
+    onAttachFiles,
+    onPrepareAttachments,
+  });
+  latestAttachmentHandlersRef.current = {
+    modelCapabilities,
+    onAttachFiles,
+    onPrepareAttachments,
+  };
   const latestContextSearchHandlersRef = useRef({
     onClose: onContextSearchClose,
     onOpen: onContextSearchOpen,
@@ -482,20 +621,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onQueryChange: onContextSearchQueryChange,
   };
   const latestHandlersRef = useRef({
-    canPrompt,
+    canPrompt: canPrompt && (!busy || allowBusyInput) && !submitDisabled && !attachmentsPending,
     onDraftChange,
     onSubmit,
   });
   latestHandlersRef.current = {
-    canPrompt,
+    canPrompt: canPrompt && (!busy || allowBusyInput) && !submitDisabled && !attachmentsPending,
     onDraftChange,
     onSubmit,
   };
 
-  const updateDraft = (next: ComposerDraft) => {
+  const applyDraft = (next: ComposerDraft): boolean => {
+    if (sameDraft(draftRef.current, next)) {
+      return false;
+    }
     setDraft(next);
     draftRef.current = next;
-    latestHandlersRef.current.onDraftChange(next);
+    return true;
+  };
+
+  const updateDraft = (next: ComposerDraft) => {
+    if (applyDraft(next)) {
+      latestHandlersRef.current.onDraftChange(next);
+    }
   };
 
   const mentionSuggestion = useMemo(() =>
@@ -520,6 +668,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }),
   []);
 
+  const slashSuggestion = useMemo(() => createSlashCommandSuggestion({
+    getCommands: () => slashCommandsRef.current,
+    getCatalog: () => catalogRef.current,
+    getKeyHandler: () => slashMenuRef.current?.onKeyDown,
+    isComposing: () => isComposingRef.current,
+    onState: (next) => {
+      if (next && !previousSlashState.current) slashOpenHandlerRef.current?.();
+      previousSlashState.current = next;
+      isSlashOpenRef.current = next !== null && buildSlashMenuSections(slashCommandsRef.current, next.query, catalogRef.current, next.leading).length > 0;
+      setSlashState(next);
+    },
+  }), []);
+
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
@@ -533,16 +694,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         orderedList: false,
       }),
       Placeholder.configure({
-        placeholder: DEFAULT_PROMPT_PLACEHOLDER,
+        placeholder: () => tRef.current("composer.placeholder"),
       }),
       ReferenceNode,
+      InvocationNode,
       mentionSuggestion.extension,
     ],
     editorProps: {
       attributes: {
-        "aria-label": "Tomcat prompt",
+        "aria-label": t("composer.inputAria"),
         class: "tc-composer__editor",
-        "data-testid": "composer-input",
+        "data-testid": testId("composer-input"),
       },
       handleDOMEvents: {
         compositionend: () => {
@@ -554,7 +716,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           return false;
         },
         keydown: (_view, event) => {
-          if (isMentionOpenRef.current) {
+          const key = event.key.toLowerCase();
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            (key === "z" || key === "y")
+          ) {
+            // VS Code forwards webview shortcuts to its workbench. Do not let a
+            // Composer undo/redo escape this contentEditable: Tiptap handles the
+            // history action locally, while the workbench could undo the active
+            // editor or issue a second browser undo.
+            event.stopPropagation();
+            return false;
+          }
+          if (isMentionOpenRef.current || isSlashOpenRef.current) {
             return false;
           }
           if (
@@ -562,7 +736,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             !event.shiftKey &&
             !isComposingRef.current &&
             !event.isComposing &&
-            latestHandlersRef.current.canPrompt
+            latestHandlersRef.current.canPrompt &&
+            draftRef.current.hasContent
           ) {
             event.preventDefault();
             latestHandlersRef.current.onSubmit();
@@ -572,6 +747,62 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
       },
       handlePaste(view, event) {
+        const attachmentFiles: File[] = [];
+        const items = event.clipboardData?.items ?? [];
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          if (item.kind === "file" && isSupportedAttachmentMime(item.type)) {
+            const file = item.getAsFile();
+            if (file) {
+              attachmentFiles.push(file);
+            }
+          }
+        }
+        if (attachmentFiles.length > 0) {
+          event.preventDefault();
+          const hint = buildPasteHint(
+            latestAttachmentHandlersRef.current.modelCapabilities,
+            attachmentFiles,
+          );
+          if (hint) {
+            setCapabilityHint(hint);
+          }
+          // Keep the existing click-time handoff, but avoid decoding every image in
+          // one paste concurrently. Original bytes and attachment order are unchanged.
+          const preparation = (async () => {
+            const prepared = [];
+            for (const file of attachmentFiles) {
+              prepared.push(await prepareAttachment({
+                bytes: await file.arrayBuffer(),
+                filename: file.name || null,
+                mimeType: file.type,
+                sourcePath: extractFileSourcePath(file),
+              }));
+            }
+            return prepared;
+          })();
+          if (latestAttachmentHandlersRef.current.onPrepareAttachments) {
+            // Registration happens synchronously, before any File.arrayBuffer() resolves,
+            // so a New Session click can establish a correct click-time cutoff.
+            latestAttachmentHandlersRef.current.onPrepareAttachments(preparation);
+          } else {
+            preparation.then((files) => {
+              latestAttachmentHandlersRef.current.onAttachFiles?.(files);
+            }).catch(() => undefined);
+          }
+          preparation.catch(() => {
+              // Fallback: paste as text if attachment processing fails
+              const text = event.clipboardData?.getData("text/plain");
+              if (text) {
+                view.dispatch(view.state.tr.insertText(text));
+              }
+            });
+          return true;
+        }
+
+        const html = event.clipboardData?.getData("text/html") ?? "";
+        if (html.includes("data-tomcat-reference") || html.includes("data-tomcat-instruction")) return false;
+        // No images: handle text paste as before
         const text = event.clipboardData?.getData("text/plain");
         if (text === undefined) {
           return false;
@@ -589,7 +820,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         return true;
       },
     },
-    content: {
+    content: initialDraft ? createComposerDocument(initialDraft.segments.length ? initialDraft.segments : [{ type: "text", text: initialDraft.text }]) : {
       content: [
         {
           type: "paragraph",
@@ -606,12 +837,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   });
 
   useEffect(() => {
+    if (!editor) return;
+    editor.setOptions({ editorProps: { ...editor.options.editorProps, attributes: {
+      "aria-label": t("composer.inputAria"), class: "tc-composer__editor", "data-testid": testId("composer-input"),
+    } } });
+    // Recompute placeholder decorations without replacing the document, selection or history.
+    editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
+  }, [editor, t]);
+
+  useEffect(() => {
+    isSlashOpenRef.current = slashState !== null && buildSlashMenuSections(slashCommands, slashState.query, instructionCatalog, slashState.leading).length > 0;
+  }, [slashState, slashCommands, instructionCatalog]);
+  useEffect(() => {
+    if (!editor) return;
+    return slashSuggestion.attach(editor);
+  }, [editor, slashSuggestion]);
+
+  useEffect(() => {
     if (!editor) {
       return;
     }
     const handleTestSetComposerValue = (event: Event) => {
       const detail = (event as CustomEvent<{ testId?: string; value?: string | null }>).detail;
-      if (detail?.testId && detail.testId !== "composer-input") {
+      if ((detail?.testId ?? "composer-input") !== testId("composer-input")) {
         return;
       }
       const nextValue = detail?.value ?? "";
@@ -639,6 +887,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     editor.setEditable(canPrompt);
+    if (!canPrompt) {
+      mentionSuggestion.close();
+      slashSuggestion.close();
+      setModeMenuOpen(false);
+    }
   }, [canPrompt, editor]);
 
   useEffect(() => {
@@ -652,26 +905,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [capabilityHint]);
 
   useEffect(() => {
-    if (!modelMenuOpen && !modeMenuOpen && !effortMenuOpen) {
+    if (!modeMenuOpen) {
       return;
     }
-    const refs = [modelMenuRef, modeMenuRef, effortMenuRef];
     const handleClickOutside = (event: MouseEvent) => {
-      if (!(event.target instanceof Node)) {
+      if (!(event.target instanceof Node) || modeMenuRef.current?.contains(event.target)) {
         return;
       }
-      if (refs.some((ref) => ref.current?.contains(event.target))) {
-        return;
-      }
-      setModelMenuOpen(false);
       setModeMenuOpen(false);
-      setEffortMenuOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setModelMenuOpen(false);
         setModeMenuOpen(false);
-        setEffortMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -680,35 +925,78 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [effortMenuOpen, modeMenuOpen, modelMenuOpen]);
+  }, [modeMenuOpen]);
 
-  const useNativeModelSelect = !onOpenModelSettings;
-  const canOpenModelMenu = canPrompt && (availableModels.length > 0 || Boolean(onOpenModelSettings));
-  const canOpenModeMenu = canPrompt;
-  const canOpenEffortMenu = canPrompt && Boolean(modelValue);
-
-  const handleModelPick = (nextModel: string) => {
-    onModelChange(nextModel);
-    setModelMenuOpen(false);
-    setModeMenuOpen(false);
-    setEffortMenuOpen(false);
-  };
+  useEffect(() => {
+    if (!canChangeConfig) setModeMenuOpen(false);
+  }, [canChangeConfig]);
+  const pickerModels = useMemo(
+    () =>
+      buildPickerModels({
+        activeModelId: modelValue,
+        availableModelDetails,
+        availableModelReasoningLevels: {
+          ...availableModelReasoningLevels,
+          ...(supportedReasoningLevels
+            ? { [modelValue]: supportedReasoningLevels }
+            : {}),
+        },
+        availableModels,
+        selectedModelId: modelValue,
+        sessionContextWindow: contextWindowValue,
+        sessionThinkingLevel: thinkingLevelValue,
+      }),
+    [
+      availableModelDetails,
+      availableModelReasoningLevels,
+      availableModels,
+      contextWindowValue,
+      modelValue,
+      supportedReasoningLevels,
+      thinkingLevelValue,
+    ],
+  );
 
   const handleModePick = (nextMode: "chat" | "plan") => {
     onModeChange(nextMode);
-    setModelMenuOpen(false);
     setModeMenuOpen(false);
-    setEffortMenuOpen(false);
   };
 
-  const handleThinkingLevelPick = (
-    nextLevel: "high" | "low" | "medium" | "xhigh" | "",
-  ) => {
-    onThinkingLevelChange(nextLevel);
-    setModelMenuOpen(false);
-    setModeMenuOpen(false);
-    setEffortMenuOpen(false);
-  };
+  const insertReferences = useCallback((references: readonly WebviewReference[]) => {
+    if (!editor) {
+      return;
+    }
+    const seenReferenceIds = new Set<string>();
+    const inserted = references.map((reference) => withOccurrence(reference)).filter((reference) => {
+      const id = referenceIdentity(reference);
+      if (seenReferenceIds.has(id) || editorHasReference(editor, reference)) return false;
+      seenReferenceIds.add(id);
+      return true;
+    });
+    if (inserted.length === 0) {
+      return;
+    }
+    editor
+      .chain()
+      .focus()
+      .insertContent(
+        inserted.flatMap((reference) => [
+          {
+            attrs: reference,
+            type: REFERENCE_NODE_NAME,
+          },
+          {
+            text: " ",
+            type: "text",
+          },
+        ]),
+      )
+      .run();
+    // A system picker can add N references at once. Persist its post-transaction
+    // document only once; emitting N intermediate drafts allows an older prefix to
+    // arrive after the complete draft and overwrite it in the extension host.
+    updateDraft(serializeComposerDocument(editor.getJSON()));
+  }, [editor]);
 
   useImperativeHandle(ref, () => ({
     clear() {
@@ -722,33 +1010,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     closeMention() {
       mentionSuggestion.close();
+      slashSuggestion.close();
     },
     getDraft() {
       return draftRef.current;
     },
     insertReference(reference: WebviewReference) {
-      if (!editor || editorHasReference(editor, reference)) {
-        return;
-      }
-      editor
-        .chain()
-        .focus()
-        .insertContent([
-          {
-            attrs: reference,
-            type: REFERENCE_NODE_NAME,
-          },
-          {
-            text: " ",
-            type: "text",
-          },
-        ])
-        .run();
-      updateDraft(serializeComposerDocument(editor.getJSON()));
+      insertReferences([reference]);
+    },
+    insertReferences(references: readonly WebviewReference[]) {
+      insertReferences(references);
     },
     replaceDraft(nextDraft: ComposerDraft) {
       if (!editor) {
-        updateDraft(nextDraft);
+        applyDraft(nextDraft);
         return;
       }
       const segments = nextDraft.segments.length
@@ -756,11 +1031,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         : nextDraft.text
           ? [{ text: nextDraft.text, type: "text" } satisfies WebviewMessageSegment]
           : [];
-      editor.commands.setContent(createComposerDocument(segments), false);
+      editor.commands.setContent(createComposerDocument(segments), { emitUpdate: false });
       editor.commands.focus("end");
-      updateDraft(serializeComposerDocument(editor.getJSON()));
+      applyDraft(serializeComposerDocument(editor.getJSON()));
     },
-  }), [editor, mentionSuggestion]);
+  }), [editor, insertReferences, mentionSuggestion, slashSuggestion]);
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
     if (!canPrompt) {
@@ -815,20 +1090,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const warningNotice: ComposerNotice | null = capabilityHint
     ? {
         id: "capability",
-        text: capabilityHint,
+        text: t(capabilityHint),
         tone: "warning",
       }
     : null;
-  const dragNotice: ComposerNotice | null = !warningNotice && canPrompt
+  const dragNotice: ComposerNotice | null = !hideDragHint && !warningNotice && canPrompt
     ? dropActive
       ? {
           id: "drag",
-          text: "松手加入上下文",
+          text: t("composer.dragReady"),
           tone: "active",
         }
       : {
           id: "drag",
-          text: "拖文件请按住 Shift",
+          text: t("composer.dragTip"),
           tone: "info",
         }
     : null;
@@ -839,23 +1114,35 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         tone: "plan",
       }
     : null;
-  const hasNotice = Boolean(warningNotice || dragNotice || planNotice);
+  const hasNotice = Boolean(warningNotice || dragNotice || planNotice || commandPending);
+  // Content presence selects the action; validation only enables/disables Send.
+  // Keep the legacy Stop-only behavior when an older server cannot queue input.
+  const hasInput = draft.hasContent || hasAttachments || attachmentsPending;
+  const showStop = busy && (!allowBusyInput || !hasInput);
+  const submitName = submitAriaLabel ?? t(busy ? "composer.queue" : "composer.send");
 
   return (
-    <section className="tc-composer" aria-label="prompt" data-testid="composer">
+    <section className="tc-composer" aria-label={t("composer.aria")} data-testid={testId("composer")} onKeyDown={(event) => {
+      if (event.key === "Escape" && !event.defaultPrevented && !event.nativeEvent.isComposing && !mentionOpen && !slashState && !modeMenuOpen && !event.currentTarget.querySelector('[aria-expanded="true"]')) {
+        event.preventDefault(); onCancelEdit?.();
+      }
+    }}>
       <div
         className={`tc-composer__surface${dropActive ? " tc-composer__surface--drop-active" : ""}`}
-        data-testid="composer-surface"
+        data-testid={testId("composer-surface")}
         onDragEnd={handleDragEnd}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >
+        {header ? <header className="tc-composer__header">{header}</header> : null}
+        <div className="tc-composer__body">
         {hasNotice ? (
-          <div className="tc-composer__notices" role="status" aria-live="polite" data-testid="composer-notices">
+          <div className="tc-composer__notices" role="status" aria-live="polite" data-testid={testId("composer-notices")}>
+            {commandPending && <span className="tc-notice tc-notice--info" data-testid={testId("composer-notice-command")}>{t("composer.commandPending")}</span>}
             {warningNotice ? (
-              <span className="tc-notice tc-notice--warning" data-testid="composer-notice-capability">
+              <span className="tc-notice tc-notice--warning" data-testid={testId("composer-notice-capability")}>
                 {warningNotice.text}
               </span>
             ) : (
@@ -864,11 +1151,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   <span
                     aria-hidden="true"
                     className={`tc-notice tc-notice--${dragNotice.tone} tc-notice--left`}
-                    data-testid="composer-notice-drag"
+                    data-testid={testId("composer-notice-drag")}
                   >
                     {dragNotice.tone === "info" ? (
                       <>
-                        <strong className="tc-notice__tip">Tip:</strong> {dragNotice.text}
+                        <strong className="tc-notice__tip">{t("composer.tip")}</strong> {dragNotice.text}
                       </>
                     ) : (
                       dragNotice.text
@@ -876,7 +1163,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   </span>
                 ) : null}
                 {planNotice ? (
-                  <span className="tc-notice tc-notice--plan tc-notice--right" data-testid="composer-notice-plan">
+                  <span className="tc-notice tc-notice--plan tc-notice--right" data-testid={testId("composer-notice-plan")}>
                     {planNotice.text}
                   </span>
                 ) : null}
@@ -884,6 +1171,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
           </div>
         ) : null}
+        {beforeEditor}
         <ContextSearchDropdown
           ref={contextSearchDropdownRef}
           loading={contextSearchLoading}
@@ -895,15 +1183,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           query={contextSearchQuery}
           truncated={contextSearchTruncated}
         />
+        <SlashCommandMenu ref={slashMenuRef} sections={buildSlashMenuSections(slashCommands, slashState?.query ?? "", instructionCatalog, slashState?.leading ?? true, t)} query={slashState?.query ?? ""} open={slashState !== null} onSelect={(item) => slashSuggestion.command(item)} onClose={() => slashSuggestion.close()} />
         <EditorContent editor={editor} />
-        <div className="tc-composer__bar" data-testid="composer-bar">
+        <div className="tc-composer__bar" data-testid={testId("composer-bar")}>
           <button
-            aria-label="添加文件/文件夹/图片"
+            aria-label={t("composer.addContext")}
             className="tc-icon-button"
-            data-testid="attachment-add"
+            data-testid={testId("attachment-add")}
             disabled={!canPrompt}
             onClick={handlePickContext}
-            title="添加文件/文件夹/图片"
+            title={t("composer.addContext")}
             type="button"
           >
             +
@@ -915,40 +1204,39 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <div
             className="tc-field tc-field--compact tc-field--dropdown tc-field--mode"
             ref={modeMenuRef}
+            title={configHint}
           >
-            <span>Mode</span>
+            <span>{t("composer.mode")}</span>
             <button
               aria-expanded={modeMenuOpen}
-              aria-label="Tomcat chat mode"
+              aria-label={t("composer.modeAria")}
               className="tc-topbar__trigger tc-topbar__trigger--compact"
-              data-testid="mode-select"
-              disabled={!canOpenModeMenu}
+              data-testid={testId("mode-select")}
+              disabled={!canChangeConfig}
               onClick={() => {
-                setModelMenuOpen(false);
-                setEffortMenuOpen(false);
                 setModeMenuOpen((value) => !value);
               }}
               type="button"
             >
-              <span className="tc-topbar__trigger-label">{modeLabel(modeValue)}</span>
+              <span className="tc-topbar__trigger-label">{modeLabel(modeValue, t)}</span>
               <span className="tc-topbar__caret" aria-hidden="true">
                 {modeMenuOpen ? "▴" : "▾"}
               </span>
             </button>
             {modeMenuOpen ? (
-              <div className="tc-session-dropdown tc-composer-dropdown" data-testid="mode-dropdown">
+              <div className="tc-session-dropdown tc-composer-dropdown" data-testid={testId("mode-dropdown")}>
                 {MODE_OPTIONS.map((option) => {
                   const isActive = option.value === modeValue;
                   return (
                     <button
                       aria-current={isActive ? "true" : undefined}
                       className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
-                      data-testid="mode-option"
+                      data-testid={testId("mode-option")}
                       key={option.value}
                       onClick={() => handleModePick(option.value)}
                       type="button"
                     >
-                      <span className="tc-session-item__title">{option.label}</span>
+                      <span className="tc-session-item__title">{t(option.labelKey)}</span>
                     </button>
                   );
                 })}
@@ -959,161 +1247,68 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             |
           </span>
 
-          <div
-            className="tc-field tc-field--compact tc-field--dropdown tc-field--model"
-            ref={useNativeModelSelect ? null : modelMenuRef}
-          >
-            <span>Model</span>
-            {useNativeModelSelect ? (
-              <select
-                aria-label="Tomcat model"
-                data-testid="model-select"
-                disabled={!canPrompt || availableModels.length === 0}
-                onChange={(event) => onModelChange(event.target.value)}
-                value={modelValue}
-              >
-                {availableModels.length === 0 ? (
-                  <option value="">No ready models</option>
-                ) : null}
-                {availableModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <>
-                <button
-                  aria-expanded={modelMenuOpen}
-                  aria-label="Tomcat model"
-                  className="tc-topbar__trigger tc-topbar__trigger--compact"
-                  data-testid="model-select"
-                  disabled={!canOpenModelMenu}
-                  onClick={() => {
-                    setModeMenuOpen(false);
-                    setEffortMenuOpen(false);
-                    setModelMenuOpen((value) => !value);
-                  }}
-                  type="button"
-                >
-                  <span className="tc-topbar__trigger-label">
-                    {modelValue || (availableModels.length ? "Select model" : "Add models")}
-                  </span>
-                  <span className="tc-topbar__caret" aria-hidden="true">
-                    {modelMenuOpen ? "▴" : "▾"}
-                  </span>
-                </button>
-                {modelMenuOpen ? (
-                  <div className="tc-session-dropdown tc-model-dropdown" data-testid="model-dropdown">
-                    {availableModels.length > 0 ? (
-                      availableModels.map((model) => {
-                        const isActive = model === modelValue;
-                        return (
-                          <button
-                            aria-current={isActive ? "true" : undefined}
-                            className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
-                            data-testid="model-option"
-                            key={model}
-                            onClick={() => handleModelPick(model)}
-                            type="button"
-                          >
-                            <span className="tc-session-item__title">{model}</span>
-                          </button>
-                        );
-                      })
-                    ) : (
-                      <div className="tc-session-dropdown__empty">No ready models</div>
-                    )}
-                    <div className="tc-model-dropdown__divider" />
-                    <button
-                      className="tc-session-item tc-model-dropdown__footer"
-                      data-testid="model-open-settings"
-                      onClick={() => {
-                        setModelMenuOpen(false);
-                        setModeMenuOpen(false);
-                        setEffortMenuOpen(false);
-                        onOpenModelSettings();
-                      }}
-                      type="button"
-                    >
-                      <span className="tc-session-item__title">Add Models...</span>
-                    </button>
-                  </div>
-                ) : null}
-              </>
-            )}
-          </div>
-          <span aria-hidden="true" className="tc-composer__bar-sep">
-            |
-          </span>
-
-          <div
-            className="tc-field tc-field--compact tc-field--dropdown tc-field--effort"
-            ref={effortMenuRef}
-          >
-            <span>Effort</span>
-            <button
-              aria-expanded={effortMenuOpen}
-              aria-label="Tomcat reasoning effort"
-              className="tc-topbar__trigger tc-topbar__trigger--compact"
-              data-testid="thinking-level-select"
-              disabled={!canOpenEffortMenu}
-              onClick={() => {
-                setModelMenuOpen(false);
+          <div className="tc-field tc-field--compact tc-field--dropdown tc-field--model" title={configHint}>
+            <span>{t("model.label")}</span>
+            <ModelPicker
+              className="tc-composer-model-picker"
+              disabled={!canChangeConfig}
+              // The VS Code host E2E harness still drives this compatibility trigger.
+              legacyThinkingTriggerTestId={testId("thinking-level-select")}
+              testId={testId("model-select")}
+              dropdownTestId={testId("model-dropdown")}
+              optionTestId={testId("model-option")}
+              models={pickerModels}
+              onOpenModelSettings={onOpenModelSettings}
+              onSelectContextWindow={(selectedModelId, contextWindow) => {
                 setModeMenuOpen(false);
-                setEffortMenuOpen((value) => !value);
+                onContextWindowChange(selectedModelId, contextWindow);
               }}
-              type="button"
-            >
-              <span className="tc-topbar__trigger-label">
-                {thinkingLevelLabel(thinkingLevelValue)}
-              </span>
-              <span className="tc-topbar__caret" aria-hidden="true">
-                {effortMenuOpen ? "▴" : "▾"}
-              </span>
-            </button>
-            {effortMenuOpen ? (
-              <div
-                className="tc-session-dropdown tc-composer-dropdown"
-                data-testid="thinking-level-dropdown"
-              >
-                {THINKING_LEVEL_OPTIONS.map((option) => {
-                  const isActive = option.value === thinkingLevelValue;
-                  return (
-                    <button
-                      aria-current={isActive ? "true" : undefined}
-                      className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
-                      data-testid="thinking-level-option"
-                      key={option.label}
-                      onClick={() => handleThinkingLevelPick(option.value)}
-                      type="button"
-                    >
-                      <span className="tc-session-item__title">{option.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
+              onSelectModel={(selectedModelId) => {
+                setModeMenuOpen(false);
+                onModelChange(selectedModelId);
+              }}
+              onSelectSpeed={(selectedModelId, speed) => {
+                setModeMenuOpen(false);
+                onSpeedChange(selectedModelId, speed);
+              }}
+              onSelectThinkingLevel={(selectedModelId, level) => {
+                setModeMenuOpen(false);
+                onThinkingLevelChange(selectedModelId, level);
+              }}
+              selectedModelId={modelValue}
+            />
           </div>
 
-          <span className="tc-composer__context" data-testid="context-ratio">
+          <span className="tc-composer__context" data-testid={testId("context-ratio")}>
             {contextLabel}
           </span>
 
           <button
-            aria-label={busy ? "Stop" : "Send prompt"}
+            aria-label={showStop ? t(stopping ? "composer.stopping" : "composer.stop") : submitName}
+            title={showStop ? t(stopping ? "composer.stopping" : "composer.stopTooltip") : submitAriaLabel ?? t(busy ? "composer.queueTooltip" : "composer.sendTooltip")}
             className="tc-send-button"
-            data-testid={busy ? "stop-button" : "send-button"}
-            disabled={busy ? !canInterrupt : !draft.hasContent || !canPrompt}
-            onClick={busy ? onInterrupt : onSubmit}
+            data-testid={testId(showStop ? "stop-button" : "send-button")}
+            disabled={showStop ? !canInterrupt || stopping : !draft.hasContent || !canPrompt || submitDisabled || attachmentsPending}
+            onClick={
+              showStop
+                ? () => {
+                    if (stopping) return;
+                    setStopping(true);
+                    onInterrupt?.();
+                  }
+                : onSubmit
+            }
             type="button"
           >
-            {busy ? (
-              <span aria-hidden="true" className="tc-stop-square" data-testid="stop-glyph" />
+            {showStop && stopping ? (
+              t("composer.stopping")
+            ) : showStop ? (
+              <span aria-hidden="true" className="tc-stop-square" data-testid={testId("stop-glyph")} />
             ) : (
               "↑"
             )}
           </button>
+        </div>
         </div>
       </div>
     </section>

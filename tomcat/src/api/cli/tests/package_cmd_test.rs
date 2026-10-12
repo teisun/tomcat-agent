@@ -4,6 +4,53 @@ use super::super::*;
 use super::mocks::test_config;
 use crate::core::load_package_registry;
 
+#[test]
+fn run_uninstall_missing_agent_package_uses_shared_manual_removal_hint() {
+    let work = tempfile::tempdir().unwrap();
+    let cfg = test_config(work.path());
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+    let paths = crate::core::package::resolve_layer_paths(
+        &cfg,
+        crate::core::package::PackageVisibility::Agent,
+        None,
+    )
+    .unwrap();
+    let error = run_uninstall(
+        "not-exist".into(),
+        Some(PackageVisibilityArg::Agent),
+        None,
+        &cfg,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "package.notInstalled",
+            &[
+                (
+                    "layer",
+                    &crate::core::package::PackageVisibility::Agent.to_string()
+                ),
+                ("name", "not-exist"),
+                (
+                    "plugins",
+                    &crate::infra::platform::format_home_path(&paths.plugins_dir)
+                ),
+                (
+                    "skills",
+                    &crate::infra::platform::format_home_path(&paths.skills_dir)
+                ),
+            ]
+        )),
+        "{error}"
+    );
+    assert!(error.contains(&crate::infra::platform::format_home_path(
+        &paths.plugins_dir
+    )));
+    assert!(error.contains(&crate::infra::platform::format_home_path(&paths.skills_dir)));
+}
+
 struct CurrentDirGuard {
     _lock: crate::test_support::TestLockGuard<'static>,
     previous: std::path::PathBuf,

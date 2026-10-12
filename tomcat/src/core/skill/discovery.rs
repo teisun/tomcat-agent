@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::infra::config::{get_work_dir, resolve_agent_trail_dir};
+use crate::infra::config::{get_work_dir, resolve_agent_trail_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -19,7 +19,7 @@ pub fn skill_roots(
     Ok(vec![
         (
             SkillSource::Project,
-            agent_workspace_dir.join(".tomcat").join("skills"),
+            resolve_project_resource_dir(cfg, agent_workspace_dir)?.join("skills"),
         ),
         (
             SkillSource::Agent,
@@ -96,9 +96,12 @@ fn scan_root(
     }
 
     let Ok(entries) = std::fs::read_dir(root) else {
+        skill_set
+            .warnings
+            .push(format!("skills_root_unreadable:{}", root.display()));
         skill_set.diagnostics.push(SkillDiagnostic {
             path: root.to_path_buf(),
-            reason: "skills 根目录不可读取".to_string(),
+            reason: crate::infra::i18n::tr("skill.rootUnreadable", &[]),
         });
         return;
     };
@@ -107,13 +110,17 @@ fn scan_root(
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
+        // Package transactions keep unpublished staging/backup siblings here.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         if *hit_limit {
             return;
         }
         let Ok(file_type) = entry.file_type() else {
             skill_set.diagnostics.push(SkillDiagnostic {
                 path: entry.path(),
-                reason: "无法读取目录项类型".to_string(),
+                reason: crate::infra::i18n::tr("resource.entryType", &[]),
             });
             continue;
         };
@@ -151,6 +158,9 @@ fn inspect_skill_file(
     let prefix = match read_frontmatter_prefix(skill_file) {
         Ok(prefix) => prefix,
         Err(error) => {
+            skill_set
+                .warnings
+                .push(format!("skills_scan_unreadable:{}", skill_file.display()));
             skill_set.diagnostics.push(SkillDiagnostic {
                 path: skill_file.to_path_buf(),
                 reason: error,
@@ -198,11 +208,71 @@ fn inspect_skill_file(
 }
 
 fn read_frontmatter_prefix(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("打开 skill 文件失败: {e}"))?;
-    let mut buf = vec![0_u8; FRONTMATTER_READ_LIMIT_BYTES];
-    let read = file
-        .read(&mut buf)
-        .map_err(|e| format!("读取 skill frontmatter 失败: {e}"))?;
-    buf.truncate(read);
-    String::from_utf8(buf).map_err(|e| format!("skill 文件不是 UTF-8 文本: {e}"))
+    let mut file = File::open(path)
+        .map_err(|e| crate::infra::i18n::tr("skill.open", &[("detail", &e.to_string())]))?;
+    let mut buf = Vec::with_capacity(FRONTMATTER_READ_LIMIT_BYTES);
+    let mut chunk = [0_u8; 1024];
+    while buf.len() < FRONTMATTER_READ_LIMIT_BYTES {
+        let remaining = FRONTMATTER_READ_LIMIT_BYTES - buf.len();
+        let chunk_len = chunk.len();
+        let read = file
+            .read(&mut chunk[..remaining.min(chunk_len)])
+            .map_err(|e| {
+                crate::infra::i18n::tr("skill.readFrontmatter", &[("detail", &e.to_string())])
+            })?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+        if let Some(end) = complete_frontmatter_end(&buf) {
+            return String::from_utf8(buf[..end].to_vec()).map_err(|error| {
+                crate::infra::i18n::tr("skill.utf8", &[("detail", &error.to_string())])
+            });
+        }
+    }
+    if !buf.starts_with(b"---\n") && !buf.starts_with(b"---\r\n") {
+        return Err(crate::infra::i18n::tr("skill.delimiter", &[]));
+    }
+    Err(crate::infra::i18n::tr(
+        "skill.frontmatterLimit",
+        &[("limit", &FRONTMATTER_READ_LIMIT_BYTES.to_string())],
+    ))
+}
+
+/// Returns the exclusive byte offset of a complete YAML closing delimiter. This
+/// deliberately works on bytes: a read may end halfway through a UTF-8 body
+/// character, but a complete ASCII delimiter before it is still safe to parse.
+fn complete_frontmatter_end(bytes: &[u8]) -> Option<usize> {
+    let opening_len = if bytes.starts_with(b"---\n") {
+        4
+    } else if bytes.starts_with(b"---\r\n") {
+        5
+    } else {
+        return None;
+    };
+    let mut line_start = opening_len;
+    while line_start < bytes.len() {
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| line_start + offset)
+            .unwrap_or(bytes.len());
+        let content_end = if line_end > line_start && bytes[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
+        if &bytes[line_start..content_end] == b"---" {
+            return Some(if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            });
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    None
 }

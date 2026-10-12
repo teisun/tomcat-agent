@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::infra::config::with_config_lock;
+use crate::infra::i18n::tr;
 use crate::{load_config, normalize_path, validate_config, write_file_atomic, AppConfig, AppError};
 
 use super::{ConfigSub, DEFAULT_CONFIG_PATH};
@@ -26,7 +27,7 @@ pub(crate) fn set_toml_key(
 ) -> Result<(), AppError> {
     let segments: Vec<&str> = key.split('.').collect();
     if segments.is_empty() {
-        return Err(AppError::Config("配置项路径不能为空".to_string()));
+        return Err(AppError::Config(tr("cli.config.emptyPath", &[])));
     }
 
     let mut current = val;
@@ -34,12 +35,12 @@ pub(crate) fn set_toml_key(
         if i == segments.len() - 1 {
             let table = current
                 .as_table_mut()
-                .ok_or_else(|| AppError::Config(format!("配置路径无效: {} 不是表", seg)))?;
+                .ok_or_else(|| AppError::Config(tr("cli.config.notTable", &[("name", seg)])))?;
             let entry = table.get(seg.to_owned()).ok_or_else(|| {
                 let available: Vec<&String> = table.keys().collect();
-                AppError::Config(format!(
-                    "配置项不存在: {}。同级可用项: {:?}",
-                    seg, available
+                AppError::Config(tr(
+                    "cli.config.keyMissing",
+                    &[("name", seg), ("siblings", &format!("{available:?}"))],
                 ))
             })?;
             let new_val =
@@ -48,31 +49,28 @@ pub(crate) fn set_toml_key(
                         .parse::<i64>()
                         .map(toml::Value::Integer)
                         .map_err(|_| {
-                        AppError::Config(format!("无法将 '{}' 转换为整数类型", raw_value))
+                        AppError::Config(tr("cli.config.intInvalid", &[("value", raw_value)]))
                     })?,
                     toml::Value::Boolean(_) => raw_value
                         .parse::<bool>()
                         .map(toml::Value::Boolean)
                         .map_err(|_| {
-                            AppError::Config(format!(
-                                "无法将 '{}' 转换为布尔类型（期望 true/false）",
-                                raw_value
-                            ))
+                            AppError::Config(tr("cli.config.boolInvalid", &[("value", raw_value)]))
                         })?,
                     toml::Value::Float(_) => raw_value
                         .parse::<f64>()
                         .map(toml::Value::Float)
                         .map_err(|_| {
-                            AppError::Config(format!("无法将 '{}' 转换为浮点类型", raw_value))
+                            AppError::Config(tr("cli.config.floatInvalid", &[("value", raw_value)]))
                         })?,
                     _ => toml::Value::String(raw_value.to_string()),
                 };
             table.insert(seg.to_string(), new_val);
             return Ok(());
         }
-        current = current
-            .get_mut(*seg)
-            .ok_or_else(|| AppError::Config(format!("配置路径无效: 不存在的中间节点 {}", seg)))?;
+        current = current.get_mut(*seg).ok_or_else(|| {
+            AppError::Config(tr("cli.config.intermediateMissing", &[("name", seg)]))
+        })?;
     }
     Ok(())
 }
@@ -96,10 +94,10 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                             .and_then(|p| p.as_table())
                             .map(|t| {
                                 let keys: Vec<&String> = t.keys().collect();
-                                format!("同级可用项: {:?}", keys)
+                                tr("cli.config.siblings", &[("siblings", &format!("{keys:?}"))])
                             })
                             .unwrap_or_default();
-                        println!("未找到配置项: {}", k);
+                        println!("{}", tr("cli.config.notFound", &[("name", &k)]));
                         if !hint.is_empty() {
                             println!("  {}", hint);
                         }
@@ -111,10 +109,24 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                 println!("{}", toml_str);
             }
         }
+        ConfigSub::Set { ref key, ref value } if key == "ui.language" => {
+            let language = crate::infra::config::ui::parse_language(value)?;
+            crate::infra::config::ui::write_language(&config_file_path()?, language)?;
+            println!(
+                "{}",
+                crate::infra::i18n::tr("ui.saved", &[("language", language.as_str())])
+            );
+        }
         ConfigSub::Set { key, value } => {
             let path = config_file_path()?;
             if !path.exists() {
-                println!("配置文件不存在: {}。请先运行: tomcat init", path.display());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.config.fileMissing",
+                        &[("path", &path.display().to_string())]
+                    )
+                );
                 return Ok(());
             }
             with_config_lock(&path, || {
@@ -129,24 +141,39 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                 match check {
                     Ok(ref c) => {
                         if let Err(e) = validate_config(c) {
-                            println!("值无效: {}，未修改配置", e);
+                            println!(
+                                "{}",
+                                tr("cli.config.valueInvalid", &[("detail", &e.to_string())])
+                            );
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("值无效: {}，未修改配置", e);
+                        println!(
+                            "{}",
+                            tr("cli.config.valueInvalid", &[("detail", &e.to_string())])
+                        );
                         return Ok(());
                     }
                 }
                 write_file_atomic(&path, new_toml.as_bytes())?;
-                println!("已设置 {} = {}", key, value);
+                println!(
+                    "{}",
+                    tr("cli.config.set", &[("key", &key), ("value", &value)])
+                );
                 Ok(())
             })?;
         }
         ConfigSub::Edit => {
             let path = config_file_path()?;
             if !path.exists() {
-                println!("配置文件不存在: {}。请先运行: tomcat init", path.display());
+                println!(
+                    "{}",
+                    tr(
+                        "cli.config.fileMissing",
+                        &[("path", &path.display().to_string())]
+                    )
+                );
                 return Ok(());
             }
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
@@ -160,24 +187,38 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                 Ok(status) if status.success() => match load_config(Some(path.as_path())) {
                     Ok(ref c) => {
                         if let Err(e) = validate_config(c) {
-                            println!("警告：编辑后的配置不合法: {}，请重新编辑修复", e);
+                            println!(
+                                "{}",
+                                tr("cli.config.editInvalid", &[("detail", &e.to_string())])
+                            );
                         } else {
-                            println!("配置已更新");
+                            println!("{}", tr("cli.config.updated", &[]));
                         }
                     }
                     Err(e) => {
-                        println!("警告：编辑后的配置解析失败: {}，请重新编辑修复", e);
+                        println!(
+                            "{}",
+                            tr("cli.config.editParse", &[("detail", &e.to_string())])
+                        );
                     }
                 },
                 Ok(status) => {
-                    println!("编辑器退出码: {}，配置可能未修改", status);
+                    println!(
+                        "{}",
+                        tr("cli.config.exit", &[("status", &status.to_string())])
+                    );
                 }
                 Err(e) => {
                     println!(
-                        "无法启动编辑器 '{}': {}。请设置 EDITOR 环境变量或手动编辑 {}",
-                        editor,
-                        e,
-                        path.display()
+                        "{}",
+                        tr(
+                            "cli.config.editorFailed",
+                            &[
+                                ("editor", &editor),
+                                ("detail", &e.to_string()),
+                                ("path", &path.display().to_string())
+                            ]
+                        )
                     );
                 }
             }

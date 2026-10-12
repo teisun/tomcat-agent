@@ -5,13 +5,20 @@
 //!
 //! [`RUST_FILE_LINES_SPEC`]: ../../../../../docs/openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md
 
+mod cmd_compact_test;
+mod cmd_connector_test;
+mod cmd_context_test;
 mod cmd_effort_test;
 mod cmd_help_test;
 mod cmd_install_test;
 mod cmd_model_test;
 mod cmd_path_test;
 mod cmd_plan_test;
+mod cmd_reload_test;
 mod cmd_restore_test;
 mod cmd_skill_test;
 mod cmd_thinking_test;
+mod cmd_uninstall_test;
 mod parse_test;
+mod shared_test;
+mod test_support;

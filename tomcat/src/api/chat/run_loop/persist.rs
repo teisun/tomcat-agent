@@ -1,6 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tracing::warn;
@@ -46,36 +48,49 @@ pub(crate) fn schedule_checkpoint_prune(ctx: &ChatContext) {
     });
 }
 
+/// Finish checkpoint writes that were deliberately decoupled from turn rendering.
+///
+/// This is only called while a session is being closed. A bounded wait preserves
+/// the interactive hot path but prevents a clean process exit from aborting the
+/// final turn's rollback checkpoint.
+pub(crate) async fn drain_checkpoint_record_tasks(ctx: &ChatContext, timeout: Duration) -> bool {
+    let tasks = {
+        let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
+        std::mem::take(&mut *pending)
+    };
+    let deadline = Instant::now() + timeout;
+    let mut tasks = tasks.into_iter();
+    while let Some(mut task) = tasks.next() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "checkpoint task failed"),
+            Err(_) => {
+                // Keep unfinished writers reachable: a retry must wait for them too.
+                let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
+                pending.push(task);
+                pending.extend(tasks);
+                tracing::warn!("checkpoint writes did not finish before timeout");
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub(crate) fn persist_turn_result(
     ctx: &ChatContext,
     context_state: &mut crate::core::ContextState,
     new_messages: Vec<crate::core::llm::ChatMessage>,
     kind: CheckpointKind,
 ) -> Result<Vec<String>, AppError> {
-    let mut appended_row_ids = Vec::new();
-    for message in new_messages {
-        let mut chat_message = message;
-        if chat_message.msg_id.is_none() {
-            let row_id = ctx
-                .session_runtime
-                .session
-                .append_message(serde_json::to_value(&chat_message)?)?;
-            chat_message.msg_id = Some(row_id);
-        }
-        let row_id = chat_message.msg_id.clone().unwrap_or_default();
-        if !row_id.is_empty() {
-            appended_row_ids.push(row_id.clone());
-        }
-        let already_present = chat_message.msg_id.as_deref().is_some_and(|msg_id| {
-            context_state
-                .messages
-                .iter()
-                .any(|existing| existing.msg_id.as_deref() == Some(msg_id))
-        });
-        if !already_present {
-            context_state.messages.push(chat_message);
-        }
-    }
+    // The AgentLoop owns the list during a turn and parks it in `context_state` on every
+    // exit. Every message has already been appended through its sink; this layer only turns
+    // those durable ids into checkpoint input and persists observability.
+    let appended_row_ids = new_messages
+        .into_iter()
+        .filter_map(|message| message.msg_id)
+        .collect::<Vec<_>>();
     ctx.session_runtime
         .session
         .persist_context_observability(context_state)?;
@@ -94,18 +109,41 @@ fn maybe_record_turn_checkpoint(
     let Some(request) = build_turn_checkpoint_request(&session_id, kind, appended_row_ids) else {
         return;
     };
-    if let Err(err) = ctx.scope_services.checkpoint_store.record(request.clone()) {
-        append_checkpoint_error_detail(ctx, &request, &err);
+    let store = ctx.scope_services.checkpoint_store.clone();
+    let agent_trail_dir = ctx.scope_services.agent_trail_dir.clone();
+    let record = move || record_turn_checkpoint(store, agent_trail_dir, request);
+
+    // Checkpoint 是回滚保障，不是本轮 transcript 一致性的前置条件。把同步 git
+    // 放在 agent_idle 之前会让慢工作树、甚至单个 git 子进程超时都阻塞用户继续输入。
+    // async turn 内交给 blocking pool；纯同步调用方（主要是 unit test）保持同步语义。
+    // Session shutdown waits for these registered handles within a bounded budget.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let task = tokio::task::spawn_blocking(record);
+        let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
+        pending.retain(|task| !task.is_finished());
+        pending.push(task);
+    } else {
+        record();
+    }
+}
+
+fn record_turn_checkpoint(
+    store: Arc<dyn crate::core::CheckpointStore>,
+    agent_trail_dir: std::path::PathBuf,
+    request: CheckpointRecordRequest,
+) {
+    if let Err(err) = store.record(request.clone()) {
+        append_checkpoint_error_detail(&agent_trail_dir, &request, &err);
         warn!("{}", checkpoint_warn_line(&err));
     }
 }
 
 fn append_checkpoint_error_detail(
-    ctx: &ChatContext,
+    agent_trail_dir: &Path,
     request: &CheckpointRecordRequest,
     err: &CheckpointError,
 ) {
-    let log_dir = ctx.scope_services.agent_trail_dir.join("logs");
+    let log_dir = agent_trail_dir.join("logs");
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }

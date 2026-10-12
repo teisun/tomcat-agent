@@ -139,7 +139,7 @@ cargo nextest run --no-fail-fast --test cli_tests --test llm_tests --test openai
 - **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md)。
 - **动作**：针对本次变更引入的模块与场景，在 `tests/` 下建立或更新集成测试文件，**仅通过 `pub` API** 做黑盒测试。
 - **Wasm 真实运行时**：若涉及插件/Wasm 加载或运行时，须包含「Wasm 真实运行时」集成测试；实现前阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 二、3**（测试不得假绿；Wasm 门禁见该规范）。
-- **静态检查**：进入 §4 全量验收前须通过 `cargo clippy --all-targets -- -D warnings`（可与 §4 第 1 项一并执行；覆盖 `tests/` 且警告即失败）。
+- **静态检查**：日常 EXEC 先跑受影响 crate/target 的 scoped Clippy（例如仅改 `tomcat` library 时跑 `cargo clippy -p tomcat --lib -- -D warnings`）；进入 §4 正式验收后仍须通过 `cargo clippy --all-targets -- -D warnings`（覆盖 `tests/` 且警告即失败）。若 baseline 已有无关告警，记录旧告警与本次范围，不机械重复全量命令；正式门禁不因此豁免。
 - **验证**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration` 通过。
 
 **检查清单**：
@@ -164,7 +164,11 @@ cargo nextest run --no-fail-fast --test cli_tests --test llm_tests --test openai
 
 > **门禁与 §7 的映射**：第 1 项对应 §7.3 第 1–2 项 + §7.1 本地执行；第 3 项对应 §7.1 + §7.2（脚本内部完成默认过滤、显式 real-llm 层与 test-group 调度）；第 4 项对应 §7.1 中 `cli_tests` / `quickjs_e2e_tests` 等关键入口的 targeted nextest 复核。本节不重复 §7.2 的目标清单；新增/移动 binary 时仅改 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 §7.2 文档，本节自动跟随。
 
-#### 自动化门禁（脚本/测试，必须 pass）
+#### 日常 EXEC 快反馈（功能分支）
+
+实现与调试阶段按影响面执行 scoped Clippy，例如 `cargo clippy -p tomcat --lib -- -D warnings`；涉及 binary、example 或 integration target 时精确追加对应 target。scoped 结果用于快速发现本次引入的告警，不取代下方正式门禁。若首次检查证明 baseline 存在与 diff 无关的旧告警，记录命令、告警与归因即可，不在代码未变化时机械重跑多轮。
+
+#### 自动化门禁（正式验收 / CI，必须 pass）
 
 1. **构建与静态检查（§7.3 第 1–2 项）**：`cargo clippy --all-targets -- -D warnings`、`RUST_LOG=tomcat=debug,info cargo test --lib`、`cargo test --doc` 通过；`cargo build --release` 改为**按需**单独执行，不再属于默认门禁。
 2. **CLI 子命令**：`tomcat init`、`tomcat doctor`、`tomcat config`、`tomcat session`、`tomcat plugin`、`tomcat audit` 可执行且帮助完整。

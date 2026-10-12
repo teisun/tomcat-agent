@@ -5,7 +5,8 @@
 
 pub mod serve;
 
-use rcgen::generate_simple_self_signed;
+use base64::Engine as _;
+use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
@@ -16,9 +17,11 @@ use std::time::Duration;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio_rustls::TlsAcceptor;
-use tomcat::{AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog};
+use tokio_native_tls::TlsAcceptor;
+use tomcat::{
+    AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog,
+    ModelPrefsStore, ThinkingLevel,
+};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INIT: Once = Once::new();
@@ -28,17 +31,31 @@ pub const DEEPSEEK_TEST_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const DEEPSEEK_TEST_API_BASE: &str = "https://api.deepseek.com";
 pub const DEEPSEEK_TEST_MODEL_ENV: &str = "TOMCAT_E2E_DEEPSEEK_MODEL";
 pub const DEEPSEEK_TEST_DEFAULT_MODEL: &str = "deepseek-v4-pro";
+pub const IDATATLAS_TEST_MODEL_ENV: &str = "TOMCAT_E2E_IDATATLAS_MODEL";
+pub const IDATATLAS_TEST_DEFAULT_MODEL: &str = "idatatlas/gpt-5.6-terra";
+pub const IDATATLAS_TEST_API_KEY_ENV: &str = "IDATATLAS_OPENAI_API_KEY";
+pub const IDATATLAS_TEST_BASE_URL: &str = "https://sub2api.idatatlas.com";
 pub const OPENAI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_OPENAI_TARGET";
-pub const OPENAI_TEST_DEFAULT_MODEL: &str = "gpt-5.4_litellm-sunmi";
+pub const OPENAI_TEST_DEFAULT_MODEL: &str = IDATATLAS_TEST_DEFAULT_MODEL;
 pub const OPENAI_GATEWAY_TEST_API_KEY_ENV: &str = "LITELLM_SUNMI_API_KEY";
 pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
+pub const FCODEX_TEST_MODEL_ENV: &str = "TOMCAT_E2E_FCODEX_MODEL";
+pub const FCODEX_TEST_DEFAULT_MODEL: &str = "fcodex/gpt-5.6-sol";
+pub const FCODEX_TEST_API_KEY_ENV: &str = "FCODEX_OPENAI_API_KEY";
+/// Keep this aligned with the user-facing fcodex Anthropic model entry in
+/// `~/.tomcat/models.toml`; a different test-only key name silently skips
+/// real gateway coverage.
+pub const FCODEX_ANTHROPIC_TEST_API_KEY_ENV: &str = "FCODEX_ANTHROPIC_API_KEY";
+pub const FCODEX_ANTHROPIC_TEST_MODEL: &str = "fcodex/claude-opus-5";
+pub const FCODEX_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_FCODEX_BASE_URL";
+pub const FCODEX_TEST_DEFAULT_BASE_URL: &str = "https://fcodex.top";
 pub const MIMO_TEST_MODEL_ENV: &str = "TOMCAT_E2E_MIMO_MODEL";
 pub const MIMO_TEST_DEFAULT_MODEL: &str = "mimo-v2.5-pro";
 pub const MIMO_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_MIMO_BASE_URL";
 pub const MIMO_TEST_DEFAULT_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com";
 pub const MIMO_TEST_API_KEY_ENV: &str = "MIMO_API_KEY";
 pub const KIMI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_KIMI_MODEL";
-pub const KIMI_TEST_DEFAULT_MODEL: &str = "kimi-k2.7-code";
+pub const KIMI_TEST_DEFAULT_MODEL: &str = "kimi-k3";
 pub const KIMI_TEST_API_KEY_ENV: &str = "MOONSHOT_API_KEY";
 pub const KIMI_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_KIMI_BASE_URL";
 pub const KIMI_TEST_DEFAULT_BASE_URL: &str = "https://api.moonshot.cn";
@@ -54,12 +71,19 @@ pub const ANTHROPIC_TEST_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// 1. `tomcat/.env`（`CARGO_MANIFEST_DIR`，与 `src/core/llm/tests/mocks.rs::load_dotenv` 一致）
 /// 2. `dotenvy::dotenv()`：从当前工作目录向上查找 `.env`（`cargo test` 在 crate 根执行时通常同上）
 pub fn load_openai_test_env() {
+    if std::env::var("TOMCAT_TEST_EXPORTED_ENV_ONLY")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return;
+    }
     let manifest_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
     let _ = dotenvy::from_path(&manifest_env);
     let _ = dotenvy::dotenv();
 }
 
-/// 为通用 real-LLM / E2E 测试加载环境变量；当前统一走 DeepSeek。
+/// 为 DeepSeek 协议专项测试加载环境变量。
 pub fn load_deepseek_test_env() {
     load_openai_test_env();
 }
@@ -69,12 +93,29 @@ pub fn deepseek_test_model() -> String {
         .unwrap_or_else(|_| DEEPSEEK_TEST_DEFAULT_MODEL.to_string())
 }
 
+pub fn idatatlas_test_model() -> String {
+    std::env::var(IDATATLAS_TEST_MODEL_ENV)
+        .unwrap_or_else(|_| IDATATLAS_TEST_DEFAULT_MODEL.to_string())
+}
+
 pub fn e2e_openai_model() -> String {
-    std::env::var(OPENAI_TEST_MODEL_ENV).unwrap_or_else(|_| OPENAI_TEST_DEFAULT_MODEL.to_string())
+    std::env::var(OPENAI_TEST_MODEL_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OPENAI_TEST_DEFAULT_MODEL.to_string())
 }
 
 pub fn mimo_test_model() -> String {
     std::env::var(MIMO_TEST_MODEL_ENV).unwrap_or_else(|_| MIMO_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn fcodex_test_model() -> String {
+    std::env::var(FCODEX_TEST_MODEL_ENV).unwrap_or_else(|_| FCODEX_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn fcodex_test_base_url() -> String {
+    std::env::var(FCODEX_TEST_BASE_URL_ENV)
+        .unwrap_or_else(|_| FCODEX_TEST_DEFAULT_BASE_URL.to_string())
 }
 
 pub fn mimo_test_base_url() -> String {
@@ -104,7 +145,11 @@ pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
 }
 
 pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {
-    if openai_target_uses_builtin_responses_key(target) {
+    if target.starts_with("idatatlas/") {
+        IDATATLAS_TEST_API_KEY_ENV
+    } else if target.starts_with("fcodex/") {
+        FCODEX_TEST_API_KEY_ENV
+    } else if openai_target_uses_builtin_responses_key(target) {
         "OPENAI_API_KEY"
     } else {
         OPENAI_GATEWAY_TEST_API_KEY_ENV
@@ -119,6 +164,14 @@ pub fn require_deepseek_api_key(test_name: &str) -> String {
     })
 }
 
+pub fn require_idatatlas_api_key(test_name: &str) -> String {
+    setup_logging();
+    load_openai_test_env();
+    std::env::var(IDATATLAS_TEST_API_KEY_ENV).unwrap_or_else(|_| {
+        panic!("{test_name} 必须设置 {IDATATLAS_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）")
+    })
+}
+
 pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
     cfg.default_model = deepseek_test_model();
     cfg.thinking.enabled = true;
@@ -128,18 +181,121 @@ pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
 pub fn apply_deepseek_app_config(cfg: &mut tomcat::AppConfig) {
     apply_deepseek_llm_config(&mut cfg.llm);
     cfg.context.compaction_model = deepseek_test_model();
-    maybe_write_test_models(cfg);
+    seed_provider_specific_test_models(cfg);
 }
 
 pub fn apply_openai_app_config(cfg: &mut AppConfig) {
-    cfg.llm.default_model = e2e_openai_model();
-    cfg.context.compaction_model = "gpt-5.4".to_string();
-    maybe_write_test_models(cfg);
+    let model_id = e2e_openai_model();
+    if model_id.starts_with("idatatlas/") {
+        apply_idatatlas_responses_app_config(cfg, &model_id);
+    } else if model_id.starts_with("fcodex/") {
+        apply_fcodex_responses_app_config(cfg, &model_id);
+    } else {
+        cfg.llm.default_model = model_id;
+        cfg.context.compaction_model = cfg.llm.default_model.clone();
+        seed_provider_specific_test_models(cfg);
+    }
+}
+
+pub fn apply_idatatlas_app_config(cfg: &mut AppConfig) {
+    let model_id = idatatlas_test_model();
+    apply_idatatlas_responses_app_config(cfg, &model_id);
+}
+
+pub fn apply_idatatlas_responses_app_config(cfg: &mut AppConfig, model_id: &str) {
+    let model_name = model_id.strip_prefix("idatatlas/").unwrap_or(model_id);
+    cfg.llm.default_model = model_id.to_string();
+    cfg.llm.title_model = Some(model_id.to_string());
+    cfg.context.compaction_model = model_id.to_string();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id,
+            api: "openai-responses",
+            provider: "idatatlas",
+            env_key: IDATATLAS_TEST_API_KEY_ENV,
+            base_url: Some(IDATATLAS_TEST_BASE_URL),
+            model_name: Some(model_name),
+            context_window: Some(400_000),
+            context_window_options: Some(&[400_000, 1_000_000]),
+            max_output_tokens: Some(128_000),
+            thinking_format: Some("openai"),
+            supported_reasoning_levels: Some(&["low", "medium", "high", "xhigh"]),
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
+}
+
+pub fn apply_fcodex_app_config(cfg: &mut AppConfig) {
+    let model_id = fcodex_test_model();
+    apply_fcodex_responses_app_config(cfg, &model_id);
+}
+
+pub fn apply_fcodex_responses_app_config(cfg: &mut AppConfig, model_id: &str) {
+    let base_url = fcodex_test_base_url();
+    let model_name = model_id.strip_prefix("fcodex/").unwrap_or(model_id);
+    cfg.llm.default_model = model_id.to_string();
+    cfg.context.compaction_model = model_id.to_string();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id,
+            api: "openai-responses",
+            provider: "fcodex",
+            env_key: FCODEX_TEST_API_KEY_ENV,
+            base_url: Some(base_url.as_str()),
+            model_name: Some(model_name),
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
+            thinking_format: Some("openai"),
+            supported_reasoning_levels: None,
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
+}
+
+pub fn apply_fcodex_anthropic_app_config(cfg: &mut AppConfig) {
+    let base_url = fcodex_test_base_url();
+    cfg.llm.default_model = FCODEX_ANTHROPIC_TEST_MODEL.to_string();
+    cfg.context.compaction_model = FCODEX_ANTHROPIC_TEST_MODEL.to_string();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id: FCODEX_ANTHROPIC_TEST_MODEL,
+            api: "anthropic-messages",
+            provider: "fcodex",
+            env_key: FCODEX_ANTHROPIC_TEST_API_KEY_ENV,
+            base_url: Some(base_url.as_str()),
+            model_name: Some("claude-opus-5"),
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
+            thinking_format: Some("anthropic-adaptive"),
+            supported_reasoning_levels: None,
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
+    let path = cfg
+        .storage
+        .work_dir
+        .as_deref()
+        .map(Path::new)
+        .expect("fcodex Anthropic probe has a work directory")
+        .join("models.toml");
+    let mut model_toml =
+        std::fs::read_to_string(&path).expect("read fcodex Anthropic probe model override");
+    model_toml.push_str("context_window = 1000000\nmax_output_tokens = 128000\n");
+    std::fs::write(path, model_toml).expect("write fcodex Anthropic probe capabilities");
 }
 
 pub fn apply_kimi_app_config(cfg: &mut AppConfig) {
     let model_id = kimi_test_model();
     let base_url = kimi_test_base_url();
+    let is_kimi_k3 = model_id.eq_ignore_ascii_case("kimi-k3");
     cfg.llm.default_model = model_id.clone();
     cfg.context.compaction_model = model_id;
     write_model_override(
@@ -151,8 +307,12 @@ pub fn apply_kimi_app_config(cfg: &mut AppConfig) {
             env_key: KIMI_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: None,
-            thinking_format: Some("doubao"),
-            supports_files: false,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
+            thinking_format: Some(if is_kimi_k3 { "openai" } else { "doubao" }),
+            supported_reasoning_levels: None,
+            supports_files: true,
             supports_reasoning: true,
         },
     );
@@ -172,8 +332,12 @@ pub fn apply_anthropic_app_config(cfg: &mut AppConfig) {
             env_key: ANTHROPIC_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some("anthropic"),
-            supports_files: false,
+            supported_reasoning_levels: None,
+            supports_files: true,
             supports_reasoning: true,
         },
     );
@@ -200,7 +364,11 @@ pub fn apply_openai_responses_test_config(
             env_key,
             base_url: base_url.or(Some("https://api.openai.com")),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some("openai"),
+            supported_reasoning_levels: None,
             supports_files: true,
             supports_reasoning: true,
         },
@@ -226,7 +394,11 @@ pub fn apply_openai_compatible_test_config(
             env_key,
             base_url: Some(base_url),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format,
+            supported_reasoning_levels: None,
             supports_files: false,
             supports_reasoning: true,
         },
@@ -237,15 +409,27 @@ pub fn resolve_main_provider(cfg: &AppConfig) -> Arc<dyn LlmProvider> {
     resolve_main_call(cfg).provider_impl
 }
 
+pub fn model_prefs_for(cfg: &AppConfig) -> Arc<ModelPrefsStore> {
+    Arc::new(
+        ModelPrefsStore::load(
+            tomcat::resolve_model_thinking_path(cfg).expect("model preference path"),
+            ThinkingLevel::parse_or_medium(&cfg.llm.thinking.level).0,
+        )
+        .expect("model preferences"),
+    )
+}
+
 pub fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
     let catalog = Arc::new(ModelCatalog::load(cfg).expect("load model catalog for test"));
-    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog);
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, model_prefs_for(cfg));
     resolver
         .resolve(LlmScene::Main, None)
         .expect("resolve main provider for test")
 }
 
-fn maybe_write_test_models(cfg: &AppConfig) {
+/// Seed only the model entries required by provider-specific DeepSeek and MiMo
+/// fixtures. Generic real-LLM tests use the explicit idatatlas helper above.
+pub fn seed_provider_specific_test_models(cfg: &AppConfig) {
     let Some(work_dir) = cfg.storage.work_dir.as_deref().map(Path::new) else {
         return;
     };
@@ -305,7 +489,11 @@ struct ModelOverrideSpec<'a> {
     env_key: &'a str,
     base_url: Option<&'a str>,
     model_name: Option<&'a str>,
+    context_window: Option<u32>,
+    context_window_options: Option<&'a [u32]>,
+    max_output_tokens: Option<u32>,
     thinking_format: Option<&'a str>,
+    supported_reasoning_levels: Option<&'a [&'a str]>,
     supports_files: bool,
     supports_reasoning: bool,
 }
@@ -327,8 +515,30 @@ fn write_model_override(cfg: &AppConfig, spec: ModelOverrideSpec<'_>) {
     if let Some(base_url) = spec.base_url {
         lines.push(format!("base_url = \"{base_url}\""));
     }
+    if let Some(context_window) = spec.context_window {
+        lines.push(format!("context_window = {context_window}"));
+    }
+    if let Some(options) = spec.context_window_options {
+        let rendered = options
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("context_window_options = [{rendered}]"));
+    }
+    if let Some(max_output_tokens) = spec.max_output_tokens {
+        lines.push(format!("max_output_tokens = {max_output_tokens}"));
+    }
     if let Some(thinking_format) = spec.thinking_format {
         lines.push(format!("thinking_format = \"{thinking_format}\""));
+    }
+    if let Some(levels) = spec.supported_reasoning_levels {
+        let rendered = levels
+            .iter()
+            .map(|level| format!("\"{level}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("supported_reasoning_levels = [{rendered}]"));
     }
     lines.push(format!(
         "capabilities = {{ vision = true, files = {}, tools = true, reasoning = {}, web_search = false }}",
@@ -339,6 +549,111 @@ fn write_model_override(cfg: &AppConfig, spec: ModelOverrideSpec<'_>) {
         std::fs::create_dir_all(parent).expect("create model override parent");
     }
     std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write model override");
+}
+
+/// 手动缓存探针要测的 `~/.tomcat/models.toml` model id（例：`idatatlas/gpt-5.6-terra`）。
+pub const CACHE_PROBE_MODEL_ENV: &str = "TOMCAT_E2E_CACHE_PROBE_MODEL";
+/// 覆盖真实 models.toml 路径（默认 `$HOME/.tomcat/models.toml`）。
+pub const MODELS_TOML_PATH_ENV: &str = "TOMCAT_E2E_MODELS_TOML";
+
+/// 真实 `~/.tomcat/models.toml` 路径。**必须在 `TempHomeGuard::new()` 之前调用**：guard 会把 HOME 切到 tempdir。
+pub fn real_models_toml_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os(MODELS_TOML_PATH_ENV) {
+        return std::path::PathBuf::from(path);
+    }
+    real_home().join(".tomcat").join("models.toml")
+}
+
+/// 真实运行时凭证文件 `~/.tomcat/assets/.env`（`tomcat init` 生成）。同样必须在切 HOME 之前调用。
+pub fn real_runtime_env_path() -> std::path::PathBuf {
+    real_home().join(".tomcat").join("assets").join(".env")
+}
+
+fn real_home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// 把真实 models.toml 里 `id == model_id` 的那条 `[[models]]` **原样**搬进测试 work_dir 的 models.toml，
+/// 让测试用与用户线上完全相同的 api / provider / base_url / 能力配置访问同一网关；并把该条目
+/// `api_key_env` 指向的凭证从 `runtime_env` 注入进程环境（进程里已有则不覆盖）。
+///
+/// 返回 wire model name（`model_name`，缺省为 id 去掉 `provider/` 前缀），供日志标注。
+pub fn apply_models_toml_entry_app_config(
+    cfg: &mut AppConfig,
+    models_toml: &Path,
+    runtime_env: &Path,
+    model_id: &str,
+) -> Result<String, String> {
+    let text = std::fs::read_to_string(models_toml)
+        .map_err(|err| format!("read {}: {err}", models_toml.display()))?;
+    let doc: toml::Value =
+        toml::from_str(&text).map_err(|err| format!("parse {}: {err}", models_toml.display()))?;
+    let entry = doc
+        .get("models")
+        .and_then(toml::Value::as_array)
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|m| m.get("id").and_then(toml::Value::as_str) == Some(model_id))
+        })
+        .cloned()
+        .ok_or_else(|| format!("model `{model_id}` not found in {}", models_toml.display()))?;
+
+    let api_key_env = entry
+        .get("api_key_env")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("model `{model_id}` has no api_key_env"))?
+        .to_string();
+    if std::env::var(&api_key_env)
+        .ok()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        // 与运行时 `infra::config::read_env_entries` 同源（dotenvy），这里只读不写。
+        let value = dotenvy::from_path_iter(runtime_env)
+            .map_err(|err| format!("read {}: {err}", runtime_env.display()))?
+            .filter_map(Result::ok)
+            .find_map(|(key, value)| (key == api_key_env).then_some(value));
+        match value.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() => std::env::set_var(&api_key_env, value),
+            _ => {
+                return Err(format!(
+                    "`{api_key_env}` is neither exported nor present in {}",
+                    runtime_env.display()
+                ))
+            }
+        }
+    }
+
+    let wire_model = entry
+        .get("model_name")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            model_id
+                .rsplit_once('/')
+                .map_or(model_id, |(_, name)| name)
+                .to_string()
+        });
+
+    let mut root = toml::map::Map::new();
+    root.insert("models".to_string(), toml::Value::Array(vec![entry]));
+    let rendered = toml::to_string(&toml::Value::Table(root))
+        .map_err(|err| format!("serialize models.toml entry: {err}"))?;
+    let work_dir = cfg
+        .storage
+        .work_dir
+        .as_deref()
+        .map(Path::new)
+        .ok_or("cfg.storage.work_dir must be set before applying a models.toml entry")?;
+    std::fs::create_dir_all(work_dir).map_err(|err| format!("create work_dir: {err}"))?;
+    std::fs::write(work_dir.join("models.toml"), rendered)
+        .map_err(|err| format!("write test models.toml: {err}"))?;
+
+    cfg.llm.default_model = model_id.to_string();
+    cfg.context.compaction_model = model_id.to_string();
+    Ok(wire_model)
 }
 
 /// 初始化日志，供各集成测试在入口调用；使用 test_writer 以便 cargo test 捕获输出。
@@ -561,23 +876,23 @@ pub struct HttpsTestServer {
 
 impl HttpsTestServer {
     pub async fn start(
-        hostname: &str,
+        _hostname: &str,
         status_line: &str,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
         delay: Duration,
     ) -> Self {
-        let certified = generate_simple_self_signed(vec![hostname.to_string()])
-            .expect("generate self-signed cert");
-        let cert_chain = vec![CertificateDer::from(certified.cert.der().to_vec())];
-        let private_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
-            certified.signing_key.serialize_der(),
-        ));
-        let server_config = tokio_rustls::rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, private_key)
-            .expect("build rustls server config");
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let encoded = include_str!("../fixtures/native-tls-test-identity.p12.b64")
+            .split_whitespace()
+            .collect::<String>();
+        let pkcs12 = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode native TLS test identity");
+        let identity =
+            Identity::from_pkcs12(&pkcs12, "tomcat-test").expect("load native TLS test identity");
+        let acceptor = TlsAcceptor::from(
+            NativeTlsAcceptor::new(identity).expect("build native TLS server acceptor"),
+        );
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind https test server");

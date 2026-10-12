@@ -1,8 +1,6 @@
 //! Tests for `commands::parse` — slash-command recognition contract.
 
-use super::super::{
-    parse_chat_command, ChatCommand, InstallCommand, InstallTarget, PlanCommand, SkillCommand,
-};
+use super::super::{parse_chat_command, ChatCommand, PlanCommand, SkillCommand};
 
 fn assert_not_command(input: &str) {
     assert!(matches!(
@@ -20,6 +18,15 @@ fn unknown_slash_commands_are_chat() {
 #[test]
 fn normal_text_with_path_is_chat() {
     assert_not_command("帮我看下 /a");
+}
+
+#[test]
+fn compact_command_parses_without_arguments_only() {
+    assert_eq!(parse_chat_command("/compact"), ChatCommand::Compact);
+    assert!(matches!(
+        parse_chat_command("/compact now"),
+        ChatCommand::UsageError { .. }
+    ));
 }
 
 #[test]
@@ -144,27 +151,48 @@ fn skill_use_list_reload_parsed() {
 fn install_command_parses_explicit_target_and_default_prompt_mode() {
     assert_eq!(
         parse_chat_command("/install ./fixtures/plugin"),
-        ChatCommand::Install(InstallCommand {
-            source: "./fixtures/plugin".to_string(),
-            target: None,
-        })
+        ChatCommand::Shared {
+            name: "install".into(),
+            args: vec!["./fixtures/plugin".into()]
+        }
     );
     assert_eq!(
         parse_chat_command("/install ./fixtures/plugin current-project"),
-        ChatCommand::Install(InstallCommand {
-            source: "./fixtures/plugin".to_string(),
-            target: Some(InstallTarget::CurrentProject),
-        })
+        ChatCommand::Shared {
+            name: "install".into(),
+            args: vec!["./fixtures/plugin".into(), "current-project".into()]
+        }
     );
     assert_eq!(
         parse_chat_command("/install ./fixtures/plugin agent"),
-        ChatCommand::Install(InstallCommand {
-            source: "./fixtures/plugin".to_string(),
-            target: Some(InstallTarget::Agent),
-        })
+        ChatCommand::Shared {
+            name: "install".into(),
+            args: vec!["./fixtures/plugin".into(), "agent".into()]
+        }
     );
     assert!(matches!(
         parse_chat_command("/install ./fixtures/plugin unknown"),
-        ChatCommand::UsageError { .. }
+        ChatCommand::Shared { .. }
     ));
+    // Semantic target validation is shared with Serve, not terminal-only parsing.
+    for (line, name, args) in [
+        ("/reload", "reload", vec![]),
+        ("/uninstall pkg", "uninstall", vec!["pkg".into()]),
+        (
+            "/uninstall pkg agent",
+            "uninstall",
+            vec!["pkg".into(), "agent".into()],
+        ),
+    ] {
+        assert_eq!(
+            parse_chat_command(line),
+            ChatCommand::Shared {
+                name: name.into(),
+                args
+            }
+        );
+    }
+    for line in ["/reloadx", "/Users/foo", "hello /reload"] {
+        assert_not_command(line);
+    }
 }

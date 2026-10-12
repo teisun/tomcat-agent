@@ -11,6 +11,7 @@
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::DefaultPrimitiveExecutor;
+use crate::core::tools::pipeline::read_state::ReadRenderMode;
 use crate::core::tools::primitive::{
     DirEntry, PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult,
 };
@@ -33,26 +34,37 @@ const READ_DEFAULT_LIMIT_LINES: u64 = 2000;
 /// 与 metadata 阶段的 `read_max_bytes` 不同，这一条限制的是**最终渲染回模型的文本体量**：
 /// 在分块读 + 行级拼装过程中累计输出字节，达到 128 KiB 后就在完整行边界停下，
 /// 并返回 `offset=<next>` 续读提示，避免单个 `read` 窗口直接把上下文顶爆。
-const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
+pub(crate) const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
 
-fn rendered_prefix_len(line_no: u64, line_numbers: bool, hashline: bool) -> usize {
+fn metadata_with_project_root_hint(
+    path: &Path,
+    raw_path: &str,
+) -> Result<std::fs::Metadata, AppError> {
+    std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound && Path::new(raw_path).is_absolute() {
+            if let Ok(project_root) = std::env::current_dir() {
+                return AppError::Primitive(format!(
+                    "read.path does not exist: {}; project root is {} — use a relative path under it",
+                    path.display(),
+                    project_root.display()
+                ));
+            }
+        }
+        AppError::Io(error)
+    })
+}
+
+fn rendered_prefix_len(line_no: u64, render_mode: ReadRenderMode) -> usize {
     let width = std::cmp::max(6, line_no.to_string().len());
-    if hashline {
-        width + 4 // "#{2-char}:"
-    } else if line_numbers {
-        width + 1 // "\t"
-    } else {
-        0
+    match render_mode {
+        ReadRenderMode::Plain => 0,
+        ReadRenderMode::LineNumbers => width + 1, // "\t"
+        ReadRenderMode::Hashline => width + 4,    // "#{2-char}:"
     }
 }
 
-fn rendered_line_len(
-    line_no: u64,
-    raw_line_bytes: usize,
-    line_numbers: bool,
-    hashline: bool,
-) -> usize {
-    rendered_prefix_len(line_no, line_numbers, hashline) + raw_line_bytes
+fn rendered_line_len(line_no: u64, raw_line_bytes: usize, render_mode: ReadRenderMode) -> usize {
+    rendered_prefix_len(line_no, render_mode) + raw_line_bytes
 }
 
 /// PR-RJ（T3-b）`read` 工具的 mime 路由：扩展名 + 头几字节 magic 双重校验。
@@ -123,28 +135,25 @@ fn magic_matches(mime: &str, head: &[u8]) -> bool {
     }
 }
 
-/// PR-RM（T3 hashline）`pi_agent_rust::compute_line_hash` 25 行实现的等价 Rust 版。
+/// PR-RM（T3 hashline）行内容的短指纹。
 ///
-/// 算法（与 `pi_agent_rust/src/tools.rs` 5451–5466 一字对齐）：
+/// 算法：
 /// 1. `strip_suffix('\r')`：去 Windows 换行残留；
 /// 2. 移除所有空白（`char::is_whitespace`）得到 `significant`——「缩进改动**不影响 hash**」；
-/// 3. seed：含字母数字字符 → 0；纯标点 / 空行 → 行号（让空行也有唯一 hash）；
-/// 4. `xxh32(significant_bytes, seed) & 0xFF`；
-/// 5. 取低字节按 4-bit nibble 拆 → 字典 `b"ZPMQVRWSNKTXJBYH"` 映射为 2 字符
+/// 3. `xxh32(significant_bytes, 0) & 0xFF`；
+/// 4. 取低字节按 4-bit nibble 拆 → 字典 `b"ZPMQVRWSNKTXJBYH"` 映射为 2 字符
 ///    （字典刻意避开 `O / I / 0 / 1` 等易混字符，便于人眼粘贴 / 比对）。
+///
+/// 行号是 hashline 协议中用于定位的独立字段，不参与指纹。这样同一内容在文件
+/// 中平移后仍保有相同指纹；读时和改时在同一行号上传入行号 seed 不能增强校验，
+/// 却会让纯中文、纯符号和空白行的指纹随位置变化。
 ///
 /// hashline 与 cat-n 行号互斥：spec §3.1 规定「hashline 优先」，
 /// 调用方在 [`crate::core::agent_loop::tool_exec`] 入口已做去抖。
-pub(crate) fn compute_line_hash(line: &str, line_no: u64) -> String {
+pub(crate) fn compute_line_hash(line: &str) -> String {
     let trimmed = line.strip_suffix('\r').unwrap_or(line);
     let significant: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-    let seed: u32 = if trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
-        0
-    } else {
-        // pi_agent_rust 用行号低 32 位作为 seed；这里同样 cast，避免大文件 wrap。
-        line_no as u32
-    };
-    let raw = xxhash_rust::xxh32::xxh32(significant.as_bytes(), seed);
+    let raw = xxhash_rust::xxh32::xxh32(significant.as_bytes(), 0);
     let low = (raw & 0xFF) as u8;
     const ALPHABET: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
     let high_nibble = ALPHABET[((low >> 4) & 0x0F) as usize] as char;
@@ -170,7 +179,7 @@ pub(crate) fn format_with_hashlines(start_line: u64, body: &str) -> String {
     let mut line_no = start_line;
     for line in body.split_inclusive('\n') {
         let bare = line.strip_suffix('\n').unwrap_or(line);
-        let tag = compute_line_hash(bare, line_no);
+        let tag = compute_line_hash(bare);
         out.push_str(&format!("{:>6}#{}:{}", line_no, tag, line));
         line_no = line_no.saturating_add(1);
     }
@@ -254,8 +263,7 @@ fn read_window_blocking(
     path: &Path,
     start_line: u64,
     limit_lines: u64,
-    line_numbers: bool,
-    hashline: bool,
+    render_mode: ReadRenderMode,
     output_budget_bytes: usize,
 ) -> Result<ReadWindowOutcome, AppError> {
     use std::io::Read;
@@ -312,7 +320,7 @@ fn read_window_blocking(
             if within_window {
                 let raw_line_bytes = leftover.len() + line_slice.len();
                 let rendered_line_bytes =
-                    rendered_line_len(current_line, raw_line_bytes, line_numbers, hashline);
+                    rendered_line_len(current_line, raw_line_bytes, render_mode);
                 if window_lines == 0 && rendered_line_bytes > output_budget_bytes {
                     return Ok(ReadWindowOutcome::FirstLineTooLong {
                         line_no: current_line,
@@ -365,7 +373,7 @@ fn read_window_blocking(
             leftover.extend_from_slice(tail);
             if window_lines == 0 {
                 let rendered_line_bytes =
-                    rendered_line_len(current_line, leftover.len(), line_numbers, hashline);
+                    rendered_line_len(current_line, leftover.len(), render_mode);
                 if rendered_line_bytes > output_budget_bytes {
                     return Ok(ReadWindowOutcome::FirstLineTooLong {
                         line_no: current_line,
@@ -382,8 +390,7 @@ fn read_window_blocking(
         && current_line >= start_line
         && current_line < end_line_exclusive
     {
-        let rendered_line_bytes =
-            rendered_line_len(current_line, leftover.len(), line_numbers, hashline);
+        let rendered_line_bytes = rendered_line_len(current_line, leftover.len(), render_mode);
         if window_lines == 0 && rendered_line_bytes > output_budget_bytes {
             return Ok(ReadWindowOutcome::FirstLineTooLong {
                 line_no: current_line,
@@ -422,24 +429,21 @@ pub(super) async fn read_file_impl(
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
-    let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
+    let meta = metadata_with_project_root_hint(&path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
-            "路径是目录，无法读取为文件".to_string(),
+            "The path is a directory and cannot be read as a file".to_string(),
         ));
     }
     if meta.len() > executor.read_max_bytes {
         return Err(AppError::Primitive(format!(
-            "文件过大 ({} bytes)，超过限制 {} bytes",
+            "File is too large ({} bytes), exceeding the {} byte limit",
             meta.len(),
             executor.read_max_bytes
         )));
     }
     let content = read_file_utf8(&path_buf).map_err(|e| match e {
-        AppError::Config(msg) if msg.contains("invalid utf-8") => AppError::Primitive(format!(
-            "文件存在且权限已通过检查，但它是二进制或非 UTF-8 文本，不能用 read_file 按文本读取：{}",
-            path_buf.display()
-        )),
+        AppError::Config(msg) if msg.contains("invalid utf-8") => AppError::Primitive(format!("The file exists and access was authorized, but it is binary or non-UTF-8 and cannot be read as text with read_file: {}", path_buf.display())),
         other => other,
     })?;
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -477,10 +481,10 @@ pub(super) async fn read_impl(
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
-    let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
+    let meta = metadata_with_project_root_hint(&path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
-            "路径是目录，无法读取为文件".to_string(),
+            "The path is a directory and cannot be read as a file".to_string(),
         ));
     }
 
@@ -546,6 +550,9 @@ pub(super) async fn read_impl(
 
     let start_line = offset.unwrap_or(1).max(1);
     let limit_lines = limit.unwrap_or(READ_DEFAULT_LIMIT_LINES).max(1);
+    // One source of truth for both byte-budget accounting and final rendering. The same
+    // normalized value is stored by tool_exec in ReadStamp before dedup is evaluated.
+    let render_mode = ReadRenderMode::resolve(line_numbers, hashline);
 
     let path_clone = path_buf.clone();
     let read_outcome = tokio::task::spawn_blocking(move || {
@@ -553,8 +560,7 @@ pub(super) async fn read_impl(
             &path_clone,
             start_line,
             limit_lines,
-            line_numbers,
-            hashline,
+            render_mode,
             READ_POST_OUTPUT_BUDGET_BYTES,
         )
     })
@@ -574,13 +580,10 @@ pub(super) async fn read_impl(
                     path_buf.display()
                 ))
             })?;
-            // PR-RM：hashline 优先于 line_numbers（与 spec §3.1 一致）。
-            let mut s = if hashline {
-                format_with_hashlines(start_line, &body)
-            } else if line_numbers {
-                format_with_line_numbers(start_line, &body)
-            } else {
-                body
+            let mut s = match render_mode {
+                ReadRenderMode::Plain => body,
+                ReadRenderMode::LineNumbers => format_with_line_numbers(start_line, &body),
+                ReadRenderMode::Hashline => format_with_hashlines(start_line, &body),
             };
             let (truncated, remaining_lines) = match truncation {
                 Some(ReadWindowTruncation::Limit {

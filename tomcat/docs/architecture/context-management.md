@@ -4,6 +4,264 @@
 
 # 上下文管理技术方案
 
+## 2026-09 Build 马拉松压缩整改
+
+Build 是单个用户请求内连续工具调用的马拉松，不能等待普通 assistant 文本回复才开始准备摘要。
+
+```text
+每次请求前（同一 guard 位于 reasoning_loop loop 顶）
+  < 50%       → 继续
+  50%..100%   → Fits：后台预热当前前缀，记住 covered_end_id
+  > 100%      → 预热已就绪：折叠 covered_end_id 以前的前缀，保留之后原始尾巴
+             → 未就绪：Step 0 落盘引用 → 运行期工具结果占位符 → 同步全量 Collapse
+```
+
+第 2 轮以后，上一条 tool round 结束到下一轮 loop 顶之间不改 `messages`，所以仍是「工具结果已入账、下一次请求尚未构造」的同一个称重点；额外覆盖了每个 loop 的首请求（新 user turn、重试、follow-up、resume）。
+
+`MIDTURN_FOLD_KEEP_RATIO = 0.5` 是刻意固定的工作集策略：摘要后上下文在约 50% 到满额之间摆动，优先保留刚读取的文件和最近工具结果。若观测表明预热常因边界 stale 失效，则只保留 L0–L3 兜底；若 cache 正常但摘要成本成为主要成本，可把保留比降为 0.25。
+
+当前轮的 Step 0 会将单条 ≥10K 字符的结果写入 sidecar，并将消息替换为可重新读取的路径指针；
+placeholder wave 仅替换当前进程内的消息，不写 JSONL。hydrate 因此恢复 wave 的原文，再由下一次
+请求前的 guard 重新称重和收束。历史 `tool_results_compacted` 记录仍可读取但被忽略，不再覆盖
+消息正文。同步 Collapse 从已覆盖消息的 `read`（最近 20 个去重路径）、`edit`、`write` 参数生成
+`<recent_files>`，只给路径而不回挂陈旧正文，并提示先查 `git status --short` 和当前 diff。
+
+请求级 ephemeral tail 的物理位置由 provider wire 决定：
+
+```text
+Anthropic Messages  : system suffix，cache breakpoint 留在最新持久 tool/user 消息
+OpenAI Chat         : leading system message
+OpenAI Responses    : top-level instructions
+```
+
+tail 变化会有意冷写一次；稳定后必须继续追加可缓存前缀。运行时累计
+`prompt_tokens`、`cache_read_tokens`、连续 miss、tail 变化次数及其 miss tokens，并将
+cache hit ratio 写入 context metrics 与 `plan.complete`。若同一稳定 prefix 的哈希不变但仍连续 miss，应交由网关排查，而不是继续改写本地 prompt。
+
+Responses tail 进 `instructions` 的依据是 `f2523cc3`，三条 wire 的推广是 `095a36d3`：
+稳定 tail 的 DeepSeek 实测优于输入末尾布局，但变化的那一轮会冷写。Build 的无人值守 tail
+通常不变，因此维持现状；仅当单一 provider 的 tail 变化率超过 10%，或这些冷写占总 prompt
+token 超过 5%，才按 provider profile 评估回退，不作全局位置切换。
+
+## 2026-08 模型额度与运行时尾巴整改
+
+`context_window` 和 `max_output_tokens` 是模型能力，不再由全局上下文配置冒充。模型目录解析出
+`EffectiveModelLimits` 后，`ContextState` 使用 `input_budget = context_window - max(model_max_output_tokens, output_reserve_tokens)` 作为压缩水位线的分母。
+`[context].context_window_fallback` 与 `output_reserve_tokens` 只服务未知模型和额外安全余量；旧键仍可读取，但新配置不得再把它们当成模型事实上报。
+
+Anthropic 必须发送 `max_tokens`，因此它取模型目录的输出能力（显式请求只能缩小）；OpenAI 未显式限长时不发送
+`max_completion_tokens`。thinking budget/effort 只控制推理，不得推导或抬高 wire 输出上限。
+
+请求级 workspace/plan 状态使用 `MessageKind::EphemeralTail`：它不持久化、不开启 user turn，也不切断 reasoning replay。
+它的唯一生产者 `EphemeralTailProvider` 只产生文本；三个 adapter 共用提取规则，并共同遵守一条 wire 不变量：
+**tail 绝不能作为对话消息出站**。各协议只在 instruction 通道选择不同落点：
+
+```text
+Anthropic Messages   → system suffix（不单独标 cache_control）
+Chat Completions     → leading system message
+OpenAI Responses     → top-level instructions
+```
+
+Anthropic 的 system 后缀避免与 `role=user` tool result 合并；它让 D 落在最新持久 tool result 的完整消息末尾。
+Chat Completions / Responses 则不能把 tail 留在末尾 user history：下一轮 assistant/tool 会插在它前面，截断自动
+prefix cache。稳定 tail 让 durable history 只追加；权限或计划状态变化会使该轮有意冷写一次，随后新的稳定前缀恢复增长。
+运行时只记录哈希形式的 `prompt_prefix_fingerprint`，用于定位前缀漂移，绝不记录 prompt 原文。
+
+诊断字段以请求真相命名：`llm_request_resolved.wire_limit_source` 说明上限来自模型目录、未知模型回退还是调用方显式请求；发生 `output_truncated` 时同时写入
+`request_max_tokens`、实际 `wire_max_tokens` 与 `thinking_budget`。adaptive thinking 的 `thinking_budget = null` 是正确证据——它发送的是
+`effort`，没有 classic budget；绝不把本地 `output_reserve_tokens` 伪装成 wire 上限。
+
+反例与推翻条件：若全历史 replay 在跨模型切换时导致签名校验失败或成本不可接受，可恢复有语义边界的窗口；若两轮指纹一致而 Anthropic 仍无 cache read，应判为网关问题而不是继续改写 prompt。部分正文已产生时的截断 notice 不落盘：它是轻提示，真正无可见输出的失败由持久化 ErrorEntry 覆盖；只有出现需要审计截断正文的产品需求时才改变这一点。
+
+### MCP 工具的渐进式披露
+
+MCP 的完整 schema 是易变且可能很大的运行态目录；它不能随连接/断开进入
+`tools` 数组或 system 正文，否则会同时破坏前缀缓存并挤占上下文。稳定前缀只保留
+`tool_search` / `tool_describe` / `tool_call`（以及用于扇出聚合的 `tool_run_code`）
+这几个固定 builtin 和静态 `connectors` skill 索引。活目录只在调用后作为消息体结果
+按 `search → describe → call` 渐进披露，因此连接时序不影响
+`prompt_prefix_fingerprint`。设计、边界和测试矩阵见
+[`connector-mcp/v2-progressive-disclosure.md`](./connector-mcp/v2-progressive-disclosure.md)。
+
+### Chat Completions 为什么仍保留 `ReplayWindow`
+
+OpenAI Responses 和 Chat Completions 不是同一种协议能力：
+
+```text
+Responses:         全历史显式 replay reasoning item
+Chat Completions:  旧历史只保留可见对话 ── ReplayWindow ──> 当前轮才带 opaque reasoning
+```
+
+Chat Completions 的 `reasoning_content` 兼容字段没有 Responses 的加密 replay 语义和稳定性保证。把每一轮旧 blob
+都重发，可能让兼容网关拒绝请求、重复计费，或把已经失效的工具推理带进新回合。因此这里保留窗口：窗口外只保留用户、
+正文和工具事实，当前 turn 才带同 profile 的 opaque 续传材料。反例是 Responses：它的 `encrypted_content` 就是为
+全历史显式重放设计，所以不套这个窗口。
+
+推翻条件：若某个 Chat Completions provider 文档化并实测支持多轮历史 `reasoning_content`，且全历史重放在同一
+模型、跨模型和工具回合中均无 4xx、成本可接受、连续性明显更好，才可针对该 provider 移除窗口；不能因为单次
+“看起来能用”而全局删除。
+
+### 2026-08-06 DeepSeek Chat Completions：移动 user tail 截断自动缓存
+
+Chat Completions 没有顶层 `instructions`。旧实现把 runtime tail 原样序列化为末尾 `role=user`；工具循环追加
+assistant/tool 后，它的物理位置每轮后移：
+
+```text
+旧 wire
+rN:     [system] → durable history → runtime tail (user)
+rN+1:   [system] → durable history → assistant/tool → runtime tail (user)
+                                                     ^ 旧完整前缀在这里断开
+
+正式 wire
+rN:     [system + runtime tail] → durable history
+rN+1:   [system + same tail]    → durable history → assistant/tool
+                                                        ^ 只追加，可继续命中
+```
+
+`openai.rs::transport_messages` 在多模态归一化之后剥离 `EphemeralTail`，将非空文本以空行合入**leading**
+system；没有 leading system 时才在 durable history 前新建 system。该函数被 `chat` 和 `chat_stream` 共用，
+所以两条路径的 wire 一致；`ChatRequest.messages`、transcript、`ReplayWindow` 和 `prompt_cache_key` 均不修改。
+
+真实 DeepSeek `deepseek-v4-pro` Agent-shaped 探针（完整 Agent system / 工具目录、六轮 `config_get`、大确定
+tool output、每个模式独立 nonce 防止服务端已有缓存污染）实测：
+
+```text
+legacy trailing user tail: 11,648 → 11,648 → 11,648 → 14,080 → 16,512 → 19,072
+stable leading system tail:13,184 → 13,184 → 15,616 → 18,176 → 20,608 → 23,168
+changing tail at r3:      13,184 → 13,184 →  3,072 → 18,176 → 20,736 → 23,168
+```
+
+第六轮的可读缓存从 `19,072 / 25,561 = 74.6%` 升至 `23,168 / 25,644 = 90.3%`；r3 唯一状态变化按预期降至
+`3,072`，r4 立即恢复 `18,176` 并在 r6 回到 `23,168`。这是「状态变化可冷写一次，稳定后可恢复」的直接证据，
+不是要求每轮数值都上升的脆弱假设（服务端按量化块报告）。
+
+反例：不把 state diff 追加进 transcript，也不把旧权限 / 计划事实留下来与当前约束竞争；不添加 Anthropic
+专用 `cache_control` 到 OpenAI-compatible wire。若目标网关拒绝 leading system、稳定 tail 连续实测仍显著
+低于旧布局，或其文档化并实测证明末尾 request-only user tail 可获得相同连续命中，才以 provider profile
+局部回退，不能全局恢复旧布局。回归由
+`tests/prompt_cache_real_llm_tests.rs::deepseek_chat_agent_shape_tail_cache_probe` 与三 adapter 的
+`EphemeralTail` wire 单测共同守住。
+
+### 2026-08-04 fcodex Opus 5 M0/M1 实测
+
+M0 对 `fcodex/claude-opus-5` 发出 `max_tokens = 128000` 的真实 Messages 请求并正常得到
+`completion_tokens = 8`。因此用户模型目录可声明 `context_window = 1000000` 和
+`max_output_tokens = 128000`；这不是从模型名猜出的值。
+
+M1 使用相同工具定义、system、三轮 tool history、adaptive thinking 与 `EphemeralTail`。旧 user-tail
+布局的三轮均为 `cache_read=0`、且每轮几乎重写全部输入；这不是两分钟预热，而是 D 位于已合并 user
+消息中间块的 wire 失配。改为 system suffix 后，真实 `fcodex/claude-opus-5` 结果为：
+`r1 read/write = 0 / 11,122`、`r2 = 11,122 / 4,402`、`r3 = 15,524 / 4,402`。
+因此首次写入后，下一请求立即读取；若 `read=0/write>0`，先比较 `tool_hash`、`system_hashes`、
+`tail_hashes` 与 selected breakpoints，定位本地 wire 前缀失配，不能以“等待预热”放行。
+
+同日以 `fcodex/gpt-5.6-sol` 走 OpenAI Responses 做了同形状（三轮、tools、xhigh reasoning、
+runtime tail）的实测：预热后的三轮 `prompt_tokens = 5655 / 7868 / 10081`，分别读取
+`cache_read_tokens = 4608 / 7680 / 7680`。首次运行曾出现 `0 / 4608 / 0`，所以 Responses 的
+单轮零 read 也不能当成“本地 prompt 一定坏了”的结论；实际门槛是同一稳定前缀是否在后续请求中出现
+cache read，而不是要求每一轮都读到完整历史。
+
+判定条件：在下一请求逐字节复用断点之前的稳定前缀后，若稳定工具/system 断点仍连续两轮
+`cache_read_tokens = 0` 且仍有 `cache_write_tokens > 0`，先判定为本地 wire 前缀或断点失配；
+携带本段哈希和 selected breakpoints 复核。确认字节前缀相同仍不读回，才向网关排查 usage 语义或
+服务端不复用。
+
+### 2026-08-05 Anthropic 缓存断点策略
+
+Anthropic 只会复用某个 `cache_control` 之前的连续字节前缀。因此断点按**出站 wire 消息的物理顺序**分配，不按“用户看见的一轮”
+这种逻辑分组分配：
+
+```text
+以下是 provider 的缓存构成顺序；不是 JSON 字段显示顺序，也不是对话发生顺序：
+
+tools:
+  ... 最后一个工具定义                                             [A]
+
+system:
+  稳定 system prompt                                               [B]
+  EphemeralTail（无独立 cache_control；稳定时由后面的 D 覆盖）
+
+messages（从旧到新）:
+  user:      原始需求
+  assistant: tool_use #1
+  user:      tool_result #1                                       [C]
+  assistant: tool_use #2
+  user:      tool_result #2                                       [D]
+
+A = tools 区末尾；B = 最后一个非 runtime system 块；
+C = 倒数第二条 wire user 消息末尾；D = 最新持久 wire 消息末尾。
+```
+
+- **D 总是完整消息末尾。** fcodex 实测不会复用同一 user 内容数组中、位于 tail 前的中间 block 断点；因此 runtime tail
+  不进入 `messages`，D 一律标记最新持久 user/tool-result 的最后 block。
+- **C 是滚动读取边界。** 下一次工具调用增长时，服务端仍可读到前一条 `tool_result` 为止的稳定历史。它是 wire 语义：工具循环中常常位于
+最后一个逻辑 turn 内部。
+- **CompactionSummary 不占 C 的名额。** system 块已经固定前缀；给 summary 再放一个断点通常只多覆盖几 K，而 C 能覆盖持续增长的工具历史。
+边界不足四个时自然退化，不造空断点。
+
+`EphemeralTail` 每轮都会重新渲染，因此它是 system 中的变化后缀。它保持不变时，D 覆盖完整的工具历史并持续读取；
+它改变时位于整个 `messages` 之前，会让下一请求缓存失效并冷写一次。这是状态正确性优先于命中率的显式取舍。
+`phase="wire_request_shape"` 的 `tail_hashes` 用于判断这一失效是否由运行时状态变化造成。
+
+**M6 实测（2026-08-05，`fcodex/claude-opus-5`，真实 8 轮 `tool_use/tool_result` 链）**：
+无 tail 的基线从 r2 起连续读回；无论把变化 tail 合并到 user，还是作为连续的独立 user，r2–r5 都是
+`read=0` 且重写全部历史。稳定 system tail 的生产布局恢复连续命中：
+`r1 read/write = 0 / 11,128`、`r2 = 11,128 / 4,371`、`r3 = 15,499 / 4,371`、`r4 = 19,870 / 4,371`，
+最终 r8 为 `37,354 / 4,371`（命中率 89.5%）。这推翻了“tail 前中间 block 的 D 可用”的旧结论。
+
+**参考实现与推翻条件**：Cline 的 `buildClineSystemPrompt`
+（`cline/sdk/packages/shared/src/prompt/cline.ts`）把 workspace 与 plan 状态放入 system；Continue CLI 的
+`constructSystemMessage`（`continue/extensions/cli/src/systemMessage.ts`）同样把 workspace/git/plan 放进 system，
+其 `systemAndToolsStrategy`（`continue/packages/openai-adapters/src/apis/AnthropicCachingStrategies.ts`）缓存 system、
+tools 与最近 user 边界。Codex 是反例而非可直接照搬的 Anthropic 方案：它的 Responses client 以稳定
+`instructions` 和 thread-scoped `prompt_cache_key` 缓存，并由
+`ContextManager::update_world_state`（`codex/codex-rs/core/src/context_manager/history.rs`）只追加 user/developer 状态 diff。
+因此角色选择不能脱离 provider wire 语义；只有 fcodex 实测支持“消息中间 block 断点 + 变化 user tail”的连续 cache read，
+且 M6 显示其成本不差于 system suffix 时，才应重新评估本方案。
+
+**回归守卫**：CI 单测
+`eight_round_marathon_keeps_rolling_c_and_d_with_a_system_tail` 重建八轮 `tool_use → tool_result`，
+逐轮断言 C 在上一条稳定 user/tool-result、D 在最新完整消息末尾，tail 是不单独标记的 system suffix，
+但稳定时仍由 D 覆盖。它防止 wire 结构回退，但不能伪造服务端 `cache_read` 计费值。需要真实验收时执行
+`cargo test --test prompt_cache_real_llm_tests fcodex_opus5_eight_round_marathon_with_system_tail_has_continuous_cache_hits -- --ignored --exact --nocapture`：
+从 r2 起必须有 `cache_read_tokens > 0` 且 cache write 小于本轮输入一半；r4–r8 命中率必须大于 80%。
+任何这些轮次的 `read=0/write>0` 都是失败，排查 wire 前缀，不得以网关预热放行。
+
+历史改写也遵循同一经济约束。设一次改写损失的原有可读前缀为 `W` tokens、每轮节省为 `S` tokens、后续可复用轮数为 `R`，Anthropic
+cache write/read 单价约为 1 : 0.08 时，只有 `R > 12.5 × W / S` 才值得主动改写。故 L0-A（大结果落盘）和 L0-B（历史占位符）
+只在成功 Boundary 切换之后运行：切换已使旧前缀失效，L0 只会缩小新前缀；实际溢出时仍由 `aggregate_precheck` 的保命路径处理。
+本轮 M4 的三次 `pwd` 没有产生 `>=50K` tool result，不能证明 L0-A 改写最后一个 turn 后仍能读到 C；保守结论是继续让
+L0-A 与 L0-B 一起留在 Boundary 后。只有后续带大结果的实测证明改写保住 C 的 cache read，才可把 L0-A 提前到 turn 末尾。
+
+**usage 失效不变量**：`ContextState::apply_boundary()` 在替换历史并重算
+`estimate_context_chars` 后已经调用 `invalidate_api_usage()`。因此
+`run_layer0_after_boundary()` 只负责继续清理、累计释放量和发事件，**不得再次使 usage
+失效**；重复失效不会更安全，只会把已明确的「boundary 改写历史」与后续 L0 清理混为两个
+会计动作。例外是 `current_tail_guard` 的保命路径：它可以在**没有**成功 boundary 的情况下
+直接执行 `compact_tool_results()`，那次本地改写没有经过 `apply_boundary()`，所以必须在
+`current_tail_guard.rs` 自己调用 `invalidate_api_usage()`。
+
+**L0 与 boundary 的绑定及推翻条件**：正常路径把 L0 绑定在成功 boundary 后，是因为
+boundary 已经打断缓存前缀，L0 不再引入额外的缓存重写成本。只有引入一种明确「应用
+boundary、但保留既有 provider usage 或缓存前缀」的机制（例如可增量拼接且不替换旧历史的
+摘要）时，才应推翻此绑定；届时必须重新给 L0 定义独立时机，并用真实 cache read/write
+实验验证，而不是把它无条件搬回每轮末尾。
+
+参考实现证据：`cc-fork-01/src/services/api/claude.ts` 的 `markerIndex` 默认取 `messages.length - 1`；Continue 在
+`packages/openai-adapters/src/apis/AnthropicCachingStrategies.ts` 对 user 内容块附加 `cache_control`；Codex 将环境状态作为
+`<environment_context>`（`codex-rs/protocol/src/protocol.rs`）维护，而非改写旧工具历史。
+
+推翻条件：若同一套 `tool_hash`、`system_hashes`、`message_prefix_hashes` 和 `tail_hashes` 在等待预热后仍连续两次 `cache_read=0`，
+停止调整断点并按网关问题处理；若 M4 证明 tail 命中但每轮尾部写成本仍不可接受，才评估把稳定状态转为仅哈希变化时追加的持久消息。
+
+## 2026-08 Plan reminder 规则
+
+计划执行不再是第三种会话模式。请求装配按两个正交事实派生提醒：`AgentMode::Plan` 注入 planner reminder；`PlanRuntime::executing_plan_id().is_some()` 注入 executor reminder。
+
+两段提醒与当前权限状态一起作为请求级 ephemeral tail，附加在已恢复的持久消息之后；它们不进入
+`ContextState.messages` 或 JSONL。Anthropic wire 将其转为不单独标记的 system suffix；稳定时由 D 覆盖，
+而模式转换与计划生命周期变化会使**下一次**缓存冷写，但不会污染已持久化历史或建立新的 user turn。
+
 ## 2026-05 Plan Recover 增补
 
 chat 启动期的 transcript 物理读取、sidecar schema、`latest_plan_event` 快路径、`MAX_PLAN_SCAN` 脱钩、`reverse-chunk` / cold rebuild / kill switch / trace 现在统一收口到 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。
@@ -23,7 +281,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
 | 层级      | 名称             | 执行模式               |
 | ------- | -------------- | ------------------ |
-| Layer 0 | tool_result 清理 | 同步（每轮必跑，纯内存操作极快，用户无感知） |
+| Layer 0 | tool_result 清理 | 同步（仅在 Layer 2 成功应用 boundary 后，纯内存操作） |
 | Layer 1 | 异步预热           | 异步（后台 Task，主线程不等待） |
 | Layer 2 | 检查与应用          | 非阻塞检查 / 仅极端时同步等待   |
 | Layer 3 | 物理截断           | 同步（API 报错后兜底）      |
@@ -40,7 +298,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 - **异步摘要**：LLM 摘要从同步阻塞改为 Layer 1 异步预热 + Layer 2 延迟应用，LLM 回复后主线程零等待
 - **Preheat 状态机（单任务）**：`Preheat` 保证后台同一时间至多一个预热 task，防止竞态和 token 浪费
 - **信息保全**：Layer 0 从「截断丢弃」升级为「落盘 + preview 占位符」，大 tool_result 内容不丢失、可按需读回
-- **UI 不卡顿**：LLM 回复后（L0/L1 时机）绝不阻塞主线程；仅在发起下一次 LLM 请求前、且 ratio >= 0.98 时才可能同步等待
+- **UI 不卡顿**：LLM 回复后仅启动 Layer 1 异步预热或非阻塞地应用已就绪的 boundary；Layer 0 只作为成功 boundary 的后续清理，绝不单独阻塞主线程。仅在发起下一次 LLM 请求前、且 ratio >= 0.98 时才可能同步等待
 - **可观测性**：`ContextState` 内嵌 **`live: ContextLiveMetrics`**（瞬时利用率与预热标志）与 **`session_obs: SessionContextObservation`**（会话累计：压缩次数、释放量、工具落盘字符）；`context_metrics_update` 由二者组装，其中 `session_obs` 在 user turn 末写入 `sessions.json`；UI 状态栏反馈压缩进度（见 §10.6）。类型别名 `ContextMetrics` ≡ `ContextLiveMetrics`（见 `context_metrics.rs`）。
 
 ### 1.2 设计目标
@@ -64,7 +322,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **user turn**          | 逻辑分组概念：一条 turn-start 消息（`role == User && kind != Steering`，或 `kind == CompactionSummary`）+ 其后所有消息，直到下一个 turn start。上下文管理的最小粒度单位。在内存中通过 `messages: Vec<ChatMessage>` 扁平存储，turn 边界由 `is_turn_start()` 动态判定。 |
 | **MessageId**          | Transcript 中每条 `MessageEntry.id`（user/assistant/tool 各一行一条），对应 `ChatMessage.msg_id`（`#[serde(skip)]`）。会话内须**唯一**，且不得包含子串 `::`（与复合 id 分隔符冲突），详见 §5.7。                                                                    |
 | **TurnId（复合）**      | `start_id + "::" + end_id`，其中 `start_id` / `end_id` 均为 MessageId。标识一段 turn 的首尾 message。`BranchSummaryEntry.id` 表示「预热 snapshot 首条 turn start 的 `msg_id` + 末条消息的 `msg_id`」，见 §5.7。                                |
-| **MessageKind**        | `ChatMessage` 上的 `#[serde(skip)]` 枚举字段，取值 `Normal`（默认）/ `Steering`（用户中途注入指令）/ `CompactionSummary`（摘要）。用于 turn 边界判定与消息分类。                                                                                         |
+| **MessageKind**        | `ChatMessage` 上的枚举字段，取值 `Normal`（默认）/ `Steering`（用户中途注入指令）/ `CompactionSummary`（摘要）/ `EphemeralTail`（本请求临时现场状态）。`EphemeralTail` 不持久化、不建立 turn 边界、不切断 reasoning replay。 |
 | **turn start**         | 满足 `(role == User && kind != Steering) \|\| kind == CompactionSummary` 的 `ChatMessage`。`ContextState.turn_count()` 统计 `messages` 中满足条件的消息数。                                                                            |
 | **context_window**     | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.4 400K）。                                                                                                                                                              |
 | **input_budget**       | 输入 token 预算，`context_window - max_output_tokens`。分母，用于计算 ratio。                                                                                                                                                           |
@@ -74,11 +332,11 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **keep_recent_turns**  | 历史 placeholder 保护区大小（turn 数），来自 `[context].keep_recent_turns`，默认 5。它只影响历史压缩边界；阶段二的 mid-turn current-tail guard 另看 `messages[start_idx..]`。                                                                                                                                       |
 | **preview 占位符**        | Layer 0 落盘后替换 tool_result 的短文本，包含路径 + 工具名 + 前 500 chars 预览。                                                                                                                                                               |
 | **placeholder**        | Layer 0 替换旧 turn 中 tool_result 的常量文本 `[Previous tool result replaced to save context space]`。                                                                                                                             |
-| **CompactionSummary**  | `ChatMessage` 的 `kind == MessageKind::CompactionSummary` 形态，通过 `ChatMessage::compaction_summary(text)` 构造。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 **`BranchSummaryEntry.id`（整串 `S::E`）** 一致），供 Layer 2 取出并应用。任务完成写入 transcript 时，**按 §5.7 插在 `MessageEntry.id == covered_end_id` 的行之后**（`is_boundary=false`），而非仅依赖「文件尾追加」。 |
+| **CompactionSummary**  | `ChatMessage` 的 `kind == MessageKind::CompactionSummary` 形态，通过 `ChatMessage::compaction_summary(text, marker_id)` 构造。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 marker id（整串 `S::E`）一致）。 |
 | **预热（Preheat）**        | Layer 1 的异步压缩任务。在 ratio >= 0.5 时启动，克隆 `messages` 后台调用 **解析后的 compaction provider + `compaction_model`** 生成摘要，主线程不等待。快照边界 id 取 **message 级** `covered_start_id` / `covered_end_id`（§5.7）。                                                                |
-| **Boundary 切换**        | Layer 2 从 **`preheat`** 取得已完成的 **`CompactionResult`** 并应用到 `messages`：按 §5.7 **`messages.splice(..=end_idx, [summary_msg])`** 用 `ChatMessage::compaction_summary(...)` 替换前缀；**更新内存中的 `start_idx`**（reasoning loop 的消息起始位置）；并按 **`transcript_compaction_entry_id`（= `BranchSummaryEntry.id` 整串 `S::E`）** **原地**将 JSONL 中对应 compaction 行的 `isBoundary` 改为 `true`（不追加第二份全文）。切换后水位从 ~~70% 瞬降至 10~~20%。                                    |
-| **compaction summary** | Layer 1 LLM 对**整个 `messages`** 生成的结构化摘要，一条 `ChatMessage::compaction_summary(text)` 替换整批 turns。                                                                                                                              |
-| **compact boundary**   | `TranscriptEntry::BranchSummary` 中的 `is_boundary: bool` 标记。每个逻辑批次在 JSONL 中 **仅一行**：预热写入 `boundary=false`（位置见 §5.7「锚点插入」；fold 时跳过）；应用 **原地升级** 为 `boundary=true`（`init_context_state` 遇到后丢弃其前所有 entry）。重载时若最后一行 compaction 仍为 `false`，`init_context_state` 通过 **`restore_completed`** 将摘要 Hydrate 回 `Preheat`（`id`/`covered_*` 须与 §5.7 字段语义一致）。                                                                     |
+| **Boundary 切换**        | Layer 2 从 **`preheat`** 取得已完成的 **`CompactionResult`**：先 append `branch_summary_text { forId: marker_id }`，再按 §5.7 `messages.splice(..=end_idx, [summary_msg])` 用 `ChatMessage::compaction_summary(..., marker_id)` 替换前缀；成功后运行 Layer 0。切换后水位从 ~~70% 瞬降至 10~~20%。 |
+| **compaction summary** | Layer 1 LLM 对**整个 `messages`** 生成的结构化摘要，一条 `ChatMessage::compaction_summary(text, marker_id)` 替换整批 turns。 |
+| **compact boundary**   | 方案 E 的一个逻辑批次有两条 append-only JSONL entry：预热触发时 `BranchSummary { id:X, summary:null, isBoundary:true }` marker；应用时 `BranchSummaryText { forId:X, summary }` 正文。fold 先把正文关联回 marker；marker 无正文时安全 no-op。 |
 | **API Usage**          | LLM API 返回的 `usage` 字段（`prompt_tokens` + `completion_tokens`），用于精确 token 计数。                                                                                                                                              |
 
 
@@ -131,10 +389,10 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
     ├───────────┼───────┼──────┼─────────────┼───┤         │
     │  正常区    │ L1    │ L2   │L1+L2        │L2 │         ▼
     │  无压缩    │预热   │请求前│回复后检查+   │请求前:    L3 物理截断
-    │  (L0每轮)  │async  │检查  │请求前检查+   │同上+      │ 目标<0.50
+    │           │async  │检查  │请求前检查+   │同上+      │ 目标<0.50
     │           │       │      │可能启动新预热│sync wait  │
 
-  注：Layer 0 每轮必跑（同步清理），不受 ratio 控制，图中省略。
+  注：Layer 0 仅在成功 Boundary 切换后运行；实际溢出时由请求前保命路径执行等价清理。
       「LLM 回复后」= user turn 结束（reasoning loop 最终回复，所有 tool 已执行）。
       「发起 LLM 请求前」= 下一个 user turn 进入时。
       100% 水位本身不触发 Layer 3；Layer 3 仅在 API 明确返回 Context Overflow 错误时触发。
@@ -145,21 +403,21 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 ### 图二：四层防护流程
 
 ```
-  User turn 结束：reasoning loop 最终回复（所有 tool 已执行，无 tool_calls）
-  当前 turn 的新消息已 push 到 messages + 写入 transcript
+  Layer 2 在② / ⑤ / mid-turn发现已完成的预热摘要
+  apply_boundary 成功：历史前缀已替换为摘要
       │
       ▼
-  ┌─ Layer 0（每轮必跑，同步，纯内存操作极快）─────────────┐
+  ┌─ Layer 0（作为成功 Boundary 的后续步骤，同步）───────────┐
   │  A. 单条 tool_result >= 50K chars？                    │
   │     → 落盘 + 500 chars preview 占位符                  │
   │  B. compactable zone (messages[..protected_start]) 中  │
   │     tool_result >= 10K chars？                         │
   │     → 占位符替换（不落盘）                             │
-  │  C. 写入 transcript JSONL（新 message entry）           │
-  │  D. 重新估算 tokens 用量和水位                          │
+  │  C. 作废被驱逐 tool_call 对应的 read stamp              │
+  │  D. 重新估算 tokens 用量和水位，非零时发释放事件          │
   └────────────────────────────────────────────────────────┘
-      │
-      ▼ 计算 ratio
+      │  （未切换时整段不运行，历史保持字节一致）
+      ▼ 计算新 ratio
       │
       ratio >= 0.50 且无进行中的异步任务？
       │  ──Yes──► 触发 Layer 1（异步，不等待）
@@ -239,9 +497,11 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
   ════════════════════ ratio >= 0.50 → Layer 1 异步预热 ════════════
 
+  前台：确认 covered_end == transcript 尾 → append marker
+        { type: branch_summary, summary: null, is_boundary: true, id: S::E }
   后台 Task：克隆整个 messages → 调用 compaction_model
   → 生成 summary_A（Goal/Constraints/Progress...）
-  → 追加 transcript: { type: branch_summary, is_boundary: false, id: ... }（持久化备份；每批次单行）
+  → 原子覆盖写 pending preheat cache（不写 transcript）
   → CompactionResult { summary_text: summary_A, covered: msg_0..msg_n-1, ... }（由 Preheat 暂存）
 
   主线程不等待，对话正常继续。
@@ -250,14 +510,14 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
   preheat 已有可应用结果？
     → Yes: 执行 Boundary 切换（非阻塞）
-           原地更新已存在 compaction 行: is_boundary: true（同一 id，不追加第二行）
+           append branch_summary_text { forId: S::E, summary: summary_A } 后切换内存
     → No:  跳过，不阻塞
 
   ════════════════════ ratio >= 0.85 → LLM 回复后检查（⑤，非阻塞）════════════
 
   preheat 已有可应用结果？
     → Yes: 立即执行 Boundary 切换
-           原地更新已存在 compaction 行: is_boundary: true
+           append branch_summary_text { forId: S::E, summary: summary_A } 后切换内存
 
   [summary_A] [msg_new_1]...[msg_new_k]
   ◄─ 1 条摘要 ──► ◄── Layer 1 快照后新增的消息 ──►
@@ -297,11 +557,21 @@ fn usage_ratio(state: &ContextState) -> f64:
     estimated_token_count(state) / state.context_budget_tokens
 ```
 
-- `**last_api_usage**`：每次 LLM 响应结束后，从 `StreamEvent::Usage` 更新
-- `**post_usage_appended_chars**`：自最近一次 API 返回 usage 之后，新追加到对话中的消息字符数（如 tool result、用户新消息等）。由于这些消息没有 API 精确 token 数，只能用 `字符数 / 4` 近似估算其 token 数，作为增量叠加到 API Usage 基线上
+- `**last_api_usage**`：每次 LLM 响应结束后，从 `StreamEvent::Usage` 更新。`TokenUsage.prompt_tokens` 的跨 provider
+  契约是“本次请求的输入总量”：OpenAI 的 `prompt_tokens` 已是总量；Anthropic 在 wire 边界归一为
+  `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`。`cache_*` 只是该总量的计费分档，未来计费不可用总量直接乘单价。
+- `**post_usage_appended_chars**`：自最近一次 API usage 后、尚未被 usage 覆盖的新用户输入和 tool result 的字符数，以
+  `字符数 / 4` 作为增量估算。assistant 正文只增加 `estimate_context_chars`，**不**增加此计数器：同一轮 usage 的
+  `completion_tokens` 已经精确包含它，再加一次会使下一轮水位虚高。
 - **compact 后**：`last_api_usage` 失效（上下文已变），清零回退到字符 fallback，等下次 API 响应刷新
 
 > **关于 `estimate_context_chars` 的度量单位**：Rust 的 `String::len()` 返回 UTF-8 字节数而非 Unicode 字符数。`CHARS_PER_TOKEN_ESTIMATE = 4` 对英文内容（1 byte ≈ 1 char）较为准确；对中文内容（3 bytes/char，约 1.5 token/char），4 bytes/token 的估算会偏保守（低估 token 数），可能导致压缩触发略晚。**API Usage 优先模式下此偏差被消除**，字符 fallback 仅在首轮和 compact 后短暂使用。
+
+**当前决策：保持 `/4` 不变。** 真实会话曾观测到 1.3–3.5 字符/token 的范围，但修改常数会同时改变 fallback、
+`context_budget_chars` 与既有水位测试基线。本次只用 `phase="context_estimate_check"` 记录每次请求前估算与该请求
+provider usage 的误差；收集到按语言、provider、请求阶段分组的稳定分布后再决定。推翻当前决策的条件是：fallback
+或 Boundary 后的请求连续显著低估，且该误差已导致可复现的压缩延迟或 context overflow；届时应替换为经过实测校准的
+估算策略，而不是凭单个会话调整常数。
 
 ### 4.2 Ratio 水位线
 
@@ -312,7 +582,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 | ratio 档位         | 触发层       | 检查时机              | 动作                                                                      |
 | ---------------- | --------- | ----------------- | ----------------------------------------------------------------------- |
-| 每轮结束             | Layer 0   | LLM 回复后（⑤）        | 同步清理 tool_result（主线程同步但极快，用户无感知）                                          |
+| Boundary 切换成功后      | Layer 0   | ② / ⑤ 的成功 apply 后  | 清理摘要之后的 tool_result；未切换时保持历史字节级不变                                        |
 | `>= 0.50`        | Layer 1   | LLM 回复后（⑤）        | `try_restart_if_pending` → 通过统一 `compaction_provider()` 入口异步预热 `preheat.try_start`（若无进行中的任务），主线程不等待                                                   |
 | `>= 0.70`        | Layer 2   | **发起 LLM 请求前（②）** | `try_restart_if_pending` → 检查 `preheat` 结果，完成则 Boundary 切换（非阻塞）                               |
 | `>= 0.85`        | Layer 1+2 | LLM 回复后（⑤）        | `try_restart_if_pending` → 先 `poll_result`：**已有结果则立即 Boundary 切换**（非阻塞）；再判断是否需要新一轮 `try_start`      |
@@ -322,7 +592,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 **设计原则**：
 
-- **LLM 回复后绝不阻塞主线程**，即使 ratio 暂时超过 0.98 甚至 >1.0 也只做 L0 清理和 L1 异步预热，不卡 UI
+- **LLM 回复后绝不阻塞主线程**，即使 ratio 暂时超过 0.98 甚至 >1.0 也只做 L1 异步预热，或非阻塞地应用已完成的 Layer 2；只有 boundary 已成功应用时才紧随其后执行 L0，不卡 UI
 - 因为 `input_budget = context_window - max_output_tokens`，LLM 回复完成时实际还有 `max_output_tokens` 的空间余量，ratio 超过 1.0 不代表立即 Context Overflow
 - **仅在发起下一次 LLM 请求前**才可能阻塞（L2 化异步为同步），此时 UI 已完成当前轮的渲染，阻塞的是推理启动而非 UI 交互
 
@@ -331,8 +601,8 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 | 触发条件                                                      | 层级        | 时机           | 动作                                   |
 | --------------------------------------------------------- | --------- | ------------ | ------------------------------------ |
-| 单条 tool_result >= 50K chars                               | Layer 0   | ⑤            | 落盘 + 500 chars preview 占位符           |
-| compactable zone (turn 0..N-5) 中 tool_result >= 10K chars | Layer 0   | ⑤            | 占位符替换（不落盘）                           |
+| 成功应用 boundary 后，单条 tool_result >= 50K chars          | Layer 0   | ② / ⑤ / 中途守卫 | 落盘 + 500 chars preview 占位符           |
+| 成功应用 boundary 后，compactable zone 中 tool_result >= 10K chars | Layer 0 | ② / ⑤ / 中途守卫 | 占位符替换（不落盘）                           |
 | ratio >= 0.50 且 preheat 可启动                                   | Layer 1   | ⑤            | `try_restart_if_pending` → `preheat.try_start`（后台 Task，内 3× retry）                   |
 | ratio >= 0.70                                             | Layer 2   | ② 发起 LLM 请求前 | `try_restart_if_pending` → `poll_result`/`apply`，完成则 Boundary 切换 |
 | ratio >= 0.85                                             | Layer 1+2 | ⑤ LLM 回复后    | `try_restart_if_pending` → 非阻塞 `poll_result` + 切换 + 可能 `try_start`                 |
@@ -450,13 +720,17 @@ struct CompactionResult {  // 规范语义（字段名以实现为准）
 
 ### 5.3 动态更新
 
-每次 reasoning loop 中追加新消息（包括 assistant、tool 消息），同步更新估算：
+追加消息分成两条路径，避免把 assistant 正文计两次：
 
 ```
-fn on_message_appended(state: &mut ContextState, msg: &ChatMessage):
-    state.estimate_context_chars += msg.content.len()
-    state.post_usage_appended_chars += msg.content.len()
-    state.messages.push(msg)
+fn on_message_appended(state: &mut ContextState, chars: usize):
+    // 用户输入、tool result、nudge：下一次 usage 尚未覆盖，需增量估算。
+    state.estimate_context_chars += chars
+    state.post_usage_appended_chars += chars
+
+fn on_assistant_message_appended(state: &mut ContextState, chars: usize):
+    // assistant 的 completion_tokens 已在同一轮 API usage 中，不能再叠加。
+    state.estimate_context_chars += chars
 
 fn update_api_usage(state: &mut ContextState, prompt_tokens: u32, completion_tokens: u32):
     state.last_api_usage = Some(ApiUsage { prompt_tokens, completion_tokens })
@@ -482,42 +756,28 @@ estimate = system_prompt.len() + sum(today_msgs.map(|m| estimate_msg_chars(m)))
 
 ### 5.5 Session 重载与 Compact Boundary
 
-从 transcript JSONL 加载消息时，需识别 `SessionEntry::BranchSummary` entry（`type: branch_summary`）并处理 boundary 语义：
-
-1. 遇到 `branch_summary` entry 且 `is_boundary=true` → 构造 `ChatMessage::compaction_summary(summary_text)` 加入 `messages`，**丢弃其前**已暂存的所有 entry
-2. 遇到 `branch_summary` entry 且 `is_boundary=false` → **跳过**（这是预热阶段的备用记录，尚未被应用；**不在** `messages` 中生成摘要消息）
-3. 已被摘要覆盖的原始消息 **不重复加载**
-4. 后续 Layer 1 可直接定位已有 summary，进入 UPDATE 模式
-5. **重载 Hydrate**：在 `fold_entries_to_messages` 与 `init_context_state` 使用的 **同一 entry 切片** 内，正向扫描维护「最后一条未应用 preheat」：遇 `is_boundary=false` 且摘要与 `covered_*` 齐全则更新；遇下一条 `is_boundary=true` 则清空。切片结束后若仍保留该 pending，且当前 `messages`（经日筛选后）仍含 `covered_end_id` 对应的 `msg_id`，则调用 **`preheat.restore_completed`**，使下一轮 `poll_result` 与「任务刚完成」一致（无需再 spawn LLM）。
-
-**Compact Boundary 处理（单行不变式）**：
+从 transcript JSONL 加载消息时，方案 E 将「切口」和「摘要正文」拆为两条 append-only entry：
 
 ```
-Transcript 文件（JSONL；每个压缩逻辑批次仅一行 `type: branch_summary`）
-═════════════════════════════════════════════
+entry 1~8:  原始消息（将被覆盖）
+entry 9:    branch_summary { id:X, summary:null, isBoundary:true }  ← 触发预热时的切口
+entry 10~11: 活尾的新消息
+entry 12:   branch_summary_text { forId:X, summary:"..." }          ← 应用时到达的正文
 
-  entry 1~8:  原始消息（已被摘要覆盖）
-  entry 9:    BranchSummary { id, summary: "...", is_boundary: false }  ← 预热追加
-              … apply 成功后同一行原地改为 is_boundary: true（不追加第二行）
-  entry 10~11: 新消息
-
-init_context_state 处理流程：
-  读到 entry 1~8 → 暂存
-  读到 entry 9：若仍为 false → fold 跳过；pending_preheat → restore_completed
-            若已 true → 丢弃暂存的 1~8，保留 summary
-  读到 entry 10~11 → 构建 ChatMessage
-
-  结果: [ChatMessage::compaction_summary(该行), ChatMessage(entry 10~11)...]
-  （与运行时一致，无重复全文 compaction）
+fold 第一遍: 收集 X → 摘要正文
+fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
+             entry 10~11 保留；entry 12 本身不生成消息
 ```
+
+因此 marker 没有正文时是 no-op，绝不能清掉原消息。正文在物理文件尾部，也绝不能在它自身的位置触发 clear。已应用后的 `<session>.preheat.jsonl` 缓存因 transcript 已有正文而自动失效；只有「marker 存在 + 无正文 + covered end 仍在当前消息」时才恢复 pending result。
 
 **被压缩的 user turn 是否仍留在 transcript JSONL 中？**
 
-采用 **消息行仅追加、`branch_summary` 行可原地改写 `isBoundary`** 约定，与 **pi-mono 相容** transcript 一致：
+采用 **所有 compaction 行仅追加** 约定：
 
 - **保留**：原先写入的 `Message` 行（user / assistant / tool）**不删除、不改写**，仍在 `.jsonl` 中，便于审计、回放与调试。
-- **BranchSummary（transcript 行）**：预热成功后写入一行 `type: branch_summary`，`is_boundary=false`，**插入位置**为 transcript 中 **`MessageEntry.id == covered_end_id`（即 `E`）的那一行之后**（见 §5.7），以保持 JSONL 时间序与 fold 一致；**`id`/`covered_*`** 与 §5.7 一致（`BranchSummaryEntry.id = S::E`）。Boundary 切换时 **按该整串 `id` 原地**将 `isBoundary` 置为 `true`（**不**再追加一条带全文摘要的新行）。开发阶段 **不** 向前兼容历史上「false 一行 + true 一行双份全文」JSONL。
-- **构建 LLM 上下文**：`messages` / `build_context_from_state`（直接返回 `state.messages.clone()`）在内存中按 Compaction 元数据 **折叠**——已摘要区间只表现为一条 `ChatMessage::compaction_summary`，**不把同一区间的原始消息再次拼进 prompt**（避免双倍 token）。
+- **BranchSummary（transcript 行）**：触发预热时，`covered_end_id` 仍是尾条，前台追加 `type: branch_summary` marker（`id = S::E`、`summary:null`、`isBoundary:true`）。应用时前台再追加关联 `type: branch_summary_text` 正文（`forId = S::E`）；不再原地改写 marker 或删除行。旧的内联 `branch_summary` 与 `isBoundary=false` 记录仍可读取，以兼容历史 transcript。
+- **构建 LLM 上下文**：回合间停放的 `ContextState.messages` 已按 Compaction 元数据**折叠**；进入回合后它 move 为唯一工作列表。请求边界才临时组装 `[system?] + messages + [ephemeral tail?]`，不把已摘要区间的原始消息再次拼进 prompt。
 
 若未来需要「物理瘦身」大文件，可作为独立运维能力（压缩归档副本），**不**作为默认行为。
 
@@ -525,27 +785,20 @@ init_context_state 处理流程：
 
 #### 统一的消息表示
 
-重构后消息表示从四层简化为两层（旧：transcript JSONL → TurnEntry → AgentMessage → ChatMessage）：
+`ChatMessage` 是 transcript、运行期工作集和 LLM 请求的统一消息类型。消息只有一份；
+区别只在它回合间停放，还是被当前 `AgentLoop` 独占运行。
 
 ```
-  ┌─ transcript JSONL ─┐    ┌── ChatMessage ───────────────────────────────┐
-  │ serde_json::Value   │    │ 统一类型：LLM wire + 内部工作集 + 上下文管理  │
-  │ (磁盘持久化格式)    │    │ role + content + tool_calls                  │
-  └─────────┬──────────┘    │ + msg_id / kind / timestamp (#[serde(skip)]) │
-            │                └─────────────────────────────────────────────┘
-            │ fold_entries_to_messages
-            │ （Compaction 区间折叠为 ChatMessage::compaction_summary）
-            └──────────────────────────►│
-                                        ▼
-                              messages: Vec<ChatMessage>
-                              ContextState 上的扁平消息列表
+              turn boundary                       AgentLoop::run
 
-  ④ LLM / run 结束后：
-       new_messages = messages[start_idx..]
-       → 逐条 messages.push(msg) 追加到 ContextState.messages
-       → serde_json 写入 JSONL
+ ContextState.messages -- mem::take --> working_messages -- park --> ContextState.messages
+   parked between turns                 exclusively owned            parked on every exit
+          |                                  |
+          |                                  +-- L0 / L2 / L3 rewrite this one list
+          +-- next turn <--------------------+
 
-  落盘：ChatMessage ──serde_json──► JSONL 行追加（msg_id/kind/timestamp 被 skip）
+ request = [system_prompt?] + working_messages + [ephemeral_tail?]
+             transient only                       transient only
 ```
 
 - `**ChatMessage**`：统一的消息类型（`role` + `content` + `tool_calls`），由 `src/core/llm/types.rs` 定义。已有的 `Steering`（用户中途注入指令）和 `CompactionSummary`（摘要）通过 `kind: MessageKind` 字段（`#[serde(skip)]`）区分，无需单独类型。
@@ -556,7 +809,8 @@ init_context_state 处理流程：
 
 #### `messages` 的定位
 
-`messages` 是 **上下文管理模块的扁平内存视图**，直接存储 `Vec<ChatMessage>`，无分组层：
+工作列表是扁平的 `Vec<ChatMessage>`，无分组层。它在回合间就是
+`ContextState.messages`；运行期被 move 出来后，`ContextState.messages` 为空：
 
 ```
   messages: Vec<ChatMessage>
@@ -571,7 +825,7 @@ init_context_state 处理流程：
       └─ ...
 ```
 
-- `ContextState.turn_count()` 统计 `messages` 中满足 `is_turn_start()` 条件的消息数。
+- `turn_count(messages)` 统计列表中满足 `is_turn_start()` 条件的消息数。
 - `find_protected_turn_start()` 从尾部倒数 `keep_recent_turns` 个 turn start，返回保护区起始索引。
 
 #### 发给 LLM 的完整链路
@@ -595,10 +849,8 @@ init_context_state 处理流程：
   │  ◆ 发起 LLM 请求前检查（详见下方 ⑤→② 循环）：                            │
   │    preheat.try_restart_if_pending(...)（② 补偿 ExhaustedPending）        │
   │                                                                         │
-  │  build_context_from_state(state) → state.messages.clone()               │
-  │       + 注入 system prompt                                              │
-  │       + 追加本轮 ChatMessage::user(...)                                 │
-  │       ──► initial_messages: Vec<ChatMessage>                            │
+  │  mem::take(state.messages) + 追加并落盘本轮 ChatMessage::user(...)       │
+  │       ──► working_messages: Vec<ChatMessage>                            │
   │                                                                         │
   │  AgentLoop::run(initial_messages)                                       │
   └─────────────────────────────────────────────────────────────────────────┘
@@ -620,31 +872,30 @@ init_context_state 处理流程：
   │  estimateContextChars += result.len()       ← 实时更新                  │
   │  update_api_usage(usage)                    ← 从 StreamEvent 更新       │
   │                                                                         │
-  │  reasoning loop 内 messages 自由增长，不做压缩。                          │
+  │  L0/L2/L3 直接改写 working_messages；无第二份历史消息列表。               │
   │  若 API 返回 Context Overflow → 触发 Layer 3 物理截断（见 §6.4）         │
   │  最终 LLM 回复（无 tool_calls）→ 退出 reasoning loop                    │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
-  │ ④ user turn 完成：追加 + 持久化                                          │
+  │ ④ user turn 完成：停放 + 持久化观测                                      │
   │                                                                         │
-  │  new_messages = messages[start_idx..]（本轮新增的 ChatMessage 片段）      │
-  │  逐条 state.messages.push(msg)           ← 追加到 ContextState         │
-  │  再 serde_json 写入 transcript 中尚未落盘的 ChatMessage 行              │
+  │  run 的统一出口：state.messages = working_messages                      │
+  │  new_messages = messages[start_idx..] 仅提供 checkpoint 的 row ids       │
+  │  消息已通过 AgentLoop 的 append sink 写入 transcript                     │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ ⑤ LLM 回复后：上下文管理检查（绝不阻塞 UI）                               │
   │                                                                         │
-  │  此时 messages 已包含刚完成的 turn 的所有消息。                           │
+  │  此时 working_messages 已包含刚完成的 turn 的所有消息。                   │
   │                                                                         │
   │  → preheat.try_restart_if_pending(...)（⑤ 与 ② 双点恢复）               │
-  │  → Layer 0（同步清理 messages 中的 tool_result）                         │
-  │  → 计算 ratio → 若 >= 0.50：`preheat.try_start(...)`（异步预热，不等待）   │
   │  → 若 ratio >= 0.85：Layer 2 回复后检查                                 │
-  │    （preheat 已有结果？→ 立即 Boundary 切换；未完成→跳过）                 │
+  │    （preheat 已有结果？→ Boundary 切换 → Layer 0；未完成→跳过）            │
+  │  → 计算新 ratio → 若 >= 0.50：`preheat.try_start(...)`（异步预热，不等待） │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -657,33 +908,66 @@ init_context_state 处理流程：
   │                                                                         │
   │  ◆ 发起 LLM 请求前检查：                                                │
   │    → preheat.try_restart_if_pending(...)                                │
-  │    → 若 ratio >= 0.70：Layer 2 检查（完成则 Boundary 切换）              │
+  │    → 若 ratio >= 0.70：Layer 2 检查（完成则 Boundary 切换 → Layer 0）     │
   │    → 若 ratio >= 0.98：Layer 2 发请求前检查                              │
   │      （完成→切换；未完成→化异步为同步，阻塞等待）                        │
   │                                                                         │
-  │  build_context_from_state(state) → state.messages.clone()               │
-  │       + 注入 system prompt                                              │
-  │       + 追加本轮 ChatMessage::user(...)                                 │
-  │       ──► initial_messages: Vec<ChatMessage>                            │
+  │  若 boundary 已切换：继续使用已改写的 working_messages                   │
+  │       ──► AgentLoop::run(working_messages)                              │
   │                                                                         │
-  │  AgentLoop::run(initial_messages) → 进入 ③                              │
+  │  AgentLoop::run(working_messages) → 进入 ③                              │
   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-`**messages`（ContextState）与 `messages`（reasoning loop 工作集）的关系**：
+`ContextState.messages` 与 reasoning loop 的 `messages` 从不是两份内容：前者是回合间
+停车位，后者是同一列表被 move 出来后的运行期名字。`estimateContextChars` 在每次 append/
+rewrite 时维护，`last_api_usage` 在 provider Usage 到达时刷新。
 
-- `**ContextState.messages`**：管理**已完成的历史消息**。只在 ② 进入前读取（clone）、④ 结束后追加、⑤ 被 L0/L1/L2 修改。
-- `**reasoning loop messages`**：实时工作集，包含历史 + 当前 turn 正在产生的新消息。每次进入 ② 时从 `ContextState.messages` clone 构建。
-- **估算更新**：`estimateContextChars` 在 ③ 每次 push 时实时累加，`last_api_usage` 在每次 LLM 响应后刷新。
-- **上下文管理与工作集 `messages` 无交集**：L0/L1/L2 在 ⑤ 操作 `ContextState.messages`；reasoning loop 内的工作集 `messages` 不受压缩影响。下一轮 ② 时从更新后的 `ContextState.messages` 重建，自然包含 Boundary 切换后的摘要。
+`apply_ready_preheat(agent, messages, min_ratio)` 是 mid-turn 和 timing ⑤ 共享的 ready
+preheat 入口。它直接在工作列表上定位 `covered_end_id`、替换前缀为摘要，并用
+`&mut start_idx` 同步平移当前 tail 边界。随后 Layer 0 只接收这个边界作为 `history_end`，
+因此绝不会修改幸存的当前 tail。
 
-即：`**ContextState.messages` 是持久化 transcript 与 LLM 请求之间的内存层**——负责 Compaction 折叠与估算维护；`ChatMessage` 已是 LLM wire 格式，无需额外转换。
+#### 5.6.2 列表归属决策记录
+
+**问题和证据。** 以前，`start_midturn_preheat_if_needed` 从 working messages 取得
+`covered_end_id`，而 `apply_and_emit_boundary` 在落后一整个 tail 的
+`ContextState.messages` 中定位它。这会确定性触发 `ApplyBoundaryStale`，而不是可由用户
+修复的输入错误。
+
+**调研（2026-09-15，逐文件复核）。**
+
+- Codex：`/Users/yankeben/workspace/codex/codex-rs/core/src/context_manager/history.rs`
+  的 `ContextManager::record_items` 追加唯一的 `items`，`ContextManager::for_prompt`
+  只在请求前对该历史做 normalize 并消费/克隆快照；`history_version` 明确随 compact/
+  rollback 重写递增。
+- Continue：`/Users/yankeben/workspace/continue/gui/src/redux/util/constructMessages.ts`
+  的 `constructMessages` 从 `ChatHistoryItem[]` 过滤/派生请求数组，并在最后通过
+  `getSystemMessageWithRules` + `unshift` 临时放入 system message；历史中的 system
+  消息会被跳过。这是“系统提示属于请求组装”的直接反例证据，而不是可持久化历史。
+- VS Code：`/Users/yankeben/workspace/vscode/src/vs/workbench/contrib/chat/common/model/chatModel.ts`
+  的 `ChatModel::_requests` 保存会话请求序列；其
+  `chatInputStatePersistence.test.ts::stores image payloads separately from frequently updated input state`
+  还把大附件载荷和高频输入状态分开持久化。它不采用 Rust 后端所有权模型，因此不能照抄，
+  但佐证“高频/临时请求材料不应制造第二份会漂移的会话权威数据”。
+
+三者的共同点是：权威历史和临时请求材料有明确边界；没有一个把“权威列表落后于当前请求
+尾巴”当正常状态后再让摘要应用猜测如何拼回。
+
+**当前决策。** 单列表已经落地：回合间列表停在 `ContextState.messages`，回合内 move
+给 `AgentLoop` 独占。`apply_boundary`、L0 和 L3 都显式接收工作列表；`start_idx` /
+`history_end` 是保护当前 tail 的硬上界，前缀被改写时由原语同步平移。旧的 fold /
+unfold / rebuild 胶水已删除，因此预热锚点不可能落在“权威状态看不见的尾巴”。
+
+**反例与推翻条件。** 这个设计适合单个 AgentLoop 独占列表。若未来在回合中增加外部的
+全文读写者（例如实时 `/context` 编辑器、并行 agent 或非-steering 注入），move 独占无法
+表达这些并发需求；届时应设计带版本/锁语义的共享权威状态，而不是恢复两份会漂移的列表。
 
 ### 5.7 消息级 ID 与 Compaction 一致性
 
 本节约定 **MessageId**（`ChatMessage.msg_id`）与 **Compaction** 之间的 id 体系，用于解决摘要应用失败、restore 失败、水位下降不及预期等与 **id 不一致或 transcript 行序** 相关的问题。**实现须与本文对齐**（实现排期独立于本文档迭代）。
 
-**总览（ASCII）**——从左到右：内存 `messages` → 预热快照 `S`/`E` → 落盘锚点 → Layer 2 替换。
+**总览（ASCII）**——从左到右：内存 `messages` → 预热快照 `S`/`E` → 切口标记 → Layer 2 正文到达与替换。
 
 ```
   messages: Vec<ChatMessage>（Layer 1 克隆的 snapshot 示意）
@@ -701,23 +985,23 @@ init_context_state 处理流程：
                     │  BranchSummaryEntry.id = S::E    │
                     └───────────────┬───────────────┘
                                     │
-        transcript JSONL（message / compaction 行序示意）
+        transcript JSONL（append-only 行序示意）
         ═══════════════════════════════════════════════════════
-        …  Msg … Msg(id=E) …                    ← 锚点：最后一条被摘要的 message
+        … Msg … Msg(id=E)                       ← 触发预热时 E 必须是尾条
                     │
-                    │ 预热成功后：在此行**之后**插入 compaction 行
+                    │ 前台 O(1) append marker
                     ▼
-              ┌─────────────────────┐
-              │ type: branch_summary    │
-              │ id = S::E           │
-              │ is_boundary = false │
-              └──────────┬──────────┘
-                         │
-        … 若其后仍有新 Msg … │
-                         │
-        Layer 2：messages 中找 end_idx 使 msg.msg_id == E
-                messages.splice(..=end_idx, [ChatMessage::compaction_summary(text)])
-                再按 id=S::E 将该 compaction 行 is_boundary → true
+              branch_summary { id:S::E, summary:null, isBoundary:true }
+                    │
+        … 工具 / 用户新消息 …                    ← 活尾继续 append
+                    │
+                    │ 预热完成且前台决定应用时 O(1) append body
+                    ▼
+              branch_summary_text { forId:S::E, summary:"..." }
+
+        reload 先建 forId → summary 查表；fold 读到 marker 才把正文放回切口。
+        Layer 2：messages 中找 end_idx 使 msg.msg_id == E，
+                messages.splice(..=end_idx, [ChatMessage::compaction_summary(text, S::E)])
 ```
 
 **读图要点**：每条 `ChatMessage` 通过 `msg_id` 标识；**`BranchSummaryEntry.id` = 整段快照首条消息的 `msg_id`（`S`）与末条消息的 `msg_id`（`E`）拼成的 `S::E`**。下文 **5.7.1～5.7.6** 为逐条规范。
@@ -733,8 +1017,8 @@ init_context_state 处理流程：
 
 Layer 1 启动时克隆 `messages: Vec<ChatMessage>` 为 snapshot，并记录：
 
-- **`covered_start_id`** = snapshot **第一条** `ChatMessage` 的 **`msg_id`**（记为 **`S`**）。
-- **`covered_end_id`** = snapshot **最后一条** `ChatMessage` 的 **`msg_id`**（记为 **`E`**）。
+- **`covered_start_id`** = snapshot 中第一条**非** `CompactionSummary` 的 `ChatMessage.msg_id`（记为 **`S`**）。
+- **`covered_end_id`** = snapshot 中最后一条**非** `CompactionSummary` 的 `ChatMessage.msg_id`（记为 **`E`**）。
 
 边界均为 **message 级** MessageId（`ChatMessage.msg_id`）。
 
@@ -742,65 +1026,38 @@ Layer 1 启动时克隆 `messages: Vec<ChatMessage>` 为 snapshot，并记录：
 
 - **`BranchSummaryEntry.id`（必填）**：**`S::E`** —— 即 **`covered_start_id::covered_end_id`**，其中 `S`/`E` 来自 §5.7.2 的快照首尾 `msg_id`。
 - **`BranchSummaryEntry.covered_start_id` / `covered_end_id`**：分别等于 **`S`** / **`E`**，与将 `BranchSummaryEntry.id` 按 `::` 拆出的左、右段一致。
-- **`CompactionResult`**：上述三字段与落盘前构造的 **`BranchSummaryEntry` 完全一致**；**`transcript_compaction_entry_id`**（或等价字段）须存 **整串 `S::E`**，供 Layer 2 调用「按 `id` 将 compaction 行 `isBoundary` 置 true」时使用（与 [`set_branch_summary_entry_is_boundary_true`](../../../src/core/session/transcript.rs) 入参一致）。
-- **摘要消息的 `msg_id`**：成功 apply boundary 后，生成的 `ChatMessage::compaction_summary(text)` 的 `msg_id` 设为本次 **`BranchSummaryEntry.id`（`S::E`）**，以便 fold 与 transcript 对齐。
+- **`CompactionResult`**：上述三字段与切口标记一致；`transcript_compaction_entry_id` 必须存整串 `S::E`，作为 marker id。
+- **摘要消息的 `msg_id`**：成功 apply 后，`ChatMessage::compaction_summary(text, marker_id)` 使用 `S::E`。摘要没有这条 durable id 就不得构造或作为普通 message 持久化。
 
-#### 5.7.4 Transcript 写入顺序（锚点插入）
+#### 5.7.4 方案 E：标记先占位、正文后到达
 
-- 预热 **成功后** 将 `branch_summary` 行写入 JSONL：**插入到「`MessageEntry.id == E`（`covered_end_id`）」的那一行之后**，而不是无条件追加到文件物理尾部。这样当 covered 段之后仍有新 message 时，摘要行仍位于 **语义时间序**正确位置，fold 不会错位。
-- **实现提示**：需在 transcript 层提供「按锚点 message id 插入」能力（读行、定位、重写文件原子替换等）；大文件成本与 **单线程 append** 假设见 [`session_impl`](../../../src/core/session/manager/session_impl.rs) 中并发 TODO。
+本节以 [方案 E 整改计划](/Users/yankeben/.cursor/plans/transcript_regressions_remediation_df3378d3.plan.md) 为准。旧的「后台中段插入候选行、再原地翻转 `isBoundary`」方案已移除；`set_branch_summary_entry_is_boundary_true`、`remove_branch_summary_entry_by_id` 与 `write_boundary_transcript` 不再存在。
 
-#### 5.7.5 Layer 2 应用算法
+```text
+触发预热（前台，covered_end 仍是 transcript 尾）:
+  append branch_summary { id:S::E, summary:null, isBoundary:true }
+  └─ 后台只计算摘要，完成后只覆盖写 preheat cache
 
-- **定位**：在 `messages` 中求最大 **`end_idx`**，使得 `messages[end_idx].msg_id == covered_end_id`。**不存在任何匹配**时应返回 **`AppError::ApplyBoundaryStale`**（见 **§5.7.5.1**）。
-- **替换（唯一推荐表述）**：**`messages.splice(..=end_idx, [ChatMessage::compaction_summary(text)])`** —— 用一条摘要消息替换下标 **0 到 end_idx（含）** 的全部 `ChatMessage`；**不要**拆成「先 drain 再 insert」，避免 off-by-one。
-- **`covered_start_id`**：**不参与** splice 右端点定位；**仍须保留**于 `CompactionResult`，供与 **`messages` 首条消息** 的 `msg_id` **一致性校验**（不一致时 `warn` 但继续 `..=end_idx`）、日志与 transcript 行 id（`S::E`）构造。
-
-#### 5.7.5.1 列表不一致（陈旧 `CompactionResult`）
-
-当 **`covered_end_id` 无法在**当前内存中的 **`messages` 匹配**到任何 `ChatMessage.msg_id` 时（典型诱因：Layer 3 drain 前缀、会话重载、ID 漂移；**错误类型不绑定「Layer3」字样**）：
-
-1. **内存**：`apply_boundary` 返回 **`AppError::ApplyBoundaryStale`**；**不得**对该类失败调用 **`restore_pending_result`**（否则会对同一陈旧结果无限重试）。
-2. **Transcript**：按 **`transcript_compaction_entry_id`**（若 `None` 则回退 **`compound_turn_id(covered_start_id, covered_end_id)`**，与落盘批次 id 一致）调用 **`remove_branch_summary_entry_by_id`**，**删除 JSONL 中所有** `type: branch_summary` 且 **`id` 相等**的行（防重复插入）；删行 I/O 失败须 **`warn`**，但仍丢弃内存中的已完成结果（保持 `Idle`），避免死循环。
-3. **事件**：发射 **`CompactionError`**（`source: "apply"`、`exhausted_after_retries: false`），payload 文案可为 `ApplyBoundaryStale` 的 `Display`。
-4. **预热再起**：**不在** Layer 2 陈旧分支内 **`try_start`**。**时机 ②**（`check_before_request`）在陈旧恢复后 **刻意不** `try_start`；下一次预热由 **时机 ⑤**（`run.rs`：`check_after_reply` 之后、同段末尾已有的 **`preheat.try_start`**）在条件满足时自然挂上（含「本轮 ⑤ 内刚因陈旧丢掉结果」——**同一段 ⑤** 即可接上）。
-
-#### 5.7.6 复合 id 与 transcript 锚点（小结）
-
-**A. `BranchSummaryEntry.id`**：即 **`S::E`**，`S` = snapshot 首条消息的 `msg_id`，`E` = snapshot 末条消息的 `msg_id`。
-
-**B. 与 `isBoundary` 原地升级**：查找 compaction 行时，主键必须为写入时的 **整串 `BranchSummaryEntry.id`（`S::E`）**，不能只匹配 `S` 或 `E`。
-
-**C. `covered_end_id`（`E`）**：被摘要范围在 transcript 上的**最后一条 message**（对应 `ChatMessage.msg_id`）；插入 compaction 行依赖 **`E` 在会话内唯一可定位**；若锚点缺失则插入失败须可观测（日志 / 错误路径）。
-
-```mermaid
-flowchart LR
-  msgUser["Message lines with msg_id"]
-  chatMsg["ChatMessage with msg_id in messages"]
-  preheat["Preheat snapshot S and E"]
-  pending["BranchSummaryEntry id S::E insert after E"]
-  apply["apply_boundary messages.splice ..=end_idx"]
-  msgUser --> chatMsg
-  chatMsg --> preheat
-  preheat --> pending
-  pending --> apply
+应用预热（前台，covered_end 仍在 messages）:
+  append branch_summary_text { forId:S::E, summary:"..." }
+  messages.splice(..=end_idx, [compaction_summary(text, S::E)])
 ```
 
-#### 5.7.7 重启与 `restore_completed`
+两次 transcript 写入都是 O(1) append：marker 在唯一「切口等于文件尾」的瞬间占据正确物理位置；正文稍后作为 tail event 通过 `forId` 关联回 marker。后台永不写 transcript，避免与前台 append 竞争。
 
-与 §5.5 一致：`is_boundary=false` 的 `branch_summary` 行在 `fold_entries_to_messages` 时跳过，但应参与 **pending hydrate**；`restore_completed` / `branch_summary_pending_from_entry` 的字段须能消费 §5.7.3 的 **`id`/`covered_*`/`summary`** 语义。
+#### 5.7.5 Fold、陈旧结果与崩溃恢复
 
-#### 5.7.8 验收与测试场景
+- **两遍 fold**：先收集所有 `branch_summary_text` 为 `forId -> summary`，再按物理顺序折叠。`isBoundary=true` marker 只有 inline summary 或关联正文存在时才清掉前缀并放入摘要；悬空 marker 是 no-op。正文行本身永不进入 timeline、也绝不能触发 clear。
+- **陈旧结果**：`covered_end_id` 不再位于当前 `messages` 时，不写正文、不改内存，发 `CompactionError`。marker 留在 transcript 中但因无正文而安全 no-op。
+- **崩溃窗口**：后台算完、前台应用前崩溃时，`<session>.preheat.jsonl` 保存一个原子覆盖的 pending result。加载只在 marker 存在、无正文、`forId` 与 `covered_end` 均匹配时 `restore_completed`；其他缓存一律忽略。
+- **兼容旧记录**：旧的 inline `branch_summary` 保持原语义；历史 `isBoundary=false` 记录继续仅作为旧 preheat pending 读取。
 
-| 场景 | 描述 |
-|------|------|
-| **1** | 进入 chat，**不重启**，ratio 触发 L1→L2，摘要成功应用，**水位下降**符合预期 |
-| **2** | 预热完成且 compaction 已写入（`is_boundary=false`）后 **重启**，`init_context_state` + **`restore_completed`**，再触发 L2 apply |
-| **3** | **插入位置**：covered 段之后仍有新 message 时，compaction 行须在 **`MessageEntry.id == E` 的行之后**、后续新消息 **之前**（fold 顺序与单义性） |
-| **4** | **仅 `covered_end_id` 命中**：右端点唯由 **`msg_id == covered_end_id`** 决定；若 **`covered_end_id` 已无法匹配**则走 **§5.7.5.1** 陈旧恢复（删 `branch_summary` 行、不 restore、预热仅 **⑤** 再起） |
-| **5** | **id 冲突**：复合 `turn_id` 与历史 boundary compaction **`id` 碰撞**时的策略（拒绝 apply / 报错 / 审计日志）须在实现中明确 |
+#### 5.7.6 验收要点
 
-**验收要点**：`BranchSummaryEntry.id` 与 `set_branch_summary_entry_is_boundary_true` 使用同一整串；**MessageId（`msg_id`）唯一**；**锚点插入**后 JSONL 顺序与 `messages` fold 一致；restore 后 `poll_result` 行为与「任务刚完成」等价。
+- marker 必须紧接 `covered_end`；后台生成期间 transcript 不变。
+- 同一 marker 至多一条 `branch_summary_text`，且绝不产生 `role:user kind:compaction_summary` message 行。
+- marker 有正文时重载还原为摘要加活尾；无正文时不得丢失任何原消息。
+- 正文已到达时缓存不得再次恢复；`forId` 不符的缓存也不得恢复。
 
 > **与 [session-storage.md](session-storage.md) 的关系**：会话级 `SessionEntry` 中的 compaction 累计字段仍以 user turn 末刷盘为准；MessageId 体系主要约束 **transcript JSONL** 与 **`messages`**，二者交叉引用即可。
 
@@ -808,9 +1065,24 @@ flowchart LR
 
 ## 6. 防护算法（Layer 0~3）
 
-### 6.1 Layer 0：tool_result 清理（每轮同步）
+### 6.1 Layer 0：与 boundary 成功应用结构性绑定
 
-在 user turn 完成后（步骤⑤，reasoning loop 已结束，当前 turn 的消息已追加到 `messages`）立即执行，**不受 ratio 控制**。操作对象是 `messages: Vec<ChatMessage>`（包含刚完成的当前 turn）。合并了旧方案的 Layer 0 落盘和 Layer 1 占位符为一个同步步骤。
+Layer 0 **不是独立的水位触发器**。它只能紧接 Layer 2 的 `apply_boundary` 成功分支运行：②（回合开始前）、⑤（回合结束）和 mid-turn current-tail guard 三条路径都调用同一个 `apply_and_emit_boundary`，因此三者要么同时完成「摘要应用 → L0」，要么全部不改历史。
+
+这样安排的原因是缓存成本：L0 会改写工具结果，而成功的 boundary 已经替换历史前缀；把两次改写绑定在一起不会额外破坏缓存。相反，boundary 未成功（低水位、无预热结果或 stale）时必须保持历史字节级不变。
+
+```
+apply_boundary 成功
+      │  （同时 invalidate_api_usage，随后水位回退到字符估算）
+      ▼
+run_layer0_cleanup
+      ├─ A. 上一个已完成 turn 的超大 tool_result 落盘 + preview
+      ├─ B. compactable zone 的大 tool_result 替换为 placeholder
+      ├─ 作废被驱逐 tool_call 的 ReadFileState stamp
+      └─ 累加释放量并在非零时发 layer0_context_release
+```
+
+回合执行期间 `ContextState.messages` 只含已完成的历史；当前回合的新消息还在 agent loop 的局部 `messages`，直到 `run()` 收束才同步回来。因此 A 所称的「最后一个 turn」是 **state 中最后一个已完成 turn**，天然可能比当前 in-flight turn 滞后一回合。
 
 **步骤 A：大结果落盘**
 
@@ -867,7 +1139,7 @@ Layer 0 处理后的新 message entry 写入 transcript（落盘的 tool_result 
 
 ### 6.2 Layer 1：异步预热
 
-Layer 0 完成后（仍在步骤⑤），先 **`preheat.try_restart_if_pending(...)`**，再计算 ratio；若 **ratio >= 0.50** 且 `preheat.try_start(...)` 接受启动，则通过统一的 compaction provider 访问入口 spawn 异步预热。
+时机⑤先 **`preheat.try_restart_if_pending(...)`**，再非阻塞检查 Layer 2；无论 boundary 是否切成，最后按更新后的 ratio 判断 `preheat.try_start(...)`。若 Layer 2 切成，期间已同步完成 Layer 0，再启动下一轮预热；若未切成，L0 不会单独运行。
 
 **主线程不等待**，当前 user turn 处理完毕。异步预热在用户阅读/思考/输入期间后台运行。
 
@@ -897,7 +1169,7 @@ Layer 2 在 **两个时机** 检查预热结果是否可取用，对应步骤⑤
 
 #### LLM 回复后检查（ratio >= 0.85）
 
-在 Layer 0 和 Layer 1 之后执行。**绝不阻塞主线程**——使用 **`poll_result()`**（或等价非阻塞路径），`Completed(result)` 则应用，否则跳过。
+在时机⑤，Layer 2 使用 **`poll_result()`**（或等价非阻塞路径），`Completed(result)` 则应用，否则跳过，绝不阻塞主线程。成功应用时，`apply_and_emit_boundary` 在内部立即执行 Layer 0；失败时 Layer 0 绝不运行。
 
 ```
 fn check_preheat_after_reply(state: &mut ContextState):
@@ -934,47 +1206,45 @@ fn check_preheat_before_request(state: &mut ContextState):
     }
 ```
 
-#### Boundary 切换动作（两个检查时机共用）
+#### Boundary 切换动作（三个检查时机共用）
 
 ```
-fn apply_boundary_switch(state: &mut ContextState):
-    let result = match state.preheat.poll_result() {
-        PreheatOutcome::Completed(r) => r,
-        _ => return,
-    }
-    # 消费结果后 preheat 内部回到 Idle（或等价可再 try_start）
-
+fn apply_and_emit_boundary(state, result):
     # 在 messages 中找 end_idx 使 msg.msg_id == covered_end_id（见 §5.7.5）；无匹配 → ApplyBoundaryStale（§5.7.5.1）
     let end_idx = state.messages.iter().rposition(|m| m.msg_id == result.covered_end_id)
         .ok_or(AppError::ApplyBoundaryStale)?
 
+    # marker 已在触发预热时追加；这里仅追加链接正文。同一 marker 已有尾条正文则不重写。
+    append branch_summary_text { forId: result.transcript_compaction_entry_id, summary: result.summary_text }
+
     let batch_chars = sum(state.messages[..=end_idx].map(|m| estimate_msg_chars(m)))
     let summary_chars = result.summary_text.len()
-    let summary_msg = ChatMessage::compaction_summary(&result.summary_text)
+    let summary_msg = ChatMessage::compaction_summary(&result.summary_text, marker_id)
 
-    state.messages.splice(..=end_idx, [summary_msg])
+    messages.splice(..=end_idx, [summary_msg])
     # 注意：使用 saturating_sub 防止 usize 下溢（累积估算误差可能导致 batch_chars > estimate）
     state.estimate_context_chars = state.estimate_context_chars.saturating_sub(batch_chars)
     state.estimate_context_chars += summary_chars
 
     invalidate_api_usage(state)
-
-    # 按 transcript 行 id 原地将 isBoundary 改为 true（`Some(id)` → set_branch_summary_entry_is_boundary_true(path, id)；无 id 则 warn）
-
-    # apply 路径从 preheat 取出并消费 CompactionResult，随后可再次 try_start
+    run_layer0_after_boundary(state, messages, history_end)
 ```
 
 ### 6.4 Layer 3：物理截断（防御性兜底）
 
-API 返回 Context Overflow 错误时触发。从 `messages` 头部起，逐 turn drain（找到第一个 turn 的结束位置），**直到 ratio < 0.50**。
+API 返回 Context Overflow 错误时触发。它只可改写当前工作列表中
+`messages[..start_idx]` 的历史前缀，绝不跨过当前 tail；逐 turn drain，直到 ratio < 0.50。
 
 ```
-fn force_drop_oldest_to_target(state: &mut ContextState):
-    while state.usage_ratio() >= 0.50 && !state.messages.is_empty():
-        # 找到最老 turn 的结束索引：从 messages[1..] 找下一个 turn start，drain 该范围
-        let turn_end = find_next_turn_start(&state.messages, 1).unwrap_or(state.messages.len())
-        let removed: Vec<_> = state.messages.drain(..turn_end).collect()
+fn force_drop_oldest_after_confirmed_overflow(state, messages, start_idx):
+    while state.usage_ratio() >= 0.50 && start_idx > 0:
+        # 在 messages[1..start_idx] 找下一个 turn start，drain 最老完整历史 turn
+        let turn_end = find_next_turn_start(&messages[..start_idx], 1)
+        if turn_end.is_none() && start_idx == messages.len():
+            break  # 回合间只剩一个 turn：保留它，避免空请求
+        let removed = messages.drain(..turn_end.unwrap_or(start_idx)).collect()
         let removed_chars = sum(removed.map(|m| estimate_msg_chars(&m)))
+        start_idx -= removed.len()
         state.estimate_context_chars =
             state.estimate_context_chars.saturating_sub(removed_chars)
     invalidate_api_usage(state)
@@ -984,17 +1254,45 @@ fn force_drop_oldest_to_target(state: &mut ContextState):
 
 **设计定位**：几乎不可达的安全网。正常运行中，0.50 的 Layer 1 异步预热 + Layer 2 应用通常已足够将 ratio 降回 0.1~0.2。Layer 3 是最后兜底。
 
-#### 6.4.1 Context Overflow 自动重试时的 `messages` 重拼（图二，与 `run.rs` 一致）
+#### 6.4.1 tail-only overflow 的同次 Collapse
 
-在 reasoning loop 的 **可重试**路径中，当错误被判定为 **Context Overflow** 且已执行 **`force_drop_oldest_to_target`**（内部先 **`invalidate_api_usage`**，见 [`cascade.rs`](../../../src/core/compaction/cascade.rs)）后，**同一次 LLM 调用**重试前将工作集 **`messages`** 重组为：
+当 `start_idx == 0`，说明没有可删的历史；旧实现会用原 payload 再试或直接失败。
+现在第一次 overflow 就复用 `collapse_to_branch_summary` 把整个工作列表收为摘要，再立即重试：
 
-1. **可选保留首条 `System`**：若 `messages[0]` 为 system 消息，则拷贝到重建列表首部（保留系统提示不被折叠丢失）。
-2. **`build_context_from_state(ctx_state)`**：直接返回 `state.messages.clone()`（已经是 drain 后的历史上下文）。
-3. **尾部原位保留**：`messages[self.context_tail_start ..]`（当前 user turn 在 overflow 前已产生的 assistant/tool 等），与 `start_idx` 更新配合，避免截断正在进行的轮次。
+```text
+messages = [ current_user | tool / assistant ... ]    start_idx = 0
+overflow -> L3 cannot drain -> collapse -> [ Summary ]    start_idx = 1
+```
 
-上述顺序在实现中为：`rebuilt = [optional System] + build_context_from_state + tail`；随后写回 **`messages`** 并调整 **`start_idx`**。这与 **§5.6** 中「`**ContextState.messages**` 在 ⑤ 被 L3 修改、下一轮 ② 从之重建」的模型一致，但 overflow 重试发生在 **同轮**内，故需显式重拼 **`messages`**。
+这保证每个 retry 都严格缩小 payload。第二次及以后的 overflow 仍直接走同一 collapse 原语。
 
 > **Layer 3 不受 m 值保护区约束**：当所有 turn 都在 protected zone 内（`protected_start = 0`）时，Layer 0/1/2 无法工作。Layer 3 作为最后兜底，**必须能删除任何 turn**（包括 protected zone 内的），否则极端场景下无法降压。
+
+### 6.4.2 手动 `/compact` 与自动 overflow 恢复不是同一条路径
+
+两者都在“让下一次请求的上下文变小”，但触发时机和优先目标不同，故意不强行复用：
+
+```
+用户主动整理会话                         当前请求已经被上游拒绝
+        │                                           │
+        ▼                                           ▼
+/compact                                      Context Overflow
+        │                                           │
+        ▼                                           ▼
+生成可持久化摘要 + 写 branch_summary boundary    先 force_drop_oldest_after_confirmed_overflow
+        │                                           │
+        ▼                                           ▼
+重载会话：以后每轮都从摘要继续                 同一轮立即重组更小 payload 并重试
+```
+
+| 场景 | 目标 | 实现 | 持久化语义 |
+|---|---|---|---|
+| 手动 `/compact`（CLI / serve） | 把会话的**长期基线**变小，同时尽可能保留已经完成工作的可读摘要 | [`cmd_compact::compact_session`](../../../src/api/chat/commands/cmd_compact.rs)：先做可丢弃的大工具结果清理，再 `generate_summary`，最后 `append_compaction_boundary` | 是。`branch_summary` 成为新的 transcript boundary，重进会话仍从摘要恢复。 |
+| 自动 overflow 恢复 | 让**本次已经失败的请求**获得一个立刻可发送的 payload | [`force_drop_oldest_after_confirmed_overflow`](../../../src/core/compaction/cascade.rs)；历史前缀为空或第二次 overflow 时走 [`collapse_to_branch_summary`](../../../src/core/agent_loop/current_tail_guard.rs) | 首次 L3 截断只改内存；Collapse 使用摘要收敛工作集。这里优先保证请求能继续，不承诺保存全部逐条历史。 |
+
+因此“手动命令没有调用 `force_drop_oldest_after_confirmed_overflow`”不是实现漏接：前者需要一个能跨重启解释既往工作的 checkpoint，后者需要在错误返回后的最短路径内腾出空间。两条路径共用 `ContextState`、摘要生成能力和 `usage_ratio` 作为结果度量，但不共享触发策略。
+
+验收不以“命令成功”或“boundary 已写入”为准：CLI 重载后的 `usage_ratio`，以及 serve 响应内的 `afterUsageRatio`，都必须严格小于压缩前的值。
 
 ### 6.5 防振荡设计
 
@@ -1057,10 +1355,6 @@ Use this EXACT format:
 ## Goal
 [What is the user trying to accomplish? Can be multiple items.]
 
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
-
 ## Progress
 ### Done
 - [x] [Completed tasks/changes]
@@ -1118,9 +1412,6 @@ Use this EXACT format (same as the original summary):
 ## Goal
 [Updated goal]
 
-## Constraints & Preferences
-- [Updated constraints]
-
 ## Progress
 ### Done
 - [x] [Completed tasks]
@@ -1143,41 +1434,39 @@ Use this EXACT format (same as the original summary):
 
 ### 7.4 摘要消息格式
 
-摘要以 `type: branch_summary` 的 `SessionEntry::BranchSummary` entry 写入 transcript JSONL（类型定义见 [session-storage.md](session-storage.md)）。**每个压缩批次仅一行**：
+方案 E 的一个压缩批次由两条 append-only JSONL entry 表示：
 
-- **预热阶段**（Layer 1 异步任务完成时）：在锚点 message 行**之后插入**一行，`is_boundary: false`，分配行 **`id`**，写入 `CompactionResult.transcript_compaction_entry_id`；`init_context_state` fold 时**跳过**该行（不生成摘要 `ChatMessage`），并可 **`restore_completed`** 注入 `Preheat`。
-- **应用阶段**（Layer 2 Boundary 切换时）：**原地**将该行的 `isBoundary` 改为 `true`（summary / `covered_*` 不变）。`init_context_state` 遇到 `is_boundary=true` 后**丢弃其前所有 entry**，使重启时重建结果与运行时一致。
+- **预热触发阶段**（Layer 1 spawn 前）：前台确认 `covered_end` 是 transcript 尾条后，追加 `type: branch_summary` marker（`id:S::E`、`summary:null`、`isBoundary:true`）。
+- **应用阶段**（Layer 2 Boundary 切换时）：前台追加 `type: branch_summary_text`（`forId:S::E`、完整正文），再替换内存中的被压缩区间；后台异步任务不写 transcript。
 
-在内存中作为一条 `ChatMessage::compaction_summary(text)`（`role=user`，`kind=CompactionSummary`，content 为摘要文本）放入 `messages`，替换被压缩的原始消息。
+重载时先收集正文，再在 marker 的物理位置折叠。marker 没有正文时是 no-op；正文行本身不生成消息。在内存中摘要是 `ChatMessage::compaction_summary(text, marker_id)`（`role=user`，`kind=CompactionSummary`），替换被压缩的原始消息。
 
 ### 7.5 Compaction v2 修订（T2-P0-002）
 
-> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../reports/compaction-prompt-cc-vs-pi.md)。
+> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量。
 
-#### 7.5.1 模板升级为 9 节
+#### 7.5.1 结构化模板
 
-`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 由 7 节扩展为 9 节，新增 `Errors Encountered`、`Recent User Messages`（最近 10 条用户原话），并要求 `Next Steps` 给出 **verbatim 引用**（精确 file path / 函数名 / 错误信息）。两个模板首行均为 `Respond with text only. Do not call any tools.`，指令区追加 `First reason internally, then output the final summary.`（隐式诱导内部推理，不开 Two-pass 第二轮 LLM）。
+`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 要求 `Goal`、`Progress`（Done / In Progress / Blocked）、`Errors Encountered`、`Key Decisions`、`Next Steps`、`Critical Context`，并要求 `Next Steps` 给出 **verbatim 引用**（精确 file path / 函数名 / 错误信息）。`Constraints & Preferences` 和 `Recent User Messages` 不由模型转述：计划路径和用户原话由运行时机器区块逐字提供。两个模板首行均为 `Respond with text only. Do not call any tools.`，指令区追加 `First reason internally, then output the final summary.`（隐式诱导内部推理，不开 Two-pass 第二轮 LLM）。
 
 模板章节顺序与必要约束：
 
 ```
 ## Goal
-## Constraints & Preferences
 ## Progress    （Done [带 file: 锚点] / In Progress / Blocked）
 ## Errors Encountered
 ## Key Decisions
-## Recent User Messages    （最近 10 条用户原话，逐字保留）
 ## Next Steps    （含 verbatim 引用）
 ## Critical Context
 ```
 
 行为契约：
 - `<8K tokens` 的输出预算与既有保持一致；§7.2 模型选择不变。
-- 测试锁点见 [`src/core/compaction/tests/prompt_snapshot.rs`](../../../src/core/compaction/tests/prompt_snapshot.rs)（13 用例：9 节标题、text-only 首行、internal-reason 指令、最近 10 条口径、verbatim 要求、文件锚点提示、`{existing_summary}` 占位符等）。
+- 测试锁点见 [`src/core/compaction/tests/prompt_snapshot_test.rs`](../../src/core/compaction/tests/prompt_snapshot_test.rs)（章节标题、text-only 首行、internal-reason 指令、无模型转述的约束/用户原话、verbatim 要求、文件锚点提示、`{existing_summary}` 占位符等）。
 
 #### 7.5.2 Compaction 请求显式 `tools: None`
 
-`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。`stream: Some(false)`（摘要不流式）。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
+`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。它经 `LlmProvider::chat_collect` 取得完整摘要：普通 provider 使用非流式 JSON；拒绝 `stream:false` 的 Responses 中转站则在 adapter 内缓冲 SSE/NDJSON，语义仍是一份完整的 `ChatResponse`，不向摘要状态机泄露传输差异。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
 
 #### 7.5.3 失败路径：指数退避 + transcript 留痕
 
@@ -1196,7 +1485,148 @@ pub attempts: Option<u32>,
 
 测试锁点见 [`src/core/compaction/tests/preheat_and_truncation.rs`](../../../src/core/compaction/tests/preheat_and_truncation.rs) 与 [`src/core/compaction/tests/legacy_transcript_compat.rs`](../../../src/core/compaction/tests/legacy_transcript_compat.rs)（虚拟时钟下退避计时；3 次耗尽端到端写入；缺字段默认 None；成功条目不序列化失败字段）。
 
-#### 7.5.4 三项不实施决议（关闭/转后续）
+#### 7.5.4 提示缓存前缀稳定化
+
+提示缓存只复用逐字节相同的请求前缀。因此系统遵循「已发送历史只追加、运行时事实先在内部请求尾部生成，
+再由 adapter 归一化到 instruction 通道」：
+
+```text
+tools（稳定排序） → system（稳定说明） → 持久化历史 → 本轮输入 → runtime tail
+      ↑                   ↑                         ↑              （未缓存后缀）
+ Anthropic 断点 1      断点 2              最深断点 D（写锚）
+```
+
+- `TokenUsage` / `StreamEvent::Usage` 记录 provider 返回的 `cache_read_tokens` 与
+  `cache_write_tokens`；只写入 assistant transcript 和 `tomcat_chat_diag`，不扩展
+  `ContextMetricsUpdate` wire schema。
+- 内置工具目录在所有 mode 相同，插件工具按 `(plugin_id, name)` 排序；权限与 mode
+  仍由 handler/path gate 强制执行，而不是通过删工具定义来实现。
+- `ChatRequest` 构造接缝在每个主 Agent 请求末尾临时添加 runtime tail（计划提醒和当前
+  workspace 权限状态）。它不进入 `ContextState.messages` 或 transcript，也绝不作为 provider dialogue
+  message：Anthropic wire 把它渲染为不单独标记的 system suffix，Chat Completions 合并到 leading system，
+  OpenAI Responses 合并到顶层 `instructions`。稳定时 durable history 只追加；状态变更会有意使下一次缓存冷写。
+- Anthropic wire 最多放四个 `cache_control: {type: "ephemeral"}` 断点：tools 末项（A）、
+  最后一个非 runtime system block（B）、倒数第二条 wire user 消息末尾（C，滚动读锚）和最后一条持久 wire
+  消息末尾（D，写锚）。runtime tail 是不单独标记的 system suffix；它变化时会使下一次 Anthropic 缓存失效。
+  OpenAI Chat Completions / Responses 使用按 `{session_id}:{family}` 分域的
+  `prompt_cache_key`。
+- Layer 0 只在 Layer 2 boundary **成功应用后**运行一次：L0-A 落盘最后一 turn 的超大
+  tool result，L0-B 替换 compactable zone 的大 tool result。Layer 1 的 preheat 本身只读
+  快照，不会改写缓存；未切换 boundary 时保持历史字节不变，真正改变历史的是 Layer 2/L3
+  的必要应用。
+
+#### 7.5.4.1 2026-08-05 Responses 缓存异常：移动 tail 截断 input 前缀
+
+`cache_read_tokens` 是服务端实际命中的**量化后的前缀长度**，不是「本轮新增历史字数」。
+因此它可以连续数轮不变；只有服务端选择更深的缓存块时才会跳变。遇到曲线平台时，先验证 wire
+是否真的改变了稳定前缀，不能仅凭单个数值推断客户端没有缓存。
+
+```text
+旧 Responses wire：
+
+请求 N:    durable history → EphemeralTail（临时 user input）
+请求 N+1:  durable history → 新 assistant/reasoning/tool → EphemeralTail
+                             ↑
+                  取代了请求 N 中 tail 的位置，前缀在此断开
+
+结果：只能读取 tail 之前的静态 system / tool 区（实际约 8.7K）。
+```
+
+根因不是 `prompt_cache_key`、完整工具目录或历史 opaque reasoning：
+
+- 固定 cache key 只能选择服务端缓存桶，不能让不同位置的 item 拼接成前缀；
+- 完整 agent tool catalog 的 40K 对照请求第二次读取 42,496；
+- 真实 transcript 依次保留全部、仅最新或删除 `reasoning.encrypted_content`，均仍停在约 8.7K；
+- 真正首个漂移由 `TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 的滚动 input hash 定位：请求 N 的
+  EphemeralTail 对应请求 N+1 的 reasoning / assistant / function call / tool result。
+
+修复将 tail 保持为 request-only，但改由顶层 instructions 承载：
+
+```text
+instructions = stable system prompt + runtime tail
+input(N+1)   = input(N) + assistant / reasoning / tool result
+                         ↑ 仅追加，允许 Responses 自动缓存继续扩展
+```
+
+这也校正了旧的简化马拉松结论：该测试把约 35K 稳定文本放在 system instructions 内，报告的深度命中
+只能证明 system 命中，不能证明 tail 之后的工具历史被写入后续前缀。
+
+真实 Agent-shaped fcodex gpt-5.6-sol / XHigh 实验：
+
+```text
+旧 tail 作为 input user:    0 → 8,704 → 8,704 → 8,704 → 8,704 → 8,704
+正式 wire，稳定 tail:        0 → 9,728 → 10,752 → 10,752 → 10,752 → 10,752
+正式 wire，每轮变 grant:     0 → 9,728 → 9,728 → 9,728 → 9,728 → 9,728
+                                           ↑
+                          state 稳定时量化块推进；频繁变 state 不承诺更深命中
+```
+
+tail 真正变化（plan mode、workspace permission / session grant 改变）会改变 instructions，因此 fcodex
+不承诺该轮的深度命中；状态稳定后的请求仍保持 append-only input，具备恢复增长的必要条件。不得为了
+命中率把 workspace state 伪装成普通 user 消息或持久写回 transcript。
+
+最终用用户提供的同一 session JSONL 截到最后一个 tool output，再按真实 Agent loop 继续六个小工具
+回合，裁决了「fcodex 是否无法缓存 40K 历史」：
+
+```text
+旧 tail-in-input 重放：    0 → 8,704 → 8,704 → 8,704 → 8,704 → 8,704
+正式 Responses wire 重放：0 → 48,640 → 48,640 → 48,640 → 48,640 → 48,640
+第六轮 prompt_tokens：49,634
+```
+
+所以 8.7K 不是 transcript 的固有限制，也不是完整工具目录或 39–44 个历史 reasoning item 的限制；
+它是移动 tail 之前的共享前缀。48.6K 后的平台符合量化缓存块行为，不能要求每个小 tool output 都使
+`cache_read_tokens` 立即上升。
+
+两个候选方案也已被真机排除：
+
+```text
+previous_response_id（HTTP）
+  └─ fcodex 返回 400：only supported on Responses WebSocket v2
+     └─ 只能回退为显式 replay；默认打开会平白多一次失败请求
+
+explicit breakpoint（GPT-5.6+）
+  └─ 合法锚点是 input_text / image / file
+     ├─ 最后的持久项常是 function_call_output，不能可靠地写入 cache
+     └─ 追加伪造 user checkpoint 虽可改变锚点，但会改变模型语义
+```
+
+不向 fcodex HTTP 默认发送 `previous_response_id`，也不注入语义性 checkpoint。
+`previous_response_id` 的 opt-in 路径仍只向**确实支持它的路由**发送锚点之后的增量 input，避免把
+已经由服务端恢复的历史再次重复发送。
+
+重新评估此决策的条件是：fcodex 宣布 HTTP Responses 支持 `previous_response_id`、OpenAI / 网关确认
+`function_call_output` 上的 breakpoint 能产生 cache write，或者生产 fingerprint 显示 tail 已不在 input
+但仍固定只命中旧断点。最后一种情况必须继续追踪更早的历史重写项。
+
+用 `scripts/analyze_prompt_cache_baseline.py` 对同一条至少 20 轮真实会话采集改造前后
+命中率、授权次数、插件/技能变动、拒绝工具比例与 `usage_ratio` P50/P90。
+
+#### 7.5.4.2 2026-08-03 三条 wire 实测基线
+
+三组探针均通过真实 provider 连发 20 次 `LlmProvider::chat` 请求，并把上一轮 assistant
+回复追加到下一轮的消息历史。数据由
+`scripts/analyze_prompt_cache_baseline.py` 从 `tomcat_chat_diag` 形状的 usage 日志统计：
+
+| wire / 模型 | prompt tokens | cache read tokens | cache write tokens | 命中率 |
+|---|---:|---:|---:|---:|
+| DeepSeek Chat / `deepseek-v4-pro` | 118,500 | 111,232 | 0 | 93.87% |
+| fcodex OpenAI Responses / `gpt-5.6-sol` | 116,160 | 82,688 | 0 | 71.18% |
+| fcodex Anthropic Messages / `claude-opus-4-8` | 208,242 | 208,202 | 11,222 | 99.98% |
+
+Anthropic 的 `input_tokens` 不包含独立返回的 `cache_read_input_tokens`；分析脚本会先把两者相加
+为总输入再计算命中率，避免把 20 次 `input_tokens=2` 误读成万倍命中率。
+
+**结论**：三条 wire 都发生了真实 cache read，且 Anthropic 显式断点能够随追加历史推进。
+Responses 的 71.18% 明显低于 DeepSeek 和 Anthropic，说明 fcodex Responses 当前只复用有限大小的
+前缀块；这不是本地 `prompt_cache_key` 缺失（同一 key 已连续下发），不能把它当成稳定达到 80%
+的跨 provider 承诺。后续应在网关侧确认 cache block 上限和前缀扩展策略，再决定是否把该阈值纳入
+Responses 的发布门禁。
+
+这些是 provider 级缓存探针，故没有真实工具执行、授权、插件变更或 `ContextMetricsUpdate` 样本；
+它们用于验证 wire 和 usage 解析，不替代带工具负载的 Agent E2E 指标。
+
+#### 7.5.5 三项不实施决议（关闭/转后续）
 
 T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`docs/TODOS.md`](../TODOS.md) 与工程变更记录，背景论证见 [报告 §5.7](../reports/compaction-prompt-cc-vs-pi.md)）：
 
@@ -1216,7 +1646,7 @@ T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`
 | 机制                              | 说明                                                                                                | 后续计划                     |
 | ------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------ |
 | **Snip（中间段删除）**                 | CC Level 1，删除中间历史保留头尾，零 API 成本。当前 Layer 1 异步摘要可覆盖此场景。                                             | 若 Layer 1 触发过于频繁/费用高，再评估 |
-| **Prompt Cache 管理**             | CC 的 `cache_control` / `cache_reference` / `cache_edits` 三原语为 Anthropic API 专属，OpenAI 自动缓存无需客户端配置 | 不适用                      |
+| **Prompt Cache 管理**             | Anthropic 使用 `cache_control` 断点，OpenAI 使用自动前缀缓存 + scoped `prompt_cache_key`；见 §7.5.4 | 已实施，按基线数据复测 |
 | **Cached Microcompact**         | 依赖 `cache_edits` 服务端打洞能力                                                                          | 不适用                      |
 | **Session Stability Latching**  | 锁定运行时状态防 cache bust，tomcat 无 Prompt Cache                                                             | 不适用                      |
 | **Context Collapse**            | CC 实验性 commit-log 视图投影，通用性差                                                                       | 不纳入                      |
@@ -1233,10 +1663,10 @@ T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`
 | 文件                                                                                | 改动内容                                                                                                                                                                        |
 | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[src/core/session/manager/types.rs](../../../src/core/session/manager/types.rs)` | `ContextState` 持有 `messages: Vec<ChatMessage>`、`preheat: Preheat`（Layer 1 状态机）、`start_idx` 等；`CompactionResult` 含 `transcript_compaction_entry_id`；`apply_boundary` 仅按 **`covered_end_id`** 定位 `end_idx`（通过 `msg_id` 匹配），无匹配返回 **`AppError::ApplyBoundaryStale`**                                           |
-| `[src/core/session/transcript.rs](../../../src/core/session/transcript.rs)` | `BranchSummaryEntry` 可选 `preheatCompactionId`；`set_branch_summary_entry_is_boundary_true` 按 id 原地升级；**`remove_branch_summary_entry_by_id`** 按 id 删除 `branch_summary` 行（陈旧 apply）                                                     |
-| `[src/core/agent_loop/run.rs](../../../src/core/agent_loop/run.rs)`               | reasoning loop 每轮 LLM 回复后：① Layer 0 同步清理 ② ratio check → Layer 1 异步预热 ③ 0.85<=r<0.98 时 Layer 2 回复后检查；发起 LLM 请求前：r>=0.70 时 Layer 2 检查、r>=0.98 时发请求前检查（可能同步等待）                |
+| `[src/core/session/transcript.rs](../../../src/core/session/transcript.rs)` | `BranchSummaryEntry` 是触发预热时追加的切口 marker；`BranchSummaryTextEntry` 是应用时追加并以 `forId` 关联 marker 的正文。已移除原地升级 `isBoundary` 与删除陈旧 marker 的 rewrite API。 |
+| `[src/core/agent_loop/turn_finalize.rs](../../../src/core/agent_loop/turn_finalize.rs)` / `[src/core/compaction/apply.rs](../../../src/core/compaction/apply.rs)` | reasoning loop 最终回复后：① 恢复 pending preheat ② ratio check 后 Layer 2 非阻塞检查（成功 boundary 在同一成功分支运行 Layer 0）③ 启动下一轮 Layer 1 预热；发起下一次 LLM 请求前：r>=0.70 时 Layer 2 检查、r>=0.98 时可能同步等待，成功后由调用方重建发送消息 |
 | `[src/infra/config/types.rs](../../../src/infra/config/types.rs)`                 | `[context]` 配置节更新 `layer0_single_result_max_chars` 为 50K、新增 `layer0_placeholder_threshold_chars`（10K）、新增 `compaction_max_tokens`（10K）                                       |
-| `[src/core/compaction/](../../../src/core/compaction/)`                           | 重构模块结构：`layer0.rs`（同步清理：落盘 + 占位符，操作 `messages` 中的 `ChatMessage`）、`preheat.rs`（异步预热：克隆整个 `messages: Vec<ChatMessage>` + 后台 Task + 写 transcript）、`apply.rs`（检查与应用：两个检查时机 + Boundary 切换，`messages.splice(..=end_idx, [summary_msg])`）、`truncation.rs`（物理截断，`messages.drain(..turn_end)`）               |
+| `[src/core/compaction/](../../../src/core/compaction/)`                           | `layer0.rs` 同步清理；`preheat.rs` 前台先追加 marker、后台只计算并写 pending cache；`apply.rs` 三个检查时机共用 `apply_and_emit_boundary`，追加正文后执行 `messages.splice(..=end_idx, [summary_msg])`；`truncation.rs` 物理截断。 |
 | `[src/core/system_prompt.rs](../../../src/core/system_prompt.rs)`                 | 新增分页读取引导 section                                                                                                                                                            |
 | `[src/infra/events/mod.rs](../../../src/infra/events/mod.rs)`                     | 压缩可观测性：L0 `Layer0ContextRelease`、L1 `AutoCompactionStart`/`End`（含估算三字段）、`CompactionError`、L2 `BoundarySwitched`（含 `estimatedTokensFreed`）、L3 `ContextOverflowTrimStart`/`End`（含删轮与释放）、`context_metrics_update`（详见 §10.4 / §10.6） |
 | `[src/core/context_metrics.rs](../../../src/core/context_metrics.rs)`             | `ContextLiveMetrics`（别名 `ContextMetrics`）字段语义；运行时嵌入 `ContextState::live`。**会话累计**在 `ContextState::session_obs`，见 §10.6 |
@@ -1252,14 +1682,13 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 - **⑤ LLM 回复后**（user turn 完成，绝不阻塞）：
   - `preheat.try_restart_if_pending(...)`（与 ② 双点恢复 ExhaustedPending）
-  - Layer 0 同步清理 `messages` 中的 tool_result（落盘 + 占位符，通过 `ChatMessage::set_text_content` 原地替换）
+  - ratio >= 0.85 → Layer 2 回复后检查（`poll_result` 已有 `CompactionResult` 则立即切换；成功切换在内部紧接执行 Layer 0，非阻塞）
   - ratio check → `preheat.try_start(...)`（Layer 1 异步预热，不等待）
-  - ratio >= 0.85 → Layer 2 回复后检查（`poll_result` 已有 `CompactionResult` 则立即切换，非阻塞）
 - **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：
   - `preheat.try_restart_if_pending(...)`
   - ratio >= 0.70 → Layer 2 检查（完成则 Boundary 切换）
   - ratio >= 0.98 → Layer 2 发请求前检查（未完成则**化异步为同步**阻塞等待）
-  - Boundary 切换后 `ContextState.messages` 已更新，工作集 `messages` 通过 `build_context_from_state` → `state.messages.clone()` 重建
+  - 成功 Boundary 切换后，L0 已同步完成；`ContextState.messages` 是历史的唯一事实源头，工作集必须从它重新拍平，并把已持久化的当前用户输入接回尾部
 - **③ reasoning loop 内 API 返回 Context Overflow 错误**：
   - Layer 3 物理截断 + 重试
 
@@ -1267,11 +1696,11 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 ### 10.2 会话存储（session-storage.md）
 
-- 压缩摘要以 `SessionEntry::BranchSummary` entry（JSONL `type: branch_summary`）写入 transcript（**每批次单行**）。
-  - 预热阶段 **追加** `is_boundary: false`（含行 `id`）
-  - 应用阶段 **原地**将该行改为 `is_boundary: true`（重启时生效；不追加第二份全文）
+- 压缩摘要以两条 append-only entry 写入 transcript：
+  - 预热触发时前台追加 `branch_summary` marker（`summary:null`、`isBoundary:true`、`id:S::E`）。
+  - 应用时前台追加 `branch_summary_text`（`forId:S::E`、完整摘要正文）；两遍 fold 在 marker 的位置还原摘要。
 - Tool result 落盘文件存储在 `agent_trail_dir/tool-results/{session_id}/` 目录，即默认 `~/.tomcat/agents/{agent_id}/tool-results/{session_id}/`。
-- 初始化时从 transcript 流式读取消息（遵守「禁止全量加载」约定，使用 `BufReader` 逐行解析 + `fold_entries_to_messages` 输出 `Vec<ChatMessage>`），识别 compact boundary，跳过 `is_boundary=false` 的预热记录。
+- 初始化时从 transcript 流式读取消息（遵守「禁止全量加载」约定，使用 `BufReader` 逐行解析 + `fold_entries_to_messages` 输出 `Vec<ChatMessage>`）；无正文 marker 是安全 no-op，`branch_summary_text` 本身不产生消息。
 
 ### 10.3 配置管理（infrastructure-layer.md）
 
@@ -1286,18 +1715,18 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 | Layer | Rust variants | wire names |
 | ----- | ------------- | ---------- |
-| **L0（⑤ 同步清理）** | `Layer0ContextRelease { persist_tokens_freed, placeholder_tokens_freed }` | `layer0_context_release` |
+| **L0（boundary 应用后同步清理）** | `Layer0ContextRelease { persist_tokens_freed, placeholder_tokens_freed }` | `layer0_context_release` |
 | **L1（异步预热）** | `AutoCompactionStart { covered_count, ratio_before }` / `AutoCompactionEnd { elapsed_ms, summary_chars, covered_count, ratio_after, estimated_covered_tokens_before, estimated_summary_tokens, estimated_tokens_saved }` / `CompactionError { exhausted_after_retries, attempts, error, source, ratio }` | `auto_compaction_start` / `auto_compaction_end` / `compaction_error` |
 | **L2（边界切换）** | `BoundarySwitched { ratio_before, ratio_after, covered_count, was_sync_wait, estimated_tokens_freed }` | `boundary_switched` |
 | **L3（溢出裁剪）** | `ContextOverflowTrimStart { reason, ratio }` / `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry, estimated_tokens_freed, turns_removed }` | `context_overflow_trim_start` / `context_overflow_trim_end` |
 
 
-其他与本模块相关的通用事件（未归入上表分层）：`tool_result_persisted`（Layer 0 单条落盘）、`context_metrics_update`（**每个 user turn** 内约两次：本轮首次 `chat_stream` 前与 timing ⑤ 末尾；payload 中累计字段来自 `ContextState`）等，见 `events` 模块定义。
+其他与本模块相关的通用事件（未归入上表分层）：`tool_result_persisted`（Layer 0 单条落盘）、`context_metrics_update`（首次 `chat_stream` 前发估算值；每次 provider `Usage` 到达后立即发实测值；timing ⑤、压缩或重载后再发最佳估算快照；payload 中累计字段来自 `ContextState`）等，见 `events` 模块定义。
 
 **CLI / 宿主按 wire name 订阅时的语义对应**：
 
 - `layer0_context_release` → **L0** 本轮落盘 + 占位符释放的估算 tok（已写入会话累计）
-- `auto_compaction_start` / `auto_compaction_end` → **L1** 异步预热进度与前/后/差展示（**不在** `auto_compaction_end` 时累加会话 `compactionTokensFreed`）；`auto_compaction_end` 仅在 L1 任务写入 transcript（或跳过路径）后发射一次
+- `auto_compaction_start` / `auto_compaction_end` → **L1** 异步预热进度与前/后/差展示（**不在** `auto_compaction_end` 时累加会话 `compactionTokensFreed`）；`auto_compaction_end` 在 L1 计算完成并写入 pending cache 后发射，L1 不写 transcript
 - `compaction_error`：`source: "preheat"` 且 **`exhausted_after_retries == true`** → **待恢复**提示（需结合 ⑤/② 的 `try_restart_if_pending` 或用户操作）；`source: "apply"` → apply 失败：若错误为 **`ApplyBoundaryStale`**（列表不可解析），**不**再挂起同一 `CompactionResult` 重试；其它 apply 失败仍表示摘要 **待 `restore_pending_result` 重试**
 - `context_overflow_trim_start` / `context_overflow_trim_end` → **L3** Context Overflow 后的物理裁剪与释放量
 - `boundary_switched` → **L2** 摘要已应用、边界重置（`estimatedTokensFreed` 与本次计入累计的量一致）
@@ -1315,10 +1744,12 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 ### 10.6 可观测性与 token 估算约定
 
-- **`context_metrics_update` 节奏**：与实现一致，**每个 user turn** 内约发射两次（本轮首次流式请求前 + timing ⑤ 末尾）；中间 tool round **不**额外发射。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**（含 `preheatInProgress` = 预热 LLM 任务仍在跑；`preheatResultPending` = 摘要已就绪待 poll/apply，与前者互斥；`turnCount` = `state.turn_count()` 统计 `messages` 中的 turn start 数）。`AgentLoop` **不**再持有独立 `metrics` 结构。
+- **`context_metrics_update` 节奏**：本轮首次流式请求前先发一条 fallback 估算；随后**每一次** provider `Usage` 事件到达时，stream handler 立即以该实测值发一条更新——它发生在工具调用被调度之前，不能等待整次 Agent 回合结束；timing ⑤、current-tail reduction、L3 截断与 rehydrate 后仍会发出边界处理后的最佳估算快照。故工具轮数本身不决定事件数，provider 实际返回的 usage 次数才决定。`providerUsageMeasured=true` 只表示**本条事件**直接来自刚收到的 provider usage；`false` 表示本条是估算，而不是对已存在实测基线的否定。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**（含 `preheatInProgress` = 预热 LLM 任务仍在跑；`preheatResultPending` = 摘要已就绪待 poll/apply，与前者互斥；`turnCount` = `state.turn_count()` 统计 `messages` 中的 turn start 数）。`AgentLoop` **不**再持有独立 `metrics` 结构。
+- **Ctx% 显示语义**：输入框的 Ctx% 是「本进程当前 slot 最近一次可信占用快照」，不是 `sessions.json` 的历史观测快照。冷启动 slot 的 `last_context_ratio=None` 收到 `providerUsageMeasured=false` 时必须继续留空，避免把 `chars/4` 粗估伪装成首个实测值；provider 返回 usage 后的 `true` 事件定基并显示 `Ctx x%`。一旦已定基，后续 `false` 估算（下一条 prompt、系统提示刷新、L0/L2/L3、rehydrate 或模型预算变化）必须更新该快照而**不得隐藏**，直到下一次 provider usage 再以真值刷新。
+- **重启、重连与改写历史**：新 slot 的 `last_context_ratio=None`，`get_state` 返回 `null`，Composer 隐藏 Ctx 文字但以固定宽度保留位置，避免按钮跳动。相同进程中切换或重连已测过的会话可从 slot 缓存立即回放；`/compact`、`/restore` 与其他 `rehydrate_slot_context_state` 路径会用重建后的上下文主动发估算事件：已定基的会话立即显示新水位，未定基会话仍留空。`SetModel` 同理：更新 `ContextState` 的输入预算并重估，不复用旧模型的百分比。持久化的 `SessionEntry.context_utilization_ratio` 可继续用于离线可观测性，但**绝不**作为实时 UI 水位来源。
 - **Transcript（暂缓专项）**：同一会话 JSONL 中可能出现多条 `isBoundary: false` 的 compaction 行或边界行语义重叠；合并策略与 LLM 约束待后续排查。
 - **估算函数**：分层释放量与 transcript 中三字段均通过 `estimated_tokens_from_chars`（与 `estimated_token_count()` 的 **chars/4** fallback 同阶）换算；与带 API usage 的精确计数相比均为**估算**，仅保证与水位线逻辑一致。`estimate_msg_chars` 替代旧 `estimate_turn_chars`，作用于单条 `ChatMessage`。
-- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `BranchSummaryEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 在 timing ⑤ 将落盘与占位符释放折算为 tok 后立即计入会话累计，并发射 `layer0_context_release`。**L3** 按被 drain 消息的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
+- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `BranchSummaryEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 作为同一成功分支的后续动作，在 ② / ⑤ / 中途守卫任一路径中将落盘与占位符释放折算为 tok 后立即计入会话累计，并在释放量非零时发射 `layer0_context_release`。**L3** 按被 drain 消息的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
 - **持久化（方案 B）**：`sessions.json` 的 `SessionEntry` 持有 `compaction_count`、`compaction_tokens_freed`、`tool_result_chars_persisted`；**仅在 user turn 结束**（含可恢复错误路径）刷盘；进程在 turn 中途崩溃可能丢失本 turn 内尚未写入 store 的观测累计，详见 [session-storage.md](session-storage.md)。
 
 

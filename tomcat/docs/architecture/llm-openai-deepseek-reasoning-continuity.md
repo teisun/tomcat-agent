@@ -408,7 +408,7 @@ OpenAI Responses 实际是**两条互斥**的 continuity 路径，**不能叠加
 
 - **单一事实源**：`src/core/llm/replay_policy.rs` 的 `CHAT_COMPLETIONS_CONTINUITY_RULES`（每行 = `{family, provider, profile_id}`）。当前两行：`deepseek-v4` / `mimo-v2.5-pro`。`ProviderCompatProfile::chat_completions(model)` 按 `model_family(model)` 查表命中即得 `capture_mode = ReasoningContent` 的 profile，否则默认 `None`（不续传）。
 - **5 道门统一读 profile**：`model_family()`（family 归一）、`chat_completions()`（查表选 profile）、`OpenAiReasoningState::maybe_snapshot()`（按 `capture_mode==ReasoningContent` + `api_family=="chat_completions"` 抓取，不再判 `provider=="deepseek"`）、`is_compatible()`（按 `capture_mode` + `same_profile(provider+model_family)` 比对，不再硬判厂商名）、`transport_messages()`（`chat_completions_reasoning_content` 注回，warn 条件改读 `capture_mode`）。新增同类模型 = **加一行数据**，不动这 5 道门。
-- **互不串档**：`same_profile` 要求 `source_provider == target.provider` 且 `model_family` 一致，因此 MiMo 的 snapshot（`source_provider="mimo"`）不会被 DeepSeek target 接受，反之亦然。跨 profile 不会 `KeepOpaque` 互吃 blob，但**默认走 `ConvertToText`**：`reasoning_content` profile 的 `downgrade_mode = FallbackText`，窗口内有 `fallback_text` / `thinking_text` 时优雅转文本续传（**不告警**），仅在无任何文本可救时才 `StripOpaque` 并计入汇总告警（与 §4.2.6 动作矩阵一致）。
+- **互不串档**：`same_profile` 要求 `source_provider == target.provider` 且 `model_family` 一致，因此 MiMo 的 snapshot（`source_provider="mimo"`）不会被 DeepSeek target 接受，反之亦然。跨 profile 不会 `KeepOpaque` 互吃 blob，且一律 `StripOpaque`：内部 reasoning 永远不能拼进 assistant 可见正文，也不依赖 `fallback_text` / `thinking_text` 兜底。
 - **MiMo 边界**：`mimo-v2.5-pro` 初版按 **exact-profile**（`model_family` 即模型名本身，仅自家可 replay）；是否与其它 MiMo 并族由数据表显式声明，不靠代码猜。
 - **架构约束**：provider 由 `LlmConfig` 装配（registry §6.5.2「稳定 schema」），运行期只拿到 model 字符串、拿不到 catalog 条目，故 continuity 的运行期事实源是这张按 `model family` 索引的数据表；`models.toml` 是面向用户的声明层，对内置厂商（deepseek / mimo）与数据表保持一致。
 
@@ -442,19 +442,18 @@ Tomcat 第一版只吸收 Hermes 的四个局部能力：
 | 窗口内场景 | 动作 | 是否告警 |
 |---|---|---|
 | 同 profile 兼容 | `KeepOpaque` | 否 |
-| 跨 profile 且有 `fallback_text` | `ConvertToText`（优雅降级） | 否 |
-| 跨 profile 且无文本可救 | `StripOpaque`（continuity 彻底丢失） | **是（B）** |
-| 同 profile 却没能 `KeepOpaque`（任何非 keep 动作） | `ConvertToText` / `StripOpaque` | **是（A）** |
+| 跨 profile（无论是否有 `fallback_text`） | `StripOpaque` | 否 |
+| 同 profile 却没能 `KeepOpaque` | `StripOpaque` | **是（A）** |
 
-- **告警聚合（`ReplayDowngradeReport`）**：逐消息 `warn!` 改为**每请求至多一条汇总告警**，只在窗口内出现「真正降级失败」（上表 A / B）时触发；warning 携带 `downgrade_kind` / `target_profile` / `source_*` 与命中条数（`warn_worthy` / `same_profile_incompatible` / `cross_profile_lost` / `graceful_text` / `stripped_old_history`），并注明历史老 turn 已按窗口策略静默 strip。不再用进程内「问题指纹」缓存压重复 warning。
+- **告警聚合（`ReplayDowngradeReport`）**：逐消息 `warn!` 改为**每请求至多一条汇总告警**，只在窗口内出现同 profile 却未能 `KeepOpaque`（上表 A）时触发；warning 携带 `downgrade_kind` / `target_profile` / `source_*` 与命中条数（`warn_worthy` / `same_profile_incompatible` / `stripped_old_history`），并注明历史老 turn 已按窗口策略静默 strip。不再用进程内「问题指纹」缓存压重复 warning。
 - **`SameProfileIncompatible` 的识别**：provider / api / model family 都与目标 profile 一致，但存储 continuity 的 `format` 与目标 `capture_mode` 不匹配（即同 profile 却落不到 `KeepOpaque`），属内部不一致，必告警以便排查。
 
 ```text
 context messages（出站前）
   [system][user#1][assistant#1+cont A][user#2][assistant#2 tool_call+cont B][tool result]
-                                         ▲ 最后一条真实 user        ▲ 最新 assistant
-  └──────────── 窗口外（旧轮次）─────────┘└──────── 可 replay 窗口（当前 turn）────────┘
-        cont A → StripOpaque（静默）              cont B → KeepOpaque / ConvertToText / Strip
+                                         ▲ 最后一条真实 user
+  └──────────────────── 窗口外（旧轮次）────────────────────┘└── 当前 turn ──┘
+        cont A → StripOpaque（静默）                    cont B → KeepOpaque / Strip
 ```
 
 ---
@@ -748,8 +747,7 @@ ReplayPolicy => keep reasoning_content on every subsequent request
 ```text
 正常 same-profile replay         → 正常请求（窗口内 KeepOpaque）
 窗口外旧轮次 continuity           → 静默 StripOpaque（仅计数，不告警）
-窗口内跨 profile + 有 fallback    → ConvertToText（优雅降级，不告警）
-窗口内跨 profile + 无文本可救     → 计入汇总告警（B：continuity 彻底丢失）
+窗口内跨 profile（无论有无 fallback）→ StripOpaque（静默）
 窗口内同 profile 却非 KeepOpaque  → 计入汇总告警（A：SameProfileIncompatible）
 DeepSeek 必需 reasoning 缺失      → Err（非可重试，避免继续 400）
 OpenAI previous_response_id 失效  → warning + 退回路径 A（store=false + 显式 replay）重试一次

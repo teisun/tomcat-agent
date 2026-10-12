@@ -3,10 +3,11 @@
 //! 当 LLM 本轮**没有产出 tool_calls**（纯文本回复）时，reasoning loop 不再继续，
 //! 进入"收束分支"做四步 cleanup：
 //!
-//! 1. `on_message_appended(content_buf.len())` + `messages.push(assistant)`
-//! 2. **Timing ⑤**：L0 cleanup → preheat.try_restart_if_pending → L2
-//!    `check_after_reply`（仅 ratio ≥ 0.85）→ preheat.try_start（Idle → Running）
-//! 3. 条件发射 `Layer0ContextRelease` / `AutoCompactionStart`
+//! 1. `on_assistant_message_appended(content_buf.len())` + `messages.push(assistant)`
+//! 2. **Timing ⑤**：preheat.try_restart_if_pending → `apply_ready_preheat`
+//!    （仅 ratio ≥ 0.85；fold → apply → unfold，成功时只在 history_end 内执行 L0）
+//!    → preheat.try_start（Idle → Running）
+//! 3. 条件发射 `AutoCompactionStart`
 //! 4. `emit_context_metrics()` + `TurnEnd { tool_results: [] }`
 //!
 //! 历史：原嵌在 `run.rs::run_reasoning_loop` 的 `if tool_calls.is_empty()` 分支
@@ -15,18 +16,79 @@
 
 use std::sync::Arc;
 
-use crate::core::compaction::run_layer0_cleanup;
-use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation};
-use crate::core::session::manager::estimated_tokens_from_chars;
+use tracing::warn;
+
+use crate::core::llm::{
+    ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
+    TokenUsage,
+};
+use crate::core::plan_runtime::{file_store, NextAction, PlanRuntime};
 use crate::infra::events::{AgentEvent, Message};
 
-use super::types::AgentLoop;
+use super::{
+    current_tail_guard::{apply_ready_preheat, ensure_working_message_ids},
+    types::AgentLoop,
+};
+
+/// 连续注入上限。到顶后停止注入、交还用户，避免模型卡在同一个坎上无限打转。
+pub(super) const MAX_COMPLETION_GUARD_INJECTIONS: u32 = 8;
+
+/// text-only 回合的处理结果。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TurnOutcome {
+    /// 回合正常结束，reasoning loop 可以返回。
+    Finished,
+    /// 计划还没做完，已注入继续指令，reasoning loop 应再跑一轮。
+    Continue,
+}
+
+/// 计划尚未收口时，模型不能靠"回一段文字"结束回合。
+///
+/// 收口判据统一由 `next_action` 决定：`Done` / `HandOff` 结束本回合；
+/// `ContinueWork`（仍有未完成 todo）或 `RunVerify`（最终验收进行中）会注入继续指令。
+async fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
+    let plan_id = plan_runtime.executing_plan_id()?;
+    let plan = plan_runtime
+        .active_plan_path()
+        .and_then(|path| file_store::read_plan(&path).ok())?;
+
+    let next_action = plan_runtime.next_action(&plan.frontmatter).await;
+    if matches!(&next_action, NextAction::Done | NextAction::HandOff { .. }) {
+        return None;
+    }
+    if plan_runtime
+        .note_completion_guard_nudge(&plan_id, &next_action)
+        .await
+    {
+        if let Err(error) = plan_runtime.hand_back_stalled_plan("idle_nudges", Some(2)) {
+            warn!(%error, plan_id, "failed to hand back stalled plan");
+        }
+        return None;
+    }
+
+    Some(format!(
+        "[Automated runtime message — not the user. Do not reply to it or acknowledge it.] Your previous response ended without a tool call. Push the plan with a tool call now.\nPlan `{plan_id}`: {}",
+        next_action.instruction()
+    ))
+}
+
+async fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {
+    if !agent.config.subagent_type.is_root() {
+        return None;
+    }
+    let runtime = agent.config.plan_runtime.as_ref()?;
+    completion_guard_instruction(runtime).await
+}
 /// 处理 text-only 回合的全部副作用：消息落盘、timing ⑤、收束事件发射。
 ///
 /// **必须在 `tool_calls.is_empty()` 分支调用，且仅调用一次**——重复调用会重复
 /// `on_message_appended` 计费、重复发 `TurnEnd`。
 ///
 /// `content_buf`：本轮 delta 累积。`turn_index`：作为 `TurnEnd` 的 turn 序号。
+///
+/// 这是不带 usage 的测试便利包装；生产路径统一调用
+/// [`finalize_turn_after_text_with_usage`]，以保留 provider usage。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finalize_turn_after_text(
     agent: &mut AgentLoop,
@@ -39,78 +101,145 @@ pub(super) async fn finalize_turn_after_text(
     thinking_text: Option<String>,
     reasoning_continuation: Option<ReasoningContinuation>,
     continuity: Option<ContinuityMetadata>,
-) -> Result<(), crate::infra::error::AppError> {
+) -> Result<TurnOutcome, crate::infra::error::AppError> {
+    finalize_turn_after_text_with_usage(
+        agent,
+        messages,
+        content_buf,
+        turn_index,
+        finish_reason,
+        error_message,
+        error_code,
+        thinking_text,
+        reasoning_continuation,
+        continuity,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finalize_turn_after_text_with_usage(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    content_buf: &str,
+    turn_index: usize,
+    finish_reason: Option<String>,
+    error_message: Option<String>,
+    error_code: Option<String>,
+    thinking_text: Option<String>,
+    reasoning_continuation: Option<ReasoningContinuation>,
+    continuity: Option<ContinuityMetadata>,
+    usage: Option<TokenUsage>,
+) -> Result<TurnOutcome, crate::infra::error::AppError> {
+    let has_error_code = error_code.is_some();
     if let Some(ref mut ctx_state) = agent.context_state {
-        ctx_state.on_message_appended(content_buf.len());
+        if usage.is_some() {
+            ctx_state.on_assistant_message_appended(content_buf.len());
+        } else {
+            // An earlier turn's usage does not include this response.
+            ctx_state.on_message_appended(content_buf.len());
+        }
     }
     let forced_id = agent.take_or_mint_pending_assistant_entry_id();
     let assistant_message_id = agent.push_message_with_forced_id(
         messages,
         ChatMessage::assistant(content_buf)
             .with_completion_metadata(finish_reason, error_message, error_code)
-            .with_reasoning_state(thinking_text, reasoning_continuation, continuity),
+            .with_reasoning_state(thinking_text, reasoning_continuation, continuity)
+            .with_usage(usage),
         &forced_id,
     )?;
 
-    // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
+    // Completion guard：计划还没收口就想用一段文字收工时，注入继续指令并把回合续上。
+    // 放在 timing ⑤ 之前 —— 这个回合根本没结束，不该走收束流程。
+    if !has_error_code {
+        if agent.completion_guard_injections >= MAX_COMPLETION_GUARD_INJECTIONS {
+            if agent.config.subagent_type.is_root() {
+                if let Some(runtime) = agent.config.plan_runtime.as_ref() {
+                    if let Err(error) = runtime.hand_back_stalled_plan("injection_cap", None) {
+                        warn!(%error, "failed to hand back plan after completion-guard cap");
+                    }
+                    return Ok(TurnOutcome::Finished);
+                }
+            }
+        } else if let Some(instruction) = should_apply_completion_guard(agent).await {
+            agent.completion_guard_injections += 1;
+            let mut nudge = ChatMessage::user(&instruction);
+            nudge.kind = MessageKind::Nudge;
+            if let Some(ref mut ctx_state) = agent.context_state {
+                ctx_state.on_message_appended(instruction.len());
+            }
+            agent.push_message(messages, nudge)?;
+            return Ok(TurnOutcome::Continue);
+        }
+    }
+
+    // Timing ⑤: try_restart → non-blocking boundary apply (including L0)
+    // → try_start → metrics. Preheat snapshots the current working set because Scheme E requires
+    // its covered end to be the durable transcript tail.
     let compaction_provider = agent.compaction_provider();
     let compaction_emitter = Arc::new(agent.emitter.clone());
+    let control_snapshot = agent
+        .config
+        .plan_runtime
+        .as_ref()
+        .map(|rt| rt.control_snapshot(Some(agent.wire_model())));
+    let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
-    let mut layer0_release: Option<(usize, usize)> = None;
-    if let Some(ref mut ctx_state) = agent.context_state {
-        // Step 1: L0 cleanup
-        let l0 = run_layer0_cleanup(
-            ctx_state,
-            &agent.config.context_config,
-            std::path::Path::new(&agent.config.agent_trail_dir),
-            &agent.config.session_id,
-        );
-        for pr in &l0.persisted {
-            ctx_state.session_obs.tool_result_chars_persisted += pr.original_chars;
-        }
-        let persist_tok = estimated_tokens_from_chars(l0.persist_chars_freed);
-        let placeholder_tok = estimated_tokens_from_chars(l0.placeholder_chars_freed);
-        if persist_tok > 0 || placeholder_tok > 0 {
-            ctx_state.session_obs.compaction_tokens_freed += persist_tok + placeholder_tok;
-            layer0_release = Some((persist_tok, placeholder_tok));
-        }
-
-        // Step 2: restore ExhaustedPending → Running
-        ctx_state.preheat.try_restart_if_pending(
-            ctx_state.usage_ratio(),
-            &ctx_state.messages,
-            &ctx_state.transcript_path,
-            Arc::clone(&compaction_provider),
-            &agent.config.context_config,
-            Arc::clone(&compaction_emitter),
-        );
-
-        // Step 3: L2 non-blocking poll + apply boundary
-        if ctx_state.usage_ratio() >= 0.85 {
-            crate::core::compaction::apply::check_after_reply(ctx_state, &agent.emitter);
-        }
-
-        // Step 4: Idle → Running (start new preheat if conditions met)
-        let ratio = ctx_state.usage_ratio();
-        let turn_count = ctx_state.turn_count();
-        if ctx_state.preheat.try_start(
-            ratio,
-            &ctx_state.messages,
-            &ctx_state.transcript_path,
-            Arc::clone(&compaction_provider),
-            &agent.config.context_config,
-            Arc::clone(&compaction_emitter),
-        ) {
-            preheat_started = Some((turn_count, ratio));
-        }
-    }
-
-    if let Some((p, ph)) = layer0_release {
-        agent.emit_event(AgentEvent::Layer0ContextRelease {
-            persist_tokens_freed: p,
-            placeholder_tokens_freed: ph,
+    if agent.context_state.is_some() {
+        // Step 1: restore ExhaustedPending → Running from the full working set, whose tail is
+        // the transcript tail while this turn is being finalized.
+        let restart_needed = agent.context_state.as_ref().is_some_and(|ctx_state| {
+            ctx_state.usage_ratio() >= 0.50 && ctx_state.preheat.is_exhausted_pending()
         });
+        if restart_needed {
+            ensure_working_message_ids(agent, messages)?;
+            if let Some(ctx_state) = agent.context_state.as_mut() {
+                ctx_state.preheat.try_restart_if_pending(
+                    ctx_state.usage_ratio(),
+                    messages,
+                    &ctx_state.transcript_path,
+                    compaction_cache_key.clone(),
+                    Arc::clone(&compaction_provider),
+                    agent.config.compaction_output_limit,
+                    &agent.config.context_config,
+                    Arc::clone(&compaction_emitter),
+                    control_snapshot.clone(),
+                );
+            }
+        }
+
+        // Step 2: L2 non-blocking poll + apply boundary. This is shared with the mid-turn
+        // guard so the boundary is always located in a merged history-plus-tail view.
+        let _boundary_applied = apply_ready_preheat(agent, messages, Some(0.85))?;
+
+        // Step 4: Idle → Running (start new preheat if conditions met).
+        let start_needed = agent.context_state.as_ref().is_some_and(|ctx_state| {
+            ctx_state.usage_ratio() >= 0.50 && ctx_state.preheat.is_idle()
+        });
+        if start_needed {
+            ensure_working_message_ids(agent, messages)?;
+            if let Some(ctx_state) = agent.context_state.as_mut() {
+                let ratio = ctx_state.usage_ratio();
+                let covered_count = messages.len();
+                if ctx_state.preheat.try_start(
+                    ratio,
+                    messages,
+                    &ctx_state.transcript_path,
+                    compaction_cache_key,
+                    Arc::clone(&compaction_provider),
+                    agent.config.compaction_output_limit,
+                    &agent.config.context_config,
+                    Arc::clone(&compaction_emitter),
+                    control_snapshot.clone(),
+                ) {
+                    preheat_started = Some((covered_count, ratio));
+                }
+            }
+        }
     }
+
     if let Some((covered_count, ratio_before)) = preheat_started {
         agent.emit_event(AgentEvent::AutoCompactionStart {
             covered_count,
@@ -118,7 +247,9 @@ pub(super) async fn finalize_turn_after_text(
         });
     }
 
-    agent.emit_context_metrics();
+    // Timing ⑤ may have rewritten history; this is a fresh best-effort
+    // estimate, not a newly returned provider Usage sample.
+    agent.emit_context_metrics(false);
     agent.emit_event(AgentEvent::TurnEnd {
         turn_index,
         message: Message(serde_json::json!({})),
@@ -127,5 +258,5 @@ pub(super) async fn finalize_turn_after_text(
         tool_call_ids: vec![],
         summary_title: None,
     });
-    Ok(())
+    Ok(TurnOutcome::Finished)
 }

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Crop the Tomcat sidebar strip from full-frame VSIX visual screenshots.
+"""Create optional left-window previews from default VSIX full-frame screenshots.
 
-Reads ``tomcat-vsix-visual-*.png`` screenshots from the artifacts dir, crops a
-left strip (activitybar + sidebar webview) and writes ``*-cropped.png`` next to
-them. Prints the full-frame paths as a fallback so they can be read directly if
-the crop is too narrow.
+Writes ``*-cropped.png`` next to the originals. A fixed left strip does not locate
+Tomcat in every workbench layout; visual acceptance must read the original full
+frames together with their AX/console evidence, not rely on these previews.
 
 Width is configurable via env:
   TOMCAT_CROP_WIDTH  logical CSS pixels of the strip (default 520)
-  TOMCAT_CROP_DPR     device pixel ratio of screencapture output (default 2)
+  TOMCAT_CROP_DPR     device pixel ratio of CDP output (default 2)
 """
 
 from __future__ import annotations
@@ -30,35 +29,26 @@ except ImportError:
 
 NAMES = (
     "tomcat-vsix-visual-collapsed.png",
-    "tomcat-vsix-visual-cross-owner.png",
-    "tomcat-vsix-visual-expanded.png",
-    "tomcat-vsix-visual-file-chip.png",
     "tomcat-vsix-visual-progress.png",
     "tomcat-vsix-visual-reload-replay.png",
     "tomcat-vsix-visual-switch-restore.png",
-    "tomcat-vsix-visual-tool-icons.png",
-    "tomcat-vsix-visual-tool-icons-bottom.png",
     "tomcat-vsix-visual-todo-expanded.png",
 )
 
-HEIGHTS = {
-    "tomcat-vsix-visual-file-chip.png": 640,
-    "tomcat-vsix-visual-tool-icons.png": 1050,
-    "tomcat-vsix-visual-tool-icons-bottom.png": 1050,
-}
+# Current default verify:vsix capture set. Legacy owner/expanded/icon captures have
+# no producer in this suite; the original full frames remain the visual evidence.
 
 
-def crop_one(src: Path, width_px: int, height_px: int | None = None) -> Path | None:
+def crop_one(src: Path, width_px: int) -> Path | None:
     if not src.exists():
         return None
     with Image.open(src) as img:
         w, h = img.size
         crop_w = min(width_px, w)
-        crop_h = min(height_px, h) if height_px is not None else h
-        cropped = img.crop((0, 0, crop_w, crop_h))
+        cropped = img.crop((0, 0, crop_w, h))
         out = src.with_name(src.stem + "-cropped.png")
         cropped.save(out)
-        print(f"cropped: {out} ({crop_w}x{crop_h} from {w}x{h})")
+        print(f"cropped: {out} ({crop_w}x{h} from {w}x{h})")
         return out
 
 
@@ -79,14 +69,12 @@ def main() -> int:
             print(f"full-frame not found: {src}", file=sys.stderr)
             continue
         print(f"full-frame: {src}")
-        logical_height = HEIGHTS.get(name)
-        height_px = logical_height * dpr if logical_height is not None else None
-        if crop_one(src, width_px, height_px) is not None:
+        if crop_one(src, width_px) is not None:
             produced += 1
 
-    if produced == 0:
+    if produced != len(NAMES):
         print(
-            "no cropped images produced; read full-frame screenshots directly.",
+            f"only {produced}/{len(NAMES)} required full frames available; do not count missing captures as accepted.",
             file=sys.stderr,
         )
         return 3

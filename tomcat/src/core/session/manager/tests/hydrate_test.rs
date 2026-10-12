@@ -1,4 +1,4 @@
-//! # `init_context_state` 与 `build_context_from_state` 还原路径
+//! # `init_context_state` 与停车列表还原路径
 //!
 //! 覆盖：
 //!
@@ -6,8 +6,7 @@
 //!   未创建会话 / boundary 边界丢弃旧轮 / 非 boundary compaction 保留旧轮
 //!   六种场景，断言 `messages` / `estimate_context_chars` / `context_budget_chars`
 //!   等字段符合预期。
-//! - `build_context_from_state`：把 `ContextState` 拼成最终发给 LLM 的
-//!   `Vec<ChatMessage>`，验证顺序与 role/kind 不丢失。
+//! - `ContextState.messages`：保存恢复后的工作列表，验证顺序与 role/kind 不丢失。
 
 use std::path::PathBuf;
 
@@ -20,10 +19,99 @@ use crate::core::llm::{
     ChatMessage, ChatMessageRole, ContinuityMetadata, MessageKind, ReasoningContinuation,
     ReasoningFormat, ReplayRequirement,
 };
+use crate::core::session::preheat_cache::write_preheat_cache;
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, resume_index_path, ResumeAnchor, ResumeDayAnchor,
     ResumeEntryKind, ResumeIndex,
 };
+
+#[test]
+fn hydrate_typed_provider_rendition_and_original_references() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, ImageSource};
+    use base64::Engine as _;
+    for with_provider in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new(temp.path().to_path_buf());
+        manager
+            .create_session(manager.current_session_key(), None)
+            .unwrap();
+        let source = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>";
+        let source_sha = manager.attachment_store().put(source).unwrap();
+        let png = base64::engine::general_purpose::STANDARD.decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+        ).unwrap();
+        let png_sha = manager.attachment_store().put(&png).unwrap();
+        let mut part = serde_json::json!({"type":"input_image_ref","blob_sha":source_sha,"mime_type":"image/svg+xml","filename":"icon.svg","detail":"high"});
+        if with_provider {
+            part["provider_sha"] = serde_json::json!(png_sha);
+        }
+        manager
+            .append_message(serde_json::json!({"role":"user","content":[part]}))
+            .unwrap();
+        let restarted = SessionManager::new(temp.path().to_path_buf());
+        let state = init_context_state(&restarted, &ContextConfig::default(), "sys").unwrap();
+        let Some(ChatMessageContent::Parts(parts)) = &state.messages[0].content else {
+            panic!("parts")
+        };
+        let ChatMessageContentPart::InputImage {
+            source: ImageSource::Inline(image),
+            detail,
+        } = &parts[0]
+        else {
+            panic!("materialized image")
+        };
+        assert_eq!(
+            image.mime_type,
+            if with_provider {
+                "image/png"
+            } else {
+                "image/svg+xml"
+            }
+        );
+        assert_eq!(
+            image.data,
+            base64::engine::general_purpose::STANDARD.encode(if with_provider {
+                png.as_slice()
+            } else {
+                source.as_slice()
+            })
+        );
+        assert_eq!(detail.as_deref(), Some("high"));
+    }
+}
+
+#[test]
+fn hydrate_provider_sha_equal_to_original_preserves_jpeg_mime() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, ImageSource};
+    let temp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(temp.path().to_path_buf());
+    manager
+        .create_session(manager.current_session_key(), None)
+        .unwrap();
+    // Pixel decoding belongs to ingest; hydration only resolves the stored rendition.
+    let sha = manager
+        .attachment_store()
+        .put(b"already ingested JPEG bytes")
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({"role":"user","content":[{
+            "type":"input_image_ref","blob_sha":sha,"provider_sha":sha,"mime_type":"image/jpeg"
+        }]}))
+        .unwrap();
+    let restarted = SessionManager::new(temp.path().to_path_buf());
+    let state = init_context_state(&restarted, &ContextConfig::default(), "sys").unwrap();
+    let Some(ChatMessageContent::Parts(parts)) = &state.messages[0].content else {
+        panic!("parts")
+    };
+    let ChatMessageContentPart::InputImage {
+        source: ImageSource::Inline(image),
+        ..
+    } = &parts[0]
+    else {
+        panic!("inline image")
+    };
+    assert_eq!(image.mime_type, "image/jpeg");
+}
 
 fn tool_call_json(id: &str) -> serde_json::Value {
     serde_json::json!({
@@ -32,6 +120,17 @@ fn tool_call_json(id: &str) -> serde_json::Value {
         "function": {
             "name": "read",
             "arguments": "{}"
+        }
+    })
+}
+
+fn ask_question_tool_call_json(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": "ask_question",
+            "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
         }
     })
 }
@@ -112,15 +211,19 @@ fn make_anchor(id: &str, ordinal: usize) -> ResumeAnchor {
 
 fn base_resume_index(total_entries: usize) -> ResumeIndex {
     ResumeIndex {
-        schema_version: 1,
+        schema_version: 2,
         transcript_size: 0,
         transcript_mtime_ms: 0,
         total_entries,
         last_entry_id: None,
         latest_boundary: None,
+        pending_boundary_markers: Default::default(),
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
+        agent_mode: None,
+        active_plan_path: None,
+        active_plan_id: None,
     }
 }
 
@@ -137,7 +240,7 @@ fn init_context_state_empty_session() {
     let state = init_context_state(&mgr, &cfg, "system prompt").unwrap();
     assert!(state.messages.is_empty());
     assert_eq!(state.estimate_context_chars, "system prompt".len());
-    assert_eq!(state.context_budget_chars, 1_088_000);
+    assert_eq!(state.context_budget_chars, 1_200_000);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -164,6 +267,272 @@ fn init_context_state_with_messages() {
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
     assert_eq!(state.messages.len(), 4);
     assert!(state.estimate_context_chars > 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn matching_preheat_cache_restores_completed_summary_without_calling_an_llm() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+    let start_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"old request"}))
+        .unwrap();
+    let end_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"old response"}))
+        .unwrap();
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let marker_id = compound_turn_id(&start_id, &end_id);
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(start_id.clone()),
+            covered_end_id: Some(end_id.clone()),
+            covered_count: Some(2),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: Some(100),
+            estimated_summary_tokens: Some(10),
+            estimated_tokens_saved: Some(90),
+            error: None,
+            attempts: None,
+            superseded: false,
+        }),
+    )
+    .unwrap();
+    write_preheat_cache(
+        &path,
+        &CompactionResult {
+            summary_text: "completed without applying".to_string(),
+            covered_start_id: start_id,
+            covered_end_id: end_id,
+            covered_count: 2,
+            transcript_compaction_entry_id: Some(marker_id),
+            estimated_covered_tokens_before: Some(100),
+            estimated_summary_tokens: Some(10),
+            estimated_tokens_saved: Some(90),
+            preheat_elapsed_ms: 140_000,
+        },
+    )
+    .unwrap();
+
+    let mut state = init_context_state(&mgr, &ContextConfig::default(), "system").unwrap();
+    let restored = state.preheat.poll_result();
+    assert!(matches!(
+        restored,
+        crate::core::compaction::preheat::PreheatOutcome::Completed(CompactionResult {
+            ref summary_text,
+            ..
+        }) if summary_text == "completed without applying"
+    ));
+}
+
+#[test]
+fn applied_preheat_body_makes_matching_cache_ineligible_for_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+    let start_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"old request"}))
+        .unwrap();
+    let end_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"old response"}))
+        .unwrap();
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let marker_id = compound_turn_id(&start_id, &end_id);
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(start_id.clone()),
+            covered_end_id: Some(end_id.clone()),
+            covered_count: Some(2),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+            superseded: false,
+        }),
+    )
+    .unwrap();
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummaryText(
+            crate::core::session::transcript::BranchSummaryTextEntry {
+                superseded: false,
+                id: Some(format!("{marker_id}:text")),
+                parent_id: Some(marker_id.clone()),
+                timestamp: Utc::now().to_rfc3339(),
+                for_id: marker_id.clone(),
+                summary: "already applied".to_string(),
+            },
+        ),
+    )
+    .unwrap();
+    write_preheat_cache(
+        &path,
+        &CompactionResult {
+            summary_text: "stale cached copy".to_string(),
+            covered_start_id: start_id,
+            covered_end_id: end_id,
+            covered_count: 2,
+            transcript_compaction_entry_id: Some(marker_id),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 0,
+        },
+    )
+    .unwrap();
+
+    let mut state = init_context_state(&mgr, &ContextConfig::default(), "system").unwrap();
+    assert!(
+        matches!(
+            state.preheat.poll_result(),
+            crate::core::compaction::preheat::PreheatOutcome::NotReady
+        ),
+        "a durable body makes its matching crash cache ineligible for restoration"
+    );
+}
+
+#[test]
+fn mismatched_preheat_cache_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+    let start_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"old request"}))
+        .unwrap();
+    let end_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"old response"}))
+        .unwrap();
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some("real-marker".to_string()),
+            parent_id: None,
+            timestamp: Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(start_id.clone()),
+            covered_end_id: Some(end_id.clone()),
+            covered_count: Some(2),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some("real-marker".to_string()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+            superseded: false,
+        }),
+    )
+    .unwrap();
+    write_preheat_cache(
+        &path,
+        &CompactionResult {
+            summary_text: "wrong result".to_string(),
+            covered_start_id: start_id,
+            covered_end_id: end_id,
+            covered_count: 2,
+            transcript_compaction_entry_id: Some("different-marker".to_string()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 0,
+        },
+    )
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "system").unwrap();
+    assert!(state.preheat.is_idle());
+}
+
+#[test]
+fn init_context_state_materializes_persisted_image_references_for_the_model() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = SessionManager::new(dir.clone());
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+    let image_bytes = b"persisted image payload";
+    let blob_sha = manager.attachment_store().put(image_bytes).unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "input_image_ref",
+                "blob_sha": blob_sha,
+                "mime_type": "image/png",
+                "detail": "high"
+            }]
+        }))
+        .unwrap();
+
+    let state = init_context_state(&manager, &ContextConfig::default(), "system").unwrap();
+    let user = state
+        .messages
+        .iter()
+        .find(|message| message.role == ChatMessageRole::User)
+        .expect("hydrated user message");
+    let crate::core::llm::ChatMessageContent::Parts(parts) =
+        user.content.as_ref().expect("image content")
+    else {
+        panic!("persisted image reference must hydrate as multipart content");
+    };
+    let crate::core::llm::ChatMessageContentPart::InputImage {
+        source: crate::core::llm::ImageSource::Inline(source),
+        detail,
+    } = &parts[0]
+    else {
+        panic!("model context must contain materialized inline image bytes");
+    };
+    assert_eq!(source.mime_type, "image/png");
+    assert_eq!(source.data, "cGVyc2lzdGVkIGltYWdlIHBheWxvYWQ=");
+    assert_eq!(detail.as_deref(), Some("high"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_skips_legacy_empty_assistant_after_output_exhaustion() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"",
+        "finish_reason":"max_tokens"
+    }))
+    .unwrap();
+    mgr.append_message(serde_json::json!({"role":"user","content":"q2"}))
+        .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    assert_eq!(state.messages.len(), 2);
+    assert_eq!(state.messages[0].text_content(), Some("q1"));
+    assert_eq!(state.messages[1].text_content(), Some("q2"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -381,7 +750,7 @@ fn compute_k_from_anchor_ordinal_and_total() {
 }
 
 #[test]
-fn slice_lower_bound_is_min_of_boundary_today_and_nth_turn() {
+fn slice_start_snaps_boundary_and_today_anchors_to_preceding_replay_turn() {
     let today = chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
     let mut index = base_resume_index(100);
     index.latest_boundary = Some(make_anchor("boundary", 40));
@@ -395,12 +764,39 @@ fn slice_lower_bound_is_min_of_boundary_today_and_nth_turn() {
     });
 
     let slice_start = compute_slice_start_anchor(&index, today).expect("slice start");
-    assert_eq!(slice_start.entry_id.as_deref(), Some("boundary"));
+    assert_eq!(
+        slice_start.entry_id.as_deref(),
+        Some("turn_earlier"),
+        "a boundary is not a protocol-safe start; use the preceding replay turn"
+    );
 
     index.latest_boundary = None;
     let slice_start =
         compute_slice_start_anchor(&index, today).expect("slice start without boundary");
     assert_eq!(slice_start.entry_id.as_deref(), Some("turn_earlier"));
+}
+
+#[test]
+fn today_anchor_never_starts_on_a_tool_result() {
+    let today = chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+    let mut index = base_resume_index(20);
+    index.recent_turn_starts = vec![make_anchor("user_before_midnight_tool", 8)];
+    index.latest_day_first_entry = Some(ResumeDayAnchor {
+        date: today.to_string(),
+        first_entry: ResumeAnchor {
+            entry_id: Some("tool_result_after_midnight".to_string()),
+            ordinal: 10,
+            timestamp: "2025-01-02T00:00:01.000Z".to_string(),
+            entry_kind: ResumeEntryKind::Message,
+        },
+    });
+
+    let slice_start = compute_slice_start_anchor(&index, today).expect("safe slice start");
+    assert_eq!(
+        slice_start.entry_id.as_deref(),
+        Some("user_before_midnight_tool"),
+        "the tool result's function declaration must remain in the recovered window"
+    );
 }
 
 #[test]
@@ -903,9 +1299,8 @@ fn init_context_state_with_compaction_entry() {
 }
 
 #[test]
-fn build_context_from_state_flattens_turns() {
-    let mut summary_msg = ChatMessage::compaction_summary("summary");
-    summary_msg.msg_id = Some("sum_1".to_string());
+fn hydrated_messages_preserve_turn_order() {
+    let mut summary_msg = ChatMessage::compaction_summary("summary", "sum_1");
     summary_msg.timestamp = Some("2026-04-04T12:00:00Z".to_string());
 
     let mut user_msg = ChatMessage::user("hello");
@@ -925,11 +1320,12 @@ fn build_context_from_state_flattens_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let msgs = build_context_from_state(&state);
+    let msgs = state.messages.clone();
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0].kind, MessageKind::CompactionSummary);
     assert_eq!(msgs[1].role, ChatMessageRole::User);
@@ -984,6 +1380,7 @@ fn init_context_state_boundary_discards_prior() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     crate::core::session::transcript::append_entry(&path, &boundary_entry).unwrap();
 
@@ -1141,6 +1538,8 @@ fn init_context_state_skips_error_entries_and_failed_turn_tail() {
         api_family: Some("responses".to_string()),
         status_code: Some(403),
         request_id: Some("req_123".to_string()),
+        failure_kind: Some("authentication".to_string()),
+        failure_domain: Some("account".to_string()),
         summary: "API 错误 403 · gateway".to_string(),
         detail: "API 错误 403 原文".to_string(),
     })
@@ -1185,7 +1584,10 @@ fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
         .find(|m| m.role == ChatMessageRole::Tool)
         .expect("hydrated messages should include synthetic tool result");
     assert_eq!(healed_tool.tool_call_id.as_deref(), Some("call_1"));
-    assert_eq!(healed_tool.text_content(), Some("[interrupted]"));
+    assert_eq!(
+        healed_tool.text_content(),
+        Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    );
 
     let path = mgr.current_transcript_path().unwrap().unwrap();
     let entries = crate::core::session::transcript::read_entries_tail(&path, 16).unwrap();
@@ -1197,13 +1599,143 @@ fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
                 TranscriptEntry::Message(me)
                     if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
                         && me.message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_1")
-                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
             )
         })
         .count();
     assert_eq!(
         interrupted_tools, 1,
         "should append exactly one synthetic tool result"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_heals_dangling_ask_question_with_pending_placeholder() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"需要你的选择",
+        "tool_calls":[ask_question_tool_call_json("ask_call_1")]
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let healed_tool = state
+        .messages
+        .iter()
+        .find(|message| message.role == ChatMessageRole::Tool)
+        .expect("hydrate should materialize a pending ask_question result");
+    assert_eq!(healed_tool.tool_call_id.as_deref(), Some("ask_call_1"));
+    assert_eq!(
+        healed_tool.text_content(),
+        Some(crate::core::session::manager::PENDING_TOOL_RESULT_TEXT)
+    );
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 8).unwrap();
+    assert!(
+        entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Message(me)
+                    if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
+                        && me.message.get("tool_call_id").and_then(|v| v.as_str()) == Some("ask_call_1")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::PENDING_TOOL_RESULT_TEXT)
+            )
+        }),
+        "restart hydration must persist a [pending] tool result for ask_question"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_heals_mixed_tail_with_terminal_reads_and_pending_ask_question() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"mixed tool batch",
+        "tool_calls":[
+            tool_call_json("read_1"),
+            tool_call_json("read_2"),
+            tool_call_json("read_3"),
+            ask_question_tool_call_json("ask_1")
+        ]
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let tool_messages: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|message| message.role == ChatMessageRole::Tool)
+        .collect();
+    assert_eq!(tool_messages.len(), 4);
+    assert_eq!(tool_messages[0].tool_call_id.as_deref(), Some("read_1"));
+    assert_eq!(
+        tool_messages[0].text_content(),
+        Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    );
+    assert_eq!(tool_messages[3].tool_call_id.as_deref(), Some("ask_1"));
+    assert_eq!(
+        tool_messages[3].text_content(),
+        Some(crate::core::session::manager::PENDING_TOOL_RESULT_TEXT)
+    );
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 16).unwrap();
+    let tool_results: Vec<(String, String)> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(me)
+                if me.message.get("role").and_then(|value| value.as_str()) == Some("tool") =>
+            {
+                Some((
+                    me.message["tool_call_id"].as_str().unwrap().to_string(),
+                    me.message["content"].as_str().unwrap().to_string(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_results,
+        vec![
+            (
+                "read_1".to_string(),
+                crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string(),
+            ),
+            (
+                "read_2".to_string(),
+                crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string(),
+            ),
+            (
+                "read_3".to_string(),
+                crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string(),
+            ),
+            (
+                "ask_1".to_string(),
+                crate::core::session::manager::PENDING_TOOL_RESULT_TEXT.to_string(),
+            ),
+        ]
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1244,7 +1776,10 @@ fn init_context_state_heals_only_missing_last_tool_result() {
         .iter()
         .rfind(|m| m.role == ChatMessageRole::Tool)
         .expect("last tool should exist");
-    assert_eq!(last_tool.text_content(), Some("[interrupted]"));
+    assert_eq!(
+        last_tool.text_content(),
+        Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1276,10 +1811,11 @@ fn init_context_state_heals_all_missing_tail_tool_results() {
     assert_eq!(interrupted_tools[0].tool_call_id.as_deref(), Some("call_1"));
     assert_eq!(interrupted_tools[1].tool_call_id.as_deref(), Some("call_2"));
     assert!(
-        interrupted_tools
-            .iter()
-            .all(|m| m.text_content() == Some("[interrupted]")),
-        "all missing tail tool results should be healed with [interrupted]"
+        interrupted_tools.iter().all(|m| {
+            m.text_content()
+                == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+        }),
+        "all missing tail tool results should be healed with the restart-unknown placeholder"
     );
 
     let path = mgr.current_transcript_path().unwrap().unwrap();
@@ -1291,7 +1827,8 @@ fn init_context_state_heals_all_missing_tail_tool_results() {
                 entry,
                 TranscriptEntry::Message(me)
                     if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
-                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
             )
         })
         .count();
@@ -1299,6 +1836,8 @@ fn init_context_state_heals_all_missing_tail_tool_results() {
         appended_interrupted, 2,
         "multi-missing case should append one synthetic tool result per missing tool"
     );
+    crate::core::session::assert_active_tool_result_integrity(&entries)
+        .expect("hydrate must close every tail tool call exactly once");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1337,10 +1876,10 @@ fn init_context_state_does_not_heal_when_non_tool_role_interrupts_tail_tool_roun
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
     assert!(
-        state
-            .messages
-            .iter()
-            .all(|m| m.text_content() != Some("[interrupted]")),
+        state.messages.iter().all(|m| {
+            m.text_content()
+                != Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+        }),
         "non-tool tail role should make hydrate refuse to guess"
     );
 
@@ -1351,10 +1890,101 @@ fn init_context_state_does_not_heal_when_non_tool_role_interrupts_tail_tool_roun
                 entry,
                 TranscriptEntry::Message(me)
                     if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
-                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+                        && me.message.get("content").and_then(|v| v.as_str())
+                            == Some(crate::core::session::manager::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
             )
         }),
         "broken tail should not append synthetic interrupted tool results"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_restores_persisted_message_kinds_and_defaults_legacy_rows() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = SessionManager::new(dir.clone());
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+
+    manager
+        .append_message(serde_json::json!({"role": "user", "content": "legacy"}))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "interjection",
+            "kind": "steering",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "keep working",
+            "kind": "nudge",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "background complete",
+            "kind": "signal",
+        }))
+        .unwrap();
+
+    let state = init_context_state(&manager, &ContextConfig::default(), "sys").unwrap();
+    assert_eq!(
+        state
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            MessageKind::Normal,
+            MessageKind::Steering,
+            MessageKind::Nudge,
+            MessageKind::Signal,
+        ],
+        "restart hydration must retain every persisted synthetic-message identity"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn steering_survives_a_reload_without_becoming_a_turn_start() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = SessionManager::new(dir.clone());
+    let key = manager.current_session_key().to_string();
+    manager.create_session(&key, None).unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "implement the change",
+        }))
+        .unwrap();
+    manager
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "use Chinese for the response",
+            "kind": "steering",
+        }))
+        .unwrap();
+
+    let rehydrated = init_context_state(&manager, &ContextConfig::default(), "sys").unwrap();
+    let steering = rehydrated
+        .messages
+        .iter()
+        .find(|message| message.text_content() == Some("use Chinese for the response"))
+        .expect("the persisted steering message must survive hydration");
+    assert_eq!(steering.kind, MessageKind::Steering);
+    assert!(
+        !steering.starts_logical_turn(),
+        "a reload must not turn an in-flight interjection into a new logical user turn"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

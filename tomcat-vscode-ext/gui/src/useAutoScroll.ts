@@ -49,9 +49,12 @@ export function selectActiveStickyUserId(
 }
 
 type UseAutoScrollOptions = {
+  paused?: boolean;
   containerRef: RefObject<HTMLElement | null>;
   contentRef: RefObject<HTMLElement | null>;
   contentKey: string;
+  // Follow the caller's actual content branch, not the stable ref object's identity.
+  contentMounted?: boolean;
   latestUserMessageId: string | null;
   oldestItemKey: string | null;
   resetKey: string | null;
@@ -118,9 +121,11 @@ function currentStickyUserMetrics(
 }
 
 export function useAutoScroll({
+  paused = false,
   containerRef,
   contentRef,
   contentKey,
+  contentMounted = true,
   latestUserMessageId,
   oldestItemKey,
   resetKey,
@@ -133,10 +138,13 @@ export function useAutoScroll({
   const autoScrollRef = useRef<{ top: number; time: number } | null>(null);
   const bottomSpacerHeightRef = useRef(0);
   const modeRef = useRef<ScrollMode>("followBottom");
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
   const pendingScrollActionRef = useRef<PendingScrollAction | null>(null);
   const previousOldestItemKeyRef = useRef<string | null>(oldestItemKey);
   const previousScrollHeightRef = useRef(0);
   const previousClientHeightRef = useRef(0);
+  const lastFollowBottomAutoLayoutRef = useRef(0);
   const revealSettledRef = useRef(false);
   const skipAutoLayoutUntilRef = useRef(0);
   const userHasScrolledRef = useRef(false);
@@ -189,8 +197,12 @@ export function useAutoScroll({
   };
 
   const setScrollTop = (element: HTMLElement, top: number) => {
+    if (pausedRef.current) return;
     const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
     const nextTop = Math.max(0, Math.min(top, maxTop));
+    if (Math.abs(element.scrollTop - nextTop) < 1) {
+      return;
+    }
     markProgrammaticScroll(nextTop);
     element.scrollTop = nextTop;
   };
@@ -304,6 +316,7 @@ export function useAutoScroll({
   };
 
   const updateAutoScrollLayout = () => {
+    if (pausedRef.current) { updateStickyPromptState(); return; }
     if (Date.now() < skipAutoLayoutUntilRef.current) {
       updateStickyPromptState();
       return;
@@ -328,6 +341,7 @@ export function useAutoScroll({
     }
 
     if (!userHasScrolledRef.current) {
+      lastFollowBottomAutoLayoutRef.current = Date.now();
       scrollToBottom(false);
       syncUserHasScrolled(false);
     }
@@ -413,9 +427,10 @@ export function useAutoScroll({
   }, [containerRef, oldestItemKey]);
 
   useLayoutEffect(() => {
+    if (!contentMounted) return;
     updateAutoScrollLayout();
     previousScrollHeightRef.current = containerRef.current?.scrollHeight ?? 0;
-  }, [contentKey]);
+  }, [contentKey, contentMounted]);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -515,7 +530,7 @@ export function useAutoScroll({
   useEffect(() => {
     const container = containerRef.current;
     const content = contentRef.current;
-    if (!container || !content || typeof ResizeObserver === "undefined") {
+    if (!contentMounted || !container || !content || typeof ResizeObserver === "undefined") {
       return;
     }
 
@@ -541,6 +556,14 @@ export function useAutoScroll({
         }
         return;
       }
+      if (
+        modeRef.current === "followBottom" &&
+        !clientHeightChanged &&
+        Date.now() - lastFollowBottomAutoLayoutRef.current < 48
+      ) {
+        updateStickyPromptState();
+        return;
+      }
       updateAutoScrollLayout();
       updateStickyPromptState();
     });
@@ -551,7 +574,7 @@ export function useAutoScroll({
     return () => {
       observer.disconnect();
     };
-  }, [containerRef, contentKey, contentRef]);
+  }, [containerRef, contentKey, contentMounted, contentRef]);
 
   useEffect(() => {
     const container = containerRef.current;

@@ -59,7 +59,7 @@ pub enum AgentEvent {
 
 | 层级 | JSON `type` | Payload |
 |------|-------------|---------|
-| L0（timing ⑤） | `layer0_context_release` | `{ "persistTokensFreed": number, "placeholderTokensFreed": number }`（估算 tok，已计入会话 `compactionTokensFreed`） |
+| L0（boundary 应用成功后） | `layer0_context_release` | `{ "persistTokensFreed": number, "placeholderTokensFreed": number }`（估算 tok，已计入会话 `compactionTokensFreed`；可在时机②、⑤或 mid-turn 发生） |
 | L1（async preheat） | `auto_compaction_start` | `{ "coveredCount": number, "ratioBefore": number }` |
 | L1 | `auto_compaction_end` | `{ "elapsedMs", "summaryChars", "coveredCount", "ratioAfter", "estimatedCoveredTokensBefore", "estimatedSummaryTokens", "estimatedTokensSaved" }`；在 **L1 后台任务**于 `append_entry` 成功（或无 transcript 路径）后发射一次；`ratioAfter` 为预热启动时的利用率快照（与 L2 apply 前主线程读到的 ratio 可能不同）；**不在此事件时**累加会话 `compactionTokensFreed`。**L2** `apply_boundary` **不再**发射 `auto_compaction_end`。 |
 | L1（失败耗尽） | `compaction_error` | `{ "exhaustedAfterRetries": boolean, "attempts": number, "error": string, "source": string, "ratio": number \| null }`；典型 `source: "preheat"` |

@@ -1,7 +1,7 @@
 use serde_json::Value;
 
-use super::super::catalog::{visible_tools_for_mode, visible_tools_for_mode_with_policy};
-use super::super::state::PlanState;
+use super::super::catalog::all_tools_with_policy;
+use crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy;
 
 fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
     values
@@ -11,73 +11,25 @@ fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
 }
 
 #[test]
-fn chat_mode_excludes_create_plan_only() {
-    let tools = visible_tools_for_mode(&PlanState::Chat);
-    let n = names(&tools);
-    assert!(
-        !n.contains("create_plan"),
-        "CHAT mode must hide create_plan"
-    );
-    for kept in ["update_plan", "todos", "ask_question", "write", "bash"] {
-        assert!(n.contains(kept), "CHAT must expose {kept}, got: {n:?}");
-    }
-}
-
-#[test]
-fn planning_mode_exposes_full_set_including_writers_and_bash() {
-    let tools = visible_tools_for_mode(&PlanState::Planning);
-    let n = names(&tools);
-    for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
-        assert!(
-            n.contains(plan_tool),
-            "PLANNING must expose {plan_tool}, got: {n:?}"
-        );
-    }
-    for kept in ["write", "edit", "bash"] {
-        assert!(
-            n.contains(kept),
-            "PLANNING must NOT hide writer/bash at catalog layer (path policy guards it): {kept}, got: {n:?}"
-        );
-    }
-}
-
-#[test]
-fn executing_mode_excludes_create_plan_and_ask_question() {
-    let tools = visible_tools_for_mode(&PlanState::Executing {
-        plan_id: "demo".into(),
-    });
-    let n = names(&tools);
-    assert!(n.contains("update_plan"), "EXEC must keep update_plan");
-    assert!(n.contains("todos"), "EXEC must keep todos");
-    for hidden in ["create_plan", "ask_question"] {
-        assert!(!n.contains(hidden), "EXEC must hide {hidden}, got: {n:?}");
-    }
-    assert!(n.contains("write"), "EXEC must keep write at catalog layer");
-    assert!(n.contains("bash"), "EXEC must keep bash");
-}
-
-#[test]
-fn pending_mode_view_equals_chat_view() {
-    let pending = visible_tools_for_mode(&PlanState::Pending {
-        plan_id: "demo".into(),
-    });
-    let chat = visible_tools_for_mode(&PlanState::Chat);
-    assert_eq!(names(&pending), names(&chat));
-}
-
-#[test]
-fn completed_mode_view_equals_chat_view() {
-    let done = visible_tools_for_mode(&PlanState::Completed {
-        plan_id: "demo".into(),
-    });
-    let chat = visible_tools_for_mode(&PlanState::Chat);
-    assert_eq!(names(&done), names(&chat));
-}
-
-#[test]
 fn load_skill_can_be_hidden_by_policy() {
-    let with_skill = names(&visible_tools_for_mode_with_policy(&PlanState::Chat, true));
-    let without_skill = names(&visible_tools_for_mode_with_policy(&PlanState::Chat, false));
+    let with_skill = names(&all_tools_with_policy(true));
+    let without_skill = names(&all_tools_with_policy(false));
     assert!(with_skill.contains("load_skill"));
     assert!(!without_skill.contains("load_skill"));
+}
+
+#[test]
+fn system_tool_lines_and_tools_array_list_the_same_tools() {
+    for allow_load_skill in [false, true] {
+        let from_system = render_core_identity_tool_lines_with_policy(allow_load_skill)
+            .lines()
+            .map(|line| {
+                line.strip_prefix("- ")
+                    .and_then(|line| line.split_once(':'))
+                    .map(|(name, _)| name.to_string())
+                    .expect("tool line has '- name: description' shape")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(from_system, names(&all_tools_with_policy(allow_load_skill)));
+    }
 }

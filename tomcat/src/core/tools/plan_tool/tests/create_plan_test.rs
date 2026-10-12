@@ -1,7 +1,7 @@
 use super::common::*;
 
 #[test]
-fn create_plan_invisible_outside_planning_returns_error() {
+fn create_plan_rejected_outside_planning_returns_actionable_error() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -12,17 +12,38 @@ fn create_plan_invisible_outside_planning_returns_error() {
             id: "t1".into(),
             content: "x".into(),
             status: TodoStatus::Pending,
+            kind: TodoKind::Work,
         }],
     };
     let err = create_plan::execute(&rt, args).expect_err("CHAT 模式应被拒");
     match err {
-        ToolError::InvisibleInMode { tool, mode } => {
+        ToolError::RejectedInMode {
+            tool,
+            mode,
+            guidance,
+        } => {
             assert_eq!(tool, "create_plan");
             assert_eq!(mode, "chat");
+            assert!(guidance.contains("Plan"));
         }
-        other => panic!("expected InvisibleInMode, got {other:?}"),
+        other => panic!("expected RejectedInMode, got {other:?}"),
     }
     cleanup_home(&home);
+}
+
+#[test]
+fn rejection_message_does_not_claim_the_tool_is_invisible() {
+    let error = ToolError::RejectedInMode {
+        tool: "create_plan",
+        mode: "chat".to_string(),
+        guidance: "Enter Plan mode before creating a plan.".into(),
+    };
+    let rendered = error.to_string().to_ascii_lowercase();
+    assert!(rendered.contains("not allowed"));
+    assert!(
+        !rendered.contains("invisible"),
+        "the catalog is stable; rejection must describe policy, not visibility"
+    );
 }
 
 #[test]
@@ -30,7 +51,7 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "为 chat 补齐 plan 闭环".into(),
         draft: "step 1; step 2; step 3".into(),
@@ -38,6 +59,7 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
             id: "t1".into(),
             content: "first".into(),
             status: TodoStatus::Pending,
+            kind: TodoKind::Work,
         }],
     };
     let out = create_plan::execute(&rt, args).expect("create_plan OK");
@@ -50,8 +72,12 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
 
     assert_eq!(
-        rt.active_planning_plan_id().as_deref(),
+        rt.active_plan().as_ref().map(|plan| plan.id.as_str()),
         Some(plan_id.as_str())
+    );
+    assert_eq!(
+        rt.active_plan().as_ref().map(|plan| plan.state),
+        Some(PlanFileState::Planning)
     );
     let path = home
         .join(".tomcat")
@@ -68,11 +94,11 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
 }
 
 #[test]
-fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
+fn create_plan_multiple_times_overrides_the_active_plan() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
 
     let first = create_plan::execute(
         &rt,
@@ -83,6 +109,7 @@ fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
                 id: "t1".into(),
                 content: "first".into(),
                 status: TodoStatus::Pending,
+                kind: TodoKind::Work,
             }],
         },
     )
@@ -96,6 +123,7 @@ fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
                 id: "t1".into(),
                 content: "second".into(),
                 status: TodoStatus::Pending,
+                kind: TodoKind::Work,
             }],
         },
     )
@@ -104,7 +132,10 @@ fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
     let first_id = first["plan_id"].as_str().unwrap();
     let second_id = second["plan_id"].as_str().unwrap();
     assert_ne!(first_id, second_id);
-    assert_eq!(rt.active_planning_plan_id().as_deref(), Some(second_id));
+    assert_eq!(
+        rt.active_plan().as_ref().map(|plan| plan.id.as_str()),
+        Some(second_id)
+    );
     assert_eq!(
         rt.active_plan_path(),
         Some(plan_path_for_id(second_id).unwrap()),
@@ -120,7 +151,7 @@ fn create_plan_normalizes_legacy_heading_wrapped_draft() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "Draft a minimal internal plan with two clear next steps.".into(),
         draft: "## Goal\n\nDraft a minimal internal plan.\n\n## Notes\n\nKeep scope small and actionable.\n"
@@ -129,6 +160,7 @@ fn create_plan_normalizes_legacy_heading_wrapped_draft() {
             id: "t1".into(),
             content: "first".into(),
             status: TodoStatus::Pending,
+            kind: TodoKind::Work,
         }],
     };
     let out = create_plan::execute(&rt, args).expect("create_plan OK");
@@ -153,7 +185,7 @@ fn create_plan_rejects_empty_goal() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "".into(),
         draft: "d".into(),
@@ -161,6 +193,7 @@ fn create_plan_rejects_empty_goal() {
             id: "t1".into(),
             content: "x".into(),
             status: TodoStatus::Pending,
+            kind: TodoKind::Work,
         }],
     };
     let err = create_plan::execute(&rt, args).expect_err("空 goal 应被拒");
@@ -173,7 +206,7 @@ fn create_plan_rejects_empty_draft_or_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let err = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -183,6 +216,7 @@ fn create_plan_rejects_empty_draft_or_todos() {
                 id: "t1".into(),
                 content: "x".into(),
                 status: TodoStatus::Pending,
+                kind: TodoKind::Work,
             }],
         },
     )
@@ -218,6 +252,18 @@ fn create_plan_from_json_rejects_legacy_plan_id_and_body() {
     }))
     .expect_err("旧字段 body 应被拒");
     matches!(err, ToolError::BadArgs(_));
+}
+
+#[test]
+fn create_plan_rejects_removed_acceptance_commands_argument() {
+    let err = create_plan::CreatePlanArgs::from_json(&serde_json::json!({
+        "goal": "declare acceptance",
+        "draft": "body",
+        "todos": [{ "id": "t1", "content": "first" }],
+        "acceptance_commands": ["cargo test"],
+    }))
+    .expect_err("removed field must not silently recreate the old floor");
+    assert!(err.to_string().contains("unknown field"));
 }
 
 #[test]

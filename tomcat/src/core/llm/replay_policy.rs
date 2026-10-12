@@ -1,11 +1,10 @@
 //! # Reasoning continuity replay policy
 //!
 //! 集中定义 transcript-first continuity 的 profile 与 replay 决策，避免把
-//! `keep / convert / strip` 规则散落到各个 provider wire 适配器中。
+//! `keep / strip` 规则散落到各个 provider wire 适配器中。
 
 use super::types::{
-    ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind, ReasoningContinuation,
-    ReasoningFormat, ReplayRequirement,
+    ChatMessage, ChatMessageRole, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
 };
 use tracing::warn;
 
@@ -25,13 +24,6 @@ pub enum ReplayAcceptance {
     Never,
 }
 
-/// opaque blob 不兼容时的降级策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DowngradeMode {
-    FallbackText,
-    VisibleHistoryOnly,
-}
-
 /// `(provider, api, model family)` 级别的兼容规则卡。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCompatProfile {
@@ -43,14 +35,12 @@ pub struct ProviderCompatProfile {
     pub replay_acceptance: ReplayAcceptance,
     pub requires_tool_turn_replay: bool,
     pub supports_response_id_hint: bool,
-    pub downgrade_mode: DowngradeMode,
 }
 
 /// 对单条 assistant turn continuity 的出站决策。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayAction {
     KeepOpaque,
-    ConvertToText(String),
     StripOpaque,
 }
 
@@ -93,6 +83,7 @@ struct ChatCompletionsContinuityRule {
     /// 逻辑厂商（用于 same-profile 比对与日志）。
     provider: &'static str,
     profile_id: &'static str,
+    preserve_history: bool,
 }
 
 /// 走 `reasoning_content` 续传的模型家族；不在表内的 chat-completions 模型默认不续传。
@@ -101,15 +92,32 @@ const CHAT_COMPLETIONS_CONTINUITY_RULES: &[ChatCompletionsContinuityRule] = &[
         family: "deepseek-v4",
         provider: "deepseek",
         profile_id: "deepseek.v4.reasoning_content",
+        preserve_history: false,
     },
     ChatCompletionsContinuityRule {
         family: "mimo-v2.5-pro",
         provider: "mimo",
         profile_id: "mimo.v2_5_pro.reasoning_content",
+        preserve_history: false,
+    },
+    ChatCompletionsContinuityRule {
+        family: "kimi-k3",
+        provider: "moonshot",
+        profile_id: "moonshot.k3.reasoning_content",
+        preserve_history: true,
     },
 ];
 
 impl ProviderCompatProfile {
+    /// K3 requires preserved thinking across real user turns as well as tool loops.
+    /// https://platform.kimi.ai/docs/guide/use-thinking-models
+    pub fn preserves_thinking_history(&self) -> bool {
+        self.api_family == "chat_completions"
+            && CHAT_COMPLETIONS_CONTINUITY_RULES
+                .iter()
+                .any(|rule| rule.family == self.model_family && rule.preserve_history)
+    }
+
     pub fn openai_responses(model: &str) -> Self {
         Self {
             profile_id: "openai.responses.default".to_string(),
@@ -120,7 +128,6 @@ impl ProviderCompatProfile {
             replay_acceptance: ReplayAcceptance::SameProfileOnly,
             requires_tool_turn_replay: false,
             supports_response_id_hint: true,
-            downgrade_mode: DowngradeMode::FallbackText,
         }
     }
 
@@ -146,7 +153,6 @@ impl ProviderCompatProfile {
             replay_acceptance: ReplayAcceptance::SameProfileOnly,
             requires_tool_turn_replay: false,
             supports_response_id_hint: true,
-            downgrade_mode: DowngradeMode::FallbackText,
         }
     }
 
@@ -165,10 +171,6 @@ impl ProviderCompatProfile {
                 replay_acceptance: ReplayAcceptance::SameProfileOnly,
                 requires_tool_turn_replay: true,
                 supports_response_id_hint: false,
-                // 跨 profile（如 deepseek↔mimo）切换时，若有 fallback_text/thinking_text 则优雅
-                // 降级为 ConvertToText（不告警），仅在无文本可救时才 StripOpaque——与续传文档
-                // §4.2.4/§4.2.6 的降级阶梯一致。
-                downgrade_mode: DowngradeMode::FallbackText,
             },
             None => Self {
                 profile_id: "openai.chat_completions.default".to_string(),
@@ -179,7 +181,6 @@ impl ProviderCompatProfile {
                 replay_acceptance: ReplayAcceptance::Never,
                 requires_tool_turn_replay: false,
                 supports_response_id_hint: false,
-                downgrade_mode: DowngradeMode::VisibleHistoryOnly,
             },
         }
     }
@@ -194,7 +195,6 @@ impl ProviderCompatProfile {
             replay_acceptance: ReplayAcceptance::SameProfileOnly,
             requires_tool_turn_replay: true,
             supports_response_id_hint: false,
-            downgrade_mode: DowngradeMode::FallbackText,
         }
     }
 }
@@ -207,22 +207,17 @@ pub fn plan(target: &ProviderCompatProfile, message: &ChatMessage) -> ReplayActi
     if is_compatible(target, continuation) {
         return ReplayAction::KeepOpaque;
     }
-    if matches!(target.downgrade_mode, DowngradeMode::FallbackText) {
-        if let Some(text) = continuity_fallback_text(message, continuation) {
-            return ReplayAction::ConvertToText(text);
-        }
-    }
     ReplayAction::StripOpaque
 }
 
 /// 带「可 replay 窗口」约束的出站决策：窗口外的历史 turn 一律 `StripOpaque`
-/// （只保留消息原有可见内容，丢弃隐藏 continuity blob，不转文本）；窗口内沿用 [`plan`]。
+/// （只保留消息原有可见内容，丢弃隐藏 continuity blob）；窗口内沿用 [`plan`]。
 pub fn plan_scoped(
     target: &ProviderCompatProfile,
     message: &ChatMessage,
     in_window: bool,
 ) -> ReplayAction {
-    if !in_window {
+    if !in_window && !target.preserves_thinking_history() {
         return ReplayAction::StripOpaque;
     }
     plan(target, message)
@@ -235,34 +230,24 @@ pub fn plan_scoped(
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayWindow {
     current_turn_start: usize,
-    last_assistant_idx: Option<usize>,
 }
 
 impl ReplayWindow {
     /// 基于整段 `messages` 计算窗口边界。
-    /// - `current_turn_start`：最后一条「真实 user 问句」（`role=user` 且 `kind=Normal`，
-    ///   排除 steering 与 compaction summary）之后的位置；无则为 0。
-    /// - `last_assistant_idx`：最后一条 assistant 消息下标，保证最新 assistant turn 始终在窗口内。
+    /// - `current_turn_start`：最后一条可作为模型输入的 user message（Normal 或 Signal）
+    ///   之后的位置；Steering、Nudge 与 compaction summary 不会切断当前窗口。无则为 0。
     pub fn compute(messages: &[ChatMessage]) -> Self {
         let current_turn_start = messages
             .iter()
-            .rposition(|m| {
-                matches!(m.role, ChatMessageRole::User) && matches!(m.kind, MessageKind::Normal)
-            })
+            .rposition(|m| matches!(m.role, ChatMessageRole::User) && m.kind.is_replay_input())
             .map(|i| i + 1)
             .unwrap_or(0);
-        let last_assistant_idx = messages
-            .iter()
-            .rposition(|m| matches!(m.role, ChatMessageRole::Assistant));
-        Self {
-            current_turn_start,
-            last_assistant_idx,
-        }
+        Self { current_turn_start }
     }
 
     /// 该下标的消息是否落在可 replay 窗口内。
     pub fn contains(&self, idx: usize) -> bool {
-        idx >= self.current_turn_start || Some(idx) == self.last_assistant_idx
+        idx >= self.current_turn_start
     }
 }
 
@@ -275,23 +260,20 @@ pub fn classify_replay_downgrade(
     let continuation = message.reasoning_continuation.as_ref()?;
     match action {
         ReplayAction::KeepOpaque => None,
-        ReplayAction::ConvertToText(_) | ReplayAction::StripOpaque => {
-            Some(if same_profile(target, continuation) {
-                ReplayDowngradeKind::SameProfileIncompatible
-            } else {
-                ReplayDowngradeKind::CrossProfile
-            })
-        }
+        ReplayAction::StripOpaque => Some(if same_profile(target, continuation) {
+            ReplayDowngradeKind::SameProfileIncompatible
+        } else {
+            ReplayDowngradeKind::CrossProfile
+        }),
     }
 }
 
 /// 判断某个**窗口内** turn 的降级是否值得告警，并返回根因分类。
 ///
-/// 返回 `None` = 静默：要么是 `KeepOpaque`（成功），要么是跨 profile 的 `ConvertToText`
-/// （设计内的优雅降级，推理已保成文本，预期行为，不刷屏）。
+/// 返回 `None` = 静默：要么是 `KeepOpaque`（成功），要么是跨 profile 的 opaque strip
+/// （opaque reasoning 无法安全跨 profile 重放，预期行为，不刷屏）。
 /// 返回 `Some(kind)` = 告警：
 /// - **A. SameProfileIncompatible**：同 profile 却没能 `KeepOpaque`（任何非 keep 动作都算异常）；
-/// - **B. CrossProfile + `StripOpaque`**：跨 profile 且连文本都救不回 → continuity 彻底丢失。
 pub fn warn_worthy_downgrade(
     target: &ProviderCompatProfile,
     message: &ChatMessage,
@@ -300,17 +282,13 @@ pub fn warn_worthy_downgrade(
     let kind = classify_replay_downgrade(target, message, action)?;
     match kind {
         ReplayDowngradeKind::SameProfileIncompatible => Some(kind),
-        ReplayDowngradeKind::CrossProfile => match action {
-            ReplayAction::StripOpaque => Some(kind),
-            _ => None,
-        },
+        ReplayDowngradeKind::CrossProfile => None,
     }
 }
 
 fn action_label(action: &ReplayAction) -> &'static str {
     match action {
         ReplayAction::KeepOpaque => "keep_opaque",
-        ReplayAction::ConvertToText(_) => "convert_to_text",
         ReplayAction::StripOpaque => "strip_opaque",
     }
 }
@@ -332,15 +310,17 @@ struct ReplayDowngradeSample {
 pub struct ReplayDowngradeReport {
     warn_worthy: usize,
     same_profile_incompatible: usize,
-    cross_profile_lost: usize,
-    graceful_text: usize,
     stripped_old_history: usize,
     sample: Option<ReplayDowngradeSample>,
 }
 
 impl ReplayDowngradeReport {
-    /// 记录窗口内一条 turn 的出站结果（`KeepOpaque` / 无 continuation 不计入）。
-    pub fn record_in_window(
+    /// Record one replay decision that was evaluated for this outbound request.
+    ///
+    /// Chat Completions invokes this only for its current replay window;
+    /// Responses invokes it for the full explicit history. The name therefore
+    /// describes the decision, not a windowing policy owned by this collector.
+    pub fn record_replay_decision(
         &mut self,
         target: &ProviderCompatProfile,
         message: &ChatMessage,
@@ -349,16 +329,13 @@ impl ReplayDowngradeReport {
         if classify_replay_downgrade(target, message, action).is_none() {
             return;
         }
-        if matches!(action, ReplayAction::ConvertToText(_)) {
-            self.graceful_text += 1;
-        }
         let Some(warn_kind) = warn_worthy_downgrade(target, message, action) else {
             return;
         };
         self.warn_worthy += 1;
         match warn_kind {
             ReplayDowngradeKind::SameProfileIncompatible => self.same_profile_incompatible += 1,
-            ReplayDowngradeKind::CrossProfile => self.cross_profile_lost += 1,
+            ReplayDowngradeKind::CrossProfile => {}
         }
         if self.sample.is_none() {
             if let Some(continuation) = message.reasoning_continuation.as_ref() {
@@ -395,8 +372,6 @@ impl ReplayDowngradeReport {
             downgrade_kind = sample.kind.as_str(),
             warn_worthy = self.warn_worthy,
             same_profile_incompatible = self.same_profile_incompatible,
-            cross_profile_lost = self.cross_profile_lost,
-            graceful_text = self.graceful_text,
             stripped_old_history = self.stripped_old_history,
             source_provider = %sample.source_provider,
             source_api = %sample.source_api,
@@ -407,18 +382,6 @@ impl ReplayDowngradeReport {
             sample.kind.message()
         );
     }
-}
-
-/// 当 opaque blob 无法原样回放时，取最佳 effort 的安全文本 continuity。
-pub fn continuity_fallback_text(
-    message: &ChatMessage,
-    continuation: &ReasoningContinuation,
-) -> Option<String> {
-    continuation
-        .fallback_text
-        .clone()
-        .or_else(|| message.thinking_text.clone())
-        .filter(|text| !text.trim().is_empty())
 }
 
 /// 根据 profile 与 turn shape 计算 transcript 中应写入的 replay 强度。
@@ -433,32 +396,6 @@ pub fn replay_requirement_for_profile(
         }
         _ => ReplayRequirement::SameProfileOptional,
     }
-}
-
-/// 仅对出站 clone 生效：把 continuity 退化为安全文本，不污染 transcript 主账本。
-pub fn apply_text_downgrade(message: &ChatMessage, continuity_text: &str) -> ChatMessage {
-    let mut downgraded = message.without_completion_metadata();
-    if continuity_text.trim().is_empty() {
-        return downgraded;
-    }
-
-    let existing = match downgraded.content.take() {
-        Some(ChatMessageContent::Text(text)) => Some(text),
-        Some(other) => {
-            downgraded.content = Some(other);
-            None
-        }
-        None => None,
-    };
-
-    let new_text = match existing {
-        Some(text) if !text.trim().is_empty() => {
-            format!("{text}\n\n[reasoning continuity]\n{continuity_text}")
-        }
-        _ => continuity_text.to_string(),
-    };
-    downgraded.content = Some(ChatMessageContent::Text(new_text));
-    downgraded
 }
 
 fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinuation) -> bool {
@@ -511,8 +448,8 @@ fn same_profile(target: &ProviderCompatProfile, continuation: &ReasoningContinua
         && target.api_family == "responses"
         && target.profile_id != "openai.responses.default"
     {
-        // New routed profiles must carry an explicit replay profile id; otherwise we fail closed
-        // and downgrade to visible text instead of risking cross-relay opaque replay.
+        // New routed profiles must carry an explicit replay profile id; otherwise fail closed
+        // and strip opaque reasoning rather than risk cross-relay replay.
         return false;
     }
     continuation.source_provider == target.provider

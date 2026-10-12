@@ -167,6 +167,7 @@ async fn async_timeout_produces_error() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn edit_file(
@@ -181,6 +182,7 @@ async fn async_timeout_produces_error() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn execute_bash(
@@ -188,7 +190,6 @@ async fn async_timeout_produces_error() {
             _: &str,
             _: Option<&str>,
             _: &str,
-            _: Option<&[String]>,
             _: Option<u64>,
         ) -> Result<BashResult, AppError> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;

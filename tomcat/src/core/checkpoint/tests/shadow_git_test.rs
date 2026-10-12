@@ -278,6 +278,35 @@ fn new_canonicalizes_existing_worktree_path() {
 }
 
 #[test]
+fn initialized_shadow_repo_enables_large_worktree_git_options() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+
+    let store = ShadowGitStore::new(trail, worktree);
+    store.ensure_repo_initialized().unwrap();
+
+    for (key, expected) in [
+        ("core.untrackedCache", "true"),
+        ("feature.manyFiles", "true"),
+        ("index.version", "4"),
+        ("index.threads", "true"),
+    ] {
+        let output = store.run_git(["config", "--get", key]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            expected,
+            "shadow git must configure {key} for large worktrees"
+        );
+    }
+}
+
+#[test]
 fn summarize_failure_omits_file_list() {
     let output = fake_output(
         "?? should-not-leak-a\n?? should-not-leak-b\n M should-not-leak-c\n",
@@ -390,6 +419,84 @@ fn timeout_sets_cooldown_and_omits_captured_file_list() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn git_runner_drains_large_stdout_and_stderr_before_waiting_for_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+
+    let script = make_large_output_git_script(root.path());
+    let store = ShadowGitStore::new(trail, worktree)
+        .with_git_program(script)
+        .with_git_timeout(Duration::from_secs(5));
+
+    let started = Instant::now();
+    let output = store
+        .run_git_allow_failure(["emit-large-output"])
+        .expect("large output must not block the git child on a full pipe");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "输出被持续排空后，git 不应等到 timeout 才退出"
+    );
+    assert_eq!(output.stdout.len(), 256 * 1024);
+    assert_eq!(output.stderr.len(), 128 * 1024);
+}
+
+#[cfg(unix)]
+#[test]
+fn git_runner_timeout_preserves_large_drained_output() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+
+    let script = make_large_output_git_script(root.path());
+    let store = ShadowGitStore::new(trail, worktree)
+        .with_git_program(script)
+        .with_git_timeout(Duration::from_secs(3));
+
+    let started = Instant::now();
+    let err = store
+        .run_git_allow_failure(["emit-large-output-and-hang"])
+        .expect_err("hung git must still hit the timeout");
+
+    assert!(err.is_timeout());
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "timeout should not be extended by joining the output readers"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn record_does_not_deadlock_when_ls_files_exceeds_pipe_capacity() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+    fs::write(worktree.join("note.txt"), "hello").unwrap();
+
+    let script = make_large_ls_files_git_script(root.path());
+    let store = ShadowGitStore::new(trail, worktree)
+        .with_git_program(script)
+        .with_git_timeout(Duration::from_secs(5));
+
+    let checkpoint = store
+        .record(request("large-ls-files"))
+        .expect("大 ls-files 输出不应卡住 checkpoint");
+
+    assert!(!checkpoint.is_null());
+}
+
 #[test]
 fn exclude_keeps_noise_out_of_snapshot() {
     if !git_available() {
@@ -476,6 +583,69 @@ fn make_status_timeout_git_script(dir: &std::path::Path) -> std::path::PathBuf {
 if [ "$1" = "status" ]; then
   echo "?? should-not-leak-from-status"
   sleep 0.2
+  exit 0
+fi
+exec git "$@"
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn make_large_output_git_script(dir: &std::path::Path) -> std::path::PathBuf {
+    let script = dir.join("git-large-output.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/bash
+emit_kib() {
+  local byte="$1"
+  local count="$2"
+  local chunk
+  printf -v chunk '%*s' 1024 ''
+  chunk=${chunk// /$byte}
+  for ((i = 0; i < count; i++)); do
+    printf '%s' "$chunk"
+  done
+}
+if [ "$1" = "emit-large-output" ] || [ "$1" = "emit-large-output-and-hang" ]; then
+  emit_kib x 256
+  emit_kib y 128 >&2
+  if [ "$1" = "emit-large-output-and-hang" ]; then
+    exec /bin/sleep 10
+  fi
+  exit 0
+fi
+exec git "$@"
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn make_large_ls_files_git_script(dir: &std::path::Path) -> std::path::PathBuf {
+    let script = dir.join("git-large-ls-files.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/bash
+emit_kib() {
+  local chunk
+  printf -v chunk '%*s' 1024 ''
+  chunk=${chunk// /x}
+  for ((i = 0; i < 256; i++)); do
+    printf '%s' "$chunk"
+  done
+}
+if [ "$1" = "ls-files" ]; then
+  emit_kib
+  printf '\0'
   exit 0
 fi
 exec git "$@"

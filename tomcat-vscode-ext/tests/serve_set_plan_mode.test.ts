@@ -1,8 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import { initializeServe } from "../src/serveClient/initialize";
 import {
   createRealServeMessenger,
+  buildAndInterruptPlan,
   spawnScriptedOpenAiStreamServer,
   sseDelta,
   sseDone,
@@ -15,105 +17,57 @@ import {
 warmTomcatBinaryForSuite();
 
 describe("real tomcat serve plan integration", () => {
-  it("supports enter, build, and exit semantics with stable error codes", async () => {
+  it("separates agent mode from the plan file and preserves stable error codes", async () => {
     const server = await spawnScriptedOpenAiStreamServer([
-      {
-        parts: [sseDelta("building plan"), sseFinish("stop"), sseDone()],
-      },
+      { parts: [sseDelta("building plan"), { ...sseFinish("stop"), delayMs: 1000 }, sseDone()] },
     ]);
-    const runtime = await createRealServeMessenger(server.baseUrl);
-
+    let runtime: Awaited<ReturnType<typeof createRealServeMessenger>> | undefined;
     try {
-      const init = await initializeServe(runtime.messenger);
+      runtime = await createRealServeMessenger(server.baseUrl);
+      const { messenger } = runtime;
+      const init = await initializeServe(messenger);
+      const initial = await messenger.request({ type: "get_state", sessionId: init.sessionId });
+      expect(initial.success).toBe(true);
+      expect(initial.payload).toMatchObject({ agentMode: "chat", activePlan: null, workspaceMode: "code" });
+      const identity = { sessionId: init.sessionId, sessionKey: initial.payload?.sessionKey };
+      expect(identity.sessionKey).toEqual(expect.any(String));
 
-      const buildBlocked = await runtime.messenger.sendSetPlanMode({
-        action: "build",
-        sessionId: init.sessionId,
+      expect(await messenger.sendSetPlanMode({ action: "build", sessionId: init.sessionId }))
+        .toMatchObject({ success: false, error: "plan_build_blocked" });
+      expect(await messenger.sendSetPlanMode({ action: "exit", sessionId: init.sessionId }))
+        .toMatchObject({ success: false, error: "plan_state_conflict" });
+
+      const entered = waitForEvent(messenger, (event) =>
+        event.type === "session.agent_mode.changed" && event.agentMode === "plan");
+      expect(await messenger.sendSetPlanMode({ action: "enter", sessionId: init.sessionId }))
+        .toMatchObject({ success: true, payload: { ...identity, agentMode: "plan", activePlan: null } });
+      expect((await entered).at(-1)).toMatchObject({ sessionId: init.sessionId, agentMode: "plan" });
+      expect(await messenger.sendSetPlanMode({ action: "enter", sessionId: init.sessionId }))
+        .toMatchObject({ success: false, error: "plan_already_in_mode" });
+      expect(await messenger.sendSetPlanMode({ action: "exit", sessionId: init.sessionId }))
+        .toMatchObject({ success: true, payload: { ...identity, agentMode: "chat", activePlan: null } });
+
+      const planPath = await writePlanFile(runtime.fixture.homePath, "stage-a-plan-build", "planning");
+      const { build, events } = await buildAndInterruptPlan(messenger, init.sessionId, planPath);
+      expect(build).toMatchObject({
+        success: true,
+        payload: { ...identity, agentMode: "chat", activePlan: { id: "stage-a-plan-build", state: "executing" } },
       });
-      expect(buildBlocked.success).toBe(false);
-      expect(buildBlocked.error).toBe("plan_build_blocked");
-
-      const exitWhileChat = await runtime.messenger.sendSetPlanMode({
-        action: "exit",
-        sessionId: init.sessionId,
+      expect(build.payload?.activePlan).toMatchObject({ path: expect.stringContaining("stage-a-plan-build.plan.md") });
+      expect(events.find((event) => event.type === "plan.build")).toMatchObject({
+        type: "plan.build", planId: "stage-a-plan-build", sessionId: init.sessionId,
       });
-      expect(exitWhileChat.success).toBe(false);
-      expect(exitWhileChat.error).toBe("plan_state_conflict");
+      expect(events.find((event) => event.type === "agent_end")).toBeDefined();
+      expect(events.at(-1)?.type).toBe("agent_idle");
 
-      const enter = await runtime.messenger.sendSetPlanMode({
-        action: "enter",
-        sessionId: init.sessionId,
-      });
-      expect(enter.success).toBe(true);
-      expect(enter.payload?.planState).toBe("planning");
-
-      const enterAgain = await runtime.messenger.sendSetPlanMode({
-        action: "enter",
-        sessionId: init.sessionId,
-      });
-      expect(enterAgain.success).toBe(false);
-      expect(enterAgain.error).toBe("plan_already_in_mode");
-
-      const exit = await runtime.messenger.sendSetPlanMode({
-        action: "exit",
-        sessionId: init.sessionId,
-      });
-      expect(exit.success).toBe(true);
-      expect(exit.payload?.planState).toBe("chat");
-
-      const planPath = await writePlanFile(
-        runtime.fixture.homePath,
-        "stage-a-plan-build",
-        "planning",
-      );
-      const planBuild = waitForEvent(
-        runtime.messenger,
-        (event) => event.type === "plan.build",
-      );
-      const agentEnd = waitForEvent(
-        runtime.messenger,
-        (event) => event.type === "agent_end",
-      );
-      // busy 标志随 agent_idle 清除，且 agent_idle 按设计晚于 agent_end；
-      // 因此必须等到 agent_idle 再发下一条命令，否则会命中 busy。
-      const agentIdle = waitForEvent(
-        runtime.messenger,
-        (event) => event.type === "agent_idle",
-      );
-
-      const build = await runtime.messenger.sendSetPlanMode({
-        action: "build",
-        planId: planPath,
-        sessionId: init.sessionId,
-      });
-      const buildEvents = await planBuild;
-      const endEvents = await agentEnd;
-
-      expect(build.success).toBe(true);
-      expect(build.payload).toMatchObject({
-        planId: "stage-a-plan-build",
-        planState: "executing",
-      });
-      expect(String(build.payload?.planPath)).toContain(".plan.md");
-      expect(
-        buildEvents.some(
-          (event) =>
-            event.type === "plan.build" &&
-            event.planId === "stage-a-plan-build",
-        ),
-      ).toBe(true);
-      expect(endEvents.at(-1)?.type).toBe("agent_end");
-      await agentIdle;
-
-      const exitAfterExecuting = await runtime.messenger.sendSetPlanMode({
-        action: "exit",
-        sessionId: init.sessionId,
-      });
-      expect(exitAfterExecuting.success).toBe(true);
-      expect(exitAfterExecuting.payload?.planState).toBe("chat");
+      // Build already leaves planning mode. Exit cannot complete or discard the file.
+      expect(await messenger.sendSetPlanMode({ action: "exit", sessionId: init.sessionId }))
+        .toMatchObject({ success: false, error: "plan_state_conflict" });
+      const after = await messenger.request({ type: "get_state", sessionId: init.sessionId });
+      expect(after).toMatchObject({ success: true, payload: { ...identity, agentMode: "chat", activePlan: { id: "stage-a-plan-build" } } });
+      expect(await readFile(planPath, "utf8")).toContain("plan_id: stage-a-plan-build");
     } finally {
-      await runtime.cleanup();
-      await server.close();
+      try { await runtime?.cleanup(); } finally { await server.close(); }
     }
   }, 30_000);
 });

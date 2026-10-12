@@ -1,4 +1,11 @@
+# Verified 2026-08-07. `context_window` is the default selection and
+# `context_window_options` declares selectable windows. A user's choice belongs
+# in model-thinking.json, never in this capability catalog. We expose a 400K
+# compact tier plus the true 1M maximum whenever both exist; the default is the
+# largest window that does not trigger a provider long-context price multiplier.
+
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/models/gpt-5.2
 id = "gpt-5.2"
 model_name = "gpt-5.2"
 api = "openai-responses"
@@ -6,10 +13,14 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+max_output_tokens = 128000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/pricing
+# GPT-5.4+ charges long-context rates above 272K input, so 400K stays default.
 id = "gpt-5.4"
 model_name = "gpt-5.4"
 api = "openai-responses"
@@ -17,10 +28,14 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://developers.openai.com/api/docs/pricing
 id = "gpt-5.5"
 model_name = "gpt-5.5"
 api = "openai-responses"
@@ -28,10 +43,16 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Sources (checked 2026-10-01): https://developers.openai.com/api/docs/models/gpt-5.6-sol
+# https://developers.openai.com/api/docs/guides/fast-mode — Fast maps to priority.
+# Keep the gpt-5.6 alias; Ultrafast preview eligibility for this alias is unverified.
 id = "gpt-5.6"
 model_name = "gpt-5.6"
 api = "openai-responses"
@@ -39,10 +60,16 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+supported_speeds = ["fast"]
 context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://api-docs.deepseek.com/quick_start/pricing
+# Official DeepSeek V4 uses 1M context at one per-token price.
 id = "deepseek-v4-pro"
 model_name = "deepseek-v4-pro"
 api = "openai"
@@ -50,10 +77,14 @@ provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
-context_window = 400000
+supported_reasoning_levels = ["high", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 384000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://api-docs.deepseek.com/quick_start/pricing
 id = "deepseek-v4-flash"
 model_name = "deepseek-v4-flash"
 api = "openai"
@@ -61,10 +92,14 @@ provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
-context_window = 400000
+supported_reasoning_levels = ["high", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 384000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Same upstream model and limits as deepseek-v4-flash; this is Tomcat's utility role.
 id = "utility-flash"
 model_name = "deepseek-v4-flash"
 api = "openai"
@@ -72,10 +107,15 @@ provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
-context_window = 400000
+supported_reasoning_levels = ["high", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 384000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://platform.xiaomimimo.com/static/docs/quick-start/model.md
+# MiMo removed length-based tiered billing: https://platform.xiaomimimo.com/docs/en-US/updates/feature
 id = "mimo-v2.5-pro"
 model_name = "mimo-v2.5-pro"
 api = "openai"
@@ -83,10 +123,20 @@ provider = "mimo"
 api_key_env = "MIMO_API_KEY"
 base_url = "https://token-plan-cn.xiaomimimo.com"
 thinking_format = "doubao"
+# Source: https://platform.xiaomimimo.com/docs/en-US/api/chat/openai-api
+# MiMo exposes thinking on/off rather than multiple effort values; High is its
+# fixed enabled mode and Tomcat's shared Off control disables it.
+supported_reasoning_levels = ["high"]
 context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
+# The standard PaaS API identifies this 1M model as `glm-5.2`. The separate
+# Coding Plan Anthropic relay documents a `[1m]` suffix; Tomcat uses PaaS, so
+# context-tier selection must not alter this model name.
 id = "glm-5.2"
 model_name = "glm-5.2"
 api = "openai"
@@ -94,10 +144,17 @@ provider = "zhipu"
 api_key_env = "ZHIPU_API_KEY"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 thinking_format = "zai"
-context_window = 400000
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://platform.moonshot.cn/docs/guide/start-using-kimi-api
+# Moonshot documents this model's output ceiling as the remaining context after
+# the prompt, not as a fixed model-wide cap. Omit max_output_tokens so Tomcat
+# uses its configured conservative reserve instead of treating 256K as reserve.
 id = "kimi-k2.7-code"
 model_name = "kimi-k2.7-code"
 api = "openai"
@@ -105,38 +162,129 @@ provider = "moonshot"
 api_key_env = "MOONSHOT_API_KEY"
 base_url = "https://api.moonshot.cn"
 thinking_format = "doubao"
-context_window = 400000
-capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+# Source: https://platform.moonshot.cn/docs/guide/start-using-kimi-api
+# K2.7 Code supports thinking mode but does not document tunable effort tiers.
+supported_reasoning_levels = ["high"]
+context_window = 256000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://platform.moonshot.cn/docs/guide/faq
+id = "kimi-k3"
+model_name = "kimi-k3"
+api = "openai"
+provider = "moonshot"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.cn"
+thinking_format = "openai"
+supported_reasoning_levels = ["low", "high", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 131072
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
+# Claude 4.6+ 1M context uses standard per-token pricing.
 id = "claude-opus-4-8"
 model_name = "claude-opus-4-8"
 api = "anthropic-messages"
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-thinking_format = "anthropic"
-context_window = 400000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-opus-4-7"
 model_name = "claude-opus-4-7"
 api = "anthropic-messages"
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-thinking_format = "anthropic"
-context_window = 400000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
 id = "claude-opus-4-6"
 model_name = "claude-opus-4-6"
 api = "anthropic-messages"
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-thinking_format = "anthropic"
-context_window = 400000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
+id = "claude-fable-5"
+model_name = "claude-fable-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
+id = "claude-opus-5"
+model_name = "claude-opus-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
+id = "claude-sonnet-5"
+model_name = "claude-sonnet-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+# Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
+id = "claude-sonnet-4-6"
+model_name = "claude-sonnet-4-6"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+context_window = 1000000
+context_window_options = [400000, 1000000]
+max_output_tokens = 128000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }

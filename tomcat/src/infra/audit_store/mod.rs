@@ -175,10 +175,12 @@ impl AuditStore {
 
     /// 追加一条记录（仅追加，不可篡改）。写入格式：一行 JSON + 换行。
     pub fn append(&self, row: &AuditEntryRow) -> Result<(), AppError> {
-        let _guard = self
-            .append_guard
-            .lock()
-            .map_err(|e| AppError::Audit(format!("audit append lock poisoned: {}", e)))?;
+        let _guard = self.append_guard.lock().map_err(|e| {
+            AppError::Audit(crate::infra::i18n::tr(
+                "audit.lock",
+                &[("detail", &e.to_string())],
+            ))
+        })?;
         let line = serde_json::to_string(row).map_err(|e| AppError::Audit(e.to_string()))?;
         let mut content = line;
         content.push('\n');
@@ -204,8 +206,12 @@ impl AuditStore {
             if line.is_empty() {
                 continue;
             }
-            let row: AuditEntryRow = serde_json::from_str(line)
-                .map_err(|e| AppError::Audit(format!("audit line parse: {}", e)))?;
+            let row: AuditEntryRow = serde_json::from_str(line).map_err(|e| {
+                AppError::Audit(crate::infra::i18n::tr(
+                    "audit.lineParse",
+                    &[("detail", &e.to_string())],
+                ))
+            })?;
             let id = (zero_based + 1) as u64;
             if !filter_matches(&row, id, filter) {
                 continue;

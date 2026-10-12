@@ -22,17 +22,42 @@ pub struct ServeFixture {
     pub workspace: PathBuf,
 }
 
+// A standalone test instance owns a disposable HOME and workspace. Do not let
+// parent-agent markers, configuration overrides, proxies or real keys escape
+// into it; this never mutates the parent process environment or real config.
+pub fn isolated_serve_command(home: &Path) -> StdCommand {
+    let mut command = StdCommand::new(cargo_bin_path());
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if name == "TOMCAT_AGENT_ACTIVE"
+            || name.starts_with("TOMCAT__")
+            || name.ends_with("_API_KEY")
+            || matches!(
+                name.to_ascii_lowercase().as_str(),
+                "http_proxy" | "https_proxy" | "all_proxy"
+            )
+        {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env("HOME", home)
+        .env("TOMCAT__UI__LANGUAGE", "en")
+        .env("SHELL", "/bin/zsh")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost");
+    command
+}
+
 pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
     let home = tempfile::tempdir().expect("temp home");
     let home_path = home.path().to_path_buf();
     let workspace = home_path.join("workspace");
     fs::create_dir_all(&workspace).expect("create workspace");
 
-    let init_output = StdCommand::new(cargo_bin_path())
-        .env_remove("TOMCAT__LLM__DEFAULT_MODEL")
+    let init_output = isolated_serve_command(&home_path)
         .args(["init"])
-        .env("HOME", &home_path)
-        .env("SHELL", "/bin/zsh")
+        .current_dir(&workspace)
         .output()
         .expect("run tomcat init");
     assert!(
@@ -54,6 +79,11 @@ pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
         toml::to_string_pretty(&cfg).expect("serialize serve config"),
     )
     .expect("persist serve config");
+    fs::write(
+        home_path.join(".tomcat").join("mcp.json"),
+        r#"{"mcpServers":{}}"#,
+    )
+    .expect("isolate offline serve fixture from managed MCP processes");
 
     fs::write(
         home_path.join(".tomcat").join("models.toml"),
@@ -91,6 +121,10 @@ pub struct ServeChild {
 }
 
 impl ServeChild {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn send_value(&mut self, value: &Value) {
         self.send_raw(&value.to_string());
     }
@@ -113,6 +147,24 @@ impl ServeChild {
         serde_json::from_str(&line).unwrap_or_else(|err| {
             panic!("stdout line should be json: {err}; line={line}");
         })
+    }
+
+    pub fn recv_available(&self, wait: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + wait;
+        let mut out = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return out;
+            }
+            match self.stdout_rx.recv_timeout(remaining) {
+                Ok(line) => out.push(serde_json::from_str(&line).unwrap_or_else(|err| {
+                    panic!("stdout line should be json: {err}; line={line}");
+                })),
+                Err(mpsc::RecvTimeoutError::Timeout) => return out,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return out,
+            }
+        }
     }
 
     pub fn recv_until<F>(&self, timeout: Duration, predicate: F) -> Vec<Value>
@@ -197,11 +249,17 @@ impl Drop for ServeChild {
 }
 
 pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
-    let mut child = StdCommand::new(cargo_bin_path())
-        .env_remove("TOMCAT__LLM__DEFAULT_MODEL")
-        .env("HOME", &fx.home_path)
-        .env("SHELL", "/bin/zsh")
+    spawn_serve_child_with_env(fx, &[])
+}
+
+/// Explicit opt-in credentials/config for a disposable integration-test child.
+/// The default helper still strips every inherited real API key.
+pub fn spawn_serve_child_with_env(fx: &ServeFixture, extra_env: &[(&str, &str)]) -> ServeChild {
+    let mut child = isolated_serve_command(&fx.home_path)
         .env("OPENAI_API_KEY", "dummy-key")
+        .env("MOONSHOT_API_KEY", "dummy-key")
+        .env("ANTHROPIC_API_KEY", "dummy-key")
+        .envs(extra_env.iter().copied())
         .env("RUST_LOG", "tomcat=debug,info")
         .current_dir(&fx.workspace)
         .args(["serve", "--stdio"])
@@ -235,9 +293,16 @@ pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
 
     thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        let mut buf = String::new();
-        let _ = reader.read_to_string(&mut buf);
-        *stderr_buf_thread.lock().expect("stderr lock") = buf;
+        let mut chunk = [0u8; 4096];
+        while let Ok(count) = reader.read(&mut chunk) {
+            if count == 0 {
+                break;
+            }
+            stderr_buf_thread
+                .lock()
+                .expect("stderr lock")
+                .push_str(&String::from_utf8_lossy(&chunk[..count]));
+        }
     });
 
     ServeChild {
@@ -293,6 +358,70 @@ pub fn spawn_scripted_openai_stream_server_with_auto_title(
     spawn_scripted_openai_stream_server_internal(responses, true)
 }
 
+/// Concurrent content-routed LLM for multi-session tests. Delays belong in the
+/// MCP fixture, not this router; existing FIFO helpers keep their old behavior.
+pub fn spawn_routed_openai_stream_server<F>(route: F) -> ScriptedOpenAiServer
+where
+    F: Fn(&Value) -> ScriptedResponse + Send + Sync + 'static,
+{
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let stop = shutdown.clone();
+    let route = Arc::new(route);
+    let join = thread::spawn(move || {
+        let mut workers = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept routed LLM request: {error}"),
+            };
+            let stop = stop.clone();
+            let route = route.clone();
+            let captured = captured.clone();
+            workers.push(thread::spawn(move || {
+                stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+                let request = read_http_request_with_shutdown(&mut stream, Some(&stop));
+                if stop.load(Ordering::Relaxed) || request.trim().is_empty() { return; }
+                captured.lock().unwrap().push(request.clone());
+                let (headers, parts) = if request_is_session_title_request(&request) {
+                    session_title_response(&request, "MCP session")
+                } else {
+                    let body = extract_json_body(&request);
+                    let headers = if body.get("stream").and_then(Value::as_bool) == Some(false) {
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                    };
+                    (headers, route(&body).parts)
+                };
+                if stream.write_all(headers.as_bytes()).is_err() { return; }
+                for part in parts {
+                    assert_eq!(part.delay_ms, 0, "use MCP barriers, not LLM timing, to prove concurrency");
+                    if stop.load(Ordering::Relaxed) || stream.write_all(part.body.as_bytes()).is_err() || stream.flush().is_err() { return; }
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("routed LLM worker");
+        }
+    });
+    ScriptedOpenAiServer {
+        base_url: format!("http://{addr}"),
+        requests,
+        join: Some(join),
+        shutdown,
+    }
+}
+
 fn spawn_scripted_openai_stream_server_internal(
     responses: Vec<ScriptedResponse>,
     auto_title_response: bool,
@@ -333,13 +462,7 @@ fn spawn_scripted_openai_stream_server_internal(
                 .push(request.clone());
             let handled_title = auto_title_response && request_is_session_title_request(&request);
             let (headers, parts) = if handled_title {
-                (
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
-                    vec![ScriptedPart {
-                        delay_ms: 0,
-                        body: session_title_response_json(&request, "Generated title"),
-                    }],
-                )
+                session_title_response(&request, "Generated title")
             } else {
                 let scripted = scripted
                     .pop_front()
@@ -387,13 +510,62 @@ fn request_is_session_title_request(request: &str) -> bool {
     let Some((_, body)) = request.split_once("\r\n\r\n") else {
         return false;
     };
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return false;
-    };
-    if value.get("stream").and_then(Value::as_bool) != Some(false) {
-        return false;
-    }
     body.contains("Generate a short chat title from the user's first message.\\n")
+}
+
+fn session_title_response(request: &str, title: &str) -> (&'static str, Vec<ScriptedPart>) {
+    if request_is_streaming(request) {
+        return (
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            session_title_sse_parts(request, title),
+        );
+    }
+    (
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+        vec![ScriptedPart {
+            delay_ms: 0,
+            body: session_title_response_json(request, title),
+        }],
+    )
+}
+
+fn request_is_streaming(request: &str) -> bool {
+    request
+        .split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+        .and_then(|body| body.get("stream").and_then(Value::as_bool))
+        == Some(true)
+}
+
+fn session_title_sse_parts(request: &str, title: &str) -> Vec<ScriptedPart> {
+    if request.starts_with("POST /v1/responses ") {
+        return vec![
+            ScriptedPart {
+                delay_ms: 0,
+                body: format!(
+                    "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"title-mock\",\"content_index\":0,\"delta\":\"{title}\"}}\n\n"
+                ),
+            },
+            ScriptedPart {
+                delay_ms: 0,
+                body: "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n".to_string(),
+            },
+        ];
+    }
+    vec![
+        ScriptedPart {
+            delay_ms: 0,
+            body: format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{title}\"}}}}]}}\n\n"),
+        },
+        ScriptedPart {
+            delay_ms: 0,
+            body: "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".to_string(),
+        },
+        ScriptedPart {
+            delay_ms: 0,
+            body: "data: [DONE]\n\n".to_string(),
+        },
+    ]
 }
 
 fn session_title_response_json(request: &str, title: &str) -> String {
@@ -485,12 +657,22 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    read_http_request_with_shutdown(stream, None)
+}
+
+fn read_http_request_with_shutdown(
+    stream: &mut std::net::TcpStream,
+    shutdown: Option<&AtomicBool>,
+) -> String {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut body_start = None;
     let mut content_len = None;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
+        if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Relaxed)) {
+            break;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => {

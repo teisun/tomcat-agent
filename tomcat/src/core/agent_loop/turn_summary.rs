@@ -2,7 +2,9 @@
 
 use tracing::warn;
 
-use crate::core::summary::{fallback_turn_summary, generate_turn_summary, ToolSnapshot};
+use crate::core::summary::{
+    fallback_turn_summary, generate_turn_summary_with_output_limit, ToolSnapshot,
+};
 use crate::infra::events::wire;
 
 use super::types::{AgentLoop, ToolCallInfo};
@@ -56,6 +58,7 @@ pub(super) fn maybe_spawn_turn_summary_update(
     }
 
     let llm = agent.title_provider();
+    let title_output_limit = agent.config.title_output_limit;
     let emitter = agent.emitter.clone();
     let session_manager = agent.session_manager.clone();
     let session_id = agent.config.session_id.clone();
@@ -68,8 +71,14 @@ pub(super) fn maybe_spawn_turn_summary_update(
         .map(ToOwned::to_owned);
 
     tokio::spawn(async move {
-        let title =
-            generate_turn_summary(thinking_text.as_deref(), &tools, llm.as_ref(), &model).await;
+        let title = generate_turn_summary_with_output_limit(
+            thinking_text.as_deref(),
+            &tools,
+            llm.as_ref(),
+            &model,
+            title_output_limit,
+        )
+        .await;
         let title = title.trim().to_string();
         if title.is_empty() {
             return;

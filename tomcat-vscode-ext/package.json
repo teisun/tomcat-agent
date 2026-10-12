@@ -1,8 +1,8 @@
 {
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
-  "description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
-  "version": "0.1.16",
+  "description": "%extension.description%",
+  "version": "0.1.86",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/teisun/tomcat-agent.git"
   },
   "tomcat": {
-    "bundledCliVersion": "0.1.13"
+    "bundledCliVersion": "0.1.72"
   },
   "categories": [
     "AI",
@@ -36,63 +36,63 @@
     "commands": [
       {
         "command": "tomcat.restartServe",
-        "title": "Tomcat: Restart Serve"
+        "title": "%command.restartServe%"
       },
       {
         "command": "tomcat.session.new",
-        "title": "Tomcat: Start New Session"
+        "title": "%command.newSession%"
       },
       {
         "command": "tomcat.session.list",
-        "title": "Tomcat: List Sessions"
+        "title": "%command.listSessions%"
       },
       {
         "command": "tomcat.ui.focus",
-        "title": "Tomcat: Focus Agent Box"
+        "title": "%command.focus%"
       },
       {
         "command": "tomcat.openSettings",
-        "title": "Tomcat: Open Settings"
+        "title": "%command.settings%"
       },
       {
         "category": "Tomcat",
         "command": "tomcat.addSelectionToChat",
         "icon": "$(comment-add)",
-        "title": "Add Selection to Tomcat Chat"
+        "title": "%command.addSelection%"
       },
       {
         "category": "Tomcat",
         "command": "tomcat.addFileToChat",
         "icon": "$(file-add)",
-        "title": "Add File to Tomcat Chat"
+        "title": "%command.addFile%"
       },
       {
         "category": "Tomcat Plan",
         "command": "tomcat.plan.build",
         "icon": "$(run)",
-        "title": "Build Plan"
+        "title": "%command.buildPlan%"
       },
       {
         "category": "Tomcat Plan",
         "command": "tomcat.plan.selectBuildModel",
         "icon": "$(sparkle)",
-        "title": "Select Build Model"
+        "title": "%command.selectBuildModel%"
       },
       {
         "category": "Tomcat Plan",
         "command": "tomcat.plan.viewAsPreview",
-        "title": "Preview"
+        "title": "%command.preview%"
       },
       {
         "category": "Tomcat Plan",
         "command": "tomcat.plan.viewAsMarkdown",
-        "title": "Markdown"
+        "title": "%command.markdown%"
       },
       {
         "category": "Tomcat Plan",
         "command": "tomcat.plan.addSelectionToChat",
         "icon": "$(comment-add)",
-        "title": "Add Selection to Tomcat Chat"
+        "title": "%command.addSelection%"
       }
     ],
     "viewsContainers": {
@@ -116,7 +116,7 @@
     "customEditors": [
       {
         "viewType": "tomcat.planPreview",
-        "displayName": "Tomcat Plan Preview",
+        "displayName": "%editor.planPreview%",
         "selector": [
           {
             "filenamePattern": "*.plan.md"
@@ -205,7 +205,7 @@
         "tomcat.path": {
           "type": "string",
           "default": "tomcat",
-          "description": "Path to the tomcat executable used to launch `tomcat serve --stdio`."
+          "description": "%config.path%"
         },
         "tomcat.serve.extraArgs": {
           "type": "array",
@@ -213,24 +213,38 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional CLI arguments passed to `tomcat serve --stdio`."
+          "description": "%config.extraArgs%"
         },
         "tomcat.session.defaultCwd": {
           "type": "string",
           "default": "",
-          "description": "Default working directory used when creating a new Tomcat session. Empty means the first workspace folder."
+          "description": "%config.defaultCwd%"
+        },
+        "tomcat.layout.controlsInset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 40,
+          "default": 15,
+          "description": "%config.controlsInset%"
+        },
+        "tomcat.layout.contentInset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 40,
+          "default": 25,
+          "description": "%config.contentInset%"
         },
         "tomcat.contextSearch.maxFiles": {
           "type": "integer",
           "minimum": 1,
           "default": 20000,
-          "description": "Maximum workspace files indexed for `@` context search. Larger workspaces stop at this cap to keep the sidebar responsive."
+          "description": "%config.maxFiles%"
         },
         "tomcat.plan.buildModel": {
           "type": "string",
           "default": "",
           "scope": "application",
-          "description": "Model used when building a plan from the plan preview or a plan card. Empty means the session's current model is used."
+          "description": "%config.buildModel%"
         },
         "tomcat.plan.toolbarStyle": {
           "type": "string",
@@ -239,11 +253,11 @@
             "native"
           ],
           "enumDescriptions": [
-            "Hybrid (default): the editor title bar omits Build/model; a slim in-body action strip keeps the yellow Build button and the model dropdown.",
-            "Full native: Build and model live on the editor title bar (icons + QuickPick); the body has no action strip."
+            "%config.toolbarHybrid%",
+            "%config.toolbarNative%"
           ],
           "default": "hybrid",
-          "description": "Temporary A/B switch for where the plan preview shows its Build / model controls. Preview/Markdown always lives in the editor title bar overflow menu."
+          "description": "%config.toolbarStyle%"
         }
       }
     }
@@ -254,20 +268,26 @@
     "gen:wire": "tsx scripts/gen-wire.ts",
     "check:wire": "tsx scripts/gen-wire.ts --check",
     "compile": "tsc -p tsconfig.json",
-    "build": "npm run gen:wire && npm run build:gui && npm run compile",
+    "build": "npm run gen:wire && npm run build:gui && npm run compile && tsx scripts/buildArtifacts.ts",
     "watch": "npm run gen:wire && tsc -watch -p tsconfig.json",
-    "lint": "tsc -p tsconfig.json --noEmit",
+    "lint:extension": "tsc -p tsconfig.json --noEmit",
+    "lint": "npm run lint:extension && npm --prefix gui run lint",
     "test:unit:gui": "npm --prefix gui run test",
     "test:unit:core": "vitest run --maxWorkers 4 src",
     "test:unit": "npm run test:unit:core && npm run test:unit:gui",
-    "test:integration": "vitest run --maxWorkers 1 tests",
+    "test:integration": "vitest run --config vitest.integration.config.ts --maxWorkers 1",
     "test:e2e:vscode-devhost": "tsx scripts/run-vscode-devhost.ts",
     "test:e2e:vscode-install": "tsx scripts/run-vscode-install-e2e.ts",
     "test:e2e:webview-devhost": "tsx scripts/run-vscode-devhost.ts",
+    "test:e2e:webview-degraded": "TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES=1 TOMCAT_E2E_GREP='connected-but-degraded' npm run test:e2e:webview-devhost",
+    "test:e2e:webview-stop": "TOMCAT_E2E_GREP='resets interrupted Tomcat' npm run test:e2e:webview-devhost",
     "test:e2e:webview-install": "tsx scripts/run-vscode-install-e2e.ts",
+    "bench:webview-bridge": "tsx gui/scripts/measure-webview-bridge.tsx",
     "test": "npm run test:unit",
     "gate:fast": "npm run lint && npm run test:unit",
     "gate:full": "tsx scripts/run-vscode-full-gate.ts",
+    "accept:image": "tsx scripts/run-vscode-image-acceptance.ts",
+    "accept:connectors": "tsx scripts/run-vscode-connectors-acceptance.ts",
     "package:vsix": "tsx scripts/package-vsix.ts",
     "verify:vsix": "tsx scripts/run-vscode-verify-vsix.ts"
   },
@@ -280,7 +300,9 @@
     "mocha": "^11.7.6",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "vitest": "^3.2.6"
+    "undici": "^7.29.0",
+    "vitest": "^3.2.6",
+    "yauzl": "^3.4.0"
   },
   "overrides": {
     "diff": "9.0.0",

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::core::llm::{ChatMessage, ChatRequest, LlmProvider};
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 
 use super::tool_summary::one_line_summary;
 
@@ -35,18 +36,63 @@ pub async fn generate_turn_summary(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> String {
+    generate_turn_summary_with_output_limit(thinking_text, tools, llm, model, None).await
+}
+
+/// Same as [`generate_turn_summary`], with a provider-wire output limit
+/// resolved from the selected title model's capability.
+pub async fn generate_turn_summary_with_output_limit(
+    thinking_text: Option<&str>,
+    tools: &[ToolSnapshot],
+    llm: &dyn LlmProvider,
+    model: &str,
+    resolved_output_limit: Option<u32>,
+) -> String {
     if tools.is_empty() && thinking_text.is_none_or(|t| t.trim().is_empty()) {
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await
+    let (title, needs_purpose) = match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, None, resolved_output_limit),
+    )
+    .await
     {
-        Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
-        _ => fallback_turn_summary(tools),
+        Ok(Ok(title)) if !title.trim().is_empty() => {
+            let title = sanitize_title(title, 10);
+            let needs_purpose = is_bare_tool_count(&title);
+            (title, needs_purpose)
+        }
+        Ok(Ok(_)) => fallback_turn_summary_with_kind(tools),
+        Ok(Err(err)) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "turn summary utility generation failed; keeping fallback title"
+            );
+            fallback_turn_summary_with_kind(tools)
+        }
+        Err(err) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "turn summary utility generation timed out; keeping fallback title"
+            );
+            fallback_turn_summary_with_kind(tools)
+        }
     };
-    if is_bare_tool_count(&title) {
-        if let Some(clause) = generate_purpose_clause(thinking_text, tools, llm, model).await {
-            return format!("Used {} tools for {clause}", tools.len());
+    if needs_purpose {
+        if let Some(clause) =
+            generate_purpose_clause(thinking_text, tools, llm, model, resolved_output_limit).await
+        {
+            return tr(
+                if tools.len() == 1 {
+                    "summary.purpose.one"
+                } else {
+                    "summary.purpose.other"
+                },
+                &[("count", &tools.len().to_string()), ("purpose", &clause)],
+            );
         }
     }
     title
@@ -58,11 +104,33 @@ async fn generate_purpose_clause(
     tools: &[ToolSnapshot],
     llm: &dyn LlmProvider,
     model: &str,
+    resolved_output_limit: Option<u32>,
 ) -> Option<String> {
     let prompt = build_purpose_clause_prompt(thinking_text, tools);
-    let raw = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    let raw = match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, None, resolved_output_limit),
+    )
+    .await
+    {
         Ok(Ok(text)) if !text.trim().is_empty() => text,
-        _ => return None,
+        Ok(Ok(_)) => return None,
+        Ok(Err(err)) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "purpose clause utility generation failed; keeping bare count title"
+            );
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "purpose clause utility generation timed out; keeping bare count title"
+            );
+            return None;
+        }
     };
     let clause = sanitize_purpose_clause(raw);
     if clause.is_empty() {
@@ -105,8 +173,42 @@ pub async fn generate_session_title(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> Result<String, AppError> {
+    generate_session_title_with_cache_key_and_output_limit(first_user_text, llm, model, None, None)
+        .await
+}
+
+pub async fn generate_session_title_with_cache_key(
+    first_user_text: &str,
+    llm: &dyn LlmProvider,
+    model: &str,
+    cache_key: Option<&str>,
+) -> Result<String, AppError> {
+    generate_session_title_with_cache_key_and_output_limit(
+        first_user_text,
+        llm,
+        model,
+        cache_key,
+        None,
+    )
+    .await
+}
+
+/// Generate a session title with the title call's capability-resolved output
+/// limit. The public compatibility wrapper above deliberately uses `None`.
+pub async fn generate_session_title_with_cache_key_and_output_limit(
+    first_user_text: &str,
+    llm: &dyn LlmProvider,
+    model: &str,
+    cache_key: Option<&str>,
+    resolved_output_limit: Option<u32>,
+) -> Result<String, AppError> {
     let prompt = build_session_title_prompt(first_user_text);
-    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, cache_key, resolved_output_limit),
+    )
+    .await
+    {
         Ok(Ok(title)) if !title.trim().is_empty() => Ok(sanitize_title(title, 6)),
         Ok(Ok(_)) => Err(AppError::internal("LLM returned empty session title")),
         Ok(Err(e)) => Err(e),
@@ -123,12 +225,29 @@ pub async fn generate_command_summary(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> String {
+    generate_command_summary_with_output_limit(command, output_excerpt, llm, model, None).await
+}
+
+/// Same as [`generate_command_summary`], with a capability-resolved output
+/// limit for the utility request.
+pub async fn generate_command_summary_with_output_limit(
+    command: &str,
+    output_excerpt: Option<&str>,
+    llm: &dyn LlmProvider,
+    model: &str,
+    resolved_output_limit: Option<u32>,
+) -> String {
     let command = command.trim();
     if command.is_empty() {
         return String::new();
     }
     let prompt = build_command_summary_prompt(command, output_excerpt);
-    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    match tokio::time::timeout(
+        UTILITY_TIMEOUT,
+        call_utility(&prompt, llm, model, None, resolved_output_limit),
+    )
+    .await
+    {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 6),
         _ => fallback_command_summary(command),
     }
@@ -137,8 +256,8 @@ pub async fn generate_command_summary(
 /// 命令目的的规则回退：`Run <首个命令名>`（如 `Run git`）；无法识别时 `Ran command`。
 pub fn fallback_command_summary(command: &str) -> String {
     match first_command_binary(command) {
-        Some(bin) => format!("Run {bin}"),
-        None => "Ran command".to_string(),
+        Some(bin) => tr("summary.run", &[("command", &bin)]),
+        None => tr("summary.ranCommand", &[]),
     }
 }
 
@@ -212,29 +331,37 @@ fn split_command_segments(command: &str) -> Vec<String> {
 
 /// 规则回退：按工具类型计数拼自然语言摘要。
 pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
+    fallback_turn_summary_with_kind(tools).0
+}
+
+// Carry the enrichment decision from the branch that creates the fallback;
+// never infer it by parsing a translated title.
+fn fallback_turn_summary_with_kind(tools: &[ToolSnapshot]) -> (String, bool) {
     if tools.is_empty() {
-        return String::new();
+        return (String::new(), false);
     }
     if tools.len() == 1 {
         let t = &tools[0];
-        return match t.tool_name.as_str() {
-            "read" | "read_file" | "grep" | "search_files" => format!("Read {}", t.summary),
-            "write" | "write_file" | "edit" | "edit_file" | "str_replace" => {
-                "Edited file".to_string()
-            }
-            "bash" | "shell" | "execute_command" => {
-                let cmd = t.summary.strip_prefix("command=").unwrap_or(&t.summary);
-                format!("Ran {cmd}")
-            }
-            "ask_question" => "Asked question".to_string(),
-            "create_plan" => "Created plan".to_string(),
-            "update_plan" => "Updated plan".to_string(),
-            "todos" => "Updated todos".to_string(),
-            "web_search" => "Searched web".to_string(),
-            "web_fetch" => "Fetched url".to_string(),
-            "search_workspace" => "Searched workspace".to_string(),
-            other => format!("Used {}", other.replace('_', " ")),
-        };
+        return (
+            match t.tool_name.as_str() {
+                "read" | "read_file" | "grep" | "search_files" => {
+                    tr("summary.read", &[("detail", &t.summary)])
+                }
+                "write" | "write_file" | "edit" | "edit_file" | "str_replace" => {
+                    tr("summary.editedFile", &[])
+                }
+                "bash" | "shell" | "execute_command" => tr("summary.shell", &[]),
+                "ask_question" => tr("summary.question", &[]),
+                "create_plan" => tr("summary.draftedPlan", &[]),
+                "update_plan" => tr("summary.revisedPlan", &[]),
+                "todos" => tr("summary.todos", &[]),
+                "web_search" => tr("summary.webSearch", &[]),
+                "web_fetch" => tr("summary.webFetch", &[]),
+                "search_workspace" => tr("summary.workspace", &[]),
+                other => tr("summary.used", &[("name", &other.replace('_', " "))]),
+            },
+            false,
+        );
     }
 
     let read_count = tools
@@ -261,35 +388,71 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
         .count();
 
     if read_count > 0 && edit_count == 0 && bash_count == 0 {
-        return format!("Reviewed {read_count} files");
+        return (
+            tr(
+                if read_count == 1 {
+                    "summary.reviewed.one"
+                } else {
+                    "summary.reviewed.other"
+                },
+                &[("count", &read_count.to_string())],
+            ),
+            false,
+        );
     }
     if edit_count > 0 && read_count == 0 && bash_count == 0 {
-        return format!("Edited {edit_count} files");
+        return (
+            tr(
+                if edit_count == 1 {
+                    "summary.edited.one"
+                } else {
+                    "summary.edited.other"
+                },
+                &[("count", &edit_count.to_string())],
+            ),
+            false,
+        );
     }
     if bash_count > 0 && read_count == 0 && edit_count == 0 {
         return if bash_count == 1 {
-            fallback_turn_summary(std::slice::from_ref(&tools[0]))
+            fallback_turn_summary_with_kind(std::slice::from_ref(&tools[0]))
         } else {
-            format!("Executed {bash_count} commands")
+            (
+                tr(
+                    "summary.commands.other",
+                    &[("count", &bash_count.to_string())],
+                ),
+                false,
+            )
         };
     }
 
-    format!("Used {} tools", tools.len())
+    (
+        tr(
+            "summary.tools.other",
+            &[("count", &tools.len().to_string())],
+        ),
+        true,
+    )
 }
 
 async fn call_utility(
     prompt: &str,
     llm: &dyn LlmProvider,
     model: &str,
+    cache_key: Option<&str>,
+    resolved_output_limit: Option<u32>,
 ) -> Result<String, AppError> {
     let req = ChatRequest {
         model: model.to_string(),
         messages: vec![ChatMessage::user(prompt)],
+        resolved_output_limit,
         stream: Some(false),
         tools: None,
+        cache_key: cache_key.map(str::to_owned),
         ..Default::default()
     };
-    let resp = llm.chat(req).await?;
+    let resp = llm.chat_collect(req).await?;
     let text = resp
         .choices
         .first()
@@ -303,7 +466,10 @@ async fn call_utility(
     Ok(text)
 }
 
-fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]) -> String {
+pub(super) fn build_turn_summary_prompt(
+    thinking_text: Option<&str>,
+    tools: &[ToolSnapshot],
+) -> String {
     let thinking = thinking_text.unwrap_or("").trim();
     let mut tools_block = String::new();
     for t in tools {
@@ -315,7 +481,10 @@ fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]
          - At most 10 words\n\
          - Past tense\n\
          - First word must be a past tense verb (Reviewed, Updated, Created, Ran, Searched, etc.)\n\
+         - If this turn only creates or updates a plan, use exactly \"Created plan for <purpose>\" \
+           or \"Updated plan for <purpose>\" where <purpose> is a 2-6 word purpose phrase\n\
          - For multiple file reads use \"Reviewed N files\"\n\
+         - Describe the turn's purpose; do NOT repeat a raw shell command, flags, paths, or test names\n\
          - NEVER answer with only a bare tool count like \"Used 4 tools\"; always describe what was done. \
            If the tools are mixed and no single verb fits, use the form \"Used N tools for <short purpose>\".\n\
          - No quotes, no trailing punctuation\n\

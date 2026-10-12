@@ -2,8 +2,6 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 
-import { runTests } from "@vscode/test-electron";
-
 import {
   createHostE2eFixture,
   resolveVsCodeCli,
@@ -11,13 +9,20 @@ import {
   seedChatUserSettings,
 } from "./e2eHostFixture";
 import { packageVsixOrReuse } from "./package-vsix";
+import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
   const harnessTestsPath = path.resolve(harnessRoot, "out/test/index.js");
   const installRoot = await fs.mkdtemp("/tmp/tvsi-");
-  const extensionsDir = path.join(installRoot, "extensions");
+  const originalCwd = process.cwd();
+  const { runTests } = await (async () => {
+    process.chdir(installRoot);
+    try { return await import("@vscode/test-electron"); }
+    finally { process.chdir(originalCwd); }
+  })();
+  const extensionsDir = path.join(installRoot, ".vscode-test", "extensions");
   const userDataDir = path.join(installRoot, "user-data");
   const fixture = await createHostE2eFixture();
 
@@ -51,16 +56,16 @@ async function main(): Promise<void> {
     );
 
     await fs.access(harnessTestsPath);
-    await runTests({
+    await runVsCodeGuiTests(runTests, {
       extensionDevelopmentPath: harnessRoot,
       extensionTestsEnv: fixture.env,
       extensionTestsPath: harnessTestsPath,
       launchArgs: [
-        path.resolve(extensionRoot, ".."),
-        `--extensions-dir=${extensionsDir}`,
         `--user-data-dir=${userDataDir}`,
+        `--extensions-dir=${extensionsDir}`,
+        path.resolve(extensionRoot, ".."),
       ],
-      reuseMachineInstall: true,
+      reuseMachineInstall: false,
       vscodeExecutablePath: resolveVsCodeExecutable(),
     });
   } finally {

@@ -9,22 +9,74 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tomcat::core::compaction::compact_tool_results;
-use tomcat::core::llm::{ChatMessageRole, MessageKind};
+use tomcat::core::compaction::{apply::BoundaryEnv, compact_tool_results};
+use tomcat::core::llm::{ChatMessageRole, EffectiveModelLimits, LimitSource, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
+use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::infra::ScopedEventEmitter;
 use tomcat::{
-    build_context_from_state, compound_turn_id, init_context_state, llm_http_status_error,
-    run_chat_turn, AgentLoop, AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities,
-    ChatContext, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
-    LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager,
-    StreamEvent, WriteFileResult,
+    compound_turn_id, init_context_state, llm_http_status_error, run_chat_turn, AgentLoop,
+    AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage,
+    ChatRequest, ChatResponse, ContextConfig, ContextState, DefaultEventBus, DirEntry,
+    EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, LlmResolver, LlmScene,
+    PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
+    WriteFileResult,
 };
 use tracing::{info, info_span};
 
 fn scoped_emitter(bus: Arc<dyn EventBus>, session_id: &str) -> ScopedEventEmitter {
     ScopedEventEmitter::new(bus, session_id)
+}
+
+#[test]
+fn model_capability_budget_changes_the_pre_request_compaction_gate() {
+    // Same 111K-token history: Opus 5 and the legacy 272K budget both stay
+    // below the 85% preheat threshold, while a 120K-input model must compact
+    // before the next provider request.
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 111_000 * 4,
+        context_budget_chars: 872_000 * 4,
+        context_budget_tokens: 872_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: tomcat::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    assert!(
+        state.usage_ratio() < 0.85,
+        "Opus 5's 872K input budget must not compact a 111K-token history"
+    );
+
+    state.apply_limits(&EffectiveModelLimits {
+        context_window: 400_000,
+        model_max_output_tokens: None,
+        output_reserve_tokens: 128_000,
+        input_budget_tokens: 272_000,
+        context_source: LimitSource::LegacyFallback,
+        output_source: LimitSource::LegacyFallback,
+    });
+    assert!(
+        state.usage_ratio() < 0.85,
+        "legacy 272K remains below the pre-request compaction gate"
+    );
+
+    state.apply_limits(&EffectiveModelLimits {
+        context_window: 184_000,
+        model_max_output_tokens: Some(64_000),
+        output_reserve_tokens: 64_000,
+        input_budget_tokens: 120_000,
+        context_source: LimitSource::ModelCatalog,
+        output_source: LimitSource::ModelCatalog,
+    });
+    assert!(
+        state.usage_ratio() >= 0.85,
+        "the smaller model must trigger compaction before its next request"
+    );
 }
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────
@@ -95,16 +147,14 @@ impl FixedResolver {
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
             web_search: false,
         };
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: api.to_string(),
-            provider: provider.to_string(),
-            base_url: Some(base_url.to_string()),
-            key_source: "DEEPSEEK_API_KEY".to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities,
-        }
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = api.to_string();
+        call.provider = provider.to_string();
+        call.base_url = Some(base_url.to_string());
+        call.key_source = "DEEPSEEK_API_KEY".to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = capabilities;
+        call
     }
 }
 
@@ -130,8 +180,11 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
+}
+
+fn loop_binding(provider: Arc<dyn LlmProvider>, model: &str) -> ResolvedCall {
+    ResolvedCall::from_parts_unchecked(provider, model, model)
 }
 
 struct RecordingMockLlm {
@@ -203,6 +256,7 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -217,6 +271,7 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -224,8 +279,7 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -390,6 +444,10 @@ impl MessageAppendSink for InjectAppendInvariantSink {
         }
         self.inner.append_message_with_id(value, forced_id)
     }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.inner.append_custom_entry(extra)
+    }
 }
 
 fn chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
@@ -512,7 +570,7 @@ async fn test_failed_turn_append_invariant_rehydrates_context_and_allows_next_tu
     Ok(())
 }
 
-/// [Layer 1 + Layer 3 全链路] compact_tool_results 后仍超 ratio 时 force_drop_oldest_to_target 兜底
+/// [Layer 1 + Layer 3 全链路] confirmed overflow 后，L3 兜底删除最旧完整 turn
 #[test]
 fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     common::setup_logging();
@@ -543,6 +601,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -552,15 +611,22 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
-        tomcat::core::compaction::force_drop_oldest_to_target(&mut state);
+        let mut history_end = messages.len();
+        tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(
+            &mut state,
+            &mut messages,
+            &mut history_end,
+        );
     }
 
     assert!(state.usage_ratio() < 0.50);
-    assert!(!state.messages.is_empty());
+    assert!(!messages.is_empty());
 }
 
 /// [Session 重载] 写入消息与 `type: branch_summary` 摘要行后 init_context_state 正确重建
@@ -622,7 +688,7 @@ fn test_session_reload_with_branch_summary_entries() -> Result<(), Box<dyn std::
         .any(|m| m.text_content().is_some_and(|t| t.contains("new question")));
     assert!(has_new_msg, "应含 compaction 之后的 new question 消息");
 
-    let msgs = build_context_from_state(&state);
+    let msgs = state.messages.clone();
     assert!(msgs.len() >= 3, "展平后消息数应 >= 3");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -670,9 +736,9 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     );
 
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-ctx-overflow".to_string(),
         max_attempts: 3,
+        system_prompt: Some("system prompt".to_string()),
         retry_base_delay_ms: 0,
         context_config: ContextConfig {
             keep_recent_turns: 1,
@@ -681,7 +747,13 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let mut old_user = ChatMessage::user("old question");
     old_user.timestamp = Some(TEST_TS.to_string());
@@ -689,25 +761,46 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let mut old_tool = ChatMessage::tool("tc1", &"x".repeat(50_000));
     old_tool.timestamp = Some(TEST_TS.to_string());
 
-    let mut recent_user = ChatMessage::user("recent question");
+    let mut old_assistant = ChatMessage::assistant("old answer");
+    old_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("previous question");
     recent_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_assistant = ChatMessage::assistant("previous answer");
+    recent_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut current_user = ChatMessage::user("current question");
+    current_user.timestamp = Some(TEST_TS.to_string());
+    let system_text = "system prompt";
+    let historical_messages = vec![
+        old_user,
+        old_tool,
+        old_assistant,
+        recent_user,
+        recent_assistant,
+    ];
+    let estimated_chars = system_text.len()
+        + historical_messages
+            .iter()
+            .map(estimate_msg_chars)
+            .sum::<usize>()
+        + estimate_msg_chars(&current_user);
 
     let ctx_state = ContextState {
-        messages: vec![old_user, old_tool, recent_user],
-        estimate_context_chars: 60_000,
+        messages: vec![],
+        estimate_context_chars: estimated_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = historical_messages;
+    messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
-
-    let messages = vec![ChatMessage::user("trigger overflow")];
 
     info!("Act: 调用 AgentLoop::run()，期望 context overflow → compaction → retry → 成功");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -739,17 +832,16 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     Ok(())
 }
 
-/// [build_context_from_state 端到端] CompactionSummary + user/assistant/tool 混合展平后消息顺序正确
+/// [context_messages_clone 端到端] CompactionSummary + user/assistant/tool 混合展平后消息顺序正确
 ///
 /// 验证：CompactionSummary 转为 CompactionSummary，普通消息展平顺序保持
-/// 意义：TASK-17 上下文重建——build_context_from_state 正确性的端到端验证
+/// 意义：TASK-17 上下文重建——context_messages_clone 正确性的端到端验证
 #[test]
 fn test_build_context_preserves_order_with_mixed_turns() {
     common::setup_logging();
     let _span = info_span!("test_build_context_preserves_order_with_mixed_turns").entered();
 
-    let mut summary = ChatMessage::compaction_summary("## Goal\nBuild a web app");
-    summary.msg_id = Some("sum_1".to_string());
+    let mut summary = ChatMessage::compaction_summary("## Goal\nBuild a web app", "sum_1");
     summary.timestamp = Some(TEST_TS.to_string());
 
     let mut user1 = ChatMessage::user("add auth");
@@ -783,12 +875,13 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
 
-    let msgs = build_context_from_state(&state);
+    let msgs = state.messages.clone();
 
     assert_eq!(msgs.len(), 5, "应展平为 5 条消息");
     assert!(
@@ -838,6 +931,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -848,13 +942,14 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    compact_tool_results(&mut state, &config);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    compact_tool_results(&mut state, &mut messages, &config, history_end);
 
     info!("Assert: old turns replaced, recent preserved");
     // Turns: turn 0 = msgs[0..3], turn 1 = msgs[3..6], turn 2 = msgs[6..9] (recent)
     // Tool messages are at index 1, 4, 7
-    let tool_msgs: Vec<&ChatMessage> = state
-        .messages
+    let tool_msgs: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| m.role == ChatMessageRole::Tool)
         .collect();
@@ -902,6 +997,7 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -912,10 +1008,11 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    compact_tool_results(&mut state, &config);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    compact_tool_results(&mut state, &mut messages, &config, history_end);
 
-    let tool_msgs: Vec<&ChatMessage> = state
-        .messages
+    let tool_msgs: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| m.role == ChatMessageRole::Tool)
         .collect();
@@ -965,6 +1062,7 @@ fn test_compact_tool_results_estimate_precise() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -974,7 +1072,9 @@ fn test_compact_tool_results_estimate_precise() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
 
     let expected_reduced = content_len - PLACEHOLDER.len();
     assert_eq!(
@@ -1007,11 +1107,10 @@ async fn test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm() {
     let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 8_000 });
     let event_bus = Arc::new(DefaultEventBus::new());
     let mut agent = AgentLoop::new(
-        llm.clone(),
+        loop_binding(llm.clone(), "mock-model"),
         primitive,
         event_bus,
         AgentLoopConfig {
-            model: "mock-model".to_string(),
             session_id: "sess-mid-turn-run".to_string(),
             context_config: ContextConfig {
                 current_tail_compactable_min_chars: 1,
@@ -1031,6 +1130,7 @@ async fn test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1094,6 +1194,7 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         },
     );
     tomcat::core::session::transcript::append_entry(&path, &boundary)?;
@@ -1155,13 +1256,22 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
     let config = ContextConfig::default();
-    let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    let (results, _) = layer0_persist_large_results(
+        &mut state,
+        &mut messages,
+        &config,
+        dir.path(),
+        "sess_persist",
+        history_end,
+    );
     assert_eq!(results.len(), 1);
 
     let readback = std::fs::read_to_string(&results[0].persisted_path)?;
@@ -1170,8 +1280,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         "persisted content should match original"
     );
 
-    let tool_in_state = state
-        .messages
+    let tool_in_state = messages
         .iter()
         .find(|m| m.role == ChatMessageRole::Tool)
         .expect("tool message should exist");
@@ -1236,6 +1345,7 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         },
     );
     tomcat::core::session::transcript::append_entry(&path, &preheat_entry)?;
@@ -1274,7 +1384,7 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
 /// [Fix B+C] agent_loop 返回的 new_messages 首条应为 role=User 的 ChatMessage
 ///
-/// 验证：修复后 start_idx = context_tail_start → new_messages 包含 User 消息
+/// 验证：start_idx 指向当前回合起点 → new_messages 包含 User 消息
 /// 意义：确保新消息列表完整包含用户输入
 #[tokio::test]
 async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::error::Error>> {
@@ -1287,16 +1397,22 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
     let event_bus = Arc::new(DefaultEventBus::new());
 
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-user-msg".to_string(),
         max_attempts: 1,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
-    let messages = vec![ChatMessage::system("system"), ChatMessage::user("hello")];
+    let messages = vec![ChatMessage::user("hello")];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
         .await
@@ -1345,17 +1461,23 @@ async fn test_agent_loop_message_append_sink_persists_assistant_immediately(
     let event_bus = Arc::new(DefaultEventBus::new());
     let sink: Arc<dyn MessageAppendSink> = Arc::new(mgr.clone());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-append-sink".to_string(),
         max_attempts: 1,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         message_append_sink: Some(sink),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
-    let messages = vec![ChatMessage::system("system"), persisted_user];
+    let messages = vec![persisted_user];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
         .await
         .map_err(|_| "run() timeout 5s")?
@@ -1406,9 +1528,9 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
 
     let system_text = "system prompt for test";
     let config = AgentLoopConfig {
-        model: "mock".to_string(),
         session_id: "sess-phantom".to_string(),
         max_attempts: 3,
+        system_prompt: Some(system_text.to_string()),
         retry_base_delay_ms: 0,
         context_config: ContextConfig {
             keep_recent_turns: 1,
@@ -1417,16 +1539,41 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let mut old_user = ChatMessage::user("old question");
     old_user.timestamp = Some(TEST_TS.to_string());
     let mut old_tool = ChatMessage::tool("tc1", &"x".repeat(50_000));
     old_tool.timestamp = Some(TEST_TS.to_string());
+    let mut old_assistant = ChatMessage::assistant("old answer");
+    old_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("previous question");
+    recent_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_assistant = ChatMessage::assistant("previous answer");
+    recent_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut trigger_user = ChatMessage::user("trigger overflow");
+    trigger_user.timestamp = Some(TEST_TS.to_string());
 
-    let big_chars: usize = estimate_msg_chars(&old_user) + estimate_msg_chars(&old_tool);
+    let historical_messages = vec![
+        old_user,
+        old_tool,
+        old_assistant,
+        recent_user,
+        recent_assistant,
+    ];
+    let big_chars: usize = historical_messages
+        .iter()
+        .map(estimate_msg_chars)
+        .sum::<usize>()
+        + estimate_msg_chars(&trigger_user);
     let ctx_state = ContextState {
-        messages: vec![old_user, old_tool],
+        messages: vec![],
         estimate_context_chars: system_text.len() + big_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -1434,16 +1581,14 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = historical_messages;
+    messages.push(trigger_user);
     agent.set_context_state(Some(ctx_state));
-
-    let messages = vec![
-        ChatMessage::system(system_text),
-        ChatMessage::user("trigger overflow"),
-    ];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
@@ -1536,14 +1681,21 @@ fn test_force_drop_estimate_consistent_after_l3() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = std::mem::take(&mut state.messages);
 
-    tomcat::core::compaction::force_drop_oldest_to_target(&mut state);
+    let mut history_end = messages.len();
+    tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(
+        &mut state,
+        &mut messages,
+        &mut history_end,
+    );
 
-    let remaining_msg_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let remaining_msg_chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let expected = system_chars + remaining_msg_chars;
     assert_eq!(
         state.estimate_context_chars, expected,
@@ -1551,7 +1703,7 @@ fn test_force_drop_estimate_consistent_after_l3() {
         state.estimate_context_chars, expected
     );
     assert!(
-        !state.messages.is_empty(),
+        !messages.is_empty(),
         "should have at least one remaining message after L3"
     );
 }
@@ -1604,6 +1756,7 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
             estimated_tokens_saved: None,
             error: None,
             attempts: None,
+            superseded: false,
         },
     );
     tomcat::core::session::transcript::append_entry(&path, &preheat_entry)?;
@@ -1667,6 +1820,7 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1681,7 +1835,7 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
     let mut m2 = ChatMessage::user("c".repeat(2000));
     m2.msg_id = Some("u2".to_string());
     m2.timestamp = Some(TEST_TS.to_string());
-    state.messages = vec![m0, m1, m2];
+    let mut messages = vec![m0, m1, m2];
     state.estimate_context_chars = 10_000;
     state.update_api_usage(900, 0); // ratio = 0.90 >= 0.85
 
@@ -1701,7 +1855,23 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
 
     info!("Act: check_after_reply");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-after-reply-boundary");
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let work_dir = tempfile::tempdir().unwrap();
+    let read_file_state = ReadFileState::default();
+    let env = BoundaryEnv {
+        config: &config,
+        work_dir: work_dir.path(),
+        session_id: "ctx-after-reply-boundary",
+        read_file_state: &read_file_state,
+    };
+    let mut turn_start = messages.len();
+    let switched = tomcat::core::compaction::apply::check_after_reply(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut turn_start,
+    );
 
     info!("Assert: BoundarySwitched event received");
     assert!(switched, "should have applied boundary");
@@ -1717,15 +1887,17 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
         "payload should have ratioAfter"
     );
 
-    assert_eq!(state.messages.len(), 2, "summary + u2 after splice");
-    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages.len(), 2, "summary + u2 after splice");
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
 }
 
-/// [L2 事件] check_after_reply 在 stale apply 时 emit CompactionError
+/// [L2 stale] stale apply 丢弃缓存并继续；用户无法通过 Notice 修复内部锚点失配。
 #[test]
-fn test_check_after_reply_stale_emits_compaction_error() {
+fn test_check_after_reply_stale_discards_preheat_without_compaction_error() {
     common::setup_logging();
-    let _span = info_span!("test_check_after_reply_stale_emits_compaction_error").entered();
+    let _span =
+        info_span!("test_check_after_reply_stale_discards_preheat_without_compaction_error")
+            .entered();
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stale_err.jsonl");
@@ -1737,6 +1909,7 @@ fn test_check_after_reply_stale_emits_compaction_error() {
             id: "sid_err".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -1767,6 +1940,7 @@ fn test_check_after_reply_stale_emits_compaction_error() {
         post_usage_appended_chars: 0,
         transcript_path: path.clone(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1788,17 +1962,36 @@ fn test_check_after_reply_stale_emits_compaction_error() {
 
     info!("Act: check_after_reply with stale covered_end_id");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-after-reply-stale");
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
+    let config = ContextConfig::default();
+    let work_dir = tempfile::tempdir().unwrap();
+    let read_file_state = ReadFileState::default();
+    let env = BoundaryEnv {
+        config: &config,
+        work_dir: work_dir.path(),
+        session_id: "ctx-after-reply-stale",
+        read_file_state: &read_file_state,
+    };
+    let mut messages = std::mem::take(&mut state.messages);
+    let mut turn_start = messages.len();
+    let switched = tomcat::core::compaction::apply::check_after_reply(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut turn_start,
+    );
 
-    info!("Assert: CompactionError event received, not switched");
+    info!("Assert: stale preheat discarded, not switched");
     assert!(!switched, "stale apply should not switch");
     let errors = compaction_errors.lock().unwrap();
-    assert_eq!(errors.len(), 1, "should emit exactly one CompactionError");
-    let payload = &errors[0];
     assert_eq!(
-        payload.get("source").and_then(|v| v.as_str()),
-        Some("apply"),
-        "error source should be 'apply'"
+        errors.len(),
+        0,
+        "a stale internal cache result must not surface a user-actionable CompactionError"
+    );
+    assert!(
+        state.preheat.is_idle(),
+        "the stale completed result is discarded"
     );
 }
 
@@ -1829,6 +2022,7 @@ async fn test_check_before_request_emits_boundary_switched() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1843,7 +2037,7 @@ async fn test_check_before_request_emits_boundary_switched() {
     let mut m2 = ChatMessage::user("c".repeat(2000));
     m2.msg_id = Some("u2".to_string());
     m2.timestamp = Some(TEST_TS.to_string());
-    state.messages = vec![m0, m1, m2];
+    let mut messages = vec![m0, m1, m2];
     state.estimate_context_chars = 10_000;
     state.update_api_usage(750, 0); // ratio = 0.75 >= 0.70
 
@@ -1862,7 +2056,24 @@ async fn test_check_before_request_emits_boundary_switched() {
 
     info!("Act: check_before_request");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-before-request-boundary");
-    let applied = tomcat::core::compaction::apply::check_before_request(&mut state, &emitter).await;
+    let mut turn_start = messages.len() - 1;
+    let config = ContextConfig::default();
+    let work_dir = tempfile::tempdir().unwrap();
+    let read_file_state = ReadFileState::default();
+    let env = BoundaryEnv {
+        config: &config,
+        work_dir: work_dir.path(),
+        session_id: "ctx-before-request-boundary",
+        read_file_state: &read_file_state,
+    };
+    let applied = tomcat::core::compaction::apply::check_before_request(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut turn_start,
+    )
+    .await;
 
     info!("Assert: BoundarySwitched event + messages shortened");
     assert!(applied, "should apply boundary in check_before_request");
@@ -1884,7 +2095,19 @@ async fn test_check_before_request_emits_boundary_switched() {
         ratio_before,
         ratio_after
     );
-    assert_eq!(state.messages.len(), 2, "summary + u2");
+    assert_eq!(messages.len(), 2, "summary + u2");
+    assert_eq!(
+        turn_start, 1,
+        "replacing two historical entries with one summary must shift the active user cursor"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.msg_id.as_deref() == Some("u2"))
+            .count(),
+        1,
+        "the active user message is already durable and must not be duplicated during apply"
+    );
 }
 
 // ────────── Group D: L0->L1->L2->L3 全管线 + 事件时序 ─────────────────────
@@ -1904,6 +2127,15 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         "boundary_switched",
         Box::new(move |_ctx: EventContext| {
             el.lock().unwrap().push("boundary_switched".to_string());
+            Ok(())
+        }),
+    );
+    let layer0_releases = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let l0 = Arc::clone(&layer0_releases);
+    event_bus.on(
+        "layer0_context_release",
+        Box::new(move |ctx: EventContext| {
+            l0.lock().unwrap().push(ctx.payload.clone());
             Ok(())
         }),
     );
@@ -1937,25 +2169,30 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = std::mem::take(&mut state.messages);
 
     info!(
         "initial: messages={}, estimate_chars={}, ratio={:.3}",
-        state.messages.len(),
+        messages.len(),
         state.estimate_context_chars,
         state.usage_ratio()
     );
 
     // Step 1: L0+L1
     info!("Act Step 1: run_layer0_cleanup");
+    let history_end = messages.len();
     let outcome = tomcat::core::compaction::run_layer0_cleanup(
         &mut state,
+        &mut messages,
         &ContextConfig::default(),
         dir.path(),
         "pipeline_sess",
+        history_end,
     );
     info!(
         "L0+L1: persisted={}, persist_freed={}, placeholder_freed={}, ratio={:.3}",
@@ -1968,6 +2205,10 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         outcome.persist_chars_freed + outcome.placeholder_chars_freed > 0,
         "L0+L1 should free some chars"
     );
+    // This full-pipeline test deliberately crosses both L0 thresholds:
+    // each tool result is 60K chars, so Step 1 covers persistence (>=50K)
+    // and placeholder replacement (>10K). The later boundary application
+    // must not release a second batch from its protected five-turn tail.
 
     // Step 2: L2 apply (simulate preheat completion)
     info!("Act Step 2: simulate preheat completed + apply_boundary");
@@ -1991,7 +2232,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
 
     if turn_starts.len() > 5 {
         let cover_end_idx = turn_starts[turn_starts.len() - 5] - 1;
-        let covered_end = state.messages[..=cover_end_idx]
+        let covered_end = messages[..=cover_end_idx]
             .iter()
             .rev()
             .find_map(|m| m.msg_id.clone())
@@ -2014,21 +2255,45 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         state.update_api_usage((state.estimated_token_count() as f64 * 0.90) as u32, 0);
 
         let emitter = scoped_emitter(event_bus.clone(), "ctx-full-pipeline");
-        let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
+        let config = ContextConfig::default();
+        let read_file_state = ReadFileState::default();
+        let env = BoundaryEnv {
+            config: &config,
+            work_dir: dir.path(),
+            session_id: "pipeline_sess",
+            read_file_state: &read_file_state,
+        };
+        let mut turn_start = messages.len();
+        let switched = tomcat::core::compaction::apply::check_after_reply(
+            &mut state,
+            &mut messages,
+            &emitter,
+            &env,
+            &mut turn_start,
+        );
         info!(
             "L2: switched={}, ratio before={:.3}, after={:.3}, messages={}",
             switched,
             ratio_before_apply,
             state.usage_ratio(),
-            state.messages.len()
+            messages.len()
         );
     }
 
     // Step 3: L3 force drop (if still over budget)
+    assert!(
+        layer0_releases.lock().unwrap().is_empty(),
+        "the boundary's protected tail should not trigger a second L0 release"
+    );
     if state.usage_ratio() >= 0.50 {
-        info!("Act Step 3: force_drop_oldest_to_target");
+        info!("Act Step 3: force_drop_oldest_after_confirmed_overflow");
+        let mut history_end = messages.len();
         let (turns_removed, chars_removed) =
-            tomcat::core::compaction::force_drop_oldest_to_target(&mut state);
+            tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(
+                &mut state,
+                &mut messages,
+                &mut history_end,
+            );
         info!(
             "L3: turns_removed={}, chars_removed={}, ratio={:.3}",
             turns_removed,
@@ -2038,7 +2303,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
     }
 
     info!("Assert: pipeline completed, chars consistent");
-    let actual_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let actual_chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let diff = (state.estimate_context_chars as i64 - actual_chars as i64).unsigned_abs();
     assert!(
         diff <= (actual_chars / 10 + 100) as u64,
@@ -2047,7 +2312,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         actual_chars,
         diff
     );
-    assert!(!state.messages.is_empty(), "should not drain all messages");
+    assert!(!messages.is_empty(), "should not drain all messages");
 }
 
 // ────────── Group F: L3 overflow 事件 payload 断言 ────────────────────────
@@ -2090,26 +2355,43 @@ async fn test_context_overflow_trim_events_have_correct_payload(
     );
 
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-overflow-payload".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         context_config: ContextConfig::default(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     let old_content = "old ".repeat(10_000); // ~40K chars
     let mut old_user = ChatMessage::user(old_content);
     old_user.timestamp = Some(TEST_TS.to_string());
-    let mut recent_user = ChatMessage::user("recent");
+    let mut old_assistant = ChatMessage::assistant("old answer");
+    old_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("previous");
     recent_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_assistant = ChatMessage::assistant("previous answer");
+    recent_assistant.timestamp = Some(TEST_TS.to_string());
+    let mut current_user = ChatMessage::user("current");
+    current_user.timestamp = Some(TEST_TS.to_string());
 
-    let estimate = 40_000usize;
+    let historical_messages = vec![old_user, old_assistant, recent_user, recent_assistant];
+    let estimate = historical_messages
+        .iter()
+        .map(estimate_msg_chars)
+        .sum::<usize>()
+        + estimate_msg_chars(&current_user);
     let budget_tokens = (estimate / 4) + 100; // ~10_100 — ratio will be ~0.99
     let ctx_state = ContextState {
-        messages: vec![old_user, recent_user],
+        messages: vec![],
         estimate_context_chars: estimate,
         context_budget_chars: estimate * 4,
         context_budget_tokens: budget_tokens,
@@ -2117,19 +2399,19 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = historical_messages;
+    messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
 
     info!("Act: run AgentLoop");
-    let _result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(vec![ChatMessage::user("trigger")]),
-    )
-    .await
-    .map_err(|_| "timeout")?;
+    let _result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "timeout")?;
 
     info!("Assert: trim event payloads");
     let starts = trim_start_payloads.lock().unwrap();

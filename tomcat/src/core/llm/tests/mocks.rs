@@ -116,6 +116,15 @@ impl MockHttpServer {
         self.requests.lock().unwrap().len()
     }
 
+    pub(crate) fn request_texts(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| String::from_utf8_lossy(request).into_owned())
+            .collect()
+    }
+
     pub(crate) async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());

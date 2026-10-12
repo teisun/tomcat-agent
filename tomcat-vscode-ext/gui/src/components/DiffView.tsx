@@ -1,3 +1,5 @@
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import { pluralKey, type Locale, type Translator } from "../../../src/shared/i18n";
 import type { FileDiffLine } from "../types";
 
 type RenderRow =
@@ -25,11 +27,24 @@ function countRenderedLines(rows: RenderRow[]): number {
   );
 }
 
-function collapseContextRows(diff: FileDiffLine[]): RenderRow[] {
+function collapseContextRows(diff: FileDiffLine[], t: Translator, locale: Locale): RenderRow[] {
   const rows: RenderRow[] = [];
   let index = 0;
   while (index < diff.length) {
     const current = diff[index];
+    if (current.tag === "gap") {
+      rows.push({
+        hiddenCount: current.skippedLines ?? 0,
+        kind: "fold",
+        key: `gap-${index}`,
+        label:
+          typeof current.skippedLines === "number"
+            ? t(pluralKey(locale, "diff.unmodified.other", current.skippedLines), { count: current.skippedLines })
+            : current.text,
+      });
+      index += 1;
+      continue;
+    }
     if (current.tag !== "ctx") {
       rows.push({
         key: `line-${index}-${current.oldLine ?? "n"}-${current.newLine ?? "n"}`,
@@ -83,13 +98,15 @@ function renderLineNumber(value: number | null | undefined): string {
   return typeof value === "number" ? String(value) : "";
 }
 
-function previewRows(rows: RenderRow[], maxRows: number): RenderRow[] {
+function previewRows(rows: RenderRow[], maxRows: number, t: Translator, locale: Locale): RenderRow[] {
   if (rows.length <= maxRows) {
     return rows;
   }
 
   const firstChangeIndex = rows.findIndex(
-    (row) => row.kind === "line" && row.line.tag !== "ctx",
+    (row) =>
+      row.kind === "line" &&
+      (row.line.tag === "add" || row.line.tag === "del"),
   );
   let start =
     firstChangeIndex === -1
@@ -105,7 +122,7 @@ function previewRows(rows: RenderRow[], maxRows: number): RenderRow[] {
       hiddenCount: countRenderedLines(rows.slice(end)),
       key: `fold-preview-more-${end}`,
       kind: "fold",
-      label: `${countRenderedLines(rows.slice(end))} more lines`,
+      label: t(pluralKey(locale, "diff.more.other", countRenderedLines(rows.slice(end))), { count: countRenderedLines(rows.slice(end)) }),
     });
   }
   return preview;
@@ -125,14 +142,27 @@ function diffRowClass(tag: FileDiffLine["tag"]): string {
 export function DiffView({
   diff,
   previewRows: previewLimit,
+  truncated = false,
+  expired = false,
 }: {
   diff?: FileDiffLine[];
   previewRows?: number;
+  truncated?: boolean;
+  expired?: boolean;
 }) {
+  const t = useT();
+  const locale = useLocale();
+  if (expired) {
+    return (
+      <div className="tc-diff-view__empty" data-testid="diff-view-expired">
+        {t("diff.expired")}
+      </div>
+    );
+  }
   if (!diff) {
     return (
       <div className="tc-diff-view__empty" data-testid="diff-view-empty">
-        File too large to render inline diff. Showing summary only.
+        {t(truncated ? "diff.truncated" : "diff.unsaved")}
       </div>
     );
   }
@@ -140,13 +170,13 @@ export function DiffView({
   if (diff.length === 0) {
     return (
       <div className="tc-diff-view__empty" data-testid="diff-view-empty">
-        No line changes to display.
+        {t("diff.empty")}
       </div>
     );
   }
 
-  const fullRows = collapseContextRows(diff);
-  const rows = previewLimit ? previewRows(fullRows, previewLimit) : fullRows;
+  const fullRows = collapseContextRows(diff, t, locale);
+  const rows = previewLimit ? previewRows(fullRows, previewLimit, t, locale) : fullRows;
 
   return (
     <div
@@ -156,7 +186,7 @@ export function DiffView({
       {rows.map((row) =>
         row.kind === "fold" ? (
           <div className="tc-diff-view__fold" data-testid="diff-fold-marker" key={row.key}>
-            {row.label ?? `${row.hiddenCount} unmodified lines`}
+            {row.label ?? t(pluralKey(locale, "diff.unmodified.other", row.hiddenCount), { count: row.hiddenCount })}
           </div>
         ) : (
           <div className={diffRowClass(row.line.tag)} key={row.key}>
@@ -173,6 +203,11 @@ export function DiffView({
           </div>
         ),
       )}
+      {truncated ? (
+        <div className="tc-diff-view__empty" data-testid="diff-view-truncated">
+          {t("diff.truncated")}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -4,7 +4,7 @@
 //!
 //! - `mocks`：跨用例共享的 `MockPrimitive` / `MockLlm` / `MockToolRegistry`
 //!   以及 `make_dispatcher_with_primitive` 工厂函数。
-//! - `dispatch_no_extension_test`：未注入扩展时各模块的兜底分支（005/006/004 错误码、
+//! - `dispatch_no_extension_test`：未注入扩展时各模块的兜底分支（005/006/007 错误码、
 //!   audit 触发计数、events 不依赖扩展也能工作）。
 //! - `dispatch_with_extension_test`：注入 primitive / llm / tools / session 后的成功
 //!   路径与负向断言（如 `registerTool` 缺 `name`）。

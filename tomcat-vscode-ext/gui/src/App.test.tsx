@@ -2,25 +2,432 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import type { HostToWebviewFrame, VsCodeApiLike } from "./types";
+import { LocaleProvider } from "./i18n/LocaleProvider";
+import { translate, type Locale } from "../../src/shared/i18n";
+import type {
+  HostToWebviewFrame,
+  VsCodeApiLike,
+  WebviewCheckpoint,
+  WebviewSessionSnapshot,
+  WebviewStateSnapshot,
+  WebviewTimelineItem,
+} from "./types";
 
-function mount() {
+const SECOND_TURN_INPUT = "第二轮问题";
+const THIRD_TURN_INPUT = "第三轮问题";
+const SESSION_TITLE_INPUT = "帮我重构 session 列表";
+
+vi.mock("./attachments/imagePipeline", () => ({
+  prepareAttachment: vi.fn(
+    async (raw: { filename: string | null; mimeType: string; sourcePath?: string | null }) => ({
+      dataBase64: "c3R1Yg==",
+      filename: raw.filename,
+      mimeType: raw.mimeType,
+      sourcePath: raw.sourcePath ?? null,
+      warnings: [],
+    }),
+  ),
+}));
+
+function mount(initialState?: unknown, locale?: Locale) {
   const postMessage = vi.fn();
+  let persistedState = initialState;
   const vscodeApi: VsCodeApiLike = {
+    getState: vi.fn(() => persistedState),
     postMessage,
-    setState: vi.fn(),
+    setState: vi.fn((state) => {
+      persistedState = state;
+    }),
   };
-  render(<App vscodeApi={vscodeApi} />);
-  return { postMessage, vscodeApi };
+  const view = render(<LocaleProvider locale={locale}><App vscodeApi={vscodeApi} /></LocaleProvider>);
+  return {
+    getPersistedState: () => persistedState,
+    postMessage,
+    unmount: view.unmount,
+    rerenderLocale: (next: Locale) => view.rerender(<LocaleProvider locale={next}><App vscodeApi={vscodeApi} /></LocaleProvider>),
+    vscodeApi,
+  };
 }
 
-async function emitState(frame: HostToWebviewFrame) {
+describe("chat locale continuity", () => {
+  it("switches chrome without changing the current session, draft or technical terms", async () => {
+    const f = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    Object.assign(snapshot.sessionViews.s1, { timeline: [], contextRatio: 0.34, activePlan: { path: "/plan.md", planId: "p", state: "planning" } });
+    await emitState({ channel: "state", content: snapshot, messageId: "locale-state" });
+    const input = screen.getByTestId("composer-input");
+    await act(async () => { fireEvent.paste(input, { clipboardData: { getData: () => "keep my unsent draft" } }); });
+    const settings = screen.getByRole("button", { name: translate("en", "settings.title") });
+    f.postMessage.mockClear();
+    f.rerenderLocale("zh-CN");
+    expect(screen.getByTestId("composer-input")).toBe(input);
+    expect(input.textContent).toBe("keep my unsent draft");
+    expect(screen.getByTestId("settings-button")).toBe(settings);
+    expect(screen.getByTestId("mode-select").textContent).toContain("Chat");
+    expect(screen.getByTestId("composer-notice-plan").textContent).toBe("Plan: planning");
+    expect(screen.getByTestId("context-ratio").textContent).toBe("Ctx 34%");
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(f.postMessage.mock.calls.some(([m]) => ["prompt", "newSession", "switchSession", "setModel"].includes(m.type))).toBe(false);
+  });
+});
+
+describe("busy input and local queue acknowledgement", () => {
+  it.each(["cancel", "save"] as const)("restores the correct normal action after %s for empty/nonempty drafts and busy/idle tasks", async action => {
+    for (const busy of [true, false]) for (const text of ["", "keep this draft"]) {
+      const { postMessage, unmount } = mount();
+      const sessionId = "s1";
+      const snapshot = approvalDraftSnapshot(sessionId); snapshot.messageQueueSupported = true;
+      const session = snapshot.sessionViews[sessionId];
+      Object.assign(session, { busy: true, timeline: [], pendingAttachments: [] });
+      session.messageQueue = { paused: true, editingId: null, items: [{ userMessageId: "q", text: "queued", segments: [], attachments: [], status: "queued" }] };
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-before" });
+      if (text) await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => text } }); });
+      const editor = screen.getByTestId("composer-input");
+      session.messageQueue = { ...session.messageQueue, editingId: "q" };
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-edit" });
+      session.busy = busy;
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-task-state" });
+      expect(screen.queryByTestId("queue-edit-stop-button")).toBeNull();
+      expect(screen.getByTestId("queue-edit-send-button").getAttribute("aria-label")).toBe("Save queued message");
+      fireEvent.click(screen.getByTestId(action === "save" ? "queue-edit-send-button" : "queue-edit-cancel"));
+      session.messageQueue = { ...session.messageQueue, editingId: null };
+      await emitState({ channel: "state", content: snapshot, messageId: "restore-after" });
+      expect(screen.getByTestId("composer-input")).toBe(editor);
+      expect(editor.textContent).toBe(text); expect(document.activeElement).toBe(editor);
+      const stop = busy && !text;
+      expect(screen.queryByTestId(stop ? "send-button" : "stop-button")).toBeNull();
+      expect(screen.getByTestId(stop ? "stop-button" : "send-button")).toHaveProperty("disabled", !busy && !text);
+      expect(postMessage.mock.calls.some(([m]) => ["prompt", "interrupt", "rewindAndResend"].includes(m.type))).toBe(false);
+      unmount();
+    }
+  });
+
+  it.each(["cancel", "save"] as const)("queue composer %s restores the same main editor and its draft/attachments", async action => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true;
+    const session = snapshot.sessionViews.s1;
+    Object.assign(session, { timeline: [], busy: true, agentMode: "plan", model: "gpt-5.4" });
+    session.pendingAttachments = [{ id: "main-file", kind: "file", filename: "main.pdf", label: "main.pdf", mimeType: "application/pdf", blobSha: "a".repeat(64) }];
+    session.messageQueue = { paused: true, editingId: null, items: [{ userMessageId: "q1", text: "queued original", segments: [], attachments: [], status: "queued" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-initial" });
+    const main = screen.getByTestId("composer-input");
+    await act(async () => { fireEvent.paste(main, { clipboardData: { getData: () => "unsent main draft" } }); });
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    session.messageQueue = { ...session.messageQueue, editingId: "q1" };
+    await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-edit" });
+    expect(screen.getByTestId("queue-editor").closest('[data-testid="composer-area"]')).toBeTruthy();
+    expect(screen.getByTestId("queue-editor").closest('[data-testid="queue-row"]')).toBeNull();
+    expect(screen.getByTestId("main-composer-draft")).toHaveProperty("hidden", true);
+    expect(main.textContent).toBe("unsent main draft");
+    expect(screen.getByTestId("main-composer-draft").querySelector('[aria-label="main.pdf"]')).toBeTruthy();
+    expect(screen.getByTestId("queue-edit-mode-select").textContent).toContain("Plan");
+    expect(screen.getByTestId("queue-edit-model-select").textContent).toContain("gpt-5.4");
+    expect(screen.getByTestId("queue-edit-mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("queue-edit-model-select")).toHaveProperty("disabled", true);
+    await act(async () => { fireEvent.paste(screen.getByTestId("queue-edit-composer-input"), { clipboardData: { getData: () => " changed" } }); });
+    fireEvent.click(screen.getByTestId(action === "save" ? "queue-edit-send-button" : "queue-edit-cancel"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "queueAction", data: expect.objectContaining({ action, userMessageId: "q1" }) }));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt" || message.type === "steer")).toBe(false);
+    session.messageQueue = { ...session.messageQueue, editingId: null };
+    await emitState({ channel: "state", content: snapshot, messageId: "queue-composer-closed" });
+    expect(screen.getByTestId("main-composer-draft")).toHaveProperty("hidden", false);
+    expect(screen.getByTestId("composer-input")).toBe(main);
+    expect(main.textContent).toBe("unsent main draft"); expect(document.activeElement).toBe(main);
+  });
+
+  it("unlocks busy input but locks configuration to the session and ignores double submit", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true;
+    Object.assign(snapshot.sessionViews.s1, { busy: true, timeline: [], agentMode: "plan", model: "gpt-5.4" });
+    await emitState({ channel: "state", content: snapshot, messageId: "busy-queue" });
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("model-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("mode-select").textContent).toContain("Plan");
+    expect(screen.getByTestId("model-select").textContent).toContain("gpt-5.4");
+    expect(screen.getByTestId("stop-button")).toBeTruthy();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "follow-up" } }); });
+    expect(screen.queryByTestId("stop-button")).toBeNull();
+    expect(screen.getByTestId("send-button").getAttribute("aria-label")).toBe("Queue message");
+    fireEvent.click(screen.getByTestId("send-button")); fireEvent.click(screen.getByTestId("send-button"));
+    const submits = postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "prompt");
+    expect(submits).toHaveLength(1);
+    snapshot.sessionViews.s1.messageQueue = { paused: false, editingId: null, items: [{ userMessageId: submits[0].data.userMessageId, text: "follow-up", segments: [], attachments: [], status: "queued" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "queued-ack" });
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+    expect(screen.getByTestId("messages-dock")).toBeTruthy();
+    expect(screen.queryByTestId("send-button")).toBeNull();
+    expect(screen.getByTestId("stop-button")).toBeTruthy();
+  });
+  it("keeps only a disabled Send while attachment work is pending and never auto-submits on completion", async () => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true; snapshot.sessionViews.s1.busy = true;
+    await emitState({ channel: "state", content: snapshot, messageId: "cutoff" });
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "frozen" } }); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    const prior = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "pickContext").data.operationId;
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(screen.queryByTestId("stop-button")).toBeNull();
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => " newer" } }); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    const later = postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "pickContext").at(-1).data.operationId;
+    expect(later).not.toBe(prior);
+    await emitState({ channel: "event", messageId: "prepared-prior", content: { type: "composerWorkResult", sessionId: "s1", operationId: prior, success: true, attachmentIds: ["prior-image"] } });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("composer-input").textContent).toContain("newer");
+    await emitState({ channel: "event", messageId: "prepared-later", content: { type: "composerWorkResult", sessionId: "s1", operationId: later, success: true, attachmentIds: ["later-image"] } });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("send-button"));
+    const sent = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "prompt");
+    expect(sent.data.text).toBe("frozen newer");
+    expect(postMessage.mock.calls.filter(([m]) => m.type === "prompt")).toHaveLength(1);
+  });
+  it("preparation failures preserve input and do not silently send only the text", async () => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true; snapshot.sessionViews.s1.busy = true;
+    await emitState({ channel: "state", content: snapshot, messageId: "prepare-fail" });
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "keep input" } }); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    const operationId = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "pickContext").data.operationId;
+    fireEvent.click(screen.getByTestId("send-button"));
+    await emitState({ channel: "event", messageId: "failed-work", content: { type: "composerWorkResult", sessionId: "s1", operationId, success: false, error: "missing image" } });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("composer-input").textContent).toBe("keep input");
+  });
+  it("a late local queue acknowledgement never clears newer input", async () => {
+    const { postMessage } = mount(); const snapshot = approvalDraftSnapshot("s1"); snapshot.messageQueueSupported = true; snapshot.sessionViews.s1.busy = true;
+    await emitState({ channel: "state", content: snapshot, messageId: "typing-queue" });
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "old" } }); });
+    fireEvent.click(screen.getByTestId("send-button"));
+    const submit = postMessage.mock.calls.map(([m]) => m).find(m => m.type === "prompt");
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => " newer" } }); });
+    snapshot.sessionViews.s1.messageQueue = { paused: false, editingId: null, items: [{ userMessageId: submit.data.userMessageId, text: "old", segments: [], attachments: [], status: "queued" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "late-queue-ack" });
+    expect(screen.getByTestId("composer-input").textContent).toContain("newer");
+  });
+});
+
+describe("inline user-message editing in App", () => {
+  it("does not expose editing for a read-only foreign session", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.ownedByThisFrontend = false;
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"foreign",kind:"user",text:"read-only prompt",rewindEligible:true}];
+    await emitState({channel:"state",content:snapshot,messageId:"foreign-state"});
+    fireEvent.click(screen.getByText("read-only prompt"));
+    expect(screen.queryByTestId("edit-user-message")).toBeNull();
+    expect(screen.queryByTestId("inline-message-editor")).toBeNull();
+  });
+  it("unlocks the main composer when history arrives before the resend result", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"old",kind:"user",text:"old editable",rewindEligible:true}];
+    await emitState({channel:"state",content:snapshot,messageId:"before-edit"});
+    fireEvent.click(screen.getByText("old editable"));
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"new",kind:"user",text:"replacement",rewindEligible:true}];
+    await emitState({channel:"state",content:snapshot,messageId:"after-edit"});
+    expect(screen.queryByTestId("inline-message-editor")).toBeNull();
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+  });
+  it("keeps Stop usable while an old message is being edited", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.busy = true;
+    snapshot.sessionViews.s1.timeline = [{ type: "message", id: "old", kind: "user", text: "old editable", rewindEligible: true }];
+    await emitState({ channel: "state", content: snapshot, messageId: "busy-edit" });
+    fireEvent.click(screen.getByText("old editable"));
+    const stop = screen.getByTestId("stop-button");
+    expect((stop as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId("edit-mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("edit-model-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("edit-composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("edit-attachment-add")).toHaveProperty("disabled", false);
+    const editor = screen.getByTestId("edit-composer-input");
+    await act(async () => { fireEvent.paste(editor, { clipboardData: { getData: () => " amended" } }); });
+    const editedText = editor.textContent;
+    fireEvent(stop.firstElementChild ?? stop, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    expect(screen.getByTestId("edit-composer-input")).toBe(editor);
+    fireEvent.click(stop);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "interrupt", data: { sessionId: "s1" } }));
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe(editedText);
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("edit-mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("edit-model-select")).toHaveProperty("disabled", true);
+    snapshot.sessionViews.s1.busy = false;
+    snapshot.sessionViews.s1.agentMode = "plan";
+    await emitState({ channel: "state", content: snapshot, messageId: "actually-stopped" });
+    expect(screen.getByTestId("edit-composer-input")).toBe(editor);
+    expect(editor.textContent).toBe(editedText);
+    expect(screen.getByTestId("edit-mode-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("edit-model-select")).toHaveProperty("disabled", false);
+    expect(screen.getByTestId("edit-mode-select").textContent).toContain("Plan");
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+  });
+
+  it("cancels the first edit when another user bubble is opened", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.timeline = [
+      { type: "message", id: "first", kind: "user", text: "First editable", rewindEligible: true },
+      { type: "message", id: "second", kind: "user", text: "Second editable", rewindEligible: true },
+    ];
+    await emitState({channel:"state",content:snapshot,messageId:"switch-edit"});
+    fireEvent.click(screen.getByText("First editable"));
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("First editable");
+    const second = screen.getByText("Second editable");
+    fireEvent(second, new MouseEvent("pointerdown", {bubbles:true,button:0}));
+    fireEvent.click(second);
+    expect(screen.getAllByTestId("inline-message-editor")).toHaveLength(1);
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("Second editable");
+  });
+
+  it("opens a historical composer without consuming the bottom draft", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.rewindSupported = true;
+    snapshot.sessionViews.s1.timeline = [{type:"message",id:"editable",kind:"user",text:"Old request",rewindEligible:true}];
+    snapshot.sessionViews.s1.composerDraft = {text:"Unsent main draft",segments:[{type:"text",text:"Unsent main draft"}]};
+    await emitState({channel:"state",content:snapshot,messageId:"edit-state"});
+    fireEvent.click(screen.getByText("Old request"));
+    expect(screen.getByTestId("inline-message-editor")).toBeTruthy();
+    expect(screen.getByTestId("edit-composer-input").textContent).toBe("Old request");
+    expect(screen.getByTestId("composer-input").textContent).toBe("Unsent main draft");
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    const before = postMessage.mock.calls.length;
+    await act(async () => document.body.dispatchEvent(new MouseEvent("pointerdown",{bubbles:true,button:0})));
+    expect(screen.queryByTestId("inline-message-editor")).toBeNull();
+    expect(screen.getByTestId("composer-input").textContent).toBe("Unsent main draft");
+    expect(postMessage.mock.calls.slice(before)).toEqual([]);
+  });
+});
+
+describe("shared slash submission and command waiting", () => {
+  const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:name}));
+  const ready = async (session:Partial<WebviewSessionSnapshot> = {}, slashCommands = commands) => {
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.sessionViews.s1.timeline = [];
+    Object.assign(snapshot.sessionViews.s1, session);
+    snapshot.slashCommands = slashCommands;
+    await emitState({channel:"state",content:snapshot,messageId:"slash-ready"});
+  };
+  const submit = async (text:string) => {
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>text}}); });
+    fireEvent.click(screen.getByTestId("send-button"));
+  };
+  it.each(["/reload", "/install './folder with space' agent"])("routes plain leading command without a transcript user message: %s", async (text) => {
+    const {postMessage} = mount(); await ready(); await submit(text);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"runSlashCommand", data:{sessionId:"s1",text}}));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+  });
+  it.each(["/foo x", "/model list", "/Users/me/a.txt", "help /reload"])("keeps ordinary messages: %s", async (text) => {
+    const {postMessage} = mount(); await ready(); await submit(text);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"prompt",data:expect.objectContaining({text})}));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "runSlashCommand")).toBe(false);
+  });
+  it("does not steal a legacy-server prompt or a command carrying a reference", async () => {
+    const first = mount(); await ready({}, []); await submit("/reload");
+    expect(first.postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
+    first.unmount();
+    const second = mount(); await ready({composerDraft:{segments:[{type:"text",text:"/reload "},{type:"reference",kind:"file",label:"app.ts",path:"app.ts"}], text:"/reload app.ts"}});
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(second.postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
+    expect(second.postMessage.mock.calls.some(([message]) => message.type === "runSlashCommand")).toBe(false);
+  });
+  it("does not send an attachment-only draft through the shared composer", async () => {
+    const {postMessage}=mount();
+    await ready({pendingAttachments:[{id:"image",label:"image.png",blobSha:"a".repeat(64),filename:"image.png",kind:"image",mimeType:"image/png",bytes:10}]});
+    expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(false);
+  });
+  it("preserves attachment prompts, disables send and Build, and keeps Settings available while pending", async () => {
+    const {postMessage} = mount();
+    await ready({pendingAttachments:[{id:"attachment-1",label:"a.png",blobSha:"a".repeat(64),filename:"a.png",kind:"image",mimeType:"image/png",bytes:42}]});
+    await submit("/reload");
+    expect(postMessage.mock.calls.some(([message]) => message.type === "prompt")).toBe(true);
+    await ready({commandPending:true, activePlan:{path:"/tmp/example.plan.md",planId:"plan-1",state:"pending"}, timeline:[{type:"tool", id:"plan-create",toolCallId:"call-plan",toolName:"create_plan",isError:false,status:"complete",summary:"created",planId:"plan-1",planPath:"/tmp/example.plan.md",planActivity:{kind:"create",stateAfter:"pending",title:"Plan"}}]});
+    expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("settings-button") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("composer-notice-command").textContent).toContain("Processing command");
+    await ready({commandPending:false});
+    expect((screen.getByTestId("settings-button") as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+type StateTestSession = Partial<WebviewSessionSnapshot> &
+  Pick<WebviewSessionSnapshot, "sessionId" | "timeline">;
+
+function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapshot {
+  return {
+    activePlan: fixture.activePlan ?? null,
+    agentMode: fixture.agentMode ?? "chat",
+    busy: fixture.busy ?? false,
+    commandPending: fixture.commandPending,
+    checkpoints: fixture.checkpoints,
+    composerDraft: fixture.composerDraft,
+    messageQueue: fixture.messageQueue,
+    contextRatio: fixture.contextRatio,
+    hasMoreHistory: fixture.hasMoreHistory,
+    historyLoading: fixture.historyLoading,
+    model: fixture.model,
+    ownedByThisFrontend: fixture.ownedByThisFrontend ?? true,
+    pendingAttachments: fixture.pendingAttachments ?? [],
+    planTodos: fixture.planTodos ?? [],
+    sessionId: fixture.sessionId,
+    sessionTodos: fixture.sessionTodos ?? [],
+    sessionFiles: fixture.sessionFiles,
+    thinkingLevel: fixture.thinkingLevel,
+    timeline: fixture.timeline,
+  };
+}
+
+type StateTestFrame = {
+  channel: "state";
+  content: Omit<WebviewStateSnapshot, "modelAdminSupported" | "sessionViews"> & {
+    modelAdminSupported?: boolean;
+    sessionViews: Record<string, StateTestSession>;
+  };
+  messageId: string;
+};
+
+type TestFrame = StateTestFrame | Exclude<HostToWebviewFrame, { channel: "state" }>;
+
+async function emitState(frame: TestFrame) {
+  let normalizedFrame: HostToWebviewFrame;
+  if (frame.channel === "state") {
+    const sessionViews: Record<string, WebviewSessionSnapshot> = {};
+    for (const [sessionId, session] of Object.entries(frame.content.sessionViews)) {
+      sessionViews[sessionId] = createSessionSnapshot(session);
+    }
+    normalizedFrame = {
+      ...frame,
+      content: {
+        modelAdminSupported: false,
+        ...frame.content,
+        sessionViews,
+      },
+    };
+  } else {
+    normalizedFrame = frame;
+  }
   await act(async () => {
-    window.dispatchEvent(new MessageEvent("message", { data: frame }));
+    window.dispatchEvent(new MessageEvent("message", { data: normalizedFrame }));
   });
 }
 
-async function emitReadySessionState(sessionId = "s1") {
+async function emitReadySessionState(
+  sessionId = "s1",
+  contextRatio: number | null = null,
+) {
   await emitState({
     channel: "state",
     content: {
@@ -40,15 +447,14 @@ async function emitReadySessionState(sessionId = "s1") {
       sessionViews: {
         [sessionId]: {
           busy: false,
-          contextRatio: null,
+          contextRatio,
           hasMoreHistory: false,
           historyLoading: false,
           model: "gpt-5.4",
           ownedByThisFrontend: true,
           pendingAttachments: [],
-          planFile: null,
-          planId: null,
-          planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
           sessionId,
           thinkingLevel: "high",
           timeline: [],
@@ -59,9 +465,69 @@ async function emitReadySessionState(sessionId = "s1") {
   });
 }
 
+function approvalDraftSnapshot(activeSessionId: "s1" | "s2"): WebviewStateSnapshot {
+  const session = (sessionId: "s1" | "s2", timeline: WebviewStateSnapshot["sessionViews"][string]["timeline"]) => ({
+    busy: false,
+    checkpoints: [],
+    composerDraft: { segments: [], text: "" },
+    contextRatio: null,
+    hasMoreHistory: false,
+    historyLoading: false,
+    model: "gpt-5.4",
+    ownedByThisFrontend: true,
+    pendingAttachments: [],
+    activePlan: null,
+    agentMode: "chat" as const,
+    planTodos: [],
+    sessionId,
+    sessionTodos: [],
+    thinkingLevel: "high",
+    timeline,
+  });
+  return {
+    activeSessionId,
+    availableModelCapabilities: {},
+    availableModelReasoningLevels: {},
+    availableModels: ["gpt-5.4"],
+    mediaRoots: [],
+    modelAdminSupported: false,
+    ready: true,
+    sessions: ["s1", "s2"].map((sessionId) => ({
+      busy: false,
+      isCurrent: sessionId === activeSessionId,
+      ownedByThisFrontend: true,
+      sessionId,
+      title: sessionId,
+      updatedAt: 1,
+    })),
+    sessionViews: {
+      s1: session("s1", [{
+        id: "approval-draft-1",
+        live: true,
+        request: {
+          questions: [{
+            id: "q-draft",
+            options: [
+              { id: "yes", label: "Yes", recommended: true },
+              { id: "no", label: "No" },
+            ],
+            prompt: "Keep this answer draft?",
+          }],
+          requestId: "request-draft-1",
+          responseEvent: "response-draft-1",
+        },
+        resolved: false,
+        sessionId: "s1",
+        type: "approval",
+      }]),
+      s2: session("s2", []),
+    },
+  };
+}
+
 async function emitCheckpointSessionState(
-  timeline: Array<Record<string, unknown>>,
-  checkpoints: Array<Record<string, unknown>> = [],
+  timeline: WebviewTimelineItem[],
+  checkpoints: WebviewCheckpoint[] = [],
   sessionId = "s1",
 ) {
   await emitState({
@@ -90,9 +556,8 @@ async function emitCheckpointSessionState(
           model: "gpt-5.4",
           ownedByThisFrontend: true,
           pendingAttachments: [],
-          planFile: null,
-          planId: null,
-          planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
           sessionId,
           thinkingLevel: "high",
           timeline,
@@ -112,7 +577,7 @@ async function emitTranscriptSessionState({
   busy: boolean;
   messageId: string;
   sessionId?: string;
-  timeline: Array<Record<string, unknown>>;
+  timeline: WebviewTimelineItem[];
 }) {
   await emitState({
     channel: "state",
@@ -139,9 +604,8 @@ async function emitTranscriptSessionState({
           model: "gpt-5.4",
           ownedByThisFrontend: true,
           pendingAttachments: [],
-          planFile: null,
-          planId: null,
-          planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
           sessionId,
           thinkingLevel: "high",
           timeline,
@@ -192,10 +656,10 @@ function mockScrollableTranscript({
   userTop: number;
 }) {
   const stream = screen.getByTestId("stream-container");
-  const transcript = screen.getByLabelText("active-session");
-  const userMessage = screen.getAllByTestId("message-block").find(
-    (node) => node.getAttribute("data-kind") === "user",
-  );
+  const transcript = screen.getByTestId("transcript");
+  const userMessage = screen
+    .getAllByTestId("message-block")
+    .find((node) => node.getAttribute("data-kind") === "user");
 
   if (!userMessage) {
     throw new Error("Expected a user message in the transcript");
@@ -219,7 +683,17 @@ function mockScrollableTranscript({
   });
 
   (stream as HTMLElement).getBoundingClientRect = vi.fn(
-    () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    () =>
+      ({
+        top: 0,
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+      }) as DOMRect,
   );
   (transcript as HTMLElement).getBoundingClientRect = vi.fn(
     () =>
@@ -259,7 +733,7 @@ function mockScrollableTranscriptUsers({
   users: Array<{ bottom: number; id: string; top: number }>;
 }) {
   const stream = screen.getByTestId("stream-container");
-  const transcript = screen.getByLabelText("active-session");
+  const transcript = screen.getByTestId("transcript");
   const userMessages = screen
     .getAllByTestId("message-block")
     .filter((node) => node.getAttribute("data-kind") === "user");
@@ -282,7 +756,17 @@ function mockScrollableTranscriptUsers({
   });
 
   (stream as HTMLElement).getBoundingClientRect = vi.fn(
-    () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    () =>
+      ({
+        top: 0,
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+      }) as DOMRect,
   );
   (transcript as HTMLElement).getBoundingClientRect = vi.fn(
     () =>
@@ -321,6 +805,37 @@ function mockScrollableTranscriptUsers({
 }
 
 describe("Tomcat webview App", () => {
+  it("routes View diff using the displayed session when tool call IDs repeat", async () => {
+    const { postMessage } = mount();
+    for (const activeSessionId of ["s1", "s2"] as const) {
+      const snapshot = approvalDraftSnapshot(activeSessionId);
+      for (const sessionId of ["s1", "s2"] as const) {
+        snapshot.sessionViews[sessionId].timeline = [{
+          id: "tool-shared-id",
+          toolCallId: "shared-call",
+          toolName: "edit",
+          type: "tool",
+          status: "complete",
+          isError: false,
+          display: { kind: "file", file: `/workspace/${sessionId}.ts` },
+          diff: [
+            { tag: "gap", text: "omitted" },
+            { tag: "del", text: `old ${sessionId}`, oldLine: 25 },
+            { tag: "add", text: `new ${sessionId}`, newLine: 25 },
+          ],
+        }];
+      }
+      await emitState({ channel: "state", content: snapshot, messageId: `diff-${activeSessionId}` });
+      postMessage.mockClear();
+      fireEvent.click(screen.getByTestId("tool-row-open-diff"));
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: "openDiff",
+        data: { sessionId: activeSessionId, toolCallId: "shared-call" },
+      }));
+      expect(postMessage.mock.calls.some(([message]) => message.type === "openFile")).toBe(false);
+    }
+  });
+
   it("shows a loading state while serve is connecting", async () => {
     mount();
 
@@ -336,11 +851,13 @@ describe("Tomcat webview App", () => {
       messageId: "state-loading",
     });
 
-    expect(screen.getByTestId("loading-state").textContent).toContain("Connecting");
-    expect(screen.queryByText("No active Tomcat session")).toBeNull();
-    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toContain(
+    expect(screen.getByTestId("loading-state").textContent).toContain(
       "Connecting",
     );
+    expect(screen.queryByText("No active Tomcat session")).toBeNull();
+    expect(
+      screen.getByTestId("connection-chip").getAttribute("aria-label"),
+    ).toContain("Connecting");
     expect(screen.getByTestId("connection-chip").className).toContain(
       "tc-conn-light--connecting",
     );
@@ -366,6 +883,145 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByTestId("loading-state")).toBeNull();
   });
 
+  it("distinguishes an automatic reconnection from the first connection", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: null,
+        availableModels: [],
+        connectionStatus: "reconnecting",
+        ready: false,
+        sessions: [],
+        sessionViews: {},
+      },
+      messageId: "state-reconnecting",
+    });
+
+    expect(screen.getByTestId("loading-state").textContent).toContain(
+      "Reconnecting",
+    );
+    expect(
+      screen.getByTestId("connection-chip").getAttribute("aria-label"),
+    ).toContain("Reconnecting");
+  });
+
+  it("renders a history-only approval inline without opening the sticky answer panel", async () => {
+    mount();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [{
+          busy: true,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          sessionId: "s1",
+          title: null,
+          updatedAt: 1,
+        }],
+        sessionViews: {
+          s1: {
+            sessionId: "s1",
+            timeline: [{
+              id: "history-approval",
+              live: false,
+              request: {
+                questions: [{
+                  id: "q1",
+                  options: [{ id: "yes", label: "Yes", recommended: true }],
+                  prompt: "Proceed?",
+                }],
+                requestId: "",
+                responseEvent: "",
+              },
+              resolved: false,
+              sessionId: "s1",
+              type: "approval",
+            }],
+          },
+        },
+      },
+      messageId: "history-only-approval",
+    });
+
+    expect(screen.getByTestId("approval-card-restoring")).toBeTruthy();
+    expect(screen.queryByTestId("pending-question-panel")).toBeNull();
+  });
+
+  it("renders one asking-question row and its live sticky answer panel", async () => {
+    mount();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [{
+          busy: true,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          sessionId: "s1",
+          title: null,
+          updatedAt: 1,
+        }],
+        sessionViews: {
+          s1: {
+            busy: true,
+            sessionId: "s1",
+            timeline: [
+              {
+                id: "ask-call-live",
+                isError: false,
+                status: "running",
+                toolCallId: "ask-call-live",
+                toolName: "ask_question",
+                type: "tool",
+              },
+              {
+                id: "approval:ask-call-live",
+                live: true,
+                request: {
+                  questions: [{
+                    id: "q1",
+                    options: [{ id: "yes", label: "Yes", recommended: true }],
+                    prompt: "Proceed?",
+                  }],
+                  requestId: "request-live",
+                  responseEvent: "plan.ask_question.response.request-live",
+                  toolCallId: "ask-call-live",
+                },
+                resolved: false,
+                sessionId: "s1",
+                type: "approval",
+              },
+            ],
+          },
+        },
+      },
+      messageId: "ask-question-live",
+    });
+
+    expect(screen.getAllByText("Asking question")).toHaveLength(1);
+    expect(screen.getByTestId("pending-question-panel")).toBeTruthy();
+    expect(screen.getByText("Proceed?")).toBeTruthy();
+  });
+
+  it("hides the context label until the first measured usage arrives", async () => {
+    mount();
+    expect(screen.getByTestId("context-ratio").textContent).toBe("");
+
+    await emitReadySessionState();
+    expect(screen.getByTestId("context-ratio").textContent).toBe("");
+
+    await emitReadySessionState("s1", 0.6);
+
+    expect(screen.getByTestId("context-ratio").textContent).toBe("Ctx 60%");
+  });
+
   it("renders transcript timeline, plan UI, attachments, and context ratio", async () => {
     const { postMessage } = mount();
 
@@ -374,6 +1030,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -396,11 +1056,9 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             pendingAttachments: [
               {
-                attachment: {
-                  dataBase64: "YWJj",
-                  kind: "file",
-                  mimeType: "text/markdown",
-                },
+                blobSha: "a".repeat(64),
+                bytes: 3,
+                filename: "README.md",
                 id: "att-1",
                 kind: "file",
                 label: "README.md",
@@ -408,14 +1066,26 @@ describe("Tomcat webview App", () => {
                 path: "/workspace/README.md",
               },
             ],
-            planFile: {
+            planTodos: [
+              {
+                content: "Audit transcript rendering",
+                id: "todo-1",
+                status: "pending",
+              },
+              {
+                content: "Render update_plan rows",
+                id: "todo-2",
+                status: "pending",
+              },
+            ],
+            activePlan: {
               path: "/workspace/login-refactor.plan.md",
               planId: "plan-1",
               state: "planning",
             },
-            planId: "plan-1",
-            planState: "planning",
+            agentMode: "plan",
             sessionId: "s1",
+            sessionTodos: [],
             timeline: [
               {
                 coveredCount: 12,
@@ -437,14 +1107,43 @@ describe("Tomcat webview App", () => {
                 type: "tool",
               },
               {
-                id: "plan-card-1",
-                path: "/workspace/login-refactor.plan.md",
+                args: {
+                  goal: "Login refactor plan",
+                  path: "/workspace/login-refactor.plan.md",
+                  todos: [
+                    {
+                      content: "Audit transcript rendering",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                    {
+                      content: "Render update_plan rows",
+                      id: "todo-2",
+                      status: "pending",
+                    },
+                  ],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Login refactor plan",
+                  total: 2,
+                },
+                planPath: "/workspace/login-refactor.plan.md",
                 planId: "plan-1",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
               },
               {
                 id: "approval-1",
+                live: true,
                 request: {
                   questions: [
                     {
@@ -471,23 +1170,39 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByText("hello")).toBeTruthy();
-    expect(screen.getByTestId("history-loader").textContent).toContain("Loading earlier");
-    expect(screen.getByTestId("boundary-block").textContent).toContain("Earlier history summary");
-    expect(screen.getByTestId("thinking-summary").textContent).toContain("thinking...");
+    expect(screen.getByTestId("history-loader").textContent).toContain(
+      "Loading earlier",
+    );
+    expect(screen.getByTestId("boundary-block").textContent).toContain(
+      "Earlier history summary",
+    );
+    expect(screen.getByTestId("thinking-summary").textContent).toContain(
+      "thinking...",
+    );
     expect(screen.queryByTestId("thinking-body")).toBeNull();
     fireEvent.click(screen.getByTestId("thinking-toggle"));
-    expect(screen.getByTestId("thinking-body").textContent).toContain("thinking...");
+    expect(screen.getByTestId("thinking-body").textContent).toContain(
+      "thinking...",
+    );
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByTestId("file-chip").textContent).toContain("app.ts");
     expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
     fireEvent.click(screen.getByTestId("session-select"));
-    expect(screen.getByTestId("session-option").textContent).toContain("New session");
+    expect(screen.getByTestId("session-option").textContent).toContain(
+      "New session",
+    );
     expect(screen.queryByLabelText("Close active session")).toBeNull();
-    expect(screen.getByTestId("plan-card").textContent).toContain("login-refactor.plan.md");
+    expect(screen.getByTestId("plan-card").textContent).toContain(
+      "login-refactor.plan.md",
+    );
     expect(screen.getByTestId("build-plan").textContent).toContain("Build");
-    expect(screen.getByTestId("attachment-chip").textContent).toContain("README.md");
-    expect(screen.getByTestId("context-ratio").textContent).toContain("Ctx 42%");
+    expect(screen.getByTestId("attachment-chip").getAttribute("aria-label")).toContain(
+      "README.md",
+    );
+    expect(screen.getByTestId("context-ratio").textContent).toContain(
+      "Ctx 42%",
+    );
   });
 
   it("forwards a plan card build-model selection as a setBuildModel intent", async () => {
@@ -517,14 +1232,43 @@ describe("Tomcat webview App", () => {
             pendingAttachments: [],
             planTodos: [],
             sessionTodos: [],
+            activePlan: {
+              path: "/workspace/login-refactor.plan.md",
+              planId: "plan-1",
+              state: "planning",
+            },
+            agentMode: "plan",
             sessionId: "s1",
             timeline: [
               {
-                id: "plan-card-1",
-                path: "/workspace/login-refactor.plan.md",
+                args: {
+                  goal: "Login refactor plan",
+                  path: "/workspace/login-refactor.plan.md",
+                  todos: [
+                    {
+                      content: "Audit transcript rendering",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                  ],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Login refactor plan",
+                  total: 1,
+                },
+                planPath: "/workspace/login-refactor.plan.md",
                 planId: "plan-1",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
               },
             ],
           },
@@ -533,9 +1277,13 @@ describe("Tomcat webview App", () => {
       messageId: "state-build-model",
     });
 
-    fireEvent.change(screen.getByTestId("plan-card-build-model"), {
-      target: { value: "claude-4.6-sonnet" },
-    });
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    fireEvent.click(
+      screen
+        .getAllByTestId("model-option")
+        .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
+        screen.getAllByTestId("model-option")[0],
+    );
 
     expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -590,12 +1338,17 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               { id: "m-user", kind: "user", text: "hello", type: "message" },
-              { id: "m-assistant", kind: "assistant", text: "world", type: "message" },
+              {
+                id: "m-assistant",
+                kind: "assistant",
+                text: "world",
+                type: "message",
+              },
             ],
           },
         },
@@ -647,8 +1400,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [
               { id: "m-user", kind: "user", text: "hello", type: "message" },
@@ -707,8 +1460,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [],
           },
@@ -752,17 +1505,41 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "planning",
+            activePlan: null,
+            agentMode: "plan",
+            planTodos: [],
             sessionId: "s1",
+            sessionTodos: [],
             timeline: [
               {
-                id: "plan-card-1",
-                path: "/workspace/restored.plan.md",
+                args: {
+                  goal: "Restored plan",
+                  path: "/workspace/restored.plan.md",
+                  todos: [
+                    {
+                      content: "Resume execution",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                  ],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Restored plan",
+                  total: 1,
+                },
+                planPath: "/workspace/restored.plan.md",
                 planId: "plan-restored",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  '{"plan_id":"plan-restored","path":"/workspace/restored.plan.md","state":"planning"}',
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
               },
             ],
           },
@@ -771,7 +1548,9 @@ describe("Tomcat webview App", () => {
       messageId: "state-restored-plan-build",
     });
 
-    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (screen.getByTestId("build-plan") as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 
   it("keeps top-pagination alive when older pages still do not advance the visible oldest item", async () => {
@@ -819,10 +1598,17 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
-            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+            timeline: [
+              {
+                id: "visible-oldest",
+                kind: "assistant",
+                text: "chunk",
+                type: "message",
+              },
+            ],
           },
         },
       },
@@ -860,10 +1646,17 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
-            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+            timeline: [
+              {
+                id: "visible-oldest",
+                kind: "assistant",
+                text: "chunk",
+                type: "message",
+              },
+            ],
           },
         },
       },
@@ -894,10 +1687,17 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
-            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+            timeline: [
+              {
+                id: "visible-oldest",
+                kind: "assistant",
+                text: "chunk",
+                type: "message",
+              },
+            ],
           },
         },
       },
@@ -956,10 +1756,17 @@ describe("Tomcat webview App", () => {
               model: "gpt-5.4",
               ownedByThisFrontend: true,
               pendingAttachments: [],
-              planId: null,
-              planState: "chat",
+              activePlan: null,
+              agentMode: "chat",
               sessionId: "s1",
-              timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
+              timeline: [
+                {
+                  id: `m-${index}`,
+                  kind: "assistant",
+                  text: "chunk",
+                  type: "message",
+                },
+              ],
             },
           },
         },
@@ -990,10 +1797,17 @@ describe("Tomcat webview App", () => {
               model: "gpt-5.4",
               ownedByThisFrontend: true,
               pendingAttachments: [],
-              planId: null,
-              planState: "chat",
+              activePlan: null,
+              agentMode: "chat",
               sessionId: "s1",
-              timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
+              timeline: [
+                {
+                  id: `m-${index}`,
+                  kind: "assistant",
+                  text: "chunk",
+                  type: "message",
+                },
+              ],
             },
           },
         },
@@ -1034,8 +1848,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [],
           },
@@ -1070,10 +1884,12 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
-            timeline: [{ id: "m1", kind: "assistant", text: "done", type: "message" }],
+            timeline: [
+              { id: "m1", kind: "assistant", text: "done", type: "message" },
+            ],
           },
         },
       },
@@ -1091,6 +1907,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -1106,15 +1926,19 @@ describe("Tomcat webview App", () => {
           s1: {
             busy: false,
             contextRatio: 0.42,
+            activePlan: {
+              path: "/workspace/login-refactor.plan.md",
+              planId: "plan-1",
+              state: "planning",
+            },
+            agentMode: "plan",
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [
               {
-                attachment: {
-                  dataBase64: "YWJj",
-                  kind: "file",
-                  mimeType: "text/markdown",
-                },
+                blobSha: "a".repeat(64),
+                bytes: 3,
+                filename: "README.md",
                 id: "att-1",
                 kind: "file",
                 label: "README.md",
@@ -1122,24 +1946,56 @@ describe("Tomcat webview App", () => {
                 path: "/workspace/README.md",
               },
             ],
-            planFile: {
-              path: "/workspace/login-refactor.plan.md",
-              planId: "plan-1",
-              state: "planning",
-            },
-            planId: null,
-            planState: "planning",
+            planTodos: [
+              {
+                content: "Audit transcript rendering",
+                id: "todo-1",
+                status: "pending",
+              },
+            ],
             sessionId: "s1",
+            sessionTodos: [],
             timeline: [
               {
-                id: "plan-card-1",
-                path: "/workspace/login-refactor.plan.md",
+                args: {
+                  goal: "Login refactor plan",
+                  path: "/workspace/login-refactor.plan.md",
+                  todos: [
+                    {
+                      content: "Audit transcript rendering",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                  ],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Login refactor plan",
+                  total: 1,
+                },
+                planPath: "/workspace/login-refactor.plan.md",
                 planId: "plan-1",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
+              },
+              {
+                assistantMessageId: "assistant-plan",
+                kind: "assistant",
+                id: "assistant-plan",
+                text: "Plan is ready to build.",
+                type: "message",
               },
               {
                 id: "approval-1",
+                live: true,
                 request: {
                   questions: [
                     {
@@ -1171,33 +2027,30 @@ describe("Tomcat webview App", () => {
       },
     });
     fireEvent.click(screen.getByTestId("send-button"));
-    const modelSelect = screen.getByTestId("model-select");
-    if (modelSelect.tagName === "SELECT") {
-      fireEvent.change(modelSelect, {
-        target: { value: "claude-4.6-sonnet" },
-      });
-    } else {
-      fireEvent.click(modelSelect);
-      fireEvent.click(
-        screen
-          .getAllByTestId("model-option")
-          .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
-          screen.getAllByTestId("model-option")[0],
-      );
-    }
+    fireEvent.click(screen.getByTestId("model-select"));
+    fireEvent.click(
+      screen
+        .getAllByTestId("model-option")
+        .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
+        screen.getAllByTestId("model-option")[0],
+    );
     fireEvent.click(screen.getByTestId("thinking-level-select"));
     fireEvent.click(
       screen
         .getAllByTestId("thinking-level-option")
-        .find((node) => node.textContent?.includes("Xhigh")) ?? screen.getAllByTestId("thinking-level-option")[0],
+        .find((node) => node.textContent?.includes("Xhigh")) ??
+        screen.getAllByTestId("thinking-level-option")[0],
     );
     fireEvent.click(screen.getByTestId("mode-select"));
     fireEvent.click(
-      screen.getAllByTestId("mode-option").find((node) => node.textContent?.includes("Chat")) ??
+      screen
+        .getAllByTestId("mode-option")
+        .find((node) => node.textContent?.includes("Chat")) ??
         screen.getAllByTestId("mode-option")[0],
     );
-    fireEvent.click(screen.getByLabelText("添加文件/文件夹/图片"));
+    fireEvent.click(screen.getByLabelText("Add files/folders/images"));
     fireEvent.click(screen.getByTestId("attachment-chip"));
+    fireEvent.click(screen.getByTestId("attachment-remove"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
     fireEvent.click(screen.getByTestId("build-plan"));
     fireEvent.click(screen.getByTestId("approval-option-q1-yes"));
@@ -1238,17 +2091,25 @@ describe("Tomcat webview App", () => {
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "setPlanMode" &&
-          message.data?.action === "exit",
+          message.type === "setPlanMode" && message.data?.action === "exit",
       ),
     ).toBe(true);
     expect(
-      postMessage.mock.calls.some(([message]) => message.type === "pickContext"),
+      postMessage.mock.calls.some(
+        ([message]) => message.type === "pickContext",
+      ),
     ).toBe(true);
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "removeAttachment" &&
+          message.type === "openFile" &&
+          message.data?.path === "/workspace/README.md",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "removeDraftAttachment" &&
           message.data?.attachmentId === "att-1",
       ),
     ).toBe(true);
@@ -1295,13 +2156,13 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+          activePlan: null,
+          agentMode: "chat",
             sessionId: "s1",
             timeline: [
               {
                 id: "approval-1",
+                live: true,
                 request: {
                   questions: [
                     {
@@ -1335,16 +2196,35 @@ describe("Tomcat webview App", () => {
       messageId: "state-batched-approval",
     });
 
+    const pendingPanel = screen.getByTestId("pending-question-panel");
+    const stream = screen.getByTestId("stream-container");
+    const composer = screen.getByTestId("composer");
+    expect(stream.contains(pendingPanel)).toBe(false);
+    expect(
+      pendingPanel.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+
     const continueButton = screen.getByTestId("approval-continue");
     expect((continueButton as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.click(screen.getByTestId("approval-option-q1-day"));
     expect((continueButton as HTMLButtonElement).disabled).toBe(true);
 
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.queryByTestId("approval-option-q2-rs")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    expect(screen.queryByTestId("approval-option-q1-day")).toBeNull();
     fireEvent.click(screen.getByTestId("approval-option-q2-rs"));
     expect((continueButton as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(continueButton);
+    fireEvent.click(continueButton);
+
+    const answerMessages = postMessage.mock.calls.filter(
+      ([message]) => message.type === "answerQuestion" && message.data?.requestId === "r2",
+    );
+    expect(answerMessages).toHaveLength(1);
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
 
     expect(
       postMessage.mock.calls.some(
@@ -1367,6 +2247,175 @@ describe("Tomcat webview App", () => {
             ]),
       ),
     ).toBe(true);
+  });
+
+  it("reports real docked Todos to the DOM capture bridge after removing the old widget shell", async () => {
+    const {postMessage}=mount();
+    const snapshot=approvalDraftSnapshot("s1");
+    snapshot.sessionViews.s1.busy=true;
+    snapshot.sessionViews.s1.sessionTodos=[{id:"todo",content:"Check files",status:"in_progress"}];
+    await emitState({channel:"state",content:snapshot,messageId:"dock-metrics"});
+    await emitState({channel:"event",content:{type:"__test.capture_dom"},messageId:"capture-dock"});
+    expect(postMessage.mock.calls.some(([message]) => message.type==="__test.dom_snapshot" && message.data.todoWidgetVisible===true && message.data.todoWidgetTitle==="Check files (1/1)")).toBe(true);
+  });
+
+  it("places the pending panel before the dock without remounting or clearing the composer", async () => {
+    mount();
+    const pending = approvalDraftSnapshot("s1");
+    pending.sessionViews.s1.busy = true;
+    pending.sessionViews.s1.sessionTodos = [
+      { id: "todo-1", content: "Check the question panel", status: "in_progress" },
+    ];
+    const idle = {
+      ...pending,
+      sessionViews: {
+        ...pending.sessionViews,
+        s1: { ...pending.sessionViews.s1, busy: false, timeline: [] },
+      },
+    };
+    await emitState({ channel: "state", content: idle, messageId: "before-question" });
+    const editor = screen.getByTestId("composer-input");
+    fireEvent.paste(editor, {
+      clipboardData: { getData: (type: string) => type === "text/plain" ? "Keep this draft" : "" },
+    });
+    expect(document.querySelector(".tc-shell--question-pending")).toBeNull();
+
+    await emitState({ channel: "state", content: pending, messageId: "show-question" });
+    expect(document.querySelector(".tc-shell--question-pending")).toBeTruthy();
+    const panel = screen.getByTestId("pending-question-panel");
+    const dock = screen.getByTestId("session-dock");
+    const footer = screen.getByTestId("composer-footer");
+    expect(dock.parentElement).toBe(footer);
+    expect(footer.parentElement).toBe(panel.parentElement);
+    expect(panel.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getByTestId("composer").closest('[data-testid="composer-area"]')).toBe(screen.getByTestId("composer-area"));
+    expect(screen.getByTestId("composer-input")).toBe(editor);
+    expect(editor.textContent).toBe("Keep this draft");
+
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    await emitState({ channel: "state", content: idle, messageId: "question-finished" });
+    expect(document.querySelector(".tc-shell--question-pending")).toBeNull();
+    expect(screen.getByTestId("composer-input")).toBe(editor);
+    expect(editor.textContent).toBe("Keep this draft");
+  });
+
+  it("shows one pending question group at a time and moves to the next group after the host confirms completion", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const firstPending = snapshot.sessionViews.s1.timeline.find(
+      (item) => item.type === "approval",
+    );
+    if (!firstPending || firstPending.type !== "approval") {
+      throw new Error("expected the approval fixture to include a pending question");
+    }
+    const nextPending = {
+      ...firstPending,
+      id: "approval-next",
+      request: {
+        ...firstPending.request,
+        questions: [{
+          id: "q-next",
+          options: [
+            { id: "finish", label: "Finish", recommended: true },
+            { id: "later", label: "Later" },
+          ],
+          prompt: "What should happen next?",
+        }],
+        requestId: "request-next",
+      },
+    };
+    snapshot.sessionViews.s1.timeline = [firstPending, nextPending];
+    await emitState({
+      channel: "state",
+      content: snapshot,
+      messageId: "two-pending-question-groups",
+    });
+
+    expect(screen.getByText("1 more question group waiting")).toBeTruthy();
+    expect(screen.getByTestId("approval-option-q-draft-yes")).toBeTruthy();
+    expect(screen.queryByTestId("approval-option-q-next-finish")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("approval-option-q-draft-yes"));
+    fireEvent.click(screen.getByTestId("approval-continue"));
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) => message.type === "answerQuestion" && message.data?.requestId === "request-draft-1",
+      ),
+    ).toBe(true);
+
+    const resolvedFirst = approvalDraftSnapshot("s1");
+    resolvedFirst.sessionViews.s1.timeline = [nextPending];
+    await emitState({
+      channel: "state",
+      content: resolvedFirst,
+      messageId: "first-pending-question-group-resolved",
+    });
+
+    expect(screen.queryByText("1 more question group waiting")).toBeNull();
+    expect(screen.queryByTestId("approval-option-q-draft-yes")).toBeNull();
+    expect(screen.getByTestId("approval-option-q-next-finish")).toBeTruthy();
+  });
+
+  it("keeps an answer draft across session switches and a webview DOM reload", async () => {
+    const first = mount();
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-s1",
+    });
+
+    expect(screen.getByTestId("question-announcement").textContent).toBe(
+      "Question waiting in s1.",
+    );
+    const announcementNode = screen.getByTestId("question-announcement");
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-s1-replay",
+    });
+    expect(screen.getByTestId("question-announcement")).toBe(announcementNode);
+
+    const option = screen.getByTestId("approval-option-q-draft-yes");
+    fireEvent.click(option);
+    expect(option.getAttribute("aria-checked")).toBe("true");
+
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s2"),
+      messageId: "approval-draft-s2",
+    });
+    expect(screen.queryByTestId("approval-option-q-draft-yes")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("session-select"));
+    const badge = screen.getByTestId("session-pending-badge");
+    expect(badge.textContent).toBe("1");
+    expect(badge.closest("button")?.getAttribute("aria-label")).toContain("1 pending question");
+
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-s1-return",
+    });
+    expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+    expect(document.activeElement).toBe(screen.getByTestId("approval-option-q-draft-yes"));
+
+    const persisted = first.getPersistedState();
+    first.unmount();
+    mount(persisted);
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "approval-draft-after-reload",
+    });
+    expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe(
+      "true",
+    );
   });
 
   it("submits the prompt on Enter without Shift", async () => {
@@ -1395,9 +2444,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             timeline: [],
           },
@@ -1409,7 +2457,8 @@ describe("Tomcat webview App", () => {
     const textbox = screen.getByTestId("composer-input");
     fireEvent.paste(textbox, {
       clipboardData: {
-        getData: (type: string) => (type === "text/plain" ? "submit via enter" : ""),
+        getData: (type: string) =>
+          type === "text/plain" ? "submit via enter" : "",
       },
     });
     fireEvent.keyDown(textbox, { key: "Enter" });
@@ -1417,13 +2466,128 @@ describe("Tomcat webview App", () => {
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "prompt" && message.data?.text === "submit via enter",
+          message.type === "prompt" &&
+          message.data?.text === "submit via enter",
       ),
     ).toBe(true);
   });
 
+  it("captures a source draft once, locks session controls, and routes only the matching result", async () => {
+    const { postMessage } = mount();
+    await emitReadySessionState("s1");
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "fork this text" : ""),
+      },
+    });
+    postMessage.mockClear();
+
+    const create = screen.getByTestId("new-session-button");
+    fireEvent.click(create);
+    fireEvent.click(create);
+    expect(postMessage.mock.calls.filter(([message]) => message.type === "newSession")).toHaveLength(1);
+    expect((create as HTMLButtonElement).disabled).toBe(true);
+    expect(create.getAttribute("aria-busy")).toBe("true");
+    expect((screen.getByTestId("session-select") as HTMLButtonElement).disabled).toBe(true);
+
+    await emitState({
+      channel: "event",
+      content: {
+        operationId: "fork-op-1",
+        sourceSessionId: "s1",
+        type: "captureDraftForFork",
+      },
+      messageId: "capture-fork-op-1",
+    });
+    const fork = postMessage.mock.calls.find(([message]) => message.type === "forkSession")?.[0];
+    expect(fork?.data).toMatchObject({
+      operationId: "fork-op-1",
+      sourceSessionId: "s1",
+      text: "fork this text",
+    });
+
+    await emitState({
+      channel: "event",
+      content: {
+        operationId: "stale-op",
+        sourceSessionId: "s1",
+        success: false,
+        error: "stale failure",
+        type: "draftForkResult",
+      },
+      messageId: "stale-result",
+    });
+    expect((create as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("stale failure")).toBeNull();
+
+    await emitState({
+      channel: "event",
+      content: {
+        operationId: "fork-op-1",
+        sourceSessionId: "s1",
+        success: false,
+        error: "target write failed",
+        type: "draftForkResult",
+      },
+      messageId: "fork-result-1",
+    });
+    expect((create as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("alert").textContent).toContain("target write failed");
+  });
+
+  it("unlocks the new-session control after an unfinished composer operation times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const { postMessage } = mount();
+      await emitReadySessionState("s1");
+      fireEvent.click(screen.getByTestId("attachment-add"));
+      const create = screen.getByTestId("new-session-button");
+      fireEvent.click(create);
+      await emitState({
+        channel: "event",
+        content: {
+          operationId: "fork-timeout-op",
+          sourceSessionId: "s1",
+          type: "captureDraftForFork",
+        },
+        messageId: "capture-fork-timeout",
+      });
+
+      expect(postMessage.mock.calls.some(([message]) => message.type === "forkSession")).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(
+        postMessage.mock.calls.some(
+          ([message]) =>
+            message.type === "forkSession" &&
+            message.data?.operationId === "fork-timeout-op",
+        ),
+      ).toBe(true);
+
+      await emitState({
+        channel: "event",
+        content: {
+          error: "fork failed after timeout",
+          operationId: "fork-timeout-op",
+          sourceSessionId: "s1",
+          success: false,
+          type: "draftForkResult",
+        },
+        messageId: "fork-timeout-result",
+      });
+      expect((create as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByTestId("draft-fork-error").textContent).toContain(
+        "fork failed after timeout",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders the top bar without legacy title or refresh button", async () => {
-    mount();
+    const { postMessage } = mount();
 
     await emitState({
       channel: "state",
@@ -1448,9 +2612,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "medium",
             timeline: [],
@@ -1461,9 +2624,9 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("new-session-button").textContent).toBe("+");
-    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toContain(
-      "Connected",
-    );
+    expect(
+      screen.getByTestId("connection-chip").getAttribute("aria-label"),
+    ).toContain("Connected");
     expect(screen.getByTestId("connection-chip").className).toContain(
       "tc-conn-light--connected",
     );
@@ -1471,8 +2634,17 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByRole("button", { name: /refresh/i })).toBeNull();
 
     const topbar = screen.getByLabelText("Session bar");
-    expect(topbar.firstElementChild).toBe(screen.getByTestId("connection-chip"));
-    expect(topbar.lastElementChild).toBe(screen.getByTestId("new-session-button"));
+    expect(topbar.firstElementChild).toBe(
+      screen.getByTestId("connection-chip"),
+    );
+    const newSession = screen.getByTestId("new-session-button");
+    const settings = screen.getByTestId("settings-button");
+    expect(newSession.nextElementSibling).toBe(settings);
+    expect(topbar.lastElementChild).toBe(settings);
+    expect(settings.querySelector(".codicon-settings-gear")).not.toBeNull();
+    fireEvent.click(settings);
+    expect(postMessage.mock.calls.some(([message]) => message.type === "openSettings" && message.data?.route === "general")).toBe(true);
+    expect(postMessage.mock.calls.some(([message]) => message.type === "compact")).toBe(false);
   });
 
   it("updates the thinking level select from session state", async () => {
@@ -1483,6 +2655,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -1501,9 +2677,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],
@@ -1513,13 +2688,19 @@ describe("Tomcat webview App", () => {
       messageId: "state-thinking-gpt",
     });
 
-    expect(screen.getByTestId("thinking-level-select").textContent).toContain("High");
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain(
+      "High",
+    );
 
     await emitState({
       channel: "state",
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -1538,9 +2719,8 @@ describe("Tomcat webview App", () => {
             model: "claude-4.6-sonnet",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "low",
             timeline: [],
@@ -1550,10 +2730,14 @@ describe("Tomcat webview App", () => {
       messageId: "state-thinking-claude",
     });
 
-    expect(screen.getByTestId("thinking-level-select").textContent).toContain("Low");
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain(
+      "Low",
+    );
   });
 
   it("shows a sticky prompt and live cluster for the active turn", async () => {
+    const prompt = "今天美国那边有什么有趣的新闻";
+    const thinking = "先整理美国热点新闻，再决定是否需要补 fetch。";
     mount();
 
     await emitState({
@@ -1579,21 +2763,20 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
               {
                 id: "user-1",
                 kind: "user",
-                text: "今天美国那边有什么有趣的新闻",
+                text: prompt,
                 type: "message",
               },
               {
                 id: "thinking-1",
-                text: "先整理美国热点新闻，再决定是否需要补 fetch。",
+                text: thinking,
                 type: "thinking",
               },
               {
@@ -1613,9 +2796,12 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
-    expect(screen.getByTestId("thinking-summary").textContent).toContain("先整理美国热点新闻");
+    expect(screen.getByTestId("thinking-summary").textContent).toContain(
+      thinking.slice(0, 10),
+    );
     expect(
-      document.querySelector(".tc-thinking pre")?.textContent,
+      document.querySelector('.tc-thinking [data-testid="thinking-body"]')
+        ?.textContent,
     ).toBeFalsy();
 
     mockScrollableTranscript({
@@ -1627,13 +2813,14 @@ describe("Tomcat webview App", () => {
     fireEvent.scroll(screen.getByTestId("stream-container"));
 
     expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
-      "今天美国那边有什么有趣的新闻",
+      prompt,
     );
 
     fireEvent.click(screen.getByTestId("thinking-toggle"));
-    expect(document.querySelector(".tc-thinking pre")?.textContent).toContain(
-      "先整理美国热点新闻，再决定是否需要补 fetch。",
-    );
+    expect(
+      document.querySelector('.tc-thinking [data-testid="thinking-body"]')
+        ?.textContent,
+    ).toContain(thinking);
   });
 
   it("hides the previous sticky prompt until the newly revealed user turn scrolls past the top edge", async () => {
@@ -1664,16 +2851,34 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
-              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
-              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
-              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
-              { id: "thinking-2", text: "正在回答第二轮问题", type: "thinking" },
+              {
+                id: "user-1",
+                kind: "user",
+                text: "第一轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-1",
+                kind: "assistant",
+                text: "第一轮回答",
+                type: "message",
+              },
+              {
+                id: "user-2",
+                kind: "user",
+                text: SECOND_TURN_INPUT,
+                type: "message",
+              },
+              {
+                id: "thinking-2",
+                text: "正在回答第二轮问题",
+                type: "thinking",
+              },
             ],
           },
         },
@@ -1696,13 +2901,13 @@ describe("Tomcat webview App", () => {
 
     metrics.scrollTop = 360;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(SECOND_TURN_INPUT);
   });
 
   it("settles the previous turn and auto-switches from reveal-to-top into the current sticky prompt", async () => {
     mount();
 
-    const previousTurn = [
+    const previousTurn: WebviewTimelineItem[] = [
       { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
       {
         assistantMessageId: "assistant-1",
@@ -1738,11 +2943,13 @@ describe("Tomcat webview App", () => {
     });
 
     const stream = screen.getByTestId("stream-container");
-    const transcript = screen.getByLabelText("active-session");
+    const transcript = screen.getByTestId("transcript");
     let baseContentHeight = 160;
     let scrollTop = 0;
     const currentSpacerHeight = () =>
-      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+      Number.parseFloat(
+        screen.getByTestId("transcript-spacer").style.height || "0",
+      );
     const rect = (top: number, bottom: number): DOMRect =>
       ({
         top,
@@ -1765,9 +2972,16 @@ describe("Tomcat webview App", () => {
     });
     Object.defineProperty(stream, "scrollTop", {
       configurable: true,
-      get: () => Math.max(0, Math.min(scrollTop, baseContentHeight + currentSpacerHeight() - 100)),
+      get: () =>
+        Math.max(
+          0,
+          Math.min(scrollTop, baseContentHeight + currentSpacerHeight() - 100),
+        ),
       set: (value: number) => {
-        const maxTop = Math.max(0, baseContentHeight + currentSpacerHeight() - 100);
+        const maxTop = Math.max(
+          0,
+          baseContentHeight + currentSpacerHeight() - 100,
+        );
         scrollTop = Math.max(0, Math.min(value, maxTop));
       },
     });
@@ -1802,7 +3016,7 @@ describe("Tomcat webview App", () => {
         messageId: "state-progress-reveal",
         timeline: [
           ...previousTurn,
-          { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+          { id: "user-2", kind: "user", text: SECOND_TURN_INPUT, type: "message" },
           {
             assistantMessageId: "assistant-2",
             id: "thinking-2",
@@ -1816,9 +3030,11 @@ describe("Tomcat webview App", () => {
       expect(screen.getByTestId("transcript-spacer").style.height).toBe("40px");
       expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
-      expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
-      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(1);
-      expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
+      expect(screen.getByTestId("tool-row-label").textContent).toContain(
+        "Edited",
+      );
+      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
+      expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
 
       baseContentHeight = 340;
       await emitTranscriptSessionState({
@@ -1826,7 +3042,7 @@ describe("Tomcat webview App", () => {
         messageId: "state-progress-follow-bottom",
         timeline: [
           ...previousTurn,
-          { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+          { id: "user-2", kind: "user", text: SECOND_TURN_INPUT, type: "message" },
           {
             assistantMessageId: "assistant-2",
             id: "thinking-2",
@@ -1845,11 +3061,15 @@ describe("Tomcat webview App", () => {
 
       expect((stream as HTMLElement).scrollTop).toBe(240);
       expect(screen.getByTestId("transcript-spacer").style.height).toBe("0px");
-      expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+      expect(
+        screen.getByTestId("sticky-user-prompt-text").textContent,
+      ).toContain(SECOND_TURN_INPUT);
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
-      expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
-      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(1);
-      expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
+      expect(screen.getByTestId("tool-row-label").textContent).toContain(
+        "Edited",
+      );
+      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
+      expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
     } finally {
       rectSpy.mockRestore();
     }
@@ -1883,18 +3103,46 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
-              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
-              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
-              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
-              { id: "assistant-2", kind: "assistant", text: "第二轮回答", type: "message" },
-              { id: "user-3", kind: "user", text: "第三轮问题", type: "message" },
-              { id: "thinking-3", text: "正在回答第三轮问题", type: "thinking" },
+              {
+                id: "user-1",
+                kind: "user",
+                text: "第一轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-1",
+                kind: "assistant",
+                text: "第一轮回答",
+                type: "message",
+              },
+              {
+                id: "user-2",
+                kind: "user",
+                text: SECOND_TURN_INPUT,
+                type: "message",
+              },
+              {
+                id: "assistant-2",
+                kind: "assistant",
+                text: "第二轮回答",
+                type: "message",
+              },
+              {
+                id: "user-3",
+                kind: "user",
+                text: THIRD_TURN_INPUT,
+                type: "message",
+              },
+              {
+                id: "thinking-3",
+                text: "正在回答第三轮问题",
+                type: "thinking",
+              },
             ],
           },
         },
@@ -1918,7 +3166,9 @@ describe("Tomcat webview App", () => {
 
     metrics.scrollTop = 460;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第三轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      THIRD_TURN_INPUT,
+    );
   });
 
   it("switches the sticky prompt to the visible historical turn while scrolling upward", async () => {
@@ -1949,18 +3199,47 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
-              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
-              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
-              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
-              { id: "assistant-2", kind: "assistant", text: "第二轮回答", type: "message" },
-              { id: "user-3", kind: "user", text: "第三轮问题", type: "message" },
-              { id: "assistant-3", kind: "assistant", text: "第三轮回答", type: "message" },
+              {
+                id: "user-1",
+                kind: "user",
+                text: "第一轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-1",
+                kind: "assistant",
+                text: "第一轮回答",
+                type: "message",
+              },
+              {
+                id: "user-2",
+                kind: "user",
+                text: SECOND_TURN_INPUT,
+                type: "message",
+              },
+              {
+                id: "assistant-2",
+                kind: "assistant",
+                text: "第二轮回答",
+                type: "message",
+              },
+              {
+                id: "user-3",
+                kind: "user",
+                text: THIRD_TURN_INPUT,
+                type: "message",
+              },
+              {
+                id: "assistant-3",
+                kind: "assistant",
+                text: "第三轮回答",
+                type: "message",
+              },
             ],
           },
         },
@@ -1980,11 +3259,13 @@ describe("Tomcat webview App", () => {
     });
 
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(SECOND_TURN_INPUT);
 
     metrics.scrollTop = 560;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第三轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      THIRD_TURN_INPUT,
+    );
 
     metrics.scrollTop = 0;
     fireEvent.scroll(screen.getByTestId("stream-container"));
@@ -1994,7 +3275,7 @@ describe("Tomcat webview App", () => {
   it("drives send stop state from busy instead of inferring from transcript tail", async () => {
     mount();
 
-    const danglingTimeline = [
+    const danglingTimeline: WebviewTimelineItem[] = [
       {
         assistantMessageId: "assistant-1",
         id: "assistant-1-thinking",
@@ -2040,9 +3321,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: danglingTimeline,
@@ -2054,7 +3334,9 @@ describe("Tomcat webview App", () => {
 
     expect(screen.getByTestId("stop-button")).toBeTruthy();
     expect(screen.queryByTestId("send-button")).toBeNull();
-    expect(screen.getByTestId("session-select").textContent).toContain("running");
+    expect(screen.getByTestId("session-select").textContent).toContain(
+      "running",
+    );
 
     await emitState({
       channel: "state",
@@ -2079,9 +3361,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: danglingTimeline,
@@ -2093,7 +3374,9 @@ describe("Tomcat webview App", () => {
 
     expect(screen.getByTestId("send-button")).toBeTruthy();
     expect(screen.queryByTestId("stop-button")).toBeNull();
-    expect(screen.getByTestId("session-select").textContent).not.toContain("running");
+    expect(screen.getByTestId("session-select").textContent).not.toContain(
+      "running",
+    );
   });
 
   it("shows the session title instead of the raw sessionId in the dropdown", async () => {
@@ -2112,7 +3395,7 @@ describe("Tomcat webview App", () => {
             isCurrent: true,
             ownedByThisFrontend: true,
             sessionId: "1781621492962_3ee132361e6832e6",
-            title: "帮我重构 session 列表",
+            title: SESSION_TITLE_INPUT,
             updatedAt: now,
           },
         ],
@@ -2123,9 +3406,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "1781621492962_3ee132361e6832e6",
             thinkingLevel: "medium",
             timeline: [],
@@ -2136,7 +3418,7 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("session-select").textContent).toContain(
-      "帮我重构 session 列表",
+      SESSION_TITLE_INPUT,
     );
     expect(screen.getByTestId("session-select").textContent).not.toContain(
       "1781621492962",
@@ -2144,7 +3426,7 @@ describe("Tomcat webview App", () => {
 
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getByTestId("session-option").textContent).toContain(
-      "帮我重构 session 列表",
+      SESSION_TITLE_INPUT,
     );
   });
 
@@ -2183,9 +3465,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "empty-session",
             thinkingLevel: "medium",
             timeline: [],
@@ -2195,11 +3476,17 @@ describe("Tomcat webview App", () => {
       messageId: "state-empty-title",
     });
 
-    expect(screen.getByTestId("session-select").textContent).toContain("New session");
-    expect(screen.getByTestId("session-select").textContent).not.toContain("empty-session");
+    expect(screen.getByTestId("session-select").textContent).toContain(
+      "New session",
+    );
+    expect(screen.getByTestId("session-select").textContent).not.toContain(
+      "empty-session",
+    );
 
     fireEvent.click(screen.getByTestId("session-select"));
-    const options = screen.getAllByTestId("session-option").map((o) => o.textContent);
+    const options = screen
+      .getAllByTestId("session-option")
+      .map((o) => o.textContent);
     expect(options[0]).toContain("New session");
     expect(options[1]).toContain("New session");
     expect(options.every((o) => !o?.includes("whitespace-session"))).toBe(true);
@@ -2231,9 +3518,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s0",
             thinkingLevel: "medium",
             timeline: [],
@@ -2245,7 +3531,9 @@ describe("Tomcat webview App", () => {
 
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getAllByTestId("session-option").length).toBe(6);
-    expect(screen.getByTestId("session-more").textContent).toContain("Show 1 more");
+    expect(screen.getByTestId("session-more").textContent).toContain(
+      "Show 1 more",
+    );
 
     fireEvent.click(screen.getByTestId("session-more"));
     expect(screen.getAllByTestId("session-option").length).toBe(7);
@@ -2253,86 +3541,93 @@ describe("Tomcat webview App", () => {
   });
 
   it("groups sessions by date with section headers", async () => {
-    mount();
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T12:00:00.000Z"));
+    try {
+      mount();
+      const now = Date.now();
+      const day = 24 * 60 * 60 * 1000;
 
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "today-s",
-        availableModels: ["gpt-5.4"],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: true,
-            ownedByThisFrontend: true,
-            sessionId: "today-s",
-            title: "today topic",
-            updatedAt: now - 60_000,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "yesterday-s",
-            title: "yesterday topic",
-            updatedAt: now - day - 60_000,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "last7-s",
-            title: "last7 topic",
-            updatedAt: now - 4 * day,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "last30-s",
-            title: "last30 topic",
-            updatedAt: now - 20 * day,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "older-s",
-            title: "older topic",
-            updatedAt: now - 400 * day,
-          },
-        ],
-        sessionViews: {
-          "today-s": {
-            busy: false,
-            contextRatio: null,
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "today-s",
-            thinkingLevel: "medium",
-            timeline: [],
+      await emitState({
+        channel: "state",
+        content: {
+          activeSessionId: "today-s",
+          availableModels: ["gpt-5.4"],
+          ready: true,
+          sessions: [
+            {
+              busy: false,
+              isCurrent: true,
+              ownedByThisFrontend: true,
+              sessionId: "today-s",
+              title: "today topic",
+              updatedAt: now - 60_000,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "yesterday-s",
+              title: "yesterday topic",
+              updatedAt: now - day - 60_000,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "last7-s",
+              title: "last7 topic",
+              updatedAt: now - 4 * day,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "last30-s",
+              title: "last30 topic",
+              updatedAt: now - 20 * day,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "older-s",
+              title: "older topic",
+              updatedAt: now - 400 * day,
+            },
+          ],
+          sessionViews: {
+            "today-s": {
+              busy: false,
+              contextRatio: null,
+              model: "gpt-5.4",
+              ownedByThisFrontend: true,
+              pendingAttachments: [],
+              activePlan: null,
+              agentMode: "chat",
+              sessionId: "today-s",
+              thinkingLevel: "medium",
+              timeline: [],
+            },
           },
         },
-      },
-      messageId: "state-groups",
-    });
+        messageId: "state-groups",
+      });
 
-    fireEvent.click(screen.getByTestId("session-select"));
-    const headers = screen.getAllByTestId("session-group-header").map((h) => h.textContent);
-    expect(headers).toEqual([
-      "Today",
-      "Yesterday",
-      "Last 7 days",
-      "Last 30 days",
-      "Older",
-    ]);
+      fireEvent.click(screen.getByTestId("session-select"));
+      const headers = screen
+        .getAllByTestId("session-group-header")
+        .map((h) => h.textContent);
+      expect(headers).toEqual([
+        "Today",
+        "Yesterday",
+        "Last 7 days",
+        "Last 30 days",
+        "Older",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("accepts insertReference events and sends reference-only prompts", async () => {
@@ -2355,7 +3650,9 @@ describe("Tomcat webview App", () => {
       messageId: "event-insert-reference",
     });
 
-    expect(screen.getByTestId("composer-reference-chip").textContent).toContain("app.ts");
+    expect(screen.getByTestId("composer-reference-chip").textContent).toContain(
+      "app.ts",
+    );
 
     fireEvent.click(screen.getByTestId("send-button"));
 
@@ -2368,6 +3665,7 @@ describe("Tomcat webview App", () => {
               label: "app.ts",
               lineEnd: null,
               lineStart: null,
+              occurrenceId: expect.any(String),
               path: "src/app.ts",
               text: null,
               type: "reference",
@@ -2384,6 +3682,239 @@ describe("Tomcat webview App", () => {
         type: "prompt",
       }),
     );
+  });
+
+  it("applies every reference from one picker transaction", async () => {
+    mount();
+    await emitReadySessionState("s1");
+
+    await emitState({
+      channel: "event",
+      content: {
+        references: [
+          {
+            kind: "file",
+            label: "app.ts",
+            path: "src/app.ts",
+            type: "reference",
+          },
+          {
+            kind: "file",
+            label: "folder/",
+            path: "src/folder/",
+            type: "reference",
+          },
+        ],
+        sessionId: "s1",
+        type: "insertReferences",
+      },
+      messageId: "event-insert-reference-batch",
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getByLabelText("src/folder/")).toBeTruthy();
+  });
+
+  it("keeps independent composer drafts while switching A to B and back", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({
+      channel: "state",
+      content: snapshot,
+      messageId: "state-independent-drafts-s1",
+    });
+
+    const selectSession = async (sessionId: "s1" | "s2") => {
+      fireEvent.click(screen.getByTestId("session-select"));
+      fireEvent.click(
+        screen.getAllByTestId("session-option").find(
+          (option) => option.textContent?.includes(sessionId),
+        ) ?? screen.getAllByTestId("session-option")[0],
+      );
+      await emitState({
+        channel: "state",
+        content: approvalDraftSnapshot(sessionId),
+        messageId: `state-independent-drafts-${sessionId}-${postMessage.mock.calls.length}`,
+      });
+    };
+
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: { getData: () => "draft from A" },
+    });
+    await selectSession("s2");
+    expect(screen.getByTestId("composer-input").textContent?.trim()).toBe("");
+
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: { getData: () => "draft from B" },
+    });
+    await selectSession("s1");
+    expect(screen.getByTestId("composer-input").textContent).toContain("draft from A");
+
+    await selectSession("s2");
+    expect(screen.getByTestId("composer-input").textContent).toContain("draft from B");
+    expect(postMessage.mock.calls.map(([message]) => message)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({ sessionId: "s1", text: "draft from A" }),
+          type: "syncComposerDraft",
+        }),
+        expect.objectContaining({
+          data: expect.objectContaining({ sessionId: "s2", text: "draft from B" }),
+          type: "syncComposerDraft",
+        }),
+      ]),
+    );
+  });
+
+  it("does not resurrect A's sent draft when confirmation arrives while B is active", async () => {
+    const { postMessage } = mount();
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "state-send-in-a",
+    });
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: { getData: () => "sent from A" },
+    });
+    fireEvent.click(screen.getByTestId("send-button"));
+    const userMessageId = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0]
+      ?.data?.userMessageId;
+    expect(typeof userMessageId).toBe("string");
+
+    const confirmedWhileBActive = approvalDraftSnapshot("s2");
+    confirmedWhileBActive.sessionViews.s1.timeline = [{
+      id: userMessageId,
+      kind: "user",
+      text: "sent from A",
+      type: "message",
+    }];
+    await emitState({
+      channel: "state",
+      content: confirmedWhileBActive,
+      messageId: "state-confirm-a-while-b-active",
+    });
+
+    const backToA = approvalDraftSnapshot("s1");
+    backToA.sessionViews.s1.timeline = confirmedWhileBActive.sessionViews.s1.timeline;
+    await emitState({
+      channel: "state",
+      content: backToA,
+      messageId: "state-return-to-a-after-confirmation",
+    });
+    expect(screen.getByTestId("composer-input").textContent?.trim()).toBe("");
+  });
+
+  it("keeps a post-submit edit that returns to the same visible text", async () => {
+    const { postMessage } = mount();
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "state-same-text-submit",
+    });
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, { clipboardData: { getData: () => "same visible text" } });
+    fireEvent.click(screen.getByTestId("send-button"));
+    const userMessageId = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0]
+      ?.data?.userMessageId;
+    fireEvent.paste(textbox, { clipboardData: { getData: () => " changed" } });
+    fireEvent.keyDown(textbox, { ctrlKey: true, key: "z" });
+    fireEvent.paste(textbox, { clipboardData: { getData: () => "same visible text" } });
+    expect(textbox.textContent).toContain("same visible text");
+
+    const confirmed = approvalDraftSnapshot("s1");
+    confirmed.sessionViews.s1.timeline = [{
+      id: userMessageId,
+      kind: "user",
+      text: "same visible text",
+      type: "message",
+    }];
+    await emitState({
+      channel: "state",
+      content: confirmed,
+      messageId: "state-same-text-submit-confirmed",
+    });
+
+    expect(screen.getByTestId("composer-input").textContent).toContain("same visible text");
+  });
+
+  it("hydrates every reference from one durable draft snapshot", async () => {
+    mount();
+    const state = approvalDraftSnapshot("s1");
+    state.sessionViews.s1.composerDraft = {
+      segments: [
+        { kind: "file", label: "app.ts", path: "src/app.ts", type: "reference" },
+        { kind: "file", label: "folder/", path: "src/folder/", type: "reference" },
+      ],
+      text: "app.ts folder/ ",
+    };
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-hydrate-reference-batch",
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getByLabelText("src/folder/")).toBeTruthy();
+  });
+
+  it("merges host-added references into a locally dirty draft", async () => {
+    mount();
+    await emitReadySessionState("s1");
+    await emitState({
+      channel: "event",
+      content: {
+        reference: {
+          kind: "file",
+          label: "app.ts",
+          occurrenceId: "app-occurrence",
+          path: "src/app.ts",
+          type: "reference",
+        },
+        sessionId: "s1",
+        type: "insertReference",
+      },
+      messageId: "event-local-reference",
+    });
+
+    const state = approvalDraftSnapshot("s1");
+    state.sessionViews.s1.composerDraft = {
+      segments: [
+        { kind: "file", label: "app.ts", path: "src/app.ts", type: "reference", occurrenceId: "app-occurrence" },
+        { kind: "file", label: "folder/", path: "src/folder/", type: "reference", occurrenceId: "folder-occurrence" },
+      ],
+      text: "app.ts folder/ ",
+    };
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-host-added-second-reference",
+    });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+    expect(screen.getByLabelText("src/folder/")).toBeTruthy();
+  });
+
+  it("does not restore a reference the user removed when an old snapshot repeats", async () => {
+    mount();
+    const state = approvalDraftSnapshot("s1");
+    state.sessionViews.s1.composerDraft = {
+      segments: [{ kind: "file", label: "app.ts", path: "src/app.ts", type: "reference" }],
+      text: "app.ts ",
+    };
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-reference-before-delete",
+    });
+    fireEvent.click(screen.getByTestId("composer-reference-chip-remove"));
+    expect(screen.queryByTestId("composer-reference-chip")).toBeNull();
+
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-reference-old-repeat",
+    });
+    expect(screen.queryByTestId("composer-reference-chip")).toBeNull();
   });
 
   it("keeps composer content until a sent prompt is confirmed, then clears it", async () => {
@@ -2414,9 +3945,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],
@@ -2436,7 +3966,9 @@ describe("Tomcat webview App", () => {
 
     expect(textbox.textContent).toContain("send this");
 
-    const promptMessage = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0];
+    const promptMessage = postMessage.mock.calls.find(
+      ([message]) => message.type === "prompt",
+    )?.[0];
     const userMessageId = promptMessage?.data?.userMessageId;
     expect(typeof userMessageId).toBe("string");
 
@@ -2465,9 +3997,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -2515,9 +4046,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [],
@@ -2535,7 +4065,9 @@ describe("Tomcat webview App", () => {
     });
     fireEvent.click(screen.getByTestId("send-button"));
 
-    const promptMessage = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0];
+    const promptMessage = postMessage.mock.calls.find(
+      ([message]) => message.type === "prompt",
+    )?.[0];
     const userMessageId = promptMessage?.data?.userMessageId;
     expect(typeof userMessageId).toBe("string");
 
@@ -2564,9 +4096,8 @@ describe("Tomcat webview App", () => {
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
+            activePlan: null,
+            agentMode: "chat",
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
@@ -2586,7 +4117,9 @@ describe("Tomcat webview App", () => {
       messageId: "state-clear-failed-result",
     });
 
-    expect(screen.getByTestId("composer-input").textContent).toContain("keep me");
+    expect(screen.getByTestId("composer-input").textContent).toContain(
+      "keep me",
+    );
   });
 
   it("ignores malformed insertReference events without a concrete session id", async () => {
@@ -2605,7 +4138,7 @@ describe("Tomcat webview App", () => {
         },
         sessionId: null,
         type: "insertReference",
-      } as HostToWebviewFrame["content"],
+      },
       messageId: "event-invalid-insert-reference",
     });
 
@@ -2628,7 +4161,9 @@ describe("Tomcat webview App", () => {
         });
       });
 
-      expect(screen.getByTestId("context-search-loading").textContent).toContain("搜索中");
+      expect(
+        screen.getByTestId("context-search-loading").textContent,
+      ).toContain("Searching");
       expect(postMessage).not.toHaveBeenCalled();
 
       await act(async () => {
@@ -2736,7 +4271,9 @@ describe("Tomcat webview App", () => {
       });
 
       expect(
-        postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+        postMessage.mock.calls.filter(
+          ([message]) => message.type === "showWarningMessage",
+        ),
       ).toHaveLength(1);
       expect(screen.queryByTestId("context-search-dropdown")).toBeNull();
 
@@ -2768,7 +4305,9 @@ describe("Tomcat webview App", () => {
       });
 
       expect(
-        postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+        postMessage.mock.calls.filter(
+          ([message]) => message.type === "showWarningMessage",
+        ),
       ).toHaveLength(0);
     } finally {
       vi.useRealTimers();
@@ -2830,11 +4369,78 @@ describe("Tomcat webview App", () => {
       });
 
       expect(screen.getByTitle("src/app.ts")).toBeTruthy();
-      expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("搜索中");
+      expect(
+        screen.getByTestId("context-search-loading-inline").textContent,
+      ).toContain("Searching");
       expect(postMessage).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows only the composer capability hint when pasted attachments are unsupported", async () => {
+    const { postMessage } = mount();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModelCapabilities: {
+          "gpt-5.4": [],
+        },
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            pendingAttachments: [],
+            activePlan: null,
+            agentMode: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+      },
+      messageId: "state-unsupported-paste",
+    });
+    postMessage.mockClear();
+
+    const textbox = screen.getByTestId("composer-input");
+    const file = new File(["x"], "shot.png", { type: "image/png" });
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: () => "",
+          items: [
+            {
+              getAsFile: () => file,
+              kind: "file",
+              type: file.type,
+            },
+          ],
+        },
+      });
+    });
+
+    expect(await screen.findByText(/does not declare vision capability/)).toBeTruthy();
+    expect(
+      postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+    ).toHaveLength(0);
   });
 
   it("closes an active @ dropdown when the active session changes", async () => {
@@ -2860,34 +4466,37 @@ describe("Tomcat webview App", () => {
 
   it("opens the checkpoint dialog first, then posts don't-revert and refills the composer after truncation", async () => {
     const { postMessage } = mount();
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-      {
-        id: "user-2",
-        kind: "user",
-        text: "follow-up prompt",
-        type: "message",
-      },
-      {
-        id: "assistant-2",
-        kind: "assistant",
-        text: "newer answer",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts", "src/state.ts"],
-        createdAt: "2026-07-12T12:00:00Z",
-        id: "ck-1",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+        {
+          id: "user-2",
+          kind: "user",
+          text: "follow-up prompt",
+          type: "message",
+        },
+        {
+          id: "assistant-2",
+          kind: "assistant",
+          text: "newer answer",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts", "src/state.ts"],
+          createdAt: "2026-07-12T12:00:00Z",
+          id: "ck-1",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
     postMessage.mockClear();
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
@@ -2907,59 +4516,68 @@ describe("Tomcat webview App", () => {
       type: "restoreCheckpoint",
     });
 
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts", "src/state.ts"],
-        createdAt: "2026-07-12T12:00:00Z",
-        id: "ck-1",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts", "src/state.ts"],
+          createdAt: "2026-07-12T12:00:00Z",
+          id: "ck-1",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
     expect(screen.queryByTestId("cp-confirm-dialog")).toBeNull();
-    expect(screen.getByTestId("composer-input").textContent).toContain("follow-up prompt");
+    expect(screen.getByTestId("composer-input").textContent).toContain(
+      "follow-up prompt",
+    );
   });
 
   it("does nothing when the checkpoint dialog is cancelled or dismissed with Escape", async () => {
     const { postMessage } = mount();
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-      {
-        id: "user-2",
-        kind: "user",
-        text: "follow-up prompt",
-        type: "message",
-      },
-      {
-        id: "assistant-2",
-        kind: "assistant",
-        text: "newer answer",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts"],
-        createdAt: "2026-07-12T12:03:00Z",
-        id: "ck-cancel",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+        {
+          id: "user-2",
+          kind: "user",
+          text: "follow-up prompt",
+          type: "message",
+        },
+        {
+          id: "assistant-2",
+          kind: "assistant",
+          text: "newer answer",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts"],
+          createdAt: "2026-07-12T12:03:00Z",
+          id: "ck-cancel",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
-    const composerTextBefore = screen.getByTestId("composer-input").textContent ?? "";
+    const composerTextBefore =
+      screen.getByTestId("composer-input").textContent ?? "";
     postMessage.mockClear();
 
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
@@ -2971,7 +4589,9 @@ describe("Tomcat webview App", () => {
     expect(postMessage).not.toHaveBeenCalled();
     expect(screen.getByText("follow-up prompt")).toBeTruthy();
     expect(screen.getByText("newer answer")).toBeTruthy();
-    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(composerTextBefore);
+    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(
+      composerTextBefore,
+    );
 
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
     expect(screen.getByTestId("cp-confirm-dialog")).toBeTruthy();
@@ -2982,33 +4602,38 @@ describe("Tomcat webview App", () => {
     expect(postMessage).not.toHaveBeenCalled();
     expect(screen.getByText("follow-up prompt")).toBeTruthy();
     expect(screen.getByText("newer answer")).toBeTruthy();
-    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(composerTextBefore);
+    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(
+      composerTextBefore,
+    );
   });
 
   it("posts revertFiles=true when the Revert action is chosen", async () => {
     const { postMessage } = mount();
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-      {
-        id: "user-3",
-        kind: "user",
-        text: "revert me",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts"],
-        createdAt: "2026-07-12T12:05:00Z",
-        id: "ck-2",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+        {
+          id: "user-3",
+          kind: "user",
+          text: "revert me",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts"],
+          createdAt: "2026-07-12T12:05:00Z",
+          id: "ck-2",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
     postMessage.mockClear();
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
@@ -3024,4 +4649,161 @@ describe("Tomcat webview App", () => {
       type: "restoreCheckpoint",
     });
   });
+
+  it("replays background wait slices and keeps the bash card loading until the background task finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-07-21T07:00:00.000Z").getTime();
+      vi.setSystemTime(startedAt);
+      mount();
+
+      await emitTranscriptSessionState({
+        busy: true,
+        messageId: "countdown-start",
+        timeline: [
+          {
+            args: {
+              command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
+              run_in_background: true,
+            },
+            backgroundRunning: true,
+            backgroundTaskId: "task-1",
+            id: "tool-bash-background",
+            isError: false,
+            status: "complete",
+            summary:
+              '{"taskId":"task-1","logPath":"/tmp/task-1.log","startedAtUnixMs":1752000000000}',
+            toolCallId: "tc-bash-background",
+            toolName: "bash",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", wait_ms: 10000 },
+            id: "tool-task-output-1",
+            isError: false,
+            startedAt,
+            status: "running",
+            toolCallId: "tc-task-output-1",
+            toolName: "task_output",
+            type: "tool",
+          },
+        ],
+      });
+
+      expect(screen.getByText("Running in background")).toBeTruthy();
+      expect(screen.getByText("Waiting up to 10s for shell")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByText("Waiting up to 9s for shell")).toBeTruthy();
+
+      await emitTranscriptSessionState({
+        busy: true,
+        messageId: "countdown-second-slice",
+        timeline: [
+          {
+            args: {
+              command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
+              run_in_background: true,
+            },
+            backgroundRunning: true,
+            backgroundTaskId: "task-1",
+            id: "tool-bash-background",
+            isError: false,
+            status: "complete",
+            summary:
+              '{"taskId":"task-1","logPath":"/tmp/task-1.log","startedAtUnixMs":1752000000000}',
+            toolCallId: "tc-bash-background",
+            toolName: "bash",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", wait_ms: 10000 },
+            id: "tool-task-output-1",
+            isError: false,
+            startedAt,
+            status: "complete",
+            summary: '{"wakeReason":"wait_window_elapsed"}',
+            toolCallId: "tc-task-output-1",
+            toolName: "task_output",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", wait_ms: 5000 },
+            id: "tool-task-output-2",
+            isError: false,
+            startedAt: startedAt + 1000,
+            status: "running",
+            toolCallId: "tc-task-output-2",
+            toolName: "task_output",
+            type: "tool",
+          },
+        ],
+      });
+
+      expect(screen.getAllByText("Waited for shell")).toHaveLength(1);
+      expect(screen.getByText("Running in background")).toBeTruthy();
+      expect(screen.getByText("Waiting up to 5s for shell")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByText("Waiting up to 4s for shell")).toBeTruthy();
+
+      await emitTranscriptSessionState({
+        busy: false,
+        messageId: "countdown-finished",
+        timeline: [
+          {
+            args: {
+              command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
+              run_in_background: true,
+            },
+            backgroundExitCode: 0,
+            backgroundRunning: false,
+            backgroundTaskId: "task-1",
+            id: "tool-bash-background",
+            isError: false,
+            status: "complete",
+            summary:
+              '{"taskId":"task-1","logPath":"/tmp/task-1.log","startedAtUnixMs":1752000000000}',
+            toolCallId: "tc-bash-background",
+            toolName: "bash",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", wait_ms: 10000 },
+            id: "tool-task-output-1",
+            isError: false,
+            startedAt,
+            status: "complete",
+            summary: '{"wakeReason":"wait_window_elapsed"}',
+            toolCallId: "tc-task-output-1",
+            toolName: "task_output",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", wait_ms: 5000 },
+            id: "tool-task-output-2",
+            isError: false,
+            startedAt: startedAt + 1000,
+            status: "complete",
+            summary: "{}",
+            toolCallId: "tc-task-output-2",
+            toolName: "task_output",
+            type: "tool",
+          },
+        ],
+      });
+
+      expect(screen.queryByText(/Waiting up to .* for shell/)).toBeNull();
+      expect(screen.queryByText("Running in background")).toBeNull();
+      expect(screen.getByText("Ran")).toBeTruthy();
+      expect(screen.getAllByText("Waited for shell")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 });

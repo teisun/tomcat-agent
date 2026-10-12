@@ -36,6 +36,7 @@
 - [`session-modes.md`](./session-modes.md)
 - [`session-storage.md`](./session-storage.md)
 - [`chat-resume-hydration.md`](./chat-resume-hydration.md)
+- [`session-files-and-keep.md`](./session-files-and-keep.md)：Files 面板与 Keep 的原理——写前存原件、按登记时间累计、Keep 只记时间点、git 提交即认可、回退时撤销之后的 Keep。
 - [`transcript-stable-id-and-stream-reconciliation.md`](./transcript-stable-id-and-stream-reconciliation.md)：assistant 稳定 `entry.id` 如何贯穿 streaming / transcript / history replay，并为 webview `upsert-by-id` 提供协议锚点。
 - [`context-management.md`](./context-management.md)
 - [`agent-loop.md`](./agent-loop.md)
@@ -72,6 +73,7 @@
 - [`tools/`](./tools/)
 - [`skill-system.md`](./skill-system.md)
 - [`package-manager.md`](./package-manager.md)
+- [`mcp-client.md`](./mcp-client.md)：连接器(Connector)模块——连接类型 MCP/CLI/A2A（本期实现 MCP/stdio 连接器，CLI/A2A 预留）；把外部能力工具以 `mcp__{server}__{tool}` 接入工具面、结果图片复用 `follow_up_parts`/`InputImage` 回流、Chat+serve 增删查管连接器；为前端 UI 验收 Phase 2 的 `@playwright/mcp` 提供底座。
 
 ### LLM 与模型集成
 

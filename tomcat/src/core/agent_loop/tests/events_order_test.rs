@@ -19,7 +19,7 @@ use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockLlmProviderFatal, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockLlmProviderFatal, MockPrimitiveExecutor};
 
 type MessageUpdateKinds = Vec<(String, Option<String>)>;
 
@@ -60,12 +60,17 @@ async fn run_emits_events_in_correct_order() {
         );
     }
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let observed = order.lock().unwrap().clone();
@@ -81,12 +86,17 @@ async fn run_fatal_401_terminates_immediately() {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await;
     assert!(result.is_err());
@@ -134,12 +144,17 @@ async fn run_message_update_carries_kind_for_thinking_and_content() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let observed = events_seen.lock().unwrap().clone();
@@ -185,12 +200,17 @@ async fn run_message_update_thinking_signature_propagates() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let payload = captured.lock().unwrap().clone().expect("应捕获到 payload");
@@ -250,12 +270,17 @@ async fn run_message_update_keeps_thinking_wire_shape_for_summary_and_raw() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let observed = events_seen.lock().unwrap().clone();
@@ -278,12 +303,17 @@ async fn run_chat_stream_returns_err_is_classified() {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await;
     assert!(result.is_err());

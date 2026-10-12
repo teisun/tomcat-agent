@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::core::llm::ChatMessage;
-use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, StreamEvent};
+use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, ResolvedCall, StreamEvent};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::error::AppError;
 
@@ -23,6 +23,14 @@ impl MockLlmProvider {
             streams: Mutex::new(streams),
         }
     }
+}
+
+pub(super) fn test_binding(
+    provider: Arc<dyn LlmProvider>,
+    model: impl Into<String>,
+) -> ResolvedCall {
+    let model = model.into();
+    ResolvedCall::from_parts_unchecked(provider, model.clone(), model)
 }
 
 #[async_trait::async_trait]
@@ -40,6 +48,67 @@ impl LlmProvider for MockLlmProvider {
         Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
         AppError,
     > {
+        let mut guard = self.streams.lock().unwrap();
+        let events = guard.remove(0);
+        drop(guard);
+        let stream = tokio_stream::iter(events);
+        Ok(Box::new(stream))
+    }
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RecordedStreamRequests(pub(super) Arc<Mutex<Vec<ChatRequest>>>);
+
+/// 记录 `chat_stream` 请求的 Mock，用于断言 attempt ladder 是否真的重新出站。
+pub(super) struct RecordingStreamLlmProvider {
+    streams: Mutex<Vec<Vec<Result<StreamEvent, AppError>>>>,
+    requests: RecordedStreamRequests,
+}
+
+impl RecordingStreamLlmProvider {
+    pub(super) fn new(
+        streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+    ) -> (Self, RecordedStreamRequests) {
+        let requests = RecordedStreamRequests::default();
+        (
+            Self {
+                streams: Mutex::new(streams),
+                requests: requests.clone(),
+            },
+            requests,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RecordingStreamLlmProvider {
+    fn provider_name(&self) -> &str {
+        "mock_recording_stream"
+    }
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        // 二次 overflow 的 Collapse 路径会复用该 provider 生成摘要。该调用不记录为
+        // chat_stream 主请求，因而 requests 的长度仍精确表示实际发给主模型的次数。
+        Ok(ChatResponse {
+            id: None,
+            choices: vec![crate::core::llm::ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant("collapsed context"),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.requests.0.lock().unwrap().push(req);
         let mut guard = self.streams.lock().unwrap();
         let events = guard.remove(0);
         drop(guard);
@@ -82,6 +151,7 @@ impl LlmProvider for MockLlmProviderFatal {
 pub(super) struct RecordedChatCall {
     pub(super) provider: String,
     pub(super) model: String,
+    pub(super) message_texts: Vec<String>,
 }
 
 /// 记录 `chat` 请求的 provider，用于断言 compaction 路由是否命中预期 provider/model。
@@ -89,6 +159,7 @@ pub(super) struct RecordingChatLlmProvider {
     provider_name: &'static str,
     summary_text: String,
     calls: Arc<Mutex<Vec<RecordedChatCall>>>,
+    error: Option<fn() -> AppError>,
 }
 
 impl RecordingChatLlmProvider {
@@ -101,6 +172,20 @@ impl RecordingChatLlmProvider {
             provider_name,
             summary_text: summary_text.into(),
             calls,
+            error: None,
+        }
+    }
+
+    pub(super) fn failing(
+        provider_name: &'static str,
+        calls: Arc<Mutex<Vec<RecordedChatCall>>>,
+        error: fn() -> AppError,
+    ) -> Self {
+        Self {
+            provider_name,
+            summary_text: String::new(),
+            calls,
+            error: Some(error),
         }
     }
 }
@@ -115,7 +200,15 @@ impl LlmProvider for RecordingChatLlmProvider {
         self.calls.lock().unwrap().push(RecordedChatCall {
             provider: self.provider_name.to_string(),
             model: req.model.clone(),
+            message_texts: req
+                .messages
+                .iter()
+                .filter_map(|message| message.text_content().map(str::to_string))
+                .collect(),
         });
+        if let Some(error) = self.error {
+            return Err(error());
+        }
         Ok(ChatResponse {
             id: None,
             choices: vec![crate::core::llm::ChatResponseChoice {
@@ -174,6 +267,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -188,6 +282,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -195,8 +290,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
@@ -247,6 +341,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -261,6 +356,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -268,8 +364,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
@@ -291,7 +386,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
 /// 第一次 `read_file` 时向共享的 steering_queue 推入 Steering，用于测试
 /// "工具执行后 steering 注入即刻跳过剩余工具"分支（tool_dispatcher 的核心契约）。
 pub(super) struct SteerableMockPrimitive {
-    pub(super) steering_queue: Arc<parking_lot::Mutex<Vec<ChatMessage>>>,
+    pub(super) steering_queue: Arc<parking_lot::Mutex<crate::core::agent_loop::SteeringInbox>>,
     pub(super) read_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -330,6 +425,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -344,6 +440,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -351,8 +448,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),

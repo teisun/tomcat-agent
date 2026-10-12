@@ -1,12 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { TodoListWidget } from "./TodoListWidget";
+import { SessionDock as TodoListWidget } from "./SessionDock";
 
 describe("TodoListWidget", () => {
   it("renders a collapsed current task title and expands into the todo list", () => {
     render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy
         planState="executing"
         planTodos={[
@@ -21,6 +21,7 @@ describe("TodoListWidget", () => {
     expect(screen.getByTestId("todo-widget-title").textContent).toBe(
       "Render the transcript UI (2/3)",
     );
+    expect(screen.getByTestId("todo-widget-title").className).toContain("tc-loading-shimmer");
 
     fireEvent.click(screen.getByTestId("todo-widget-toggle"));
 
@@ -33,10 +34,23 @@ describe("TodoListWidget", () => {
 
   it("stays hidden without todo data", () => {
     const { container } = render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy
-        planState="chat"
+        planState={null}
         planTodos={[]}
+        sessionTodos={[]}
+      />,
+    );
+
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("stays hidden when the plan is completed", () => {
+    const { container } = render(
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
+        busy
+        planState="completed"
+        planTodos={[{ content: "All done", id: "1", status: "completed" }]}
         sessionTodos={[]}
       />,
     );
@@ -46,7 +60,7 @@ describe("TodoListWidget", () => {
 
   it("stays hidden when the session is idle", () => {
     const { container } = render(
-      <TodoListWidget
+      <TodoListWidget sessionId="s" onIntent={() => undefined}
         busy={false}
         planState="planning"
         planTodos={[{ content: "Plan", id: "1", status: "pending" }]}

@@ -1,0 +1,419 @@
+//! Project prompt files are runtime configuration, not agent tool reads.
+//! Only hard Deny blocks them; no grants are created and no confirmation is requested.
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_yaml::Value;
+
+use crate::core::permission::{PermissionDecision, PermissionGate};
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::infra::i18n::tr;
+
+pub const MAX_FILE_BYTES: usize = 65_536;
+const MAX_HEADER_BYTES: usize = 4096;
+const MAX_ENTRIES: usize = 4096;
+const MAX_FILES: usize = 256;
+const MAX_DEPTH: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionKind {
+    Command,
+    Skill,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct InstructionCard {
+    pub id: String,
+    pub kind: InstructionKind,
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptFile {
+    pub card: InstructionCard,
+    pub file_path: PathBuf,
+    pub always_apply: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct Discovery {
+    pub files: Vec<PromptFile>,
+    pub diagnostics: Vec<String>,
+}
+
+fn diagnostic_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn readable(gate: &dyn PermissionGate, path: &Path) -> Result<(), String> {
+    match gate
+        .check(PrimitiveOperation::Read, &path.to_string_lossy())
+        .map_err(|e| e.to_string())?
+    {
+        PermissionDecision::Deny { reason } => {
+            Err(tr("instructions.denied", &[("reason", &reason)]))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Reject links in every component below the trusted scope root (including .cursor).
+fn safe_path(root: &Path, path: &Path) -> Result<(), String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| tr("instructions.outsideRoot", &[]))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(tr("instructions.invalidPath", &[]));
+        };
+        current.push(name);
+        if fs::symlink_metadata(&current)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(tr("instructions.noSymlink", &[]));
+        }
+    }
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.starts_with(root) {
+        return Err(tr("instructions.outsideRoot", &[]));
+    }
+    Ok(())
+}
+
+pub fn parse_document(text: &str) -> Result<(String, bool, &str), String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.lines().next() != Some("---") {
+        return Ok((String::new(), false, text));
+    }
+    let (yaml, body) =
+        crate::core::skill::frontmatter::split_frontmatter(text).map_err(|e| e.to_string())?;
+    if yaml.len() > MAX_HEADER_BYTES {
+        return Err(tr("instructions.headerLarge", &[]));
+    }
+    let value: Value = serde_yaml::from_str(yaml)
+        .map_err(|e| tr("instructions.yaml", &[("detail", &e.to_string())]))?;
+    let description = value
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let always = value.get("alwaysApply").and_then(Value::as_bool) == Some(true);
+    Ok((description, always, body))
+}
+
+/// Bounded, non-interactive runtime read. No client-provided path reaches this helper.
+pub fn read_body(root: &Path, path: &Path, gate: &dyn PermissionGate) -> Result<String, String> {
+    safe_path(root, path)?;
+    readable(gate, path)?;
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES as u64 {
+        return Err(tr("instructions.notRegular", &[]));
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take((MAX_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(tr("instructions.fileLarge", &[]));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| tr("instructions.utf8", &[]))?;
+    let (_, _, body) = parse_document(&text)?;
+    if body.trim().is_empty() {
+        return Err(tr("instructions.empty", &[]));
+    }
+    Ok(body.to_string())
+}
+
+pub fn discover(
+    root: &Path,
+    resource_dir: &str,
+    rules: bool,
+    gate: &dyn PermissionGate,
+) -> Discovery {
+    let mut result = Discovery::default();
+    let Ok(root) = root.canonicalize() else {
+        return result;
+    };
+    let mut sources = vec![".cursor".to_string(), ".agents".to_string()];
+    if !sources.iter().any(|s| s == resource_dir) {
+        sources.push(resource_dir.to_string());
+    }
+    let mut seen = BTreeSet::new();
+    let mut entries = 0;
+    let mut candidates = 0;
+    for source in sources {
+        let base = root
+            .join(&source)
+            .join(if rules { "rules" } else { "commands" });
+        if !base.exists() {
+            continue;
+        }
+        if let Err(e) = safe_path(&root, &base).and_then(|_| readable(gate, &base)) {
+            result
+                .diagnostics
+                .push(format!("{}：{e}", diagnostic_path(&root, &base)));
+            continue;
+        }
+        if !seen.insert(base.clone()) {
+            continue;
+        }
+        scan(
+            &root,
+            &base,
+            &base,
+            &source,
+            rules,
+            gate,
+            0,
+            &mut entries,
+            &mut candidates,
+            &mut result,
+        );
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan(
+    root: &Path,
+    base: &Path,
+    dir: &Path,
+    source: &str,
+    rules: bool,
+    gate: &dyn PermissionGate,
+    depth: usize,
+    entries: &mut usize,
+    candidates: &mut usize,
+    result: &mut Discovery,
+) {
+    if depth > MAX_DEPTH {
+        result.diagnostics.push(tr(
+            "instructions.depth",
+            &[("path", &diagnostic_path(root, dir))],
+        ));
+        return;
+    }
+    if let Err(e) = safe_path(root, dir).and_then(|_| readable(gate, dir)) {
+        result
+            .diagnostics
+            .push(format!("{}：{e}", diagnostic_path(root, dir)));
+        return;
+    }
+    let listing = match fs::read_dir(dir) {
+        Ok(v) => v,
+        Err(e) => {
+            result
+                .diagnostics
+                .push(format!("{}：{e}", diagnostic_path(root, dir)));
+            return;
+        }
+    };
+    // Bound enumeration itself, not merely the retained vector. Sort the bounded
+    // batch; an over-limit directory is explicitly partial (read_dir has no sorted API).
+    let remaining = MAX_ENTRIES.saturating_sub(*entries);
+    let mut paths = BTreeSet::new();
+    let mut count = 0usize;
+    let mut truncated = false;
+    for entry in listing {
+        if count >= remaining {
+            truncated = true;
+            break;
+        }
+        count += 1;
+        match entry {
+            Ok(entry) => {
+                paths.insert(entry.path());
+            }
+            Err(e) => result
+                .diagnostics
+                .push(format!("{}：{e}", diagnostic_path(root, dir))),
+        }
+    }
+    if truncated {
+        result.diagnostics.push(tr(
+            "instructions.entriesTruncated",
+            &[("path", &diagnostic_path(root, dir))],
+        ));
+    }
+    *entries += count;
+    for path in paths {
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                result
+                    .diagnostics
+                    .push(format!("{}：{e}", diagnostic_path(root, &path)));
+                continue;
+            }
+        };
+        if meta.file_type().is_symlink() {
+            result.diagnostics.push(tr(
+                "instructions.symlinkSkipped",
+                &[("path", &diagnostic_path(root, &path))],
+            ));
+            continue;
+        }
+        if meta.is_dir() {
+            scan(
+                root,
+                base,
+                &path,
+                source,
+                rules,
+                gate,
+                depth + 1,
+                entries,
+                candidates,
+                result,
+            );
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !meta.is_file() || !(ext == "md" || rules && ext == "mdc") {
+            continue;
+        }
+        if *candidates >= MAX_FILES {
+            result.diagnostics.push(tr(
+                "instructions.filesTruncated",
+                &[("path", &diagnostic_path(root, &path))],
+            ));
+            break;
+        }
+        *candidates += 1;
+        let parsed = (|| {
+            safe_path(root, &path)?;
+            readable(gate, &path)?;
+            if meta.len() > MAX_FILE_BYTES as u64 {
+                return Err(tr("instructions.fileLarge", &[]));
+            }
+            let mut bytes = Vec::new();
+            File::open(&path)
+                .map_err(|e| e.to_string())?
+                .take((MAX_HEADER_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            // A UTF-8 character can straddle the prefix boundary; malformed interior bytes cannot.
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(t) => t,
+                Err(e) if e.error_len().is_none() && meta.len() > bytes.len() as u64 => {
+                    std::str::from_utf8(&bytes[..e.valid_up_to()])
+                        .map_err(|_| tr("instructions.utf8", &[]))?
+                }
+                Err(_) => return Err(tr("instructions.utf8", &[])),
+            };
+            let (description, always, body) = parse_document(text).map_err(|e| {
+                if text.starts_with("---") && bytes.len() > MAX_HEADER_BYTES {
+                    tr("instructions.headerLarge", &[])
+                } else {
+                    e
+                }
+            })?;
+            if body.trim().is_empty() && meta.len() <= bytes.len() as u64 {
+                return Err(tr("instructions.empty", &[]));
+            }
+            Ok((description, always))
+        })();
+        match parsed {
+            Ok((description, always_apply)) => {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let name = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                result.files.push(PromptFile {
+                    card: InstructionCard {
+                        id: format!("command:{relative}"),
+                        kind: InstructionKind::Command,
+                        name,
+                        description,
+                        source: source.to_string(),
+                        path: relative,
+                    },
+                    file_path: path,
+                    always_apply,
+                });
+            }
+            Err(e) => result
+                .diagnostics
+                .push(format!("{}：{e}", diagnostic_path(root, &path))),
+        }
+    }
+}
+
+pub fn render_rules(
+    discovery: &Discovery,
+    root: &Path,
+    gate: &dyn PermissionGate,
+    budget: usize,
+) -> (String, Vec<String>, usize) {
+    let mut diagnostics = discovery.diagnostics.clone();
+    let limit = 32_000.min(budget / 10);
+    let mut text = String::new();
+    let mut loaded = 0;
+    for file in &discovery.files {
+        if !file.always_apply {
+            diagnostics.push(tr("instructions.notAlways", &[("path", &file.card.path)]));
+            continue;
+        }
+        match read_body(root, &file.file_path, gate) {
+            Ok(body) => {
+                let header = if text.is_empty() {
+                    "## User Custom Instructions\n\n"
+                } else {
+                    "\n\n"
+                };
+                let description = if file.card.description.is_empty() {
+                    String::new()
+                } else {
+                    format!("Description: {}\n", file.card.description)
+                };
+                let entry = format!(
+                    "{header}### Source: {}\n{description}{body}",
+                    file.card.path
+                );
+                if text.chars().count() + entry.chars().count() > limit {
+                    diagnostics.push(tr("instructions.budget", &[("path", &file.card.path)]));
+                    continue;
+                }
+                text.push_str(&entry);
+                loaded += 1;
+            }
+            Err(e) => diagnostics.push(format!("{}：{e}", file.card.path)),
+        }
+    }
+    (text, diagnostics, loaded)
+}
+
+#[cfg(test)]
+#[path = "tests/project_instructions_test.rs"]
+mod tests;

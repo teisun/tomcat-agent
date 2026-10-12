@@ -1,22 +1,80 @@
+use super::super::code_reviewer::code_reviewer_allowed_tools_with_policy;
 use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
-use super::super::prod_reviewer::ProdReviewerDispatcher;
-use super::super::review::{
-    resolve_internal_tools, reviewer_allowed_tools_for, reviewer_allowed_tools_with_policy,
-    ReviewKind,
+use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
+use super::super::prod_reviewer::{
+    read_parent_session_model, ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher,
 };
-use super::super::{PlanRuntime, ReviewerDispatcher};
-use crate::core::plan_runtime::review::build_review_prompt;
+use super::super::review::resolve_internal_tools;
+use super::super::{
+    CodeReviewDispatchInfo, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime,
+};
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
 #[tokio::test]
-async fn prod_reviewer_stub_returns_aborted_with_origin() {
-    let d = ProdReviewerDispatcher::stub("test_origin");
-    let r = d.dispatch("demo", "noop", ReviewKind::Plan, true).await;
+async fn prod_plan_reviewer_stub_returns_aborted_with_origin() {
+    let d = ProdPlanReviewerDispatcher::stub("test_origin");
+    let r = d.dispatch("demo", "noop", true).await;
     assert!(r.aborted);
     assert!(r.summary.contains("test_origin"));
     assert!(!r.applied_changes);
+}
+
+#[tokio::test]
+async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
+    let d = ProdCodeReviewerDispatcher::stub("test_origin");
+    let review_state = super::sample_frontmatter();
+    let r = d
+        .dispatch(
+            "demo",
+            "noop",
+            &review_state,
+            &CodeReviewDispatchInfo {
+                round: 1,
+                review_attempt_id: "demo:1".into(),
+                tool_call_id: "tc-demo".into(),
+                is_incremental: false,
+                delta_file_count: 0,
+            },
+        )
+        .await;
+    assert!(r.aborted);
+    assert_eq!(r.verdict.as_deref(), Some("aborted"));
+    assert!(r.summary.contains("test_origin"));
+    assert!(!r.applied_changes);
+}
+
+#[test]
+fn persisted_parent_selection_overrides_or_clears_the_cached_child_model() {
+    use crate::core::session::manager::SessionManager;
+
+    let sessions = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(sessions.path().to_path_buf());
+    let entry = manager
+        .create_session(manager.current_session_key(), None)
+        .expect("create parent session");
+    manager
+        .update_session(manager.current_session_key(), |entry| {
+            entry.model_override = Some("selected-now".to_string());
+        })
+        .expect("persist parent model");
+    assert_eq!(
+        read_parent_session_model(sessions.path(), &entry.session_id),
+        Some(Some("selected-now".to_string()))
+    );
+
+    manager
+        .update_session(manager.current_session_key(), |entry| {
+            entry.model_override = None
+        })
+        .expect("clear parent model as deletion does");
+    assert_eq!(
+        read_parent_session_model(sessions.path(), &entry.session_id),
+        Some(None),
+        "a cleared persisted selection must be distinguishable from an unreadable session"
+    );
+    assert_eq!(read_parent_session_model(sessions.path(), "missing"), None);
 }
 
 #[test]
@@ -29,7 +87,7 @@ fn reviewer_not_in_catalog() {
 
 #[test]
 fn reviewer_default_allowed_tools_no_create_plan() {
-    let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Plan));
+    let tools = resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(false));
     let names: std::collections::BTreeSet<String> = tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -46,7 +104,7 @@ fn reviewer_default_allowed_tools_no_create_plan() {
 
 #[test]
 fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
-    let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Code));
+    let tools = resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(false));
     let names: std::collections::BTreeSet<String> = tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -59,12 +117,18 @@ fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
 
 #[test]
 fn reviewer_can_expose_load_skill_when_config_enabled() {
-    let tools = resolve_internal_tools(&reviewer_allowed_tools_with_policy(ReviewKind::Plan, true));
-    let names: std::collections::BTreeSet<String> = tools
+    let plan_tools = resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(true));
+    let code_tools = resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(true));
+    let plan_names: std::collections::BTreeSet<String> = plan_tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
         .collect();
-    assert!(names.contains("load_skill"));
+    let code_names: std::collections::BTreeSet<String> = code_tools
+        .iter()
+        .map(|v| v["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(plan_names.contains("load_skill"));
+    assert!(code_names.contains("load_skill"));
 }
 
 #[test]
@@ -94,7 +158,16 @@ fn review_prompt_uses_active_external_plan_path() {
                     id: "t1".into(),
                     content: "ship".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: Default::default(),
                 }],
+                code_review_pass: false,
+                code_review_rounds: 0,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
+                code_review_residual_findings: Vec::new(),
                 unknown: Default::default(),
             },
             body: "## Goal\nexternal\n".into(),
@@ -115,4 +188,44 @@ fn review_prompt_uses_active_external_plan_path() {
         crate::normalize_path(&external_path.to_string_lossy()).unwrap()
     );
     assert!(prompt.contains(&resolved_display));
+}
+
+/// D2：`[reviewer].model_override` 为空时，子 Agent 跟随当前会话模型；
+/// 会话中途换模型，下一次派发就换过去。
+#[test]
+fn dispatch_model_prefers_override_then_session_then_fallback() {
+    use crate::core::plan_runtime::prod_reviewer::resolve_dispatch_model;
+
+    assert_eq!(
+        resolve_dispatch_model(
+            Some("reviewer-model"),
+            Some("session-model"),
+            "default-model"
+        ),
+        "reviewer-model"
+    );
+    assert_eq!(
+        resolve_dispatch_model(None, Some("session-model"), "default-model"),
+        "session-model"
+    );
+    assert_eq!(
+        resolve_dispatch_model(Some(""), Some(""), "default-model"),
+        "default-model"
+    );
+    assert_eq!(
+        resolve_dispatch_model(None, None, "default-model"),
+        "default-model"
+    );
+}
+
+#[test]
+fn plan_runtime_session_model_tracks_latest_turn() {
+    let rt = crate::core::plan_runtime::PlanRuntime::new("sess-model");
+    assert_eq!(rt.session_model(), None);
+    rt.set_session_model("model-a");
+    assert_eq!(rt.session_model().as_deref(), Some("model-a"));
+    rt.set_session_model("");
+    assert_eq!(rt.session_model().as_deref(), Some("model-a"), "空值不覆盖");
+    rt.set_session_model("model-b");
+    assert_eq!(rt.session_model().as_deref(), Some("model-b"));
 }

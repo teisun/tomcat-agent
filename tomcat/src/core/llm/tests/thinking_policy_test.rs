@@ -1,9 +1,10 @@
 //! `thinking_policy` 单测：覆盖 ThinkingLevel/Format 解析与 resolve_request_fields 映射表。
 
 use super::super::thinking_policy::{
-    resolve_anthropic_request, resolve_request_fields, should_persist_thinking,
-    should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_format_for_api,
-    thinking_format_for_model, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+    clamp_reasoning_level, default_thinking_format_for_api, resolve_anthropic_request,
+    resolve_request_fields, should_persist_thinking, should_strip_on_resend,
+    strip_anthropic_thinking_blocks, thinking_format_for_api, thinking_format_for_model,
+    ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -37,6 +38,14 @@ fn level_parse_known_strings() {
         ThinkingLevel::parse_or_medium("x-high"),
         (ThinkingLevel::Xhigh, true)
     );
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("max"),
+        (ThinkingLevel::Max, true)
+    );
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("none"),
+        (ThinkingLevel::Off, true)
+    );
 }
 
 #[test]
@@ -59,7 +68,7 @@ fn format_resolve_auto_by_wire_api() {
     );
     assert_eq!(
         ThinkingFormat::Auto.resolve_for_api("anthropic-messages"),
-        ThinkingFormat::Anthropic
+        ThinkingFormat::AnthropicAdaptive
     );
     assert_eq!(thinking_format_for_api("openai"), ThinkingFormat::Openai);
     assert_eq!(
@@ -71,6 +80,14 @@ fn format_resolve_auto_by_wire_api() {
         ThinkingFormat::Deepseek
     );
     assert_eq!(thinking_format_for_api("doubao"), ThinkingFormat::Doubao);
+    assert_eq!(
+        default_thinking_format_for_api("openai-responses"),
+        "openai"
+    );
+    assert_eq!(
+        default_thinking_format_for_api("anthropic-messages"),
+        "anthropic-adaptive"
+    );
     // 已显式指定的 format 不会被改写
     assert_eq!(
         ThinkingFormat::Doubao.resolve_for_api("openai"),
@@ -96,7 +113,7 @@ fn format_resolve_auto_by_model_name() {
     );
     assert_eq!(
         thinking_format_for_model("claude-opus-4-6"),
-        ThinkingFormat::Anthropic
+        ThinkingFormat::AnthropicAdaptive
     );
 }
 
@@ -123,16 +140,14 @@ fn disabled_or_off_yields_no_fields() {
 #[test]
 fn openai_level_maps_to_reasoning_effort() {
     let r = resolve_request_fields(&cfg_with(true, "minimal"), ThinkingFormat::Openai);
-    assert_eq!(r.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(r.reasoning_effort.as_deref(), Some("minimal"));
     assert!(r.thinking.is_none());
     let r = resolve_request_fields(&cfg_with(true, "medium"), ThinkingFormat::Openai);
     assert_eq!(r.reasoning_effort.as_deref(), Some("medium"));
     let r = resolve_request_fields(&cfg_with(true, "xhigh"), ThinkingFormat::Openai);
-    assert_eq!(
-        r.reasoning_effort.as_deref(),
-        Some("high"),
-        "xhigh 默认降级到 high，避免在不支持的模型上 400"
-    );
+    assert_eq!(r.reasoning_effort.as_deref(), Some("xhigh"));
+    let r = resolve_request_fields(&cfg_with(true, "max"), ThinkingFormat::Openai);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("max"));
 }
 
 #[test]
@@ -163,12 +178,47 @@ fn deepseek_writes_effort_and_thinking_enable_flag() {
 }
 
 #[test]
-fn deepseek_maps_lower_levels_to_high_and_xhigh_to_max() {
-    let medium = resolve_request_fields(&cfg_with(true, "medium"), ThinkingFormat::Deepseek);
-    assert_eq!(medium.reasoning_effort.as_deref(), Some("high"));
+fn clamp_reasoning_level_matches_supported_model_set() {
+    let supported_openai = vec![
+        "low".to_string(),
+        "medium".to_string(),
+        "high".to_string(),
+        "xhigh".to_string(),
+    ];
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Xhigh, &supported_openai),
+        ThinkingLevel::Xhigh
+    );
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Max, &supported_openai),
+        ThinkingLevel::Xhigh
+    );
 
-    let xhigh = resolve_request_fields(&cfg_with(true, "xhigh"), ThinkingFormat::Deepseek);
-    assert_eq!(xhigh.reasoning_effort.as_deref(), Some("max"));
+    let supported_deepseek = vec!["high".to_string(), "max".to_string()];
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Medium, &supported_deepseek),
+        ThinkingLevel::High
+    );
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Xhigh, &supported_deepseek),
+        ThinkingLevel::High
+    );
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Max, &supported_deepseek),
+        ThinkingLevel::Max
+    );
+}
+
+#[test]
+fn clamp_reasoning_level_uses_safe_toggle_default_for_empty_list() {
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Off, &[]),
+        ThinkingLevel::Off
+    );
+    assert_eq!(
+        clamp_reasoning_level(ThinkingLevel::Low, &[]),
+        ThinkingLevel::High
+    );
 }
 
 #[test]
@@ -181,21 +231,131 @@ fn qwen_has_no_request_field() {
 
 #[test]
 fn anthropic_request_maps_to_enabled_budget_tokens() {
-    let r = resolve_anthropic_request(&cfg_with(true, "high"), None);
-    assert_eq!(r.max_tokens, 5120);
+    let r = resolve_anthropic_request(
+        &cfg_with(true, "high"),
+        ThinkingFormat::Anthropic,
+        None,
+        Some(128_000),
+    );
+    assert_eq!(r.max_tokens, 128_000);
     assert_eq!(r.thinking.as_ref().unwrap()["type"], "enabled");
     assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 4096);
+    assert!(r.effort.is_none());
 }
 
 #[test]
 fn anthropic_request_caps_budget_against_requested_max_tokens() {
-    let r = resolve_anthropic_request(&cfg_with(true, "xhigh"), Some(1024));
+    let r = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::Anthropic,
+        Some(1024),
+        Some(128_000),
+    );
     assert_eq!(r.max_tokens, 1024);
-    assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 768);
+    assert!(
+        r.thinking.is_none(),
+        "classic thinking must be omitted when the cap cannot satisfy 1024 <= budget < max"
+    );
 
-    let off = resolve_anthropic_request(&cfg_with(true, "off"), Some(400));
+    let fitted = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::Anthropic,
+        Some(8_192),
+        Some(128_000),
+    );
+    let fitted_budget = fitted.thinking.as_ref().unwrap()["budget_tokens"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        (1_024..8_192).contains(&fitted_budget),
+        "classic budget must satisfy the Anthropic protocol bounds"
+    );
+
+    let off = resolve_anthropic_request(
+        &cfg_with(true, "off"),
+        ThinkingFormat::Anthropic,
+        Some(400),
+        Some(128_000),
+    );
     assert!(off.thinking.is_none());
     assert_eq!(off.max_tokens, 400);
+}
+
+#[test]
+fn anthropic_adaptive_request_emits_effort() {
+    let r = resolve_anthropic_request(
+        &cfg_with(true, "max"),
+        ThinkingFormat::AnthropicAdaptive,
+        Some(4096),
+        Some(128_000),
+    );
+    assert_eq!(r.max_tokens, 4096);
+    assert_eq!(r.thinking.as_ref().unwrap()["type"], "adaptive");
+    assert_eq!(r.effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn anthropic_adaptive_effort_changes_do_not_change_the_output_cap() {
+    let high = resolve_anthropic_request(
+        &cfg_with(true, "high"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        Some(128_000),
+    );
+    let xhigh = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        Some(128_000),
+    );
+
+    assert_eq!(high.max_tokens, 128_000);
+    assert_eq!(xhigh.max_tokens, 128_000);
+    assert_ne!(high.effort, xhigh.effort);
+}
+
+#[test]
+fn anthropic_request_uses_model_cap_and_never_raises_explicit_cap() {
+    let adaptive = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        Some(128_000),
+    );
+    assert_eq!(adaptive.max_tokens, 128_000);
+
+    let capped = resolve_anthropic_request(
+        &cfg_with(true, "max"),
+        ThinkingFormat::Anthropic,
+        Some(8_192),
+        Some(128_000),
+    );
+    assert_eq!(capped.max_tokens, 8_192);
+    assert!(
+        capped.thinking.as_ref().unwrap()["budget_tokens"]
+            .as_u64()
+            .unwrap()
+            < 8_192
+    );
+
+    let over_cap = resolve_anthropic_request(
+        &cfg_with(true, "high"),
+        ThinkingFormat::AnthropicAdaptive,
+        Some(256_000),
+        Some(128_000),
+    );
+    assert_eq!(over_cap.max_tokens, 128_000);
+}
+
+#[test]
+fn anthropic_request_uses_conservative_fallback_for_unknown_models() {
+    let request = resolve_anthropic_request(
+        &cfg_with(true, "xhigh"),
+        ThinkingFormat::AnthropicAdaptive,
+        None,
+        None,
+    );
+    assert_eq!(request.max_tokens, 32_000);
 }
 
 #[test]
@@ -285,11 +445,12 @@ fn anthropic_strip_keeps_unknown_types() {
 fn level_to_effort_table_is_stable() {
     let cases = [
         ("off", None),
-        ("minimal", Some("low")),
+        ("minimal", Some("minimal")),
         ("low", Some("low")),
         ("medium", Some("medium")),
         ("high", Some("high")),
-        ("xhigh", Some("high")),
+        ("xhigh", Some("xhigh")),
+        ("max", Some("max")),
     ];
     for (level, expected) in cases {
         let r = resolve_request_fields(&cfg_with(true, level), ThinkingFormat::Openai);

@@ -1,29 +1,63 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
+import { AttachmentStrip } from "./AttachmentStrip";
 import { ReferenceChip } from "./ReferenceChip";
-import type { WebviewMessageBlock, WebviewMessageSegment } from "../types";
+import { InvocationChip } from "./InvocationChip";
+import { ChatMarkdown } from "./markdown/ChatMarkdown";
+import type {
+  WebviewMessageBlock,
+  WebviewMediaRoot,
+  WebviewMessageSegment,
+  WebviewPendingAttachment,
+  PathResolution,
+} from "../types";
 
-const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
-  assistant: "Tomcat",
-  error: "Error",
-  notice: "Notice",
-  user: "You",
-  warn: "Warn",
+const NOOP_OPEN_FILE = () => undefined;
+
+type MessageBubbleProps = {
+  onEdit?(item: WebviewMessageBlock): void;
+  hasFileWrites?: boolean;
+  item: WebviewMessageBlock;
+  mediaRoots?: WebviewMediaRoot[];
+  onOpenFile?: (path: string, line?: number) => void;
+  onOpenLink?: (href: string) => void;
+  onOpenImagePreview?: (imageId: string) => void;
+  onRecover?: (messageId: string, action: "resume" | "retry") => void;
+  onRetry?: (messageId: string) => void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
+  recoveryDisabled?: boolean;
+  onZoomImage?: (image: { alt: string; src: string }) => void;
 };
 
-export function MessageBubble({
+function MessageBubbleComponent({
+  onEdit,
+  hasFileWrites,
   item,
+  mediaRoots,
+  onOpenFile,
+  onOpenLink,
+  onOpenImagePreview,
+  onRecover,
   onRetry,
-}: {
-  item: WebviewMessageBlock;
-  onRetry?: (messageId: string) => void;
-}) {
+  resolvePaths,
+  recoveryDisabled = false,
+  onZoomImage,
+}: MessageBubbleProps) {
+  const t = useT();
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const showHeader = item.kind !== "user" && item.kind !== "assistant";
   const isFailedUserMessage = item.kind === "user" && item.deliveryState === "failed";
   const isPendingUserMessage = item.kind === "user" && item.deliveryState === "pending";
+  const isAbandonedUserMessage = item.kind === "user" && item.abandoned === true;
   const showRetry = isFailedUserMessage && item.retryable === true && typeof onRetry === "function";
+  const recoveryAction =
+    item.kind === "error" && item.recoveryAction && typeof onRecover === "function"
+      ? item.recoveryAction
+      : null;
+  const showHeader = item.kind === "error" && recoveryAction === null;
+  const statusIcon =
+    item.kind === "notice" ? "codicon-info" : item.kind === "warn" ? "codicon-warning" : null;
   const rawErrorDetail =
     item.kind === "error" && typeof item.detailText === "string" && item.detailText.trim().length > 0
       ? item.detailText
@@ -31,6 +65,13 @@ export function MessageBubble({
   const canToggleRawError = rawErrorDetail !== null && rawErrorDetail.trim() !== item.text.trim();
   const segments: WebviewMessageSegment[] =
     item.segments?.length ? item.segments : [{ text: item.text, type: "text" }];
+  const historyAttachments: WebviewPendingAttachment[] = (item.attachments ?? []).map(
+    (attachment) => ({
+      ...attachment,
+      label: attachment.filename,
+      path: null,
+    }),
+  );
 
   useEffect(() => {
     setDetailsExpanded(false);
@@ -52,66 +93,140 @@ export function MessageBubble({
 
   return (
     <article
-      className={`tc-message tc-message--${item.kind}${isFailedUserMessage ? " tc-message--user-failed" : ""}${isPendingUserMessage ? " tc-message--user-pending" : ""}`}
+      className={`tc-message tc-message--${item.kind}${isFailedUserMessage ? " tc-message--user-failed" : ""}${isPendingUserMessage ? " tc-message--user-pending" : ""}${isAbandonedUserMessage ? " tc-message--user-abandoned" : ""}`}
       data-delivery-state={item.deliveryState}
       data-kind={item.kind}
       data-message-id={item.id}
       data-message-kind={item.kind}
       data-testid="message-block"
+      onClick={(event) => {
+        if (!onEdit || window.getSelection()?.toString() || (event.target as Element).closest('button,a,[role="button"]')) return;
+        onEdit(item);
+      }}
+      data-editable={!!onEdit}
+      data-has-writes={!!hasFileWrites}
     >
+      {onEdit ? (
+        <button
+          type="button"
+          className={`tc-message__edit-trigger${hasFileWrites ? " tc-message__edit-trigger--revert" : ""}`}
+          data-testid="edit-user-message"
+          aria-label={t("message.edit")}
+          title={t("message.edit")}
+          onClick={() => onEdit(item)}
+        >
+          <span aria-hidden="true" className={`codicon ${hasFileWrites ? "codicon-discard" : "codicon-edit"}`} />
+        </button>
+      ) : null}
       {showHeader ? (
         <div className="tc-message__header">
-          <strong>{MESSAGE_LABELS[item.kind]}</strong>
-          <span>{item.kind}</span>
+          <strong>{t("message.label.error")}</strong>
+          {item.label ? <span>{item.label}</span> : null}
         </div>
       ) : null}
+      {statusIcon ? (
+        <span
+          aria-label={t(`message.label.${item.kind}`)}
+          className={`tc-message__icon codicon ${statusIcon}`}
+          role="img"
+          title={t(`message.label.${item.kind}`)}
+        />
+      ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">
-        {segments.map((segment, index) =>
-          segment.type === "text" ? (
-            <span className="tc-message__text-segment" key={`${item.id}-text-${index}`}>
-              {segment.text}
-            </span>
-          ) : (
-            <ReferenceChip
-              key={`${item.id}-reference-${index}`}
-              reference={segment}
-              testId="history-reference-chip"
-            />
-          ),
+        {item.kind === "assistant" ? (
+          <ChatMarkdown
+            markdown={item.text}
+            mediaRoots={mediaRoots}
+            onOpenFile={onOpenFile ?? NOOP_OPEN_FILE}
+            onOpenLink={onOpenLink}
+            resolvePaths={resolvePaths}
+            onZoomImage={onZoomImage}
+          />
+        ) : (
+          segments.map((segment, index) =>
+            segment.type === "text" ? (
+              <span className="tc-message__text-segment" key={`${item.id}-text-${index}`}>
+                {segment.text}
+              </span>
+            ) : segment.type === "instruction" ? (
+              <InvocationChip key={`${item.id}-instruction-${index}`} instruction={segment} />
+            ) : (
+              <ReferenceChip
+                key={`${item.id}-reference-${index}`}
+                reference={segment}
+                testId="history-reference-chip"
+              />
+            ),
+          )
         )}
       </div>
-      {canToggleRawError ? (
-        <div className="tc-message__detail-actions" data-testid="error-detail-actions">
-          <button
-            aria-expanded={detailsExpanded}
-            className="tc-message__detail-button"
-            data-testid="toggle-error-detail"
-            onClick={() => setDetailsExpanded((value) => !value)}
-            type="button"
-          >
-            <span
-              aria-hidden="true"
-              className={`codicon ${detailsExpanded ? "codicon-chevron-down" : "codicon-chevron-right"}`}
-            />
-            <span>{detailsExpanded ? "Hide original error" : "Show original error"}</span>
-          </button>
-          <button
-            className="tc-message__detail-button"
-            data-testid="copy-error-detail"
-            onClick={() => {
-              void copyRawError();
-            }}
-            type="button"
-          >
-            <span aria-hidden="true" className="codicon codicon-copy" />
-            <span>
-              {copyState === "copied"
-                ? "Copied"
-                : copyState === "failed"
-                  ? "Copy failed"
-                  : "Copy original"}
-            </span>
-          </button>
+      <AttachmentStrip
+        attachments={historyAttachments}
+        onOpen={(attachment) => {
+          if (attachment.kind === "image") {
+            onOpenImagePreview?.(attachment.id);
+            return;
+          }
+          if (attachment.path) {
+            onOpenFile?.(attachment.path);
+          }
+        }}
+        readonly
+      />
+      {canToggleRawError || recoveryAction ? (
+        <>
+          {canToggleRawError ? (
+            <div className="tc-message__detail-actions" data-testid="error-detail-actions">
+              <button
+                aria-expanded={detailsExpanded}
+                className="tc-message__detail-button"
+                data-testid="toggle-error-detail"
+                onClick={() => setDetailsExpanded((value) => !value)}
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`codicon ${detailsExpanded ? "codicon-chevron-down" : "codicon-chevron-right"}`}
+                />
+                <span>{t(detailsExpanded ? "message.hideOriginal" : "message.showOriginal")}</span>
+              </button>
+              <button
+                className="tc-message__detail-button"
+                data-testid="copy-error-detail"
+                onClick={() => {
+                  void copyRawError();
+                }}
+                type="button"
+              >
+                <span aria-hidden="true" className="codicon codicon-copy" />
+                <span>
+                  {t(copyState === "copied" ? "common.copied" : copyState === "failed" ? "common.copyFailed" : "message.copyOriginal")}
+                </span>
+              </button>
+            </div>
+          ) : null}
+          {recoveryAction ? (
+            <div className="tc-message__recovery-actions" data-testid="error-recovery-actions">
+              <button
+                className="tc-button tc-button--primary tc-message__recovery-button"
+                data-testid="recover-error-turn"
+                disabled={recoveryDisabled}
+                onClick={() => onRecover?.(item.id, recoveryAction)}
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`codicon ${recoveryAction === "retry" ? "codicon-refresh" : "codicon-debug-continue"}`}
+                />
+                <span>{t(recoveryAction === "retry" ? "common.retry" : "common.resume")}</span>
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {item.kind === "error" && item.recoveryError ? (
+        <div className="tc-message__status" data-testid="error-recovery-rejection">
+          <span>{item.recoveryError}</span>
         </div>
       ) : null}
       {detailsExpanded && rawErrorDetail ? (
@@ -121,12 +236,19 @@ export function MessageBubble({
       ) : null}
       {isPendingUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">
-          <span>Sending...</span>
+          <span>{t("message.sending")}</span>
+        </div>
+      ) : null}
+      {isAbandonedUserMessage ? (
+        <div className="tc-message__status" data-testid="abandoned-user-message-status">
+          <span>{t("message.abandoned")}</span>
         </div>
       ) : null}
       {isFailedUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">
-          <span>{item.deliveryError ?? "Send failed."}</span>
+          <span title={item.deliveryErrorDetail ?? undefined}>
+            {item.deliveryError ?? t("message.sendFailed")}
+          </span>
           {showRetry ? (
             <button
               className="tc-message__retry"
@@ -134,7 +256,7 @@ export function MessageBubble({
               onClick={() => onRetry?.(item.id)}
               type="button"
             >
-              Retry
+              {t("common.retry")}
             </button>
           ) : null}
         </div>
@@ -142,3 +264,23 @@ export function MessageBubble({
     </article>
   );
 }
+
+function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): boolean {
+  return (
+    prev.mediaRoots === next.mediaRoots &&
+    prev.onEdit === next.onEdit &&
+    prev.hasFileWrites === next.hasFileWrites &&
+    prev.item === next.item &&
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onOpenLink === next.onOpenLink &&
+    prev.resolvePaths === next.resolvePaths &&
+    prev.onOpenImagePreview === next.onOpenImagePreview &&
+    prev.onRecover === next.onRecover &&
+    prev.onRetry === next.onRetry &&
+    prev.recoveryDisabled === next.recoveryDisabled &&
+    prev.onZoomImage === next.onZoomImage
+  );
+}
+
+export const MessageBubble = memo(MessageBubbleComponent, areMessageBubblePropsEqual);
+MessageBubble.displayName = "MessageBubble";

@@ -6,6 +6,7 @@ use crate::core::package::{
     load_package_registry, load_plugin_registry, resolve_layer_paths, PackageManager,
     PackageVisibility,
 };
+use crate::infra::i18n::{tr_in, Locale};
 use crate::AppConfig;
 
 fn test_config(work_dir: &Path) -> AppConfig {
@@ -81,6 +82,70 @@ fn write_named_package_manifest(
 }
 
 #[test]
+fn uninstall_manual_plugin_keeps_resources_and_registries_and_lists_real_paths() {
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work.path());
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    let manual = paths.plugins_dir.join("directory-not-id");
+    write_plugin(&manual, "qa-echo", "1.0.0", "qa_echo");
+    crate::core::package::save_package_registry(
+        &paths.package_registry_path,
+        &load_package_registry(&paths.package_registry_path).unwrap(),
+    )
+    .unwrap();
+    crate::core::package::save_plugin_registry(
+        &paths.plugin_registry_path,
+        &load_plugin_registry(&paths.plugin_registry_path).unwrap(),
+    )
+    .unwrap();
+    let package_before = std::fs::read(&paths.package_registry_path).unwrap();
+    let plugin_before = std::fs::read(&paths.plugin_registry_path).unwrap();
+    let manifest_before = std::fs::read(manual.join("plugin.json")).unwrap();
+    let error = PackageManager::new(&cfg)
+        .uninstall("qa-echo", PackageVisibility::Scope, Some(workspace.path()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.notInstalled",
+            &[
+                ("layer", &PackageVisibility::Scope.to_string()),
+                ("name", "qa-echo"),
+                (
+                    "plugins",
+                    &crate::infra::platform::format_home_path(&paths.plugins_dir)
+                ),
+                (
+                    "skills",
+                    &crate::infra::platform::format_home_path(&paths.skills_dir)
+                ),
+            ]
+        )),
+        "{error}"
+    );
+    assert!(error.contains(&crate::infra::platform::format_home_path(
+        &paths.plugins_dir
+    )));
+    assert!(error.contains(&crate::infra::platform::format_home_path(&paths.skills_dir)));
+    assert_eq!(
+        std::fs::read(&paths.package_registry_path).unwrap(),
+        package_before
+    );
+    assert_eq!(
+        std::fs::read(&paths.plugin_registry_path).unwrap(),
+        plugin_before
+    );
+    assert_eq!(
+        std::fs::read(manual.join("plugin.json")).unwrap(),
+        manifest_before
+    );
+    assert!(manual.join("main.js").is_file());
+}
+
+#[test]
 fn detect_bare_plugin_and_bare_skill() {
     let work_dir = tempfile::tempdir().unwrap();
     let cfg = test_config(work_dir.path());
@@ -101,6 +166,35 @@ fn detect_bare_plugin_and_bare_skill() {
     assert_eq!(detected_skill.manifest.version, "0.0.0");
     assert_eq!(detected_skill.resources.len(), 1);
     assert_eq!(detected_skill.resources[0].id, "commit");
+}
+
+#[test]
+fn detect_package_rejects_resource_reference_outside_package_root() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source_parent = tempfile::tempdir().unwrap();
+    let package_root = source_parent.path().join("package");
+    let outside_plugin = source_parent.path().join("outside-plugin");
+    std::fs::create_dir_all(&package_root).unwrap();
+    write_plugin(&outside_plugin, "outside-plugin", "0.1.0", "outside_tool");
+    write_package_manifest(&package_root, &["../outside-plugin"], &[]);
+
+    let error = manager
+        .detect_source(&package_root)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.relativeRef",
+            &[
+                ("kind", "plugin"),
+                ("reference", &format!("{:?}", "../outside-plugin"))
+            ]
+        )),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -244,7 +338,7 @@ fn prepare_install_rejects_same_layer_conflict_without_force() {
     let manager = PackageManager::new(&cfg);
 
     write_plugin(
-        &workspace.path().join(".tomcat/plugins/conflict-plugin"),
+        &workspace.path().join(".agents/plugins/conflict-plugin"),
         "conflict-plugin",
         "0.1.0",
         "tool_a",
@@ -261,7 +355,14 @@ fn prepare_install_rejects_same_layer_conflict_without_force() {
         )
         .unwrap_err()
         .to_string();
-    assert!(error.contains("同层"), "unexpected error: {error}");
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.exists",
+            &[("kind", "plugin"), ("id", "conflict-plugin")]
+        )),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -272,7 +373,7 @@ fn prepare_install_reports_cross_layer_shadow_warning() {
     let manager = PackageManager::new(&cfg);
 
     write_skill(
-        &workspace.path().join(".tomcat/skills/commit"),
+        &workspace.path().join(".agents/skills/commit"),
         "commit",
         "already here",
     );
@@ -291,7 +392,15 @@ fn prepare_install_reports_cross_layer_shadow_warning() {
         prepared
             .warnings
             .iter()
-            .any(|warning| warning.contains("更高优先级层")),
+            .any(|warning| warning.contains(&tr_in(
+                Locale::En,
+                "package.shadowed",
+                &[
+                    ("kind", "skill"),
+                    ("id", "commit"),
+                    ("layer", &PackageVisibility::Scope.to_string())
+                ]
+            ))),
         "warnings should mention higher-priority shadowing: {:?}",
         prepared.warnings
     );
@@ -365,7 +474,7 @@ fn install_scope_package_writes_layer_registries() {
 }
 
 #[test]
-fn install_failure_rolls_back_copied_dirs() {
+fn invalid_registry_parent_fails_before_copying_resources() {
     let work_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let cfg = test_config(work_dir.path());
@@ -379,27 +488,26 @@ fn install_failure_rolls_back_copied_dirs() {
     std::fs::create_dir_all(&scope_paths.layer_root).unwrap();
     std::fs::write(&scope_paths.packages_dir, "block registry writes here").unwrap();
 
-    let prepared = manager
+    let error = manager
         .prepare_install(
             source.path(),
             PackageVisibility::Scope,
             Some(workspace.path()),
             false,
         )
-        .unwrap();
-    let error = manager.install(prepared).unwrap_err().to_string();
+        .unwrap_err();
 
     assert!(
-        !error.contains("dirty_state"),
-        "unexpected dirty rollback: {error}"
+        matches!(error, crate::AppError::Io(ref cause) if cause.kind() == std::io::ErrorKind::NotADirectory),
+        "{error}"
     );
     assert!(
         !scope_paths.plugins_dir.join("broken-plugin").exists(),
-        "copied plugin dir should be removed after rollback"
+        "invalid registry parent must fail before copying a plugin directory"
     );
     assert!(
         !scope_paths.package_registry_path.exists(),
-        "package registry should be restored to non-existent state"
+        "no registry file should be created below a non-directory parent"
     );
 }
 
@@ -544,8 +652,13 @@ fn load_package_registry_corrupt_returns_error() {
     let path = dir.path().join("registry.json");
     std::fs::write(&path, "not valid json {{{").unwrap();
 
-    let error = load_package_registry(&path).unwrap_err().to_string();
-    assert!(error.contains("registry 损坏"), "unexpected error: {error}");
+    let error = load_package_registry(&path).unwrap_err();
+    assert!(matches!(error, crate::AppError::Config(_)), "{error}");
+    assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "not valid json {{{"
+    );
 }
 
 #[test]
@@ -603,4 +716,337 @@ fn uninstall_uses_package_registry_for_precise_cleanup() {
         .unwrap()
         .plugins
         .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_preserves_regular_file_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "file-modes",
+        "preserve scripts and private files",
+    );
+    for (name, mode) in [("run.sh", 0o755), ("private.txt", 0o600)] {
+        let path = source.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nprintf installed\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let cfg = test_config(work.path());
+    let manager = PackageManager::new(&cfg);
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    manager.install(prepared).unwrap();
+    let installed = resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path()))
+        .unwrap()
+        .skills_dir
+        .join("file-modes");
+    for (name, mode) in [("run.sh", 0o755), ("private.txt", 0o600)] {
+        assert_eq!(
+            std::fs::metadata(installed.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode,
+            "{name}"
+        );
+    }
+    let output = std::process::Command::new(installed.join("run.sh"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"installed");
+}
+
+#[test]
+fn install_rejects_ambiguous_path_content_substitution() {
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "digest-boundary",
+        "path and content are separate fields",
+    );
+    std::fs::write(source.path().join("a"), "bc").unwrap();
+    let cfg = test_config(work.path());
+    let manager = PackageManager::new(&cfg);
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    std::fs::rename(source.path().join("a"), source.path().join("ab")).unwrap();
+    std::fs::write(source.path().join("ab"), "c").unwrap();
+    let error = manager
+        .install(prepared)
+        .expect_err("a+bc and ab+c must not have the same source digest");
+    assert!(
+        error
+            .to_string()
+            .contains(&tr_in(Locale::En, "package.sourceChanged", &[("path", "")])),
+        "{error}"
+    );
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(!paths.skills_dir.join("digest-boundary").exists());
+    assert!(load_package_registry(&paths.package_registry_path)
+        .unwrap()
+        .packages
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_source_mode_changed_after_preparation() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "changed-mode",
+        "mode changes require a fresh confirmation",
+    );
+    let script = source.path().join("run.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf installed\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let cfg = test_config(work.path());
+    let manager = PackageManager::new(&cfg);
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = manager
+        .install(prepared)
+        .expect_err("confirmed file permissions must not change");
+    assert!(
+        error
+            .to_string()
+            .contains(&tr_in(Locale::En, "package.sourceChanged", &[("path", "")])),
+        "{error}"
+    );
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(!paths.skills_dir.join("changed-mode").exists());
+}
+
+#[test]
+fn install_rejects_a_source_changed_after_preparation() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(source.path(), "changed-source", "before confirmation");
+
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    std::fs::write(
+        source.path().join("SKILL.md"),
+        "---\nname: changed-source\ndescription: modified after confirmation\n---\n# Changed\n",
+    )
+    .unwrap();
+
+    let error = manager.install(prepared).unwrap_err().to_string();
+    assert!(
+        error.contains(&tr_in(Locale::En, "package.sourceChanged", &[("path", "")])),
+        "unexpected error: {error}"
+    );
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(!paths.skills_dir.join("changed-source").exists());
+}
+
+#[test]
+fn install_rejects_source_target_overlap_in_both_directions() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = workspace.path().join(".agents/skills");
+    write_skill(&source, "overlap", "source contains the target directory");
+
+    let prepared = manager
+        .prepare_install(
+            &source,
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    let error = manager.install(prepared).unwrap_err().to_string();
+    let destination = resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path()))
+        .unwrap()
+        .skills_dir
+        .join("overlap");
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.overlap",
+            &[
+                (
+                    "source",
+                    &source.canonicalize().unwrap().display().to_string()
+                ),
+                ("destination", &destination.display().to_string()),
+            ]
+        )),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_install_rejects_special_files_in_source_tree() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(source.path(), "special-file", "contains a fifo");
+    let fifo = source.path().join("unexpected.fifo");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    let error = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&tr_in(Locale::En, "package.specialFile", &[("path", "")])),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn concurrent_prepared_installs_commit_exactly_one_owner() {
+    use std::sync::{Arc, Barrier};
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "concurrent-owner",
+        "only one install may own this id",
+    );
+    let cfg = Arc::new(test_config(work_dir.path()));
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let cfg = Arc::clone(&cfg);
+        let barrier = Arc::clone(&barrier);
+        let source = source.path().to_path_buf();
+        let workspace = workspace.path().to_path_buf();
+        workers.push(std::thread::spawn(move || {
+            let manager = PackageManager::new(&cfg);
+            let prepared = manager
+                .prepare_install(&source, PackageVisibility::Scope, Some(&workspace), false)
+                .unwrap();
+            barrier.wait();
+            manager.install(prepared)
+        }));
+    }
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+        1
+    );
+
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    let registry = load_package_registry(&paths.package_registry_path).unwrap();
+    assert_eq!(registry.packages.len(), 1);
+    assert_eq!(registry.packages[0].name, "concurrent-owner");
+}
+
+#[test]
+fn uninstall_rolls_back_resources_and_registries_when_commit_fails() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "rollback-uninstall",
+        "must be restored on a commit failure",
+    );
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    manager.install(prepared).unwrap();
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    crate::core::package::manager::fail_next_registry_save_for_test(&paths.package_registry_path);
+
+    let error = manager
+        .uninstall(
+            "rollback-uninstall",
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&tr_in(
+            Locale::En,
+            "package.operationFailed",
+            &[("operation", "uninstall"), ("detail", "")]
+        )),
+        "unexpected error: {error}"
+    );
+    assert!(paths
+        .skills_dir
+        .join("rollback-uninstall/SKILL.md")
+        .is_file());
+    assert_eq!(
+        load_package_registry(&paths.package_registry_path)
+            .unwrap()
+            .packages
+            .len(),
+        1
+    );
 }

@@ -6,10 +6,12 @@ use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
 use crate::core::llm::replay_policy::ProviderCompatProfile;
-use crate::core::llm::types::{StreamEvent, ThinkingSource, TokenUsage};
-use crate::infra::error::{llm_error_with_source, AppError, LlmErrorStage};
+use crate::core::llm::types::{StreamEvent, ThinkingSource};
+use crate::infra::error::{
+    llm_error_with_source, llm_stream_interrupted_error, AppError, LlmErrorStage,
+};
 
-use super::wire::final_stream_events;
+use super::wire::{anthropic_token_usage, final_stream_events};
 
 const PROVIDER_NAME: &str = "anthropic";
 
@@ -24,17 +26,31 @@ pub(super) struct ToolTrack {
     pub(super) arguments: String,
 }
 
+/// Provider counters are cumulative but arrive in partial frames. Keep them raw until
+/// the terminal event; normalized prompt totals cannot recover disjoint input counters.
+#[derive(Default)]
+struct StreamUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_tokens: Option<u32>,
+    cache_write_tokens: Option<u32>,
+}
+
 pub(super) struct AnthropicStream<S> {
     inner: S,
     buffer: Vec<u8>,
     pending: std::vec::IntoIter<StreamEvent>,
     thinking: BTreeMap<u32, ThinkingTrack>,
     tool_calls: BTreeMap<u32, ToolTrack>,
-    usage: Option<TokenUsage>,
+    usage: Option<StreamUsage>,
     stop_reason: Option<String>,
     source_profile: ProviderCompatProfile,
     continuity_enabled: bool,
     terminal_emitted: bool,
+    finished: bool,
+    /// 与 OpenAI Responses 对齐：首个有效事件前的解析失败更可能是中转流截断，可重试；
+    /// 已输出事件后才失败则是协议错误，保留 Parse 阶段供诊断。
+    seen_valid_event: bool,
 }
 
 impl<S> AnthropicStream<S> {
@@ -54,6 +70,8 @@ impl<S> AnthropicStream<S> {
             source_profile,
             continuity_enabled,
             terminal_emitted: false,
+            finished: false,
+            seen_valid_event: false,
         }
     }
 
@@ -75,12 +93,17 @@ impl<S> AnthropicStream<S> {
             return Ok(Vec::new());
         }
         let value: Value = serde_json::from_str(&data).map_err(|error| {
-            llm_error_with_source(
-                PROVIDER_NAME,
-                LlmErrorStage::Parse,
-                "解析 Anthropic SSE 失败".to_string(),
-                anyhow::anyhow!("{error} | raw={raw}"),
-            )
+            let summary = format!("解析 Anthropic SSE 失败: {error} | raw={raw}");
+            if self.seen_valid_event {
+                llm_error_with_source(
+                    PROVIDER_NAME,
+                    LlmErrorStage::Parse,
+                    summary,
+                    anyhow::anyhow!("{error} | raw={raw}"),
+                )
+            } else {
+                llm_stream_interrupted_error(PROVIDER_NAME, summary)
+            }
         })?;
         let event = event_name
             .or_else(|| {
@@ -90,7 +113,9 @@ impl<S> AnthropicStream<S> {
                     .map(str::to_string)
             })
             .unwrap_or_default();
-        self.events_for_value(&event, &value)
+        let events = self.events_for_value(&event, &value)?;
+        self.seen_valid_event |= !events.is_empty();
+        Ok(events)
     }
 
     fn events_for_value(
@@ -234,11 +259,13 @@ impl<S> AnthropicStream<S> {
                     .or_else(|| error.get("code"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                let reason = code
+                    .as_deref()
+                    .filter(|code| !code.is_empty())
+                    .map(|code| format!("error:{code}"))
+                    .unwrap_or_else(|| "error".to_string());
                 let mut events = vec![StreamEvent::LlmError {
-                    reason: format!(
-                        "error:{}",
-                        code.clone().unwrap_or_else(|| "unknown".to_string())
-                    ),
+                    reason,
                     message,
                     code,
                 }];
@@ -254,22 +281,32 @@ impl<S> AnthropicStream<S> {
         let Some(usage) = usage else {
             return;
         };
-        let prompt_tokens = usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
-        let completion_tokens = usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
-        if prompt_tokens == 0 && completion_tokens == 0 {
+        let counter = |name| {
+            usage
+                .get(name)
+                .and_then(Value::as_u64)
+                .map(|value| value as u32)
+        };
+        let input_tokens = counter("input_tokens");
+        let output_tokens = counter("output_tokens");
+        let cache_read_tokens = counter("cache_read_input_tokens");
+        let cache_write_tokens = counter("cache_creation_input_tokens");
+        if [
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        ]
+        .iter()
+        .all(Option::is_none)
+        {
             return;
         }
-        self.usage = Some(TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: Some(prompt_tokens + completion_tokens),
-        });
+        let current = self.usage.get_or_insert_with(StreamUsage::default);
+        current.input_tokens = input_tokens.unwrap_or(current.input_tokens);
+        current.output_tokens = output_tokens.unwrap_or(current.output_tokens);
+        current.cache_read_tokens = cache_read_tokens.or(current.cache_read_tokens);
+        current.cache_write_tokens = cache_write_tokens.or(current.cache_write_tokens);
     }
 
     fn build_terminal_events(&self) -> Vec<StreamEvent> {
@@ -305,7 +342,14 @@ impl<S> AnthropicStream<S> {
             thinking_blocks,
             thinking_text,
             !self.tool_calls.is_empty(),
-            self.usage.clone(),
+            self.usage.as_ref().map(|usage| {
+                anthropic_token_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_write_tokens,
+                )
+            }),
             self.stop_reason.clone(),
         )
     }
@@ -321,6 +365,9 @@ where
         loop {
             if let Some(event) = self.pending.next() {
                 return Poll::Ready(Some(Ok(event)));
+            }
+            if self.finished {
+                return Poll::Ready(None);
             }
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
@@ -355,13 +402,19 @@ where
                     ))));
                 }
                 Poll::Ready(None) => {
+                    self.finished = true;
+                    // 未分隔残留沿用原行为丢弃，不能把 EOF 伪装成协议终止。
+                    self.buffer.clear();
                     if !self.terminal_emitted {
-                        self.terminal_emitted = true;
-                        let events = self.build_terminal_events();
-                        if !events.is_empty() {
-                            self.pending = events.into_iter();
-                            continue;
+                        if self.stop_reason.is_none() {
+                            return Poll::Ready(Some(Err(llm_stream_interrupted_error(
+                                PROVIDER_NAME,
+                                "stream closed before stop_reason or message_stop",
+                            ))));
                         }
+                        self.terminal_emitted = true;
+                        self.pending = self.build_terminal_events().into_iter();
+                        continue;
                     }
                     return Poll::Ready(None);
                 }
@@ -376,78 +429,5 @@ fn find_double_newline(buffer: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-    use tokio_stream::empty;
-
-    use super::AnthropicStream;
-    use crate::core::llm::replay_policy::ProviderCompatProfile;
-    use crate::core::llm::types::{ReasoningFormat, StreamEvent};
-
-    #[test]
-    fn parse_block_emits_thinking_and_terminal_events() {
-        let mut stream = AnthropicStream::new(
-            empty::<Result<Bytes, reqwest::Error>>(),
-            ProviderCompatProfile::anthropic_messages("claude-opus-4-6"),
-            true,
-        );
-
-        assert!(stream
-            .parse_block(
-                "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":12}}}\n\n",
-            )
-            .expect("message_start")
-            .is_empty());
-        assert!(stream
-            .parse_block(
-                "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
-            )
-            .expect("thinking start")
-            .is_empty());
-        let thinking_events = stream
-            .parse_block(
-                "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason step\"}}\n\n",
-            )
-            .expect("thinking delta");
-        assert!(matches!(
-            thinking_events.as_slice(),
-            [StreamEvent::Thinking { delta, .. }] if delta == "reason step"
-        ));
-        assert!(stream
-            .parse_block(
-                "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_1\"}}\n\n",
-            )
-            .expect("signature")
-            .is_empty());
-        assert!(stream
-            .parse_block(
-                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":34}}\n\n",
-            )
-            .expect("message delta")
-            .is_empty());
-
-        let terminal = stream
-            .parse_block("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-            .expect("message stop");
-
-        assert!(terminal.iter().any(|event| matches!(
-            event,
-            StreamEvent::ReasoningSnapshot {
-                reasoning_continuation: Some(continuation),
-                ..
-            } if continuation.format == ReasoningFormat::AnthropicThinkingBlocks
-        )));
-        assert!(terminal.iter().any(|event| matches!(
-            event,
-            StreamEvent::Usage {
-                prompt_tokens: 12,
-                completion_tokens: 34,
-                total_tokens: Some(46),
-            }
-        )));
-        assert!(terminal.iter().any(|event| matches!(
-            event,
-            StreamEvent::FinishReason { reason } if reason == "stop"
-        )));
-    }
-}
+#[path = "tests/stream_test.rs"]
+mod tests;

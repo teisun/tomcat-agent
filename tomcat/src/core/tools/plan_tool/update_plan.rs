@@ -4,35 +4,37 @@
 //! - 任何模式可见；按 `plan_id` / `path` 路由（`plan_id` 优先，缺省取 active plan）。
 //! - 入参 **仅认 `kind`**（D3 破坏性）：`upsert | set_status | remove`。
 //! - State 矩阵闸门（G2 / `update-plan.md` §6.2）：
-//!   - 目标 `plan.state == completed` → 全拒（N2）。
-//!   - `set_status: in_progress` 仅 `executing` 允许；planning / pending 一律拒。
+//!   - 已完成计划重新出现非终态 todo 时回到 `pending`。
+//!   - `set_status: in_progress` 仅 `executing` 允许，所有非执行状态一律拒。
 //! - 跨 session 编辑规则：
 //!   - 目标 plan `state ∈ {planning, pending}`：允许（协作改稿）
 //!   - 目标 plan `state == executing` 且 `session_key != current_session_key`：拒
-//! - 写盘后 EXEC 自动派生：所有 todos completed → 先写 `Executing`，若 code review
-//!   轮次未耗尽则先派发 code reviewer；`verdict=pass` 时同回合 verifier，否则把
-//!   `code_review` 返回给主 Agent。code review 轮次耗尽后直接走 verifier。
+//! - 写盘后 EXEC 由 `NextAction` 统一裁决：至少一个 todo 且全部终态时计划完成。
+//!   LLM 可将唯一的最终验收 todo 标为 `Acceptance`；其变为 `in_progress` 时结果
+//!   返回 `load_skill(verify)` 提示，验收范围与重跑判断由该 skill 按实际 diff 决定。
 //! - 返回 JSON（G1）：`plan_id` / `path` / `applied` / `items[]` /
 //!   `active_in_progress` / `plan_state_before` / `plan_state_after` / `warnings[]` /
-//!   `panel_snapshot_id` / `code_review` / `verify`（节流后 panel 刷新版本；目前与 timestamp 等价）。
+//!   `panel_snapshot_id` / `next_step`（节流后 panel 刷新版本；目前与 timestamp 等价）。
 
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::core::plan_runtime::{
-    file_store::{update_plan_locked, write_plan, PlanFileState, TodoStatus},
-    ops, review,
-    state::PlanState,
-    verify, PlanRuntime,
+    file_store::{
+        update_plan_locked, validate_single_acceptance, PlanFileState, TodoItem, TodoKind,
+        TodoStatus,
+    },
+    NextAction, PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
 use super::ToolError;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePlanArgs {
-    /// 目标 plan_id；EXEC 模式可省略（默认 active_plan_id）。
+    /// 目标 plan_id；执行中计划可省略（默认当前 active plan）。
     #[serde(default)]
     pub plan_id: Option<String>,
     /// 可选直接路径；仅在未传 plan_id 时生效。
@@ -41,10 +43,13 @@ pub struct UpdatePlanArgs {
     #[serde(default)]
     pub replace: bool,
     /// 增量 ops；统一为 `kind` 标记的 enum（D3 破坏性）。
+    #[serde(default)]
     pub ops: Vec<UpdateOp>,
 }
 
 pub use super::shared_todo_ops::SharedTodoOpArg as UpdateOp;
+
+use crate::infra::i18n::tr;
 
 impl UpdatePlanArgs {
     pub fn from_json(raw: &serde_json::Value) -> Result<Self, ToolError> {
@@ -53,20 +58,20 @@ impl UpdatePlanArgs {
             for op in ops {
                 if op.get("op").is_some() && op.get("kind").is_none() {
                     return Err(ToolError::BadArgs(
-                        "update_plan ops: 字段 `op` 已下线，请改用 `kind`（kind: upsert | set_status | remove）".into(),
+                        "update_plan ops: field `op` was removed; use `kind` (kind: upsert | set_status | remove)".into(),
                     ));
                 }
             }
         }
         if raw.get("replace_todos").is_some() || raw.get("replace_milestones").is_some() {
             return Err(ToolError::BadArgs(
-                "update_plan 顶层字段 `replace_todos` / `replace_milestones` 已下线，请统一改用 `replace`"
-                    .into(),
+                "update_plan top-level fields `replace_todos` / `replace_milestones` were removed; use `replace`".into(),
             ));
         }
         if raw.get("milestones_ops").is_some() {
             return Err(ToolError::BadArgs(
-                "update_plan 不再支持 `milestones_ops`；当前仅支持 todo-only ops".into(),
+                "update_plan no longer supports `milestones_ops`; only todo-only ops are supported"
+                    .into(),
             ));
         }
         serde_json::from_value(raw.clone())
@@ -78,228 +83,185 @@ pub async fn execute(
     runtime: &PlanRuntime,
     args: UpdatePlanArgs,
 ) -> Result<serde_json::Value, ToolError> {
-    let path = resolve_target_plan_path(runtime, args.plan_id, args.path)?;
+    let path = resolve_target_plan_path(runtime, args.plan_id.clone(), args.path.clone())?;
+    execute_at_path(runtime, args, path).await
+}
+
+/// Apply the shared transaction at a resolved path. The LLM entry authorizes
+/// this exact target before entering; trusted Rust callers use `execute`.
+pub(crate) async fn execute_at_path(
+    runtime: &PlanRuntime,
+    args: UpdatePlanArgs,
+    path: PathBuf,
+) -> Result<serde_json::Value, ToolError> {
     struct UpdateTxOutcome {
         plan: crate::core::plan_runtime::file_store::PlanFile,
-        target_plan_id: String,
         plan_state_before: PlanFileState,
         warnings: Vec<String>,
-        active_in_progress: Option<String>,
-        derived_completed: bool,
     }
 
     let tx = match update_plan_locked(&path, runtime.lock_timeout_ms(), |plan| {
-        let target_plan_id = plan.frontmatter.plan_id.clone();
         let plan_state_before = plan.frontmatter.state;
-
         enforce_cross_session_policy(runtime, &plan.frontmatter, plan_state_before)?;
-
-        // G2 state 矩阵闸门：先做语义校验，再下沉到 ops 引擎。
         enforce_state_matrix(plan_state_before, &args.ops)?;
+        enforce_executing_work_content_is_frozen(
+            plan_state_before,
+            &plan.frontmatter.todos,
+            &args.ops,
+        )?;
+        let mut warnings =
+            apply_plan_todo_ops(&mut plan.frontmatter.todos, &args.ops, args.replace)?;
 
-        apply_shared_todo_ops(&mut plan.frontmatter.todos, &args.ops, args.replace)?;
-
-        let warnings: Vec<String> = Vec::new();
-        let all_completed = ops::all_completed(&plan.frontmatter.todos);
-        let derived_completed =
-            matches!(plan_state_before, PlanFileState::Executing) && all_completed;
-
-        if matches!(plan_state_before, PlanFileState::Completed) && !all_completed {
+        if matches!(plan_state_before, PlanFileState::Completed)
+            && !plan_completion_ready(&plan.frontmatter.todos)
+        {
             plan.frontmatter.state = PlanFileState::Pending;
+            warnings.push(tr("planTool.reopened", &[]));
         }
 
-        // E2：在 body 的 `## Todos Board` 标记区间内自动重写当前 todos 状态视图。
+        if plan_completion_ready(&plan.frontmatter.todos) {
+            // State and todos are one mutation. A second write after releasing
+            // this lock could overwrite another already-accepted update.
+            plan.frontmatter.state = PlanFileState::Completed;
+        }
+
         rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
-
-        if derived_completed {
-            // 第一写：todos 完成，但 state 保持 Executing，确保 verifier/code reviewer 看到的是
-            // 「已做完 todos、尚未正式收工」的磁盘态。
-            plan.frontmatter.state = PlanFileState::Executing;
-        }
-
-        let active_in_progress = plan
-            .frontmatter
-            .todos
-            .iter()
-            .find(|t| matches!(t.status, TodoStatus::InProgress))
-            .map(|t| t.id.clone());
-
         Ok(UpdateTxOutcome {
             plan: plan.clone(),
-            target_plan_id,
             plan_state_before,
             warnings,
-            active_in_progress,
-            derived_completed,
         })
     }) {
-        Ok(v) => v,
-        Err(crate::core::plan_runtime::file_store::LockedPlanMutationError::Plan(e)) => {
-            return Err(e.into());
+        Ok(value) => value,
+        Err(crate::core::plan_runtime::file_store::LockedPlanMutationError::Plan(error)) => {
+            return Err(error.into());
         }
-        Err(crate::core::plan_runtime::file_store::LockedPlanMutationError::Callback(e)) => {
-            return Err(e);
+        Err(crate::core::plan_runtime::file_store::LockedPlanMutationError::Callback(error)) => {
+            return Err(error);
         }
     };
 
-    let applied = args.ops.len();
-    let mut plan = tx.plan;
-    let target_plan_id = tx.target_plan_id;
-    let plan_state_before = tx.plan_state_before;
-    let active_in_progress = tx.active_in_progress;
-    let mut warnings = tx.warnings;
+    let plan = tx.plan;
+    let target_plan_id = plan.frontmatter.plan_id.clone();
+    let warnings = tx.warnings;
 
-    let mut code_review_json = serde_json::Value::Null;
-    let mut verify_json = serde_json::Value::Null;
-    let plan_state_after = if tx.derived_completed {
-        if let Some(round) = runtime.try_begin_code_review_round(&target_plan_id) {
-            let mut code_review_summary = runtime.dispatch_code_reviewer(&target_plan_id).await;
-            warnings.extend(review::normalize_for_code_review_result(
-                &mut code_review_summary,
-            ));
-            runtime.write_code_review_transcript(&target_plan_id, &code_review_summary, round);
-            code_review_json = code_review_summary.to_json();
-
-            if code_review_summary.verdict.as_deref() == Some("pass") {
-                let (state_after, verify_payload) = run_verifier_after_code_review(
-                    runtime,
-                    &target_plan_id,
-                    &path,
-                    &mut plan,
-                    &mut warnings,
-                )
-                .await?;
-                verify_json = verify_payload;
-                state_after
-            } else if code_review_summary.aborted {
-                warnings.push(
-                    "code review 未能执行(aborted)，按 reviewer 不可用处理，转交 verifier".into(),
-                );
-                let (state_after, verify_payload) = run_verifier_after_code_review(
-                    runtime,
-                    &target_plan_id,
-                    &path,
-                    &mut plan,
-                    &mut warnings,
-                )
-                .await?;
-                verify_json = verify_payload;
-                state_after
-            } else {
-                warnings.push(format!(
-                    "code review verdict={}，plan 保持 executing，等待主 Agent 修复或重新 complete",
-                    code_review_summary.verdict.as_deref().unwrap_or("partial")
-                ));
-                PlanFileState::Executing
-            }
-        } else {
-            warnings.push(format!(
-                "code review rounds 已用尽（{}/{}），跳过 code review 直接 verifier",
-                runtime.code_review_rounds(&target_plan_id),
-                runtime.max_code_review_rounds()
-            ));
-            runtime.write_code_review_warning_transcript(
-                &target_plan_id,
-                "rounds_exhausted",
-                runtime.code_review_rounds(&target_plan_id),
-            );
-            let (state_after, verify_payload) = run_verifier_after_code_review(
-                runtime,
-                &target_plan_id,
-                &path,
-                &mut plan,
-                &mut warnings,
-            )
-            .await?;
-            verify_json = verify_payload;
-            state_after
-        }
-    } else {
-        plan.frontmatter.state
-    };
-
+    let plan_state_after = plan.frontmatter.state;
+    let next_action = runtime.next_action(&plan.frontmatter).await;
+    let active_in_progress = plan
+        .frontmatter
+        .todos
+        .iter()
+        .find(|todo| matches!(todo.status, TodoStatus::InProgress))
+        .map(|todo| todo.id.clone());
     let panel_snapshot_id = crate::core::plan_runtime::panels::next_panel_snapshot_id();
+    runtime.refresh_active_plan_after_write(path.clone(), &plan);
+    if tx.plan_state_before != PlanFileState::Completed
+        && plan_state_after == PlanFileState::Completed
+    {
+        emit_plan_completed(runtime, &target_plan_id, &path);
+    }
+    runtime
+        .refresh_notifier()
+        .notify(&crate::core::plan_runtime::panels::TodosPanelSnapshot {
+            panel_snapshot_id,
+            scope: format!("plan:{target_plan_id}"),
+            items: plan.frontmatter.todos.clone(),
+            warnings: warnings.clone(),
+        });
 
-    // E：fanout UI 刷新——advisory lock 在 write_plan 内已 release，这里仅同步通知
-    // 已注册 panel；panel 自行决定如何渲染（CLI/IDE/noop）。
-    let snapshot = crate::core::plan_runtime::panels::TodosPanelSnapshot {
-        panel_snapshot_id,
-        scope: format!("plan:{target_plan_id}"),
-        items: plan.frontmatter.todos.clone(),
-        warnings: warnings.clone(),
-    };
-    runtime.refresh_notifier().notify(&snapshot);
-
-    if matches!(plan_state_before, PlanFileState::Completed)
+    if matches!(tx.plan_state_before, PlanFileState::Completed)
         && matches!(plan_state_after, PlanFileState::Pending)
     {
-        runtime.set_mode_pending_with_path(target_plan_id.clone(), Some(path.clone()));
-    }
-
-    let event_payload = crate::infra::events::PlanEventPayload {
-        plan_id: target_plan_id.clone(),
-        path: crate::infra::platform::format_home_path(&path),
-        state: plan_state_after.as_str().to_string(),
-    };
-    if !(matches!(plan_state_before, PlanFileState::Completed)
-        && matches!(plan_state_after, PlanFileState::Pending))
-    {
         runtime.write_transcript_custom(serde_json::json!({
-            "event": crate::infra::wire::WIRE_PLAN_UPDATE,
-            "plan_id": event_payload.plan_id,
-            "path": event_payload.path,
-            "state": event_payload.state,
+            "event": crate::infra::wire::WIRE_PLAN_PENDING,
+            "plan_id": target_plan_id.clone(),
+            "path": crate::infra::platform::format_home_path(&path),
+            "state": plan_state_after.as_str(),
         }));
     }
-    runtime.write_transcript_custom(serde_json::json!({
-        "event": crate::infra::wire::WIRE_PLAN_TODOS,
-        "plan_id": target_plan_id,
-        "todos": items_json(&plan.frontmatter.todos),
-    }));
+    if !matches!(plan_state_after, PlanFileState::Completed) {
+        runtime.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_UPDATE,
+            "plan_id": target_plan_id,
+            "path": crate::infra::platform::format_home_path(&path),
+            "state": plan_state_after.as_str(),
+        }));
+        runtime.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_TODOS,
+            "plan_id": target_plan_id,
+            "todos": items_json(&plan.frontmatter.todos),
+        }));
+    }
 
     Ok(serde_json::json!({
         "plan_id": target_plan_id,
         "path": crate::infra::platform::format_home_path(&path),
-        "applied": applied,
+        "applied": args.ops.len(),
         "replace": args.replace,
-        "plan_state_before": plan_state_before.as_str(),
+        "plan_state_before": tx.plan_state_before.as_str(),
         "plan_state_after": plan_state_after.as_str(),
         "panel_snapshot_id": panel_snapshot_id,
         "warnings": warnings,
         "active_in_progress": active_in_progress,
         "items": items_json(&plan.frontmatter.todos),
-        "code_review": code_review_json,
-        "verify": verify_json,
+        "next_step": next_action_json(&next_action),
     }))
 }
 
-async fn run_verifier_after_code_review(
-    runtime: &PlanRuntime,
-    target_plan_id: &str,
-    path: &std::path::Path,
-    plan: &mut crate::core::plan_runtime::file_store::PlanFile,
-    warnings: &mut Vec<String>,
-) -> Result<(PlanFileState, serde_json::Value), ToolError> {
-    let mut verify_summary = runtime.dispatch_verifier(target_plan_id).await;
-    warnings.extend(verify::normalize_for_gate(&mut verify_summary));
-    runtime.write_verify_transcript(target_plan_id, &verify_summary);
-    let verify_json = verify_summary.to_json();
-
-    let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");
-    if allow_complete {
-        plan.frontmatter.state = PlanFileState::Completed;
-        write_plan(path, plan, runtime.lock_timeout_ms())?;
-        runtime.set_mode_completed_with_path(target_plan_id.to_string(), Some(path.to_path_buf()));
-        let _ = runtime.finalize_completed_to_chat();
-        Ok((PlanFileState::Completed, verify_json))
-    } else {
-        warnings
-            .push("verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into());
-        Ok((PlanFileState::Executing, verify_json))
+fn apply_plan_todo_ops(
+    todos: &mut Vec<TodoItem>,
+    ops_list: &[UpdateOp],
+    replace: bool,
+) -> Result<Vec<String>, ToolError> {
+    if ops_list.iter().any(|op| {
+        matches!(
+            op,
+            UpdateOp::Upsert {
+                todo_kind: Some(TodoKind::Unknown),
+                ..
+            }
+        )
+    }) {
+        return Err(ToolError::BadArgs(
+            "update_plan.ops[].todo_kind supports only work or acceptance".into(),
+        ));
     }
+    apply_shared_todo_ops(todos, ops_list, replace)?;
+    validate_single_acceptance(todos).map_err(|error| ToolError::BadArgs(error.to_string()))?;
+    Ok(Vec::new())
 }
 
-fn resolve_target_plan_path(
+fn plan_completion_ready(todos: &[TodoItem]) -> bool {
+    !todos.is_empty()
+        && todos
+            .iter()
+            .all(|todo| matches!(todo.status, TodoStatus::Completed | TodoStatus::Cancelled))
+}
+
+fn next_action_json(action: &NextAction) -> serde_json::Value {
+    serde_json::json!({
+        "phase": action.phase(),
+        "hint": action.instruction(),
+    })
+}
+
+fn emit_plan_completed(runtime: &PlanRuntime, target_plan_id: &str, path: &std::path::Path) {
+    let mut completion_event = serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_COMPLETE,
+        "plan_id": target_plan_id,
+        "path": crate::infra::platform::format_home_path(path),
+        "state": PlanFileState::Completed.as_str(),
+    });
+    if let (Some(event), Some(cache_observation)) = (
+        completion_event.as_object_mut(),
+        runtime.plan_cache_observation_json(target_plan_id),
+    ) {
+        event.insert("cacheObservation".into(), cache_observation);
+    }
+    runtime.write_transcript_custom(completion_event);
+}
+
+pub(crate) fn resolve_target_plan_path(
     runtime: &PlanRuntime,
     explicit_plan_id: Option<String>,
     explicit_path: Option<String>,
@@ -309,21 +271,13 @@ fn resolve_target_plan_path(
     }
     if let Some(path) = explicit_path {
         return crate::infra::platform::normalize_path(&path)
-            .map_err(|e| ToolError::BadArgs(format!("update_plan path 非法：{e}")));
+            .map_err(|e| ToolError::BadArgs(format!("Invalid update_plan path: {e}")));
     }
-    if let Some(path) = runtime.active_plan_path() {
-        return Ok(path);
-    }
-    if let PlanState::Executing { plan_id } | PlanState::Pending { plan_id } = runtime.mode() {
-        return runtime
-            .resolved_plan_path(&plan_id)
-            .map_err(ToolError::BadArgs);
-    }
-    if let Some(id) = runtime.active_planning_plan_id() {
-        return runtime.resolved_plan_path(&id).map_err(ToolError::BadArgs);
+    if let Some(plan) = runtime.active_plan() {
+        return Ok(plan.path);
     }
     Err(ToolError::BadArgs(
-        "update_plan 需要 plan_id 或 path；当前模式无 active plan".into(),
+        "update_plan requires plan_id or path; there is no active plan in the current mode".into(),
     ))
 }
 
@@ -338,7 +292,7 @@ fn enforce_cross_session_policy(
     let target_key = fm.session_key.as_deref().unwrap_or("");
     if target_key != runtime.session_key() {
         return Err(ToolError::CrossSessionDenied(format!(
-            "plan {} 当前由 session {target_key} 在 EXEC，本 session {} 不能写入",
+            "plan {} is executing in session {target_key}; current session {} cannot write it",
             fm.plan_id,
             runtime.session_key()
         )));
@@ -346,32 +300,57 @@ fn enforce_cross_session_policy(
     Ok(())
 }
 
-/// G2 state 矩阵闸门——参考 [update-plan.md] §6.2。
-fn enforce_state_matrix(plan_state: PlanFileState, ops_list: &[UpdateOp]) -> Result<(), ToolError> {
+/// `content` is the approved work description. During execution it must remain stable, otherwise
+/// a todo can appear complete even though the original work was silently rewritten. Progress,
+/// verification, and noteworthy trade-offs belong in `evidence`.
+fn enforce_executing_work_content_is_frozen(
+    plan_state: PlanFileState,
+    todos: &[TodoItem],
+    ops_list: &[UpdateOp],
+) -> Result<(), ToolError> {
+    if !matches!(plan_state, PlanFileState::Executing) {
+        return Ok(());
+    }
     for op in ops_list {
-        match (plan_state, op) {
-            // in_progress 仅在 executing 允许
-            (
-                PlanFileState::Planning | PlanFileState::Pending,
-                UpdateOp::SetStatus {
-                    status: TodoStatus::InProgress,
-                    ..
-                },
-            )
-            | (
-                PlanFileState::Planning | PlanFileState::Pending,
-                UpdateOp::Upsert {
-                    status: Some(TodoStatus::InProgress),
-                    ..
-                },
-            ) => {
-                return Err(ToolError::BadArgs(format!(
-                    "in_progress 仅允许在 executing 状态下使用；当前 plan.state = {}",
-                    plan_state.as_str()
-                )));
-            }
-            _ => {}
+        let UpdateOp::Upsert {
+            id,
+            content: Some(content),
+            ..
+        } = op
+        else {
+            continue;
+        };
+        let Some(existing) = todos.iter().find(|todo| todo.id == *id) else {
+            continue;
+        };
+        if existing.kind == TodoKind::Work && existing.content != *content {
+            return Err(ToolError::BadArgs(format!(
+                "Executing work todo `{id}` content is frozen; keep the approved work description and record progress or verification in set_status `evidence`"
+            )));
         }
+    }
+    Ok(())
+}
+
+/// G2 state 矩阵闸门——参考 [update-plan.md] §4.3。
+fn enforce_state_matrix(plan_state: PlanFileState, ops_list: &[UpdateOp]) -> Result<(), ToolError> {
+    let starts_work = ops_list.iter().any(|op| {
+        matches!(
+            op,
+            UpdateOp::SetStatus {
+                status: TodoStatus::InProgress,
+                ..
+            } | UpdateOp::Upsert {
+                status: Some(TodoStatus::InProgress),
+                ..
+            }
+        )
+    });
+    if plan_state != PlanFileState::Executing && starts_work {
+        return Err(ToolError::BadArgs(format!(
+            "in_progress is allowed only while executing; current plan.state = {}",
+            plan_state.as_str()
+        )));
     }
     Ok(())
 }
@@ -420,3 +399,7 @@ pub fn rewrite_todos_board(
     }
     body.replace_range(body_after_begin..end_idx, &rendered);
 }
+
+#[cfg(test)]
+#[path = "tests/update_plan_completion_test.rs"]
+mod tests;

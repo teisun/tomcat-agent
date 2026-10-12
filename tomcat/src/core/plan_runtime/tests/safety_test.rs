@@ -2,7 +2,7 @@ use super::super::safety::{
     enforce_write_path_policy, reviewer_body_diff_guard, ReviewDiffDenied, SubagentKind,
     WritePathDenied,
 };
-use super::super::state::PlanState;
+use crate::core::session::AgentMode;
 
 fn home_lock() -> &'static crate::test_support::TestLock {
     crate::test_support::home_env_lock()
@@ -47,12 +47,9 @@ fn plan_mode_rejects_writes_outside_plans_dir() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let outside = std::path::PathBuf::from("/tmp/foo.txt");
-    let err = enforce_write_path_policy(&PlanState::Planning, SubagentKind::Other, &outside)
+    let err = enforce_write_path_policy(AgentMode::Plan, false, SubagentKind::Other, &outside)
         .expect_err("PLAN 期写 plans/ 外路径应拒");
-    assert!(matches!(
-        err,
-        WritePathDenied::PlanStateOnlyPlanFiles { .. }
-    ));
+    assert!(matches!(err, WritePathDenied::PlanModeOnlyPlanFiles { .. }));
 }
 
 #[test]
@@ -60,7 +57,7 @@ fn plan_mode_allows_writes_inside_plans_dir() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let target = home.path.join(".tomcat/plans/foo.plan.md");
-    enforce_write_path_policy(&PlanState::Planning, SubagentKind::Other, &target)
+    enforce_write_path_policy(AgentMode::Plan, false, SubagentKind::Other, &target)
         .expect("PLAN 期写 plans/ 内 .md 应放行");
 }
 
@@ -69,18 +66,25 @@ fn exec_mode_rejects_writes_to_any_plans_dir_file() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let target = home.path.join(".tomcat/plans/foo.plan.md");
-    let err = enforce_write_path_policy(
-        &PlanState::Executing {
-            plan_id: "foo".into(),
-        },
-        SubagentKind::Other,
-        &target,
-    )
-    .expect_err("EXEC 期写任何 plans/ 路径都应拒");
+    let err = enforce_write_path_policy(AgentMode::Chat, true, SubagentKind::Other, &target)
+        .expect_err("EXEC 期写任何 plans/ 路径都应拒");
     assert!(matches!(
         err,
-        WritePathDenied::ExecModePlanFilesReadOnly { .. }
+        WritePathDenied::ExecutingPlanFilesReadOnly { .. }
     ));
+}
+
+#[test]
+fn executing_plan_write_denial_describes_lifecycle_and_keeps_update_plan_hint() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let target = home.path.join(".tomcat/plans/foo.plan.md");
+    let err = enforce_write_path_policy(AgentMode::Chat, true, SubagentKind::Other, &target)
+        .expect_err("an executing plan must reject raw writes");
+    let message = err.to_string();
+    assert!(!message.contains("EXEC"));
+    assert!(message.contains("While a plan is executing"));
+    assert!(message.contains("update_plan"));
 }
 
 #[test]
@@ -88,14 +92,8 @@ fn exec_mode_allows_writes_outside_plans_dir() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let outside = std::path::PathBuf::from("/tmp/foo.txt");
-    enforce_write_path_policy(
-        &PlanState::Executing {
-            plan_id: "foo".into(),
-        },
-        SubagentKind::Other,
-        &outside,
-    )
-    .expect("EXEC 期写 plans/ 外路径应放行");
+    enforce_write_path_policy(AgentMode::Chat, true, SubagentKind::Other, &outside)
+        .expect("EXEC 期写 plans/ 外路径应放行");
 }
 
 #[test]
@@ -103,8 +101,46 @@ fn chat_mode_does_not_restrict() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let outside = std::path::PathBuf::from("/tmp/foo.txt");
-    enforce_write_path_policy(&PlanState::Chat, SubagentKind::Other, &outside)
+    enforce_write_path_policy(AgentMode::Chat, false, SubagentKind::Other, &outside)
         .expect("CHAT 期不做路径限制");
+}
+
+#[test]
+fn old_plan_state_equivalents_preserve_the_raw_write_guard_matrix() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let plan_path = home.path.join(".tomcat/plans/plan.plan.md");
+    let outside_path = home.path.join("workspace/source.rs");
+    let cases = [
+        ("chat", AgentMode::Chat, false, &plan_path, true),
+        ("planning-plan", AgentMode::Plan, false, &plan_path, true),
+        (
+            "planning-workspace",
+            AgentMode::Plan,
+            false,
+            &outside_path,
+            false,
+        ),
+        ("executing-plan", AgentMode::Chat, true, &plan_path, false),
+        (
+            "executing-workspace",
+            AgentMode::Chat,
+            true,
+            &outside_path,
+            true,
+        ),
+        ("pending", AgentMode::Chat, false, &plan_path, true),
+        ("completed", AgentMode::Chat, false, &plan_path, true),
+    ];
+
+    for (old_state, mode, executing, path, allowed) in cases {
+        assert_eq!(
+            enforce_write_path_policy(mode, executing, SubagentKind::Other, path).is_ok(),
+            allowed,
+            "{old_state} equivalent must preserve its raw-write decision for {}",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -112,8 +148,9 @@ fn reviewer_subagent_must_target_plan_files() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let outside = std::path::PathBuf::from("/tmp/foo.txt");
-    let err = enforce_write_path_policy(&PlanState::Chat, SubagentKind::Reviewer, &outside)
-        .expect_err("reviewer 不能写 plans/ 外路径");
+    let err =
+        enforce_write_path_policy(AgentMode::Chat, false, SubagentKind::PlanReviewer, &outside)
+            .expect_err("reviewer 不能写 plans/ 外路径");
     assert!(matches!(err, WritePathDenied::ReviewerOnlyPlanFiles));
 }
 
@@ -122,7 +159,7 @@ fn reviewer_subagent_allows_tilde_expanded_plan_file() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let target = std::path::PathBuf::from("~/.tomcat/plans/foo.plan.md");
-    enforce_write_path_policy(&PlanState::Chat, SubagentKind::Reviewer, &target)
+    enforce_write_path_policy(AgentMode::Chat, false, SubagentKind::PlanReviewer, &target)
         .expect("reviewer 应接受 ~ 展开的 plans 路径");
 }
 
@@ -131,8 +168,9 @@ fn code_reviewer_is_always_read_only() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let target = std::path::PathBuf::from("/tmp/foo.txt");
-    let err = enforce_write_path_policy(&PlanState::Chat, SubagentKind::CodeReviewer, &target)
-        .expect_err("code reviewer 任意写路径都应拒绝");
+    let err =
+        enforce_write_path_policy(AgentMode::Chat, false, SubagentKind::CodeReviewer, &target)
+            .expect_err("code reviewer 任意写路径都应拒绝");
     assert!(matches!(err, WritePathDenied::CodeReviewerReadOnly));
 }
 

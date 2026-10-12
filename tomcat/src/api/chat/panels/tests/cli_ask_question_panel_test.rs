@@ -1,10 +1,59 @@
 use std::ffi::OsString;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
+#[cfg(unix)]
+use std::os::fd::RawFd;
+
+#[cfg(unix)]
+use crate::api::chat::panels::cli_ask_question_panel::read_one_line_from_fd_for_test;
 use crate::api::chat::panels::CliAskQuestionPanel;
-use crate::core::plan_runtime::panels::{AskQuestionPanel, Question, QuestionOption};
+use crate::core::plan_runtime::panels::{
+    AskQuestionOutcome, AskQuestionPanel, AskQuestionTermination, Question, QuestionOption,
+};
 use tokio::sync::Mutex;
+
+use super::parse_custom_answer;
+
+#[tokio::test]
+async fn cli_custom_answer_counts_characters_not_utf8_bytes() {
+    let question = Question {
+        allow_custom: true,
+        id: "q1".into(),
+        prompt: "Choose".into(),
+        options: vec![
+            QuestionOption {
+                id: "a".into(),
+                label: "A".into(),
+                recommended: true,
+            },
+            QuestionOption {
+                id: "b".into(),
+                label: "B".into(),
+                recommended: false,
+            },
+        ],
+    };
+    for glyph in ["a", "中", "🙂"] {
+        let text = glyph.repeat(500);
+        let answer = parse_custom_answer(
+            &question,
+            &format!("c {text}"),
+            &AskQuestionTermination::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(answer.custom_text.as_deref(), Some(text.as_str()));
+        assert!(parse_custom_answer(
+            &question,
+            &format!("c {}", glyph.repeat(501)),
+            &AskQuestionTermination::default()
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+}
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -42,6 +91,7 @@ impl Drop for EnvGuard {
 
 fn sample_question() -> Question {
     Question {
+        allow_custom: true,
         id: "deploy_target".into(),
         prompt: "选择发布目标".into(),
         options: vec![
@@ -66,10 +116,10 @@ async fn cli_panel_auto_picks_recommended_answer_when_test_env_enabled() {
     let panel = CliAskQuestionPanel;
 
     let result = panel
-        .ask(vec![sample_question()], Arc::new(AtomicBool::new(false)))
+        .ask(vec![sample_question()], AskQuestionTermination::default())
         .await;
 
-    assert!(!result.cancelled, "auto-pick 不应走 cancelled");
+    assert_eq!(result.outcome, AskQuestionOutcome::Answered);
     assert_eq!(result.answers.len(), 1, "应返回 1 个回答");
     assert_eq!(result.answers[0].question_id, "deploy_target");
     assert_eq!(result.answers[0].option_ids, vec!["staging"]);
@@ -82,15 +132,130 @@ async fn cli_panel_auto_picks_recommended_answer_when_test_env_enabled() {
 }
 
 #[tokio::test]
-async fn cli_panel_returns_cancelled_immediately_when_signal_already_set() {
+async fn cli_panel_returns_interrupted_immediately_when_signal_already_set() {
     let panel = CliAskQuestionPanel;
-    let cancel = Arc::new(AtomicBool::new(true));
+    let termination = AskQuestionTermination::default();
+    termination.interrupt();
 
-    let result = panel.ask(vec![sample_question()], cancel).await;
+    let result = panel.ask(vec![sample_question()], termination).await;
 
-    assert!(result.cancelled, "cancel_signal 已置位时应立即取消");
+    assert_eq!(result.outcome, AskQuestionOutcome::Interrupted);
     assert!(
         result.answers.is_empty(),
         "取消路径不应返回半截 answers，避免 CLI 交互残留脏数据"
     );
+}
+
+#[cfg(unix)]
+struct TestPty {
+    master: RawFd,
+    slave: RawFd,
+}
+
+#[cfg(unix)]
+impl TestPty {
+    fn open() -> Self {
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: pointers target initialized descriptors; null termios/winsize request defaults.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "openpty failed: {}",
+            std::io::Error::last_os_error()
+        );
+        Self { master, slave }
+    }
+
+    fn write_line(&self, line: &str) {
+        let bytes = line.as_bytes();
+        // SAFETY: master is an open PTY descriptor and bytes is valid for the call duration.
+        let count = unsafe {
+            libc::write(
+                self.master,
+                bytes.as_ptr().cast::<libc::c_void>(),
+                bytes.len(),
+            )
+        };
+        assert_eq!(count, bytes.len() as isize, "write PTY input");
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TestPty {
+    fn drop(&mut self) {
+        // SAFETY: descriptors are owned by this test helper and closed once here.
+        unsafe {
+            if self.master >= 0 {
+                libc::close(self.master);
+            }
+            if self.slave >= 0 {
+                libc::close(self.slave);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_pty_waits_without_input_then_sigint_releases_reader_for_next_line() {
+    let pty = TestPty::open();
+    let first_termination = AskQuestionTermination::default();
+    let first = tokio::spawn(read_one_line_from_fd_for_test(
+        pty.slave,
+        first_termination.clone(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !first.is_finished(),
+        "PTY reader must have no wall-clock deadline"
+    );
+
+    first_termination.interrupt();
+    let interrupted = tokio::time::timeout(std::time::Duration::from_secs(1), first)
+        .await
+        .expect("interrupted PTY reader did not exit")
+        .expect("PTY reader task")
+        .expect_err("interrupt must terminate the question reader");
+    assert_eq!(interrupted.outcome, AskQuestionOutcome::Interrupted);
+
+    pty.write_line("2\n");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        read_one_line_from_fd_for_test(pty.slave, AskQuestionTermination::default()),
+    )
+    .await
+    .expect("next PTY reader was blocked by a leaked owner")
+    .expect("next PTY line");
+    assert_eq!(
+        second, "2\n",
+        "the interrupted reader must not swallow next-turn input"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_pty_eof_returns_host_disconnected_without_reader_leak() {
+    let mut pty = TestPty::open();
+    // SAFETY: close the owned master once to deliver an irrecoverable channel closure.
+    unsafe { libc::close(pty.master) };
+    pty.master = -1;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        read_one_line_from_fd_for_test(pty.slave, AskQuestionTermination::default()),
+    )
+    .await
+    .expect("EOF reader did not exit")
+    .expect_err("PTY EOF must not be treated as an answer");
+    assert_eq!(result.outcome, AskQuestionOutcome::HostDisconnected);
 }

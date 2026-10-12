@@ -14,35 +14,51 @@ pub mod admin;
 pub mod auth;
 pub mod catalog;
 pub(crate) mod endpoint;
+pub mod files_api;
 pub(crate) mod http_client;
 pub(crate) mod multimodal;
 pub mod openai_files;
+mod prompt_cache_key;
 mod provider;
 mod registry;
 pub mod replay_policy;
 pub mod resolver;
 pub(crate) mod retry_delay;
+pub mod speed;
 pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;
+pub(crate) mod tool_result_media;
 mod types;
+pub(crate) use types::IMAGE_PROVIDER_RENDITION_MIME;
 
 pub use admin::{
-    list_model_views, list_provider_keys, remove_user_model, resolve_provider_key_env_name,
-    set_default_model, set_provider_key, upsert_user_model, ModelEntryInput, ModelKeyStatus,
-    ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
+    list_model_views, list_model_views_with_prefs, list_provider_keys, remove_user_model,
+    remove_user_model_with_config_path, resolve_provider_key_env_name, set_default_model,
+    set_provider_key, upsert_user_model, with_current_model_catalog, ModelEntryInput,
+    ModelKeyStatus, ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
 };
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};
+pub use files_api::{
+    build_openai_compatible_files_adapter, AnthropicFilesAdapter, FilesApiAdapter, ImageRefSlot,
+    MoonshotFilesAdapter, OpenAiFilesAdapter, ANTHROPIC_FILES_BETA,
+};
 pub(crate) use multimodal::degrade_unsupported_multimodal;
+pub use openai_files::FilesApiProviderContext;
+pub use prompt_cache_key::PromptCacheKeyFamily;
 pub use provider::LlmProvider;
 pub use registry::{build_provider, registered_provider_ids};
 #[allow(unused_imports)]
 pub use replay_policy::{
-    apply_text_downgrade, model_family, plan as plan_replay, CaptureMode, DowngradeMode,
-    ProviderCompatProfile, ReplayAcceptance, ReplayAction,
+    model_family, plan as plan_replay, CaptureMode, ProviderCompatProfile, ReplayAcceptance,
+    ReplayAction,
 };
-pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
+pub use resolver::{
+    DefaultLlmResolver, EffectiveModelLimits, LimitSource, LlmResolver, LlmScene, ResolvedCall,
+};
+pub use speed::Speed;
+pub use system_prompt::{SystemPromptSnapshot, ToolSurface};
 pub use thinking_policy::ThinkingLevel;
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]

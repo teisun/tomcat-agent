@@ -16,8 +16,9 @@
 - **稳健的代码读写**：`read` / `write` / `edit` / `list_dir` 等原语之外，还提供 `hashline_edit` 行锚点编辑；`search_files` 同时支持系统 `rg` / `fd` 与进程内回退实现，统一遵循忽略规则。
 - **命令执行与后台任务**：`bash` 走权限门控；长任务可后台运行，再用 `task_output` / `task_stop` / `task_list` 跨轮驱动，不必把整个会话卡死在单条命令上。
 - **联网检索**：`web_search` 归一化多个搜索后端，`web_fetch` 抓取网页并转成 Markdown，同时对私网 / 环回 / 带凭据 URL 做前置拦截。
-- **Plan、Todos 与澄清问题**：`create_plan` / `update_plan` / `todos` / `ask_question` 让长任务可以先出计划、再执行、再追踪。
+- **Plan、Todos 与澄清问题**：`create_plan` / `update_plan` / `todos` / `ask_question` 让长任务可以先出计划、再执行、再追踪。澄清问题没有墙钟超时，会一直保留，直到回答/整单跳过、当前轮被中断，或宿主连接不可恢复地关闭。
 - **Skills 与插件扩展**：支持按名加载 Skills；插件系统使用进程内 `rquickjs`，敏感能力统一走 `pi.*` hostcall，可同时扩展 LLM 工具与宿主扩展点。
+- **项目 Commands 与 Rules**：兼容 `.agents` / `.cursor` 的 Markdown 命令与常驻规则；斜杠菜单分组、黄色调用标签、可重复引用与输入区限高。用法见 [扩展说明](tomcat-vscode-ext/README.zh.md#项目-commandsskills-与-rules)。
 - **多模型与安全审计**：支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 等管线；内置 OpenAI / DeepSeek / MiMo / GLM / Kimi / Claude Opus 常用预置；`models.toml` 与 `.env` 共同管理模型目录与凭据；PermissionGate、Checkpoint 影子 Git、JSONL transcript 与审计日志保证可控可回溯。
 - **终端 CLI**：无子命令默认进入 `chat`，覆盖 `init` / `doctor` / 会话 / 配置 / 工作区 / 审计等完整工作流。
 

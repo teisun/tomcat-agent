@@ -3,26 +3,24 @@
 //! 三个子命令均在 chat 层处理，**不**进 LLM、**不**入 tool catalog：
 //!
 //! ```text
-//! /plan                      → PlanRuntime::enter_planning  → mode=Planning
-//! /plan exit                 → PlanRuntime::exit_to_chat   → mode=Chat
-//! /plan build [plan_id/path] → PlanRuntime::build_plan     → mode=Executing { plan_id }
+//! /plan                      → PlanRuntime::enter_plan → mode=Plan
+//! /plan exit                 → PlanRuntime::exit_plan  → mode=Chat
+//! /plan build [plan_id/path] → PlanRuntime::build_plan     → mode=Chat + plan.state=executing
 //! ```
-//!
-//! P1 只闭环 `enter_planning` / `exit_to_chat` 两条；`build` 在 P6 接入
-//! （P1 阶段 `build` 命中会返回结构化提示「P6 落地」）。
 
 use crate::api::chat::ChatContext;
+use crate::infra::i18n::tr;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
 /// `/plan` 子命令解析结果（仅在 chat 层使用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanCommand {
-    /// `/plan`，进入 Planning。
+    /// `/plan`，进入 Plan 会话模式。
     Enter,
     /// `/plan exit`，退回 Chat。
     Exit,
-    /// `/plan build [plan_id/path]`，进入 EXEC（省略参数时走 runtime 默认源）。
+    /// `/plan build [plan_id/path]`，让计划文件进入 executing 并回到 Chat。
     Build { plan_target: Option<String> },
     /// J2：`/plan list`，列出 `~/.tomcat/plans/` 下所有 plan 文件的 id / state / goal。
     List,
@@ -46,32 +44,36 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
 }
 
 fn usage_text() -> String {
-    "用法错误：/plan | /plan exit | /plan build [plan_id/path] | /plan list".to_string()
+    tr("slash.plan.usage", &[])
 }
 
 /// `/plan` 子命令分发。`ctx.plan_runtime` 在 P1 起由 `ChatContext::from_config` 注入。
 pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
     let rt = ctx.session_runtime.plan_runtime.clone();
     match cmd {
-        PlanCommand::Enter => match rt.enter_planning() {
+        PlanCommand::Enter => match rt.enter_plan() {
             Ok(()) => {
-                println!(
-                    "[plan] 已进入 PLAN 模式。\n[plan] 先与模型讨论目标；用 /plan exit 退回 Chat；用 /plan build <plan_id/path> 进入 EXEC。"
+                println!("{}", tr("slash.plan.entered", &[]));
+                ChatCommandOutcome::Handled
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    tr("slash.plan.enterFailed", &[("detail", &e.to_string())])
                 );
                 ChatCommandOutcome::Handled
             }
-            Err(e) => {
-                eprintln!("[plan] 进入 PLAN 失败：{}", e);
-                ChatCommandOutcome::Handled
-            }
         },
-        PlanCommand::Exit => match rt.exit_to_chat() {
+        PlanCommand::Exit => match rt.exit_plan() {
             Ok(()) => {
-                println!("[plan] 已退回 Chat 模式。");
+                println!("{}", tr("slash.plan.exited", &[]));
                 ChatCommandOutcome::Handled
             }
             Err(e) => {
-                eprintln!("[plan] /plan exit 失败：{}", e);
+                eprintln!(
+                    "{}",
+                    tr("slash.plan.exitFailed", &[("detail", &e.to_string())])
+                );
                 ChatCommandOutcome::Handled
             }
         },
@@ -79,11 +81,14 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
             let session_id_for_plan = match ctx.session_runtime.session.current_session_id() {
                 Ok(Some(v)) => Some(v),
                 Ok(None) => {
-                    eprintln!("[plan] /plan build 失败：当前无会话，无法确定 session_id");
+                    eprintln!("{}", tr("slash.plan.buildNoSession", &[]));
                     return ChatCommandOutcome::Handled;
                 }
                 Err(e) => {
-                    eprintln!("[plan] /plan build 失败：读取当前 session_id 失败：{}", e);
+                    eprintln!(
+                        "{}",
+                        tr("slash.plan.sessionFailed", &[("detail", &e.to_string())])
+                    );
                     return ChatCommandOutcome::Handled;
                 }
             };
@@ -92,7 +97,10 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                 None => match rt.default_build_target() {
                     Ok(target) => target,
                     Err(e) => {
-                        eprintln!("[plan] /plan build 失败：{}", e);
+                        eprintln!(
+                            "{}",
+                            tr("slash.plan.buildFailed", &[("detail", &e.to_string())])
+                        );
                         return ChatCommandOutcome::Handled;
                     }
                 },
@@ -108,7 +116,10 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                         history_line: None,
                     };
                 }
-                Err(e) => eprintln!("[plan] /plan build 拒绝：{}", e),
+                Err(e) => eprintln!(
+                    "{}",
+                    tr("slash.plan.buildRejected", &[("detail", &e.to_string())])
+                ),
             }
             ChatCommandOutcome::Handled
         }
@@ -128,7 +139,10 @@ fn print_plan_list() {
     let plans_dir = match file_store::plans_dir() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[plan list] 无法解析 plans 目录：{e}");
+            eprintln!(
+                "{}",
+                tr("slash.plan.dirFailed", &[("detail", &e.to_string())])
+            );
             return;
         }
     };
@@ -136,8 +150,11 @@ fn print_plan_list() {
         Ok(e) => e,
         Err(_) => {
             println!(
-                "[plan list] 暂无 plan（目录不存在或为空）：{}",
-                plans_dir.display()
+                "{}",
+                tr(
+                    "slash.plan.emptyDir",
+                    &[("path", &plans_dir.display().to_string())]
+                )
             );
             return;
         }
@@ -167,14 +184,25 @@ fn print_plan_list() {
         ));
     }
     if rows.is_empty() {
-        println!("[plan list] 暂无 plan：{}", plans_dir.display());
+        println!(
+            "{}",
+            tr(
+                "slash.plan.empty",
+                &[("path", &plans_dir.display().to_string())]
+            )
+        );
         return;
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     println!(
-        "[plan list] {} plan(s) in {}：",
-        rows.len(),
-        plans_dir.display()
+        "{}",
+        tr(
+            "slash.plan.count",
+            &[
+                ("count", &rows.len().to_string()),
+                ("path", &plans_dir.display().to_string())
+            ]
+        )
     );
     for (id, mode, goal, ts) in rows {
         println!("  - {id:<32} [{mode:<10}]  {goal}  (created {ts})");

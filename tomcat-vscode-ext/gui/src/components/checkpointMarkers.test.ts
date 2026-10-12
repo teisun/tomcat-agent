@@ -1,7 +1,31 @@
 import { describe, expect, it } from "vitest";
 
 import type { WebviewCheckpoint, WebviewTimelineItem } from "../types";
-import { injectCheckpointMarkers } from "./checkpointMarkers";
+import { injectCheckpointMarkers, messageIdsWithWritesAfter } from "./checkpointMarkers";
+
+describe("messageIdsWithWritesAfter", () => {
+  const user = (id: string): WebviewTimelineItem => ({ type: "message", kind: "user", id, text: id });
+  const tool = (id: string, display: Extract<WebviewTimelineItem, { type: "tool" }>["display"]): WebviewTimelineItem => ({
+    type: "tool", id, toolName: "edit", toolCallId: id, status: "complete", summary: "edited", isError: false, display,
+  });
+  it("counts writes in any later turn for multiple users", () => {
+    expect([...messageIdsWithWritesAfter([user("first"), user("second"), tool("write", { kind: "file", file: "a" }), user("last")])].sort()).toEqual(["first", "second"]);
+  });
+  it("ignores batches with only failed or skipped files", () => {
+    expect(messageIdsWithWritesAfter([user("first"), tool("failed", { kind: "files", summary: "batch", files: [
+      { file: "a", status: "failed" }, { file: "b", status: "skipped" },
+    ] })]).size).toBe(0);
+  });
+  it("counts a batch with one applied file", () => {
+    expect(messageIdsWithWritesAfter([user("first"), tool("batch", { kind: "files", summary: "batch", files: [
+      { file: "a", status: "failed" }, { file: "b", status: "applied" },
+    ] })]).has("first")).toBe(true);
+  });
+  it("ignores cards without file evidence and writes before the user", () => {
+    expect(messageIdsWithWritesAfter([tool("earlier", { kind: "file", file: "a" }), user("first"), tool("read", undefined)]).size).toBe(0);
+    expect(messageIdsWithWritesAfter([user("first"), user("second")]).size).toBe(0);
+  });
+});
 
 describe("injectCheckpointMarkers", () => {
   it("injects checkpoint markers before the next user message only", () => {

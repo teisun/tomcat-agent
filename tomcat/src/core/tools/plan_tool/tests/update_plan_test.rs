@@ -10,6 +10,8 @@ fn rewrite_todos_board_replaces_between_markers() {
         id: "t1".into(),
         content: "step".into(),
         status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: Default::default(),
     }];
     rewrite_todos_board(&mut body, &todos);
     assert!(!body.contains("OLD CONTENT"));
@@ -26,6 +28,82 @@ fn rewrite_todos_board_noop_without_markers() {
     assert_eq!(body, original);
 }
 
+#[test]
+fn verify_hint_is_a_prompt_not_a_green_build_contract() {
+    let hint = crate::core::plan_runtime::NextAction::RunVerify.instruction();
+    assert!(hint.contains("load_skill(verify)"));
+    assert!(!hint.contains("green_build"));
+    assert!(!hint.contains("acceptance_commands"));
+}
+
+#[tokio::test]
+async fn nonexecuting_plans_reject_in_progress_updates_without_writing_the_plan() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    let path = plan_path_for_id(&plan_id).unwrap();
+    for state in [
+        PlanFileState::Planning,
+        PlanFileState::Pending,
+        PlanFileState::Completed,
+    ] {
+        let mut plan = read_plan(&path).unwrap();
+        plan.frontmatter.state = state;
+        if state == PlanFileState::Completed {
+            for todo in &mut plan.frontmatter.todos {
+                todo.status = TodoStatus::Completed;
+            }
+        }
+        write_plan(&path, &plan, 2000).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for op in [
+            update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            },
+            update_plan::UpdateOp::Upsert {
+                id: "t1".into(),
+                content: None,
+                status: Some(TodoStatus::InProgress),
+                todo_kind: None,
+            },
+        ] {
+            let err = update_plan::execute(
+                &rt,
+                update_plan::UpdatePlanArgs {
+                    plan_id: Some(plan_id.clone()),
+                    path: None,
+                    replace: false,
+                    ops: vec![
+                        update_plan::UpdateOp::Upsert {
+                            id: "t2".into(),
+                            content: Some("must not be partially written".into()),
+                            status: None,
+                            todo_kind: None,
+                        },
+                        op,
+                    ],
+                },
+            )
+            .await
+            .expect_err("only executing plans may start work");
+            assert!(
+                matches!(err, ToolError::BadArgs(ref message)
+                if message.contains("in_progress") && message.contains(state.as_str())),
+                "{err}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "rejected batch must not change any plan bytes"
+            );
+        }
+    }
+    cleanup_home(&home);
+}
+
 #[tokio::test]
 async fn update_plan_set_status_returns_full_items_snapshot() {
     let _g = home_lock().lock().unwrap();
@@ -39,7 +117,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
+    rt.bind_plan_file_for_test(path.clone());
 
     let out = update_plan::execute(
         &rt,
@@ -68,7 +146,127 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
 }
 
 #[tokio::test]
-async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
+async fn work_todo_content_is_frozen_while_executing() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let err = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::Upsert {
+                id: "t1".into(),
+                content: Some("silently broaden the approved task".into()),
+                status: None,
+                todo_kind: None,
+            }],
+        },
+    )
+    .await
+    .expect_err("executing work content must be immutable");
+
+    assert!(
+        err.to_string().contains("Executing work todo `t1` content is frozen; keep the approved work description and record progress or verification in set_status `evidence`"),
+        "unexpected error: {err}"
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn set_status_completed_accepts_evidence_and_persists_to_frontmatter() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    let evidence = vec!["cargo test -p tomcat --lib update_plan_test passed".to_string()];
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: Some(evidence.clone().into()),
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["items"][0]["evidence"], serde_json::json!(evidence));
+    let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(plan.frontmatter.todos[0].evidence, evidence);
+    assert!(!plan.body.contains("  - evidence:"));
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn planning_state_still_allows_content_rewrite() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::Upsert {
+                id: "t1".into(),
+                content: Some("refined planning description".into()),
+                status: None,
+                todo_kind: None,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["items"][0]["content"], "refined planning description");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn completed_work_todo_without_evidence_is_allowed() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(out["warnings"].as_array().unwrap().is_empty());
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn update_plan_allows_two_independent_in_progress_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -78,9 +276,9 @@ async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
     plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
+    rt.bind_plan_file_for_test(path.clone());
 
-    let err = update_plan::execute(
+    let out = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id),
@@ -101,8 +299,9 @@ async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
         },
     )
     .await
-    .expect_err("两个 in_progress 应被 ops 引擎拒");
-    matches!(err, ToolError::Op(_));
+    .expect("两个独立 todo 可并行推进");
+    assert_eq!(out["items"][0]["status"], "in_progress");
+    assert_eq!(out["items"][1]["status"], "in_progress");
     cleanup_home(&home);
 }
 
@@ -113,7 +312,7 @@ async fn update_plan_cross_session_allowed_for_planning_pending() {
     let rt_a = PlanRuntime::new("session-a");
     let plan_id = fresh_planning_plan(&rt_a);
     let rt_b = PlanRuntime::new("session-b");
-    rt_b.enter_planning().unwrap();
+    rt_b.enter_plan().unwrap();
     let out = update_plan::execute(
         &rt_b,
         update_plan::UpdatePlanArgs {
@@ -124,6 +323,7 @@ async fn update_plan_cross_session_allowed_for_planning_pending() {
                 id: "t1".into(),
                 content: Some("edited by b".into()),
                 status: None,
+                todo_kind: None,
             }],
         },
     )
@@ -158,12 +358,13 @@ async fn update_plan_cross_session_rejected_for_executing() {
                 id: "t1".into(),
                 content: Some("intruder".into()),
                 status: None,
+                todo_kind: None,
             }],
         },
     )
     .await
     .expect_err("session-b 不应能写入 session-a 的 executing plan");
-    matches!(err, ToolError::CrossSessionDenied(_));
+    assert!(matches!(err, ToolError::CrossSessionDenied(_)));
     cleanup_home(&home);
 }
 
@@ -186,7 +387,16 @@ async fn update_plan_plan_id_prefers_active_external_path() {
                 id: "t1".into(),
                 content: "step 1".into(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             }],
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
             unknown: Default::default(),
         },
         body: "## Goal\nexternal\n".into(),
@@ -236,7 +446,7 @@ async fn update_plan_in_exec_promotes_completed() {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
+    rt.bind_plan_file_for_test(path.clone());
 
     let out = update_plan::execute(
         &rt,
@@ -262,7 +472,8 @@ async fn update_plan_in_exec_promotes_completed() {
     .unwrap();
     assert_eq!(out["plan_state_before"], "executing");
     assert_eq!(out["plan_state_after"], "completed");
-    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(out["next_step"]["phase"], "done");
+    assert_eq!(rt.mode(), AgentMode::Plan);
     assert_eq!(rt.active_plan_path(), Some(path));
     cleanup_home(&home);
 }
@@ -290,9 +501,7 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
         todo.status = TodoStatus::Completed;
     }
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
-    rt.set_mode_completed(plan_id.clone());
-    let _ = rt.finalize_completed_to_chat();
+    rt.bind_plan_file_for_test(path.clone());
 
     let out = update_plan::execute(
         &rt,
@@ -312,10 +521,8 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
 
     assert_eq!(out["plan_state_before"], "completed");
     assert_eq!(out["plan_state_after"], "pending");
-    match rt.mode() {
-        PlanState::Pending { plan_id: cur } => assert_eq!(cur, plan_id),
-        other => panic!("expected Pending, got {other:?}"),
-    }
+    assert_eq!(rt.mode(), AgentMode::Plan);
+    assert_eq!(rt.active_plan().unwrap().id, plan_id);
     assert_eq!(rt.active_plan_path(), Some(path.clone()));
     let persisted = read_plan(&path).unwrap();
     assert_eq!(persisted.frontmatter.state, PlanFileState::Pending);

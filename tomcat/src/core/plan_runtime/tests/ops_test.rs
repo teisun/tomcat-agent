@@ -6,6 +6,8 @@ fn td(id: &str, status: TodoStatus) -> TodoItem {
         id: id.into(),
         content: id.into(),
         status,
+        evidence: Vec::new(),
+        kind: Default::default(),
     }
 }
 
@@ -59,8 +61,37 @@ fn set_status_nonexistent_returns_err() {
 }
 
 #[test]
-fn enforces_single_in_progress_after_batch() {
-    let mut v = vec![td("a", TodoStatus::Pending), td("b", TodoStatus::Pending)];
+fn allows_three_in_progress_but_rejects_four_after_batch() {
+    let mut allowed = vec![
+        td("a", TodoStatus::Pending),
+        td("b", TodoStatus::Pending),
+        td("c", TodoStatus::Pending),
+    ];
+    apply_todos_ops(
+        &mut allowed,
+        &[
+            TodoOp::SetStatus {
+                id: "a".into(),
+                status: TodoStatus::InProgress,
+            },
+            TodoOp::SetStatus {
+                id: "b".into(),
+                status: TodoStatus::InProgress,
+            },
+            TodoOp::SetStatus {
+                id: "c".into(),
+                status: TodoStatus::InProgress,
+            },
+        ],
+    )
+    .expect("three independent todos may progress together");
+
+    let mut v = vec![
+        td("a", TodoStatus::Pending),
+        td("b", TodoStatus::Pending),
+        td("c", TodoStatus::Pending),
+        td("d", TodoStatus::Pending),
+    ];
     let err = apply_todos_ops(
         &mut v,
         &[
@@ -72,10 +103,18 @@ fn enforces_single_in_progress_after_batch() {
                 id: "b".into(),
                 status: TodoStatus::InProgress,
             },
+            TodoOp::SetStatus {
+                id: "c".into(),
+                status: TodoStatus::InProgress,
+            },
+            TodoOp::SetStatus {
+                id: "d".into(),
+                status: TodoStatus::InProgress,
+            },
         ],
     )
-    .expect_err("two in_progress");
-    assert_eq!(err, OpError::MultipleInProgress { count: 2 });
+    .expect_err("four in_progress");
+    assert_eq!(err, OpError::MultipleInProgress { count: 4 });
 }
 
 #[test]

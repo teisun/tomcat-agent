@@ -11,7 +11,7 @@ use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 type CapturedIds = Arc<Mutex<Vec<String>>>;
 type AssistantIdCapture = (CapturedIds, CapturedIds);
@@ -93,12 +93,17 @@ async fn text_only_turn_reuses_stream_id_for_transcript_and_turn_end() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let (message_start_ids, turn_end_ids) = capture_assistant_ids(&event_bus);
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-text-only-id".to_string(),
         message_append_sink: Some(Arc::new(mgr.clone())),
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    );
 
     let result = agent.run(vec![ChatMessage::user("hi")]).await.unwrap();
     assert_eq!(result.final_text, "Hello stable id");
@@ -143,12 +148,17 @@ async fn multi_turn_tool_loop_mints_distinct_ids_per_assistant_message() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let (message_start_ids, turn_end_ids) = capture_assistant_ids(&event_bus);
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-multi-turn-id".to_string(),
         message_append_sink: Some(Arc::new(mgr.clone())),
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    );
 
     let result = agent
         .run(vec![ChatMessage::user("use a tool")])
@@ -192,11 +202,16 @@ async fn no_sink_mode_still_emits_stable_assistant_ids() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let (message_start_ids, turn_end_ids) = capture_assistant_ids(&event_bus);
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-no-sink-id".to_string(),
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    );
 
     let result = agent.run(vec![ChatMessage::user("hi")]).await.unwrap();
     assert_eq!(result.final_text, "ephemeral");
@@ -259,13 +274,18 @@ async fn interrupted_partial_stream_persists_the_same_pre_minted_id() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let (message_start_ids, turn_end_ids) = capture_assistant_ids(&event_bus);
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-interrupt-id".to_string(),
         message_append_sink: Some(Arc::new(mgr.clone())),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     tokio::spawn(async move {
         for index in 0..200 {
@@ -313,4 +333,18 @@ async fn interrupted_partial_stream_persists_the_same_pre_minted_id() {
         "interrupt path should not emit turn_end after an aborted stream"
     );
     assert_eq!(transcript_ids, message_start_ids);
+    assert!(
+        mgr.get_entries(16)
+            .expect("read interrupted transcript")
+            .iter()
+            .any(|entry| {
+                matches!(
+                    entry,
+                    TranscriptEntry::Custom(custom)
+                        if custom.extra.get("event").and_then(|value| value.as_str())
+                            == Some("agent.interrupted")
+                )
+            }),
+        "interruption must leave a durable custom transcript marker"
+    );
 }

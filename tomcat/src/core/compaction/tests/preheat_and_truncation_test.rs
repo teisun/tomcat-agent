@@ -1,6 +1,6 @@
 use super::super::truncation::floor_char_boundary;
 use super::super::{
-    compact_tool_results, force_drop_oldest_to_target, layer0_persist_large_results,
+    compact_tool_results, force_drop_oldest_after_confirmed_overflow, layer0_persist_large_results,
 };
 use super::mocks::*;
 use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
@@ -60,7 +60,7 @@ fn floor_char_boundary_multibyte() {
 fn compact_tool_results_reduces_budget() {
     let mut state = make_state(11_000, 5_000, 1_250);
     // Turn 1: [user, large tool result]  Turn 2: [user] — m=1 protects turn 2
-    state.messages = vec![
+    let mut messages = vec![
         user_msg("q"),
         tool_msg("c1", &"x".repeat(25_000)),
         user_msg("q2"),
@@ -69,7 +69,8 @@ fn compact_tool_results_reduces_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert!(reduced > 0);
 }
 
@@ -78,12 +79,13 @@ fn compact_tool_results_protects_recent() {
     let tool_content = "x".repeat(25_000);
     let mut state = make_state(25_000, 5_000, 1_250);
     // Only one turn (one user message), m=1 → everything protected
-    state.messages = vec![user_msg("q"), tool_msg("c1", &tool_content)];
+    let mut messages = vec![user_msg("q"), tool_msg("c1", &tool_content)];
     let config = ContextConfig {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert_eq!(reduced, 0);
 }
 
@@ -91,7 +93,7 @@ fn compact_tool_results_protects_recent() {
 fn compact_tool_results_skips_small() {
     let mut state = make_state(5_000, 3_000, 750);
     // Small tool result (1000 < 10_000 threshold) → not replaced
-    state.messages = vec![
+    let mut messages = vec![
         user_msg("q"),
         tool_msg("c1", &"x".repeat(1_000)),
         user_msg("q2"),
@@ -100,20 +102,40 @@ fn compact_tool_results_skips_small() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert_eq!(reduced, 0);
 }
 
 #[test]
-fn force_drop_oldest_to_target_below_half() {
+fn confirmed_overflow_drops_a_turn_even_when_local_estimate_is_low() {
     let mut state = make_state(4000, 4000, 1000);
-    state.messages = vec![
+    let mut messages = vec![
         user_msg(&"x".repeat(2000)),
         user_msg(&"y".repeat(1000)),
         user_msg(&"z".repeat(500)),
     ];
-    force_drop_oldest_to_target(&mut state);
+    state.context_budget_tokens = 100_000;
+    let mut history_end = messages.len();
+    let (turns_removed, _) =
+        force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut history_end);
+    assert_eq!(turns_removed, 1);
+    assert_eq!(messages.len(), 2);
     assert!(state.usage_ratio() < 0.50);
+}
+
+#[test]
+fn confirmed_overflow_never_empties_the_last_turn() {
+    let mut state = make_state(4000, 4000, 1000);
+    let mut messages = vec![user_msg(&"x".repeat(3000))];
+
+    let mut history_end = messages.len();
+    let (turns_removed, chars_removed) =
+        force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut history_end);
+
+    assert_eq!(turns_removed, 0);
+    assert_eq!(chars_removed, 0);
+    assert_eq!(messages.len(), 1);
 }
 
 #[test]
@@ -245,9 +267,12 @@ async fn preheat_retries_with_exponential_backoff() {
         0.95,
         &messages,
         &dummy_path,
+        None,
         provider,
+        None,
         &cfg,
         Arc::clone(&event_emitter),
+        None,
     );
     assert!(
         did_start,
@@ -292,7 +317,7 @@ async fn preheat_retries_with_exponential_backoff() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn preheat_exhausted_writes_failure_entry_to_transcript() {
+async fn preheat_exhausted_keeps_its_unfulfilled_marker_and_emits_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("failure_trail.jsonl");
     write_header(
@@ -303,13 +328,12 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
             id: "sid_d".to_string(),
             timestamp: "2026-04-26T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
 
-    // 写一条 type=message + id=msg_end 作为 covered_end_id 锚点，
-    // insert_entry_after_message_id 才能在该锚点之后插入失败留痕；
-    // 否则按 §5.7.4 退化为 append_entry，仍能落盘但用例语义弱化。
+    // The marker is appended at start, while `msg_end` is still the transcript tail.
     let anchor_msg = TranscriptEntry::Message(MessageEntry {
         id: Some("msg_end".to_string()),
         parent_id: None,
@@ -337,47 +361,36 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
         0.95,
         &messages,
         &path,
+        None,
         provider,
+        None,
         &cfg,
         Arc::clone(&event_emitter),
+        None,
     );
     assert!(did_start);
     let outcome = preheat.await_result(Duration::from_secs(60)).await;
     assert!(matches!(outcome, PreheatOutcome::Exhausted));
 
     let entries = read_entries_tail(&path, 16).unwrap();
-    let failure_entry = entries
+    let marker = entries
         .iter()
         .rev()
         .find_map(|e| match e {
-            TranscriptEntry::BranchSummary(b) if b.summary.is_none() => Some(b.clone()),
+            TranscriptEntry::BranchSummary(b) if b.is_boundary == Some(true) => Some(b.clone()),
             _ => None,
         })
-        .expect("3 次失败后 transcript 应出现 summary == None 的 BranchSummary 失败留痕");
+        .expect("preheat start must leave its empty marker even if all retries fail");
 
     assert_eq!(
-        failure_entry.attempts,
-        Some(3),
-        "attempts 必须等于 MAX_PREHEAT_RETRIES = 3（与计划 §6.D 接口约束一致）",
-    );
-    assert!(
-        failure_entry
-            .error
-            .as_deref()
-            .map(|s| s.contains("simulated provider failure"))
-            .unwrap_or(false),
-        "error 必须保留最末次 LLM 错误描述，实际 {:?}",
-        failure_entry.error,
+        marker.summary,
+        None,
+        "failure diagnostics are emitted as CompactionError; the transcript marker stays unfulfilled"
     );
     assert_eq!(
-        failure_entry.is_boundary,
-        Some(false),
-        "失败行同样标 is_boundary=false，避免 reload 时清空 prefix",
-    );
-    assert_eq!(
-        failure_entry.covered_end_id.as_deref(),
+        marker.covered_end_id.as_deref(),
         Some("msg_end"),
-        "失败行需要保留 covered 范围，便于运行期定位故障窗口",
+        "marker keeps the covered range for later diagnostics",
     );
 }
 
@@ -387,19 +400,25 @@ fn layer0_persist_creates_files() {
     let mut state = make_state(60_000, 100_000, 25_000);
     let big_content = "x".repeat(60_000);
     // Layer 0 persists tool results from the last turn (after the last user message)
-    state.messages = vec![
+    let mut messages = vec![
         user_msg("question"),
         tool_msg_with_id("tc_1_msg", "tc_1", &big_content),
     ];
     let config = ContextConfig::default();
-    let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+    let history_end = messages.len();
+    let (results, _) = layer0_persist_large_results(
+        &mut state,
+        &mut messages,
+        &config,
+        dir.path(),
+        "test_session",
+        history_end,
+    );
     assert_eq!(results.len(), 1);
     assert!(std::path::Path::new(&results[0].persisted_path).exists());
     assert!(state.estimate_context_chars < 60_000);
     // Check the tool message content was replaced
-    let tool = state
-        .messages
+    let tool = messages
         .iter()
         .find(|m| m.role == ChatMessageRole::Tool)
         .unwrap();

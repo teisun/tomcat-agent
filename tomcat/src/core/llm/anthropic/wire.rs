@@ -1,43 +1,129 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tracing::{info, warn, Level};
 
+use crate::core::llm::files_api::FilesApiAdapter;
+use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan_scoped, replay_requirement_for_profile, ProviderCompatProfile,
-    ReplayAction, ReplayWindow,
+    plan, replay_requirement_for_profile, ProviderCompatProfile, ReplayAction,
 };
-use crate::core::llm::thinking_policy::resolve_anthropic_request;
+use crate::core::llm::thinking_policy::{resolve_anthropic_request, ThinkingFormat};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, ContinuityMetadata, FileSource, ImageSource,
-    ReasoningContinuation, ReasoningFormat, StreamEvent, TokenUsage,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatRequest, ChatResponse, ChatResponseChoice,
+    ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
+    StreamEvent, TokenUsage,
 };
+use crate::core::llm::Capabilities;
 use crate::infra::config::ThinkingConfig;
 
+/// Anthropic rejects requests with more than four explicit cache breakpoints.
+///
+/// Keep this as a hard provider limit rather than a tuning parameter: callers
+/// must safely degrade by dropping lower-priority candidates.
+const ANTHROPIC_MAX_CACHE_BREAKPOINTS: usize = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheBreakpoint {
+    LastTool,
+    SystemBlock(usize),
+    /// End of a complete wire message.
+    MessageEnd(usize),
+}
+
+struct RenderedMessages {
+    system: Vec<Value>,
+    messages: Vec<Value>,
+    /// Runtime state was moved to the system suffix rather than merged into a
+    /// user/tool-result message, where fcodex cannot reuse an earlier block
+    /// cache-control marker.
+    has_ephemeral_system_tail: bool,
+    keep_opaque_messages: usize,
+    strip_opaque_messages: usize,
+    /// Ordered from highest to lowest priority, excluding the tool candidate.
+    cache_breakpoint_candidates: Vec<CacheBreakpoint>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_request_body(
     request: &ChatRequest,
     model: &str,
     thinking_cfg: &ThinkingConfig,
+    thinking_format: ThinkingFormat,
     continuity_enabled: bool,
     stream: bool,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Value {
     let target = ProviderCompatProfile::anthropic_messages(model);
-    let (system, messages) = build_messages(&request.messages, &target, continuity_enabled);
-    let tools = request
+    let mut rendered = build_messages(
+        &request.messages,
+        &target,
+        continuity_enabled,
+        capabilities,
+        files_adapter,
+    );
+    let mut tools = request
         .tools
         .as_ref()
         .map(|tools| convert_tools(tools))
         .filter(|tools| !tools.is_empty());
-    let thinking_request = resolve_anthropic_request(thinking_cfg, request.max_tokens);
+
+    // A breakpoint budget is shared across tools, system blocks and messages.
+    // Do not add controls at their individual construction sites: compaction
+    // recovery may legitimately contain multiple summaries, which would
+    // otherwise overflow Anthropic's hard limit.
+    let mut cache_breakpoint_candidates = Vec::new();
+    if tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+        cache_breakpoint_candidates.push(CacheBreakpoint::LastTool);
+    }
+    cache_breakpoint_candidates.append(&mut rendered.cache_breakpoint_candidates);
+    let selected_cache_breakpoints = apply_cache_breakpoints(
+        &mut rendered.system,
+        &mut rendered.messages,
+        tools.as_deref_mut(),
+        cache_breakpoint_candidates.clone(),
+    );
+    log_prompt_prefix_fingerprint(
+        model,
+        request,
+        &rendered,
+        tools.as_deref(),
+        &cache_breakpoint_candidates,
+        &selected_cache_breakpoints,
+    );
+    log_wire_request_shape(
+        model,
+        request,
+        &rendered,
+        tools.as_deref(),
+        &selected_cache_breakpoints,
+    );
+    // Model capabilities are resolved per request by `ResolvedCall`, not kept
+    // in this connection-scoped provider. Direct provider tests/calls without
+    // that resolved value conservatively use the unknown-Anthropic fallback in
+    // `resolve_anthropic_request`.
+    let (request_max_tokens, model_max_output_tokens) = match request.resolved_output_limit {
+        Some(limit) => (Some(limit), Some(limit)),
+        None => (request.max_tokens, None),
+    };
+    let thinking_request = resolve_anthropic_request(
+        thinking_cfg,
+        thinking_format,
+        request_max_tokens,
+        model_max_output_tokens,
+    );
 
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(model.to_string()));
-    body.insert("messages".to_string(), Value::Array(messages));
+    body.insert("messages".to_string(), Value::Array(rendered.messages));
     body.insert(
         "max_tokens".to_string(),
         Value::Number(thinking_request.max_tokens.into()),
     );
     body.insert("stream".to_string(), Value::Bool(stream));
-    if let Some(system) = system.filter(|system| !system.trim().is_empty()) {
-        body.insert("system".to_string(), Value::String(system));
+    if !rendered.system.is_empty() {
+        body.insert("system".to_string(), Value::Array(rendered.system));
     }
     if let Some(temperature) = request
         .temperature
@@ -52,7 +138,227 @@ pub(super) fn build_request_body(
     if let Some(thinking) = thinking_request.thinking {
         body.insert("thinking".to_string(), thinking);
     }
+    if let Some(effort) = thinking_request.effort {
+        body.insert(
+            "output_config".to_string(),
+            serde_json::json!({
+                "effort": effort,
+            }),
+        );
+    }
     Value::Object(body)
+}
+
+/// Emit hashes, never prompt text, so adjacent requests can be compared without
+/// exposing user content in diagnostics. Cache invalidation is a prefix problem:
+/// the first differing hash identifies which stable-looking section drifted.
+fn log_prompt_prefix_fingerprint(
+    model: &str,
+    request: &ChatRequest,
+    rendered: &RenderedMessages,
+    tools: Option<&[Value]>,
+    candidates: &[CacheBreakpoint],
+    selected: &[CacheBreakpoint],
+) {
+    if !prompt_prefix_fingerprint_enabled()
+        || !tracing::enabled!(target: "tomcat_chat_diag", Level::INFO)
+    {
+        return;
+    }
+    let tail_hashes = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.kind, crate::core::llm::MessageKind::EphemeralTail))
+        .map(|message| fingerprint(&serde_json::to_value(message).unwrap_or(Value::Null)))
+        .collect::<Vec<_>>();
+    let system_hashes = rendered.system.iter().map(fingerprint).collect::<Vec<_>>();
+    let last_message_breakpoint = selected
+        .iter()
+        .filter_map(|breakpoint| match breakpoint {
+            CacheBreakpoint::MessageEnd(index) => Some(*index),
+            CacheBreakpoint::LastTool | CacheBreakpoint::SystemBlock(_) => None,
+        })
+        .max();
+    let cacheable_messages = last_message_breakpoint
+        .and_then(|index| rendered.messages.get(..=index))
+        .unwrap_or_default();
+    let message_hashes = cacheable_messages
+        .iter()
+        .map(fingerprint)
+        .collect::<Vec<_>>();
+    let message_prefix_hashes = rolling_array_fingerprints(cacheable_messages);
+    let user_message_hashes = rendered
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(message_idx, message)| {
+            let (with_tail, without_tail) = user_message_tail_fingerprints(message, 0);
+            (message_idx, with_tail, without_tail)
+        })
+        .collect::<Vec<_>>();
+    let tool_hash = tools.map(|tools| fingerprint(&Value::Array(tools.to_vec())));
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "prompt_prefix_fingerprint",
+        model,
+        request_id = ?request.diagnostic_request_id,
+        tool_hash = ?tool_hash,
+        ?system_hashes,
+        ?message_hashes,
+        ?message_prefix_hashes,
+        ?user_message_hashes,
+        ?tail_hashes,
+        cache_prefix_message_end = ?last_message_breakpoint,
+        cache_breakpoint_candidates = ?candidates,
+        cache_breakpoints_selected = ?selected,
+    );
+}
+
+/// Emit request-shape facts without prompt text. This is intentionally tied to
+/// the fingerprint switch so operators can correlate it with provider usage by
+/// `request_id` without enabling a high-volume diagnostic path permanently.
+fn log_wire_request_shape(
+    model: &str,
+    request: &ChatRequest,
+    rendered: &RenderedMessages,
+    tools: Option<&[Value]>,
+    selected: &[CacheBreakpoint],
+) {
+    if !prompt_prefix_fingerprint_enabled()
+        || !tracing::enabled!(target: "tomcat_chat_diag", Level::INFO)
+    {
+        return;
+    }
+
+    let tail_hashes = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.kind, crate::core::llm::MessageKind::EphemeralTail))
+        .map(|message| fingerprint(&serde_json::to_value(message).unwrap_or(Value::Null)))
+        .collect::<Vec<_>>();
+    let message_block_count = rendered
+        .messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
+    let message_chars = rendered
+        .messages
+        .iter()
+        .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+        .sum::<usize>();
+    let local_metadata_fields = ["tool_display", "summary_title", "usage"]
+        .into_iter()
+        .filter(|field| {
+            rendered
+                .system
+                .iter()
+                .chain(rendered.messages.iter())
+                .chain(tools.into_iter().flatten())
+                .any(|value| value_contains_key(value, field))
+        })
+        .collect::<Vec<_>>();
+    let request_family = request.cache_key.as_deref();
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "wire_request_shape",
+        model,
+        request_id = ?request.diagnostic_request_id,
+        request_family = ?request_family,
+        message_count = rendered.messages.len(),
+        message_block_count,
+        message_chars,
+        has_ephemeral_tail = rendered.has_ephemeral_system_tail,
+        ephemeral_tail_location = "system_suffix",
+        ?tail_hashes,
+        keep_opaque_messages = rendered.keep_opaque_messages,
+        strip_opaque_messages = rendered.strip_opaque_messages,
+        cache_breakpoints_selected = ?selected,
+        local_metadata_fields = ?local_metadata_fields,
+    );
+
+    let is_main_agent_request = request_family.is_some_and(|key| key.ends_with(":main"));
+    if is_main_agent_request && !rendered.has_ephemeral_system_tail {
+        warn!(
+            target: "tomcat_chat_diag",
+            phase = "ephemeral_tail_missing",
+            model,
+            request_id = ?request.diagnostic_request_id,
+            request_family = ?request_family,
+            tail_source = "AgentLoopConfig::ephemeral_tail_provider",
+            "main-agent request was expected to include an ephemeral tail but none rendered"
+        );
+    }
+}
+
+fn value_contains_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(|item| value_contains_key(item, key)),
+        Value::Object(entries) => {
+            entries.contains_key(key)
+                || entries.values().any(|entry| value_contains_key(entry, key))
+        }
+        _ => false,
+    }
+}
+
+const PROMPT_PREFIX_FINGERPRINT_ENV: &str = "TOMCAT_PROMPT_PREFIX_FINGERPRINT";
+
+fn prompt_prefix_fingerprint_enabled() -> bool {
+    std::env::var(PROMPT_PREFIX_FINGERPRINT_ENV)
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+fn fingerprint(value: &Value) -> String {
+    fingerprint_bytes(&serde_json::to_vec(value).unwrap_or_default())
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))[..16].to_string()
+}
+
+/// Hash JSON array prefixes incrementally. Snapshotting the hasher after
+/// appending `]` produces the exact same digest as serializing that prefix as
+/// a standalone `Value::Array`, without cloning and reserializing every
+/// earlier message.
+fn rolling_array_fingerprints(messages: &[Value]) -> Vec<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"[");
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            if index > 0 {
+                hasher.update(b",");
+            }
+            hasher.update(serde_json::to_vec(message).unwrap_or_default());
+            let mut snapshot = hasher.clone();
+            snapshot.update(b"]");
+            format!("{:x}", snapshot.finalize())[..16].to_string()
+        })
+        .collect()
+}
+
+fn user_message_tail_fingerprints(message: &Value, tail_blocks: usize) -> (String, String) {
+    let with_tail = fingerprint(message);
+    if tail_blocks == 0 {
+        return (with_tail.clone(), with_tail);
+    }
+    let mut without_tail_message = message.clone();
+    if let Some(blocks) = without_tail_message
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+    {
+        blocks.truncate(blocks.len().saturating_sub(tail_blocks));
+    }
+    (with_tail, fingerprint(&without_tail_message))
 }
 
 pub(super) fn response_to_chat_response(
@@ -126,11 +432,25 @@ pub(super) fn final_stream_events(
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            text_tokens: usage.text_tokens,
         });
     }
     if let Some(stop_reason) = stop_reason {
+        let finish_reason = normalize_finish_reason(&stop_reason);
+        // Anthropic 的 `max_tokens` 是正常 stream terminal，不会像 Responses 那样
+        // 自动带用户可见 notice。没有这条，界面只能看到一个看似正常的 stop，
+        // 很难区分“模型完成”与“输出预算耗尽”。
+        if stop_reason == "max_tokens" {
+            events.push(StreamEvent::LlmNotice {
+                finish_reason: finish_reason.clone(),
+                message: crate::infra::i18n::tr("llm.anthropicMaxOutputNotice", &[]),
+            });
+        }
         events.push(StreamEvent::FinishReason {
-            reason: normalize_finish_reason(&stop_reason),
+            reason: finish_reason,
         });
     }
     events
@@ -235,39 +555,103 @@ pub(super) struct ParsedAssistantContent {
     pub continuity: Option<ContinuityMetadata>,
 }
 
+fn flush_tool_media(
+    out: &mut Vec<Value>,
+    media: &mut Vec<ChatMessageContentPart>,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Option<usize> {
+    if media.is_empty() {
+        return None;
+    }
+    let message = ChatMessage::user_with_parts(std::mem::take(media));
+    push_role_message(
+        out,
+        "user",
+        user_content_blocks(&message, capabilities, files_adapter),
+    )
+}
+
 fn build_messages(
     messages: &[ChatMessage],
     target: &ProviderCompatProfile,
     continuity_enabled: bool,
-) -> (Option<String>, Vec<Value>) {
-    let mut system_chunks = Vec::new();
-    let mut out = Vec::new();
-    let window = ReplayWindow::compute(messages);
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> RenderedMessages {
+    build_messages_with_media_mode(
+        messages,
+        target,
+        continuity_enabled,
+        capabilities,
+        files_adapter,
+        crate::core::llm::tool_result_media::tool_result_media_mode("anthropic-messages"),
+    )
+}
 
-    for (idx, original) in messages.iter().enumerate() {
+fn build_messages_with_media_mode(
+    messages: &[ChatMessage],
+    target: &ProviderCompatProfile,
+    continuity_enabled: bool,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+    mode: crate::core::llm::tool_result_media::ToolResultMediaMode,
+) -> RenderedMessages {
+    use crate::core::llm::tool_result_media::{media_parts, ToolResultMediaMode};
+    let mut deferred_media = Vec::new();
+    let mut system_chunks = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    let mut last_non_ephemeral_message = None;
+    let mut last_non_ephemeral_system = None;
+    let runtime_tail = ephemeral_tail_texts(messages)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut keep_opaque_messages = 0;
+    let mut strip_opaque_messages = 0;
+    for original in messages {
+        if is_ephemeral_tail(original) {
+            continue;
+        }
+        if original.role != ChatMessageRole::Tool {
+            if let Some(index) =
+                flush_tool_media(&mut out, &mut deferred_media, capabilities, files_adapter)
+            {
+                last_non_ephemeral_message = Some(index);
+            }
+        }
         let action = if continuity_enabled {
-            plan_scoped(target, original, window.contains(idx))
+            plan(target, original)
         } else {
             ReplayAction::StripOpaque
         };
+        if matches!(action, ReplayAction::KeepOpaque) {
+            keep_opaque_messages += 1;
+        } else {
+            strip_opaque_messages += 1;
+        }
         let keep_opaque = matches!(action, ReplayAction::KeepOpaque);
         let msg = match action {
             ReplayAction::KeepOpaque | ReplayAction::StripOpaque => {
                 original.without_completion_metadata()
             }
-            ReplayAction::ConvertToText(text) => apply_text_downgrade(original, &text),
         };
         match msg.role {
             ChatMessageRole::System => {
                 let text = flatten_message_text(&msg);
                 if !text.trim().is_empty() {
-                    system_chunks.push(text);
+                    system_chunks.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                    last_non_ephemeral_system = system_chunks.len().checked_sub(1);
                 }
             }
             ChatMessageRole::User => {
-                let content = user_content_blocks(&msg);
+                let content = user_content_blocks(&msg, capabilities, files_adapter);
                 if !content.is_empty() {
-                    push_role_message(&mut out, "user", content);
+                    if let Some(out_idx) = push_role_message(&mut out, "user", content) {
+                        last_non_ephemeral_message = Some(out_idx);
+                    }
                 }
             }
             ChatMessageRole::Assistant => {
@@ -314,27 +698,76 @@ fn build_messages(
                     }
                 }
                 if !content.is_empty() {
-                    push_role_message(&mut out, "assistant", content);
+                    if let Some(out_idx) = push_role_message(&mut out, "assistant", content) {
+                        last_non_ephemeral_message = Some(out_idx);
+                    }
                 }
             }
             ChatMessageRole::Tool => {
                 let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-                let text = flatten_message_text(&msg);
-                push_role_message(
+                let text = crate::core::llm::tool_result_media::tool_result_text(&msg);
+                let content =
+                    if mode == ToolResultMediaMode::Native && media_parts(&msg).next().is_some() {
+                        Value::Array(user_content_blocks(&msg, capabilities, files_adapter))
+                    } else {
+                        deferred_media.extend(media_parts(&msg).cloned());
+                        Value::String(text)
+                    };
+                if let Some(out_idx) = push_role_message(
                     &mut out,
                     "user",
                     vec![json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": text,
+                        "content": content,
                     })],
-                );
+                ) {
+                    last_non_ephemeral_message = Some(out_idx);
+                }
             }
         }
     }
+    if let Some(index) =
+        flush_tool_media(&mut out, &mut deferred_media, capabilities, files_adapter)
+    {
+        last_non_ephemeral_message = Some(index);
+    }
+    // fcodex only reuses cache controls at completed message ends. Keeping
+    // request-only runtime state as a system suffix leaves D on the newest
+    // durable tool result; a state change deliberately invalidates one request.
+    let has_ephemeral_system_tail = !runtime_tail.is_empty();
+    system_chunks.extend(runtime_tail.into_iter().map(|text| {
+        json!({
+            "type": "text",
+            "text": text,
+        })
+    }));
 
-    let system = (!system_chunks.is_empty()).then(|| system_chunks.join("\n\n"));
-    (system, out)
+    let mut cache_breakpoint_candidates = Vec::new();
+    if let Some(last_system_idx) = last_non_ephemeral_system {
+        cache_breakpoint_candidates.push(CacheBreakpoint::SystemBlock(last_system_idx));
+    }
+    let penultimate_user_message = out
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(index, _)| index)
+        .rev()
+        .nth(1);
+    if let Some(message_idx) = penultimate_user_message {
+        cache_breakpoint_candidates.push(CacheBreakpoint::MessageEnd(message_idx));
+    }
+    if let Some(breakpoint) = deepest_message_breakpoint(last_non_ephemeral_message) {
+        cache_breakpoint_candidates.push(breakpoint);
+    }
+    RenderedMessages {
+        system: system_chunks,
+        messages: out,
+        has_ephemeral_system_tail,
+        keep_opaque_messages,
+        strip_opaque_messages,
+        cache_breakpoint_candidates,
+    }
 }
 
 fn continuation_blocks(continuation: &ReasoningContinuation) -> Option<Vec<Value>> {
@@ -383,30 +816,76 @@ fn convert_tools(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
-    let usage = usage?;
-    let prompt = usage
-        .get("input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32;
-    let completion = usage
-        .get("output_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32;
-    if prompt == 0 && completion == 0 {
-        None
-    } else {
-        Some(TokenUsage {
-            prompt_tokens: prompt,
-            completion_tokens: completion,
-            total_tokens: Some(prompt + completion),
-        })
+/// Normalize Anthropic's three disjoint input counters to the cross-provider
+/// `TokenUsage::prompt_tokens` contract: total request input.
+pub(crate) fn anthropic_token_usage(
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_tokens: Option<u32>,
+    cache_write_tokens: Option<u32>,
+) -> TokenUsage {
+    let prompt_tokens = input_tokens
+        .saturating_add(cache_read_tokens.unwrap_or(0))
+        .saturating_add(cache_write_tokens.unwrap_or(0));
+    TokenUsage {
+        prompt_tokens,
+        completion_tokens: output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens: Some(prompt_tokens.saturating_add(output_tokens)),
+        reasoning_tokens: None,
+        text_tokens: None,
     }
 }
 
-fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
+fn usage_from_value(usage: Option<&Value>) -> Option<TokenUsage> {
+    let usage = usage?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let cache_write_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    if input_tokens == 0
+        && output_tokens == 0
+        && cache_read_tokens.is_none()
+        && cache_write_tokens.is_none()
+    {
+        None
+    } else {
+        Some(anthropic_token_usage(
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        ))
+    }
+}
+
+/// Select D at the end of the latest persisted wire message.
+///
+/// Runtime-only state is appended to the system suffix, rather than to a user
+/// content array, so a completed message end is always available to fcodex's
+/// cache implementation.
+fn deepest_message_breakpoint(
+    last_non_ephemeral_message: Option<usize>,
+) -> Option<CacheBreakpoint> {
+    last_non_ephemeral_message.map(CacheBreakpoint::MessageEnd)
+}
+
+fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) -> Option<usize> {
     if content.is_empty() {
-        return;
+        return None;
     }
     if let Some(last) = out.last_mut() {
         let same_role = last
@@ -417,7 +896,7 @@ fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
         if same_role {
             if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
                 existing.extend(content);
-                return;
+                return Some(out.len() - 1);
             }
         }
     }
@@ -425,17 +904,67 @@ fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
         "role": role,
         "content": content,
     }));
+    Some(out.len() - 1)
 }
 
-fn user_content_blocks(message: &ChatMessage) -> Vec<Value> {
+fn add_cache_control(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    }
+}
+
+fn apply_cache_breakpoints(
+    system: &mut [Value],
+    messages: &mut [Value],
+    mut tools: Option<&mut [Value]>,
+    candidates: Vec<CacheBreakpoint>,
+) -> Vec<CacheBreakpoint> {
+    let mut selected = Vec::with_capacity(ANTHROPIC_MAX_CACHE_BREAKPOINTS);
+    for candidate in candidates {
+        if selected.len() == ANTHROPIC_MAX_CACHE_BREAKPOINTS {
+            break;
+        }
+        if selected.contains(&candidate) {
+            continue;
+        }
+        let applied = match candidate {
+            CacheBreakpoint::LastTool => tools
+                .as_deref_mut()
+                .and_then(|tools| tools.last_mut())
+                .map(add_cache_control)
+                .is_some(),
+            CacheBreakpoint::SystemBlock(index) => {
+                system.get_mut(index).map(add_cache_control).is_some()
+            }
+            CacheBreakpoint::MessageEnd(message_idx) => messages
+                .get_mut(message_idx)
+                .and_then(|message| message.get_mut("content"))
+                .and_then(Value::as_array_mut)
+                .and_then(|blocks| blocks.last_mut())
+                .map(add_cache_control)
+                .is_some(),
+        };
+        if applied {
+            selected.push(candidate);
+        }
+    }
+    selected
+}
+
+fn user_content_blocks(
+    message: &ChatMessage,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Vec<Value> {
     match &message.content {
         Some(ChatMessageContent::Text(text)) => vec![json!({
             "type": "text",
             "text": text,
         })],
-        Some(ChatMessageContent::Parts(parts)) => {
-            parts.iter().map(content_part_to_block).collect::<Vec<_>>()
-        }
+        Some(ChatMessageContent::Parts(parts)) => parts
+            .iter()
+            .map(|part| content_part_to_block(part, capabilities, files_adapter))
+            .collect::<Vec<_>>(),
         None => vec![json!({
             "type": "text",
             "text": "",
@@ -443,7 +972,11 @@ fn user_content_blocks(message: &ChatMessage) -> Vec<Value> {
     }
 }
 
-fn content_part_to_block(part: &ChatMessageContentPart) -> Value {
+fn content_part_to_block(
+    part: &ChatMessageContentPart,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Value {
     match part {
         ChatMessageContentPart::InputText { text } => json!({
             "type": "text",
@@ -453,30 +986,96 @@ fn content_part_to_block(part: &ChatMessageContentPart) -> Value {
             "type": "text",
             "text": reference.to_prompt_text(),
         }),
-        ChatMessageContentPart::InputImage { source, .. } => match source {
-            ImageSource::Inline(source) => json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": source.mime_type,
-                    "data": source.data,
+        ChatMessageContentPart::InputImage { source, .. } => {
+            if !capabilities.vision {
+                return json!({
+                    "type": "text",
+                    "text": degrade_placeholder(part),
+                });
+            }
+            match source {
+                ImageSource::Inline(source) => json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": source.mime_type,
+                        "data": source.data,
+                    }
+                }),
+                ImageSource::Uploaded(source) => {
+                    if !capabilities.files {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    }
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "file",
+                            "file_id": adapter.reference_token(&source.file_id),
+                        }
+                    })
                 }
-            }),
-            ImageSource::Uploaded(source) => json!({
-                "type": "text",
-                "text": format!("[uploaded image: {}]", source.file_id),
-            }),
-        },
-        ChatMessageContentPart::InputFile { source } => match source {
-            FileSource::Inline(source) => json!({
-                "type": "text",
-                "text": format!("[file attachment omitted: {} ({})]", source.filename, source.mime_type),
-            }),
-            FileSource::Uploaded(source) => json!({
-                "type": "text",
-                "text": format!("[uploaded file attachment omitted: {}]", source.file_id),
-            }),
-        },
+            }
+        }
+        ChatMessageContentPart::InputImageRef { .. } => json!({
+            "type": "text",
+            "text": degrade_placeholder(part),
+        }),
+        ChatMessageContentPart::InputFile { source } => {
+            if !capabilities.files {
+                return json!({
+                    "type": "text",
+                    "text": degrade_placeholder(part),
+                });
+            }
+            match source {
+                FileSource::Inline(source) => {
+                    let mut block = json!({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": source.mime_type,
+                            "data": source.data,
+                        }
+                    });
+                    if !source.filename.trim().is_empty() {
+                        block["title"] = Value::String(source.filename.clone());
+                    }
+                    block
+                }
+                FileSource::Uploaded(source) => {
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    let mut block = json!({
+                        "type": "document",
+                        "source": {
+                            "type": "file",
+                            "file_id": adapter.reference_token(&source.file_id),
+                        }
+                    });
+                    if let Some(filename) = source
+                        .filename
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        block["title"] = Value::String(filename.to_string());
+                    }
+                    block
+                }
+            }
+        }
     }
 }
 
@@ -491,21 +1090,11 @@ fn flatten_message_text(message: &ChatMessage) -> String {
                     ChatMessageContentPart::InputReference { reference } => {
                         text.push_str(&reference.to_prompt_text());
                     }
-                    ChatMessageContentPart::InputImage { .. } => {}
-                    ChatMessageContentPart::InputFile { source } => match source {
-                        FileSource::Inline(source) => {
-                            text.push_str(&format!(
-                                "[file attachment omitted: {} ({})]",
-                                source.filename, source.mime_type
-                            ));
-                        }
-                        FileSource::Uploaded(source) => {
-                            text.push_str(&format!(
-                                "[uploaded file attachment omitted: {}]",
-                                source.file_id
-                            ));
-                        }
-                    },
+                    ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
+                    | ChatMessageContentPart::InputFile { .. } => {
+                        text.push_str(&degrade_placeholder(part));
+                    }
                 }
             }
             text
@@ -527,104 +1116,5 @@ fn normalize_finish_reason(reason: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{build_request_body, response_to_chat_response};
-    use crate::core::llm::replay_policy::ProviderCompatProfile;
-    use crate::core::llm::types::{ChatMessage, ChatRequest, ReasoningFormat};
-    use crate::infra::config::ThinkingConfig;
-
-    #[test]
-    fn build_request_body_extracts_system_and_user_messages() {
-        let request = ChatRequest {
-            messages: vec![
-                ChatMessage::system("be helpful"),
-                ChatMessage::user("hello"),
-            ],
-            model: "ignored".to_string(),
-            temperature: Some(0.2),
-            max_tokens: Some(4096),
-            stream: Some(true),
-            model_override: None,
-            thinking_level: None,
-            tools: None,
-        };
-
-        let body = build_request_body(
-            &request,
-            "claude-opus-4-6",
-            &ThinkingConfig::default(),
-            true,
-            true,
-        );
-
-        assert_eq!(body["model"], "claude-opus-4-6");
-        assert_eq!(body["system"], "be helpful");
-        assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
-        assert_eq!(body["stream"], true);
-        let temperature = body["temperature"]
-            .as_f64()
-            .expect("temperature serialized as number");
-        assert!((temperature - 0.2).abs() < 1e-6);
-    }
-
-    #[test]
-    fn response_to_chat_response_preserves_thinking_and_tool_calls() {
-        let profile = ProviderCompatProfile::anthropic_messages("claude-opus-4-6");
-        let raw = json!({
-            "id": "msg_1",
-            "content": [
-                {
-                    "type": "thinking",
-                    "thinking": "reason step",
-                    "signature": "sig_1",
-                },
-                {
-                    "type": "text",
-                    "text": "Need one tool call.",
-                },
-                {
-                    "type": "tool_use",
-                    "id": "tool_1",
-                    "name": "read_file",
-                    "input": {
-                        "path": "README.md"
-                    }
-                }
-            ],
-            "stop_reason": "tool_use",
-            "usage": {
-                "input_tokens": 11,
-                "output_tokens": 22
-            }
-        });
-
-        let response = response_to_chat_response(&raw, &profile, true);
-        let choice = &response.choices[0];
-        let message = &choice.message;
-
-        assert_eq!(choice.finish_reason.as_deref(), Some("tool_calls"));
-        assert_eq!(message.thinking_text.as_deref(), Some("reason step"));
-        assert_eq!(
-            message
-                .tool_calls
-                .as_ref()
-                .and_then(|calls| calls.first())
-                .and_then(|call| call["function"]["name"].as_str()),
-            Some("read_file")
-        );
-        assert_eq!(
-            message
-                .reasoning_continuation
-                .as_ref()
-                .map(|continuation| continuation.format.clone()),
-            Some(ReasoningFormat::AnthropicThinkingBlocks)
-        );
-        assert_eq!(
-            response.usage.as_ref().map(|usage| usage.total_tokens),
-            Some(Some(33))
-        );
-    }
-}
+#[path = "tests/wire_test.rs"]
+mod tests;

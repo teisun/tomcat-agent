@@ -1,140 +1,193 @@
-use super::super::{PlanRuntime, PlanRuntimeError, PlanState};
+use super::super::file_store::{PlanFileState, TodoItem, TodoKind, TodoStatus};
+use super::super::{NextAction, PlanRuntime, PlanRuntimeError};
+use crate::core::session::AgentMode;
 
 #[test]
-fn enter_planning_from_chat_transitions_to_planning() {
-    let rt = PlanRuntime::new("sess-1");
-    assert!(matches!(rt.mode(), PlanState::Chat));
-    rt.enter_planning().unwrap();
-    assert!(matches!(rt.mode(), PlanState::Planning));
+fn enter_plan_changes_only_the_session_mode() {
+    let runtime = PlanRuntime::new("session");
+
+    runtime.enter_plan().unwrap();
+
+    assert_eq!(runtime.mode(), AgentMode::Plan);
+    assert!(runtime.active_plan().is_none());
 }
 
 #[test]
-fn enter_planning_from_completed_transitions_to_planning() {
-    let rt = PlanRuntime::new("sess-1");
-    rt.set_mode_completed("done-1".into());
-    rt.enter_planning().unwrap();
-    assert!(matches!(rt.mode(), PlanState::Planning));
+fn entering_plan_twice_is_rejected() {
+    let runtime = PlanRuntime::new("session");
+    runtime.enter_plan().unwrap();
+
+    assert!(matches!(
+        runtime.enter_plan().unwrap_err(),
+        PlanRuntimeError::AlreadyInMode(_)
+    ));
+    assert_eq!(runtime.mode(), AgentMode::Plan);
 }
 
 #[test]
-fn enter_planning_twice_is_rejected() {
-    let rt = PlanRuntime::new("sess-1");
-    rt.enter_planning().unwrap();
-    let err = rt.enter_planning().unwrap_err();
-    assert!(matches!(err, PlanRuntimeError::AlreadyInMode(_)));
-    assert!(matches!(rt.mode(), PlanState::Planning));
+fn exit_plan_changes_only_the_session_mode() {
+    let runtime = PlanRuntime::new("session");
+    runtime.enter_plan().unwrap();
+
+    runtime.exit_plan().unwrap();
+
+    assert_eq!(runtime.mode(), AgentMode::Chat);
+    assert!(runtime.active_plan().is_none());
 }
 
 #[test]
-fn exit_to_chat_from_planning_resets() {
-    let rt = PlanRuntime::new("sess-1");
-    rt.enter_planning().unwrap();
-    rt.exit_to_chat().unwrap();
-    assert!(matches!(rt.mode(), PlanState::Chat));
+fn mode_transitions_are_durable_before_notifier_observes_them() {
+    let runtime = PlanRuntime::new("session");
+    let transcript = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    let observed_modes = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<AgentMode>::new()));
+    {
+        let transcript = transcript.clone();
+        runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            transcript.lock().push(event);
+            Ok(())
+        }));
+    }
+    {
+        let observed_modes = observed_modes.clone();
+        let runtime_for_notifier = runtime.clone();
+        runtime.attach_transcript_event_notifier(std::sync::Arc::new(move |_| {
+            observed_modes.lock().push(runtime_for_notifier.mode());
+        }));
+    }
+
+    runtime.enter_plan().unwrap();
+    runtime.exit_plan().unwrap();
+
+    assert_eq!(
+        *transcript.lock(),
+        vec![
+            serde_json::json!({
+                "event": crate::infra::wire::WIRE_SESSION_AGENT_MODE_CHANGED,
+                "agentMode": "plan",
+            }),
+            serde_json::json!({
+                "event": crate::infra::wire::WIRE_SESSION_AGENT_MODE_CHANGED,
+                "agentMode": "chat",
+            }),
+        ]
+    );
+    assert_eq!(
+        *observed_modes.lock(),
+        vec![AgentMode::Plan, AgentMode::Chat]
+    );
 }
 
 #[test]
-fn exit_to_chat_when_already_chat_errors() {
-    let rt = PlanRuntime::new("sess-1");
-    let err = rt.exit_to_chat().unwrap_err();
-    assert!(matches!(err, PlanRuntimeError::AlreadyInMode(_)));
+fn transcript_append_failure_does_not_change_in_memory_mode_or_notify() {
+    let runtime = PlanRuntime::new("session");
+    let notifications = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
+    runtime.attach_transcript_appender(std::sync::Arc::new(|_| {
+        Err(crate::AppError::Config("simulated append failure".into()))
+    }));
+    {
+        let notifications = notifications.clone();
+        runtime.attach_transcript_event_notifier(std::sync::Arc::new(move |_| {
+            *notifications.lock() += 1;
+        }));
+    }
+
+    assert!(matches!(
+        runtime.enter_plan().unwrap_err(),
+        PlanRuntimeError::Io(message) if message.contains("simulated append failure")
+    ));
+    assert_eq!(runtime.mode(), AgentMode::Chat);
+    assert_eq!(*notifications.lock(), 0);
 }
 
 #[test]
-fn enter_and_exit_write_transition_events() {
-    let rt = PlanRuntime::new("sess-1");
+fn concurrent_enter_plan_commits_a_single_mode_event() {
+    let runtime = PlanRuntime::new("session");
     let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
     {
         let events = events.clone();
-        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
-            events.lock().push(extra);
+        runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            events.lock().push(event);
             Ok(())
         }));
     }
 
-    rt.enter_planning().unwrap();
-    rt.exit_to_chat().unwrap();
+    let first = {
+        let runtime = runtime.clone();
+        std::thread::spawn(move || runtime.enter_plan())
+    };
+    let second = {
+        let runtime = runtime.clone();
+        std::thread::spawn(move || runtime.enter_plan())
+    };
 
-    let events = events.lock();
-    assert_eq!(events[0]["event"], crate::infra::wire::WIRE_PLAN_ENTER);
-    assert_eq!(events[0]["state"], "planning");
-    assert_eq!(events[1]["event"], crate::infra::wire::WIRE_PLAN_EXIT);
-    assert_eq!(events[1]["state"], "chat");
+    assert!(first.join().unwrap().is_ok() ^ second.join().unwrap().is_ok());
+    assert_eq!(runtime.mode(), AgentMode::Plan);
+    assert_eq!(events.lock().len(), 1);
 }
 
 #[test]
-fn completed_and_pending_modes_emit_transition_events() {
-    let rt = PlanRuntime::new("sess-1");
-    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
-    {
-        let events = events.clone();
-        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
-            events.lock().push(extra);
-            Ok(())
-        }));
-    }
+fn executing_plan_id_is_derived_from_the_active_plan_cache() {
+    let runtime = PlanRuntime::new("session");
+    assert!(runtime.executing_plan_id().is_none());
 
-    rt.set_mode_completed("done-1".into());
-    rt.set_mode_pending("done-1".into());
-
-    let events = events.lock();
-    assert_eq!(events[0]["event"], crate::infra::wire::WIRE_PLAN_COMPLETE);
-    assert_eq!(events[0]["plan_id"], "done-1");
-    assert_eq!(events[0]["state"], "completed");
-    assert_eq!(events[1]["event"], crate::infra::wire::WIRE_PLAN_PENDING);
-    assert_eq!(events[1]["plan_id"], "done-1");
-    assert_eq!(events[1]["state"], "pending");
-}
-
-#[test]
-fn finalize_completed_to_chat_does_not_emit_event() {
-    let rt = PlanRuntime::new("sess-1");
-    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
-    {
-        let events = events.clone();
-        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
-            events.lock().push(extra);
-            Ok(())
-        }));
-    }
-
-    rt.set_mode_completed("done-1".into());
-    events.lock().clear();
-
-    assert_eq!(rt.finalize_completed_to_chat().as_deref(), Some("done-1"));
-    assert!(events.lock().is_empty());
-}
-
-#[test]
-fn recover_in_initial_chat_is_noop() {
-    let rt = PlanRuntime::new("sess-1");
-    rt.recover().unwrap();
-    assert!(matches!(rt.mode(), PlanState::Chat));
-}
-
-#[test]
-fn mode_active_plan_id_returns_some_only_for_attached_states() {
-    assert_eq!(PlanState::Chat.active_plan_id(), None);
-    assert_eq!(PlanState::Planning.active_plan_id(), None);
-    assert_eq!(
-        PlanState::Executing {
-            plan_id: "x".into()
-        }
-        .active_plan_id(),
-        Some("x")
+    runtime.seed_active_plan_for_test(
+        "plan_a".into(),
+        crate::core::plan_runtime::file_store::PlanFileState::Executing,
     );
+
+    assert_eq!(runtime.mode(), AgentMode::Chat);
+    assert_eq!(runtime.executing_plan_id().as_deref(), Some("plan_a"));
+}
+
+#[test]
+fn recovering_without_sidecar_state_defaults_to_chat() {
+    let runtime = PlanRuntime::new("session");
+    runtime.recover().unwrap();
+
+    assert_eq!(runtime.mode(), AgentMode::Chat);
+    assert!(runtime.active_plan().is_none());
+}
+
+#[tokio::test]
+async fn next_action_is_the_single_close_out_decision_source() {
+    let runtime = PlanRuntime::new("session");
+    let mut frontmatter = super::sample_frontmatter();
+    frontmatter.todos = vec![
+        TodoItem {
+            id: "work".into(),
+            content: "implement".into(),
+            status: TodoStatus::Completed,
+            evidence: Vec::new(),
+            kind: TodoKind::Work,
+        },
+        TodoItem {
+            id: "acceptance".into(),
+            content: "验收".into(),
+            status: TodoStatus::Pending,
+            evidence: Vec::new(),
+            kind: TodoKind::Acceptance,
+        },
+    ];
     assert_eq!(
-        PlanState::Pending {
-            plan_id: "x".into()
+        runtime.next_action(&frontmatter).await,
+        NextAction::ContinueWork {
+            remaining_work: vec!["- acceptance (pending)".into()]
         }
-        .active_plan_id(),
-        Some("x")
     );
+
+    frontmatter.todos[1].status = TodoStatus::InProgress;
     assert_eq!(
-        PlanState::Completed {
-            plan_id: "x".into()
-        }
-        .active_plan_id(),
-        Some("x")
+        runtime.next_action(&frontmatter).await,
+        NextAction::RunVerify
     );
+
+    frontmatter.todos[1].status = TodoStatus::Completed;
+    assert_eq!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::Done,
+        "executing plans with only terminal todos must finish"
+    );
+
+    frontmatter.state = PlanFileState::Completed;
+    assert_eq!(runtime.next_action(&frontmatter).await, NextAction::Done);
 }

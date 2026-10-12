@@ -54,7 +54,14 @@ fn deny_path_command_menu_only_allows_cancel_contract() {
     assert!(!menu.persist_extra_root);
     assert!(!menu.persist_readonly);
     assert!(!menu.persist_deny);
-    assert!(menu.note.as_deref().unwrap_or("").contains("禁止读写访问"));
+    assert!(menu
+        .note
+        .as_deref()
+        .unwrap_or("")
+        .contains(&tomcat::infra::tr(
+            "slash.path.denied",
+            &[("path", &denied.display().to_string())]
+        )));
 }
 
 /// E2E-CLI-026 — `/help` 解析 + 用户可见文案契约。
@@ -72,7 +79,7 @@ fn help_command_lists_path_and_help_contract() {
         "/help 文案必须列出 /help 自身；当前为：\n{banner}"
     );
     assert!(
-        banner.contains("绝对路径"),
+        banner.contains(&tomcat::infra::tr("slash.help", &[])),
         "/help 必须说明 /path 需要绝对路径参数；当前为：\n{banner}"
     );
 }

@@ -1,27 +1,22 @@
-//! `create_plan` 工具实现（plan-runtime.md §P2 / [create-plan.md]）。
+//! `create_plan`：Plan 模式保存计划，并在明确同意后进行 advisory review。
 //!
-//! 语义：
-//! - 仅 `Planning` 模式可见；EXEC/CHAT/Pending/Completed 调用 → `InvisibleInMode`。
-//! - 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md`；runtime 拼 frontmatter（state/session/created_at/schema_version）。
-//! - P4 前 `review` 字段返回 `aborted: true` 占位（reviewer 子 Agent 在 P4 接入）。
-//! - 写盘后 PlanRuntime 内存切换为 `Planning`（已是 Planning 时不变），保持 active_plan_id。
-//!
-//! 注意：本 P2 PR-PLB 实现尚**不**直接在 `tool_exec.rs` 注册分发；将在 P6 PR-PLC
-//! 把 4 个 plan 工具同时接入 LLM tool_call 路径。当前仅作为 PlanRuntime 内部 API
-//! 给 §9.3B / §9.4 单测与集成测调用。
+//! `execute` 校验并带锁写入 PlanFile，刷新 ActivePlan，记录创建/待办事件；
+//! 产品入口 `execute_for_tool` 在释放文件锁后通过现有问答面板征求评审同意。
+//! 跳过、中断和评审失败都保留已保存计划，不构成 `/plan build` 门禁。
+//! 待办增量修改由 `update_plan` 负责，本工具不接收指定 plan_id 重写旧计划。
 
 use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{
-        plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
-        TodoStatus, PLAN_FILE_SCHEMA_VERSION,
+        plan_path_for_id, validate_single_acceptance, write_plan, PlanFile, PlanFileFrontmatter,
+        PlanFileState, TodoItem, TodoKind, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
     },
     ops,
     safety::assert_plan_id_safe,
-    state::PlanState,
     PlanRuntime,
 };
+use crate::core::session::AgentMode;
 
 use super::ToolError;
 
@@ -34,6 +29,7 @@ use super::ToolError;
 ///   其它段落由模板拼接，
 ///   传 `body` 将报 [`ToolError::BadArgs`]；
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePlanArgs {
     /// 高层目标（必填）。runtime 由此派生 plan_id。
     pub goal: String,
@@ -49,11 +45,16 @@ pub struct TodoArg {
     pub content: String,
     #[serde(default = "default_pending")]
     pub status: TodoStatus,
+    /// `acceptance` only marks the one final acceptance todo in a coding plan.
+    #[serde(default)]
+    pub kind: TodoKind,
 }
 
 fn default_pending() -> TodoStatus {
     TodoStatus::Pending
 }
+
+use crate::infra::i18n::tr;
 
 impl CreatePlanArgs {
     /// 从 OpenAI tool_call `arguments` JSON 反序列化。
@@ -63,12 +64,12 @@ impl CreatePlanArgs {
         if let Some(obj) = raw.as_object() {
             if obj.contains_key("plan_id") {
                 return Err(ToolError::BadArgs(
-                    "create_plan 不再接受 plan_id；runtime 由 goal 派生".into(),
+                    "create_plan no longer accepts plan_id; runtime derives it from goal".into(),
                 ));
             }
             if obj.contains_key("body") {
                 return Err(ToolError::BadArgs(
-                    "create_plan 字段 body 已重命名为 draft（承载计划正文要点，落盘到 `## Plan` 段）".into(),
+                    "create_plan field body was renamed to draft (plan-body content, saved under `## Plan`)".into(),
                 ));
             }
         }
@@ -116,39 +117,44 @@ pub fn derive_plan_id(goal: &str) -> String {
     format!("plan_{slug}_{hash:08x}")
 }
 
-/// `create_plan` 执行体；返回 ToolResult 内容 JSON：
-///
-/// ```json
-/// { "plan_id": "...", "path": "...", "state": "planning",
-///   "review": { "aborted": true, "summary": "P4 接入" } }
-/// ```
-/// `create_plan` 同步执行（不派发 reviewer）；返回写盘成功后的核心信息。
-/// 当 PlanRuntime 注入了 `ReviewerDispatcher` 时，调用方应使用
-/// [`execute_with_reviewer`] 以获得真实的 review summary。
+/// 仅保存计划并返回核心信息与未派发的 review 占位。
+/// 产品交互入口使用 [`execute_for_tool`]，在保存后征求同意，再决定是否评审。
 pub fn execute(
     runtime: &PlanRuntime,
     args: CreatePlanArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    if !matches!(mode, PlanState::Planning) {
-        return Err(ToolError::InvisibleInMode {
+    if mode != AgentMode::Plan {
+        return Err(ToolError::RejectedInMode {
             tool: "create_plan",
             mode: mode.as_str().to_string(),
+            guidance: crate::infra::i18n::tr("planTool.createGuidance", &[]),
         });
     }
     if args.goal.trim().is_empty() {
-        return Err(ToolError::BadArgs("goal 不可为空".into()));
+        return Err(ToolError::BadArgs("goal cannot be empty".into()));
     }
     if args.draft.trim().is_empty() {
-        return Err(ToolError::BadArgs("draft 不可为空".into()));
+        return Err(ToolError::BadArgs("draft cannot be empty".into()));
     }
     if args.todos.is_empty() {
-        return Err(ToolError::BadArgs("todos 至少 1 项".into()));
+        return Err(ToolError::BadArgs(
+            "todos must contain at least one item".into(),
+        ));
+    }
+    if args
+        .todos
+        .iter()
+        .any(|todo| matches!(todo.kind, TodoKind::Unknown))
+    {
+        return Err(ToolError::BadArgs(
+            "create_plan.todos[].kind supports only work or acceptance".into(),
+        ));
     }
     // G4：runtime 由 goal 派生 plan_id；LLM 不传 plan_id。
     let plan_id = derive_plan_id(&args.goal);
     assert_plan_id_safe(&plan_id)
-        .map_err(|e| ToolError::BadArgs(format!("派生 plan_id 非法: {e}")))?;
+        .map_err(|e| ToolError::BadArgs(format!("Derived plan_id is invalid: {e}")))?;
 
     let todos: Vec<TodoItem> = args
         .todos
@@ -157,15 +163,18 @@ pub fn execute(
             id: t.id.clone(),
             content: t.content.clone(),
             status: t.status,
+            evidence: Vec::new(),
+            kind: t.kind,
         })
         .collect();
-    // 复用 ops 引擎的不变量校验：duplicate id / single in_progress
+    // 复用 ops 引擎的不变量校验：duplicate id / bounded in_progress
     let mut v = Vec::with_capacity(todos.len());
     let add_ops: Vec<_> = todos
         .iter()
         .map(|t| ops::TodoOp::AddTodo(t.clone()))
         .collect();
     ops::apply_todos_ops(&mut v, &add_ops)?;
+    validate_single_acceptance(&todos).map_err(|error| ToolError::BadArgs(error.to_string()))?;
 
     let now = chrono::Local::now().to_rfc3339();
     let frontmatter = PlanFileFrontmatter {
@@ -177,6 +186,13 @@ pub fn execute(
         created_at: now,
         schema_version: PLAN_FILE_SCHEMA_VERSION,
         todos,
+        code_review_pass: false,
+        code_review_rounds: 0,
+        code_review_open_findings: Vec::new(),
+        code_review_disputed_findings: Vec::new(),
+        code_review_handoff: false,
+        code_review_handoff_acknowledged: false,
+        code_review_residual_findings: Vec::new(),
         unknown: serde_yaml::Mapping::new(),
     };
     let body = default_body(&args.goal, &args.draft);
@@ -184,7 +200,7 @@ pub fn execute(
     let path = plan_path_for_id(&plan_id)?;
     write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
-    runtime.set_active_planning_plan(plan_id.clone(), path.clone());
+    runtime.refresh_active_plan_after_write(path.clone(), &plan);
     let event_payload = crate::infra::events::PlanEventPayload {
         plan_id: plan_id.clone(),
         path: crate::infra::platform::format_home_path(&path),
@@ -206,11 +222,12 @@ pub fn execute(
         "plan_id": plan_id,
         "path": crate::infra::platform::format_home_path(&path),
         "state": "planning",
-        "review": crate::core::plan_runtime::review::ReviewSummary::placeholder_pending().to_json(),
+        "items": super::shared_todo_ops::items_json(&plan.frontmatter.todos),
+        "review": crate::core::plan_runtime::plan_reviewer::PlanReviewSummary::placeholder_pending().to_json(),
     }))
 }
 
-/// 同 `execute`，但在写盘成功后**同步**派发 reviewer 子 Agent。
+/// Save first, then ask for explicit review consent through the existing question panel.
 ///
 /// 顺序严格遵守 RV14：write_plan 完成（lock 已释放）→ dispatch_reviewer。
 /// reviewer 解析失败 / max_turns / 父 abort 都不影响 create_plan 成功；
@@ -220,12 +237,74 @@ pub async fn execute_with_reviewer(
     args: CreatePlanArgs,
     allow_review_edit: bool,
 ) -> Result<serde_json::Value, ToolError> {
+    execute_for_tool(runtime, args, allow_review_edit, Default::default(), None).await
+}
+
+pub async fn execute_for_tool(
+    runtime: &PlanRuntime,
+    args: CreatePlanArgs,
+    allow_review_edit: bool,
+    termination: crate::core::plan_runtime::AskQuestionTermination,
+    tool_call_id: Option<&str>,
+) -> Result<serde_json::Value, ToolError> {
+    use crate::core::plan_runtime::panels::{
+        AskQuestionIdentity, AskQuestionOutcome, Question, QuestionOption,
+    };
+    use crate::core::plan_runtime::plan_reviewer::PlanReviewSummary;
+    use crate::infra::i18n::tr;
     let mut out = execute(runtime, args)?;
     let plan_id = out["plan_id"].as_str().unwrap_or("").to_string();
-    // 由 PlanRuntime 自洽派发；advisory lock 已在 write_plan 内 drop。
-    let summary = runtime.dispatch_reviewer(&plan_id, allow_review_edit).await;
-    // 若 reviewer 通过 update_plan / edit 改了 plan 文件 → reload 内存视图
-    // （目前 P2 内存仅持 active_planning_plan_id；具体 reload 字段在 P7 PR-PLE 接 panel 时扩展）
+    let summary = if let Some(panel) = runtime.ask_question_panel() {
+        let result = panel
+            .ask_with_identity(
+                AskQuestionIdentity {
+                    session_id: runtime.current_session_id(),
+                    tool_call_id: tool_call_id.map(str::to_owned),
+                },
+                vec![Question {
+                    id: "plan-review".into(),
+                    allow_custom: false,
+                    prompt: tr("plan.review.prompt", &[]),
+                    options: vec![
+                        QuestionOption {
+                            id: "review".into(),
+                            label: tr("plan.review.accept", &[]),
+                            recommended: true,
+                        },
+                        QuestionOption {
+                            id: "skip".into(),
+                            label: tr("plan.review.skip", &[]),
+                            recommended: false,
+                        },
+                    ],
+                }],
+                termination.clone(),
+            )
+            .await;
+        if termination.reason().is_some()
+            || matches!(
+                result.outcome,
+                AskQuestionOutcome::Interrupted
+                    | AskQuestionOutcome::HostDisconnected
+                    | AskQuestionOutcome::CancelledUnknown
+            )
+        {
+            let summary = PlanReviewSummary::interrupted();
+            runtime.record_plan_review(&plan_id, &summary, 0);
+            summary
+        } else if review_choice(&result, "review") {
+            runtime.dispatch_reviewer(&plan_id, allow_review_edit).await
+        } else {
+            let summary = PlanReviewSummary::skipped();
+            runtime.record_plan_review(&plan_id, &summary, 0);
+            summary
+        }
+    } else {
+        let summary = PlanReviewSummary::interrupted();
+        runtime.record_plan_review(&plan_id, &summary, 0);
+        summary
+    };
+    // 若 reviewer 通过 update_plan / edit 改了计划文件，刷新 active plan 缓存。
     if summary.applied_changes {
         let _ = reload_after_review(runtime, &plan_id);
     }
@@ -233,12 +312,23 @@ pub async fn execute_with_reviewer(
     Ok(out)
 }
 
-fn reload_after_review(_runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {
+fn review_choice(
+    result: &crate::core::plan_runtime::panels::AskQuestionResult,
+    choice: &str,
+) -> bool {
+    result.outcome == crate::core::plan_runtime::panels::AskQuestionOutcome::Answered
+        && result.answers.len() == 1
+        && result.answers[0].question_id == "plan-review"
+        && !result.answers[0].skipped
+        && result.answers[0].custom_text.is_none()
+        && result.answers[0].option_ids == [choice]
+}
+
+fn reload_after_review(runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {
     use crate::core::plan_runtime::file_store::{plan_path_for_id, read_plan};
     let path = plan_path_for_id(plan_id)?;
-    // 当前 PlanRuntime 不缓存 plan 内容（todos 直接在 disk 上读改）；
-    // 这里仅做 read 一次以验证仍可解析（防御 D7：reviewer 写坏文件）。
-    let _ = read_plan(&path)?;
+    let plan = read_plan(&path)?;
+    runtime.refresh_active_plan_after_write(path, &plan);
     Ok(())
 }
 
@@ -370,7 +460,8 @@ fn normalize_plan_body(goal: &str, draft: &str) -> String {
 
 fn default_body(goal: &str, draft: &str) -> String {
     let plan = normalize_plan_body(goal, draft);
+    let notice = tr("planTool.autoBoard", &[]);
     format!(
-        "## Goal\n\n{goal}\n\n## Plan\n\n{plan}\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n（由 update_plan 自动维护，请勿手工编辑标记之间内容）\n<!-- todos-board:auto:end -->\n"
+        "## Goal\n\n{goal}\n\n## Plan\n\n{plan}\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n{notice}\n<!-- todos-board:auto:end -->\n"
     )
 }

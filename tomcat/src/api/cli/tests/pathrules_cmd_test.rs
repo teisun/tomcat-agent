@@ -15,7 +15,14 @@ fn parse_mode_recognises_canonical_forms() {
 #[test]
 fn parse_mode_rejects_unknown() {
     match parse_mode("allow") {
-        Err(AppError::Config(msg)) => assert!(msg.contains("未识别")),
+        Err(AppError::Config(msg)) => assert_eq!(
+            msg,
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "cli.pathrules.invalidMode",
+                &[("mode", "allow")]
+            )
+        ),
         other => panic!("expected Config error, got {:?}", other),
     }
 }

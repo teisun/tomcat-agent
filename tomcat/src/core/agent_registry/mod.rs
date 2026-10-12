@@ -62,30 +62,30 @@ impl Default for AgentRegistryConfig {
 /// `spawn_subagent_internal` 失败原因。
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
-    #[error("派生深度超限：parent depth {parent_depth} + 1 > {max}")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.depth", &[("depth", &.parent_depth.to_string()), ("max", &.max.to_string())]))]
     DepthExceeded { parent_depth: u32, max: u32 },
-    #[error("全局并发 Agent 数超限：当前 {current} / 上限 {max}")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.concurrent", &[("current", &.current.to_string()), ("max", &.max.to_string())]))]
     GlobalConcurrencyExceeded { current: u32, max: u32 },
-    #[error("父 Agent {parent} 子数超限：当前 {current} / 上限 {max}")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.children", &[("parent", .parent), ("current", &.current.to_string()), ("max", &.max.to_string())]))]
     ChildrenPerAgentExceeded {
         parent: String,
         current: u32,
         max: u32,
     },
-    #[error("父 Agent {0} 未在 registry（已 unregister 或从未 register）")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.parentMissing", &[("id", .0)]))]
     ParentNotFound(String),
-    #[error("父 Agent {0} 已被请求 abort，拒绝派生新子")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.parentAborted", &[("id", .0)]))]
     ParentAborted(String),
-    #[error("子 Agent 执行或结果解析阶段 panic：{0}")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.panic", &[("detail", .0)]))]
     Panic(String),
-    #[error("子 spawn 内部错误: {0}")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.internal", &[("detail", .0)]))]
     Internal(String),
 }
 
 /// `register` 失败原因（独立于 `SpawnError`，便于父循环对 chat_loop 自身 register 单独处理）。
 #[derive(Debug, thiserror::Error)]
 pub enum RegisterError {
-    #[error("session_id {0} 已存在")]
+    #[error("{}", crate::infra::i18n::tr("agentRegistry.duplicate", &[("id", .0)]))]
     DuplicateSessionId(String),
 }
 
@@ -178,6 +178,26 @@ pub struct SubagentSpawnContext {
     pub cancel_token: CancellationToken,
 }
 
+struct SpawnCleanupGuard {
+    registry: Arc<AgentRegistry>,
+    child_session_id: String,
+}
+
+impl Drop for SpawnCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self
+            .registry
+            .handles
+            .read()
+            .get(&self.child_session_id)
+            .cloned()
+        {
+            handle.cancel();
+        }
+        self.registry.unregister(&self.child_session_id);
+    }
+}
+
 // ─── Registry ───────────────────────────────────────────────────────────────
 
 /// 进程内单例（按需注入，不是 OnceCell）；`ChatContext::from_config` 在装配阶段
@@ -207,6 +227,13 @@ impl std::fmt::Debug for AgentRegistry {
 }
 
 impl AgentRegistry {
+    pub(crate) fn has_children(&self, session_id: &str) -> bool {
+        self.handles
+            .read()
+            .values()
+            .any(|handle| handle.parent_session_id.as_deref() == Some(session_id))
+    }
+
     pub fn new() -> Arc<Self> {
         Self::with_config(AgentRegistryConfig::default())
     }
@@ -336,6 +363,10 @@ impl AgentRegistry {
         let child_session_id = child_handle.session_id.clone();
         let cancel_token = child_handle.token();
         let spawn_depth = child_handle.spawn_depth;
+        let cleanup_guard = SpawnCleanupGuard {
+            registry: Arc::clone(self),
+            child_session_id: child_session_id.clone(),
+        };
 
         // emit SubAgentStart
         self.emit(
@@ -361,8 +392,8 @@ impl AgentRegistry {
         let join = tokio::spawn(async move { spawn(ctx).await });
         let outcome_result = join.await;
 
-        // 不论结果，都 unregister + emit End
-        self.unregister(&child_session_id);
+        // 不论结果，都 unregister + emit End；future 被 drop 时 guard 也会 cancel + unregister。
+        drop(cleanup_guard);
 
         match outcome_result {
             Ok(outcome) => {

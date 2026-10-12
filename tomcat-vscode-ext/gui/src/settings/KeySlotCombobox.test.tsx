@@ -60,6 +60,22 @@ function renderCombobox(
 }
 
 describe("KeySlotCombobox", () => {
+  it("preserves the active option when translated labels change but option identities do not", () => {
+    const onChange = vi.fn();
+    const view = (options: KeySlotOption[]) => <KeySlotCombobox hint="Choose" placeholder="Key" options={options} value="" onChange={onChange} onRefresh={() => {}} refreshDisabled={false} refreshLabel="Refresh" refreshing={false} />;
+    const { rerender } = render(view(DEFAULT_OPTIONS));
+    const input = screen.getByRole("combobox");
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const activeId = input.getAttribute("aria-activedescendant");
+    rerender(view(DEFAULT_OPTIONS.map((option) => ({ ...option, label: `${option.envName} 已翻译` }))));
+    expect(screen.getByRole("combobox")).toBe(input);
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(input.getAttribute("aria-activedescendant")).toBe(activeId);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChange).toHaveBeenLastCalledWith("BETA_KEY");
+  });
+
   it("supports keyboard navigation and exposes combobox accessibility attributes", () => {
     const { input, onChange } = renderCombobox();
 

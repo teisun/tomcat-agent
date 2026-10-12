@@ -19,11 +19,13 @@ fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
                     id: "x1".into(),
                     content: Some("scratchpad 1".into()),
                     status: Some(TodoStatus::Pending),
+                    todo_kind: None,
                 },
                 todos::TodoOpArg::Upsert {
                     id: "x2".into(),
                     content: Some("scratchpad 2".into()),
                     status: Some(TodoStatus::Pending),
+                    todo_kind: None,
                 },
                 todos::TodoOpArg::SetStatus {
                     id: "x1".into(),
@@ -63,6 +65,7 @@ fn todos_persists_to_disk_when_todos_runtime_is_injected() {
                 id: "p1".into(),
                 content: Some("persist me".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -99,6 +102,7 @@ fn todos_new_todos_overwrites_same_session_file() {
                 id: "old".into(),
                 content: Some("old item".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -115,6 +119,7 @@ fn todos_new_todos_overwrites_same_session_file() {
                 id: "new".into(),
                 content: Some("new item".into()),
                 status: Some(TodoStatus::InProgress),
+                todo_kind: None,
             }],
         },
     )
@@ -147,6 +152,7 @@ fn todos_never_writes_plan_file_in_chat() {
                 id: "x1".into(),
                 content: Some("should not touch plan".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -165,7 +171,7 @@ fn todos_never_writes_plan_file_in_chat() {
 }
 
 #[test]
-fn todos_state_enforces_single_in_progress() {
+fn todos_state_allows_independent_in_progress_items() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -181,17 +187,19 @@ fn todos_state_enforces_single_in_progress() {
                     id: "x1".into(),
                     content: Some("1".into()),
                     status: Some(TodoStatus::InProgress),
+                    todo_kind: None,
                 },
                 todos::TodoOpArg::Upsert {
                     id: "x2".into(),
                     content: Some("2".into()),
                     status: Some(TodoStatus::Pending),
+                    todo_kind: None,
                 },
             ],
         },
     )
     .unwrap();
-    let err = todos::execute(
+    let out = todos::execute(
         &rt,
         None,
         todos::TodosArgs {
@@ -205,8 +213,9 @@ fn todos_state_enforces_single_in_progress() {
             }],
         },
     )
-    .expect_err("第二个 in_progress 应被 ops 引擎拒");
-    assert!(matches!(err, ToolError::Op(_)));
+    .expect("第二个独立 todo 可并行推进");
+    assert_eq!(out["items"][0]["status"], "in_progress");
+    assert_eq!(out["items"][1]["status"], "in_progress");
     cleanup_home(&home);
 }
 
@@ -222,7 +231,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id);
+    rt.bind_plan_file_for_test(path.clone());
 
     todos::execute(
         &rt,
@@ -235,6 +244,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
                 id: "sub-1".into(),
                 content: Some("debug step".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )

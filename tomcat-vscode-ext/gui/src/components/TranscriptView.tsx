@@ -1,25 +1,33 @@
-import { Fragment, type RefObject, useMemo } from "react";
+import { Fragment, type RefObject, type ReactNode, useMemo } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
-import { selectActiveTodoSource } from "../hooks/useActiveTodoProgress";
 import type {
   AskQuestionResult,
+  PathResolution,
   WebviewCheckpoint,
-  WebviewPlanFileCard,
-  WebviewPlanState,
+  WebviewMediaRoot,
+  WebviewPlanFileState,
   WebviewTimelineItem,
   WebviewTodo,
-  WebviewToolCard,
 } from "../types";
-import { ApprovalCard } from "./ApprovalCard";
+import {
+  ApprovalCard,
+  approvalAnswerKey,
+  type ApprovalAnswerDraft,
+  type ApprovalAnswerState,
+} from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
-import { injectCheckpointMarkers } from "./checkpointMarkers";
+import { messageIdsWithWritesAfter, injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
-import { PlanFileCard } from "./PlanFileCard";
+import type { Speed } from "../../../src/shared/modelSpeed";
+import type { ModelPickerModel } from "./ModelPicker";
+import { createPlanFileCardFromTool, PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
+import { ReviewRow } from "./ReviewRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
-import { isActionTool, isSuppressedPlanToolRow, ToolRow } from "./ToolRow";
+import { isActionTool, ToolRow, toolCategory } from "./ToolRow";
 import {
   groupTimelineByAssistantResponse,
   type AssistantResponseGroup,
@@ -36,42 +44,26 @@ export type AssistantRenderEntry =
       type: "action-tool";
     };
 
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function isPlanWorkflowTool(tool: WebviewToolCard): boolean {
-  return (
-    tool.toolName === "create_plan" ||
-    tool.toolName === "update_plan" ||
-    tool.display?.kind === "plan"
-  );
-}
-
-function isRunningPlanTool(item: WebviewTimelineItem): item is WebviewToolCard {
-  return (
-    item.type === "tool" &&
-    !item.isError &&
-    (item.status === "running" || item.status === "streaming") &&
-    isPlanWorkflowTool(item)
-  );
-}
-
-function toolPlanId(tool: WebviewToolCard): string | null {
-  return asString(tool.args?.plan_id) ?? asString(tool.args?.planId);
-}
-
-function toolPlanPath(tool: WebviewToolCard): string | null {
-  return tool.display?.kind === "plan" ? tool.display.plan : asString(tool.args?.path);
-}
-
-function matchesPlanCard(tool: WebviewToolCard, item: WebviewPlanFileCard): boolean {
-  const candidatePlanId = toolPlanId(tool);
-  if (candidatePlanId && item.planId && candidatePlanId === item.planId) {
-    return true;
+function assistantMessageIdForLiveItem(item: WebviewTimelineItem): string | null {
+  if (item.type === "tool" || item.type === "thinking") {
+    return item.assistantMessageId ?? null;
   }
-  const candidatePath = toolPlanPath(tool);
-  return candidatePath === item.path;
+  if (item.type === "message" && item.kind === "assistant") {
+    return item.assistantMessageId ?? null;
+  }
+  return null;
+}
+
+function lastLiveAssistantMessageId(
+  clusterTimeline: WebviewTimelineItem[],
+): string | null {
+  for (let index = clusterTimeline.length - 1; index >= 0; index -= 1) {
+    const assistantMessageId = assistantMessageIdForLiveItem(clusterTimeline[index]);
+    if (assistantMessageId) {
+      return assistantMessageId;
+    }
+  }
+  return null;
 }
 
 export function partitionAssistantResponseGroup(
@@ -124,6 +116,10 @@ export function partitionAssistantResponseGroup(
 }
 
 export function TranscriptView({
+  renderUserEditor,
+  onEditUserMessage,
+  approvalAnswers = {},
+  availableModelDetails,
   availableModels = [],
   buildModel = "",
   busy,
@@ -131,39 +127,77 @@ export function TranscriptView({
   canBuildPlan,
   checkpoints = [],
   onAnswer,
+  onApprovalDraftChange,
   onBuildPlan,
   onOpenDiff,
   onOpenFile,
+  onOpenLink,
+  onOpenImagePreview,
   onOpenPlanFile,
+  onRecoverErrorTurn,
   onRestoreCheckpoint,
   onRetryUserMessage,
+  onSelectContextWindow,
+  onSelectThinkingLevel,
+  onSelectSpeed,
   onSetBuildModel,
+  onZoomImage,
+  resolvePaths,
+  planId,
   planState,
   planTodos = [],
+  sessionContextWindow,
+  sessionModel = "",
+  sessionThinkingLevel,
   sessionTodos = [],
   timeline,
+  mediaRoots,
   transcriptRef,
 }: {
+  renderUserEditor?(message: Extract<WebviewTimelineItem, {type:"message"}>): ReactNode;
+  onEditUserMessage?(message: Extract<WebviewTimelineItem, {type:"message"}>): void;
+  approvalAnswers?: Record<string, ApprovalAnswerState>;
+  availableModelDetails?: Record<string, ModelPickerModel>;
   availableModels?: string[];
   buildModel?: string;
   busy: boolean;
   bottomSpacerHeight?: number;
   canBuildPlan: boolean;
   checkpoints?: WebviewCheckpoint[];
-  onAnswer(requestId: string, result: AskQuestionResult): void;
+  onAnswer(sessionId: string, requestId: string, result: AskQuestionResult): void;
+  onApprovalDraftChange(
+    sessionId: string,
+    requestId: string,
+    draft: ApprovalAnswerDraft,
+  ): void;
   onBuildPlan(planId: string | null, path: string): void;
   onOpenDiff?(toolCallId: string): void;
-  onOpenFile(path: string): void;
+  onOpenFile(path: string, line?: number): void;
+  onOpenLink?(href: string): void;
+  onOpenImagePreview?(imageId: string): void;
   onOpenPlanFile(path: string): void;
+  onRecoverErrorTurn?(errorId: string, action: "resume" | "retry"): void;
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
-  onSetBuildModel?(modelId: string): void;
-  planState?: WebviewPlanState | null;
+  onSelectContextWindow(modelId: string, contextWindow: number): void;
+  onSelectThinkingLevel(modelId: string, level: string): void;
+  onSelectSpeed(modelId: string, speed: Speed): void;
+  onSetBuildModel(modelId: string): void;
+  onZoomImage?(image: { alt: string; src: string }): void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
+  planId?: string | null;
+  planState?: WebviewPlanFileState | null;
   planTodos?: WebviewTodo[];
+  sessionContextWindow?: number | null;
+  sessionModel?: string;
+  sessionThinkingLevel?: string | null;
   sessionTodos?: WebviewTodo[];
   timeline: WebviewTimelineItem[];
+  mediaRoots?: WebviewMediaRoot[];
   transcriptRef?: RefObject<HTMLElement | null>;
 }) {
+  const t = useT();
+  const messagesWithWrites = useMemo(() => messageIdsWithWritesAfter(timeline), [timeline]);
   const renderedTimeline = useMemo(
     () => injectCheckpointMarkers(timeline, checkpoints),
     [checkpoints, timeline],
@@ -179,25 +213,83 @@ export function TranscriptView({
     const clusterLastThinkingId = showProgress
       ? [...clusterTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
       : null;
-    const activePlanTools = clusterTimeline.filter(isRunningPlanTool);
-    const planCards = clusterTimeline.filter(
-      (item): item is WebviewPlanFileCard => item.type === "plan",
-    );
-    const latestPlanCardId = [...planCards].reverse()[0]?.id ?? null;
-    const matchedPlanCardIds = new Set(
-      planCards
-        .filter((item) => activePlanTools.some((tool) => matchesPlanCard(tool, item)))
-        .map((item) => item.id),
-    );
-    const shouldFallbackToLatestPlanCard =
-      activePlanTools.length > 0 && matchedPlanCardIds.size === 0;
+    const activeAssistantMessageId = showProgress
+      ? lastLiveAssistantMessageId(clusterTimeline)
+      : null;
+    const planModelPicker = {
+      availableModelDetails,
+      availableModels,
+      buildModel,
+      onSelectContextWindow,
+      onSelectThinkingLevel,
+      onSelectSpeed,
+      onSetBuildModel,
+      sessionContextWindow,
+      sessionModel,
+      sessionThinkingLevel,
+    };
+
+    const renderTool = (
+      item: Extract<WebviewTimelineItem, { type: "tool" }>,
+      key: string,
+    ) => {
+      const planCard = createPlanFileCardFromTool(item, {
+        currentPlanId: planId,
+        currentPlanState: planState,
+        planTodos,
+      }, t);
+      if (planCard) {
+        return (
+          <PlanFileCard
+            canBuild={canBuildPlan}
+            creating={item.status === "running" || item.status === "streaming"}
+            item={planCard}
+            key={key}
+            modelPicker={planModelPicker}
+            onBuild={onBuildPlan}
+            onOpenPlanFile={onOpenPlanFile}
+            planTodos={planTodos}
+          />
+        );
+      }
+      return (
+        <ToolRow
+          item={item}
+          key={key}
+          onOpenDiff={onOpenDiff}
+          onOpenImagePreview={onOpenImagePreview}
+          onOpenFile={onOpenFile}
+          onOpenPlanFile={onOpenPlanFile}
+        />
+      );
+    };
 
     const renderTimelineItem = (item: WebviewTimelineItem) => {
       switch (item.type) {
         case "boundary":
           return <BoundaryBlock item={item} key={item.id} />;
         case "message":
-          return <MessageBubble item={item} key={item.id} onRetry={onRetryUserMessage} />;
+          if (item.kind === "user") {
+            const editor = renderUserEditor?.(item);
+            if (editor) return <Fragment key={item.id}>{editor}</Fragment>;
+          }
+          return (
+            <MessageBubble
+              item={item}
+              onEdit={item.kind === "user" && item.rewindEligible ? onEditUserMessage : undefined}
+              hasFileWrites={item.kind === "user" ? messagesWithWrites.has(item.id) : undefined}
+              key={item.id}
+              mediaRoots={mediaRoots}
+              onOpenFile={onOpenFile}
+              onOpenLink={onOpenLink}
+              onOpenImagePreview={onOpenImagePreview}
+              onRecover={onRecoverErrorTurn}
+              onRetry={onRetryUserMessage}
+              recoveryDisabled={busy}
+              resolvePaths={resolvePaths}
+              onZoomImage={onZoomImage}
+            />
+          );
         case "checkpoint":
           return (
             <CheckpointMarker
@@ -212,40 +304,30 @@ export function TranscriptView({
               isStreaming={showProgress && item.id === clusterLastThinkingId}
               item={item}
               key={item.id}
-            />
-          );
-        case "tool":
-          if (isSuppressedPlanToolRow(item)) {
-            return null;
-          }
-          return (
-            <ToolRow
-              item={item}
-              key={item.id}
-              onOpenDiff={onOpenDiff}
               onOpenFile={onOpenFile}
             />
           );
+        case "tool":
+          return renderTool(item, item.id);
         case "plan":
+          return null;
+        case "review":
+          return <ReviewRow item={item} key={item.id} />;
+        case "approval": {
+          const answerState = approvalAnswers[
+            approvalAnswerKey(item.sessionId ?? "", item.request.requestId)
+          ];
           return (
-            <PlanFileCard
-              availableModels={availableModels}
-              buildModel={buildModel}
-              canBuild={canBuildPlan}
-              creating={
-                matchedPlanCardIds.has(item.id) ||
-                (shouldFallbackToLatestPlanCard && latestPlanCardId === item.id)
-              }
+            <ApprovalCard
+              draft={answerState?.draft}
               item={item}
               key={item.id}
-              onBuild={onBuildPlan}
-              onOpenPlanFile={onOpenPlanFile}
-              onSetBuildModel={onSetBuildModel}
-              planTodos={planTodos}
+              onAnswer={onAnswer}
+              onDraftChange={onApprovalDraftChange}
+              submitting={answerState?.submitting}
             />
           );
-        case "approval":
-          return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
+        }
       }
     };
 
@@ -253,54 +335,77 @@ export function TranscriptView({
       if ("type" in item && item.type === "assistant-response-group") {
         const group = item as AssistantResponseGroup;
         const segments = partitionAssistantResponseGroup(group);
+        const isActiveGroup =
+          activeAssistantMessageId !== null &&
+          group.assistantMessageId === activeAssistantMessageId;
+        const lastContextGroupIndex = isActiveGroup
+          ? segments.reduce(
+              (lastIndex, segment, index) =>
+                segment.type === "context-group" ? index : lastIndex,
+              -1,
+            )
+          : -1;
         return (
           <Fragment key={`group-${group.assistantMessageId}`}>
             {group.preamble ? (
               <MessageBubble
                 item={group.preamble}
                 key={`${group.preamble.id}-preamble`}
+                mediaRoots={mediaRoots}
+                onOpenFile={onOpenFile}
+                onOpenLink={onOpenLink}
+                resolvePaths={resolvePaths}
+                onOpenImagePreview={onOpenImagePreview}
+                onRecover={onRecoverErrorTurn}
                 onRetry={onRetryUserMessage}
+                recoveryDisabled={busy}
+                onZoomImage={onZoomImage}
               />
             ) : null}
             {segments.map((segment, index) => {
+              const isActiveTailContextGroup = isActiveGroup && index === lastContextGroupIndex;
               if (segment.type === "action-tool") {
-                return (
-                  <ToolRow
-                    item={segment.tool}
-                    key={`group-action-${segment.tool.id}`}
-                    onOpenDiff={onOpenDiff}
-                    onOpenFile={onOpenFile}
-                  />
-                );
+                return renderTool(segment.tool, `group-action-${segment.tool.id}`);
               }
               const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
-              const renderableTools = segment.group.tools.filter(
-                (tool) => !isSuppressedPlanToolRow(tool),
-              );
-              if (renderableTools.length === 0 && !hasThinkingText) {
+              if (segment.group.tools.length === 0 && !hasThinkingText) {
                 return null;
               }
-              if (renderableTools.length === 1 && !hasThinkingText) {
+              if (
+                segment.group.tools.length === 1 &&
+                !hasThinkingText &&
+                toolCategory(segment.group.tools[0].toolName) !== "task" &&
+                !isActiveTailContextGroup
+              ) {
                 return (
                   <ToolRow
-                    item={renderableTools[0]}
-                    key={`group-context-standalone-${renderableTools[0].id}`}
+                    item={segment.group.tools[0]}
+                    key={`group-context-standalone-${segment.group.tools[0].id}`}
                     onOpenDiff={onOpenDiff}
+                    onOpenImagePreview={onOpenImagePreview}
                     onOpenFile={onOpenFile}
                   />
                 );
               }
+              const hasIncompleteTools = segment.group.tools.some(
+                (tool) => tool.status !== "complete",
+              );
               const isStreaming =
                 showProgress &&
-                (segment.group.thinking?.id === clusterLastThinkingId ||
-                  segment.group.tools.some((tool) => tool.status !== "complete"));
+                (hasIncompleteTools ||
+                  (segment.group.tools.length === 0 &&
+                    segment.group.thinking?.id === clusterLastThinkingId));
               return (
                 <ThinkingGroup
                   group={segment.group}
+                  isLive={isActiveTailContextGroup}
                   isStreaming={isStreaming}
                   key={`group-context-${group.assistantMessageId}-${index}`}
+                  mediaRoots={mediaRoots}
                   onOpenDiff={onOpenDiff}
+                  onOpenImagePreview={onOpenImagePreview}
                   onOpenFile={onOpenFile}
+                  onZoomImage={onZoomImage}
                 />
               );
             })}
@@ -310,57 +415,37 @@ export function TranscriptView({
 
       return renderTimelineItem(item as WebviewTimelineItem);
     };
-
-    const hasActiveThinking = clusterTimeline.some((item) => item.type === "thinking");
-    const hasRunningTool = clusterTimeline.some(
-      (item) => item.type === "tool" && item.status !== "complete",
-    );
-    const hasStreamingText = clusterTimeline.some(
-      (item) => item.type === "message" && item.kind === "assistant",
-    );
-    const hasTodos = Boolean(
-      selectActiveTodoSource({
-        busy,
-        planState,
-        planTodos,
-        sessionTodos,
-      })?.length,
-    );
     return (
       <>
         {grouped.map(renderGroupedItem)}
-        {showProgress ? (
-          <ProgressRow
-            busy={busy}
-            hasActiveThinking={hasActiveThinking}
-            hasRunningTool={hasRunningTool}
-            hasStreamingText={hasStreamingText}
-            hasTodos={hasTodos}
-          />
-        ) : null}
+        {showProgress ? <ProgressRow busy={showProgress} /> : null}
       </>
     );
   };
 
-  const leadingTimeline =
-    busy && latestUserIndex >= 0
-      ? renderedTimeline.slice(0, latestUserIndex + 1)
-      : renderedTimeline;
-  const liveClusterTimeline =
-    busy && latestUserIndex >= 0 ? renderedTimeline.slice(latestUserIndex + 1) : [];
+  const splitTimeline =
+    latestUserIndex >= 0 && (busy || latestUserIndex + 1 < renderedTimeline.length);
+  const leadingTimeline = splitTimeline
+    ? renderedTimeline.slice(0, latestUserIndex + 1)
+    : renderedTimeline;
+  const liveClusterTimeline = splitTimeline
+    ? renderedTimeline.slice(latestUserIndex + 1)
+    : [];
+  const showLiveCluster = splitTimeline;
 
   return (
     <section
       className="tc-transcript"
-      aria-label="active-session"
+      aria-label={t("chat.transcript")}
+      data-testid="transcript"
       ref={transcriptRef}
     >
       {renderCluster(leadingTimeline, false)}
-      {liveClusterTimeline.length ? (
+      {showLiveCluster ? (
         <div className="tc-live-cluster" data-testid="live-cluster">
-          {renderCluster(liveClusterTimeline, true)}
+          {renderCluster(liveClusterTimeline, busy)}
         </div>
-      ) : null}
+      ) : busy ? <ProgressRow busy /> : null}
       <div
         aria-hidden="true"
         className="tc-transcript__spacer"

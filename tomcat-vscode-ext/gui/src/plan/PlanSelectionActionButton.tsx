@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 interface FloatingPosition {
   left: number;
@@ -39,6 +40,7 @@ export function PlanSelectionActionButton({
 }: {
   onAdd(text: string): void;
 }) {
+  const t = useT();
   const [position, setPosition] = useState<FloatingPosition | null>(null);
   const textRef = useRef("");
 
@@ -98,7 +100,7 @@ export function PlanSelectionActionButton({
       style={{ left: position.left, top: position.top }}
       type="button"
     >
-      Add to Tomcat Chat
+      {t("plan.addSelection")}
     </button>
   );
 }

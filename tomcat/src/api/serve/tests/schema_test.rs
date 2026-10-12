@@ -12,6 +12,10 @@ fn serve_dts_emits_named_types_not_unknown() {
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("export interface WireModelView {"));
     assert!(dts.contains("export interface SetProviderKeyResponse {"));
+    assert!(dts.contains("export interface SetConnectorToolEnabledResponse {"));
+    assert!(dts.contains("configSaved: boolean;"));
+    assert!(dts.contains("runtimeApplied: boolean;"));
+
     assert!(dts.contains("export interface ProviderKeyView {"));
     assert!(dts.contains("export interface ListModelsPayload {"));
     assert!(!dts.contains("export type ServeCommand = unknown;"));
@@ -24,6 +28,11 @@ fn serve_dts_preserves_wire_event_session_id() {
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("sessionId?: null | string;"));
     assert!(dts.contains("type: \"agent_idle\";"));
+    assert!(dts.contains("type: \"sub_agent_start\";"));
+    assert!(dts.contains("subagentType: string;"));
+    assert!(dts.contains("type: \"background_task_finished\";"));
+    assert!(dts.contains("taskId: string;"));
+    assert!(dts.contains("exitCode: number;"));
     assert!(dts.contains("type: \"message_update\";"));
     assert!(dts.contains("type: \"message_start\";"));
     assert!(dts.contains("type: \"message_end\";"));
@@ -48,6 +57,10 @@ fn serve_dts_includes_user_message_id_on_message_params() {
     assert!(dts.contains("export interface ServeMessageParams {"));
     assert!(dts.contains("segments?: ServeContentSegment[];"));
     assert!(dts.contains("userMessageId?: null | string;"));
+    assert!(dts.contains("onlyIfRunning?:"));
+    assert!(dts.contains("type: \"steering_consumed\";"));
+    assert!(dts.contains("userMessageIds: string[];"));
+    assert!(dts.contains("outcome: AgentIdleOutcome;"));
 }
 
 #[test]
@@ -58,6 +71,7 @@ fn serve_dts_includes_checkpoint_commands() {
     assert!(dts.contains("checkpointId: string;"));
     assert!(dts.contains("revertFiles: boolean;"));
     assert!(dts.contains("dryRun?: boolean | null;"));
+    assert!(dts.contains("type: \"compact\";"));
 }
 
 #[test]
@@ -73,21 +87,44 @@ fn serve_dts_includes_context_reference_types() {
 }
 
 #[test]
+fn serve_dts_includes_plan_code_review_findings() {
+    let dts = serve_dts();
+    assert!(dts.contains("export interface ServeFinding {"));
+    assert!(dts.contains("type: \"plan.review.started\";"));
+    assert!(dts.contains("type: \"plan.code_review.started\";"));
+    assert!(dts.contains("transcriptPath?: null | string;"));
+    assert!(dts.contains("reviewAttemptId?: null | string;"));
+    assert!(dts.contains("toolCallId?: null | string;"));
+    assert!(dts.contains("type: \"plan.explorer.started\";"));
+    assert!(dts.contains("taskId?: null | string;"));
+    assert!(dts.contains("type: \"plan.code_review\";"));
+    assert!(dts.contains("changesSummary?: null | string;"));
+    assert!(dts.contains("skipReason?: null | string;"));
+    assert!(dts.contains("findings?: ServeFinding[] | null;"));
+    assert!(dts.contains("rounds?: null | number;"));
+}
+
+#[test]
 fn build_schema_bundle_includes_wire_event() {
     let value = serde_json::to_value(build_schema_bundle()).expect("serialize schema bundle");
     assert!(value.get("wire_event").is_some(), "wire_event root missing");
+    assert!(
+        value.get("set_connector_tool_enabled_response").is_some(),
+        "single-tool response root missing"
+    );
 }
 
 #[test]
 fn serve_emitted_event_validates_against_generated_schema() {
     let bundle = build_schema_bundle();
     let bundle_value = serde_json::to_value(&bundle).expect("serialize schema bundle");
-    let schema = bundle_value
+    let wire_schema = bundle_value
         .get("wire_event")
         .cloned()
         .expect("wire_event schema should exist");
-    let validator = jsonschema::validator_for(&schema).expect("compile wire event schema");
-    let samples = vec![
+    let wire_validator =
+        jsonschema::validator_for(&wire_schema).expect("compile wire event schema");
+    let wire_samples = vec![
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::MessageUpdate {
@@ -115,6 +152,7 @@ fn serve_emitted_event_validates_against_generated_schema() {
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::ToolExecutionEnd {
+                media: Vec::new(),
                 tool_call_id: "call_1".to_string(),
                 tool_name: "ask_question".to_string(),
                 result: ToolOutput(json!({"cancelled": true})),
@@ -128,6 +166,7 @@ fn serve_emitted_event_validates_against_generated_schema() {
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::ToolExecutionEnd {
+                media: Vec::new(),
                 tool_call_id: "call_2".to_string(),
                 tool_name: "write".to_string(),
                 result: ToolOutput(json!({"path": "demo.txt"})),
@@ -140,15 +179,19 @@ fn serve_emitted_event_validates_against_generated_schema() {
                             tag: crate::core::tools::primitive::DiffTag::Ctx,
                             old_line: Some(1),
                             new_line: Some(1),
+                            skipped_lines: None,
                             text: "before".to_string(),
                         },
                         crate::core::tools::primitive::FileDiffLine {
                             tag: crate::core::tools::primitive::DiffTag::Add,
                             old_line: None,
                             new_line: Some(2),
+                            skipped_lines: None,
                             text: "after".to_string(),
                         },
                     ]),
+                    diff_truncated: false,
+                    expired: false,
                 }),
                 is_error: false,
             },
@@ -167,17 +210,95 @@ fn serve_emitted_event_validates_against_generated_schema() {
         .expect("agent_end sample"),
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
-            event: AgentEvent::AgentIdle,
+            event: AgentEvent::AgentIdle {
+                outcome: crate::infra::events::AgentIdleOutcome::Completed,
+            },
         })
         .expect("agent_idle sample"),
+        serde_json::to_value(WireEvent {
+            session_id: Some("s1".to_string()),
+            event: AgentEvent::SubAgentStart {
+                parent_session_id: "parent-1".to_string(),
+                child_session_id: "child-code-reviewer-1".to_string(),
+                subagent_type: "code_reviewer".to_string(),
+                spawn_depth: 1,
+            },
+        })
+        .expect("sub_agent_start sample"),
     ];
 
-    for sample in samples {
+    for sample in wire_samples {
         assert!(
-            validator.is_valid(&sample),
+            wire_validator.is_valid(&sample),
             "sample should validate against generated schema: {sample}"
         );
     }
+
+    let out_frame_schema = bundle_value
+        .get("out_frame")
+        .cloned()
+        .expect("out_frame schema should exist");
+    let out_frame_validator =
+        jsonschema::validator_for(&out_frame_schema).expect("compile out_frame schema");
+    let started_frame_sample = serde_json::to_value(OutFrame::Event(
+        serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanCodeReviewStarted {
+            session_id: Some("s1".to_string()),
+            plan_id: Some("plan-1".to_string()),
+            round: Some(1),
+            review_attempt_id: Some("plan-1:1".to_string()),
+            tool_call_id: Some("tc-update".to_string()),
+            child_session_id: Some("code-reviewer-child".to_string()),
+            transcript_path: Some("subagent-sessions/code-reviewer-child.jsonl".to_string()),
+        }))
+        .expect("serialize plan.code_review.started event"),
+    ))
+    .expect("out_frame plan.code_review.started sample");
+    assert!(
+        out_frame_validator.is_valid(&started_frame_sample),
+        "plan.code_review.started out_frame should validate: {started_frame_sample}"
+    );
+    let out_frame_sample = serde_json::to_value(OutFrame::Event(
+        serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanCodeReview {
+            session_id: Some("s1".to_string()),
+            plan_id: Some("plan-1".to_string()),
+            summary: Some("review found one issue".to_string()),
+            aborted: Some(false),
+            verdict: Some("fail".to_string()),
+            changes_summary: Some("none".to_string()),
+            findings: Some(vec![ServeFinding {
+                severity: "concern".to_string(),
+                area: "logic".to_string(),
+                note: "missing guard".to_string(),
+            }]),
+            rounds: Some(1),
+            round: Some(1),
+            review_attempt_id: Some("plan-1:1".to_string()),
+            tool_call_id: Some("tc-update".to_string()),
+            child_session_id: Some("code-reviewer-child".to_string()),
+            skip_reason: None,
+        }))
+        .expect("serialize plan.code_review event"),
+    ))
+    .expect("out_frame plan.code_review sample");
+    assert!(
+        out_frame_validator.is_valid(&out_frame_sample),
+        "plan.code_review out_frame should validate: {out_frame_sample}"
+    );
+    let stalled_frame = serde_json::to_value(OutFrame::Event(
+        serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanStalled {
+            session_id: Some("s1".to_string()),
+            plan_id: Some("plan-1".to_string()),
+            reason: Some("idle_nudges".to_string()),
+            idle_nudges: Some(2),
+            remaining_work: Some(vec!["- t1 (pending)".to_string()]),
+        }))
+        .expect("serialize plan.stalled event"),
+    ))
+    .expect("out_frame plan.stalled sample");
+    assert!(
+        out_frame_validator.is_valid(&stalled_frame),
+        "plan.stalled out_frame should validate: {stalled_frame}"
+    );
 }
 
 #[test]

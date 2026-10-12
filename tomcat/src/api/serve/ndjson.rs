@@ -6,8 +6,12 @@ use serde_json::Value;
 use crate::AppError;
 
 pub fn ndjson_safe_stringify<T: Serialize>(value: &T) -> Result<String, AppError> {
-    let json = serde_json::to_string(value)
-        .map_err(|error| AppError::Config(format!("serialize ndjson frame failed: {error}")))?;
+    let json = serde_json::to_string(value).map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "serve.frameSerialize",
+            &[("detail", &error.to_string())],
+        ))
+    })?;
     Ok(json
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029"))

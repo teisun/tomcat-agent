@@ -77,7 +77,7 @@ pub struct PlanConfig {
     /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
     #[serde(default = "default_plan_max_review_rounds")]
     pub max_review_rounds: u32,
-    /// EXEC 完成前 code reviewer 的最大尝试轮次。默认 1；0 表示直接跳过 code review。
+    /// EXEC 完成前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
     #[serde(default = "default_plan_max_code_review_rounds")]
     pub max_code_review_rounds: u32,
     /// Verifier gate 模式：`soft`（默认，FAIL 仅 advisory）或 `gate`（FAIL 阻止 completed）。
@@ -94,7 +94,8 @@ fn default_plan_max_review_rounds() -> u32 {
 }
 
 fn default_plan_max_code_review_rounds() -> u32 {
-    1
+    // 首轮找问题，预留三次真实修复后的核销机会。
+    4
 }
 
 fn default_plan_verify_gate() -> String {
@@ -109,29 +110,6 @@ impl Default for PlanConfig {
             max_review_rounds: default_plan_max_review_rounds(),
             max_code_review_rounds: default_plan_max_code_review_rounds(),
             verify_gate: default_plan_verify_gate(),
-        }
-    }
-}
-
-/// `[ask_question]` 子表：`ask_question` 工具运行时参数。
-///
-/// env 覆盖：
-/// - `TOMCAT_ASK_QUESTION_TIMEOUT_MS` → `timeout_ms`
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AskQuestionConfig {
-    /// 一次 ask_question 调用等待用户输入的墙钟超时（毫秒）。0 表示无超时。默认 300_000 ms = 5 min。
-    #[serde(default = "default_ask_question_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-fn default_ask_question_timeout_ms() -> u64 {
-    0
-}
-
-impl Default for AskQuestionConfig {
-    fn default() -> Self {
-        Self {
-            timeout_ms: default_ask_question_timeout_ms(),
         }
     }
 }

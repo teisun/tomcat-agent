@@ -21,6 +21,19 @@ fn security_config_default() {
 }
 
 #[test]
+fn mcp_runtime_defaults_and_partial_toml() {
+    let defaults = AppConfig::default().connector.mcp;
+    assert_eq!(defaults.startup_timeout_ms, 30_000);
+    assert_eq!(defaults.call_timeout_ms, 120_000);
+    assert_eq!(defaults.max_concurrent_calls, 16);
+
+    let cfg: AppConfig = toml::from_str("[connector.mcp]\ncall_timeout_ms = 90000\n").unwrap();
+    assert_eq!(cfg.connector.mcp.call_timeout_ms, 90_000);
+    assert_eq!(cfg.connector.mcp.startup_timeout_ms, 30_000);
+    assert_eq!(cfg.connector.mcp.max_concurrent_calls, 16);
+}
+
+#[test]
 fn deserialize_security_config_uses_default_helpers() {
     let s = r#"{"security":{}}"#;
     let cfg: AppConfig = serde_json::from_str(s).unwrap();
@@ -31,7 +44,7 @@ fn deserialize_security_config_uses_default_helpers() {
 #[test]
 fn app_config_includes_context() {
     let cfg = AppConfig::default();
-    assert_eq!(cfg.context.context_window, 400_000);
+    assert_eq!(cfg.context.context_window_fallback, 400_000);
     assert_eq!(cfg.context.resume_hydration_mode, ResumeHydrationMode::Auto);
     assert_eq!(cfg.context.resume_lazy_threshold, 2_000);
 }
@@ -61,12 +74,6 @@ fn plugin_config_defaults_are_wired_into_app_config() {
     assert_eq!(cfg.plugin.interrupt_budget, 5_000_000);
     assert_eq!(cfg.plugin.event_channel_capacity, 64);
     assert_eq!(cfg.plugin.idle_ttl_ms, 5 * 60 * 1000);
-}
-
-#[test]
-fn ask_question_timeout_defaults_to_no_timeout() {
-    let cfg = AppConfig::default();
-    assert_eq!(cfg.ask_question.timeout_ms, 0);
 }
 
 #[test]

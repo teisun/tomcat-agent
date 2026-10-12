@@ -104,16 +104,17 @@ pub fn missing_key_message(
         .map(str::trim)
         .filter(|env| !env.is_empty() && *env != inferred_env)
     {
-        Some(fallback) => format!(
-            "未找到 provider=`{}` 的凭证，请设置 `{}`（或兼容回退 `{}`）。",
-            provider.trim(),
-            inferred_env,
-            fallback
+        Some(fallback) => crate::infra::i18n::tr(
+            "model.missingKeyFallback",
+            &[
+                ("provider", provider.trim()),
+                ("name", inferred_env),
+                ("fallback", fallback),
+            ],
         ),
-        None => format!(
-            "未找到 provider=`{}` 的凭证，请设置 `{}`。",
-            provider.trim(),
-            inferred_env
+        None => crate::infra::i18n::tr(
+            "model.missingKey",
+            &[("provider", provider.trim()), ("name", inferred_env)],
         ),
     }
 }

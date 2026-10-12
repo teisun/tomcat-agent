@@ -3,6 +3,8 @@
 本文是 **tomcat Skill 系统** 的技术方案（OpenSpec **架构子系统类**：`docs/architecture/`，与 `plan-runtime.md` / `plugin-system-overview.md` 同级）。Skill 系统跨 `core/skill`（新模块）、`core/llm/system_prompt`、`core/tools/contract/catalog`、`core/agent_loop/tool_exec`、`infra/config` 五处一级落点，触发 `[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)` §1 第 1/2/3 条「跨 ≥2 子目录 + 新增工具/事件契约 + 新生命周期」，故单开一份架构文档。
 
 > **安装入口补充（T2-P1-017 PackageManager）**：skill 仍然只通过三层磁盘根被发现，但现在除了手工把 `SKILL.md` 放进目录外，也支持走统一安装入口：shell 用 `tomcat install <source>` / `tomcat uninstall <package>` / `tomcat packages`，会话内用 `/install <source> [current-project|agent|global]`。`current-project` 只是 UI 标签，内部仍映射到 `scope`。code/claw 当前会话里的 `/install` 成功后会自动 `reload_skill_set()`，让新装的 skill 立即进入当前 `SkillSet`；这一步只刷新发现结果，不赋予 skill 额外权限。
+> **当前实现（2026-09）**：项目层不再硬编码 `.tomcat`。它由 `workspace.project_resource_dir` 决定，默认是 `.agents`，例如 `<project>/.agents/skills`。值必须是项目内的单个安全目录名；旧 `.tomcat` 资源目录不会被新代码写入。内置 `skill-creator` 与 `plugin-creator` 是 Managed（全局托管）技能，源文件在 `tomcat/assets/skills/`，不写项目目录。
+
 
 ---
 
@@ -191,7 +193,7 @@ run_loop      discovery task(后台)   skill::catalog      system_prompt        
  ▼ 用户首条消息 → 构造首轮 prompt        │                  │                 │
  │ await JoinHandle ────────────────────▶│ (未完成则阻塞一次)│                 │
  │◀──────────────── SkillSet ────────────│                  │                 │
- │ build_system_prompt_with_state(.., skills=SkillSet)      │                 │
+ │ build_prompt_snapshot(.., SkillSet)                      │                 │
  │─────────────────────────────────────────────────────────▶│ AvailableSkills │
  │                  │                    │  render_available_skills_block(budget)
  │                  │                    │                  │ <available_skills>
@@ -484,7 +486,7 @@ sequenceDiagram
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
 | **PR-SK-A**（类型 + 配置）       | **交付物**：`Skill` / `SkillFrontmatter` / `SkillSource` 类型；`ALLOWED_SKILL_FRONTMATTER` 白名单；`SkillsConfig` 子表 + env。**落地点**：`core/skill` 新模块骨架、`AppConfig.skills`                                                                   | 新 `src/core/skill/{mod,model,frontmatter}.rs`；`src/infra/config/types/skills.rs` + `src/infra/config/types/mod.rs` 的 `AppConfig` 加 `skills` 字段                                                                                                                                                                                                     | `core::skill::tests::frontmatter_test::parse_requires_name_and_description`、`unknown_keys_ignored`、`infra::config::tests::skills_cfg_test::skills_toml_override`（**PASS，2026-06-07**）                                                  | 先把结构和开关放好，后面接发现不改字面量。           |
 | **PR-SK-D**（发现 + 去重）       | **交付物**：`skill_roots()` 三层扫描；frontmatter 解析；同名 first-wins + `diagnostics`/`warnings`；`SkillSet` 索引。**落地点**：`core/skill/discovery.rs`、`catalog.rs`                                                                               | 新 `src/core/skill/{discovery,catalog}.rs`；复用 `infra/config/load.rs` 的 `get_work_dir` + 当前 `agentId` 拼 P0 `<cwd>/.tomcat/skills`、P1 `~/.tomcat/agents/<id>/skills`、P2 `~/.tomcat/skills`                                                                                                                                                  | `core::skill::tests::discovery_test::skill_roots_follow_project_agent_managed_order`、`discover_prefers_higher_priority_same_name`、`discover_keeps_diagnostics_for_bad_skill_without_blocking_good_ones`（**PASS，2026-06-07**）                                                                                           | 从三层根扫出技能、撞名去重、坏的跳过不崩。           |
-| **PR-SK-P**（prompt 注入）     | **交付物**：`AvailableSkillsSection`（priority 35）；`<available_skills>` 渲染 + 字符预算 + 单条 250 字截断；新 `PromptKey::SystemAvailableSkills` + 模板。**落地点**：`system_prompt.rs`、`prompts/mod.rs`                                                 | `[src/core/llm/system_prompt.rs](../../src/core/llm/system_prompt.rs)`（加 section + `build_system_prompt_with_state` 注册）、`[src/core/prompts/mod.rs](../../src/core/prompts/mod.rs)`:8（加 `PromptKey`）+ `templates/system/available_skills.txt`；`catalog.rs::render_available_skills_block`                                                           | `core::llm::tests::system_prompt_test::available_skills_section_renders_metadata_only`、`skills_prompt_truncates_at_budget`、`disabled_skill_absent_from_prompt`（**PASS，2026-06-07**）                                                                                | 把「有哪些技能」按预算注入系统提示，正文不进。         |
+| **PR-SK-P**（prompt 注入）     | **交付物**：`AvailableSkillsSection`（priority 35）；`<available_skills>` 渲染 + 字符预算 + 单条 250 字截断；新 `PromptKey::SystemAvailableSkills` + 模板。**落地点**：`system_prompt.rs`、`prompts/mod.rs`                                                 | `[src/core/llm/system_prompt.rs](../../src/core/llm/system_prompt.rs)`（加 section + `SystemPromptSnapshot` 装配）、`[src/core/prompts/mod.rs](../../src/core/prompts/mod.rs)`:8（加 `PromptKey`）+ `templates/system/available_skills.txt`；`catalog.rs::render_available_skills_block`                                                           | `core::llm::tests::system_prompt_test::available_skills_section_renders_metadata_only`、`skills_prompt_truncates_at_budget`、`disabled_skill_absent_from_prompt`（**PASS，2026-06-07**）                                                                                | 把「有哪些技能」按预算注入系统提示，正文不进。         |
 | **PR-SK-T**（load_skill 工具） | **交付物**：`BUILTIN_TOOL_CATALOG` 加 `load_skill` 条目（schema `{name, file?}`）；`tool_exec` match 增一臂；按名解析 + 过 gate 读正文 + `<skill>` 包裹；reviewer/verifier guard 默认拒。**落地点**：`contract/catalog.rs`、`tool_exec/{mod,guard}.rs` + 新 branch | `[src/core/tools/contract/catalog.rs](../../src/core/tools/contract/catalog.rs)`:91（加条目 + `load_skill_parameters`）、`[src/core/agent_loop/tool_exec/mod.rs](../../src/core/agent_loop/tool_exec/mod.rs)`:311（match 增臂）+ 新 `tool_exec/branches/load_skill.rs` + `branches/mod.rs` 注册、`[guard.rs](../../src/core/agent_loop/tool_exec/guard.rs)`:3,29 | `core::tools::contract::tests::catalog_test::load_skill_registered`、`core::agent_loop::tests::submodules_test::tool_exec_load_skill_resolves_by_name`、`tool_exec_load_skill_rejected_for_reviewer`、`tool_exec_load_skill_unknown_name_errors`（**PASS，2026-06-07**） | 模型报技能名 → 工具调出正文；审查子 Agent 默认禁用。 |
 | **PR-SK-B**（官方资产 + init，下期） | **交付物**：官方 skill 文件放 `tomcat/assets/skills/`，编译嵌入 `.rs`；`tomcat init` 将其写入 `~/.tomcat/skills/`（P2 Managed）并在当前 project 生成 `.tomcat/skills/` 样例。**本期不做，放下期。** **落地点**：`tomcat/assets/skills/`、`core/skill/embedded_assets.rs`、`api/cli` init | 新 `tomcat/assets/skills/**/SKILL.md`；新 `src/core/skill/embedded_assets.rs`（编译期嵌入 / 列表）+ `tomcat init` 资产释放 / 同步到 `~/.tomcat/skills/`                                                                                                                                         | `core::skill::embedded_assets::tests::assets_embedded`、`api::cli::tests::init_test::embedded_skills_written_to_managed_dir`、`core::skill::discovery::tests::project_skill_dir_highest_precedence`（**PENDING**）                                               | 官方内置 skill 方案定了，但实现放下期。        |
 | **PR-SK-C**（命令面） | **交付物**：聊天内斜杠 `/skill list\|reload\|use <name> "intent..."`（统一单数 `skill`）；外层 CLI `tomcat skill list\|reload`（只读发现 / 重扫 + 诊断）。`reload` 重跑发现任务原子替换 `SkillSet`；`use <name> "intent..."` 注入当前轮（含 `disable_model_invocation`）。**落地点**：`api/chat/commands`、`api/cli` | `src/api/chat/commands/parse.rs`（`parse_chat_command` 白名单加 `/skill` + 子命令解析，仿 `/model use`）+ 新 `commands/cmd_skill.rs`；`src/api/cli/mod.rs`（`Commands` 加 `Skill{sub: SkillSub{List,Reload}}`，仿 `Plugin`）+ 新 `cli/skill_cmd.rs` | `api::chat::commands::tests::parse_test::skill_use_list_reload_parsed`、`api::cli::tests::parse_cli_test::skill_subcommand_parsed`（**PENDING**） | 列表/重载/手动调技能，斜杠与 `tomcat` 外层同名。 |
@@ -534,7 +536,7 @@ roots (按优先级 P0→P2): [Project, Agent, Managed]
 - **交付**：`AvailableSkillsSection: SystemPromptSection`（`priority()=35`，落在工具说明与后台 shell 说明之后、工作区状态之前），仅在「`load_skill` 工具对当前模式可用且 `SkillSet` 非空」时渲染非空；`render_available_skills_block(skills, budget)` 过滤 `disable_model_invocation`、累加字符到预算即停。模板新增 `PromptKey::SystemAvailableSkills`（`prompts/mod.rs` 加枚举臂 + `include_str!`）。
 
 ```text
-SystemPromptBuilder::default() / build_system_prompt_with_state
+SystemPromptSnapshot / SystemPromptBuilder::default()
    │ register(AvailableSkillsSection{skills})  // priority 35
    ▼
  render(): catalog::render_available_skills_block(&skills, budget=max(floor, ctx_chars×pct%))
@@ -628,7 +630,7 @@ pub struct SkillFrontmatter {
 | 字段                         | YAML 类型           | 必填    | 默认      | 适用场景                   | 说明                                                              | 说人话              |
 | -------------------------- | ----------------- | ----- | ------- | ---------------------- | --------------------------------------------------------------- | ---------------- |
 | `name`                     | string            | **是** | —       | 技能身份                   | `[a-z0-9-]+`，≤64 字；唯一性见文首导读 D 状态机（发现去重）；缺失 → 跳过 + diagnostic              | 技能的唯一名字。         |
-| `description`              | string            | **是** | —       | 进 `<available_skills>` | ≤1024 字（prompt 中再按 250 截断）；缺失 → 跳过 + diagnostic                 | 一句话说清这技能干嘛、何时用。  |
+| `description`              | string            | **是** | —       | 进 `<available_skills>` | ≤1024 UTF-8 bytes（与整个 header 的独立 4096-byte 上限分开；prompt 中再按 250 字符截断）；缺失 → 跳过 + diagnostic                 | 一句话说清这技能干嘛、何时用。  |
 | `license`                  | string            | 否     | null    | 元信息                    | 仅记录，不影响装载                                                       | 许可证，存着备查。        |
 | `compatibility`            | string            | 否     | null    | 元信息                    | 仅记录                                                             | 兼容性说明。           |
 | `metadata`                 | map               | 否     | `{}`    | 扩展位                    | 透传保存，未来扩展（emoji/tags 等）                                         | 自定义附加信息。         |
@@ -755,7 +757,7 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 ┌──────────────────────────────────────┐   ┌──────────────────────────────────────┐
 │ src/core/llm/system_prompt.rs        │   │ src/core/tools/contract/catalog.rs    │
 │ • AvailableSkillsSection(priority 35)│   │ • BUILTIN_TOOL_CATALOG 加 "load_skill"│
-│ • build_system_prompt_with_state 注册│   │ • load_skill_parameters(): {name,file?}│
+│ • SystemPromptSnapshot 装配         │   │ • load_skill_parameters(): {name,file?}│
 │ src/core/prompts/mod.rs:8            │   └───────────────────┬──────────────────┘
 │ • PromptKey::SystemAvailableSkills   │                       │
 │ • templates/system/available_skills  │                       ▼
@@ -801,14 +803,14 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 | `tomcat.config.toml` | `[skills] max_description_chars`     | 单条描述截断                            | config      | 默认 250。   |
 | `tomcat.config.toml` | `[skills] disabled`                | 按名拉黑技能                              | config      | 临时禁某几条。   |
 | `tomcat.config.toml` | `[skills] expose_to_reviewer`      | reviewer/verifier 是否可用 `load_skill` | config      | 默认 false。 |
-| 磁盘 P0              | `<agent_workspace_dir>/.tomcat/skills/` | 当前 project 本地技能（最高优先级）              | —           | 当前仓库自己写的技能。 |
+| 磁盘 P0              | `<agent_workspace_dir>/.agents/skills/` | 当前 project 本地技能（最高优先级）              | —           | 当前仓库自己写的技能。 |
 | 磁盘 P1              | `~/.tomcat/agents/<agentId>/skills/` | 当前 agent 专属技能                         | —           | 绑定 agent 的技能。 |
 | 磁盘 P2              | `~/.tomcat/skills/`                | 全局托管技能（Gateway 安装）                  | —           | 集中管理的技能。  |
 | 编译期资产源           | `tomcat/assets/skills/`             | 官方内置 skill 文件源（编译期）                  | build/init  | 不是发现根；`tomcat init` 写入 P2 Managed。 |
 
 
 > **技能不读 env override 正文**：与 `prompts/mod.rs` 同口径，`SKILL.md` 正文从磁盘读但不支持 env 注入；env 仅控制开关 / 预算 / 路径。
-> **能否「纯配置接入新技能」**：能——往当前 project 的 `.tomcat/skills/<name>/SKILL.md` 放一个文件即可，无需改码（与「新增工具要改 `catalog.rs`」不同）。这是技能相对内置工具的核心扩展性优势。
+> **能否「纯配置接入新技能」**：能——往当前 project 的 `.agents/skills/<name>/SKILL.md` 放一个文件即可，无需改码（与「新增工具要改 `catalog.rs`」不同）。这是技能相对内置工具的核心扩展性优势。
 
 ## 8. 错误模型 / 截断 / 警告
 

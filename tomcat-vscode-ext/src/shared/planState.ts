@@ -1,17 +1,18 @@
 import type { ServePlanEvent } from "../serveClient/wire";
+import { t } from "./i18n";
 
-export type ParticipantPlanState =
-  | "chat"
+export type WebviewPlanFileState =
   | "planning"
   | "executing"
   | "pending"
   | "completed";
 
-export function normalizePlanState(
+export type WebviewAgentMode = "chat" | "plan";
+
+export function normalizePlanFileState(
   value: unknown,
-): ParticipantPlanState | null {
+): WebviewPlanFileState | null {
   switch (value) {
-    case "chat":
     case "planning":
     case "executing":
     case "pending":
@@ -22,31 +23,29 @@ export function normalizePlanState(
   }
 }
 
-export function planStateProgressLabel(
-  state: ParticipantPlanState | null,
+export function planFileStateProgressLabel(
+  state: WebviewPlanFileState | null,
   planId?: string | null,
 ): string {
   const suffix = planId ? ` (${planId})` : "";
   switch (state) {
     case "planning":
-      return `Tomcat plan mode${suffix}`;
+      return t("plan.progress.planning", { suffix });
     case "executing":
-      return `Tomcat executing plan${suffix}`;
+      return t("plan.progress.executing", { suffix });
     case "pending":
-      return `Tomcat plan pending${suffix}`;
+      return t("plan.progress.pending", { suffix });
     case "completed":
-      return `Tomcat completed plan${suffix}`;
-    case "chat":
-      return "Tomcat chat mode";
+      return t("plan.progress.completed", { suffix });
     default:
-      return "Tomcat plan state updated";
+      return t("plan.progress.updated");
   }
 }
 
 export function planEventState(
   event: ServePlanEvent,
-): ParticipantPlanState | null {
-  const explicit = normalizePlanState(
+): WebviewPlanFileState | null {
+  const explicit = normalizePlanFileState(
     "state" in event ? event.state : undefined,
   );
   if (explicit) {
@@ -59,13 +58,11 @@ export function planEventState(
     case "plan.complete":
       return "completed";
     case "plan.pending":
+    case "plan.stalled":
       return "pending";
-    case "plan.enter":
     case "plan.create":
     case "plan.update":
       return "planning";
-    case "plan.exit":
-      return "chat";
     default:
       return null;
   }

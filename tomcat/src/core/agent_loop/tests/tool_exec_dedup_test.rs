@@ -64,6 +64,11 @@ fn make_tc(args_json: &str) -> ToolCallInfo {
 /// 写入新内容 + 显式 set_modified，避免 fs 缓存或同秒 mtime 假命中。
 fn bump_mtime(path: &std::path::Path) {
     std::fs::write(path, b"changed-content\n").expect("rewrite file");
+    touch_mtime(path);
+}
+
+/// 保持文件字节不变，只让 mtime 失配。
+fn touch_mtime(path: &std::path::Path) {
     let new_t = SystemTime::now() + Duration::from_secs(2);
     if let Ok(file) = std::fs::File::open(path) {
         let _ = file.set_modified(new_t);
@@ -116,9 +121,127 @@ async fn tool_exec_read_second_call_returns_unchanged_stub() {
 
     let (second, err2, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!err2, "second read should not flag is_error");
-    assert_eq!(
-        second, FILE_UNCHANGED_STUB,
-        "second identical read must return the FILE_UNCHANGED stub verbatim"
+    assert!(
+        second.starts_with(FILE_UNCHANGED_STUB),
+        "second identical read must return the FILE_UNCHANGED stub, got {second:?}"
+    );
+    assert!(
+        second.contains("earlier read covered L1-2"),
+        "命中要写清是被哪一段覆盖的，否则窄窗口请求无从确认: {second:?}"
+    );
+    assert!(
+        second.contains("call read with line_numbers or hashline"),
+        "dedup stub should explain how to request another rendering without mutating the file: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_exec_read_state_is_independent_per_subagent() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("independent-state.txt");
+    std::fs::write(&file, b"shared source\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let agent_a_state = Arc::new(ReadFileState::new());
+    let agent_b_state = Arc::new(ReadFileState::new());
+    let call = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":false}}"#,
+        file.to_string_lossy()
+    ));
+
+    let (first_a, first_a_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&agent_a_state), &call).await;
+    assert!(!first_a_error, "{first_a}");
+    let (second_a, second_a_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&agent_a_state), &call).await;
+    assert!(!second_a_error, "{second_a}");
+    assert!(
+        second_a.starts_with(FILE_UNCHANGED_STUB),
+        "the same subagent may deduplicate its own repeated read: {second_a:?}"
+    );
+
+    let (first_b, first_b_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&agent_b_state), &call).await;
+    assert!(!first_b_error, "{first_b}");
+    assert!(
+        first_b.contains("shared source") && !first_b.starts_with(FILE_UNCHANGED_STUB),
+        "a second subagent needs an independent first read: {first_b:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_exec_read_line_numbers_then_hashline_refetches_for_edit_anchors() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("render-mode.txt");
+    std::fs::write(&file, b"alpha\nbeta\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let line_numbers = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (first, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &line_numbers).await;
+    assert!(!first_error, "{first}");
+    assert!(
+        first.contains("\talpha"),
+        "first read must use cat-n line numbers: {first:?}"
+    );
+
+    let hashline = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":false,"hashline":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (second, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &hashline).await;
+    assert!(!second_error, "{second}");
+    assert!(
+        second.contains("#") && second.contains(":alpha"),
+        "a hashline request after line numbers must refetch hash anchors: {second:?}"
+    );
+    assert!(
+        !second.contains(FILE_UNCHANGED_STUB),
+        "a different render mode cannot be short-circuited: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_exec_read_hashline_then_line_numbers_refetches_for_plain_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("reverse-render-mode.txt");
+    std::fs::write(&file, b"alpha\nbeta\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let hashline = make_tc(&format!(
+        r#"{{"path":{:?},"hashline":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (first, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &hashline).await;
+    assert!(!first_error, "{first}");
+    assert!(
+        first.contains("#") && first.contains(":alpha"),
+        "first read must use hashline rendering: {first:?}"
+    );
+
+    let line_numbers = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (second, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &line_numbers).await;
+    assert!(!second_error, "{second}");
+    assert!(
+        second.contains("\talpha"),
+        "a line-number request after hashline must refetch cat-n text: {second:?}"
+    );
+    assert!(
+        !second.contains(FILE_UNCHANGED_STUB),
+        "a different render mode cannot be short-circuited: {second:?}"
     );
 }
 
@@ -251,7 +374,7 @@ async fn tool_exec_read_state_clear_resets_dedup() {
 // ─── PR-RJ T3-c：read 命中 image / pdf → follow_up_parts 注入下一条 user 消息 ──
 
 #[tokio::test]
-async fn tool_exec_image_result_injects_into_next_user_message_parts() {
+async fn tool_exec_image_result_returns_tool_parts() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let png_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -267,7 +390,7 @@ async fn tool_exec_image_result_injects_into_next_user_message_parts() {
         execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "image read should succeed");
     assert!(
-        msg.contains("Image saved as next user input"),
+        msg.contains("[Image attached]"),
         "tool message should be a placeholder, got: {:?}",
         msg
     );
@@ -289,7 +412,7 @@ async fn tool_exec_image_result_injects_into_next_user_message_parts() {
 }
 
 #[tokio::test]
-async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
+async fn tool_exec_pdf_result_returns_tool_parts() {
     use base64::Engine;
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
@@ -312,7 +435,7 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
         execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "pdf read should succeed");
     assert!(
-        msg.contains("PDF attached as next user input"),
+        msg.contains("[PDF attached]"),
         "tool message should be a placeholder, got: {:?}",
         msg
     );
@@ -330,11 +453,11 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
 }
 
 #[tokio::test]
-async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
+async fn tool_exec_pdf_over_inline_limit_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let pdf = dir_path.join("oversize.pdf");
-    write_fake_pdf(&pdf, 11 * 1024 * 1024);
+    write_fake_pdf(&pdf, crate::core::llm::FILE_MAX_BYTES + 1);
 
     let primitive = make_executor(&dir_path);
     let state = Arc::new(ReadFileState::new());
@@ -347,15 +470,15 @@ async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
         "without files runtime, oversize pdf must fail by policy"
     );
     assert!(
-        msg.contains("requires OpenAI Files upload"),
-        "should guide to Files upload path, got: {:?}",
+        msg.contains("FILE_MAX_BYTES"),
+        "should clearly report the inline bound, got: {:?}",
         msg
     );
     assert!(follow_ups.is_empty());
 }
 
 #[tokio::test]
-async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
+async fn tool_exec_pdf_ignores_cached_file_id_and_stays_inline() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let pdf = dir_path.join("oversize.pdf");
@@ -411,16 +534,16 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
         "with runtime + cached file_id, oversize should succeed; msg={:?}",
         msg
     );
-    assert!(msg.contains("PDF attached as next user input"));
+    assert!(msg.contains("[PDF attached]"));
     assert_eq!(follow_ups.len(), 1);
     match &follow_ups[0] {
         crate::core::llm::ChatMessageContentPart::InputFile {
-            source: crate::core::llm::FileSource::Uploaded(uploaded),
+            source: crate::core::llm::FileSource::Inline(inline),
         } => {
-            assert_eq!(uploaded.file_id, "file-cached-pdf");
-            assert_eq!(uploaded.filename.as_deref(), Some("oversize.pdf"));
+            assert_eq!(inline.filename, "oversize.pdf");
+            assert!(!inline.data.is_empty());
         }
-        other => panic!("expected InputFile(file_id), got {:?}", other),
+        other => panic!("expected inline InputFile, got {:?}", other),
     }
 }
 
@@ -464,15 +587,15 @@ async fn edit_legacy_edit_file_returns_unknown_tool_error() {
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "legacy edit_file 必须按未知工具回错");
     assert!(
-        msg.contains("edit_file") || msg.to_lowercase().contains("unknown") || msg.contains("未知"),
+        msg.contains("edit_file") && msg.to_lowercase().contains("unknown"),
         "错误文案应提示未知工具：{}",
         msg
     );
 }
 
 #[tokio::test]
-async fn edit_rejected_when_read_stamp_stale() {
-    // 先 read 落 stamp → 外部改文件（mtime+size 都变）→ edit 必须被 Stale 拦截。
+async fn edit_accepts_content_identical_file_after_mtime_only_change() {
+    // 先 read 落完整 stamp → 外部 touch（只变 mtime）→ 内容 hash 相同，不能误报 Stale。
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
     let f = dir_path.join("stale.txt");
@@ -489,19 +612,64 @@ async fn edit_rejected_when_read_stamp_stale() {
     let (_, err1, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err1);
     assert_eq!(state.len(), 1);
+    let normalized = crate::infra::platform::normalize_path(&f.to_string_lossy()).unwrap();
+    let stamp = state.get(&normalized).expect("read must create stamp");
+    assert_eq!(stamp.offset, None);
+    assert_eq!(stamp.limit, None);
+    assert_eq!(stamp.covered_lines.map(|(start, _)| start), Some(1));
+    assert!(stamp.reached_eof);
+    assert_eq!(
+        stamp.content_hash,
+        crate::core::tools::pipeline::read_state::hash_content(&std::fs::read(&f).unwrap())
+    );
 
-    // 外部修改文件（同时变 mtime 和 size）。
-    bump_mtime(&f);
+    // 外部 touch，只变 mtime。
+    touch_mtime(&f);
+    assert_eq!(
+        stamp.content_hash,
+        crate::core::tools::pipeline::read_state::hash_content(&std::fs::read(&f).unwrap())
+    );
 
-    // 此时 edit 必须被 Stale 拦截（在 primitive 调用之前）。
+    // 内容没有变，内容 hash fallback 应放行 edit。
     let edit_args = format!(
         r#"{{"path":{:?},"old_content":"hello","new_content":"hi"}}"#,
         f.to_string_lossy()
     );
     let edit_tc = make_edit_tc(&edit_args);
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
-    assert!(is_error, "stamp 不一致必须返回 is_error");
-    assert!(msg.contains("Stale"), "错误文案应含 Stale：{}", msg);
+    assert!(!is_error, "仅 mtime 改变不应误报 Stale：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "hi\nworld\n");
+}
+
+#[tokio::test]
+async fn edit_rejects_same_size_external_content_change_after_hash_fallback() {
+    // 内容 hash fallback 只能消除 touch 假阳性，绝不能放过同尺寸的真实外部改动。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("same-size-stale.txt");
+    std::fs::write(&f, b"hello\nworld\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let read_tc = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":false}}"#,
+        f.to_string_lossy()
+    ));
+    let (_, read_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
+    assert!(!read_error);
+
+    // 改动后的字节数完全相同；只有内容 hash 能识别这次外部写入。
+    std::fs::write(&f, b"HELLO\nworld\n").unwrap();
+    touch_mtime(&f);
+    let edit_tc = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"world","new_content":"planet"}}"#,
+        f.to_string_lossy()
+    ));
+    let (message, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
+    assert!(is_error, "外部同尺寸改动必须仍被拦截：{message}");
+    assert!(message.contains("Stale"), "错误文案应含 Stale：{message}");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "HELLO\nworld\n");
 }
 
 #[tokio::test]
@@ -710,12 +878,12 @@ async fn read_line_numbers_output_misused_as_edit_old_content_returns_line_prefi
         msg
     );
     assert!(
-        msg.contains("cat -n 行号前缀"),
+        msg.contains("cat -n line prefixes"),
         "错误文案应指出 cat -n 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("near line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );
@@ -772,12 +940,12 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
         msg
     );
     assert!(
-        msg.contains("hashline 前缀"),
+        msg.contains("hashline prefixes"),
         "错误文案应指出 hashline 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("near line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );
@@ -788,7 +956,100 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
     );
 }
 
-// ─── T2-P0-017 Phase3 / PR-M：hashline_edit + read 闭环 ─────────────────────
+// ─── T2-P0-017 Phase3 / PR-M：edit / hashline_edit + read 闭环 ──────────────
+
+#[tokio::test]
+async fn single_file_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("single-edit-refresh.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"one","new_content":"ONE"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (first_message, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error, "{first_message}");
+
+    let second = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        !second_error && !second_message.contains("Stale"),
+        "single-file edit must refresh its own read stamp: {second_message}",
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn single_file_edit_refresh_does_not_hide_a_later_external_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("single-edit-external-change.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"one","new_content":"ONE"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error);
+
+    std::fs::write(&file, "EXTERNAL\ntwo\n").unwrap();
+    touch_mtime(&file);
+    let second = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        second_error && second_message.contains("Stale"),
+        "a change after the refresh must still be caught: {second_message}",
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "EXTERNAL\ntwo\n");
+}
+
+#[tokio::test]
+async fn single_file_edit_refresh_switch_off_restores_stale_guard_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("single-edit-refresh-off.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::with_mutation_stamp_refresh(false));
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"one","new_content":"ONE"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error);
+
+    let second = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        second_error && second_message.contains("Stale"),
+        "disabling the refresh switch must preserve the old guard: {second_message}",
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\ntwo\n");
+}
 
 #[tokio::test]
 async fn hashline_edit_replace_matches_read_hashline() {
@@ -803,7 +1064,7 @@ async fn hashline_edit_replace_matches_read_hashline() {
     prime_read_stamp(&primitive, &state, &f).await;
 
     // 取第 2 行（beta）的 2 字符 hash
-    let beta_hash = compute_line_hash("beta", 2);
+    let beta_hash = compute_line_hash("beta");
     let edit_args = format!(
         r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"BETA\n"}}]}}"#,
         f.to_string_lossy(),
@@ -821,6 +1082,243 @@ async fn hashline_edit_replace_matches_read_hashline() {
         "alpha\nBETA\ngamma\ndelta\n",
         "第 2 行被替换为 BETA"
     );
+}
+
+#[tokio::test]
+async fn hashline_edit_batches_non_overlapping_original_ranges_despite_line_count_changes() {
+    use crate::core::tools::primitive::compute_line_hash;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("batched-original-snapshot.txt");
+    std::fs::write(&file, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    // 两段锚点都按原快照取：前一段插入两行后，原 L4 会成为 L6。
+    // 同一批中第二段仍须命中原 L4；实现将全部段先校验、再自下而上套用。
+    let tc = ToolCallInfo {
+        id: "hl-batched-original-snapshot".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[
+                {{"op":"insert","pos":"2#{}","lines":"intro-a\nintro-b\n"}},
+                {{"op":"replace","pos":"4#{}","lines":"FOUR\n"}}
+            ]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("two"),
+            compute_line_hash("four"),
+        ),
+    };
+    let (message, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+
+    assert!(!is_error, "非重叠原快照批量编辑应成功：{message}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "one\nintro-a\nintro-b\ntwo\nthree\nFOUR\nfive\n",
+        "下方替换必须仍命中原 L4，而非被上方插入后的新行号"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_cjk_anchor_is_stable_after_lines_are_inserted_above_it() {
+    let replacement = "#### 已验收\n";
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("cjk-anchor.txt");
+    let original = format!("{}#### 验收标准\ntrailer\n", "filler\n".repeat(367));
+    std::fs::write(&file, &original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let first_read = make_tc(&format!(
+        r#"{{"path":{:?},"hashline":true}}"#,
+        file.to_string_lossy()
+    ));
+    let (first_output, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &first_read).await;
+    assert!(!first_error, "{first_output}");
+    let first_cjk_tag = hashline_tag_at(&first_output, 368);
+
+    let insert = ToolCallInfo {
+        id: "cjk-anchor-insert".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"insert","pos":"1#{}","lines":"intro-1\nintro-2\nintro-3\n"}}]}}"#,
+            file.to_string_lossy(),
+            hashline_tag_at(&first_output, 1),
+        ),
+    };
+    let (insert_output, insert_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &insert).await;
+    assert!(!insert_error, "{insert_output}");
+
+    let second_read = ToolCallInfo {
+        id: "cjk-anchor-reread".into(),
+        name: "read".into(),
+        arguments: format!(r#"{{"path":{:?},"hashline":true}}"#, file.to_string_lossy()),
+    };
+    let (second_output, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second_read).await;
+    assert!(!second_error, "{second_output}");
+    let moved_cjk_tag = hashline_tag_at(&second_output, 371);
+    assert_eq!(
+        first_cjk_tag, moved_cjk_tag,
+        "同一 CJK 行内容在文件中平移后必须保有相同 hashline 指纹"
+    );
+
+    let replace = ToolCallInfo {
+        id: "cjk-anchor-replace".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#####"{{"path":{:?},"edits":[{{"op":"replace","pos":"371#{}","lines":{}}}]}}"#####,
+            file.to_string_lossy(),
+            moved_cjk_tag,
+            serde_json::to_string(replacement).unwrap(),
+        ),
+    };
+    let (replace_output, replace_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &replace).await;
+    assert!(!replace_error, "{replace_output}");
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .contains(replacement));
+}
+
+fn hashline_tag_at(output: &str, line_no: u64) -> String {
+    let prefix = format!("{line_no:>6}#");
+    output
+        .lines()
+        .find_map(|line| {
+            let tagged = line.strip_prefix(&prefix)?;
+            tagged.split_once(':').map(|(tag, _)| tag.to_string())
+        })
+        .unwrap_or_else(|| panic!("expected hashline output for line {line_no}, got {output:?}"))
+}
+
+#[tokio::test]
+async fn hashline_edit_refreshes_read_stamp_so_a_second_edit_is_not_stale() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("twice.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = ToolCallInfo {
+        id: "hl-refresh-1".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("one"),
+        ),
+    };
+    let (first_message, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error, "{}", first_message);
+
+    let second = ToolCallInfo {
+        id: "hl-refresh-2".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"TWO\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("two"),
+        ),
+    };
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        !second_error && !second_message.contains("Stale"),
+        "agent 自己刚做的 hashline_edit 必须刷新 guard stamp：{second_message}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn hashline_edit_then_edit_completes_without_a_stale_recovery_round_trip() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("hashline-then-edit.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::new());
+    let mut tool_calls = 0;
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let hashline = ToolCallInfo {
+        id: "hashline-then-edit-1".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("one"),
+        ),
+    };
+    let (first_message, first_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &hashline).await;
+    tool_calls += 1;
+    assert!(!first_error, "{first_message}");
+
+    let edit = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"two","new_content":"TWO"}}"#,
+        file.to_string_lossy(),
+    ));
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &edit).await;
+    tool_calls += 1;
+    assert!(
+        !second_error && !second_message.contains("Stale"),
+        "hashline_edit must refresh the guard for the next edit: {second_message}",
+    );
+    assert_eq!(tool_calls, 2, "the chain must not need a stale/read retry");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn hashline_edit_refresh_switch_off_restores_stale_guard_behavior() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let file = root.join("refresh-off.txt");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let primitive = make_executor(&root);
+    let state = Arc::new(ReadFileState::with_mutation_stamp_refresh(false));
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let first = ToolCallInfo {
+        id: "hl-refresh-off-1".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"1#{}","lines":"ONE\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("one"),
+        ),
+    };
+    let (_, first_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &first).await;
+    assert!(!first_error);
+
+    let second = ToolCallInfo {
+        id: "hl-refresh-off-2".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"TWO\n"}}]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("two"),
+        ),
+    };
+    let (second_message, second_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &second).await;
+    assert!(
+        second_error && second_message.contains("Stale"),
+        "关闭 refresh 后必须回到旧 Stale 守卫：{second_message}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\ntwo\n");
 }
 
 #[tokio::test]
@@ -854,6 +1352,107 @@ async fn hashline_edit_rejects_hash_mismatch() {
         std::fs::read_to_string(&f).unwrap(),
         "a\nb\nc\n",
         "拒绝时磁盘必须未变"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_reports_all_mismatched_anchors_without_writing() {
+    use crate::core::tools::primitive::compute_line_hash;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("all-mismatches.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&file, original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let tc = ToolCallInfo {
+        id: "hl-all-mismatches".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[
+                {{"op":"replace","pos":"1#!!","lines":"ALPHA\n"}},
+                {{"op":"replace","pos":"2#{}","end":"3#!!","lines":"BETA\nGAMMA\n"}},
+                {{"op":"replace","pos":"3#{}","lines":"GAMMA\n"}}
+            ]}}"#,
+            file.to_string_lossy(),
+            compute_line_hash("beta"),
+            compute_line_hash("gamma"),
+        ),
+    };
+    let (message, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+
+    assert!(is_error, "陈旧 hashline 锚点必须拒绝：{message}");
+    assert!(
+        message.contains("HashlineValidationFailed: Invalid anchors: 2"),
+        "应汇总错误锚点数量：{message}"
+    );
+    assert!(
+        message.contains("edits[0].pos: HashMismatch"),
+        "应报告第一个陈旧锚点：{message}"
+    );
+    assert!(
+        message.contains(&format!("latest anchor `1#{}`", compute_line_hash("alpha"))),
+        "应给出可直接替换的第一个锚点：{message}"
+    );
+    assert!(
+        message.contains("edits[1].end: HashMismatch"),
+        "应报告第二个陈旧锚点：{message}"
+    );
+    assert!(
+        message.contains(&format!("latest anchor `3#{}`", compute_line_hash("gamma"))),
+        "应给出可直接替换的第二个锚点：{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        original,
+        "任一锚点无效时文件必须字节级未变"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_reports_mismatch_and_out_of_range_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("mixed-anchor-errors.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&file, original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let tc = ToolCallInfo {
+        id: "hl-mixed-errors".into(),
+        name: "hashline_edit".into(),
+        arguments: format!(
+            r#"{{"path":{:?},"edits":[
+                {{"op":"replace","pos":"1#!!","lines":"ALPHA\n"}},
+                {{"op":"replace","pos":"4#ZZ","lines":"DELTA\n"}}
+            ]}}"#,
+            file.to_string_lossy(),
+        ),
+    };
+    let (message, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+
+    assert!(is_error, "陈旧或越界锚点必须拒绝：{message}");
+    assert!(
+        message.contains("HashlineValidationFailed: Invalid anchors: 2"),
+        "应汇总错误锚点数量：{message}"
+    );
+    assert!(
+        message.contains("edits[0].pos: HashMismatch"),
+        "应保留 mismatch 诊断：{message}"
+    );
+    assert!(
+        message.contains("edits[1].pos: OutOfRange: Anchor line 4 exceeds the file's 3 lines"),
+        "应在同一响应报告越界锚点：{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        original,
+        "任一锚点无效时文件必须字节级未变"
     );
 }
 
@@ -930,6 +1529,61 @@ async fn edit_oneof_shape_b_edits_array_is_parsed() {
     );
 }
 
+#[tokio::test]
+async fn edit_insert_modes_are_parsed_and_preserve_the_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("anchor.md");
+    std::fs::write(&file, "before\n## Anchor\nafter\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let args = format!(
+        r###"{{"path":{:?},"edits":[{{"old_content":"## Anchor","new_content":"inserted before\n","mode":"insert_before"}},{{"old_content":"## Anchor","new_content":"\ninserted after","mode":"insert_after"}}]}}"###,
+        file.to_string_lossy()
+    );
+    let tool_call = make_edit_tc(&args);
+    let (message, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tool_call).await;
+
+    assert!(!is_error, "insert modes should succeed: {message}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "before\ninserted before\n## Anchor\ninserted after\nafter\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_replace_that_consumes_a_heading_returns_an_insert_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("heading.md");
+    std::fs::write(&file, "## Milestones\nbody\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    prime_read_stamp(&primitive, &state, &file).await;
+
+    let args = format!(
+        r###"{{"path":{:?},"old_content":"## Milestones","new_content":"replacement text"}}"###,
+        file.to_string_lossy()
+    );
+    let tool_call = make_edit_tc(&args);
+    let (message, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tool_call).await;
+
+    assert!(!is_error, "replace remains a successful edit: {message}");
+    assert!(
+        message.contains("mode=`insert_before`"),
+        "successful replacement should warn about a consumed heading: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "replacement text\nbody\n",
+        "the guard must advise rather than block a valid replacement"
+    );
+}
+
 // ─── T2-P0-016 PR-命名 / PR-C：write 工具门禁焦小测 ────────────────────────
 
 fn make_write_tc(args_json: &str) -> ToolCallInfo {
@@ -954,9 +1608,7 @@ async fn tool_exec_legacy_write_file_returns_unknown_tool_error() {
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "legacy write_file 必须按未知工具回错");
     assert!(
-        msg.contains("write_file")
-            || msg.to_lowercase().contains("unknown")
-            || msg.contains("未知"),
+        msg.contains("write_file") && msg.to_lowercase().contains("unknown"),
         "错误文案应提示未知工具：{}",
         msg
     );

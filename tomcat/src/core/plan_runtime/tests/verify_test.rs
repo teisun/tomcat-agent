@@ -132,8 +132,8 @@ fn normalize_for_gate_demotes_empty_command_pass_and_partializes_key_checks() {
     assert_eq!(summary.checks[0].result, "skip");
     assert_eq!(summary.verdict, "partial");
     assert_eq!(warnings.len(), 2);
-    assert!(warnings[0].contains("command 为空"));
-    assert!(warnings[1].contains("降级为 partial"));
+    assert!(warnings[0].contains("pass without a command"));
+    assert!(warnings[1].contains("downgraded to partial"));
 }
 
 #[test]
@@ -297,6 +297,12 @@ fn verifier_allowed_tools_do_not_include_write_paths() {
     assert!(names.contains("list_dir"));
     assert!(names.contains("bash"));
     assert!(names.contains("web_fetch"));
+    for tool in ["task_output", "task_stop", "task_list"] {
+        assert!(
+            names.contains(tool),
+            "verifier cannot finish its own Bash work without {tool}"
+        );
+    }
     assert!(!names.contains("create_plan"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("write"));
@@ -339,7 +345,16 @@ fn verify_prompt_uses_active_external_plan_path() {
                     id: "t1".into(),
                     content: "ship".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: Default::default(),
                 }],
+                code_review_pass: false,
+                code_review_rounds: 0,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
+                code_review_residual_findings: Vec::new(),
                 unknown: Default::default(),
             },
             body: "## Goal\nexternal\n".into(),

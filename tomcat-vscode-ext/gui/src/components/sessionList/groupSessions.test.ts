@@ -17,6 +17,17 @@ function makeSession(sessionId: string, updatedAt: number | null): WebviewSessio
 }
 
 describe("groupSessionsByDate", () => {
+  it("separates pinned sessions without changing last-active or duplicating date entries", () => {
+    const now = Date.now();
+    const pinned = { ...makeSession("p", now - 100 * MS_PER_DAY), isPinned: true };
+    const current = { ...makeSession("current", now), isCurrent: true };
+    const groups = groupSessionsByDate([current, pinned], now);
+    expect(groups.map(g => g.id)).toEqual(["pinned", "today"]);
+    expect(groups[0].sessions).toEqual([pinned]);
+    expect(current.isCurrent).toBe(true);
+    expect(groupSessionsByDate([current, { ...pinned, isPinned: false }], now).map(g => g.id)).toEqual(["today", "older"]);
+  });
+
   it("returns an empty array when there are no sessions", () => {
     expect(groupSessionsByDate([], 0)).toEqual([]);
   });
@@ -29,14 +40,14 @@ describe("groupSessionsByDate", () => {
       makeSession("older", now - 400 * MS_PER_DAY),
     ];
     const groups = groupSessionsByDate(sessions, now);
-    expect(groups.map((g) => g.label)).toEqual(["Today", "Last 7 days", "Older"]);
+    expect(groups.map((g) => g.id)).toEqual(["today", "week", "older"]);
   });
 
   it("puts a session at exactly start-of-today into Today", () => {
     const startOfToday = new Date(2026, 5, 25, 0, 0, 0, 0).getTime();
     const sessions = [makeSession("s", startOfToday)];
     const groups = groupSessionsByDate(sessions, startOfToday + 10 * 60 * 1000);
-    expect(groups[0].label).toBe("Today");
+    expect(groups[0].id).toBe("today");
     expect(groups[0].sessions.map((s) => s.sessionId)).toEqual(["s"]);
   });
 
@@ -45,7 +56,7 @@ describe("groupSessionsByDate", () => {
     const lateYesterday = new Date(2026, 5, 24, 23, 59, 59).getTime();
     const sessions = [makeSession("late", lateYesterday)];
     const groups = groupSessionsByDate(sessions, now);
-    expect(groups[0].label).toBe("Yesterday");
+    expect(groups[0].id).toBe("yesterday");
   });
 
   it("uses rolling 7-day and 30-day windows for the middle buckets", () => {
@@ -57,17 +68,17 @@ describe("groupSessionsByDate", () => {
       makeSession("d60", now - 60 * MS_PER_DAY),
     ];
     const groups = groupSessionsByDate(sessions, now);
-    const byLabel = Object.fromEntries(groups.map((g) => [g.label, g.sessions]));
-    expect(byLabel["Last 7 days"].map((s) => s.sessionId)).toEqual(["d3"]);
-    expect(byLabel["Last 30 days"].map((s) => s.sessionId)).toEqual(["d10", "d20"]);
-    expect(byLabel["Older"].map((s) => s.sessionId)).toEqual(["d60"]);
+    const byLabel = Object.fromEntries(groups.map((g) => [g.id, g.sessions]));
+    expect(byLabel["week"].map((s) => s.sessionId)).toEqual(["d3"]);
+    expect(byLabel["month"].map((s) => s.sessionId)).toEqual(["d10", "d20"]);
+    expect(byLabel["older"].map((s) => s.sessionId)).toEqual(["d60"]);
   });
 
   it("falls back to Older when updatedAt is null or NaN", () => {
     const now = new Date(2026, 5, 25, 12, 0, 0).getTime();
     const sessions = [makeSession("null", null), makeSession("nan", Number.NaN)];
     const groups = groupSessionsByDate(sessions, now);
-    expect(groups[0].label).toBe("Older");
+    expect(groups[0].id).toBe("older");
     expect(groups[0].sessions.map((s) => s.sessionId)).toEqual(["null", "nan"]);
   });
 

@@ -66,6 +66,59 @@ async fn list_tools_filters_by_plugin_id() {
 }
 
 #[tokio::test]
+async fn list_tools_is_stable_regardless_of_registration_order() {
+    let first =
+        DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
+    for (plugin_id, name) in [
+        ("plugin-b", "zeta"),
+        ("plugin-a", "beta"),
+        ("plugin-a", "alpha"),
+    ] {
+        first
+            .register_tool(make_tool(name, plugin_id), plugin_id)
+            .await
+            .unwrap();
+    }
+
+    let second =
+        DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
+    for (plugin_id, name) in [
+        ("plugin-a", "alpha"),
+        ("plugin-a", "beta"),
+        ("plugin-b", "zeta"),
+    ] {
+        second
+            .register_tool(make_tool(name, plugin_id), plugin_id)
+            .await
+            .unwrap();
+    }
+
+    let first_names = first
+        .list_tools(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|tool| (tool.plugin_id, tool.name))
+        .collect::<Vec<_>>();
+    let second_names = second
+        .list_tools(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|tool| (tool.plugin_id, tool.name))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_names,
+        vec![
+            ("plugin-a".to_string(), "alpha".to_string()),
+            ("plugin-a".to_string(), "beta".to_string()),
+            ("plugin-b".to_string(), "zeta".to_string()),
+        ]
+    );
+    assert_eq!(first_names, second_names);
+}
+
+#[tokio::test]
 async fn unregister_plugin_tools_removes_all_plugin_tools() {
     let reg = DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
     reg.register_tool(make_tool("x", "p1"), "p1").await.unwrap();
@@ -105,7 +158,7 @@ async fn register_tool_rejects_scope_name_conflict() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("scope 内工具名冲突"),
+        err.to_string().contains("Tool name conflict in scope"),
         "unexpected conflict error: {err}"
     );
 }

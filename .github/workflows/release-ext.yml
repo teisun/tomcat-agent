@@ -78,6 +78,9 @@ jobs:
             tomcat-vscode-ext/gui/package-lock.json
           node-version: 22
 
+      - name: Check version mirrors
+        run: node ../scripts/release-version.mjs check
+
       - name: Validate extension release tag
         id: guard
         run: node ../.github/scripts/release/check-ext-tag.mjs "${GITHUB_WORKSPACE}" "${{ steps.meta.outputs.release_tag }}"

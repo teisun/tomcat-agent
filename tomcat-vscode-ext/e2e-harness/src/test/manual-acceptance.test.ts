@@ -3,6 +3,8 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import * as vscode from "vscode";
+
 const repoRoot = path.resolve(__dirname, "../../../");
 const hostE2e = require(path.resolve(
   repoRoot,
@@ -12,22 +14,37 @@ const hostE2e = require(path.resolve(
 };
 
 type DomSnapshot = Awaited<ReturnType<TomcatApi["__testing"]["captureWebviewDom"]>>;
-type WebviewState = ReturnType<TomcatApi["__testing"]["getWebviewState"]>;
+type PreviewDomSnapshot = {
+  activeId: string | null;
+  activeThumbIndex: number;
+  position: number;
+  stageClientWidth: number;
+  stageScrollWidth: number;
+  thumbCount: number;
+  total: number;
+  zoom: "fit" | number;
+};type WebviewState = ReturnType<TomcatApi["__testing"]["getWebviewState"]>;
 
 type TomcatApi = {
   __testing: {
     captureWebviewDom(): Promise<{
       activeSessionId: string | null;
       approvalCount: number;
+      composerFooterPlanStatus: string | null;
       composerControlMetrics: Record<string, { top: number; width: number }>;
       composerRowCount: number;
       expandedThinkingCount: number;
       expandedToolTitles: string[];
+      historyAttachmentThumbCount: number;
       html: string;
       jumpToLatestVisible: boolean;
       latestUserTopWithinStream: number | null;
       messageTexts: string[];
       overflowAnchor: string | null;
+      pendingAttachmentStripClientWidth: number;
+      pendingAttachmentStripOverflowing: boolean;
+      pendingAttachmentStripScrollWidth: number;
+      pendingAttachmentThumbCount: number;
       sessionTabs: string[];
       sessionGroupHeaders: string[];
       sessionMoreButtons: string[];
@@ -62,7 +79,28 @@ type TomcatApi = {
         }
       >;
     };
-    clearObservedEvents(): void;
+    captureImagePreviewDom(): Promise<PreviewDomSnapshot>;
+    clearObservedEvents(): void;    captureSettingsDom(): Promise<{ html: string }>;
+    getSettingsPanelState(): {
+      route: "connectors" | "models";
+      state: {
+        connectorTools?: Array<{ rawName: string }>;
+        connectors?: Array<{ configKey: string; name: string; source: string }>;
+        ready: boolean;
+        selectedConnector?: string | null;
+      };
+      visible: boolean;
+      webviewReady: boolean;
+    };
+    sendSettingsIntent(intent: {
+      data?: Record<string, unknown>;
+      messageId: string;
+      type: string;
+    }): Promise<void>;
+    dispatchImagePreviewDomAction(action: {
+      kind: "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
+    }): Promise<void>;
+    executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
     restartServe(): Promise<void>;
     sendWebviewDomAction(action: {
@@ -95,15 +133,39 @@ function requireEnv(name: string): string {
 async function pause(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
+/**
+ * Runs a narrow-layout check without letting the test-only root width leak into
+ * later screenshots when an assertion or wait fails.
+ */
+async function withRootWidth<T>(
+  api: TomcatApi,
+  widthPx: number,
+  work: () => Promise<T>,
+): Promise<T> {
+  await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx });
+  try {
+    return await work();
+  } finally {
+    await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx: null });
+  }
+}
 
 async function captureScreenshot(name: string): Promise<string> {
   const screenshotsDir = requireEnv("TOMCAT_ACCEPT_SCREENSHOTS_DIR");
   const targetPath = path.join(screenshotsDir, name);
   await pause(300);
-  execFileSync("screencapture", ["-x", targetPath], {
-    stdio: "inherit",
-  });
+  await (require(path.resolve(repoRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
+    captureWorkbenchArtifacts(target: string): Promise<void>;
+  }).captureWorkbenchArtifacts(targetPath);
   return targetPath;
+}
+
+async function setNextFakeServePromptScript(script: string): Promise<void> {
+  const scriptPath = path.join(
+    requireEnv("TOMCAT_FAKE_SERVE_STATE_DIR"),
+    "manual-acceptance-next-prompt-script.txt",
+  );
+  await fs.writeFile(scriptPath, `${script}\n`, "utf8");
 }
 
 async function waitForDom<T>(
@@ -112,15 +174,94 @@ async function waitForDom<T>(
   timeoutMs = 15_000,
 ): Promise<T> {
   const startedAt = Date.now();
+  let lastSnapshot: DomSnapshot | undefined;
   while (Date.now() - startedAt < timeoutMs) {
     const snapshot = await api.__testing.captureWebviewDom();
+    lastSnapshot = snapshot;
     const result = predicate(snapshot);
     if (result !== undefined) {
       return result;
     }
     await pause(100);
   }
-  throw new Error("Timed out waiting for webview DOM to match the expected condition");
+  throw new Error(
+    `Timed out waiting for webview DOM. Last snapshot: ${JSON.stringify({
+      activeSessionId: lastSnapshot?.activeSessionId,
+      historyAttachmentThumbCount: lastSnapshot?.historyAttachmentThumbCount,
+      messageTexts: lastSnapshot?.messageTexts.slice(-5),
+      pendingAttachmentThumbCount: lastSnapshot?.pendingAttachmentThumbCount,
+      timelineKinds: lastSnapshot?.timelineKinds.slice(-10),
+      toolTitles: lastSnapshot?.toolTitles.slice(-5),
+    })}`,
+  );
+}
+
+async function waitForPreviewDom<T>(
+  api: TomcatApi,
+  predicate: (snapshot: PreviewDomSnapshot) => T | undefined,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const snapshot = await api.__testing.captureImagePreviewDom();
+      const result = predicate(snapshot);
+      if (result !== undefined) {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await pause(100);
+  }
+  throw new Error(
+    `Timed out waiting for image preview DOM: ${String(
+      lastError instanceof Error ? lastError.message : lastError ?? "no snapshot",
+    )}`,
+  );
+}
+
+function createAcceptanceImage(index: number): {
+  dataBase64: string;
+  filename: string;
+  mimeType: "image/svg+xml";
+} {
+  const hue = (index * 37) % 360;
+  const accent = (hue + 155) % 360;
+  const number = String(index).padStart(2, "0");
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300">',
+    `<rect width="480" height="300" rx="28" fill="hsl(${hue} 72% 42%)"/>`,
+    `<circle cx="382" cy="82" r="58" fill="hsl(${accent} 88% 64%)" opacity="0.9"/>`,
+    '<path d="M0 252 L128 126 L230 224 L306 142 L480 300 L0 300 Z" fill="rgba(255,255,255,.2)"/>',
+    `<text x="32" y="72" fill="white" font-family="system-ui,sans-serif" font-size="28" font-weight="700">TOMCAT IMAGE</text>`,
+    `<text x="32" y="210" fill="white" font-family="system-ui,sans-serif" font-size="104" font-weight="800">${number}</text>`,
+    '</svg>',
+  ].join("");
+  return {
+    dataBase64: Buffer.from(svg, "utf8").toString("base64"),
+    filename: `acceptance-image-${number}.svg`,
+    mimeType: "image/svg+xml",
+  };
+}
+
+async function setColorTheme(
+  themeName: string,
+  expectedKind: vscode.ColorThemeKind,
+): Promise<boolean> {
+  await vscode.workspace
+    .getConfiguration("workbench")
+    .update("colorTheme", themeName, vscode.ConfigurationTarget.Global);
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    if (vscode.window.activeColorTheme.kind === expectedKind) {
+      await pause(300);
+      return true;
+    }
+    await pause(100);
+  }
+  return false;
 }
 
 async function waitForWebviewState<T>(
@@ -161,13 +302,9 @@ function metricWidth(snapshot: DomSnapshot, key: string): number {
 }
 
 function hasThinkingBeforeAssistant(snapshot: DomSnapshot): boolean {
-  const lastThinkingIndex = snapshot.timelineKinds.lastIndexOf("thinking-block");
-  if (lastThinkingIndex === -1) {
-    return false;
-  }
-  return snapshot.timelineKinds
-    .slice(lastThinkingIndex + 1)
-    .includes("message:assistant");
+  const thinkingIndex = snapshot.html.lastIndexOf('data-testid="thinking-block"');
+  const replyIndex = snapshot.html.lastIndexOf("Manual acceptance reply for prompt: manual acceptance prompt");
+  return thinkingIndex >= 0 && replyIndex > thinkingIndex;
 }
 
 suite("Tomcat manual acceptance", () => {
@@ -175,16 +312,32 @@ suite("Tomcat manual acceptance", () => {
     const screenshots: string[] = [];
     const limitations: string[] = [];
     const reportPath = requireEnv("TOMCAT_ACCEPT_REPORT_PATH");
+    const originalColorTheme = vscode.workspace
+      .getConfiguration("workbench")
+      .get<string>("colorTheme");
     const api = await hostE2e.getTomcatExtensionApi();
 
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady(20_000);
+    console.log(
+      "Manual acceptance initial state:",
+      JSON.stringify(api.__testing.getWebviewState()),
+    );
 
+    // Context tools now live in a collapsed thinking group. Open the actual
+    // group before checking its hydrated tool row rather than waiting for the
+    // old, always-visible tool card.
+    await waitForDom(api, (snapshot) =>
+      snapshot.messageTexts.some((text) => /Historic prompt 6/i.test(text)) &&
+      snapshot.html.includes('data-testid="thinking-group-toggle"') ? snapshot : undefined,
+      20_000,
+    );
+    await sendDomAction(api, { kind: "clickTestId", testId: "thinking-group-toggle", index: 0 });
     const hydrated = await waitForDom(
       api,
       (snapshot) =>
         snapshot.messageTexts.some((text) => /Historic prompt 6/i.test(text)) &&
-        snapshot.toolTitles.some((title) => /search_files/i.test(title))
+        snapshot.toolTitles.some((title) => /Searched files/i.test(title))
           ? snapshot
           : undefined,
       20_000,
@@ -214,6 +367,12 @@ suite("Tomcat manual acceptance", () => {
       5_000,
     );
     screenshots.push(await captureScreenshot("02-autoscroll-following.png"));
+    await sendDomAction(api, { kind: "clickTestId", testId: "thinking-toggle", index: -1 });
+    const thinkingExpanded = await waitForDom(api, (snapshot) =>
+      snapshot.expandedThinkingCount > 0 && hasThinkingBeforeAssistant(snapshot) ? snapshot : undefined,
+      5_000,
+    );
+    screenshots.push(await captureScreenshot("06-thinking-expanded.png"));
 
     await sendDomAction(api, {
       edge: "top",
@@ -262,64 +421,48 @@ suite("Tomcat manual acceptance", () => {
       timeoutMs: 20_000,
       type: "agent_end",
     });
+    // Successful context rows remain inside the collapsed live thinking group.
+    await sendDomAction(api, { kind: "clickTestId", testId: "thinking-group-toggle", index: -1 });
     const completed = await waitForDom(
       api,
       (snapshot) =>
-        snapshot.toolTitles.some((title) => /search_workspace/i.test(title)) &&
-        snapshot.toolTitles.some((title) => /validate_layout/i.test(title))
+        snapshot.toolTitles.some((title) => /Searched workspace/i.test(title)) &&
+        snapshot.toolTitles.some((title) => /validate[_ ]layout/i.test(title))
           ? snapshot
           : undefined,
       10_000,
     );
     screenshots.push(await captureScreenshot("05-tool-default-states.png"));
 
-    await sendDomAction(api, {
-      index: -1,
-      kind: "clickTestId",
-      testId: "thinking-toggle",
-    });
-    const thinkingExpanded = await waitForDom(
-      api,
-      (snapshot) => (snapshot.expandedThinkingCount > 0 ? snapshot : undefined),
-      5_000,
-    );
-    screenshots.push(await captureScreenshot("06-thinking-expanded.png"));
 
     const liveSearchIndex = completed.toolTitles.findIndex((title) =>
-      /search_workspace/i.test(title),
+      /Searched workspace/i.test(title),
     );
     assert.ok(liveSearchIndex >= 0, "expected the live complete tool card to exist");
     await sendDomAction(api, {
       index: liveSearchIndex,
       kind: "clickTestId",
-      testId: "tool-toggle",
+      testId: "tool-row-toggle",
     });
     const toolExpanded = await waitForDom(
       api,
       (snapshot) =>
-        snapshot.expandedToolTitles.some((title) => /search_workspace/i.test(title))
+        snapshot.expandedToolTitles.some((title) => /Searched workspace/i.test(title))
           ? snapshot
           : undefined,
       5_000,
     );
     screenshots.push(await captureScreenshot("07-live-tool-expanded.png"));
 
-    await sendDomAction(api, {
-      kind: "setRootWidth",
-      widthPx: 480,
-    });
-    await pause(300);
-    const narrow = await api.__testing.captureWebviewDom();
-    if (narrow.composerRowCount !== 1) {
-      limitations.push(
-        `At the synthetic narrow width, the composer rendered in ${narrow.composerRowCount} visual rows in the real VSCode host. The screenshot and DOM metrics were still captured for review instead of failing the entire acceptance run on platform-specific layout variance.`,
-      );
-    }
-    screenshots.push(await captureScreenshot("08-composer-narrow.png"));
-
-    await sendDomAction(api, {
-      kind: "setRootWidth",
-      widthPx: null,
+    await withRootWidth(api, 480, async () => {
+      await pause(300);
+      const narrow = await api.__testing.captureWebviewDom();
+      if (narrow.composerRowCount !== 1) {
+        limitations.push(
+          `At the synthetic narrow width, the composer rendered in ${narrow.composerRowCount} visual rows in the real VSCode host. The screenshot and DOM metrics were still captured for review instead of failing the entire acceptance run on platform-specific layout variance.`,
+        );
+      }
+      screenshots.push(await captureScreenshot("08-composer-narrow.png"));
     });
     const wide = await waitForDom(api, (snapshot) => snapshot, 1_000);
     if (wide.composerRowCount !== 1) {
@@ -411,10 +554,12 @@ suite("Tomcat manual acceptance", () => {
       messageId: "manual-acceptance-capability-mismatch",
       type: "prompt",
     });
-    await api.__testing.waitForEvent({
+    const mismatchEvent = await api.__testing.waitForEvent({
       timeoutMs: 15_000,
       type: "agent_end",
-    });
+    }) as { sessionId: string; error: string };
+    assert.equal(mismatchEvent.sessionId, deepseekState.activeSessionId);
+    assert.equal(typeof mismatchEvent.error, "string");
     const mismatchState = await waitForWebviewState(
       api,
       (state) => {
@@ -431,7 +576,7 @@ suite("Tomcat manual acceptance", () => {
             item.type === "message" &&
             item.kind === "error" &&
             typeof item.text === "string" &&
-            /provider\/model 不支持 vision/i.test(item.text),
+            item.text === mismatchEvent.error,
         )
           ? state
           : undefined;
@@ -521,11 +666,213 @@ suite("Tomcat manual acceptance", () => {
       sessionList.sessionTabs.every((label) => !/^\d+_[0-9a-f]+$/.test(label.trim())) &&
       sessionList.sessionGroupHeaders.some((header) => /Today|Yesterday|Last 7 days|Last 30 days|Older/i.test(header));
 
+    // Image attachment acceptance: draft strip, 11-image overflow, standalone
+    // preview, transcript hydration, restart recovery, and theme variants.
+    await sendDomAction(api, {
+      index: -1,
+      kind: "clickTestId",
+      testId: "session-select",
+    });
+    const imageSessionId = api.__testing.getWebviewState().activeSessionId;
+    assert.ok(imageSessionId, "expected an active session for image acceptance");
+    const acceptanceImages = Array.from({ length: 11 }, (_, index) =>
+      createAcceptanceImage(index + 1),
+    );
+
+    await api.__testing.sendWebviewIntent({
+      data: {
+        files: [acceptanceImages[0]],
+        sessionId: imageSessionId,
+      },
+      messageId: "manual-acceptance-attach-single-image",
+      type: "attachFiles",
+    });
+    const singleImageDraft = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.pendingAttachmentThumbCount === 1 ? snapshot : undefined,
+      10_000,
+    );
+    screenshots.push(await captureScreenshot("17-image-composer-single.png"));
+
+    await api.__testing.sendWebviewIntent({
+      data: {
+        files: acceptanceImages.slice(1),
+        sessionId: imageSessionId,
+      },
+      messageId: "manual-acceptance-attach-ten-images",
+      type: "attachFiles",
+    });
+    const narrowImageDraft = await withRootWidth(api, 320, async () => {
+      const draft = await waitForDom(
+        api,
+        (snapshot) =>
+          snapshot.pendingAttachmentThumbCount === 11 &&
+          snapshot.pendingAttachmentStripOverflowing
+            ? snapshot
+            : undefined,
+        10_000,
+      );
+      screenshots.push(await captureScreenshot("18-image-composer-11-narrow.png"));
+      return draft;
+    });
+
+    await sendDomAction(api, {
+      index: 1,
+      kind: "clickTestId",
+      testId: "attachment-thumb",
+    });
+    const previewSecond = await waitForPreviewDom(
+      api,
+      (snapshot) =>
+        snapshot.position === 2 &&
+        snapshot.total === 11 &&
+        snapshot.thumbCount === 11
+          ? snapshot
+          : undefined,
+      15_000,
+    );
+    screenshots.push(await captureScreenshot("19-image-preview-02-of-11.png"));
+
+    await api.__testing.dispatchImagePreviewDomAction({ kind: "zoomIn" });
+    const previewZoomed = await waitForPreviewDom(
+      api,
+      (snapshot) =>
+        typeof snapshot.zoom === "number" && snapshot.zoom > 1
+          ? snapshot
+          : undefined,
+      5_000,
+    );
+    screenshots.push(await captureScreenshot("20-image-preview-zoomed.png"));
+
+    await api.__testing.executeCommand("workbench.action.closeActiveEditor");
+    await api.__testing.focusWebview();
+    api.__testing.clearObservedEvents();
+    await api.__testing.sendWebviewIntent({
+      data: {
+        sessionId: imageSessionId,
+        text: "Image acceptance history message",
+      },
+      messageId: "manual-acceptance-image-prompt",
+      type: "prompt",
+    });
+    await api.__testing.waitForEvent({
+      timeoutMs: 20_000,
+      type: "agent_end",
+    });
+    const historyImages = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.historyAttachmentThumbCount >= 11 ? snapshot : undefined,
+      15_000,
+    );
+    screenshots.push(await captureScreenshot("21-image-history-sent.png"));
+
+    await api.__testing.restartServe();
+    await api.__testing.waitForWebviewReady(20_000);
+    await api.__testing.focusWebview();
+    const restartHistoryImages = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.historyAttachmentThumbCount >= 11 ? snapshot : undefined,
+      20_000,
+    );
+    screenshots.push(await captureScreenshot("22-image-history-after-restart.png"));
+
+    const lightThemePassed = await setColorTheme(
+      "Default Light Modern",
+      vscode.ColorThemeKind.Light,
+    );
+    await api.__testing.focusWebview();
+    screenshots.push(await captureScreenshot("23-image-history-light-theme.png"));
+
+    const highContrastThemePassed = await setColorTheme(
+      "Default High Contrast",
+      vscode.ColorThemeKind.HighContrast,
+    );
+    await api.__testing.focusWebview();
+    screenshots.push(await captureScreenshot("24-image-history-high-contrast.png"));
+
+    await vscode.workspace
+      .getConfiguration("workbench")
+      .update(
+        "colorTheme",
+        originalColorTheme,
+        vscode.ConfigurationTarget.Global,
+      );
+
+
+    await api.__testing.executeCommand("tomcat.openSettings");
+    await (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 20_000) {
+        const snapshot = api.__testing.getSettingsPanelState();
+        if (snapshot.visible && snapshot.webviewReady) {
+          return;
+        }
+        await pause(100);
+      }
+      throw new Error(
+        `Timed out waiting for the Settings webview to mount: ${JSON.stringify(
+          api.__testing.getSettingsPanelState(),
+        )}`,
+      );
+    })();
+    await api.__testing.sendSettingsIntent({
+      data: { route: "connectors" },
+      messageId: "manual-acceptance-open-connectors",
+      type: "settings.ready",
+    });
+    const connectorSettings = await (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 20_000) {
+        const snapshot = api.__testing.getSettingsPanelState();
+        const connector = snapshot.state.connectors?.find(
+          (entry) => entry.configKey === "mcp:manual-global",
+        );
+        if (snapshot.visible && snapshot.webviewReady && snapshot.route === "connectors" && connector) {
+          return { connector, snapshot };
+        }
+        await pause(100);
+      }
+      throw new Error(
+        `Timed out waiting for the installed connectors settings view: ${JSON.stringify(
+          api.__testing.getSettingsPanelState(),
+        )}`,
+      );
+    })();
+    await api.__testing.sendSettingsIntent({
+      data: {
+        configKey: connectorSettings.connector.configKey,
+        name: connectorSettings.connector.name,
+      },
+      messageId: "manual-acceptance-list-connector-tools",
+      type: "listConnectorTools",
+    });
+    const connectorToolsLoaded = await (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 15_000) {
+        const snapshot = api.__testing.getSettingsPanelState().state;
+        if (
+          snapshot.selectedConnector === connectorSettings.connector.configKey &&
+          snapshot.connectorTools?.some((tool) => tool.rawName === "connector_probe")
+        ) {
+          return snapshot;
+        }
+        await pause(100);
+      }
+      throw new Error("Timed out waiting for the connector tool list.");
+    })();
+    const connectorDom = await api.__testing.captureSettingsDom();
+    assert.ok(connectorDom.html.includes("Connectors"));
+    assert.ok(connectorDom.html.includes("manual-global"));
+    assert.ok(connectorDom.html.includes("connector_probe"));
+    screenshots.push(await captureScreenshot("25-connectors-installed.png"));
     const toolScrollMetric = toolExpanded.toolBodyMetrics.find((entry) =>
-      /search_workspace/i.test(entry.title),
+      /Searched workspace/i.test(entry.title),
     );
     const errorToolMetric = completed.toolBodyMetrics.find((entry) =>
-      /validate_layout/i.test(entry.title),
+      /validate[_ ]layout/i.test(entry.title),
     );
 
     const report = {
@@ -540,10 +887,34 @@ suite("Tomcat manual acceptance", () => {
         composer: {
           passed: true,
         },
+        connectors: {
+          passed:
+            connectorSettings.snapshot.route === "connectors" &&
+            connectorSettings.connector.source === "global" &&
+            connectorToolsLoaded.connectorTools?.some((tool) => tool.rawName === "connector_probe") === true,
+        },
+        imageAttachments: {
+          passed:
+            singleImageDraft.pendingAttachmentThumbCount === 1 &&
+            narrowImageDraft.pendingAttachmentThumbCount === 11 &&
+            narrowImageDraft.pendingAttachmentStripOverflowing &&
+            narrowImageDraft.pendingAttachmentStripScrollWidth >
+              narrowImageDraft.pendingAttachmentStripClientWidth &&
+            previewSecond.position === 2 &&
+            previewSecond.total === 11 &&
+            previewSecond.activeThumbIndex === 1 &&
+            typeof previewZoomed.zoom === "number" &&
+            previewZoomed.zoom > 1 &&
+            historyImages.historyAttachmentThumbCount >= 11 &&
+            restartHistoryImages.historyAttachmentThumbCount >= 11,
+        },
+        imageThemes: {
+          passed: lightThemePassed && highContrastThemePassed,
+        },
         hydration: {
           passed:
             hydrated.messageTexts.some((text) => /Historic prompt 6/i.test(text)) &&
-            hydrated.toolTitles.some((title) => /search_files/i.test(title)),
+            hydrated.toolTitles.some((title) => /Searched files/i.test(title)),
         },
         effort: {
           passed:
@@ -557,7 +928,7 @@ suite("Tomcat manual acceptance", () => {
               "xhigh",
         },
         thinking: {
-          passed: thinkingExpanded.expandedThinkingCount > 0 && hasThinkingBeforeAssistant(completed),
+          passed: thinkingExpanded.expandedThinkingCount > 0 && hasThinkingBeforeAssistant(thinkingExpanded),
         },
         modelSwitch: {
           passed:
@@ -567,7 +938,7 @@ suite("Tomcat manual acceptance", () => {
                 item.type === "message" &&
                 item.kind === "error" &&
                 typeof item.text === "string" &&
-                /provider\/model 不支持 vision/i.test(item.text),
+                item.text === mismatchEvent.error,
             ) === true,
         },
         restart: {
@@ -588,8 +959,8 @@ suite("Tomcat manual acceptance", () => {
         },
         toolcards: {
           passed:
-            !completed.expandedToolTitles.some((title) => /search_workspace/i.test(title)) &&
-            completed.expandedToolTitles.some((title) => /validate_layout/i.test(title)) &&
+            !completed.expandedToolTitles.some((title) => /Searched workspace/i.test(title)) &&
+            completed.expandedToolTitles.some((title) => /validate[_ ]layout/i.test(title)) &&
             !!toolScrollMetric &&
             toolScrollMetric.scrollHeight > toolScrollMetric.clientHeight &&
             !!errorToolMetric &&
@@ -608,5 +979,64 @@ suite("Tomcat manual acceptance", () => {
     for (const [name, value] of Object.entries(report.checks)) {
       assert.equal(value.passed, true, `expected ${name} acceptance check to pass`);
     }
+  });
+});
+
+suite("Tomcat fake serve plan close-out", () => {
+  test("renders completed plan with code review and green build rows", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady(20_000);
+
+    const priorSessionId = api.__testing.getWebviewState().activeSessionId;
+    await api.__testing.sendWebviewIntent({
+      messageId: "plan-close-out-new-session",
+      type: "newSession",
+    });
+    const sessionId = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId && snapshot.activeSessionId !== priorSessionId
+          ? snapshot.activeSessionId
+          : undefined,
+      20_000,
+    );
+
+    await setNextFakeServePromptScript("plan_close_out_review_green_finalize");
+    api.__testing.clearObservedEvents();
+    await api.__testing.sendWebviewIntent({
+      data: {
+        sessionId,
+        text: "render deterministic plan close-out presentation",
+      },
+      messageId: "plan-close-out-prompt",
+      type: "prompt",
+    });
+    await api.__testing.waitForEvent({ timeoutMs: 20_000, type: "agent_end" });
+
+    const completed = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId &&
+        snapshot.composerFooterPlanStatus === "Plan: completed" &&
+        snapshot.toolTitles.some(
+          (title) => title.includes("Green build passed"),
+        )
+          ? snapshot
+          : undefined,
+      20_000,
+    );
+
+    assert.equal(completed.composerFooterPlanStatus, "Plan: completed");
+    assert.ok(
+      completed.html.includes("Code review") && completed.html.includes("PASS"),
+      `expected completed code-review row; DOM=${completed.html}`,
+    );
+    assert.ok(
+      completed.toolTitles.some(
+        (title) => title.includes("Green build passed"),
+      ),
+      `expected green-build command row; titles=${JSON.stringify(completed.toolTitles)}`,
+    );
   });
 });

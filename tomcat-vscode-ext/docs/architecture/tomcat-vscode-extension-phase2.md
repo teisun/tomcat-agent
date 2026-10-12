@@ -8,6 +8,12 @@
 
 **一句话定位**：Phase 1 让 Tomcat 当后端、原生聊天当前端跑通了「聊天/工具/审批/多会话」；Phase 2 补两件事——**(1) 把 Tomcat 独有的 `/plan`、`/model` 能力也接进来（瓶颈在 serve 后端缺命令，先补后端再接 UI）；(2) 加一个自建 Webview 富前端，与原生 participant 并存**，桥接核心两阶段 100% 复用。
 
+## 2026-08 协议 v2：会话模式与计划文件状态分离
+
+下文涉及 `planState`、`planId`、`planPath` 或 `mode` 的旧表述均已废弃。`get_state` 使用 `workspaceMode` 表示 code/claw 通道，用 `agentMode: "chat" | "plan"` 表示用户当前会话模式，并用 `activePlan: { id, path, state } | null` 表示已绑定计划文件。`state` 只有 `planning | pending | executing | completed`，不会出现 `"chat"`。
+
+前端只能由 `session.agent_mode.changed` 改写 Composer 模式开关；`plan.*` 事件只更新计划卡片和 `activePlan.state`。因此计划完成后，卡片可显示 completed，而 Composer 仍正确保持 Chat。Build 的当前回合输入以 `plan_build` 作为折叠摘要“开始执行计划”渲染；pending 卡片沿用同一个按钮入口，文案为 Resume。
+
 ---
 
 ## 子文档索引

@@ -1,11 +1,14 @@
 //! init_context_state helpers and context assembly functions.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use base64::Engine as _;
 use chrono::{NaiveDate, Utc};
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, MessageKind};
+use crate::core::session::preheat_cache::read_preheat_cache;
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
     ResumeIndexIoStats, ResumeIndexSource,
@@ -14,9 +17,12 @@ use crate::core::session::transcript::{
     read_entries_tail_with_stats, BranchSummaryEntry, TranscriptEntry, TranscriptReadStats,
 };
 use crate::core::session::{
-    append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_call_ids,
+    append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_calls,
 };
-use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
+use crate::infra::config::{
+    compute_context_budget_chars_from_tokens, fallback_input_budget_tokens, ContextConfig,
+    ResumeHydrationMode,
+};
 use crate::infra::error::AppError;
 
 use super::session_impl::generate_entry_id;
@@ -24,12 +30,15 @@ use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
 use super::types::{
-    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, SessionContextObservation,
+    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, PlanModeTransition,
+    ResumeControlState, SessionContextObservation,
 };
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
 const MAX_PLAN_SCAN: usize = 5000;
-pub(crate) const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
+pub const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
+pub const PENDING_TOOL_RESULT_TEXT: &str = "[pending]";
+pub const UNKNOWN_RESTART_TOOL_RESULT_TEXT: &str = "[unknown after restart: this tool may have partially or fully executed; verify its effects before depending on it]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HydrateTraceMode {
@@ -50,6 +59,7 @@ impl HydrateTraceMode {
 struct HydrateLoadOutcome {
     entries: Vec<TranscriptEntry>,
     latest_plan_event: Option<PlanEventRef>,
+    resume_control: ResumeControlState,
     io_stats: ResumeIndexIoStats,
     trace_mode: HydrateTraceMode,
     plan_source: &'static str,
@@ -97,9 +107,10 @@ fn legacy_read_cap() -> usize {
 }
 
 fn boundary_exists(entries: &[TranscriptEntry]) -> bool {
-    entries.iter().any(
-        |entry| matches!(entry, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true)),
-    )
+    let bodies = branch_summary_texts(entries);
+    entries
+        .iter()
+        .any(|entry| is_completed_boundary(entry, &bodies))
 }
 
 fn choose_recent_turn_anchor(index: &ResumeIndex) -> Option<ResumeAnchor> {
@@ -161,10 +172,31 @@ pub(super) fn compute_turn_window_start(
     earlier_anchor(today_anchor, recent_turn_anchor)
 }
 
+/// A hydration slice may only begin at a user message that can establish a
+/// replay turn. Starting at an assistant tool call or its result would split
+/// the provider protocol pair across the slice boundary.
+fn snap_to_protocol_safe_start(
+    index: &ResumeIndex,
+    candidate: Option<ResumeAnchor>,
+) -> Option<ResumeAnchor> {
+    let candidate = candidate?;
+    index
+        .recent_turn_starts
+        .iter()
+        .rev()
+        .find(|anchor| anchor.ordinal <= candidate.ordinal)
+        .cloned()
+}
+
 pub(super) fn compute_slice_start_anchor(
     index: &ResumeIndex,
     today: NaiveDate,
 ) -> Option<ResumeAnchor> {
+    let candidate = compute_slice_start_candidate(index, today);
+    snap_to_protocol_safe_start(index, candidate)
+}
+
+fn compute_slice_start_candidate(index: &ResumeIndex, today: NaiveDate) -> Option<ResumeAnchor> {
     later_anchor(
         index.latest_boundary.clone(),
         compute_turn_window_start(index, today),
@@ -196,9 +228,11 @@ fn full_hydration_entries(
             "init_context_state scanned at least MAX_PLAN_SCAN transcript entries"
         );
     }
+    let resume_control = extract_resume_control(&entries);
     Ok(HydrateLoadOutcome {
         entries,
         latest_plan_event: latest_plan_event.clone(),
+        resume_control,
         io_stats,
         trace_mode: HydrateTraceMode::Full,
         plan_source: if latest_plan_event.is_some() {
@@ -218,6 +252,7 @@ fn targeted_hydration_entries_with_load(
 ) -> Result<HydrateLoadOutcome, AppError> {
     let index = load.index.clone();
     let latest_plan_event = index.latest_plan_event_ref();
+    let raw_slice_start_candidate = compute_slice_start_candidate(&index, today);
     let slice_start_anchor = compute_slice_start_anchor(&index, today);
     let slice_start_ordinal = slice_start_anchor
         .as_ref()
@@ -238,6 +273,21 @@ fn targeted_hydration_entries_with_load(
     let (mut entries, tail_stats) = read_entries_tail_with_stats(path, k.max(1))?;
     let mut io_stats = load.stats;
     add_transcript_stats(&mut io_stats, tail_stats);
+
+    if let Some(candidate) = raw_slice_start_candidate.as_ref() {
+        let candidate_matches = entries.iter().any(|entry| candidate.matches_entry(entry));
+        if !candidate_matches {
+            let (_, rebuild_stats) = rebuild_resume_index(path)?;
+            io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
+            io_stats.entries_scanned += rebuild_stats.entries_scanned;
+
+            let mut fallback = full_hydration_entries(session, path)?;
+            fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
+            fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+            fallback.fallback = "full+rebuild";
+            return Ok(fallback);
+        }
+    }
 
     if let Some(anchor) = slice_start_anchor.as_ref() {
         let edge_matches = entries
@@ -267,6 +317,7 @@ fn targeted_hydration_entries_with_load(
     Ok(HydrateLoadOutcome {
         entries: std::mem::take(&mut entries),
         latest_plan_event: latest_plan_event.clone(),
+        resume_control: index.resume_control_state(),
         io_stats,
         trace_mode: HydrateTraceMode::Tail,
         plan_source: if latest_plan_event.is_some() {
@@ -299,6 +350,8 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
+        TranscriptEntry::BranchSummaryText(e) => &e.timestamp,
+        TranscriptEntry::ToolResultsCompacted(e) => &e.timestamp,
         TranscriptEntry::Label(e) => &e.timestamp,
         TranscriptEntry::SessionInfo(e) => &e.timestamp,
         TranscriptEntry::Custom(e) => &e.timestamp,
@@ -308,6 +361,15 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
 pub(super) fn is_user_message(entry: &TranscriptEntry) -> bool {
     if let TranscriptEntry::Message(me) = entry {
         me.message.get("role").and_then(|r| r.as_str()) == Some("user")
+            && me
+                .message
+                .get("superseded")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            && !MessageKind::from_persisted(
+                me.message.get("kind").and_then(serde_json::Value::as_str),
+            )
+            .is_non_turn_start()
     } else {
         false
     }
@@ -329,9 +391,10 @@ pub(super) fn compute_fold_start(
     today: NaiveDate,
     min_turns: usize,
 ) -> usize {
-    let boundary = entries.iter().rposition(
-        |e| matches!(e, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true)),
-    );
+    let bodies = branch_summary_texts(entries);
+    let boundary = entries
+        .iter()
+        .rposition(|entry| is_completed_boundary(entry, &bodies));
     let effective_start = boundary.unwrap_or(0);
 
     let today_start = entries[effective_start..]
@@ -372,7 +435,7 @@ pub(super) fn compute_fold_start(
 }
 
 fn branch_summary_pending_from_entry(ce: &BranchSummaryEntry) -> Option<CompactionResult> {
-    if ce.is_boundary != Some(false) {
+    if ce.superseded || ce.is_boundary != Some(false) {
         return None;
     }
     Some(CompactionResult {
@@ -385,6 +448,53 @@ fn branch_summary_pending_from_entry(ce: &BranchSummaryEntry) -> Option<Compacti
         estimated_summary_tokens: ce.estimated_summary_tokens,
         estimated_tokens_saved: ce.estimated_tokens_saved,
         preheat_elapsed_ms: 0,
+    })
+}
+
+/// Bodies are persisted as tail-appended `branch_summary_text` rows, while their marker remains
+/// at the original compaction cut. Build this lookup before positional folding so a marker is a
+/// boundary only after its body is durably present.
+fn branch_summary_texts(entries: &[TranscriptEntry]) -> HashMap<&str, &str> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::BranchSummaryText(body) if !body.superseded => {
+                Some((body.for_id.as_str(), body.summary.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_completed_boundary(entry: &TranscriptEntry, bodies: &HashMap<&str, &str>) -> bool {
+    let TranscriptEntry::BranchSummary(summary) = entry else {
+        return false;
+    };
+    !summary.superseded
+        && summary.is_boundary == Some(true)
+        && (summary.summary.is_some()
+            || summary
+                .id
+                .as_deref()
+                .is_some_and(|id| bodies.contains_key(id)))
+}
+
+fn has_unfulfilled_preheat_marker(entries: &[TranscriptEntry], marker_id: &str) -> bool {
+    entries.iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::BranchSummary(marker)
+                if marker.id.as_deref() == Some(marker_id)
+                    && !marker.superseded
+                    && marker.is_boundary == Some(true)
+                    && marker.summary.is_none()
+        )
+    })
+}
+
+fn has_summary_body(entries: &[TranscriptEntry], marker_id: &str) -> bool {
+    entries.iter().any(|entry| {
+        matches!(entry, TranscriptEntry::BranchSummaryText(body) if !body.superseded && body.for_id == marker_id)
     })
 }
 
@@ -476,17 +586,83 @@ fn chat_message_from_entry(
     }
     let mut msg: ChatMessage = serde_json::from_value(me.message.clone()).ok()?;
 
+    // Older transcripts may contain an assistant row emitted after output
+    // exhaustion even though the provider produced neither visible text nor a
+    // tool call. It cannot help the next request and renders as a blank bubble,
+    // so omit it during rehydrate. Tool-call-only assistant turns remain
+    // replayable and must never be filtered here.
+    if msg.role == crate::core::llm::ChatMessageRole::Assistant
+        && msg.tool_calls.as_ref().is_none_or(Vec::is_empty)
+        && msg.text_content().is_none_or(|text| text.trim().is_empty())
+    {
+        return None;
+    }
+
     if let Some(ref arr) = msg.tool_calls {
         warn_if_legacy_tool_name(arr);
     }
 
-    // Detect compaction summary injected as user message (via older paths)
-    // These are plain user messages from transcript — no special marking needed here.
-    // The CompactionSummary kind is only set for BranchSummary entries below.
     msg.msg_id = me.id.clone().or_else(|| Some(generate_entry_id()));
-    msg.kind = MessageKind::Normal;
     msg.timestamp = Some(me.timestamp.clone());
     Some(msg)
+}
+
+/// The persisted image form is a cheap content reference. Convert it only when
+/// rebuilding the live model context, where an upstream provider actually requires
+/// base64. A missing referenced blob is a durable-data failure: silently omitting a
+/// sent image would change the user's request.
+fn materialize_image_refs(
+    session: &SessionManager,
+    messages: &mut [ChatMessage],
+) -> Result<(), AppError> {
+    let store = session.attachment_store();
+    for message in messages {
+        let Some(crate::core::llm::ChatMessageContent::Parts(parts)) = message.content.as_mut()
+        else {
+            continue;
+        };
+        for part in parts {
+            let ChatMessageContentPart::InputImageRef {
+                blob_sha,
+                mime_type,
+                detail,
+                provider_sha,
+                ..
+            } = part
+            else {
+                continue;
+            };
+            let sha = provider_sha.as_deref().unwrap_or(blob_sha);
+            let resolved_mime = if provider_sha
+                .as_deref()
+                .is_some_and(|sha| sha != blob_sha.as_str())
+            {
+                crate::core::llm::IMAGE_PROVIDER_RENDITION_MIME
+            } else {
+                mime_type.as_str()
+            };
+            let bytes = store.get(sha)?.ok_or_else(|| {
+                AppError::Config(format!(
+                    "session image blob {sha} is missing; restore it before resuming"
+                ))
+            })?;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let mut resolved = if resolved_mime.eq_ignore_ascii_case("image/svg+xml") {
+                ChatMessageContentPart::validated_svg_base64_for_transcript(encoded)?
+            } else {
+                ChatMessageContentPart::image_base64_data(resolved_mime, encoded)?
+            };
+            if let ChatMessageContentPart::InputImage {
+                detail: resolved_detail,
+                ..
+            } = &mut resolved
+            {
+                *resolved_detail = detail.clone();
+            }
+            *part = resolved;
+        }
+    }
+    Ok(())
 }
 
 fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef> {
@@ -496,17 +672,34 @@ fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef
     })
 }
 
-fn fold_entries_to_messages(
+/// 全量扫描路径（无 sidecar 可用时）折出与 sidecar 等价的控制态。
+fn extract_resume_control(entries: &[TranscriptEntry]) -> ResumeControlState {
+    let mut control = ResumeControlState::default();
+    for entry in entries {
+        if let TranscriptEntry::Custom(custom) = entry {
+            if let Some(transition) = PlanModeTransition::from_custom_event(&custom.extra) {
+                control.apply(transition);
+            }
+        }
+    }
+    control
+}
+
+pub(super) fn fold_entries_to_messages(
     entries: &[TranscriptEntry],
     system_text_len: usize,
 ) -> FoldEntriesOutcome {
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut total_chars = system_text_len;
     let mut pending_preheat: Option<CompactionResult> = None;
+    let bodies = branch_summary_texts(entries);
 
     for entry in entries {
         match entry {
             TranscriptEntry::BranchSummary(ce) => {
+                if ce.superseded {
+                    continue;
+                }
                 // is_boundary=false → preheat record: skip during reload
                 if ce.is_boundary == Some(false) {
                     if let Some(r) = branch_summary_pending_from_entry(ce) {
@@ -515,25 +708,37 @@ fn fold_entries_to_messages(
                     continue;
                 }
 
-                if ce.is_boundary == Some(true) {
+                let summary_text = if ce.is_boundary == Some(true) {
+                    ce.summary
+                        .as_deref()
+                        .or_else(|| ce.id.as_deref().and_then(|id| bodies.get(id).copied()))
+                } else {
+                    // Only a new `is_boundary=true` marker can have a tail body. Legacy
+                    // is_boundary=None rows retain their historic inline-only behavior.
+                    ce.summary.as_deref()
+                };
+                let is_completed_boundary = ce.is_boundary == Some(true) && summary_text.is_some();
+                if is_completed_boundary {
                     pending_preheat = None;
                 }
 
-                // is_boundary=true → discard prefix (boundary switch)
-                // is_boundary=None → legacy entry, don't clear (backward compat)
-                if ce.is_boundary == Some(true) {
+                // A completed is_boundary=true record discards the prefix. A marker without its
+                // tail body is deliberately a no-op: treating it as a boundary would lose the
+                // original history after a failed or interrupted preheat.
+                if is_completed_boundary {
                     messages.clear();
                     total_chars = system_text_len;
                 }
 
-                if let Some(ref summary) = ce.summary {
-                    let mut summary_msg = ChatMessage::compaction_summary(summary.as_str());
-                    summary_msg.msg_id = ce.id.clone().or_else(|| Some(generate_entry_id()));
+                if let Some(summary) = summary_text {
+                    let entry_id = ce.id.clone().unwrap_or_else(generate_entry_id);
+                    let mut summary_msg = ChatMessage::compaction_summary(summary, entry_id);
                     summary_msg.timestamp = Some(ce.timestamp.clone());
                     total_chars += estimate_msg_chars(&summary_msg);
                     messages.push(summary_msg);
                 }
             }
+            TranscriptEntry::BranchSummaryText(_) => {}
             TranscriptEntry::Message(me) => {
                 if let Some(msg) = chat_message_from_entry(me) {
                     total_chars += estimate_msg_chars(&msg);
@@ -556,30 +761,37 @@ fn heal_dangling_tail_tool_call(
     entries: &[TranscriptEntry],
 ) -> Result<bool, AppError> {
     let recent = collect_recent_chat_messages_from_tail(entries);
-    let Some(tool_call_ids) = find_dangling_tail_tool_call_ids(&recent) else {
+    let Some(tool_calls) = find_dangling_tail_tool_calls(&recent) else {
         return Ok(false);
     };
 
     tracing::warn!(
-        tool_call_ids = ?tool_call_ids,
-        "hydrate detected dangling tail tool_call block; appending synthetic interrupted tool results"
+        tool_call_ids = ?tool_calls.iter().map(|call| &call.id).collect::<Vec<_>>(),
+        "hydrate detected dangling tail tool_call block"
     );
 
-    for tool_call_id in tool_call_ids {
+    let mut appended = false;
+    for tool_call in tool_calls {
+        let content = if crate::core::tools::contract::catalog::is_replay_safe_tool(&tool_call.name)
+        {
+            PENDING_TOOL_RESULT_TEXT.to_string()
+        } else {
+            UNKNOWN_RESTART_TOOL_RESULT_TEXT.to_string()
+        };
         session.append_message(serde_json::json!({
             "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": INTERRUPTED_TOOL_RESULT_TEXT,
+            "tool_call_id": tool_call.id,
+            "content": content,
         }))?;
+        appended = true;
     }
 
-    Ok(true)
+    Ok(appended)
 }
 
 /// Returns true if the message is a "turn start" — i.e., starts a new logical turn.
 fn is_turn_start(m: &ChatMessage) -> bool {
-    (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
-        || m.kind == MessageKind::CompactionSummary
+    m.starts_logical_turn()
 }
 
 /// Phase 3: 按天筛选 messages + 不足 min_turns 向前补齐。
@@ -662,6 +874,7 @@ fn empty_context_state(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: ResumeControlState::default(),
         preheat: Preheat::new(),
         session_obs,
         live: super::types::ContextLiveMetrics::default(),
@@ -677,15 +890,14 @@ pub fn init_context_state(
     system_text: &str,
 ) -> Result<ContextState, AppError> {
     let started = Instant::now();
-    let budget = compute_context_budget_chars(config);
-    let token_budget = config
-        .context_window
-        .saturating_sub(config.max_output_tokens);
+    let token_budget = fallback_input_budget_tokens(config);
+    let budget = compute_context_budget_chars_from_tokens(token_budget);
     let (cc, ctf, trcp) = observability_from_session(session)?;
     let session_obs = SessionContextObservation {
         compaction_count: cc,
         compaction_tokens_freed: ctf,
         tool_result_chars_persisted: trcp,
+        ..Default::default()
     };
 
     let path = match session.current_transcript_path()? {
@@ -696,7 +908,7 @@ pub fn init_context_state(
                 budget,
                 token_budget,
                 session_obs,
-            ))
+            ));
         }
     };
     let today = Utc::now().date_naive();
@@ -731,9 +943,11 @@ pub fn init_context_state(
 
     let entries = load_outcome.entries;
     let latest_plan_event = load_outcome.latest_plan_event;
+    let resume_control = load_outcome.resume_control;
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
     let fold_out = fold_entries_to_messages(&entries[fold_start..], system_text.len());
-    let selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
+    let mut selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
+    materialize_image_refs(session, &mut selected)?;
 
     let total_chars = system_text.len() + selected.iter().map(estimate_msg_chars).sum::<usize>();
 
@@ -742,6 +956,24 @@ pub fn init_context_state(
         let end = p.covered_end_id.as_str();
         if selected.iter().any(|m| m.msg_id.as_deref() == Some(end)) {
             preheat.restore_completed(p);
+        }
+    }
+    if preheat.is_idle() {
+        if let Some(cached) = read_preheat_cache(&path) {
+            // The cache is an optional recovery optimization. Its record normally always has a
+            // marker id, but a malformed/future record must never prevent the session itself
+            // from loading.
+            if let Some(marker_id) = cached.transcript_compaction_entry_id.as_deref() {
+                let covered_end_is_live = selected.iter().any(|message| {
+                    message.msg_id.as_deref() == Some(cached.covered_end_id.as_str())
+                });
+                if has_unfulfilled_preheat_marker(&entries, marker_id)
+                    && !has_summary_body(&entries, marker_id)
+                    && covered_end_is_live
+                {
+                    preheat.restore_completed(cached);
+                }
+            }
         }
     }
 
@@ -765,13 +997,24 @@ pub fn init_context_state(
         post_usage_appended_chars: 0,
         transcript_path: path,
         latest_plan_event,
+        resume_control,
         preheat,
         session_obs,
         live: super::types::ContextLiveMetrics::default(),
     })
 }
 
-/// Messages from ContextState, ready for LLM (no system prompt).
-pub fn build_context_from_state(state: &ContextState) -> Vec<ChatMessage> {
-    state.messages.clone()
+/// 与已解析模型能力一起恢复上下文。
+///
+/// 历史解析本身不依赖 provider，故仍由 [`init_context_state`] 完成；但任何已知主模型
+/// 的生产入口必须在返回前覆盖预算，避免用全局 fallback 判断压缩水位。
+pub fn init_context_state_with_limits(
+    session: &SessionManager,
+    config: &ContextConfig,
+    system_text: &str,
+    limits: &crate::core::llm::EffectiveModelLimits,
+) -> Result<ContextState, AppError> {
+    let mut state = init_context_state(session, config, system_text)?;
+    state.apply_limits(limits);
+    Ok(state)
 }

@@ -302,6 +302,7 @@ SearchFilesStats
 │  • globset：路径匹配；regex (RegexBuilder)：内容匹配         │
 │  • 大文件 5 MiB / 二进制 NUL 嗅探 → 跳过 + warning           │
 │  • 单查询墙钟 10s（PI_SEARCH_TIER2_DEADLINE_MS 可覆盖）      │
+│  • 命中超时先收窄 path / glob / file_type，再考虑放宽墙钟    │
 │  • regex 编译失败 → 空命中 + warning（不 panic / 不 Err）    │
 └──────────────────────────────────────────────────────────────┘
                  │
@@ -390,7 +391,7 @@ SearchFilesStats
 | `.gitignore` | fd/rg 默认尊重 | **`ignore` crate 默认遵守** |
 | 权限 / deny | gate + 结果过滤 | `filter_entry` 阶段剪枝（拒绝目录直接不递归）+ 叶子复检 |
 | 大文件 / 二进制 | rg 流式跳过 | > 5 MiB 或前 8 KiB 含 NUL → 跳过 + warning |
-| 墙钟 | rg 自身控制 | 默认 10s；`PI_SEARCH_TIER2_DEADLINE_MS=<ms>` 可覆盖；超时 `truncated=true` + warning |
+| 墙钟 | rg 自身控制 | 默认 10s；`PI_SEARCH_TIER2_DEADLINE_MS=<ms>` 可覆盖；超时 `truncated=true` + warning；优先收窄 `path/glob/file_type`，不要先把默认值无限放大 |
 | 输出结构 | `SearchFilesOutput` | **同一结构**，`warnings` 标 `implementation=tier2 rust-fallback` |
 | 缺一策略 | — | 仅缺 `fd` → `target=files` 走 Tier2；仅缺 `rg` → `target=content` 走 Tier2；都缺 → 全 Tier2 |
 

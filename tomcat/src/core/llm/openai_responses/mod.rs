@@ -25,35 +25,39 @@
 //!   `impl LlmProvider`，每个 wire 翻译入口做一行委托。
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
-use tracing::warn;
+use tracing::{info, warn, Level};
 
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use crate::core::llm::degrade_unsupported_multimodal;
-use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{plan, ProviderCompatProfile, ReplayAction};
+use crate::core::llm::{
+    build_openai_compatible_files_adapter, FilesApiAdapter, FilesApiProviderContext,
+};
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
-    llm_http_status_error, llm_http_status_error_with_stage, AppError, LlmErrorStage,
+    llm_http_status_error, llm_http_status_error_with_stage, llm_retry_after_ms, AppError,
+    LlmErrorStage,
 };
 
-use super::super::retry_delay::provider_retry_delay;
-use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
+use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse,
+    ChatResponseChoice, StreamEvent, TokenUsage,
 };
 
 mod payload;
@@ -63,6 +67,7 @@ mod stream;
 // 进而通过 `#[path = "../tests/openai_responses_test.rs"] mod tests;` 的 `super::*`
 // 暴露给同名单测——tests 是本模块的子模块，可以看到 mod.rs 私有的 `use` 别名。
 // 不向外加 `pub`，外部仍只能通过 `OpenAiResponsesProvider` 公共 API 接触。
+use crate::infra::i18n::tr;
 #[allow(unused_imports)]
 use payload::{
     build_responses_input, convert_tools_to_responses, responses_payload_to_chat_response,
@@ -74,13 +79,17 @@ use stream::responses_chunk_to_events;
 use stream::{
     responses_chunk_to_events_with_state, ReasoningState, ResponsesStream, ToolCallTrack,
 };
+
 const PROVIDER_NAME: &str = "openai-responses";
 
 fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::IdleTimeout,
-        format!("流式空闲超时: stream_timeout_sec={}s", stream_timeout_sec),
+        tr(
+            "llm.idleTimeout",
+            &[("seconds", &stream_timeout_sec.to_string())],
+        ),
     )
 }
 
@@ -88,9 +97,9 @@ fn non_stream_stale_timeout_error(non_stream_stale_timeout_sec: u64) -> AppError
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::NonStreamStale,
-        format!(
-            "非流式请求长时间无响应: non_stream_stale_timeout_sec={}s",
-            non_stream_stale_timeout_sec
+        tr(
+            "llm.nonStreamStale",
+            &[("seconds", &non_stream_stale_timeout_sec.to_string())],
         ),
     )
 }
@@ -100,7 +109,7 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::Connect,
-            format!("{prefix}连接失败"),
+            tr("llm.connectFailed", &[("action", prefix)]),
             err,
         );
     }
@@ -108,9 +117,12 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::ReadTimeout,
-            format!(
-                "{prefix}读/空闲超时（等待响应头）: http_read_timeout_sec={}s",
-                http_read_timeout_sec
+            tr(
+                "llm.headersTimeout",
+                &[
+                    ("action", prefix),
+                    ("seconds", &http_read_timeout_sec.to_string()),
+                ],
             ),
             err,
         );
@@ -118,7 +130,7 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::Send,
-        format!("{prefix}发送失败"),
+        tr("llm.sendFailed", &[("action", prefix)]),
         err,
     )
 }
@@ -128,9 +140,12 @@ fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec:
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::ReadTimeout,
-            format!(
-                "{prefix}超时: http_read_timeout_sec={}s",
-                http_read_timeout_sec
+            tr(
+                "llm.readTimeout",
+                &[
+                    ("action", prefix),
+                    ("seconds", &http_read_timeout_sec.to_string()),
+                ],
             ),
             err,
         );
@@ -138,7 +153,7 @@ fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec:
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::BodyRead,
-        format!("{prefix}失败"),
+        tr("llm.failed", &[("action", prefix)]),
         err,
     )
 }
@@ -147,7 +162,7 @@ fn map_parse_error(prefix: &str, err: impl Into<anyhow::Error>) -> AppError {
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::Parse,
-        format!("{prefix}失败"),
+        tr("llm.failed", &[("action", prefix)]),
         err,
     )
 }
@@ -170,12 +185,40 @@ fn gateway_http_stage(status: u16, body: &str) -> Option<LlmErrorStage> {
     None
 }
 
-fn map_http_status_error(status: reqwest::StatusCode, body: &[u8]) -> AppError {
-    let message = String::from_utf8_lossy(body).into_owned();
-    if let Some(stage) = gateway_http_stage(status.as_u16(), &message) {
-        return llm_http_status_error_with_stage(PROVIDER_NAME, stage, status.as_u16(), message);
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
     }
-    llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
+    let retry_at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let remaining = retry_at
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(chrono::Utc::now())
+        .num_milliseconds();
+    Some(remaining.max(0) as u64)
+}
+
+fn map_http_status_error(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    retry_after_ms: Option<u64>,
+) -> AppError {
+    let message = String::from_utf8_lossy(body).into_owned();
+    let error = if let Some(stage) = gateway_http_stage(status.as_u16(), &message) {
+        llm_http_status_error_with_stage(PROVIDER_NAME, stage, status.as_u16(), message)
+    } else {
+        llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
+    };
+    match (error, retry_after_ms) {
+        (AppError::LlmDetailed(detail), Some(delay)) => {
+            AppError::LlmDetailed(Box::new((*detail).with_retry_after_ms(delay)))
+        }
+        (error, _) => error,
+    }
 }
 
 /// `POST {base}/v1/responses` 适配器；与 [`OpenAiProvider`] 共享 [`LlmRuntimeConfig`] 横切字段，
@@ -193,14 +236,14 @@ pub struct OpenAiResponsesProvider {
     catalog_model_id: String,
     default_model: String,
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
-    semaphore: Option<Semaphore>,
+    semaphore: Option<Arc<Semaphore>>,
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
     http_read_timeout_sec: u64,
-    /// Files client 懒加载实例（U10）：同一 provider 生命周期只构造一次。
-    files_client: std::sync::OnceLock<OpenAiFilesClient>,
+    /// Files adapter 懒加载实例：同一 provider 生命周期只构造一次。
+    files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
     files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
     thinking_cfg: crate::infra::config::ThinkingConfig,
@@ -211,12 +254,13 @@ pub struct OpenAiResponsesProvider {
     capabilities: Capabilities,
 }
 
-fn apply_stream_idle_timeout<S>(
+fn apply_stream_idle_timeout<S, T>(
     stream: S,
     stream_timeout_sec: u64,
-) -> Pin<Box<dyn Stream<Item = Result<Bytes, AppError>> + Send>>
+) -> Pin<Box<dyn Stream<Item = Result<T, AppError>> + Send>>
 where
-    S: Stream<Item = Result<Bytes, AppError>> + Send + 'static,
+    S: Stream<Item = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
 {
     if stream_timeout_sec == 0 {
         return Box::pin(stream);
@@ -232,22 +276,44 @@ where
     )
 }
 
-fn latest_openai_response_id_for_profile(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviousResponseHint {
+    id: String,
+    assistant_index: usize,
+}
+
+struct ResponsesWireFingerprint<'a> {
+    model: &'a str,
+    request: &'a ChatRequest,
+    instructions: Option<&'a str>,
+    input: &'a [Value],
+    tools: Option<&'a [Value]>,
+    explicit_replay: bool,
+    input_start: usize,
+    has_previous_response_id: bool,
+}
+
+fn latest_openai_response_hint_for_profile(
     messages: &[ChatMessage],
     target_profile: &ProviderCompatProfile,
-) -> Option<String> {
+) -> Option<PreviousResponseHint> {
     messages
         .iter()
+        .enumerate()
         .rev()
-        .find(|msg| matches!(msg.role, ChatMessageRole::Assistant))
-        .and_then(|msg| match plan(target_profile, msg) {
+        .find(|(_, msg)| matches!(msg.role, ChatMessageRole::Assistant))
+        .and_then(|(assistant_index, msg)| match plan(target_profile, msg) {
             ReplayAction::KeepOpaque => msg
                 .reasoning_continuation
                 .as_ref()
                 .and_then(|continuation| continuation.provider_refs.as_ref())
                 .and_then(|refs| refs.openai_response_id.clone())
-                .filter(|id| !id.is_empty()),
-            ReplayAction::ConvertToText(_) | ReplayAction::StripOpaque => None,
+                .filter(|id| !id.is_empty())
+                .map(|id| PreviousResponseHint {
+                    id,
+                    assistant_index,
+                }),
+            ReplayAction::StripOpaque => None,
         })
 }
 
@@ -264,6 +330,116 @@ fn is_previous_response_id_error(err: &AppError) -> bool {
         || text.contains("previous_response")
 }
 
+/// Emit only hashes and structural facts, never prompt text. The cache key is
+/// an input prefix, so adjacent requests can be compared at the first input
+/// item whose hash differs without exposing user content in diagnostics.
+fn log_responses_wire_fingerprint(wire: ResponsesWireFingerprint<'_>) {
+    let ResponsesWireFingerprint {
+        model,
+        request,
+        instructions,
+        input,
+        tools,
+        explicit_replay,
+        input_start,
+        has_previous_response_id,
+    } = wire;
+    if !prompt_prefix_fingerprint_enabled()
+        || !tracing::enabled!(target: "tomcat_chat_diag", Level::INFO)
+    {
+        return;
+    }
+
+    let tail_hashes = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.kind, crate::core::llm::MessageKind::EphemeralTail))
+        .map(|message| fingerprint(&serde_json::to_value(message).unwrap_or(Value::Null)))
+        .collect::<Vec<_>>();
+    let input_hashes = input.iter().map(fingerprint).collect::<Vec<_>>();
+    let input_prefix_hashes = rolling_array_fingerprints(input);
+    let tool_hash = tools.map(|tools| fingerprint(&Value::Array(tools.to_vec())));
+    let input_item_types = input
+        .iter()
+        .map(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let replayed_reasoning_items = input
+        .iter()
+        .filter(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.contains("reasoning"))
+                || item.get("encrypted_content").is_some()
+        })
+        .count();
+
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "responses_wire_fingerprint",
+        model,
+        request_id = ?request.diagnostic_request_id,
+        request_family = ?request.cache_key,
+        instructions_hash = ?instructions.map(fingerprint_str),
+        instructions_chars = instructions.map(str::len).unwrap_or_default(),
+        tool_hash = ?tool_hash,
+        input_count = input.len(),
+        ?input_item_types,
+        ?input_hashes,
+        ?input_prefix_hashes,
+        ?tail_hashes,
+        explicit_replay,
+        replayed_reasoning_items,
+        input_start,
+        has_previous_response_id,
+    );
+}
+
+fn prompt_prefix_fingerprint_enabled() -> bool {
+    std::env::var("TOMCAT_PROMPT_PREFIX_FINGERPRINT")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+fn fingerprint(value: &Value) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(value).unwrap_or_default())
+    )[..16]
+        .to_string()
+}
+
+fn fingerprint_str(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))[..16].to_string()
+}
+
+fn rolling_array_fingerprints(values: &[Value]) -> Vec<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"[");
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index > 0 {
+                hasher.update(b",");
+            }
+            hasher.update(serde_json::to_vec(value).unwrap_or_default());
+            let mut snapshot = hasher.clone();
+            snapshot.update(b"]");
+            format!("{:x}", snapshot.finalize())[..16].to_string()
+        })
+        .collect()
+}
+
 impl OpenAiResponsesProvider {
     fn credential_fingerprint(api_key: &str) -> String {
         let digest = Sha256::digest(api_key.as_bytes());
@@ -271,10 +447,25 @@ impl OpenAiResponsesProvider {
     }
 
     /// 从模型条目 + 全局运行时配置构建。
+    #[cfg(test)]
     pub fn new(
         entry: &ModelEntry,
         runtime: &LlmRuntimeConfig,
         credential: &Credential,
+    ) -> Result<Self, AppError> {
+        Self::with_route(
+            entry,
+            runtime,
+            credential,
+            &super::ProviderRoute::new(runtime)?,
+        )
+    }
+
+    pub(super) fn with_route(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+        route: &super::ProviderRoute,
     ) -> Result<Self, AppError> {
         let base_url = entry
             .base_url
@@ -285,13 +476,8 @@ impl OpenAiResponsesProvider {
             .trim_end_matches('/')
             .to_string();
 
-        let client = build_http_client(runtime, None)?;
-
-        let semaphore = if runtime.max_concurrent_requests > 0 {
-            Some(Semaphore::new(runtime.max_concurrent_requests as usize))
-        } else {
-            None
-        };
+        let client = route.client.clone();
+        let semaphore = route.semaphore.clone();
 
         let api_base_fallback = runtime
             .api_base_fallback
@@ -319,7 +505,7 @@ impl OpenAiResponsesProvider {
             stream_timeout_sec: runtime.stream_timeout_sec,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
             http_read_timeout_sec: runtime.http_read_timeout_sec,
-            files_client: std::sync::OnceLock::new(),
+            files_adapter: std::sync::OnceLock::new(),
             files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
@@ -406,27 +592,41 @@ impl OpenAiResponsesProvider {
         let target_profile = self.replay_profile_for_model(&model);
         let thinking_format = self.thinking_format_for_wire();
         let thinking_cfg = self.thinking_cfg_for_request(request);
-        let previous_response_id = if self.continuity_enabled
+        let previous_response_hint = if self.continuity_enabled
             && self.use_previous_response_id
             && allow_response_id_hint
             && target_profile.supports_response_id_hint
         {
-            latest_openai_response_id_for_profile(&request.messages, &target_profile)
+            latest_openai_response_hint_for_profile(&request.messages, &target_profile)
         } else {
             None
         };
-        let explicit_replay = self.continuity_enabled && previous_response_id.is_none();
+        let explicit_replay = self.continuity_enabled && previous_response_hint.is_none();
+        let input_start = previous_response_hint
+            .as_ref()
+            .map_or(0, |hint| hint.assistant_index + 1);
         let (instructions, input) = payload::build_responses_input(
             degraded_messages.as_ref(),
             &target_profile,
             self.continuity_enabled,
             explicit_replay,
+            input_start,
         );
         let tools_payload = request
             .tools
             .as_deref()
             .map(payload::convert_tools_to_responses)
             .filter(|v| !v.is_empty());
+        log_responses_wire_fingerprint(ResponsesWireFingerprint {
+            model: &model,
+            request,
+            instructions: instructions.as_deref(),
+            input: &input,
+            tools: tools_payload.as_deref(),
+            explicit_replay,
+            input_start,
+            has_previous_response_id: previous_response_hint.is_some(),
+        });
 
         let mut body = json!({
             "model": model,
@@ -434,12 +634,22 @@ impl OpenAiResponsesProvider {
             "stream": stream,
             "store": false,
         });
+        if let Some(cache_key) = request
+            .cache_key
+            .as_ref()
+            .filter(|key| !key.trim().is_empty())
+        {
+            body["prompt_cache_key"] = Value::String(cache_key.clone());
+        }
+        if let Some(speed) = request.speed {
+            body["service_tier"] = json!(crate::core::llm::endpoint::openai_service_tier(speed));
+        }
         if explicit_replay {
             body["include"] = json!(["reasoning.encrypted_content"]);
         }
-        if let Some(previous_response_id) = previous_response_id {
+        if let Some(previous_response_hint) = previous_response_hint {
             body["store"] = json!(true);
-            body["previous_response_id"] = Value::String(previous_response_id);
+            body["previous_response_id"] = Value::String(previous_response_hint.id);
         }
         if let Some(ins) = instructions {
             body["instructions"] = Value::String(ins);
@@ -447,7 +657,7 @@ impl OpenAiResponsesProvider {
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
-        if let Some(max) = request.max_tokens {
+        if let Some(max) = request.resolved_output_limit {
             // Responses 用 max_output_tokens；与 Completions 的 max_completion_tokens 概念一致。
             // 上游对 max_output_tokens 有下限（当前为 16），低于则 400。
             let max_out = max.max(16);
@@ -499,20 +709,30 @@ impl OpenAiResponsesProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| map_send_error("请求", e, self.http_read_timeout_sec))?;
+            .map_err(|e| {
+                map_send_error(
+                    &tr("llm.action.request", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
 
         let status = resp.status();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| map_body_read_error("读取响应", e, self.http_read_timeout_sec))?;
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
+        let bytes = resp.bytes().await.map_err(|e| {
+            map_body_read_error(
+                &tr("llm.action.readResponse", &[]),
+                e,
+                self.http_read_timeout_sec,
+            )
+        })?;
 
         if !status.is_success() {
-            return Err(map_http_status_error(status, &bytes));
+            return Err(map_http_status_error(status, &bytes, retry_after_ms));
         }
 
-        let raw: Value =
-            serde_json::from_slice(&bytes).map_err(|e| map_parse_error("解析响应", e))?;
+        let raw: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| map_parse_error(&tr("llm.action.parseResponse", &[]), e))?;
         Ok(payload::responses_payload_to_chat_response(&raw))
     }
 
@@ -530,7 +750,9 @@ impl OpenAiResponsesProvider {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = provider_retry_delay(attempt);
+                        let delay = llm_retry_after_ms(&e)
+                            .map(std::time::Duration::from_millis)
+                            .unwrap_or_else(|| provider_retry_delay(attempt));
                         warn!(
                             "Responses 请求失败，{}ms 后重试 ({}/{}): {}",
                             delay.as_millis(),
@@ -538,7 +760,7 @@ impl OpenAiResponsesProvider {
                             self.retry_count,
                             e
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -547,7 +769,7 @@ impl OpenAiResponsesProvider {
                 }
             }
         }
-        let err = last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+        let err = last_err.unwrap_or_else(|| AppError::Llm(tr("llm.retriesExhausted", &[])));
         if Self::is_connect_or_network_error(&err) {
             if let Some(ref fallback) = self.api_base_fallback {
                 warn!("主 API 不可达，尝试 fallback: {}", fallback);
@@ -588,14 +810,24 @@ impl OpenAiResponsesProvider {
             .json(body)
             .send()
             .await
-            .map_err(|e| map_send_error("流式请求", e, self.http_read_timeout_sec))?;
+            .map_err(|e| {
+                map_send_error(
+                    &tr("llm.action.streamRequest", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
         let status = resp.status();
+        let retry_after_ms = parse_retry_after_ms(resp.headers());
         if !status.is_success() {
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| map_body_read_error("读取错误响应", e, self.http_read_timeout_sec))?;
-            return Err(map_http_status_error(status, &bytes));
+            let bytes = resp.bytes().await.map_err(|e| {
+                map_body_read_error(
+                    &tr("llm.action.readErrorResponse", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
+            return Err(map_http_status_error(status, &bytes, retry_after_ms));
         }
         Ok(resp)
     }
@@ -610,7 +842,9 @@ impl OpenAiResponsesProvider {
             match self.stream_post_once(base_url, body).await {
                 Ok(resp) => return Ok(resp),
                 Err(err) if Self::is_retriable(&err) && attempt < self.retry_count => {
-                    let delay = provider_retry_delay(attempt);
+                    let delay = llm_retry_after_ms(&err)
+                        .map(std::time::Duration::from_millis)
+                        .unwrap_or_else(|| provider_retry_delay(attempt));
                     warn!(
                         "Responses 流式建连失败，{}ms 后重试 ({}/{}): {}",
                         delay.as_millis(),
@@ -618,13 +852,13 @@ impl OpenAiResponsesProvider {
                         self.retry_count,
                         err
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("Responses 流式建连重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| AppError::Llm(tr("llm.responsesRetriesExhausted", &[]))))
     }
 
     async fn stream_post_with_base_fallback(
@@ -646,6 +880,93 @@ impl OpenAiResponsesProvider {
             Err(err) => Err(err),
         }
     }
+
+    /// Buffers a normalized Responses stream into the repository's ordinary complete-response
+    /// shape.  Some compatible gateways reject `stream: false`, while background callers such as
+    /// compaction still need one complete response rather than incremental rendering.
+    async fn collect_streaming_response(
+        &self,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, AppError> {
+        let mut stream = self.chat_stream(request).await?;
+        let mut text = String::new();
+        let mut finish_reason = None;
+        let mut usage = None;
+        let mut tool_calls = BTreeMap::<u32, Value>::new();
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                StreamEvent::ContentDelta { delta } => text.push_str(&delta),
+                StreamEvent::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta,
+                } => {
+                    let call = tool_calls.entry(index).or_insert_with(|| {
+                        json!({
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                    });
+                    if let Some(id) = id {
+                        call["id"] = Value::String(id);
+                    }
+                    if let Some(name) = name {
+                        call["function"]["name"] = Value::String(name);
+                    }
+                    if let Some(arguments_delta) = arguments_delta {
+                        let existing = call["function"]["arguments"].as_str().unwrap_or_default();
+                        call["function"]["arguments"] =
+                            Value::String(format!("{existing}{arguments_delta}"));
+                    }
+                }
+                StreamEvent::FinishReason { reason } => finish_reason = Some(reason),
+                StreamEvent::Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    total_tokens,
+                    reasoning_tokens,
+                    text_tokens,
+                } => {
+                    usage = Some(TokenUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                        total_tokens,
+                        reasoning_tokens,
+                        text_tokens,
+                    });
+                }
+                StreamEvent::LlmError {
+                    reason, message, ..
+                } => return Err(AppError::Llm(format!("{reason}: {message}"))),
+                StreamEvent::Thinking { .. }
+                | StreamEvent::ReasoningSnapshot { .. }
+                | StreamEvent::LlmNotice { .. } => {}
+            }
+        }
+
+        let mut message = ChatMessage::assistant(text);
+        if !tool_calls.is_empty() {
+            message.tool_calls = Some(tool_calls.into_values().collect());
+        }
+        message.finish_reason = finish_reason.clone();
+        message.usage = usage.clone();
+        Ok(ChatResponse {
+            id: None,
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message,
+                finish_reason,
+            }],
+            usage,
+        })
+    }
 }
 
 #[async_trait]
@@ -656,11 +977,9 @@ impl LlmProvider for OpenAiResponsesProvider {
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
         let _permit = if let Some(ref sem) = self.semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| AppError::Llm(format!("限流信号量关闭: {}", e)))?,
-            )
+            Some(sem.acquire().await.map_err(|e| {
+                AppError::Llm(tr("llm.semaphoreClosed", &[("detail", &e.to_string())]))
+            })?)
         } else {
             None
         };
@@ -683,17 +1002,19 @@ impl LlmProvider for OpenAiResponsesProvider {
         }
     }
 
+    async fn chat_collect(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.collect_streaming_response(request).await
+    }
+
     async fn chat_stream(
         &self,
         request: ChatRequest,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
         let _permit = if let Some(ref sem) = self.semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| AppError::Llm(format!("限流信号量关闭: {}", e)))?,
-            )
+            Some(sem.acquire().await.map_err(|e| {
+                AppError::Llm(tr("llm.semaphoreClosed", &[("detail", &e.to_string())]))
+            })?)
         } else {
             None
         };
@@ -730,17 +1051,19 @@ impl LlmProvider for OpenAiResponsesProvider {
 
         let http_read_timeout_sec = self.http_read_timeout_sec;
         let stream_timeout_sec = self.stream_timeout_sec;
-        let bytes_stream = resp
-            .bytes_stream()
-            .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
-        let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
+        let bytes_stream = resp.bytes_stream().map_err(move |e| {
+            map_body_read_error(&tr("llm.action.readStream", &[]), e, http_read_timeout_sec)
+        });
         let event_stream = stream::ResponsesStream::new(
             bytes_stream,
             prefer_ndjson,
             source_profile,
             self.continuity_enabled,
         );
-        Ok(Box::new(event_stream))
+        Ok(Box::new(apply_stream_idle_timeout(
+            event_stream,
+            stream_timeout_sec,
+        )))
     }
 
     /// Trait 启发式 token 估算：`chars / 3`（与 Completions 同口径，便于上层统一近似预算）。
@@ -767,23 +1090,7 @@ impl LlmProvider for OpenAiResponsesProvider {
         Ok((total_chars / 3).max(1) as u32)
     }
 
-    fn supports_openai_files_api(&self) -> bool {
-        true
-    }
-
-    fn openai_files_context(&self) -> Option<OpenAiFilesProviderContext> {
-        Some(OpenAiFilesProviderContext {
-            client: self.client.clone(),
-            base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
-            retry_count: self.retry_count,
-        })
-    }
-
-    fn openai_files_client(&self, files_cfg: &LlmFilesConfig) -> Option<OpenAiFilesClient> {
-        if !self.supports_openai_files_api() {
-            return None;
-        }
+    fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
         let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
             self.files_expires_after_seconds
         } else {
@@ -792,9 +1099,10 @@ impl LlmProvider for OpenAiResponsesProvider {
         let cfg = LlmFilesConfig {
             expires_after_seconds: expires,
         };
-        let client = self.files_client.get_or_init(|| {
-            OpenAiFilesClient::from_provider_context(
-                OpenAiFilesProviderContext {
+        let adapter = self.files_adapter.get_or_init(|| {
+            build_openai_compatible_files_adapter(
+                &self.route_provider,
+                FilesApiProviderContext {
                     client: self.client.clone(),
                     base_url: self.base_url.clone(),
                     api_key: self.api_key.clone(),
@@ -803,7 +1111,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 &cfg,
             )
         });
-        Some(client.clone())
+        Some(adapter.clone())
     }
 }
 

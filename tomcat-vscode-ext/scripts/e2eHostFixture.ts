@@ -1,8 +1,11 @@
 import * as os from "node:os";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { TEST_DEFAULT_CWD_ENV, TEST_HISTORY_PAGE_GATE_FILE } from "../src/constants";
 
 export interface HostE2eFixture {
+  attachmentRootDir: string;
   cleanup(): Promise<void>;
   editFilePath: string;
   env: NodeJS.ProcessEnv;
@@ -12,8 +15,30 @@ export interface HostE2eFixture {
 }
 
 export interface HostE2eFixtureOptions {
+  bootstrapListModelsFailures?: number;
+  handshakeDelayMs?: number;
+  interruptDelayMs?: number;
   requireInit?: boolean;
+  transientServeFailures?: number;
 }
+
+const FALLBACK_SERVER_VERSION = "0.1.30";
+
+function readBundledCliVersion(): string {
+  try {
+    const metadata = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { tomcat?: { bundledCliVersion?: unknown } };
+    const version = metadata.tomcat?.bundledCliVersion;
+    return typeof version === "string" && version.trim().length > 0
+      ? version.trim()
+      : FALLBACK_SERVER_VERSION;
+  } catch {
+    return FALLBACK_SERVER_VERSION;
+  }
+}
+
+const BUNDLED_CLI_VERSION = readBundledCliVersion();
 
 const CHAT_E2E_SETTINGS = {
   "chat.allowAnonymousAccess": true,
@@ -42,6 +67,10 @@ function buildFakeServeSource(
   options: HostE2eFixtureOptions,
   setupMarkerPath: string,
 ): string {
+  const reviewCopy = Object.fromEntries(["en", "zh-CN"].map(locale => {
+    const catalog = JSON.parse(readFileSync(new URL(`../../tomcat/assets/i18n/${locale}.json`, import.meta.url), "utf8")) as Record<string, string>;
+    return [locale, { prompt: catalog["plan.review.prompt"], review: catalog["plan.review.accept"], skip: catalog["plan.review.skip"] }];
+  }));
   const transcriptPlanMarkdown = JSON.stringify(`---
 name: Transcript UI Showcase
 overview: Review the transcript UI polish and confirm the merged plan card before building.
@@ -57,9 +86,11 @@ overview: Keep one Creating plan header and a breathing View Plan state.
 # Plan tool UX
 `);
   return `#!/usr/bin/env node
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
+const reviewCopy = ${JSON.stringify(reviewCopy)};
 
 const editFilePath =
   process.env.TOMCAT_VSCODE_TEST_EDIT_FILE || ${JSON.stringify(editFilePath)};
@@ -67,8 +98,46 @@ const requireInit =
   process.env.TOMCAT_VSCODE_TEST_REQUIRE_INIT === "1"
     ? true
     : ${JSON.stringify(Boolean(options.requireInit))};
+const transientServeFailures = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES
+      || ${JSON.stringify(options.transientServeFailures ?? 0)},
+  ),
+);
+const handshakeDelayMs = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS
+      || ${JSON.stringify(options.handshakeDelayMs ?? 0)},
+  ),
+);
+let bootstrapListModelsFailures = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES
+      || ${JSON.stringify(options.bootstrapListModelsFailures ?? 0)},
+  ),
+);
+const interruptDelayMs = Math.max(
+  0,
+  Number(
+    process.env.TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS
+      ?? ${JSON.stringify(options.interruptDelayMs ?? 150)},
+  ) || 0,
+);
 const setupMarkerPath =
   process.env.TOMCAT_VSCODE_TEST_SETUP_MARKER || ${JSON.stringify(setupMarkerPath)};
+const transientFailureMarkerPath =
+  process.env.TOMCAT_VSCODE_TEST_TRANSIENT_FAILURE_MARKER
+  || ${JSON.stringify(`${setupMarkerPath}.transient-failures`)};
+// Attachment bytes live outside the extension, exactly as they do with a real backend,
+// so the host has to be told where they are and grant the webview access to that path.
+const ATTACHMENT_ROOT =
+  process.env.TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT ||
+  path.join(path.dirname(setupMarkerPath), "..", "attachments");
+const BLOBS_DIR = path.join(ATTACHMENT_ROOT, "blobs");
+const THUMBS_DIR = path.join(ATTACHMENT_ROOT, "thumbs");
 const BUILTIN_MODELS = [
   {
     api: "openai",
@@ -79,6 +148,7 @@ const BUILTIN_MODELS = [
     modelName: "fake-model",
     provider: "openai",
     source: "builtin",
+    supportedReasoningLevels: [],
     thinkingFormat: null,
   },
   {
@@ -90,6 +160,7 @@ const BUILTIN_MODELS = [
     modelName: "gpt-5.4",
     provider: "openai",
     source: "builtin",
+    supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
     thinkingFormat: "openai",
   },
   {
@@ -101,21 +172,74 @@ const BUILTIN_MODELS = [
     modelName: "claude-4.6-sonnet",
     provider: "anthropic",
     source: "builtin",
-    thinkingFormat: "anthropic",
+    supportedReasoningLevels: ["low", "medium", "high", "max"],
+    thinkingFormat: "anthropic-adaptive",
   },
 ];
 const MODEL_OPTIONS = BUILTIN_MODELS.map((model) => model.id);
 const userModels = new Map();
+const modelPreferences = new Map();
 const providerKeys = new Map(
   BUILTIN_MODELS.map((model) => [model.apiKeyEnv, { keyPresent: true, provider: model.provider }]),
 );
+const USER_MODELS_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-models.json");
+const MODEL_PREFS_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-model-prefs.json");
+try {
+  const savedModels = JSON.parse(fs.readFileSync(USER_MODELS_PATH, "utf8"));
+  if (Array.isArray(savedModels)) {
+    for (const model of savedModels) {
+      if (model && typeof model.id === "string") {
+        userModels.set(model.id, model);
+        if (typeof model.selectedReasoningLevel === "string") {
+          modelPreferences.set(model.id, { reasoning: model.selectedReasoningLevel });
+        }
+        if (model.keyPresent === true && typeof model.apiKeyEnv === "string") {
+          providerKeys.set(model.apiKeyEnv, { keyPresent: true, provider: model.provider || "openai" });
+        }
+      }
+    }
+  }
+} catch (error) {
+  if (!error || error.code !== "ENOENT") throw error;
+}
+try {
+  const savedPreferences = JSON.parse(fs.readFileSync(MODEL_PREFS_PATH, "utf8"));
+  if (savedPreferences && typeof savedPreferences === "object") {
+    for (const [modelId, preference] of Object.entries(savedPreferences)) {
+      if (preference && typeof preference === "object") {
+        modelPreferences.set(modelId, {
+          ...modelPreferences.get(modelId),
+          ...preference,
+        });
+      }
+    }
+  }
+} catch (error) {
+  if (!error || error.code !== "ENOENT") throw error;
+}
+function persistUserModels() {
+  fs.mkdirSync(path.dirname(USER_MODELS_PATH), { recursive: true });
+  fs.writeFileSync(USER_MODELS_PATH, JSON.stringify([...userModels.values()]));
+}
+function persistModelPreferences() {
+  fs.mkdirSync(path.dirname(MODEL_PREFS_PATH), { recursive: true });
+  fs.writeFileSync(MODEL_PREFS_PATH, JSON.stringify(Object.fromEntries(modelPreferences)));
+}
 const sessions = new Map();
+let uiLanguage = "auto";
+function uiPreferences() {
+  return { language: uiLanguage, effective: uiLanguage === "auto" ? (/^zh/i.test(process.env.TOMCAT_HOST_LOCALE || "en") ? "zh-CN" : "en") : uiLanguage, envOverride: false };
+}
+const attachmentLeases = new Map();
 let sessionCounter = 1;
 let historyCounter = 1;
 let assistantMessageCounter = 1;
+const pendingSteering = new Map();
 let pendingApproval = null;
 let pendingInterrupt = null;
+let pendingPlanCompletion = null;
 let activeSessionId = null;
+const RESUME_STATE_PATH = path.join(path.dirname(setupMarkerPath), "fake-serve-resume.json");
 const debugGetMessages = process.env.TOMCAT_E2E_DEBUG_GET_MESSAGES === "1";
 const historyPageDelayMs = Math.max(
   0,
@@ -125,9 +249,57 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
+const serverVersion = ${JSON.stringify(BUNDLED_CLI_VERSION)};
+function persistPendingApproval() {
+  if (!pendingApproval || pendingApproval.kind !== "answer-card") {
+    try {
+      fs.unlinkSync(RESUME_STATE_PATH);
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    return;
+  }
+  fs.mkdirSync(path.dirname(RESUME_STATE_PATH), { recursive: true });
+  fs.writeFileSync(RESUME_STATE_PATH, JSON.stringify({
+    activeSessionId,
+    assistantMessageCounter,
+    historyCounter,
+    pendingApproval,
+    sessionCounter,
+    sessions: [...sessions.entries()],
+  }));
+}
+
+function restorePendingApproval() {
+  if (!fs.existsSync(RESUME_STATE_PATH)) {
+    return;
+  }
+  try {
+    const state = JSON.parse(fs.readFileSync(RESUME_STATE_PATH, "utf8"));
+    if (!state || !Array.isArray(state.sessions) || !state.pendingApproval) {
+      return;
+    }
+    for (const [sessionId, session] of state.sessions) {
+      if (typeof sessionId === "string" && session && typeof session === "object") {
+        sessions.set(sessionId, session);
+      }
+    }
+    activeSessionId = typeof state.activeSessionId === "string" ? state.activeSessionId : null;
+    pendingApproval = state.pendingApproval;
+    sessionCounter = Number.isInteger(state.sessionCounter) ? state.sessionCounter : sessionCounter;
+    historyCounter = Number.isInteger(state.historyCounter) ? state.historyCounter : historyCounter;
+    assistantMessageCounter = Number.isInteger(state.assistantMessageCounter)
+      ? state.assistantMessageCounter
+      : assistantMessageCounter;
+  } catch {
+    // A corrupt synthetic state must not make unrelated extension-host tests fail.
+  }
+}
 
 if (process.argv[2] === "--version") {
-  process.stdout.write("tomcat fake 0.1.8\\n");
+  process.stdout.write("tomcat fake " + serverVersion + "\\n");
   process.exit(0);
 }
 
@@ -148,6 +320,21 @@ if (requireInit && !fs.existsSync(setupMarkerPath)) {
   process.exit(1);
 }
 
+if (transientServeFailures > 0) {
+  let failuresSoFar = 0;
+  try {
+    failuresSoFar = Number(fs.readFileSync(transientFailureMarkerPath, "utf8")) || 0;
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+  if (failuresSoFar < transientServeFailures) {
+    fs.mkdirSync(path.dirname(transientFailureMarkerPath), { recursive: true });
+    fs.writeFileSync(transientFailureMarkerPath, String(failuresSoFar + 1));
+    process.stderr.write("fake transient serve startup failure\\n");
+    process.exit(1);
+  }
+}
+
 function touchSession(session) {
   session.updatedAt = Date.now();
   return session;
@@ -160,15 +347,116 @@ function inferDefaultKeyEnv(provider) {
   return provider.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_") + "_API_KEY";
 }
 
+function normalizeThinkingFormat(api, thinkingFormat) {
+  if (typeof thinkingFormat === "string" && thinkingFormat.trim().length > 0) {
+    return thinkingFormat.trim().toLowerCase();
+  }
+  switch (String(api || "").trim()) {
+    case "deepseek":
+      return "deepseek";
+    case "zai":
+      return "zai";
+    case "qwen":
+      return "qwen";
+    case "doubao":
+    case "moonshot":
+      return "doubao";
+    case "anthropic":
+      return "anthropic";
+    case "anthropic-messages":
+      return "anthropic";
+    case "openai":
+    case "openai-responses":
+    default:
+      return "openai";
+  }
+}
+
+function normalizeReasoningLevel(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "x-high") {
+    return "xhigh";
+  }
+  if (token === "none") {
+    return "off";
+  }
+  return token;
+}
+
+function inferSupportedReasoningLevels(api, thinkingFormat) {
+  switch (normalizeThinkingFormat(api, thinkingFormat)) {
+    case "deepseek":
+    case "zai":
+      return ["high", "max"];
+    case "doubao":
+      return [];
+    case "anthropic":
+    case "anthropic-adaptive":
+      return ["low", "medium", "high", "xhigh", "max"];
+    case "qwen":
+    case "openrouter":
+    case "openai":
+    default:
+      return ["low", "medium", "high", "xhigh"];
+  }
+}
+
+function normalizeSupportedReasoningLevels(levels, api, thinkingFormat) {
+  if (!Array.isArray(levels)) {
+    return inferSupportedReasoningLevels(api, thinkingFormat);
+  }
+  const normalized = [];
+  for (const value of levels) {
+    const token = normalizeReasoningLevel(value);
+    if (!token || normalized.includes(token)) {
+      continue;
+    }
+    normalized.push(token);
+  }
+  return normalized.length > 0 ? normalized : inferSupportedReasoningLevels(api, thinkingFormat);
+}
+
+function collectModelWarnings(api, thinkingFormat) {
+  const format = normalizeThinkingFormat(api, thinkingFormat);
+  const effortApis = new Set(["openai", "openai-responses"]);
+  const effortFormats = new Set(["openai", "openrouter", "deepseek", "zai"]);
+  if (!effortApis.has(String(api || "").trim()) || effortFormats.has(format)) {
+    return [];
+  }
+  return [
+    'Current API "' +
+      String(api || "").trim() +
+      '" will not send reasoning effort when thinking format is "' +
+      format +
+      '".',
+  ];
+}
+
 function normalizeModelEntry(entry, source) {
   const provider = typeof entry?.provider === "string" ? entry.provider : "openai";
+  const api = typeof entry?.api === "string" ? entry.api : "openai";
   const apiKeyEnv =
     typeof entry?.apiKeyEnv === "string" && entry.apiKeyEnv.trim().length > 0
       ? entry.apiKeyEnv.trim()
       : inferDefaultKeyEnv(provider);
   const providerKey = providerKeys.get(apiKeyEnv);
+  const thinkingFormat = normalizeThinkingFormat(api, entry?.thinkingFormat);
+  const supportedReasoningLevels = normalizeSupportedReasoningLevels(
+    entry?.supportedReasoningLevels,
+    api,
+    thinkingFormat,
+  );
+  const supportedSpeeds = Array.isArray(entry?.supportedSpeeds)
+    ? entry.supportedSpeeds.filter((speed) => speed === "fast" || speed === "ultrafast")
+    : [];
+  const id = typeof entry?.id === "string" ? entry.id : "fake-model";
+  const preference = modelPreferences.get(id) || {};
+  const contextWindow = typeof entry?.contextWindow === "number" ? entry.contextWindow : null;
+  const contextWindowOptions = Array.isArray(entry?.contextWindowOptions)
+    ? entry.contextWindowOptions.filter((value) => Number.isInteger(value) && value > 0)
+    : [];
   return {
-    api: typeof entry?.api === "string" ? entry.api : "openai",
+    api,
     apiKeyEnv,
     baseUrl: typeof entry?.baseUrl === "string" ? entry.baseUrl : null,
     capabilities: {
@@ -179,7 +467,9 @@ function normalizeModelEntry(entry, source) {
       webSearch:
         entry?.capabilities?.webSearch === true || entry?.capabilities?.web_search === true,
     },
-    contextWindow: typeof entry?.contextWindow === "number" ? entry.contextWindow : null,
+    contextWindow,
+    contextWindowOptions,
+    description: typeof entry?.description === "string" ? entry.description : null,
     cost:
       entry?.cost && typeof entry.cost === "object"
         ? {
@@ -197,12 +487,19 @@ function normalizeModelEntry(entry, source) {
                   : null,
           }
         : null,
-    id: typeof entry?.id === "string" ? entry.id : "fake-model",
+    id,
+    selectedContextWindow:
+      typeof preference.contextWindow === "number" ? preference.contextWindow : contextWindow,
+    selectedReasoningLevel:
+      typeof preference.reasoning === "string" ? preference.reasoning : null,
     keyPresent: providerKey?.keyPresent === true,
     modelName: typeof entry?.modelName === "string" ? entry.modelName : null,
     provider,
     source,
-    thinkingFormat: typeof entry?.thinkingFormat === "string" ? entry.thinkingFormat : null,
+    supportedReasoningLevels,
+    supportedSpeeds,
+    selectedSpeed: supportedSpeeds.includes(preference.speed) ? preference.speed : "standard",
+    thinkingFormat,
   };
 }
 
@@ -231,9 +528,12 @@ function listProviderKeyViews() {
 }
 
 function createSession() {
-  const sessionId = \`session-\${sessionCounter++}\`;
+  // Real session IDs are never recycled. A fake restart without a pending question
+  // drops its synthetic history, but must not collide with Host draft/retirement IDs.
+  const sessionId = \`session-\${sessionCounter++}-\${crypto.randomUUID()}\`;
   sessions.set(sessionId, touchSession({
     busy: false,
+    agentMode: "chat",
     contextRatio: null,
     cwd: process.cwd(),
     history: [],
@@ -244,6 +544,7 @@ function createSession() {
     planPath: null,
     planState: "chat",
     sessionKey: "fake-workspace",
+    thinkingByModel: {},
     title: null,
   }));
   if (!activeSessionId) {
@@ -252,10 +553,40 @@ function createSession() {
   return sessionId;
 }
 
-createSession();
+restorePendingApproval();
+if (sessions.size === 0) {
+  createSession();
+}
 
 function send(frame) {
   process.stdout.write(JSON.stringify(frame) + "\\n");
+}
+
+function activePlanForSession(session) {
+  if (!session.planId || !session.planPath || session.planState === "chat") {
+    return null;
+  }
+  return {
+    id: session.planId,
+    path: session.planPath,
+    state: session.planState,
+  };
+}
+
+function planControlPayload(session) {
+  return {
+    activePlan: activePlanForSession(session),
+    agentMode: session.agentMode || "chat",
+  };
+}
+
+function emitAgentModeChanged(sessionId) {
+  const session = ensureSession(sessionId);
+  send({
+    agentMode: session.agentMode || "chat",
+    sessionId,
+    type: "session.agent_mode.changed",
+  });
 }
 
 function deriveSessionTitleFromText(text) {
@@ -327,6 +658,7 @@ function ensureSession(sessionId) {
       planPath: null,
       planState: "chat",
       sessionKey: "fake-workspace",
+      thinkingByModel: {},
       title: null,
     }));
   }
@@ -360,6 +692,7 @@ function emitCompletedTool(sessionId, tool) {
     display: tool.display,
     isError: false,
     result: tool.result,
+    media: tool.media,
     sessionId,
     toolCallId: tool.toolCallId,
     toolName: tool.toolName,
@@ -618,6 +951,145 @@ function buildGiantHistoryTools() {
   });
 }
 
+function buildCompactDiffTools() {
+  const fixtureDir = path.join(process.cwd(), "test-stuff", "compact-diff");
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  return [
+    { name: "single", changes: [235] },
+    { name: "multiple", changes: [29, 235] },
+  ].map(({ name, changes }) => {
+    const file = path.join(fixtureDir, name + ".ts");
+    const before = Array.from({ length: 300 }, (_, i) => "const value" + (i + 1) + " = 'before';");
+    const after = before.map((line, i) => changes.includes(i) ? line.replace("before", "after") : line);
+    const diff = [];
+    let skipped = 0;
+    const flushGap = () => {
+      if (skipped > 0) diff.push({ tag: "gap", text: skipped + " unmodified lines", skippedLines: skipped });
+      skipped = 0;
+    };
+    before.forEach((text, i) => {
+      if (!changes.some((changed) => Math.abs(changed - i) <= 3)) {
+        skipped += 1;
+        return;
+      }
+      flushGap();
+      if (changes.includes(i)) {
+        diff.push({ tag: "del", text, oldLine: i + 1, newLine: null });
+        diff.push({ tag: "add", text: after[i], oldLine: null, newLine: i + 1 });
+      } else {
+        diff.push({ tag: "ctx", text, oldLine: i + 1, newLine: i + 1 });
+      }
+    });
+    flushGap();
+    fs.writeFileSync(file, after.join("\\n") + "\\n", "utf8");
+    return {
+      toolCallId: "tc-compact-" + name,
+      toolName: "edit",
+      args: { path: file },
+      display: { kind: "file", file, diff, added: changes.length, removed: changes.length },
+      result: "已编辑: " + file,
+    };
+  });
+}
+
+function buildEditDisplayReplayTools() {
+  const fixtureDir = path.join(process.cwd(), "test-stuff", "edit-display-replay");
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  const singlePath = path.join(fixtureDir, "single.ts");
+  const batchSinglePath = path.join(fixtureDir, "batch-single.ts");
+  const multiAppliedPath = path.join(fixtureDir, "multi-applied.ts");
+  const multiFailedPath = path.join(fixtureDir, "multi-failed.ts");
+  fs.writeFileSync(singlePath, "export const mode = 'before';\\n", "utf8");
+  fs.writeFileSync(batchSinglePath, "export const batch = 'before';\\n", "utf8");
+  fs.writeFileSync(multiAppliedPath, "export const multi = 'before';\\n", "utf8");
+  fs.writeFileSync(multiFailedPath, "export const untouched = true;\\n", "utf8");
+  return [
+    {
+      toolCallId: "tc-edit-display-single",
+      toolName: "edit",
+      args: { path: singlePath },
+      display: {
+        added: 1,
+        diff: createReplacementDiff(
+          ["export const mode = 'before';"],
+          ["export const mode = 'after';"],
+        ),
+        file: singlePath,
+        kind: "file",
+        removed: 1,
+      },
+      result: "已编辑: " + singlePath,
+    },
+    {
+      toolCallId: "tc-edit-display-batch-single",
+      toolName: "edit",
+      args: {
+        files: [
+          {
+            new_content: "export const batch = 'after';",
+            old_content: "export const batch = 'before';",
+            path: batchSinglePath,
+          },
+        ],
+      },
+      display: {
+        added: 1,
+        diff: createReplacementDiff(
+          ["export const batch = 'before';"],
+          ["export const batch = 'after';"],
+        ),
+        file: batchSinglePath,
+        kind: "file",
+        removed: 1,
+      },
+      result: "已编辑 1 个文件，全部落盘\\n- APPLIED " + batchSinglePath + " (+1 -1)",
+    },
+    {
+      toolCallId: "tc-edit-display-batch-multi",
+      toolName: "edit",
+      args: {
+        files: [
+          {
+            new_content: "export const multi = 'after';",
+            old_content: "export const multi = 'before';",
+            path: multiAppliedPath,
+          },
+          {
+            new_content: "export const untouched = false;",
+            old_content: "export const untouched = true;",
+            path: multiFailedPath,
+          },
+        ],
+      },
+      display: {
+        files: [
+          {
+            added: 1,
+            diff: createReplacementDiff(
+              ["export const multi = 'before';"],
+              ["export const multi = 'after';"],
+            ),
+            file: multiAppliedPath,
+            removed: 1,
+            status: "applied",
+          },
+          {
+            file: multiFailedPath,
+            note: "第 2 段匹配到 3 处",
+            status: "failed",
+          },
+        ],
+        kind: "files",
+        summary: "1 个文件已落盘，1 个失败且未写入；失败的文件磁盘内容保持原样",
+      },
+      result:
+        "1 个文件已落盘，1 个失败且未写入；失败的文件磁盘内容保持原样\\n" +
+        "- APPLIED " + multiAppliedPath + " (+1 -1)\\n" +
+        "- FAILED  " + multiFailedPath + ": 第 2 段匹配到 3 处",
+    },
+  ];
+}
+
 function emitMessageDelta(sessionId, delta) {
   const session = touchSession(ensureSession(sessionId));
   const assistantMessageId = ensurePendingAssistantMessageId(session);
@@ -697,6 +1169,13 @@ function emitCustomPlanEvent(sessionId, type, extra = {}) {
   });
 }
 
+// A single controlled prompt fixture exercises host/GUI transport, not Rust discovery.
+function instructionCatalog() {
+  const relative = ".cursor/commands/host-review.md";
+  const target = path.join(process.env.TOMCAT_VSCODE_TEST_DEFAULT_CWD || process.cwd(), relative);
+  return fs.existsSync(target) ? [{id:"command:" + relative,kind:"command",name:"host-review",description:"Host invocation fixture",source:".cursor",path:relative}] : [];
+}
+
 function normalizeHistoryContent(text, segments) {
   if (!Array.isArray(segments) || segments.length === 0) {
     return text;
@@ -705,6 +1184,12 @@ function normalizeHistoryContent(text, segments) {
     .map((segment) => {
       if (!segment || typeof segment !== "object") {
         return null;
+      }
+      if (segment.type === "instruction") {
+        const card = instructionCatalog().find(item => item.id === segment.resourceId);
+        if (!card) return null;
+        const target = path.join(process.env.TOMCAT_VSCODE_TEST_DEFAULT_CWD || process.cwd(), card.path);
+        return {type:"input_reference",ref_kind:card.kind,label:"/" + card.name,path:card.path,resource_id:card.id,text:fs.readFileSync(target,"utf8")};
       }
       if (segment.type === "text" && typeof segment.text === "string") {
         return {
@@ -745,6 +1230,7 @@ function recordHistoryMessage(sessionId, role, content, forcedId = null) {
     message: {
       content,
       role,
+      rewindEligible: role === "user",
     },
     type: "message",
   });
@@ -762,6 +1248,45 @@ function markLatestUserMessageFailed(sessionId) {
     return entry;
   }
   return null;
+}
+
+function recordHistoryCustom(sessionId, event, attempt) {
+  const session = touchSession(ensureSession(sessionId));
+  session.history.push({
+    attempt,
+    event,
+    type: "custom",
+  });
+}
+
+function copyUserMessageForward(sessionId, messageId) {
+  const session = touchSession(ensureSession(sessionId));
+  const targetIndex = session.history.findIndex(
+    (entry) => entry?.type === "message" && entry?.id === messageId && entry?.message?.role === "user",
+  );
+  if (targetIndex < 0) {
+    return null;
+  }
+  for (let index = targetIndex + 1; index < session.history.length; index += 1) {
+    const entry = session.history[index];
+    if (
+      entry?.type === "message"
+      && entry?.message?.role === "user"
+      && entry?.message?.superseded !== true
+    ) {
+      return null;
+    }
+  }
+  const message = JSON.parse(JSON.stringify(session.history[targetIndex].message));
+  delete message.superseded;
+  delete message.turn_failed;
+  const copy = {
+    id: "h-" + historyCounter++,
+    message,
+    type: "message",
+  };
+  session.history.push(copy);
+  return copy;
 }
 
 function recordHistoryError(sessionId, summary, detail) {
@@ -814,8 +1339,9 @@ function recordHistoryToolResult(sessionId, tool) {
   session.history.push({
     id: \`h-\${historyCounter++}\`,
     message: {
-      content: tool.result,
+      content: tool.media?.length ? [{type:"input_text",text:tool.result}, ...tool.media.map(image => ({type:"input_image_ref",blob_sha:image.blobSha,mime_type:image.mimeType}))] : tool.result,
       role: "tool",
+      tool_display: tool.display,
       tool_call_id: tool.toolCallId,
     },
     type: "message",
@@ -826,13 +1352,43 @@ function emitContextMetrics(sessionId, ratio = 0.42) {
   const session = touchSession(ensureSession(sessionId));
   session.contextRatio = ratio;
   send({
+    cacheReadTokensTotal: 0,
     compactionCount: 0,
     compactionTokensFreed: 0,
+    consecutiveMissMax: 0,
     contextUtilizationRatio: ratio,
     inputTokensUsed: 256,
     preheatInProgress: false,
     preheatResultPending: false,
+    promptTokensTotal: 256,
+    providerUsageMeasured: true,
     sessionId,
+    tailChangeMissTokens: 0,
+    tailChangedCount: 0,
+    totalToolResultBytesPersisted: 0,
+    type: "context_metrics_update",
+  });
+}
+
+function emitEstimatedContextMetrics(sessionId, ratio) {
+  const session = touchSession(ensureSession(sessionId));
+  if (typeof session.contextRatio === "number") {
+    session.contextRatio = ratio;
+  }
+  send({
+    cacheReadTokensTotal: 0,
+    compactionCount: 0,
+    compactionTokensFreed: 0,
+    consecutiveMissMax: 0,
+    contextUtilizationRatio: ratio,
+    inputTokensUsed: 256,
+    preheatInProgress: false,
+    preheatResultPending: false,
+    promptTokensTotal: 256,
+    providerUsageMeasured: false,
+    sessionId,
+    tailChangeMissTokens: 0,
+    tailChangedCount: 0,
     totalToolResultBytesPersisted: 0,
     type: "context_metrics_update",
   });
@@ -841,6 +1397,8 @@ function emitContextMetrics(sessionId, ratio = 0.42) {
 function finishTurn(sessionId, error = null) {
   const session = touchSession(ensureSession(sessionId));
   clearPendingAssistantMessageId(sessionId);
+  if (error) pendingSteering.delete(sessionId);
+  else consumeSteering(sessionId);
   session.busy = false;
   send({
     error,
@@ -851,6 +1409,7 @@ function finishTurn(sessionId, error = null) {
   send({
     sessionId,
     type: "agent_idle",
+    outcome: error === "interrupted" ? "interrupted" : error ? "failed" : "completed",
   });
 }
 
@@ -863,6 +1422,115 @@ function startTurn(sessionId) {
     sessionId,
     type: "agent_start",
   });
+}
+
+/** Write bytes under their own sha256, the way the real blob store does. */
+function putBlob(bytes) {
+  const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+  const target = path.join(BLOBS_DIR, sha);
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(BLOBS_DIR, { recursive: true });
+    fs.writeFileSync(target, bytes);
+  }
+  return sha;
+}
+
+/** Thumbnails are addressed by the hash of the image they came from, never their own. */
+function putThumbnail(sourceSha, bytes) {
+  fs.mkdirSync(THUMBS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(THUMBS_DIR, sourceSha), bytes);
+}
+
+function handleIngestAttachment(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const attachment = (frame && frame.attachment) || {};
+  if (
+    typeof attachment.dataBase64 !== "string" ||
+    typeof attachment.mimeType !== "string"
+  ) {
+    send({
+      error: "ingest_attachment requires dataBase64 and mimeType",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const bytes = Buffer.from(attachment.dataBase64, "base64");
+  const blobSha = putBlob(bytes);
+  let hasThumb = false;
+  if (typeof attachment.thumbBase64 === "string" && attachment.thumbBase64.length > 0) {
+    putThumbnail(blobSha, Buffer.from(attachment.thumbBase64, "base64"));
+    hasThumb = true;
+  }
+  const providerSha =
+    typeof attachment.providerBase64 === "string" && attachment.providerBase64.length > 0
+      ? putBlob(Buffer.from(attachment.providerBase64, "base64"))
+      : null;
+
+  send({
+    id: frame.id,
+    payload: {
+      blobSha,
+      bytes: bytes.length,
+      filename:
+        typeof attachment.filename === "string" && attachment.filename.length > 0
+          ? attachment.filename
+          : "pasted-image.png",
+      hasThumb,
+      mimeType: attachment.mimeType,
+      providerSha,
+    },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+function handleCacheAttachmentThumbnail(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const thumbnail = (frame && frame.thumbnail) || {};
+  const cached =
+    typeof thumbnail.sourceSha === "string" &&
+    /^[0-9a-f]{64}$/.test(thumbnail.sourceSha) &&
+    typeof thumbnail.thumbBase64 === "string" &&
+    thumbnail.thumbBase64.length > 0;
+  if (cached) {
+    putThumbnail(thumbnail.sourceSha, Buffer.from(thumbnail.thumbBase64, "base64"));
+  }
+  send({
+    id: frame.id,
+    payload: { cached },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+function consumeSteering(sessionId) {
+  const entries = pendingSteering.get(sessionId) || [];
+  pendingSteering.delete(sessionId);
+  for (const frame of entries) {
+    const id = frame.params?.userMessageId || crypto.randomUUID();
+    recordHistoryMessage(sessionId, "user", normalizeHistoryContent(String(frame.text || ""), frame.params?.segments), id);
+    ensureSession(sessionId).history.at(-1).message.kind = "steering";
+    send({ type: "steering_consumed", sessionId, userMessageIds: [id] });
+  }
+}
+function handleSteer(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const session = ensureSession(sessionId);
+  if (!session.busy) {
+    if (frame.params?.onlyIfRunning) send({ type: "response", id: frame.id, sessionId, success: false, error: "not_running" });
+    else handlePrompt(frame);
+    return;
+  }
+  const entries = pendingSteering.get(sessionId) || [];
+  entries.push(frame); pendingSteering.set(sessionId, entries);
+  send({ type: "response", id: frame.id, sessionId, success: true, payload: { queued: true } });
+  if (session.queueHold !== "pending" && pendingApproval?.sessionId !== sessionId) consumeSteering(sessionId);
 }
 
 function handlePrompt(frame) {
@@ -887,6 +1555,14 @@ function handlePrompt(frame) {
     success: true,
     type: "response",
   });
+  // A new user input settles an interrupted question in the real serve path.
+  // Do not restore the fixture's old live approval on a later process restart.
+  if (!frame.resume && pendingApproval?.sessionId === sessionId) {
+    pendingApproval = null;
+    persistPendingApproval();
+  }
+  if (typeof frame.params?.model === "string") session.model = frame.params.model;
+  if (["chat", "plan"].includes(frame.params?.agentMode)) session.agentMode = frame.params.agentMode;
   startTurn(sessionId);
 
   const text = String(frame.text || "");
@@ -904,10 +1580,63 @@ function handlePrompt(frame) {
     seedTranscriptSwitchBackHistory(sessionId);
   }
   const normalizedUserContent = normalizeHistoryContent(text, segments);
-  recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
-  emitSessionTitleUpdated(sessionId, normalizedUserContent);
-  if (text.includes("answer card showcase")) {
-    const requestId = \`ask-answer-\${sessionId}\`;
+  if (!frame.resume) {
+    recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
+    emitSessionTitleUpdated(sessionId, normalizedUserContent);
+  }
+  if (text.includes("message queue hold")) {
+    session.queueHold = text.includes("consume") ? "consume" : "pending";
+    emitMessageDelta(sessionId, "Queue acceptance fixture is waiting for Stop.");
+    return;
+  }
+  if (text === "tool image showcase") {
+    const bytes = fs.readFileSync(${JSON.stringify(path.resolve(__dirname, "../../tomcat/tests/fixtures/llm_multimodal/sample_image.png"))});
+    const blobSha = putBlob(bytes);
+    const tool = {toolCallId:"tool-image-" + historyCounter++,toolName:"read",args:{path:"photo.png"},result:"[Image attached]",media:[{type:"input_image_ref",blobSha,mimeType:"image/png",bytes:bytes.length}]};
+    recordHistoryAssistantWithTools(sessionId,"",[tool],"Inspect screenshot");
+    recordHistoryToolResult(sessionId,tool); emitCompletedTool(sessionId,tool);
+    recordHistoryMessage(sessionId,"assistant","The tool image is available in its card.");
+    emitMessageDelta(sessionId,"The tool image is available in its card."); finishTurn(sessionId,null); return;
+  }
+  if (text === "session files dock edit" || text === "session files dock edit again") {
+    const target = path.join(path.dirname(editFilePath), \`session-files-\${process.pid}-\${sessionId}.ts\`);
+    const before = fs.existsSync(target) ? fs.readFileSync(target,"utf8") : "first line\\noriginal line\\n";
+    const after = text.endsWith("again") ? "second change\\nmore content\\n" : "first line\\nmodified line\\nnew line\\n";
+    fs.writeFileSync(target, after, "utf8");
+    if (!session.sessionFiles) session.sessionFiles = { sourceTurnId: userMessageId || session.history.filter(row => row.message?.role === "user").at(-1).id, entries: [] };
+    if (!session.sessionFiles.entries.some(entry => entry.path === target)) session.sessionFiles.entries.push({path:target,before});
+    const tool = {toolCallId:"session-files-write",toolName:"write",args:{path:target},result:"written",display:{kind:"file",file:target,added:2,removed:1}};
+    recordHistoryAssistantWithTools(sessionId,"",[tool],"Updated file");recordHistoryToolResult(sessionId,tool);
+    send({type:"tool_execution_end",sessionId,toolCallId:tool.toolCallId,toolName:"write",result:"written",display:tool.display,isError:false});
+    recordHistoryMessage(sessionId,"assistant","Files ready");emitMessageDelta(sessionId,"Files ready");finishTurn(sessionId,null);return;
+  }
+  if (text.includes("inline edit file fixture") && !text.includes("edited")) {
+    session.inlineBaseline = fs.existsSync(editFilePath) ? fs.readFileSync(editFilePath, "utf8") : null;
+    if (text.includes("no baseline")) delete session.inlineBaseline;
+    fs.writeFileSync(editFilePath, "inline AI modification", "utf8");
+    const tool = {toolCallId:"inline-write",toolName:"write",args:{path:editFilePath},result:"written",display:{kind:"file",file:editFilePath,added:1,removed:0}};
+    recordHistoryAssistantWithTools(sessionId,"",[tool],"Edited one file");
+    recordHistoryToolResult(sessionId,tool);
+    send({type:"tool_execution_start",sessionId,toolCallId:tool.toolCallId,toolName:"write",args:tool.args});
+    send({type:"tool_execution_end",sessionId,toolCallId:tool.toolCallId,toolName:"write",result:"written",display:tool.display,isError:false});
+    pendingInterrupt = setTimeout(() => { pendingInterrupt=null; finishTurn(sessionId,null); }, 60000);
+    return;
+  }
+  if (text.includes("waterline pending second request")) {
+    emitEstimatedContextMetrics(sessionId, 0.53);
+    setTimeout(() => {
+      emitMessageDelta(sessionId, "waterline refreshed");
+      recordHistoryMessage(sessionId, "assistant", "waterline refreshed");
+      emitContextMetrics(sessionId, 0.57);
+      finishTurn(sessionId, null);
+    }, 300);
+    return;
+  }
+  if (text.includes("answer card showcase") || text.includes("plan review decision showcase")) {
+    const isPlanReview = text.includes("plan review decision showcase");
+    // Every tool invocation owns a distinct durable id, even in the same session.
+    const requestId = \`ask-answer-\${sessionId}-\${crypto.randomUUID()}\`;
+    const toolCallId = \`tool-ask-\${requestId}\`;
     const request = {
       questions: [
         {
@@ -921,8 +1650,43 @@ function handlePrompt(frame) {
       ],
       requestId,
       responseEvent: \`plan.ask_question.response.\${requestId}\`,
+      toolCallId,
     };
-    pendingApproval = { kind: "answer-card", request, requestId, sessionId };
+    if (isPlanReview) {
+      const copy = reviewCopy[uiPreferences().effective];
+      request.questions = [{
+        id: "review-plan", allowCustom: false,
+        prompt: copy.prompt,
+        options: [
+          { id: "review", label: copy.review, recommended: true },
+          { id: "skip", label: copy.skip, recommended: false },
+        ],
+      }];
+      session.planId = "review-decision-" + requestId;
+      session.planPath = path.join(process.cwd(), "plans", session.planId + ".plan.md");
+      session.planState = "planning";
+      fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
+      fs.writeFileSync(session.planPath, "# Review decision\\n\\nKeep the parent plan card.\\n", "utf8");
+    }
+    const pendingTool = {
+      args: isPlanReview
+        ? { goal: "Review decision", draft: "Keep the parent plan card", todos: [{ id: "work", content: "Implement", status: "pending" }] }
+        : { questions: request.questions },
+      result: "[pending]",
+      toolCallId,
+      toolName: isPlanReview ? "create_plan" : "ask_question",
+    };
+    recordHistoryAssistantWithTools(sessionId, "", [pendingTool], isPlanReview ? "Create review plan" : "Asked question");
+    recordHistoryToolResult(sessionId, pendingTool);
+    pendingApproval = { kind: "answer-card", request, requestId, sessionId, tool: pendingTool };
+    persistPendingApproval();
+    send({
+      args: pendingTool.args,
+      sessionId,
+      toolCallId,
+      toolName: pendingTool.toolName,
+      type: "tool_execution_start",
+    });
     send({
       payload: request,
       requestId,
@@ -971,11 +1735,91 @@ function handlePrompt(frame) {
     return;
   }
 
-  if (text.includes("retry 403 showcase")) {
+  if (text.includes("loading gap showcase")) {
+    const assistantMessageId = ensurePendingAssistantMessageId(session);
+    setTimeout(() => {
+      send({
+        assistantMessageEvent: {
+          delta: "Working through the first response.",
+          kind: "thinking_delta",
+        },
+        assistantMessageId,
+        message: {},
+        sessionId,
+        type: "message_update",
+      });
+    }, 250);
+    setTimeout(() => {
+      emitMessageDelta(sessionId, "loading gap complete");
+      recordHistoryMessage(sessionId, "assistant", "loading gap complete");
+      emitContextMetrics(sessionId, 0.33);
+      finishTurn(sessionId, null);
+    }, 550);
+    return;
+  }
+
+  if (text.includes("reasoning effort probe")) {
+    const thinkingLevel =
+      session.thinkingByModel && typeof session.thinkingByModel === "object"
+        ? session.thinkingByModel[session.model] || "off"
+        : "off";
+    emitMessageDelta(sessionId, "reasoning effort: " + thinkingLevel);
+    recordHistoryMessage(sessionId, "assistant", "reasoning effort: " + thinkingLevel);
+    emitContextMetrics(sessionId, 0.36);
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("message kind showcase")) {
+    session.history.push(
+      {
+        id: "h-" + historyCounter++,
+        message: {
+          content: "please answer in Chinese",
+          kind: "steering",
+          role: "user",
+        },
+        type: "message",
+      },
+      {
+        id: "h-" + historyCounter++,
+        message: {
+          content: "Finish the remaining plan tasks before stopping.",
+          kind: "nudge",
+          role: "user",
+        },
+        type: "message",
+      },
+      {
+        id: "h-" + historyCounter++,
+        message: {
+          content: "Background task build-1 finished successfully.",
+          kind: "signal",
+          role: "user",
+        },
+        type: "message",
+      },
+    );
+    const mediaTool = {toolCallId:"kind-tool-image",toolName:"read",args:{path:"photo.png"},result:"Image returned"};
+    recordHistoryAssistantWithTools(sessionId,"",[mediaTool],"Read image");
+    recordHistoryToolResult(sessionId,mediaTool);
+    session.history.push({ id:"kind-tool-media", type:"message", message:{role:"user",kind:"tool_media",content:[{type:"input_image",mime_type:"image/png",image_b64:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9p8qAAAAAASUVORK5CYII="}]} });
+    emitMessageDelta(sessionId, "message kinds recorded");
+    recordHistoryMessage(sessionId, "assistant", "message kinds recorded");
+    emitContextMetrics(sessionId, 0.36);
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("retry 403 showcase") || text.includes("retry rejected showcase")) {
     const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
     const failureDetail = "API 错误 403: <html>forbidden</html>\\nHost: aigateway.sunmi.com\\nRequest-Id: req-host-retry";
     session.retry403ShowcaseAttempts = Number(session.retry403ShowcaseAttempts || 0) + 1;
     if (session.retry403ShowcaseAttempts === 1) {
+      for (let attempt = 2; attempt <= 4; attempt += 1) {
+        recordHistoryCustom(sessionId, "auto_retry_start", attempt);
+      }
+      recordHistoryCustom(sessionId, "auto_retry_end", 4);
       markLatestUserMessageFailed(sessionId);
       recordHistoryError(sessionId, failureSummary, failureDetail);
       finishTurn(sessionId, failureSummary);
@@ -985,6 +1829,32 @@ function handlePrompt(frame) {
     recordHistoryMessage(sessionId, "assistant", "same session retry succeeded");
     emitContextMetrics(sessionId, 0.44);
     finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("resume card showcase")) {
+    const tool = {
+      args: { path: "README.md" },
+      result: "[pending]",
+      toolCallId: "resume-card-read-1",
+      toolName: "read",
+    };
+    recordHistoryAssistantWithTools(
+      sessionId,
+      "I read the project overview before the connection failed.",
+      [tool],
+      "Read project overview",
+    );
+    markLatestUserMessageFailed(sessionId);
+    recordHistoryError(
+      sessionId,
+      "连接中断 · 可继续",
+      "The model stopped after all tool calls had already completed.",
+    );
+    // Recovery writes an unknown/pending tool result after its error record. The webview's
+    // Resume scanner must cross that annotation boundary and use this actual transcript tail.
+    recordHistoryToolResult(sessionId, tool);
+    finishTurn(sessionId, "连接中断 · 可继续");
     return;
   }
 
@@ -1060,6 +1930,53 @@ function handlePrompt(frame) {
     return;
   }
 
+  if (text.includes("compact diff preview")) {
+    const tools = buildCompactDiffTools();
+    emitMessageDelta(sessionId, "I changed isolated lines in two 300-line files.");
+    for (const tool of tools) emitCompletedTool(sessionId, tool);
+    emitTurnEnd(sessionId, { message: {}, summaryTitle: "Compact diff preview", toolResults: [], turnIndex: 1 });
+    recordHistoryAssistantWithTools(sessionId, "I changed isolated lines in two 300-line files.", tools, "Compact diff preview");
+    for (const tool of tools) recordHistoryToolResult(sessionId, tool);
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("edit display replay")) {
+    emitMessageDelta(sessionId, "I prepared single-file and batch edit cards.");
+    send({
+      assistantMessageEvent: {
+        delta: "Keep the single-file rich card for one file and the list card for many files.",
+        kind: "thinking_delta",
+      },
+      assistantMessageId: ensurePendingAssistantMessageId(session),
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    const displayTools = buildEditDisplayReplayTools();
+    for (const tool of displayTools) {
+      emitCompletedTool(sessionId, tool);
+    }
+    emitTurnEnd(sessionId, {
+      message: {},
+      summaryTitle: "Edit display replay",
+      toolResults: [],
+      turnIndex: 1,
+    });
+    emitContextMetrics(sessionId, 0.35);
+    recordHistoryAssistantWithTools(
+      sessionId,
+      "I prepared single-file and batch edit cards.",
+      displayTools,
+      "Edit display replay",
+    );
+    for (const tool of displayTools) {
+      recordHistoryToolResult(sessionId, tool);
+    }
+    finishTurn(sessionId, null);
+    return;
+  }
+
   if (text.includes("transcript ui")) {
     const readPath = editFilePath;
     emitMessageDelta(sessionId, "I will read the file and refresh the plan.");
@@ -1073,71 +1990,79 @@ function handlePrompt(frame) {
       sessionId,
       type: "message_update",
     });
-    send({
+    const readTool = {
       args: { path: readPath },
-      sessionId,
-      toolCallId: "tc-transcript-read",
-      toolName: "read",
-      type: "tool_execution_start",
-    });
-    send({
       display: { file: readPath, kind: "file" },
-      isError: false,
       result: "fake file contents for transcript ui showcase",
-      sessionId,
       toolCallId: "tc-transcript-read",
       toolName: "read",
-      type: "tool_execution_end",
-    });
-    send({
+    };
+    emitCompletedTool(sessionId, readTool);
+    const bashTool = {
       args: { command: "git status --short" },
-      sessionId,
-      toolCallId: "tc-transcript-bash",
-      toolName: "bash",
-      type: "tool_execution_start",
-    });
-    send({
-      isError: false,
       result: "M src/app.tsx\\n M README.md\\n?? plans/transcript-ui-showcase.plan.md",
-      sessionId,
       toolCallId: "tc-transcript-bash",
       toolName: "bash",
-      type: "tool_execution_end",
-    });
-    send({
+    };
+    emitCompletedTool(sessionId, bashTool);
+    const webSearchTool = {
       args: { query: "vscode chat thinking collapsible" },
-      sessionId,
+      result:
+        "Found 3 results.\\n- vscode/chatThinkingContentPart.ts\\n- chatCollapsibleContentPart.ts\\n- chatToolInvocationPart.ts",
       toolCallId: "tc-transcript-web-search",
       toolName: "web_search",
-      type: "tool_execution_start",
-    });
-    send({
-      isError: false,
-      result: "Found 3 results.\\n- vscode/chatThinkingContentPart.ts\\n- chatCollapsibleContentPart.ts\\n- chatToolInvocationPart.ts",
-      sessionId,
-      toolCallId: "tc-transcript-web-search",
-      toolName: "web_search",
-      type: "tool_execution_end",
-    });
+    };
+    emitCompletedTool(sessionId, webSearchTool);
     const planPath = path.join(process.cwd(), "plans", "transcript-ui-showcase.plan.md");
     fs.mkdirSync(path.dirname(planPath), { recursive: true });
     fs.writeFileSync(planPath, ${transcriptPlanMarkdown}, "utf8");
     session.planId = "transcript-ui-showcase";
     session.planPath = planPath;
     session.planState = "planning";
-    emitPlanEvent(sessionId, "plan.create");
     const planTodos = [
       { id: "t1", content: "Read the file", status: "completed" },
       { id: "t2", content: "Render the transcript UI", status: "in_progress" },
       { id: "t3", content: "Verify the screenshot crop", status: "pending" },
       { id: "t4", content: "Review the merged plan card", status: "pending" },
     ];
+    const createPlanTool = {
+      args: {
+        draft: "Refresh the transcript UI and keep the plan card stable.",
+        goal: "Transcript UI Showcase",
+        todos: planTodos,
+      },
+      display: { kind: "plan", plan: planPath },
+      result: JSON.stringify({
+        path: planPath,
+        plan_id: session.planId,
+        state: "planning",
+      }),
+      toolCallId: "tc-transcript-create-plan",
+      toolName: "create_plan",
+    };
+    send({
+      args: createPlanTool.args,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_start",
+    });
+    emitPlanEvent(sessionId, "plan.create");
     session.planTodos = planTodos;
     send({
       planId: session.planId,
       sessionId,
       todos: planTodos,
       type: "plan.todos",
+    });
+    send({
+      display: createPlanTool.display,
+      isError: false,
+      result: createPlanTool.result,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_end",
     });
     emitCustomPlanEvent(sessionId, "plan.review.warning", {
       reason: "rounds_exhausted",
@@ -1154,9 +2079,18 @@ function handlePrompt(frame) {
       toolResults: [],
       turnIndex: 1,
     });
+    const transcriptTools = [readTool, bashTool, webSearchTool, createPlanTool];
     const finishTranscriptTurn = () => {
       emitContextMetrics(sessionId, 0.55);
-      recordHistoryMessage(sessionId, "assistant", "I will read the file and refresh the plan.");
+      recordHistoryAssistantWithTools(
+        sessionId,
+        "I will read the file and refresh the plan.",
+        transcriptTools,
+        "Reviewed 1 file",
+      );
+      for (const tool of transcriptTools) {
+        recordHistoryToolResult(sessionId, tool);
+      }
       finishTurn(sessionId, null);
     };
     const finishDelayMs = text.includes("switch back order")
@@ -1253,14 +2187,47 @@ function handlePrompt(frame) {
       "---\\ngoal: Replay the plan review and verify history\\noverview: Confirm the merged plan card after reload.\\n---\\n\\n# History plan\\n\\n- Review\\n- Verify\\n",
       "utf8",
     );
-    session.planState = "pending";
-    emitPlanEvent(sessionId, "plan.create");
-    emitPlanEvent(sessionId, "plan.build");
+    session.planState = "planning";
     const replayTodos = [
       { id: "rp-1", content: "Review the plan", status: "completed" },
       { id: "rp-2", content: "Verify the plan", status: "in_progress" },
       { id: "rp-3", content: "Confirm the merged card", status: "pending" },
     ];
+    const createPlanTool = {
+      args: {
+        draft: "Replay the review and verify history without drifting the plan card.",
+        goal: "Replay the plan review and verify history",
+        todos: replayTodos,
+      },
+      display: { kind: "plan", plan: session.planPath },
+      result: JSON.stringify({
+        path: session.planPath,
+        plan_id: session.planId,
+        state: "planning",
+      }),
+      toolCallId: "tc-plan-replay-create",
+      toolName: "create_plan",
+    };
+    send({
+      args: createPlanTool.args,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_start",
+    });
+    emitPlanEvent(sessionId, "plan.create");
+    send({
+      display: createPlanTool.display,
+      isError: false,
+      result: createPlanTool.result,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_end",
+    });
+    session.planState = "executing";
+    emitPlanEvent(sessionId, "plan.build");
+    session.planTodos = replayTodos;
     send({
       planId: session.planId,
       sessionId,
@@ -1276,13 +2243,16 @@ function handlePrompt(frame) {
     });
     emitCustomPlanEvent(sessionId, "plan.review", { summary: "looks good" });
     emitCustomPlanEvent(sessionId, "plan.verify", { verdict: "pass" });
+    session.planState = "pending";
     emitPlanEvent(sessionId, "plan.pending");
     emitMessageDelta(sessionId, "I replayed the plan review and verify history.");
-    recordHistoryMessage(
+    recordHistoryAssistantWithTools(
       sessionId,
-      "assistant",
       "I replayed the plan review and verify history.",
+      [createPlanTool],
+      "Replayed the plan review and verify history",
     );
+    recordHistoryToolResult(sessionId, createPlanTool);
     emitContextMetrics(sessionId, 0.62);
     finishTurn(sessionId, null);
     return;
@@ -1297,6 +2267,79 @@ function handlePrompt(frame) {
   finishTurn(sessionId, null);
 }
 
+function handleResume(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const session = touchSession(ensureSession(sessionId));
+  let previousUser = null;
+  for (let index = session.history.length - 1; index >= 0; index -= 1) {
+    const entry = session.history[index];
+    if (entry?.type === "message" && entry?.message?.role === "user") {
+      previousUser = entry;
+      break;
+    }
+  }
+  const content = previousUser?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    send({
+      error: "resume_without_user_prompt",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+  send({
+    id: frame.id,
+    payload: { accepted: true },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+  startTurn(sessionId);
+  if (content.includes("resume card showcase")) {
+    emitMessageDelta(sessionId, "same session Resume continued from the healed tool result");
+    recordHistoryMessage(
+      sessionId,
+      "assistant",
+      "same session Resume continued from the healed tool result",
+    );
+    emitContextMetrics(sessionId, 0.44);
+    finishTurn(sessionId, null);
+    return;
+  }
+  finishTurn(sessionId, null);
+}
+
+function handleRetry(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const copied = copyUserMessageForward(sessionId, frame.messageId);
+  const content = copied?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    send({
+      error: "retry_target_stale",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+  if (content.includes("retry rejected showcase")) {
+    send({
+      error: "retry_target_stale",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+  // The copy is already durable; use the normal prompt simulation only to execute the next
+  // model turn, never to synthesize another user row.
+  handlePrompt({ ...frame, params: {}, resume: true, sessionId, text: content });
+}
+
 function handleControlResponse(frame) {
   if (!pendingApproval || frame.requestId !== pendingApproval.requestId) {
     return;
@@ -1304,19 +2347,31 @@ function handleControlResponse(frame) {
 
   const pending = pendingApproval;
   pendingApproval = null;
+  persistPendingApproval();
   const sessionId = pending.sessionId;
   const result =
     frame.payload && frame.payload.result && typeof frame.payload.result === "object"
       ? frame.payload.result
       : { answers: [], cancelled: false };
   if (pending.kind === "answer-card") {
+    const session = ensureSession(sessionId);
     const tool = {
-      args: { questions: pending.request.questions },
-      result,
-      toolCallId: \`tool-ask-\${pending.requestId}\`,
-      toolName: "ask_question",
+      ...pending.tool,
+      result: pending.tool.toolName === "create_plan"
+        ? { plan_id: session.planId, path: session.planPath, state: "planning" }
+        : result,
     };
-    emitCompletedTool(sessionId, tool);
+    for (const entry of ensureSession(sessionId).history) {
+      if (entry.message && entry.message.tool_call_id === tool.toolCallId && entry.message.content === "[pending]") {
+        entry.message.superseded = true;
+      }
+    }
+    if (tool.toolName === "create_plan") {
+      send({ type: "tool_execution_end", sessionId, toolCallId: tool.toolCallId, toolName: tool.toolName, result: tool.result, isError: false });
+    } else {
+      emitCompletedTool(sessionId, tool);
+    }
+    clearPendingAssistantMessageId(sessionId);
     emitMessageDelta(sessionId, "Recorded your answer.");
     emitTurnEnd(sessionId, {
       message: {},
@@ -1324,8 +2379,8 @@ function handleControlResponse(frame) {
       toolResults: [],
       turnIndex: 1,
     });
-    recordHistoryAssistantWithTools(sessionId, "Recorded your answer.", [tool], "Asked question");
     recordHistoryToolResult(sessionId, tool);
+    recordHistoryMessage(sessionId, "assistant", "Recorded your answer.");
     emitContextMetrics(sessionId, 0.49);
     finishTurn(sessionId, null);
     return;
@@ -1386,18 +2441,34 @@ function handleInterrupt(frame) {
     return;
   }
 
-  if (pendingInterrupt) {
-    clearTimeout(pendingInterrupt);
-    pendingInterrupt = null;
-  }
+  const settleInterrupt = () => {
+    if (pendingInterrupt) {
+      clearTimeout(pendingInterrupt);
+      pendingInterrupt = null;
+    }
+    if (pendingPlanCompletion) {
+      clearTimeout(pendingPlanCompletion);
+      pendingPlanCompletion = null;
+    }
 
-  const session = ensureSession(sessionId);
-  if (session.busy) {
-    send({
-      sessionId,
-      type: "agent_interrupted",
-    });
-    finishTurn(sessionId, "interrupted");
+    const session = ensureSession(sessionId);
+    if (session.busy) {
+      if (session.planState === "executing") {
+        session.planState = "pending";
+        emitPlanEvent(sessionId, "plan.pending");
+      }
+      recordHistoryCustom(sessionId, "agent.interrupted");
+      send({
+        sessionId,
+        type: "agent_interrupted",
+      });
+      finishTurn(sessionId, "interrupted");
+    }
+  };
+  if (interruptDelayMs > 0) {
+    setTimeout(settleInterrupt, interruptDelayMs);
+  } else {
+    settleInterrupt();
   }
 }
 
@@ -1406,33 +2477,77 @@ function handleCommand(frame) {
     case "control_request":
       if (frame.subtype === "initialize") {
         const sessionId = activeSessionId || createSession();
-        send({
-          payload: {
-            capabilities: [
-              "prompt",
-              "ask_question",
-              "new_session",
-              "switch_session",
-              "list_sessions",
-              "get_state",
-              "close_session",
-              "interrupt",
-              "follow_up",
-              "list_models",
-              "upsert_model",
-              "remove_model",
-              "set_provider_key",
-              "list_provider_keys",
-              "set_model",
-              "set_plan_mode",
-            ],
-            protocolVersion: 1,
+        const respondToInitialize = () => {
+          send({
+            payload: {
+              attachmentRoot: ATTACHMENT_ROOT,
+              uiPreferences: uiPreferences(),
+              capabilities: [
+                "prompt",
+                "steer",
+                "message_queue",
+                "rewind_and_resend",
+                "session_files",
+                "ask_question",
+                "ingest_attachment",
+                "retain_attachment_leases",
+                "cache_attachment_thumbnail",
+                "discard_detached_session",
+                "set_ui_language",
+                "delete_session",
+                "new_session",
+                "switch_session",
+                "list_sessions",
+                "get_state",
+                "get_instruction_catalog",
+                "list_checkpoints",
+                "close_session",
+                "interrupt",
+                "follow_up",
+                "list_models",
+                "upsert_model",
+                "remove_model",
+                "set_provider_key",
+                "list_provider_keys",
+                "set_model",
+                "set_thinking_level",
+                "set_speed",
+                "set_context_window",
+                "set_plan_mode",
+              ],
+              protocolVersion: 2,
+              serverVersion,
+              sessionId,
+            },
+            requestId: frame.requestId,
             sessionId,
-          },
-          requestId: frame.requestId,
-          sessionId,
-          type: "control_response",
-        });
+            type: "control_response",
+          });
+          if (pendingApproval && pendingApproval.kind === "answer-card") {
+            const requestId = \`ask-resumed-\${pendingApproval.sessionId}-\${Date.now()}\`;
+            const request = {
+              ...pendingApproval.request,
+              requestId,
+              responseEvent: \`plan.ask_question.response.\${requestId}\`,
+            };
+            pendingApproval = { ...pendingApproval, request, requestId };
+            persistPendingApproval();
+            setTimeout(() => {
+              send({
+                payload: request,
+                requestId,
+                sessionId: pendingApproval.sessionId,
+                subtype: "ask_question",
+                type: "control_request",
+              });
+            }, 0);
+          }
+        };
+        if (handshakeDelayMs > 0) {
+          setTimeout(respondToInitialize, handshakeDelayMs);
+        } else {
+          respondToInitialize();
+        }
       }
       break;
     case "control_response":
@@ -1440,7 +2555,9 @@ function handleCommand(frame) {
       break;
     case "new_session": {
       const sessionId = createSession();
-      activeSessionId = sessionId;
+      if (!frame.params || frame.params.detached !== true) {
+        activeSessionId = sessionId;
+      }
       send({
         id: frame.id,
         payload: { sessionId },
@@ -1453,7 +2570,7 @@ function handleCommand(frame) {
     case "switch_session": {
       activeSessionId = frame.sessionId;
       touchSession(ensureSession(activeSessionId));
-      send({
+          send({
         id: frame.id,
         payload: { activeSessionId },
         sessionId: activeSessionId,
@@ -1467,6 +2584,7 @@ function handleCommand(frame) {
         id: frame.id,
         payload: {
           activeSessionId,
+          sessionKey: "fake-workspace",
           sessions: [...sessions.entries()].map(([sessionId, session]) => ({
             busy: session.busy,
             isCurrent: sessionId === activeSessionId,
@@ -1479,6 +2597,11 @@ function handleCommand(frame) {
         type: "response",
       });
       break;
+    case "get_instruction_catalog": {
+      const sessionId = frame.sessionId || activeSessionId;
+      send({id:frame.id,type:"response",success:true,sessionId,payload:{items:instructionCatalog()}});
+      break;
+    }
     case "get_state": {
       const sessionId = frame.sessionId || activeSessionId;
       const session = ensureSession(sessionId);
@@ -1488,15 +2611,57 @@ function handleCommand(frame) {
           busy: session.busy,
           contextUtilizationRatio: session.contextRatio,
           cwd: session.cwd,
-          mode: session.mode,
+          activePlan: activePlanForSession(session),
+          agentMode: session.agentMode || "chat",
           model: session.model,
-          planId: session.planId,
-          planPath: session.planPath,
-          planState: session.planState,
           planTodos: session.planTodos ?? [],
           sessionId,
           sessionKey: session.sessionKey,
           sessionTodos: session.sessionTodos ?? [],
+          workspaceMode: session.mode,
+          thinkingLevel:
+            session.thinkingByModel && typeof session.thinkingByModel === "object"
+              ? session.thinkingByModel[session.model] || null
+              : null,
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "get_session_files": {
+      const session = ensureSession(frame.sessionId);
+      const view = session.sessionFiles;
+      const files = view ? view.entries.filter(entry => (fs.existsSync(entry.path) ? fs.readFileSync(entry.path,"utf8") : null) !== entry.before).map(entry => ({path:entry.path,status:entry.before===null?"added":fs.existsSync(entry.path)?"modified":"deleted",added:2,removed:1,restorable:true})) : [];
+      send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:view?.sourceTurnId || null,files}});break;
+    }
+    case "get_session_file_baseline": {
+      const view = ensureSession(frame.sessionId).sessionFiles;
+      const entry = view?.sourceTurnId === frame.sourceTurnId ? view.entries.find(entry=>entry.path===frame.path) : null;
+      send({id:frame.id,type:"response",success:!!entry,sessionId:frame.sessionId,error:entry?undefined:"unknown_path",payload:entry?{sessionId:frame.sessionId,sourceTurnId:frame.sourceTurnId,path:entry.path,existed:true,text:entry.before}:undefined});break;
+    }
+    case "keep_session_files": {
+      const session = ensureSession(frame.sessionId), view = session.sessionFiles;
+      if(session.busy || !view || view.sourceTurnId !== frame.sourceTurnId) {send({id:frame.id,type:"response",success:false,sessionId:frame.sessionId,error:session.busy?"busy":"unknown_path"});break;}
+      view.sourceTurnId = "keep-" + Date.now() + "-" + crypto.randomUUID();
+      view.entries = [];
+      send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:view.sourceTurnId}});break;
+    }
+    case "restore_session_files": {
+      const session = ensureSession(frame.sessionId), view = session.sessionFiles;
+      const entries = view?.sourceTurnId === frame.sourceTurnId ? (frame.paths || []).map(target=>view.entries.find(entry=>entry.path===target)) : [];
+      if(session.busy || !entries.length || entries.some(entry=>!entry)) {send({id:frame.id,type:"response",success:false,sessionId:frame.sessionId,error:session.busy?"busy":"unknown_path"});break;}
+      for(const entry of entries) fs.writeFileSync(entry.path,entry.before,"utf8");
+      send({id:frame.id,type:"response",success:true,sessionId:frame.sessionId,payload:{sessionId:frame.sessionId,sourceTurnId:frame.sourceTurnId,restored:frame.paths}});break;
+    }
+    case "list_checkpoints": {
+      const sessionId = frame.sessionId || activeSessionId;
+      send({
+        id: frame.id,
+        payload: {
+          checkpoints: [],
+          sessionId,
         },
         sessionId,
         success: true,
@@ -1529,7 +2694,14 @@ function handleCommand(frame) {
           ? Math.min(requestedCursor, session.history.length)
           : session.history.length;
       const start = Math.max(0, endExclusive - requestedLimit);
-      const messages = session.history.slice(start, endExclusive);
+      const messages = session.history.slice(start, endExclusive).map(entry => {
+        if (entry.message?.role !== "tool" || !Array.isArray(entry.message.content)) return entry;
+        return {...entry,message:{...entry.message,content:entry.message.content.map(part => {
+          if (part.type !== "input_image_ref") return part;
+          const blobSha=part.blob_sha || part.blobSha;
+          return {...part,blobSha,mimeType:part.mime_type || part.mimeType,bytes:fs.statSync(path.join(BLOBS_DIR,blobSha)).size,hasThumb:fs.existsSync(path.join(THUMBS_DIR,blobSha))};
+        })}};
+      });
       const hasMore = start > 0;
       if (debugGetMessages) {
         console.error(
@@ -1567,15 +2739,48 @@ function handleCommand(frame) {
         success: true,
         type: "response",
       };
-      if (Number.isInteger(requestedCursor) && requestedCursor > 0 && historyPageDelayMs > 0) {
-        setTimeout(() => send(response), historyPageDelayMs);
+      const olderPage = Number.isInteger(requestedCursor) && requestedCursor > 0;
+      const gatePath = path.join(
+        process.env[${JSON.stringify(TEST_DEFAULT_CWD_ENV)}] || process.cwd(),
+        ${JSON.stringify(TEST_HISTORY_PAGE_GATE_FILE)},
+      );
+      const sendWhenReleased = () => {
+        if (olderPage && fs.existsSync(gatePath)) {
+          setTimeout(sendWhenReleased, 20);
+        } else {
+          send(response);
+        }
+      };
+      if (olderPage && historyPageDelayMs > 0) {
+        setTimeout(sendWhenReleased, historyPageDelayMs);
       } else {
-        send(response);
+        sendWhenReleased();
       }
+      break;
+    }
+    case "set_ui_language": {
+      if (!["auto", "en", "zh-CN"].includes(frame.language)) {
+        send({ id: frame.id, type: "response", success: false, error: "invalid_language" });
+      } else {
+        uiLanguage = frame.language;
+        send({ id: frame.id, type: "response", success: true, payload: uiPreferences() });
+      }
+      break;
+    }
+    case "delete_session": {
+      if (sessions.get(frame.sessionId)?.busy) {
+        send({ id: frame.id, type: "response", success: false, sessionId: frame.sessionId, error: "busy" });
+        break;
+      }
+      sessions.delete(frame.sessionId);
+      attachmentLeases.delete(frame.sessionId);
+      if (activeSessionId === frame.sessionId) activeSessionId = sessions.keys().next().value || null;
+      send({ id: frame.id, type: "response", success: true, sessionId: frame.sessionId, payload: { warnings: [] } });
       break;
     }
     case "close_session":
       sessions.delete(frame.sessionId);
+      attachmentLeases.delete(frame.sessionId);
       if (activeSessionId === frame.sessionId) {
         activeSessionId = sessions.keys().next().value || null;
       }
@@ -1587,6 +2792,17 @@ function handleCommand(frame) {
       });
       break;
     case "list_models":
+      if (bootstrapListModelsFailures > 0) {
+        bootstrapListModelsFailures -= 1;
+        send({
+          error: "simulated list_models bootstrap failure",
+          id: frame.id,
+          sessionId: activeSessionId,
+          success: false,
+          type: "response",
+        });
+        break;
+      }
       send({
         id: frame.id,
         payload: {
@@ -1600,10 +2816,13 @@ function handleCommand(frame) {
     case "upsert_model": {
       const normalized = normalizeModelEntry(frame.model, "user");
       userModels.set(normalized.id, normalized);
+      persistUserModels();
+      const warnings = collectModelWarnings(normalized.api, normalized.thinkingFormat);
       send({
         id: frame.id,
         payload: {
           model: normalized,
+          warnings,
         },
         success: true,
         type: "response",
@@ -1629,6 +2848,10 @@ function handleCommand(frame) {
           listModelViews().find((model) => model.apiKeyEnv === frame.envName)?.provider || "openai",
       };
       providerKeys.set(frame.envName, entry);
+      for (const model of userModels.values()) {
+        if (model.apiKeyEnv === frame.envName) model.keyPresent = entry.keyPresent;
+      }
+      persistUserModels();
       send({
         id: frame.id,
         payload: {
@@ -1654,10 +2877,76 @@ function handleCommand(frame) {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = touchSession(ensureSession(sessionId));
       session.model = frame.model;
-      send({
+          send({
         id: frame.id,
         payload: { model: session.model, sessionId },
         sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "set_speed": {
+      const modelId = frame.model;
+      const model = listModelViews().find((candidate) => candidate.id === modelId);
+      if (!model || !(frame.speed === "standard" || model.supportedSpeeds.includes(frame.speed))) {
+        send({ id: frame.id, error: "invalid_speed", success: false, type: "response" });
+        break;
+      }
+      modelPreferences.set(modelId, { ...modelPreferences.get(modelId), speed: frame.speed });
+      persistModelPreferences();
+      send({ id: frame.id, payload: { model: modelId, speed: frame.speed, sessionId: frame.sessionId || activeSessionId }, success: true, type: "response" });
+      break;
+    }
+    case "set_thinking_level": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      const session = touchSession(ensureSession(sessionId));
+      const modelId =
+        typeof frame.model === "string" && frame.model.length > 0 ? frame.model : session.model;
+      const level = normalizeReasoningLevel(frame.level);
+      session.thinkingByModel = session.thinkingByModel || {};
+      session.thinkingByModel[modelId] = level || "off";
+      modelPreferences.set(modelId, {
+        ...modelPreferences.get(modelId),
+        reasoning: session.thinkingByModel[modelId],
+      });
+      persistModelPreferences();
+      const userModel = userModels.get(modelId);
+      if (userModel) {
+        userModel.selectedReasoningLevel = session.thinkingByModel[modelId];
+        persistUserModels();
+      } else if (level) {
+        for (const model of userModels.values()) {
+          model.selectedReasoningLevel = level;
+        }
+        persistUserModels();
+      }
+          send({
+        id: frame.id,
+        payload: { model: modelId, sessionId, thinkingLevel: session.thinkingByModel[modelId] },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "set_context_window": {
+      const modelId = typeof frame.model === "string" ? frame.model : "";
+      const contextWindow = frame.contextWindow;
+      const model = listModelViews().find((candidate) => candidate.id === modelId);
+      if (!model || !model.contextWindowOptions.includes(contextWindow)) {
+        send({ id: frame.id, error: "invalid_context_window", success: false, type: "response" });
+        break;
+      }
+      modelPreferences.set(modelId, {
+        ...modelPreferences.get(modelId),
+        contextWindow,
+      });
+      persistModelPreferences();
+      send({
+        id: frame.id,
+        payload: { contextWindow, model: modelId, sessionId: frame.sessionId || activeSessionId },
+        sessionId: frame.sessionId || activeSessionId,
         success: true,
         type: "response",
       });
@@ -1667,67 +2956,163 @@ function handleCommand(frame) {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = touchSession(ensureSession(sessionId));
       if (frame.action === "enter") {
+        session.agentMode = "plan";
         session.planState = "planning";
-        session.planId = session.planId || "fake-plan";
+        session.planId = frame.planId || session.planId || "fake-plan";
         session.planPath = path.join(process.cwd(), "plans", \`\${session.planId}.plan.md\`);
         fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
         fs.writeFileSync(session.planPath, "# Fake plan\\n\\n- Step 1\\n", "utf8");
         send({
           id: frame.id,
-          payload: { planId: session.planId, planState: session.planState },
+          payload: planControlPayload(session),
           sessionId,
           success: true,
           type: "response",
         });
-        emitPlanEvent(sessionId, "plan.enter");
+        emitAgentModeChanged(sessionId);
         break;
       }
       if (frame.action === "exit") {
-        const lastPlanId = session.planId;
-        const lastPlanPath = session.planPath;
-        session.planState = "chat";
+        session.agentMode = "chat";
         send({
           id: frame.id,
-          payload: { planId: null, planState: "chat" },
+          payload: planControlPayload(session),
           sessionId,
           success: true,
           type: "response",
         });
-        emitCustomPlanEvent(sessionId, "plan.exit", {
-          path: lastPlanPath,
-          planId: lastPlanId,
-          state: "chat",
-        });
-        session.planId = null;
-        session.planPath = null;
+        emitAgentModeChanged(sessionId);
         break;
       }
 
+      const resumesPendingPlan = session.planState === "pending";
       session.planId = frame.planId || session.planId || "fake-plan";
       session.planPath = session.planPath || path.join(process.cwd(), "plans", \`\${session.planId}.plan.md\`);
       fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
       fs.writeFileSync(session.planPath, "# Fake plan\\n\\n- Step 1\\n- Build\\n", "utf8");
       session.planState = "executing";
+      session.agentMode = "chat";
+      // Mirror production ordering: persist the user-visible kickoff before
+      // acknowledging build, so the immediate history refresh can render it.
+      session.history.push({
+        id: "h-" + historyCounter++,
+        message: {
+          content: "start building " + session.planPath,
+          kind: "plan_build",
+          role: "user",
+        },
+        type: "message",
+      });
       send({
         id: frame.id,
-        payload: {
-          planId: session.planId,
-          planPath: session.planPath,
-          planState: session.planState,
-        },
+        payload: planControlPayload(session),
         sessionId,
         success: true,
         type: "response",
       });
+      startTurn(sessionId);
       emitPlanEvent(sessionId, "plan.build");
-      setTimeout(() => {
+      emitAgentModeChanged(sessionId);
+      const finishPlanRun = () => {
+        pendingPlanCompletion = null;
+        if (session.planId === "fake-plan-complete") {
+          session.planState = "completed";
+          emitPlanEvent(sessionId, "plan.complete");
+        }
         finishTurn(sessionId, null);
-      }, 10);
+      };
+      const completionDelayMs =
+        session.planId === "fake-plan-interrupt" && !resumesPendingPlan
+          ? 5_000
+          : resumesPendingPlan
+            ? 250
+            : 10;
+      pendingPlanCompletion = setTimeout(finishPlanRun, completionDelayMs);
       break;
     }
+    case "retain_attachment_leases": {
+      const sessionId = frame.sessionId;
+      if (!sessions.has(sessionId)) {
+        send({ error: "unknown_session", id: frame.id, sessionId, success: false, type: "response" });
+        break;
+      }
+      const attachments = frame.params && Array.isArray(frame.params.attachments)
+        ? frame.params.attachments
+        : [];
+      const retainedShas = [...new Set(attachments.flatMap((attachment) => [
+        attachment && attachment.blobSha,
+        attachment && attachment.providerSha,
+      ]).filter((sha) => typeof sha === "string"))].sort();
+      const missing = retainedShas.find((sha) => !fs.existsSync(path.join(BLOBS_DIR, sha)));
+      if (missing) {
+        send({ error: \`missing_attachment_blob: \${missing}\`, id: frame.id, sessionId, success: false, type: "response" });
+        break;
+      }
+      attachmentLeases.set(sessionId, new Set([
+        ...(attachmentLeases.get(sessionId) || []),
+        ...retainedShas,
+      ]));
+      send({
+        id: frame.id,
+        payload: { retainedShas },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "discard_detached_session": {
+      const discarded = sessions.delete(frame.sessionId);
+      attachmentLeases.delete(frame.sessionId);
+      send({
+        id: frame.id,
+        payload: { discarded, sessionId: frame.sessionId },
+        sessionId: frame.sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "ingest_attachment":
+      handleIngestAttachment(frame);
+      break;
+    case "cache_attachment_thumbnail":
+      handleCacheAttachmentThumbnail(frame);
+      break;
+    case "preview_rewind": {
+      const session = ensureSession(frame.sessionId);
+      send({type:"response",id:frame.id,sessionId:frame.sessionId,success:true,payload:{
+        revertAvailable: session.inlineBaseline !== undefined,
+        ...(session.inlineBaseline === undefined ? {revertReason:"no_baselines"} : {}),
+        revertPaths:session.inlineBaseline !== undefined ? [editFilePath] : []}});
+      break;
+    }
+    case "rewind_and_resend": {
+      const session = ensureSession(frame.sessionId);
+      const index = session.history.findIndex((entry)=>entry.id===frame.messageId && entry.message?.role==="user" && !entry.message.superseded);
+      if(index<0) { send({type:"response",id:frame.id,sessionId:frame.sessionId,success:false,error:"rewind_target_stale"}); break; }
+      if(pendingInterrupt) { clearTimeout(pendingInterrupt); pendingInterrupt=null; }
+      if(session.busy) finishTurn(frame.sessionId,"interrupted");
+      if(frame.files==="revert") {
+        if(session.inlineBaseline===null) { if(fs.existsSync(editFilePath)) fs.unlinkSync(editFilePath); }
+        else if(session.inlineBaseline!==undefined) fs.writeFileSync(editFilePath,session.inlineBaseline,"utf8");
+      }
+      for(const entry of session.history.slice(index)) { if(entry.message) { entry.message.superseded=true; entry.message.rewindEligible=false; delete entry.message.turn_failed; } }
+      handlePrompt({...frame,type:"prompt",text:frame.message.text,params:frame.message});
+      break;
+    }
+    case "steer":
+      handleSteer(frame);
+      break;
     case "prompt":
     case "follow_up":
       handlePrompt(frame);
+      break;
+    case "resume":
+      handleResume(frame);
+      break;
+    case "retry":
+      handleRetry(frame);
       break;
     case "interrupt":
       handleInterrupt(frame);
@@ -1769,13 +3154,21 @@ rl.on("line", (line) => {
 export async function createHostE2eFixture(
   options: HostE2eFixtureOptions = {},
 ): Promise<HostE2eFixture> {
-  const rootDir = await mkdtemp(path.join(os.tmpdir(), "tomcat-vscode-ext-host-"));
+  const rootDir = await mkdtemp(
+    path.join(os.tmpdir(), "tomcat-vscode-ext-host-"),
+  );
   const workspaceDir = path.join(rootDir, "workspace");
   const fakeServePath = path.join(rootDir, "fake-tomcat.js");
   const editFilePath = path.join(rootDir, "edit-target.txt");
   const setupMarkerPath = path.join(rootDir, "setup", "ready");
+  const transientFailureMarkerPath = path.join(rootDir, "setup", "transient-failures");
+  const attachmentRootDir = path.join(rootDir, "attachments");
 
   await mkdir(workspaceDir, { recursive: true });
+  // Created up front so the host can grant the webview access to a path that exists;
+  // an ingest that happens to be the first write should not be what creates it.
+  await mkdir(path.join(attachmentRootDir, "blobs"), { recursive: true });
+  await mkdir(path.join(attachmentRootDir, "thumbs"), { recursive: true });
   await writeFile(editFilePath, "before\n", "utf8");
   await writeFile(
     fakeServePath,
@@ -1785,18 +3178,33 @@ export async function createHostE2eFixture(
   await chmod(fakeServePath, 0o755);
 
   return {
+    attachmentRootDir,
     async cleanup() {
       await rm(rootDir, { force: true, recursive: true });
     },
     editFilePath,
     env: {
       ...process.env,
+      TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT: attachmentRootDir,
+      TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES: String(
+        options.bootstrapListModelsFailures ?? 0,
+      ),
       TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
       TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
+      TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS: String(
+        options.handshakeDelayMs ?? 0,
+      ),
+      TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS: String(
+        options.interruptDelayMs ?? 150,
+      ),
       TOMCAT_VSCODE_TEST_PATH: fakeServePath,
       TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",
       TOMCAT_VSCODE_TEST_SETUP_MARKER: setupMarkerPath,
       TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+      TOMCAT_VSCODE_TEST_TRANSIENT_FAILURE_MARKER: transientFailureMarkerPath,
+      TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES: String(
+        options.transientServeFailures ?? 0,
+      ),
     },
     fakeServePath,
     rootDir,
@@ -1814,6 +3222,6 @@ export function resolveVsCodeCli(): string {
 export function resolveVsCodeExecutable(): string {
   return (
     process.env.VSCODE_EXECUTABLE_PATH ||
-    "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
+    "/Applications/Visual Studio Code.app/Contents/MacOS/Code"
   );
 }

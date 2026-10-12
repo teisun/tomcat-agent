@@ -2,8 +2,36 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { MessageBubble } from "./MessageBubble";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 
 describe("MessageBubble", () => {
+  it.each(["Single line", "First line\nSecond line"])("keeps the file-revert edit affordance clickable for %j", (text) => {
+    const onEdit = vi.fn();
+    const item = {id:"editable",kind:"user" as const,type:"message" as const,text,rewindEligible:true};
+    render(<MessageBubble item={item} onEdit={onEdit} hasFileWrites />);
+    const button = screen.getByRole("button", {name:"Edit message"});
+    expect(button.className).toContain("tc-message__edit-trigger--revert");
+    expect(button.querySelector(".codicon-discard")).not.toBeNull();
+    expect(screen.getByTestId("message-block").getAttribute("data-has-writes")).toBe("true");
+    fireEvent.click(button);
+    expect(onEdit).toHaveBeenCalledExactlyOnceWith(item);
+    expect(screen.getByTestId("message-text").textContent).toBe(text);
+  });
+
+  it("retains a focusable edit entry without reserving revert-icon space", () => {
+    const onEdit = vi.fn();
+    const item = { id: "no-write", kind: "user" as const, type: "message" as const, text: "No writes", rewindEligible: true };
+    render(<MessageBubble item={item} onEdit={onEdit} />);
+    expect(screen.getByTestId("message-block").getAttribute("data-has-writes")).toBe("false");
+    const button = screen.getByRole("button", { name: "Edit message" });
+    expect(button.tabIndex).toBe(0);
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(screen.getByTestId("message-text"));
+    expect(onEdit).toHaveBeenCalledExactlyOnceWith(item);
+  });
+
   it("renders user message as right pill without header", () => {
     render(
       <MessageBubble
@@ -22,13 +50,13 @@ describe("MessageBubble", () => {
     expect(screen.getByTestId("message-text").textContent).toContain("Hello Tomcat");
   });
 
-  it("renders assistant message without card or header", () => {
+  it("renders assistant markdown without the old assistant header", () => {
     render(
       <MessageBubble
         item={{
           id: "a1",
           kind: "assistant",
-          text: "Here is the answer.",
+          text: "Here is **the** answer.",
           type: "message",
         }}
       />,
@@ -38,45 +66,71 @@ describe("MessageBubble", () => {
     expect(node.className).toContain("tc-message--assistant");
     expect(screen.queryByText("Tomcat")).toBeNull();
     expect(screen.queryByText("assistant")).toBeNull();
+    expect(screen.getByTestId("message-text").querySelector("strong")?.textContent).toBe("the");
   });
 
-  it("keeps left border for error and notice", () => {
+  it("renders assistant code fences as clickable code cards", async () => {
+    const onOpenFile = vi.fn();
+    render(
+      <MessageBubble
+        item={{
+          id: "a-code",
+          kind: "assistant",
+          text: "```rust src/lib.rs:9\nfn answer() -> i32 { 42 }\n```",
+          type: "message",
+        }}
+        onOpenFile={onOpenFile}
+      />,
+    );
+
+    await screen.findByTestId("assistant-code-card");
+    fireEvent.click(screen.getByTestId("assistant-code-file"));
+    expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs", 9);
+  });
+
+  it("forwards assistant Markdown links to the transcript link handler", () => {
+    const onOpenLink = vi.fn();
+    render(
+      <MessageBubble
+        item={{
+          id: "a-link",
+          kind: "assistant",
+          text: "See [the docs](https://example.com/docs).",
+          type: "message",
+        }}
+        onOpenLink={onOpenLink}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "the docs" }));
+    expect(onOpenLink).toHaveBeenCalledWith("https://example.com/docs");
+  });
+
+  it("renders notice and warn as flat status lines while error keeps its card", () => {
+    const header = () => screen.getByTestId("message-block").querySelector(".tc-message__header");
     const { rerender } = render(
-      <MessageBubble
-        item={{
-          id: "e1",
-          kind: "error",
-          text: "boom",
-          type: "message",
-        }}
-      />,
+      <MessageBubble item={{ id: "n1", kind: "notice", text: "note", type: "message" }} />,
     );
-    expect(screen.getByTestId("message-block").className).toContain("tc-message--error");
+    expect(header()).toBeNull();
+    expect(screen.getByRole("img", { name: "Notice" }).className).toContain("codicon-info");
+    expect(screen.queryByText("Notice")).toBeNull();
+    expect(screen.queryByText("notice")).toBeNull();
+
+    rerender(<MessageBubble item={{ id: "w1", kind: "warn", text: "careful", type: "message" }} />);
+    expect(header()).toBeNull();
+    expect(screen.getByRole("img", { name: "Warn" }).className).toContain("codicon-warning");
+
+    rerender(<MessageBubble item={{ id: "e1", kind: "error", text: "boom", type: "message" }} />);
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(header()?.querySelector("strong")?.textContent).toBe("Error");
+    expect(header()?.querySelector("span")).toBeNull();
 
     rerender(
       <MessageBubble
-        item={{
-          id: "n1",
-          kind: "notice",
-          text: "note",
-          type: "message",
-        }}
+        item={{ id: "e2", kind: "error", label: "rate_limit", text: "slow down", type: "message" }}
       />,
     );
-    expect(screen.getByTestId("message-block").className).toContain("tc-message--notice");
-
-    rerender(
-      <MessageBubble
-        item={{
-          id: "w1",
-          kind: "warn",
-          text: "careful",
-          type: "message",
-        }}
-      />,
-    );
-    expect(screen.getByTestId("message-block").className).toContain("tc-message--warn");
-    expect(screen.getByText("Warn")).toBeTruthy();
+    expect(header()?.querySelector("span")?.textContent).toBe("rate_limit");
   });
 
   it("renders failed user status with retry", () => {
@@ -102,6 +156,93 @@ describe("MessageBubble", () => {
     expect(screen.getByTestId("user-message-status").textContent).toContain("Session is busy");
     fireEvent.click(screen.getByTestId("retry-user-message"));
     expect(retriedMessageId).toBe("u-failed");
+  });
+
+  it.each(["en", "zh-CN"] as const)("renders a superseded failed user message as an abandoned bubble (%s)", (locale) => {
+    render(
+      <LocaleProvider locale={locale}><MessageBubble
+        item={{
+          abandoned: true,
+          id: "u-abandoned",
+          kind: "user",
+          text: "Retry me",
+          type: "message",
+        }}
+      /></LocaleProvider>,
+    );
+
+    expect(screen.getByTestId("message-block").className).toContain("tc-message--user-abandoned");
+    const status = screen.getByTestId("abandoned-user-message-status");
+    expect(status.isConnected).toBe(true);
+    if (locale === "en") expect(status.textContent).toContain(translate("en", "message.abandoned"));
+  });
+
+  it("shows a rejected recovery reason on the persistent error card", () => {
+    render(
+      <MessageBubble
+        item={{
+          id: "error-rejected",
+          kind: "error",
+          recoveryError: "This error card is stale. Refresh the session and try again.",
+          text: "Request failed",
+          type: "message",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("error-recovery-rejection").textContent).toContain(
+      "This error card is stale",
+    );
+  });
+
+  it("separates Retry or Resume as an icon-backed primary action", () => {
+    const onRecover = vi.fn();
+    const { rerender } = render(
+      <MessageBubble
+        item={{
+          detailText: "raw provider payload",
+          id: "error-1",
+          kind: "error",
+          recoveryAction: "retry",
+          text: "Request failed",
+          type: "message",
+        }}
+        onRecover={onRecover}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("recover-error-turn"));
+    expect(onRecover).toHaveBeenCalledWith("error-1", "retry");
+    expect(screen.getByTestId("error-detail-actions").textContent).not.toContain("Retry");
+    expect(
+      screen
+        .getByTestId("error-recovery-actions")
+        .contains(screen.getByTestId("recover-error-turn")),
+    ).toBe(true);
+    expect(screen.getByTestId("recover-error-turn").className).toContain("tc-button--primary");
+    expect(
+      screen
+        .getByTestId("recover-error-turn")
+        .querySelector(".codicon-refresh"),
+    ).not.toBeNull();
+
+    rerender(
+      <MessageBubble
+        item={{
+          id: "error-2",
+          kind: "error",
+          recoveryAction: "resume",
+          text: "Stream interrupted",
+          type: "message",
+        }}
+        onRecover={onRecover}
+      />,
+    );
+    expect(screen.getByTestId("recover-error-turn").textContent).toBe("Resume");
+    expect(
+      screen
+        .getByTestId("recover-error-turn")
+        .querySelector(".codicon-debug-continue"),
+    ).not.toBeNull();
   });
 
   it("renders pending user status", () => {

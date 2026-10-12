@@ -12,23 +12,34 @@
 //! - `ResponsesStream`：SSE 帧切分、NDJSON fallback；上层与 `OpenAiProvider` 同 Stream 契约。
 
 use super::*;
+use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent, ThinkingSource,
+    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, MessageKind, StreamEvent,
+    ThinkingSource,
 };
-use crate::core::llm::{Capabilities, Credential, ModelEntry};
+use crate::core::llm::{Capabilities, Credential, ModelEntry, ResolvedCall};
+use crate::core::session::manager::MessageAppendSink;
+use crate::core::tools::primitive::{
+    BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
+    WriteFileResult,
+};
 use crate::infra::error::{
-    llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError, LlmErrorStage,
+    classify_llm_failure, llm_http_status, llm_http_status_error, llm_retry_after_ms, llm_stage,
+    llm_summary, AppError, LlmErrorStage, LlmFailureKind,
 };
-use crate::infra::LlmConfig;
+use crate::infra::events::ToolDisplay;
+use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, LlmConfig};
 
 use bytes::Bytes;
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const TEST_KEY_ENV: &str = "__OPENAI_RESPONSES_TEST_KEY__";
 
@@ -48,6 +59,16 @@ fn responses_entry() -> ModelEntry {
             web_search: false,
         },
         context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: Some("openai".to_string()),
     }
 }
@@ -70,6 +91,121 @@ fn provider_with_stub_key() -> OpenAiResponsesProvider {
     provider_from_cfg(LlmConfig::default())
 }
 
+#[test]
+fn tool_owned_media_responses_native_split_preserves_anchor_and_file_id() {
+    use super::payload::build_responses_input_with_media_mode;
+    use crate::core::llm::{tool_result_media::ToolResultMediaMode, ChatMessageContent};
+    let mut first = ChatMessage::tool("one", "");
+    first.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("first"),
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+    ]));
+    let mut second = ChatMessage::tool("two", "");
+    second.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("second"),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("notes.pdf".into())).unwrap(),
+    ]));
+    let messages = vec![
+        ChatMessage::user("old request"),
+        ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![
+                json!({"id":"one","function":{"name":"read","arguments":"{}"}}),
+                json!({"id":"two","function":{"name":"read","arguments":"{}"}}),
+            ],
+        ),
+        first,
+        second,
+        {
+            let mut tail = ChatMessage::user("current runtime");
+            tail.kind = MessageKind::EphemeralTail;
+            tail
+        },
+    ];
+    let before = serde_json::to_value(&messages).unwrap();
+    for mode in [ToolResultMediaMode::Native, ToolResultMediaMode::Split] {
+        let (instructions, input) =
+            build_responses_input_with_media_mode(&messages, &test_profile(), true, false, 2, mode);
+        assert!(instructions.unwrap().contains("current runtime"));
+        assert_eq!(input[0]["call_id"], "one");
+        assert_eq!(input[1]["call_id"], "two");
+        if mode == ToolResultMediaMode::Native {
+            assert_eq!(input.len(), 2);
+            assert_eq!(input[0]["output"][0]["text"], "first");
+            assert_eq!(
+                input[0]["output"][1]["image_url"],
+                "data:image/png;base64,aGVsbG8="
+            );
+            assert_eq!(input[0]["output"][2]["file_id"], "file-image");
+            assert_eq!(input[1]["output"][1]["file_id"], "file-pdf");
+        } else {
+            assert_eq!(input.len(), 3);
+            assert_eq!(input[0]["output"], "first");
+            assert_eq!(input[1]["output"], "second");
+            assert_eq!(input[2]["role"], "user");
+            assert_eq!(input[2]["content"][2]["file_id"], "file-image");
+            assert_eq!(input[2]["content"][3]["file_id"], "file-pdf");
+        }
+    }
+    assert_eq!(serde_json::to_value(messages).unwrap(), before);
+}
+
+#[test]
+fn tool_media_responses_wire_equals_user_media() {
+    let parts = vec![ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap()];
+    let request = |message| ChatRequest {
+        model: "gpt-5.4".into(),
+        messages: vec![message],
+        ..Default::default()
+    };
+    assert_eq!(
+        provider_with_stub_key()
+            .build_request_body(&request(ChatMessage::tool_media(parts.clone())), true),
+        provider_with_stub_key()
+            .build_request_body(&request(ChatMessage::user_with_parts(parts)), true)
+    );
+}
+
+#[test]
+fn responses_wire_omits_local_message_metadata() {
+    let mut message = ChatMessage::assistant("wire-visible text");
+    message.summary_title = Some("local summary".to_string());
+    message.tool_display = Some(ToolDisplay::Text {
+        text: "local tool display".to_string(),
+    });
+    message.usage = Some(Default::default());
+    let request = ChatRequest {
+        model: "gpt-5.4".to_string(),
+        messages: vec![message],
+        ..Default::default()
+    };
+
+    let body = provider_with_stub_key().build_request_body(&request, true);
+    let serialized = serde_json::to_string(&body).expect("serialize wire body");
+    for local_field in ["tool_display", "summary_title", "usage"] {
+        assert!(
+            !serialized.contains(local_field),
+            "Responses wire leaked local field `{local_field}`: {serialized}"
+        );
+    }
+}
+
+#[test]
+fn responses_wire_fingerprint_tracks_each_input_prefix() {
+    let input = vec![
+        json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "one"}]}),
+        json!({"type": "function_call", "call_id": "call-1", "name": "read", "arguments": "{}"}),
+        json!({"type": "function_call_output", "call_id": "call-1", "output": "two"}),
+    ];
+
+    let expected = (1..=input.len())
+        .map(|end| fingerprint(&serde_json::Value::Array(input[..end].to_vec())))
+        .collect::<Vec<_>>();
+
+    assert_eq!(rolling_array_fingerprints(&input), expected);
+}
+
 fn test_profile() -> crate::core::llm::ProviderCompatProfile {
     crate::core::llm::ProviderCompatProfile::openai_responses("gpt-5")
 }
@@ -78,28 +214,128 @@ fn build_responses_input_test(
     messages: &[ChatMessage],
 ) -> (Option<String>, Vec<serde_json::Value>) {
     let profile = test_profile();
-    build_responses_input(messages, &profile, true, true)
+    build_responses_input(messages, &profile, true, true, 0)
 }
 
 fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S> {
     ResponsesStream::new(stream, prefer_ndjson, test_profile(), true)
 }
 
+/// Guard against executing tools from failed stream attempts. Any call reaching
+/// this executor is a test failure, including the complete-but-discarded fixture.
+struct UnusedPrimitive;
+
+#[async_trait::async_trait]
+impl PrimitiveExecutor for UnusedPrimitive {
+    async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn write_file(
+        &self,
+        _path: &str,
+        _content: &str,
+        _overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn edit_file(
+        &self,
+        _path: &str,
+        _edits: Vec<EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn execute_bash(
+        &self,
+        _command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _foreground_wait_ms: Option<u64>,
+    ) -> Result<BashResult, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _operation: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+}
+
+#[derive(Default)]
+struct CrossLayerAppendSink {
+    messages: Mutex<Vec<serde_json::Value>>,
+    custom_entries: Mutex<Vec<serde_json::Value>>,
+}
+
+impl MessageAppendSink for CrossLayerAppendSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        Ok("cross-layer-message".to_string())
+    }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.custom_entries.lock().unwrap().push(extra);
+        Ok(())
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        Ok(forced_id.to_string())
+    }
+}
+
+fn cross_layer_agent(
+    provider: OpenAiResponsesProvider,
+    sink: Option<Arc<dyn MessageAppendSink>>,
+) -> (AgentLoop, Arc<DefaultEventBus>) {
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let agent = AgentLoop::new(
+        ResolvedCall::from_parts_unchecked(Arc::new(provider), "gpt-5", "gpt-5"),
+        Arc::new(UnusedPrimitive),
+        event_bus.clone(),
+        AgentLoopConfig {
+            max_attempts: 2,
+            message_append_sink: sink,
+            retry_base_delay_ms: 0,
+            session_id: "responses-cross-layer".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    (agent, event_bus)
+}
+
 #[test]
-fn openai_files_client_is_lazy_once_per_provider() {
+fn files_adapter_is_lazy_once_per_provider() {
     let cfg = LlmConfig::default();
     let p = provider_from_cfg(cfg.clone());
 
-    let c1 = p
-        .openai_files_client(&cfg.files)
+    let a1 = p
+        .files_adapter(&cfg.files)
         .expect("openai-responses should support files");
-    let c2 = p
-        .openai_files_client(&cfg.files)
+    let a2 = p
+        .files_adapter(&cfg.files)
         .expect("openai-responses should support files");
-    assert_eq!(
-        c1.instance_id(),
-        c2.instance_id(),
-        "same provider should lazily init files client once"
+    assert!(
+        std::sync::Arc::ptr_eq(&a1, &a2),
+        "same provider should lazily init files adapter once"
     );
 }
 
@@ -112,6 +348,37 @@ fn build_responses_input_extracts_first_system_to_instructions() {
     assert_eq!(input[0]["role"], "user");
     assert_eq!(input[0]["content"][0]["type"], "input_text");
     assert_eq!(input[0]["content"][0]["text"], "hi");
+}
+
+#[test]
+fn build_responses_input_promotes_ephemeral_tail_to_instructions() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let msgs = vec![
+        ChatMessage::system("stable instructions"),
+        ChatMessage::user("hi"),
+        tail,
+    ];
+
+    let (ins, input) = build_responses_input_test(&msgs);
+
+    assert_eq!(
+        ins.as_deref(),
+        Some("stable instructions\n\nruntime-only workspace state")
+    );
+    assert_eq!(
+        input.len(),
+        1,
+        "runtime tail must not create a moving input item"
+    );
+    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[0]["content"][0]["text"], "hi");
+    assert!(
+        !serde_json::to_string(&input)
+            .expect("serialize Responses input")
+            .contains("runtime-only workspace state"),
+        "EphemeralTail must never be serialized as a Responses dialogue item"
+    );
 }
 
 #[test]
@@ -243,7 +510,12 @@ fn responses_payload_to_chat_response_extracts_text_and_usage() {
             "type": "message",
             "content": [{"type": "output_text", "text": "hello"}]
         }],
-        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 3,
+            "total_tokens": 8,
+            "input_tokens_details": {"cached_tokens": 4}
+        }
     });
     let r = responses_payload_to_chat_response(&raw);
     assert_eq!(r.id.as_deref(), Some("resp_1"));
@@ -254,6 +526,27 @@ fn responses_payload_to_chat_response_extracts_text_and_usage() {
     assert_eq!(u.prompt_tokens, 5);
     assert_eq!(u.completion_tokens, 3);
     assert_eq!(u.total_tokens, Some(8));
+    assert_eq!(u.cache_read_tokens, Some(4));
+    assert_eq!(u.cache_write_tokens, None);
+}
+
+#[test]
+fn responses_payload_without_cache_details_leaves_cache_usage_empty() {
+    let raw = json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "content": [{"type": "output_text", "text": "hello"}]
+        }],
+        "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+    });
+
+    let usage = responses_payload_to_chat_response(&raw)
+        .usage
+        .expect("usage present");
+    assert_eq!(usage.cache_read_tokens, None);
+    assert_eq!(usage.cache_write_tokens, None);
 }
 
 #[test]
@@ -301,6 +594,54 @@ fn responses_payload_completed_function_call_prefers_tool_calls_finish_reason() 
 }
 
 #[test]
+fn responses_payload_completed_reasoning_only_stays_stop() {
+    let raw = json!({
+        "id": "resp_reasoning_exhausted",
+        "status": "completed",
+        "output": [{"type": "reasoning", "summary": []}],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 8192,
+            "output_tokens_details": {"reasoning_tokens": 8000}
+        }
+    });
+
+    let response = responses_payload_to_chat_response(&raw);
+
+    assert_eq!(
+        response.choices[0].finish_reason.as_deref(),
+        Some("stop"),
+        "a completed response remains stop regardless of its reasoning-token ratio"
+    );
+    assert_eq!(
+        response.choices[0].message.finish_reason.as_deref(),
+        Some("stop")
+    );
+}
+
+#[test]
+fn responses_payload_completed_empty_structured_response_stays_stop_without_reasoning_exhaustion() {
+    let raw = json!({
+        "id": "resp_legitimate_empty",
+        "status": "completed",
+        "output": [],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 8,
+            "output_tokens_details": {"reasoning_tokens": 0}
+        }
+    });
+
+    let response = responses_payload_to_chat_response(&raw);
+
+    assert_eq!(
+        response.choices[0].finish_reason.as_deref(),
+        Some("stop"),
+        "the heuristic must not turn an ordinary structured empty completion into a truncation"
+    );
+}
+
+#[test]
 fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
     let raw = json!({
         "id": "resp_2c",
@@ -309,18 +650,12 @@ fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
         "output": []
     });
     let r = responses_payload_to_chat_response(&raw);
-    assert_eq!(
-        r.choices[0].finish_reason.as_deref(),
-        Some("error:content_filter")
-    );
+    assert_eq!(r.choices[0].finish_reason.as_deref(), Some("error"));
     assert_eq!(
         r.choices[0].message.error_message.as_deref(),
         Some("content_filter")
     );
-    assert_eq!(
-        r.choices[0].message.finish_reason.as_deref(),
-        Some("error:content_filter")
-    );
+    assert_eq!(r.choices[0].message.finish_reason.as_deref(), Some("error"));
 }
 
 #[test]
@@ -416,7 +751,13 @@ fn responses_chunk_completed_emits_finish_and_usage() {
     let value = json!({
         "type": "response.completed",
         "response": {
-            "usage": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11}
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 4,
+                "total_tokens": 11,
+                "input_tokens_details": {"cached_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 3}
+            }
         }
     });
     let events = responses_chunk_to_events(&value, &mut tracks);
@@ -429,12 +770,21 @@ fn responses_chunk_completed_emits_finish_and_usage() {
     if let StreamEvent::Usage {
         prompt_tokens,
         completion_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
         total_tokens,
+        reasoning_tokens,
+        text_tokens,
+        ..
     } = &events[1]
     {
         assert_eq!(*prompt_tokens, 7);
         assert_eq!(*completion_tokens, 4);
+        assert_eq!(*cache_read_tokens, Some(5));
+        assert_eq!(*cache_write_tokens, None);
         assert_eq!(*total_tokens, Some(11));
+        assert_eq!(*reasoning_tokens, Some(3));
+        assert_eq!(*text_tokens, Some(1));
     } else {
         panic!("expected Usage, got {:?}", events[1]);
     }
@@ -582,6 +932,59 @@ fn responses_chunk_incomplete_max_output_tokens_emits_notice_finish_and_usage() 
     assert!(matches!(&events[2], StreamEvent::Usage { .. }));
 }
 
+#[tokio::test]
+async fn speed_responses_http_stream_and_non_stream_keep_max_independent() {
+    use crate::core::llm::{Speed, ThinkingLevel};
+    use tokio_stream::StreamExt;
+    let speeds = [
+        (None, None),
+        (Some(Speed::Standard), Some("default")),
+        (Some(Speed::Fast), Some("priority")),
+        (Some(Speed::Ultrafast), Some("ultrafast")),
+    ];
+    for stream in [false, true] {
+        let payload = if stream {
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        } else {
+            r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}]}"#
+        };
+        let server =
+            MockHttpServer::start(vec![ScriptedHttpResponse::json(200, payload); speeds.len()])
+                .await;
+        let mut entry = responses_entry();
+        entry.base_url = Some(server.base_url.clone());
+        let mut provider = provider_from_entry(entry, LlmConfig::default());
+        provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (speed, _) in speeds {
+            let request = ChatRequest {
+                messages: vec![ChatMessage::user("OK")],
+                model: "gpt-5.6-sol".into(),
+                speed,
+                thinking_level: Some(ThinkingLevel::Max),
+                ..Default::default()
+            };
+            if stream {
+                let mut events = provider.chat_stream(request).await.unwrap();
+                while let Some(event) = events.next().await {
+                    event.unwrap();
+                }
+            } else {
+                provider.chat(request).await.unwrap();
+            }
+        }
+        for (raw, (_, expected)) in server.request_texts().iter().zip(speeds) {
+            let body: serde_json::Value =
+                serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body.get("service_tier").and_then(|v| v.as_str()), expected);
+            assert_eq!(body["reasoning"]["effort"], "max");
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["model"], "gpt-5.6-sol");
+        }
+        assert_eq!(server.request_count(), 4);
+        server.shutdown().await;
+    }
+}
+
 #[test]
 fn responses_build_request_body_uses_model_name_when_present() {
     let mut entry = responses_entry();
@@ -600,13 +1003,18 @@ fn responses_build_request_body_uses_model_name_when_present() {
         model: String::new(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: Some("session-1:main".to_string()),
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
     assert_eq!(body["model"], "gpt-5.4");
+    assert_eq!(body["prompt_cache_key"], "session-1:main");
 }
 
 #[test]
@@ -627,9 +1035,13 @@ fn responses_build_request_body_maps_catalog_id_to_model_name() {
         model: "gpt-5.4_litellm-sunmi".to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -654,9 +1066,13 @@ fn responses_build_request_body_without_model_name_uses_id() {
         model: String::new(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -679,9 +1095,13 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -691,6 +1111,28 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         body
     );
     assert!(body.get("thinking").is_none());
+    assert!(
+        body.get("max_output_tokens").is_none(),
+        "OpenAI Responses must omit an unspecified output limit so the provider may adapt it: {body}"
+    );
+}
+
+#[test]
+fn responses_build_request_body_uses_resolved_cap_not_callers_raw_request() {
+    let provider = provider_from_cfg(LlmConfig::default());
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        // The resolver accepts this as the caller's product request, then
+        // clamps it to the model capacity below before it reaches the wire.
+        max_tokens: Some(256_000),
+        resolved_output_limit: Some(128_000),
+        stream: Some(true),
+        ..Default::default()
+    };
+
+    let body = provider.build_request_body(&request, true);
+    assert_eq!(body["max_output_tokens"], 128_000);
 }
 
 #[test]
@@ -712,9 +1154,13 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -748,9 +1194,13 @@ fn responses_auto_thinking_format_ignores_claude_model_name_on_responses_wire() 
         model: String::new(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -779,9 +1229,13 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -809,9 +1263,13 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -839,9 +1297,13 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -865,9 +1327,13 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -876,7 +1342,7 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
 }
 
 #[test]
-fn openai_responses_roundtrip_replays_reasoning_items() {
+fn openai_responses_roundtrip_replays_reasoning_items_and_promotes_ephemeral_tail() {
     let cfg = LlmConfig {
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         ..LlmConfig::default()
@@ -906,19 +1372,35 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
             replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
         }),
     );
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
     let req = ChatRequest {
-        messages: vec![ChatMessage::user("hi"), assistant],
+        messages: vec![ChatMessage::user("hi"), assistant, tail],
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
     assert_eq!(body["input"][1]["type"], "reasoning");
     assert_eq!(body["input"][1]["encrypted_content"], "enc_123");
+    assert!(
+        body["input"]
+            .as_array()
+            .expect("Responses input must be an array")
+            .iter()
+            .all(|item| !item.to_string().contains("runtime-only workspace state")),
+        "the runtime tail must not become a disappearing input item: {}",
+        body["input"]
+    );
+    assert_eq!(body["instructions"], "runtime-only workspace state");
 }
 
 #[test]
@@ -960,9 +1442,13 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -978,6 +1464,94 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
             .iter()
             .all(|item| item.get("type") != Some(&json!("reasoning"))),
         "previous_response_id 分支不应显式 replay reasoning items"
+    );
+}
+
+#[test]
+fn responses_build_request_body_previous_response_id_sends_only_new_items_after_anchor() {
+    let cfg = LlmConfig {
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let provider = provider_from_cfg(cfg);
+    let route_profile = provider.replay_profile_for_model("gpt-5");
+    let previous_assistant = ChatMessage::assistant_with_tool_calls(
+        Some("calling read"),
+        vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"old.txt\"}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: route_profile.provider.clone(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(route_profile.profile_id),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let mut tail = ChatMessage::user("runtime-only tail");
+    tail.kind = MessageKind::EphemeralTail;
+    let req = ChatRequest {
+        messages: vec![
+            ChatMessage::system("stable instructions"),
+            ChatMessage::user("old user input"),
+            previous_assistant,
+            ChatMessage::tool("call_1", "new tool output"),
+            ChatMessage::user("new user input"),
+            tail,
+        ],
+        model: "gpt-5".into(),
+        stream: Some(true),
+        ..Default::default()
+    };
+
+    let body = provider.build_request_body(&req, true);
+
+    assert_eq!(body["store"], true);
+    assert_eq!(body["previous_response_id"], "resp_123");
+    assert_eq!(
+        body["instructions"],
+        "stable instructions\n\nruntime-only tail"
+    );
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 2, "only anchor-successor items are new input");
+    assert_eq!(input[0]["type"], "function_call_output");
+    assert_eq!(input[0]["call_id"], "call_1");
+    assert_eq!(input[0]["output"], "new tool output");
+    assert_eq!(input[1]["role"], "user");
+    assert_eq!(input[1]["content"][0]["text"], "new user input");
+    assert!(
+        input
+            .iter()
+            .all(|item| !item.to_string().contains("runtime-only tail")),
+        "the runtime tail belongs in instructions, not a moving input suffix: {input:?}"
+    );
+    assert!(
+        !body.to_string().contains("old user input"),
+        "previous_response_id must restore the old history instead of resending it: {body}"
+    );
+    assert!(
+        !body.to_string().contains("calling read"),
+        "the anchored assistant response must not be duplicated in input: {body}"
     );
 }
 
@@ -1020,9 +1594,13 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body_with_hint(&req, true, false);
@@ -1097,9 +1675,13 @@ fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_u
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -1173,18 +1755,21 @@ fn responses_build_request_body_skips_previous_response_id_across_routed_relays(
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = target_provider.build_request_body(&req, true);
     assert!(body.get("previous_response_id").is_none());
+    assert_eq!(body["input"][1]["content"][0]["text"], "prior answer");
     assert!(
-        body["input"][1]["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("[reasoning continuity]")),
-        "cross-relay replay should downgrade to visible continuity text instead of reusing response_id"
+        !body.to_string().contains("[reasoning continuity]"),
+        "cross-relay replay must drop opaque continuity rather than turn it into dialogue text"
     );
 }
 
@@ -1259,9 +1844,13 @@ fn responses_build_request_body_does_not_fall_back_to_older_same_route_response_
         model: "gpt-5".into(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -1656,10 +2245,10 @@ fn responses_chunk_failed_event_emits_structured_error_and_finish_reason() {
             reason,
             message,
             code: Some(code)
-        } if reason == "error:boom" && message == "boom" && code == "server_error"
+        } if reason == "error:server_error" && message == "boom" && code == "server_error"
     ));
     assert!(
-        matches!(&events[1], StreamEvent::FinishReason { reason } if reason == "error:boom"),
+        matches!(&events[1], StreamEvent::FinishReason { reason } if reason == "error:server_error"),
         "unexpected {:?}",
         events
     );
@@ -1683,11 +2272,11 @@ fn responses_chunk_incomplete_content_filter_emits_structured_error_and_finish_r
             reason,
             message,
             code: None
-        } if reason == "error:content_filter" && message == "content_filter"
+        } if reason == "error" && message == "content_filter"
     ));
     assert!(matches!(
         &events[1],
-        StreamEvent::FinishReason { reason } if reason == "error:content_filter"
+        StreamEvent::FinishReason { reason } if reason == "error"
     ));
 }
 
@@ -1736,6 +2325,46 @@ async fn responses_stream_parses_sse_chunks() {
 }
 
 #[tokio::test]
+async fn responses_stream_completed_with_text_and_reasoning_dominance_stays_stop_without_notice() {
+    let response_text = "继续执行。";
+    use tokio_stream::StreamExt;
+
+    // Proxies may omit response.output[] from the terminal event even after emitting
+    // text deltas. Terminal metadata must still faithfully preserve `completed`.
+    let chunks: Vec<Result<Bytes, AppError>> = vec![
+        Ok(Bytes::from(format!("data: {}\n\n", serde_json::json!({
+            "type": "response.output_text.delta", "item_id": "m1", "content_index": 0, "delta": response_text,
+        })))),
+        Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":182514,\"output_tokens\":245,\"total_tokens\":182759,\"output_tokens_details\":{\"reasoning_tokens\":236}}}}\n\n",
+        )),
+    ];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+    let mut events = Vec::new();
+    while let Some(item) = stream.next().await {
+        events.push(item.expect("stream event"));
+    }
+
+    assert!(events.iter().any(
+        |event| matches!(event, StreamEvent::ContentDelta { delta } if delta == response_text)
+    ));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::FinishReason { reason } if reason == "stop")));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, StreamEvent::LlmNotice { .. })));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Usage {
+            reasoning_tokens: Some(236),
+            text_tokens: Some(9),
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn responses_stream_parses_ndjson_fallback() {
     use tokio_stream::StreamExt;
 
@@ -1775,6 +2404,211 @@ async fn responses_stream_parses_ndjson_fallback() {
 }
 
 #[tokio::test]
+async fn responses_stream_eof_mid_frame_is_interrupted() {
+    use tokio_stream::StreamExt;
+
+    let delta = r#"{"type":"response.output_text.delta","delta":"partial"}"#;
+    let half_json = r#"{"type":"response.completed","response":{"id":"r"#;
+    for (ndjson, utf8_cut) in [(false, false), (true, false), (false, true), (true, true)] {
+        let first = if ndjson {
+            format!("{delta}\n")
+        } else {
+            responses_sse_body(&[delta])
+        };
+        let mut tail = if ndjson {
+            half_json.as_bytes().to_vec()
+        } else {
+            format!("data: {half_json}").into_bytes()
+        };
+        if utf8_cut {
+            tail.extend_from_slice(&"中".as_bytes()[..2]);
+        }
+        let discarded_bytes = tail.len();
+        let source = tokio_stream::iter(vec![Ok(Bytes::from(first)), Ok(Bytes::from(tail))]);
+        let mut stream = new_responses_stream(source, ndjson);
+        assert!(matches!(
+            stream.next().await.expect("delta").expect("valid delta"),
+            StreamEvent::ContentDelta { delta } if delta == "partial"
+        ));
+        let error = stream
+            .next()
+            .await
+            .expect("interruption")
+            .expect_err("truncated frame");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        let summary = llm_summary(&error).expect("interruption summary");
+        assert!(
+            summary.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.responsesClosed",
+                &[("bytes", &discarded_bytes.to_string())]
+            )),
+            "{summary}"
+        );
+        assert!(!summary.contains("raw="), "{summary}");
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn responses_stream_eof_between_frames_is_interrupted() {
+    use tokio_stream::StreamExt;
+
+    let delta = r#"{"type":"response.output_text.delta","delta":"partial"}"#;
+    let tool = r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{\"path\":\"fixture.txt\"}"}}"#;
+    let cases = [
+        (responses_sse_body(&[delta, tool]), true),
+        (
+            format!("event: response.output_text.delta\ndata: {delta}"),
+            false,
+        ),
+        (
+            format!("{}data: [DONE]\n\n", responses_sse_body(&[delta])),
+            false,
+        ),
+    ];
+    for (body, has_tool) in cases {
+        let mut stream =
+            new_responses_stream(tokio_stream::iter(vec![Ok(Bytes::from(body))]), false);
+        assert!(matches!(
+            stream.next().await.expect("delta").expect("valid delta"),
+            StreamEvent::ContentDelta { delta } if delta == "partial"
+        ));
+        if has_tool {
+            assert!(matches!(
+                stream.next().await.expect("tool delta").expect("valid tool"),
+                StreamEvent::ToolCallDelta { name: Some(name), arguments_delta: Some(_), .. }
+                    if name == "read"
+            ));
+        }
+        let error = stream
+            .next()
+            .await
+            .expect("interruption")
+            .expect_err("missing terminal");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        let summary = llm_summary(&error).expect("summary");
+        assert!(
+            summary.contains("stream closed before response.completed"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.responsesClosed",
+                &[("bytes", "0")]
+            )),
+            "{summary}"
+        );
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn responses_stream_terminal_then_eof_ends_cleanly() {
+    use tokio_stream::StreamExt;
+
+    for kind in [
+        "response.completed",
+        "response.done",
+        "response.incomplete",
+        "response.failed",
+        "error",
+    ] {
+        let mut terminal = if kind == "error" {
+            json!({"type":kind, "error":{"code":"server_error","message":"boom"}})
+        } else {
+            json!({
+                "type": kind,
+                "response": {
+                    "usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}
+                }
+            })
+        };
+        if kind == "response.incomplete" {
+            terminal["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+        } else if kind == "response.failed" {
+            terminal["response"]["error"] = json!({"code":"server_error","message":"boom"});
+        }
+        let raw = terminal.to_string();
+        let expected = responses_chunk_to_events(&terminal, &mut Vec::new());
+        for (ndjson, tail_variant) in [(false, 0), (true, 0), (false, 1), (true, 1), (false, 2)] {
+            // 0: 完整终止帧；1: 合法 JSON 缺分隔符；2: 终止后垃圾半帧。
+            let body = if ndjson {
+                format!("{raw}{}", if tail_variant == 1 { "" } else { "\n" })
+            } else if tail_variant == 1 {
+                format!("event: {kind}\ndata: {raw}")
+            } else {
+                format!(
+                    "{}{}",
+                    responses_sse_body(&[&raw]),
+                    if tail_variant == 2 {
+                        "data: {garbage"
+                    } else {
+                        ""
+                    }
+                )
+            };
+            let mut stream =
+                new_responses_stream(tokio_stream::iter(vec![Ok(Bytes::from(body))]), ndjson);
+            // 固定读预期数量，再检查 None，避免错误实现无限 collect。
+            for event in &expected {
+                let actual = stream
+                    .next()
+                    .await
+                    .expect("terminal event")
+                    .expect("no EOF error");
+                assert_eq!(
+                    serde_json::to_value(&actual).expect("serialize actual event"),
+                    serde_json::to_value(event).expect("serialize expected event"),
+                    "{kind}"
+                );
+            }
+            assert!(
+                stream.next().await.is_none(),
+                "{kind}: no extra events or errors"
+            );
+            assert!(stream.next().await.is_none(), "{kind}: stable EOF");
+        }
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::FinishReason { .. }))
+                .count(),
+            1
+        );
+        if kind == "response.failed" || kind == "error" {
+            assert!(expected.iter().any(|e| matches!(e,
+                StreamEvent::LlmError { code: Some(code), message, .. }
+                    if code == "server_error" && message == "boom"
+            )));
+        }
+        if kind == "response.incomplete" {
+            assert!(expected
+                .iter()
+                .any(|e| matches!(e, StreamEvent::LlmNotice { .. })));
+        }
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::Usage { .. }))
+                .count(),
+            usize::from(kind != "error")
+        );
+    }
+}
+
+#[tokio::test]
 async fn responses_stream_early_close_does_not_fabricate_finish_reason() {
     use tokio_stream::StreamExt;
 
@@ -1783,15 +2617,21 @@ async fn responses_stream_early_close_does_not_fabricate_finish_reason() {
     ))];
     let stream = tokio_stream::iter(chunks);
     let mut s = new_responses_stream(stream, true);
-    let mut events = Vec::new();
-    while let Some(item) = s.next().await {
-        events.push(item.expect("ok"));
-    }
-    assert_eq!(events.len(), 1);
     assert!(matches!(
-        &events[0],
+        s.next().await.expect("delta").expect("valid delta"),
         StreamEvent::ContentDelta { delta } if delta == "partial"
     ));
+    let error = s
+        .next()
+        .await
+        .expect("interruption, not FinishReason")
+        .expect_err("early close");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
+    );
+    assert!(s.next().await.is_none());
+    assert!(s.next().await.is_none());
 }
 
 #[tokio::test]
@@ -1809,6 +2649,92 @@ async fn responses_stream_auto_detects_ndjson_when_no_data_prefix() {
         matches!(&evt, StreamEvent::ContentDelta { delta } if delta == "x"),
         "{:?}",
         evt
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_keeps_sse_mode_after_comment_keepalives() {
+    use tokio_stream::StreamExt;
+
+    for keepalive in [":\n", ": ping\n", ":\n\n", "\n"] {
+        let chunks: Vec<Result<Bytes, AppError>> = vec![
+            Ok(Bytes::from(keepalive.to_string())),
+            Ok(Bytes::from(
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"x\"}\n\n",
+            )),
+        ];
+        let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+        let item = stream
+            .next()
+            .await
+            .expect("comment followed by SSE data must yield an event")
+            .expect("SSE payload must parse");
+        assert!(
+            matches!(item, StreamEvent::ContentDelta { ref delta } if delta == "x"),
+            "keepalive {keepalive:?} must not lock the stream into NDJSON"
+        );
+    }
+}
+
+#[tokio::test]
+async fn responses_stream_parse_before_any_event_is_transport_interruption() {
+    use tokio_stream::StreamExt;
+
+    let chunks: Vec<Result<Bytes, AppError>> = vec![Ok(Bytes::from("not-json\n"))];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+    let error = stream
+        .next()
+        .await
+        .expect("invalid first frame must surface an error")
+        .expect_err("first-frame parse failure is not a valid event");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_parse_after_valid_event_stays_protocol_failure() {
+    use tokio_stream::StreamExt;
+
+    let chunks: Vec<Result<Bytes, AppError>> = vec![
+        Ok(Bytes::from(
+            "{\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"x\"}\n",
+        )),
+        Ok(Bytes::from("not-json\n")),
+    ];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+    assert!(matches!(
+        stream
+            .next()
+            .await
+            .expect("event")
+            .expect("valid first event"),
+        StreamEvent::ContentDelta { .. }
+    ));
+    let error = stream
+        .next()
+        .await
+        .expect("invalid later frame must surface an error")
+        .expect_err("later protocol break must remain fatal");
+    assert_eq!(llm_stage(&error), Some(LlmErrorStage::Parse));
+}
+
+#[tokio::test]
+async fn responses_stream_eof_does_not_swallow_residual_invalid_frame() {
+    use tokio_stream::StreamExt;
+
+    // 没有换行时 `drain_buffer` 不会取走这段残留；它仍必须显式报错。
+    let chunks: Vec<Result<Bytes, AppError>> = vec![Ok(Bytes::from("not-json"))];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), true);
+    let error = stream
+        .next()
+        .await
+        .expect("residual invalid frame must not be swallowed")
+        .expect_err("residual invalid frame must fail");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
     );
 }
 
@@ -1831,7 +2757,15 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "llm.idleTimeout",
+                    &[("seconds", "3")]
+                )),
+                "unexpected msg: {}",
+                msg
+            );
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
                 "unexpected msg: {}",
@@ -1843,29 +2777,39 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn responses_keepalive_bytes_do_not_trigger_idle_timeout() {
+async fn responses_keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
     use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
-    let source = IntervalStream::new(interval)
-        .take(3)
-        .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
-    let mut stream = apply_stream_idle_timeout(source, 1);
-    let collect_task = tokio::spawn(async move {
-        let mut out = Vec::new();
-        while let Some(item) = stream.next().await {
-            out.push(item);
-        }
-        out
+    let source = IntervalStream::new(interval).map(|_| {
+        Ok(Bytes::from_static(
+            b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+        ))
     });
+    let event_stream = new_responses_stream(source, false);
+    let mut stream = apply_stream_idle_timeout(event_stream, 1);
+    let next_task = tokio::spawn(async move { stream.next().await });
 
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
 
-    let out = collect_task.await.expect("join ok");
-    assert_eq!(out.len(), 3);
-    assert!(out.into_iter().all(|item| item.is_ok()));
+    let item = next_task
+        .await
+        .expect("join ok")
+        .expect("should produce timeout error");
+    match item {
+        Err(err) => {
+            let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
+            assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
+            assert!(
+                msg.contains("stream_timeout_sec=1s"),
+                "unexpected msg: {}",
+                msg
+            );
+        }
+        other => panic!("expected timeout AppError, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1879,6 +2823,20 @@ fn is_retriable_detects_429_and_5xx() {
     assert!(!OpenAiResponsesProvider::is_retriable(
         &llm_http_status_error("openai-responses", 400, "bad request",)
     ));
+}
+
+#[test]
+fn retry_after_header_overrides_exponential_backoff() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, "7".parse().unwrap());
+
+    let err = map_http_status_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        br#"{"error":"rate limited"}"#,
+        parse_retry_after_ms(&headers),
+    );
+
+    assert_eq!(llm_retry_after_ms(&err), Some(7_000));
 }
 
 fn responses_stream_test_provider(
@@ -1904,9 +2862,13 @@ fn responses_stream_test_request() -> ChatRequest {
         model: "gpt-5".to_string(),
         temperature: Some(0.0),
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     }
 }
@@ -1963,7 +2925,21 @@ async fn responses_stream_post_once_header_read_timeout_maps_to_retryable_read_t
     assert!(OpenAiResponsesProvider::is_retriable(&err));
     let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
     assert!(
-        msg.contains("等待响应头"),
+        msg.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "llm.headersTimeout",
+            &[
+                (
+                    "action",
+                    &crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "llm.action.streamRequest",
+                        &[]
+                    )
+                ),
+                ("seconds", "1"),
+            ]
+        )),
         "错误文案应说明卡在响应头阶段，实际: {}",
         msg
     );
@@ -2014,6 +2990,315 @@ async fn responses_chat_stream_retries_503_before_first_delta_and_succeeds() {
     }
     assert_eq!(server.request_count(), 2);
     assert_eq!(text, "Hello");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_truncated_stream_retries_without_persisting_partial() {
+    for tail in [
+        "",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r",
+    ] {
+        let first = format!(
+            "{}{tail}",
+            responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","delta":"partial"}"#,
+                // write emits a streaming preview, so the test proves the tool was
+                // actually consumed before EOF, but never executed.
+                r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"write","arguments":"{\"path\":\"fixture.txt\",\"content\":\"discarded\",\"overwrite\":false}"}}"#,
+            ])
+        );
+        let server = MockHttpServer::start(vec![
+            ScriptedHttpResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                body: first,
+                delay_ms: 0,
+                declared_content_length: None,
+            },
+            ScriptedHttpResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+                body: responses_sse_body(&[
+                    r#"{"type":"response.output_text.delta","delta":"recovered"}"#,
+                    r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                ]),
+                delay_ms: 0,
+                declared_content_length: None,
+            },
+        ]).await;
+        let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+        let sink = Arc::new(CrossLayerAppendSink::default());
+        let (mut agent, event_bus) = cross_layer_agent(provider, Some(sink.clone()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _listeners = [
+            wire::WIRE_MESSAGE_END,
+            wire::WIRE_AUTO_RETRY_START,
+            wire::WIRE_TOOL_EXECUTION_START,
+            wire::WIRE_TOOL_CALL_STREAMING,
+        ]
+        .map(|event_name| {
+            let events = events.clone();
+            event_bus.on(
+                event_name,
+                Box::new(move |_context: EventContext| {
+                    events.lock().unwrap().push(event_name);
+                    Ok(())
+                }),
+            )
+        });
+
+        let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+        assert!(
+            matches!(outcome,
+                AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
+            ),
+            "truncated stream must automatically recover: {outcome:?}"
+        );
+        assert_eq!(server.request_count(), 2);
+        {
+            let events = events.lock().unwrap();
+            let end = events
+                .iter()
+                .position(|e| *e == wire::WIRE_MESSAGE_END)
+                .expect("first MessageEnd");
+            let retry = events
+                .iter()
+                .position(|e| *e == wire::WIRE_AUTO_RETRY_START)
+                .expect("automatic retry");
+            assert!(end < retry, "{events:?}");
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| **e == wire::WIRE_AUTO_RETRY_START)
+                    .count(),
+                1
+            );
+            assert!(
+                events.contains(&wire::WIRE_TOOL_CALL_STREAMING),
+                "fixture must deliver a tool call"
+            );
+            assert!(
+                !events.contains(&wire::WIRE_TOOL_EXECUTION_START),
+                "failed attempt must not execute tools"
+            );
+        }
+        {
+            let messages = sink.messages.lock().unwrap();
+            assert_eq!(
+                messages.len(),
+                1,
+                "only the successful assistant message persists"
+            );
+            let stored = messages[0].to_string();
+            assert!(stored.contains("recovered"), "{stored}");
+            assert!(
+                !stored.contains("partial") && !stored.contains("call_1"),
+                "{stored}"
+            );
+            assert!(
+                messages[0].get("tool_calls").is_none_or(
+                    |calls| calls.is_null() || calls.as_array().is_some_and(Vec::is_empty)
+                )
+            );
+        }
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn cross_layer_completed_reasoning_only_retries_in_the_agent_loop() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":284,"output_tokens_details":{"reasoning_tokens":284}}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"recovered"}"#,
+                r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let sink = Arc::new(CrossLayerAppendSink::default());
+    let (mut agent, _) = cross_layer_agent(provider, Some(sink.clone()));
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"),
+        "completed reasoning-only output must be retried: {outcome:?}"
+    );
+    assert_eq!(server.request_count(), 2);
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"] == "empty_turn"
+            && entry["failure_kind"] == "hidden_output"
+            && entry["attempt"] == 1
+    }));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_completed_text_with_bare_terminal_payload_stays_stop_without_notice() {
+    let response_text = "继续执行。";
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            &serde_json::json!({ "type": "response.output_text.delta", "item_id": "m1", "content_index": 0, "delta": response_text }).to_string(),
+            r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":245,"output_tokens_details":{"reasoning_tokens":236}}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let (mut agent, event_bus) = cross_layer_agent(provider, None);
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let notices_sink = notices.clone();
+    let _listener = event_bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |context: EventContext| {
+            notices_sink.lock().unwrap().push(context.payload);
+            Ok(())
+        }),
+    );
+
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == response_text)
+    );
+    assert!(notices.lock().unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_terminal_error_after_whitespace_retries_without_a_tool_branch() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":" "}"#,
+                r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"overloaded"}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"recovered"}"#,
+                r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let sink = Arc::new(CrossLayerAppendSink::default());
+    let (mut agent, _) = cross_layer_agent(provider, Some(sink.clone()));
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"),
+        "a terminal provider failure must retry instead of becoming a blank assistant turn: {outcome:?}"
+    );
+    assert_eq!(server.request_count(), 2);
+    assert_eq!(
+        sink.messages.lock().unwrap().len(),
+        1,
+        "the whitespace before a terminal error must not persist as an assistant message"
+    );
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"] == "stream_terminal_error"
+            && entry["discarded_text"] == " "
+            && entry["code"] == "server_error"
+    }));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_explicit_max_output_tokens_stays_fatal() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":128000}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let (mut agent, event_bus) = cross_layer_agent(provider, None);
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let notices_sink = notices.clone();
+    let _listener = event_bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |context: EventContext| {
+            notices_sink.lock().unwrap().push(context.payload);
+            Ok(())
+        }),
+    );
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    assert_eq!(server.request_count(), 1);
+    assert!(notices
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event["finishReason"] == "max_output_tokens"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responses_chat_collect_buffers_a_required_stream_transport() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"Buffered"}"#,
+            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":" summary"}"#,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+
+    let response = provider
+        .chat_collect(responses_stream_test_request())
+        .await
+        .expect("stream-only Responses gateway must still produce a buffered response");
+
+    assert_eq!(
+        response.choices[0].message.text_content(),
+        Some("Buffered summary")
+    );
+    assert_eq!(
+        response.usage.as_ref().map(|usage| usage.prompt_tokens),
+        Some(11)
+    );
+    assert!(
+        server.request_texts()[0].contains(r#""stream":true"#),
+        "chat_collect must use the streaming wire transport"
+    );
     server.shutdown().await;
 }
 
@@ -2093,7 +3378,11 @@ async fn responses_chat_stream_after_first_delta_body_read_error_is_not_retried(
     assert!(
         llm_summary(&err)
             .unwrap_or_else(|| err.to_string())
-            .contains("流读取"),
+            .contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.action.readStream",
+                &[]
+            )),
         "错误摘要应保留流读取失败语义，实际: {}",
         err
     );
@@ -2276,9 +3565,13 @@ fn responses_build_request_body_degrades_unsupported_history_attachments_to_inpu
         model: entry.id,
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
 

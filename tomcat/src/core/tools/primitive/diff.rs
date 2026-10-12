@@ -2,8 +2,21 @@ use std::borrow::Cow;
 
 use super::{DiffTag, FileDiffLine};
 
-const MAX_DIFF_TOTAL_LINES: usize = 8_000;
-const MAX_DIFF_TOTAL_BYTES: usize = 1_500_000;
+/// Guard the quadratic LCS calculation itself. This is intentionally looser than the
+/// render budget below: a medium-sized file still gets a useful compact diff.
+pub(crate) const MAX_DIFF_INPUT_LINES: usize = 8_000;
+pub(crate) const MAX_DIFF_INPUT_BYTES: usize = 1_500_000;
+/// `ToolDisplay` is persisted and sent over stdio, so its budget must be much smaller
+/// than the source file. Three context lines on either side are enough to orient a reader.
+const DIFF_CONTEXT_LINES: usize = 3;
+const MAX_DIFF_RENDERED_LINES: usize = 2_000;
+const MAX_DIFF_RENDERED_BYTES: usize = 200 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineDiff {
+    pub lines: Option<Vec<FileDiffLine>>,
+    pub truncated: bool,
+}
 
 fn normalize_text(text: &str) -> Cow<'_, str> {
     if text.contains("\r\n") {
@@ -79,6 +92,7 @@ fn push_ctx(out: &mut Vec<FileDiffLine>, old_line: usize, new_line: usize, text:
         tag: DiffTag::Ctx,
         old_line: Some(to_u32(old_line)),
         new_line: Some(to_u32(new_line)),
+        skipped_lines: None,
         text: text.to_string(),
     });
 }
@@ -88,6 +102,7 @@ fn push_add(out: &mut Vec<FileDiffLine>, new_line: usize, text: &str) {
         tag: DiffTag::Add,
         old_line: None,
         new_line: Some(to_u32(new_line)),
+        skipped_lines: None,
         text: text.to_string(),
     });
 }
@@ -97,7 +112,21 @@ fn push_del(out: &mut Vec<FileDiffLine>, old_line: usize, text: &str) {
         tag: DiffTag::Del,
         old_line: Some(to_u32(old_line)),
         new_line: None,
+        skipped_lines: None,
         text: text.to_string(),
+    });
+}
+
+fn push_gap(out: &mut Vec<FileDiffLine>, skipped_lines: usize) {
+    if skipped_lines == 0 {
+        return;
+    }
+    out.push(FileDiffLine {
+        tag: DiffTag::Gap,
+        old_line: None,
+        new_line: None,
+        skipped_lines: Some(to_u32(skipped_lines)),
+        text: format!("{skipped_lines} unmodified lines"),
     });
 }
 
@@ -206,23 +235,88 @@ fn build_line_diff_recursive(
     );
 }
 
-pub(crate) fn build_line_diff(old: &str, new: &str) -> Option<Vec<FileDiffLine>> {
-    if old.len().saturating_add(new.len()) > MAX_DIFF_TOTAL_BYTES {
-        return None;
-    }
-    if normalize_text(old) == normalize_text(new) {
-        return Some(Vec::new());
+fn compact_context(full: Vec<FileDiffLine>) -> Vec<FileDiffLine> {
+    let mut keep = vec![false; full.len()];
+    for (index, line) in full.iter().enumerate() {
+        if line.tag == DiffTag::Ctx {
+            continue;
+        }
+        let start = index.saturating_sub(DIFF_CONTEXT_LINES);
+        let end = (index + DIFF_CONTEXT_LINES + 1).min(full.len());
+        for value in &mut keep[start..end] {
+            *value = true;
+        }
     }
 
+    let mut compact = Vec::with_capacity(full.len().min(128));
+    let mut skipped = 0usize;
+    for (line, keep_line) in full.into_iter().zip(keep) {
+        if keep_line {
+            push_gap(&mut compact, skipped);
+            skipped = 0;
+            compact.push(line);
+        } else {
+            debug_assert_eq!(line.tag, DiffTag::Ctx);
+            skipped += 1;
+        }
+    }
+    push_gap(&mut compact, skipped);
+    compact
+}
+
+fn line_cost(line: &FileDiffLine) -> usize {
+    // JSON punctuation and optional numeric fields. This is a conservative bound and
+    // avoids serializing the vector once just to measure it.
+    48 + line.text.len()
+}
+
+fn bound_rendered_diff(lines: Vec<FileDiffLine>) -> LineDiff {
+    let mut bounded = Vec::with_capacity(lines.len().min(MAX_DIFF_RENDERED_LINES));
+    let mut bytes = 0usize;
+    for line in lines {
+        let cost = line_cost(&line);
+        if bounded.len() == MAX_DIFF_RENDERED_LINES
+            || bytes.saturating_add(cost) > MAX_DIFF_RENDERED_BYTES
+        {
+            return LineDiff {
+                lines: Some(bounded),
+                truncated: true,
+            };
+        }
+        bytes += cost;
+        bounded.push(line);
+    }
+    LineDiff {
+        lines: Some(bounded),
+        truncated: false,
+    }
+}
+
+pub(crate) fn build_line_diff(old: &str, new: &str) -> LineDiff {
+    if old.len().saturating_add(new.len()) > MAX_DIFF_INPUT_BYTES {
+        return LineDiff {
+            lines: None,
+            truncated: true,
+        };
+    }
+    if normalize_text(old) == normalize_text(new) {
+        return LineDiff {
+            lines: Some(Vec::new()),
+            truncated: false,
+        };
+    }
     let old_lines = split_logical_lines(old);
     let new_lines = split_logical_lines(new);
-    if old_lines.len().max(new_lines.len()) > MAX_DIFF_TOTAL_LINES {
-        return None;
+    if old_lines.len().max(new_lines.len()) > MAX_DIFF_INPUT_LINES {
+        return LineDiff {
+            lines: None,
+            truncated: true,
+        };
     }
 
     let mut diff = Vec::with_capacity(old_lines.len().max(new_lines.len()));
     build_line_diff_recursive(&old_lines, &new_lines, 0, 0, &mut diff);
-    Some(diff)
+    bound_rendered_diff(compact_context(diff))
 }
 
 pub(crate) fn line_diff_stat(old: &str, new: &str) -> (u32, u32) {
@@ -255,163 +349,11 @@ pub(super) fn build_simple_diff(old: &str, new: &str) -> String {
         out.push_str(&format!("  ... ({} -> {} lines)\n", o.len(), n.len()));
     }
     if out.is_empty() {
-        out = "(无变化)".to_string();
+        out = "(no changes)".to_string();
     }
     out
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{build_line_diff, line_diff_stat, normalize_text};
-    use crate::core::tools::primitive::{DiffTag, FileDiffLine};
-
-    fn logical_text(text: &str) -> String {
-        let normalized = normalize_text(text);
-        let without_terminal_newline = normalized.strip_suffix('\n').unwrap_or(&normalized);
-        without_terminal_newline.to_string()
-    }
-
-    fn rebuild_old(diff: &[FileDiffLine]) -> String {
-        diff.iter()
-            .filter(|line| matches!(line.tag, DiffTag::Ctx | DiffTag::Del))
-            .map(|line| line.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn rebuild_new(diff: &[FileDiffLine]) -> String {
-        diff.iter()
-            .filter(|line| matches!(line.tag, DiffTag::Ctx | DiffTag::Add))
-            .map(|line| line.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn line_diff_stat_handles_empty_input() {
-        assert_eq!(line_diff_stat("", ""), (0, 0));
-    }
-
-    #[test]
-    fn line_diff_stat_handles_new_file() {
-        assert_eq!(line_diff_stat("", "alpha\nbeta\ngamma\n"), (3, 0));
-    }
-
-    #[test]
-    fn line_diff_stat_handles_pure_deletion() {
-        assert_eq!(line_diff_stat("alpha\nbeta\ngamma\n", ""), (0, 3));
-    }
-
-    #[test]
-    fn line_diff_stat_handles_mixed_changes() {
-        assert_eq!(
-            line_diff_stat("alpha\nbeta\ngamma\n", "alpha\nbeta-2\ngamma\ndelta\n"),
-            (2, 1)
-        );
-    }
-
-    #[test]
-    fn line_diff_stat_handles_repeated_lines() {
-        assert_eq!(
-            line_diff_stat("same\nkeep\nsame\n", "same\nsame\nkeep\nsame\n"),
-            (1, 0)
-        );
-    }
-
-    #[test]
-    fn line_diff_stat_ignores_crlf_only_changes() {
-        assert_eq!(line_diff_stat("alpha\r\nbeta\r\n", "alpha\nbeta\n"), (0, 0));
-    }
-
-    #[test]
-    fn line_diff_stat_ignores_terminal_newline_only_changes() {
-        assert_eq!(line_diff_stat("alpha\nbeta", "alpha\nbeta\n"), (0, 0));
-    }
-
-    #[test]
-    fn build_line_diff_handles_new_file() {
-        let diff = build_line_diff("", "alpha\nbeta\ngamma\n")
-            .expect("small new file should produce structured diff");
-        assert_eq!(diff.len(), 3);
-        assert!(diff.iter().all(|line| line.tag == DiffTag::Add));
-        assert_eq!(diff[0].old_line, None);
-        assert_eq!(diff[0].new_line, Some(1));
-        assert_eq!(rebuild_old(&diff), "");
-        assert_eq!(rebuild_new(&diff), "alpha\nbeta\ngamma");
-    }
-
-    #[test]
-    fn build_line_diff_handles_pure_deletion() {
-        let diff = build_line_diff("alpha\nbeta\ngamma\n", "")
-            .expect("small deletion should produce structured diff");
-        assert_eq!(diff.len(), 3);
-        assert!(diff.iter().all(|line| line.tag == DiffTag::Del));
-        assert_eq!(diff[1].old_line, Some(2));
-        assert_eq!(diff[1].new_line, None);
-        assert_eq!(rebuild_old(&diff), "alpha\nbeta\ngamma");
-        assert_eq!(rebuild_new(&diff), "");
-    }
-
-    #[test]
-    fn build_line_diff_handles_mixed_changes_with_context() {
-        let diff = build_line_diff("alpha\nbeta\ngamma\n", "alpha\nbeta-2\ngamma\ndelta\n")
-            .expect("mixed change should produce structured diff");
-        let tags: Vec<_> = diff.iter().map(|line| line.tag).collect();
-        assert_eq!(
-            tags,
-            vec![
-                DiffTag::Ctx,
-                DiffTag::Del,
-                DiffTag::Add,
-                DiffTag::Ctx,
-                DiffTag::Add
-            ]
-        );
-        assert_eq!(diff[0].old_line, Some(1));
-        assert_eq!(diff[0].new_line, Some(1));
-        assert_eq!(diff[1].old_line, Some(2));
-        assert_eq!(diff[1].new_line, None);
-        assert_eq!(diff[2].old_line, None);
-        assert_eq!(diff[2].new_line, Some(2));
-        assert_eq!(rebuild_old(&diff), "alpha\nbeta\ngamma");
-        assert_eq!(rebuild_new(&diff), "alpha\nbeta-2\ngamma\ndelta");
-    }
-
-    #[test]
-    fn build_line_diff_handles_repeated_lines() {
-        let old = "same\nkeep\nsame\n";
-        let new = "same\nsame\nkeep\nsame\n";
-        let diff = build_line_diff(old, new).expect("repeated lines should diff");
-        assert_eq!(rebuild_old(&diff), logical_text(old));
-        assert_eq!(rebuild_new(&diff), logical_text(new));
-        assert_eq!(
-            diff.iter().filter(|line| line.tag == DiffTag::Add).count(),
-            1
-        );
-    }
-
-    #[test]
-    fn build_line_diff_normalizes_crlf_and_terminal_newline() {
-        let diff = build_line_diff("alpha\r\nbeta\r\n", "alpha\nbeta\n")
-            .expect("normalized equal content should still succeed");
-        assert!(diff.is_empty());
-    }
-
-    #[test]
-    fn build_line_diff_returns_none_when_file_is_too_large() {
-        let huge = (0..=super::MAX_DIFF_TOTAL_LINES)
-            .map(|index| format!("line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(build_line_diff("", &huge).is_none());
-    }
-
-    #[test]
-    fn build_line_diff_reconstructs_original_and_new_content() {
-        let old = "one\ntwo\nthree\nfour\n";
-        let new = "zero\none\nthree\nfour\nfive\n";
-        let diff = build_line_diff(old, new).expect("diff should exist");
-        assert_eq!(rebuild_old(&diff), logical_text(old));
-        assert_eq!(rebuild_new(&diff), logical_text(new));
-    }
-}
+#[path = "tests/diff_test.rs"]
+mod tests;

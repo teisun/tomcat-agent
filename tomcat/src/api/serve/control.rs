@@ -7,12 +7,17 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::AppError;
 
 use super::cleanup_session_slot;
 use super::types::{ControlFrame, OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
+
+/// Keep first paint and the initial session/history fetch ahead of disk-heavy,
+/// best-effort cleanup. This runs only after the initialize response is queued.
+const STARTUP_HOUSEKEEPING_DELAY: Duration = Duration::from_secs(2);
 
 pub(crate) async fn handle_control_or_interrupt(
     state: Arc<ServeState>,
@@ -31,32 +36,82 @@ pub(crate) async fn handle_control_or_interrupt(
                     request_id,
                     session_id.or_else(|| state.registry.active_session_id()),
                     serde_json::json!({
-                        "protocolVersion": 1,
+                        "protocolVersion": 2,
+                        "uiPreferences": super::ui_preferences::snapshot().ok(),
+                        "serverVersion": env!("CARGO_PKG_VERSION"),
                         "capabilities": [
                             "prompt",
                             "steer",
+                            "message_queue",
                             "follow_up",
+                            "resume",
+                            "retry",
+                            "rewind_and_resend",
+                            "session_files",
                             "get_state",
+                            "compact",
+                            "run_slash_command",
+                            "get_instruction_catalog",
                             "set_plan_mode",
                             "set_model",
+                            "set_ui_language",
                             "set_thinking_level",
+                            "set_speed",
+                            "set_context_window",
                             "list_models",
                             "upsert_model",
                             "remove_model",
                             "set_provider_key",
                             "list_provider_keys",
+                            "list_connectors",
+                            "list_connector_tools",
+                            "add_connector",
+                            "remove_connector",
+                            "get_project_trust",
+                            "trust_project",
+                            "test_connector",
+                            "reload_connector",                            "login_connector",
+                            "cancel_login_connector",
+                            "logout_connector",
+
+                            "set_connector_tool_filter",
+                            "set_connector_tool_enabled",
                             "new_session",
                             "switch_session",
                             "get_messages",
+                            "list_checkpoints",
+                            "ingest_attachment",
+                            "retain_attachment_leases",
+                            "cache_attachment_thumbnail",
+                            "discard_detached_session",
                             "close_session",
+                            "delete_session",
                             "list_sessions",
                             "interrupt",
-                            "ask_question"
+                            "ask_question",
+                            "confirmation"
                         ],
+                        "slashCommands": crate::api::chat::commands::shared_slash_commands(),
                         "sessionId": state.registry.active_session_id(),
+                        // 见 `serve::attachment_root`：宿主必须在渲染 webview 之前拿到它。
+                        "attachmentRoot": super::attachment_root(&state)
+                            .map(|path| path.to_string_lossy().into_owned()),
                     }),
                 );
                 state.writer.send(OutFrame::Control(response))?;
+                let housekeeping_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    tokio::time::sleep(STARTUP_HOUSEKEEPING_DELAY).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        super::run_attachment_housekeeping(&housekeeping_state);
+                    })
+                    .await;
+                });
+                if let Some(session_id) = state.registry.active_session_id() {
+                    if let Some(slot) = state.registry.get(&session_id) {
+                        super::resume_pending_ask_question(&state, &slot);
+                    }
+                }
                 return Ok(true);
             }
             state.writer.send(OutFrame::Response(ResponseFrame::error(
@@ -72,7 +127,9 @@ pub(crate) async fn handle_control_or_interrupt(
             payload,
         } => {
             let frame = ControlFrame::response(request_id, session_id, payload);
-            state.ask_question.handle_control_response(&frame)?;
+            if !state.confirmation.handle_control_response(&frame)? {
+                state.ask_question.handle_control_response(&frame)?;
+            }
             Ok(true)
         }
         ServeCommand::ControlCancel {
@@ -81,7 +138,9 @@ pub(crate) async fn handle_control_or_interrupt(
             payload,
         } => {
             let frame = ControlFrame::cancel(request_id, session_id, payload);
-            state.ask_question.handle_control_cancel(&frame)?;
+            if !state.confirmation.handle_control_cancel(&frame)? {
+                state.ask_question.handle_control_cancel(&frame)?;
+            }
             Ok(true)
         }
         ServeCommand::Interrupt { id, session_id } => {
@@ -109,6 +168,12 @@ pub(crate) async fn handle_control_or_interrupt(
                 .registry
                 .get(&resolved)
                 .ok_or_else(|| AppError::Config("unknown_session".to_string()))?;
+            state
+                .ask_question
+                .cancel_live_session(&resolved, "interrupt");
+            state
+                .confirmation
+                .cancel_live_session(&resolved, "interrupt");
             slot.ctx.session_runtime.cancel_token.lock().cancel();
             slot.ctx.agent_registry.cascade_abort(&resolved);
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
@@ -130,7 +195,7 @@ pub(crate) async fn shutdown_all_sessions(state: Arc<ServeState>) -> Result<(), 
         .filter_map(|summary| state.registry.get(&summary.session_id))
         .collect::<Vec<_>>();
     for slot in slots {
-        cleanup_session_slot(&state, &slot, false, "serve_stdio_shutdown").await?;
+        cleanup_session_slot(&state, &slot, super::SlotCleanup::Shutdown).await?;
     }
     Ok(())
 }

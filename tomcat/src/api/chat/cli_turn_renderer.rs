@@ -43,8 +43,20 @@ use crate::api::render::MarkdownRenderer;
 use crate::core::llm::ThinkingSource;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{EventContext, EventListenerId};
-use crate::infra::events::ToolDisplay;
+use crate::infra::events::{ToolDisplay, ToolDisplayFileStatus};
+use crate::infra::i18n::tr;
 use crate::infra::{wire, EventBus};
+
+fn format_countdown_ms(ms: u64) -> String {
+    let total_secs = ms.saturating_add(999) / 1000;
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{total_secs}s")
+    }
+}
 
 /// 上一次打印通道类型，决定是否需要补换行；`Tool` 始终 stderr，`Thinking` /
 /// `Content` 默认 stdout。
@@ -454,18 +466,19 @@ impl CliTurnRenderer {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let timeout = partial
-            .get("timeoutMs")
+            .get("waitMs")
+            .or_else(|| partial.get("timeoutMs"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let remaining_secs = remaining.saturating_add(999) / 1000;
-        let timeout_secs = timeout.saturating_add(999) / 1000;
+        let remaining_label = format_countdown_ms(remaining);
+        let timeout_label = format_countdown_ms(timeout);
         let line = format!(
-            "\r\x1b[2K\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}s/{timeout}s\x1b[0m",
+            "\r\x1b[2K\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}/{timeout}\x1b[0m",
             name = tool_name,
             phase = phase,
             task = task_id,
-            remaining = remaining_secs,
-            timeout = timeout_secs,
+            remaining = remaining_label,
+            timeout = timeout_label,
         );
         let mut st = self.state.lock();
         self.writer.write_stderr(&line);
@@ -689,9 +702,12 @@ fn parse_thinking_source(event: &Value) -> Option<ThinkingSource> {
 
 fn tool_call_streaming_summary(args_preview: &Value) -> String {
     if let Some(path) = args_preview.get("path").and_then(|v| v.as_str()) {
-        format!("path={}  receiving args...", expand_path_for_terminal(path))
+        tr(
+            "terminal.receivePathArgs",
+            &[("path", &expand_path_for_terminal(path))],
+        )
     } else {
-        "receiving args...".to_string()
+        tr("terminal.receiveArgs", &[])
     }
 }
 
@@ -729,6 +745,20 @@ fn expand_path_for_terminal(path: &str) -> String {
 fn display_summary(display: &ToolDisplay) -> String {
     match display {
         ToolDisplay::File { file, .. } => expand_path_for_terminal(file),
+        ToolDisplay::Files { summary, files, .. } => {
+            let failures = files
+                .iter()
+                .filter(|file| matches!(file.status, Some(ToolDisplayFileStatus::Failed)))
+                .filter_map(|file| file.note.as_deref())
+                .map(str::trim)
+                .filter(|note| !note.is_empty())
+                .collect::<Vec<_>>();
+            if failures.is_empty() {
+                summary.trim().to_string()
+            } else {
+                format!("{}: {}", summary.trim(), failures.join("; "))
+            }
+        }
         ToolDisplay::Plan { plan } => expand_path_for_terminal(plan),
         ToolDisplay::Text { text } => text.trim().to_string(),
     }
@@ -755,33 +785,56 @@ pub fn result_summary_for_tool(
             }
         }
         let parsed = parse_tool_result_value(result);
+        let fallback = tr("term.result.failed", &[]);
         let msg = parsed
             .get("error")
             .and_then(|v| v.as_str())
             .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
-            .unwrap_or("failed");
+            .unwrap_or(&fallback);
         return truncate_chars(msg, PATH_MAX_CHARS);
     }
 
     if let Some(display) = display {
         let summary = display_summary(display);
         if !summary.is_empty() {
-            let max_chars =
-                if matches!(display, ToolDisplay::File { .. } | ToolDisplay::Plan { .. }) {
-                    PATH_MAX_CHARS
-                } else {
-                    DEFAULT_MAX_CHARS
-                };
+            let max_chars = if matches!(
+                display,
+                ToolDisplay::File { .. } | ToolDisplay::Plan { .. }
+            ) || matches!(
+                display,
+                ToolDisplay::Files { files, .. }
+                    if files
+                        .iter()
+                        .any(|file| matches!(file.status, Some(ToolDisplayFileStatus::Failed)))
+            ) {
+                PATH_MAX_CHARS
+            } else {
+                DEFAULT_MAX_CHARS
+            };
             return truncate_chars(&summary, max_chars);
         }
     }
 
     let parsed = parse_tool_result_value(result);
     if let Some(lines) = parsed.get("lines").and_then(|v| v.as_u64()) {
-        return format!("{} lines", lines);
+        return tr(
+            if lines == 1 {
+                "terminal.lines.one"
+            } else {
+                "terminal.lines.other"
+            },
+            &[("count", &lines.to_string())],
+        );
     }
     if let Some(bytes) = parsed.get("bytes").and_then(|v| v.as_u64()) {
-        return format!("{} bytes", bytes);
+        return tr(
+            if bytes == 1 {
+                "terminal.bytes.one"
+            } else {
+                "terminal.bytes.other"
+            },
+            &[("count", &bytes.to_string())],
+        );
     }
     if let Some(s) = parsed
         .get("summary")
@@ -790,7 +843,7 @@ pub fn result_summary_for_tool(
     {
         return truncate_chars(s, DEFAULT_MAX_CHARS);
     }
-    "ok".to_string()
+    tr("term.result.ok", &[])
 }
 
 /// 失败时附加最多 `n` 行的错误细节（取 `stderr` / `error` 字段的前 N 行）。

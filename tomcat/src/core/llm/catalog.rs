@@ -1,11 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::thinking_policy::{
+    clamp_reasoning_level, normalize_supported_reasoning_levels,
+    safe_supported_reasoning_levels_for, ThinkingLevel,
+};
+use super::Speed;
+use crate::core::session::ModelPrefsStore;
 use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
 
@@ -57,13 +66,122 @@ pub struct ModelEntry {
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
+    pub context_window_options: Vec<u32>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
     pub thinking_format: Option<String>,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
+    /// Accelerated speeds only; Standard is implicit.
+    #[serde(default)]
+    pub supported_speeds: Vec<Speed>,
 }
 
 impl ModelEntry {
     pub fn request_model_name(&self) -> &str {
         self.model_name.as_deref().unwrap_or(self.id.as_str())
     }
+
+    pub fn resolve_speed(&self, requested: Speed) -> Option<Speed> {
+        if self.supported_speeds.is_empty() {
+            None
+        } else if requested == Speed::Standard || self.supported_speeds.contains(&requested) {
+            Some(requested)
+        } else {
+            Some(Speed::Standard)
+        }
+    }
+}
+
+use crate::infra::i18n::tr;
+
+/// Validate the hard relationship between a model's total context capacity and
+/// its maximum output capacity. Both catalog loading and runtime fallback
+/// resolution call this one helper so configuration errors fail early without
+/// creating a second rule.
+pub(crate) fn validate_model_limit_values(
+    model_id: &str,
+    context_window: usize,
+    max_output_tokens: Option<usize>,
+) -> Result<(), AppError> {
+    if context_window == 0 {
+        return Err(AppError::Config(tr(
+            "model.contextPositive",
+            &[("id", model_id)],
+        )));
+    }
+    if let Some(output) = max_output_tokens {
+        if output == 0 || output > context_window {
+            return Err(AppError::Config(tr(
+                "model.outputRange",
+                &[("id", model_id)],
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Normalize and validate the selectable context tiers for one model.
+///
+/// The catalog and the model upsert path both call this helper so a model
+/// cannot be accepted with one set of tier rules and later rejected with
+/// another. An empty list deliberately means "there is no selectable tier".
+pub(crate) fn validate_context_window_options(
+    model_id: &str,
+    context_window: Option<u32>,
+    options: &[u32],
+    max_output_tokens: Option<u32>,
+) -> Result<Vec<u32>, AppError> {
+    let mut normalized = options.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+
+    for option in &normalized {
+        validate_model_limit_values(
+            model_id,
+            *option as usize,
+            max_output_tokens.map(|value| value as usize),
+        )?;
+    }
+
+    if !normalized.is_empty() {
+        let Some(default_window) = context_window else {
+            return Err(AppError::Config(tr(
+                "model.contextDefaultMissing",
+                &[("id", model_id)],
+            )));
+        };
+        if !normalized.contains(&default_window) {
+            return Err(AppError::Config(tr(
+                "model.contextDefaultInvalid",
+                &[("id", model_id), ("value", &default_window.to_string())],
+            )));
+        }
+    }
+
+    Ok(normalized)
+}
+
+/// Accept Standard in input, but store only the accelerated capabilities.
+pub(crate) fn validate_supported_speeds(
+    model_id: &str,
+    api: &str,
+    speeds: &[Speed],
+) -> Result<Vec<Speed>, AppError> {
+    let mut normalized: Vec<_> = speeds
+        .iter()
+        .copied()
+        .filter(|speed| *speed != Speed::Standard)
+        .collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    if !normalized.is_empty() && !matches!(api, "openai" | "openai-responses") {
+        return Err(AppError::Config(tr("model.speedApi", &[("id", model_id)])));
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +196,7 @@ pub struct ModelCatalog {
 #[derive(Debug, Clone)]
 pub struct SharedModelCatalog {
     inner: Arc<RwLock<Arc<ModelCatalog>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl ModelCatalog {
@@ -101,7 +220,7 @@ impl ModelCatalog {
             for raw in file.models {
                 let model_id = raw.id.clone();
                 user_ids.insert(model_id.clone());
-                let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context)?;
+                let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context, true)?;
                 if !ordered_ids.iter().any(|existing| existing == &merged.id) {
                     ordered_ids.push(merged.id.clone());
                 }
@@ -169,6 +288,7 @@ impl SharedModelCatalog {
     pub fn replace(&self, catalog: ModelCatalog) -> Arc<ModelCatalog> {
         let next = Arc::new(catalog);
         *self.inner.write() = next.clone();
+        self.generation.fetch_add(1, Ordering::Relaxed);
         next
     }
 
@@ -210,12 +330,42 @@ impl SharedModelCatalog {
         let snapshot = self.snapshot();
         f(snapshot.as_ref())
     }
+
+    /// Resolves the user's requested effort for a model, clamping it to the
+    /// model's advertised capability when that model is known to the catalog.
+    ///
+    /// Keep this in the shared catalog boundary: every agent path must apply
+    /// the same preference lookup and capability clamp, rather than each
+    /// caller reimplementing (or forgetting) one half of the policy.
+    pub fn resolve_reasoning_level(
+        &self,
+        prefs: &ModelPrefsStore,
+        model_id: &str,
+    ) -> ThinkingLevel {
+        self.with_catalog(|catalog| {
+            let requested = prefs.reasoning_for(model_id);
+            catalog
+                .lookup_explicit(model_id)
+                .map(|entry| clamp_reasoning_level(requested, &entry.supported_reasoning_levels))
+                .unwrap_or(requested)
+        })
+    }
+
+    pub fn resolve_speed(&self, prefs: &ModelPrefsStore, model_id: &str) -> Option<Speed> {
+        self.lookup(model_id)?
+            .resolve_speed(prefs.speed_for(model_id))
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
 }
 
 impl From<ModelCatalog> for SharedModelCatalog {
     fn from(value: ModelCatalog) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Arc::new(value))),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -224,6 +374,7 @@ impl From<Arc<ModelCatalog>> for SharedModelCatalog {
     fn from(value: Arc<ModelCatalog>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(value)),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -260,7 +411,24 @@ pub(crate) struct UserModelEntry {
     pub(crate) context_window: Option<u32>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window_options: Option<Vec<u32>>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking_format: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) supported_reasoning_levels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) supported_speeds: Option<Vec<Speed>>,
+    /// Preserve unknown top-level model fields across admin writes.
+    #[serde(flatten)]
+    pub(crate) extra: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -288,10 +456,12 @@ pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppEr
     }
     let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
     toml::from_str(&content).map_err(|e| {
-        AppError::Config(format!(
-            "解析 models.toml 失败（{}）：{}",
-            path.display(),
-            e
+        AppError::Config(tr(
+            "model.parseFile",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &e.to_string()),
+            ],
         ))
     })
 }
@@ -299,7 +469,7 @@ pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppEr
 pub(crate) fn render_user_models_file(file: &UserModelsFile) -> Result<String, AppError> {
     toml::to_string_pretty(file)
         .map(|text| format!("{text}\n"))
-        .map_err(|e| AppError::Config(format!("序列化 models.toml 失败: {e}")))
+        .map_err(|e| AppError::Config(tr("model.serializeFile", &[("detail", &e.to_string())])))
 }
 
 pub(crate) fn builtin_seed_toml_text() -> &'static str {
@@ -316,10 +486,10 @@ pub(crate) fn builtin_seed_entries_result(
     context: &ContextConfig,
 ) -> Result<Vec<ModelEntry>, AppError> {
     let file = toml::from_str::<UserModelsFile>(BUILTIN_MODELS_TOML)
-        .map_err(|e| AppError::Config(format!("解析内嵌 builtin_models.toml 失败: {e}")))?;
+        .map_err(|e| AppError::Config(tr("model.parseBuiltin", &[("detail", &e.to_string())])))?;
     file.models
         .into_iter()
-        .map(|raw| merge_user_model(raw, None, context))
+        .map(|raw| merge_user_model(raw, None, context, false))
         .collect()
 }
 
@@ -327,6 +497,7 @@ fn merge_user_model(
     raw: UserModelEntry,
     existing: Option<ModelEntry>,
     context: &ContextConfig,
+    degrade_invalid_user_options: bool,
 ) -> Result<ModelEntry, AppError> {
     let mut merged = existing.unwrap_or_else(|| ModelEntry {
         id: raw.id.clone(),
@@ -336,8 +507,13 @@ fn merge_user_model(
         api_key_env: None,
         base_url: None,
         capabilities: Capabilities::default(),
-        context_window: Some(context.context_window as u32),
+        context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
         thinking_format: None,
+        supported_reasoning_levels: Vec::new(),
+        supported_speeds: Vec::new(),
     });
     merged.id = raw.id.clone();
     if let Some(model_name) = raw.model_name {
@@ -346,17 +522,17 @@ fn merge_user_model(
     if let Some(api) = raw.api {
         merged.api = api;
     } else if merged.api.trim().is_empty() {
-        return Err(AppError::Config(format!(
-            "models.toml 中模型 `{}` 必须显式填写 `api`。",
-            raw.id.trim()
+        return Err(AppError::Config(tr(
+            "model.explicitField",
+            &[("id", raw.id.trim()), ("field", "api")],
         )));
     }
     if let Some(provider) = raw.provider {
         merged.provider = provider;
     } else if merged.provider.trim().is_empty() {
-        return Err(AppError::Config(format!(
-            "models.toml 中模型 `{}` 必须显式填写 `provider`。",
-            raw.id.trim()
+        return Err(AppError::Config(tr(
+            "model.explicitField",
+            &[("id", raw.id.trim()), ("field", "provider")],
         )));
     }
     if let Some(api_key_env) = raw.api_key_env {
@@ -370,12 +546,84 @@ fn merge_user_model(
     if let Some(capabilities) = raw.capabilities {
         apply_partial_capabilities(&mut merged.capabilities, capabilities);
     }
+    let context_window_overridden = raw.context_window.is_some();
+    let context_window_options = raw.context_window_options;
     if let Some(context_window) = raw.context_window {
         merged.context_window = Some(context_window);
+    }
+    if let Some(options) = context_window_options {
+        merged.context_window_options = options;
+    } else if context_window_overridden {
+        // An explicit single-value override means this user model has one
+        // supported tier; never inherit builtin options into a contradictory state.
+        merged.context_window_options.clear();
+    }
+    if let Some(max_output_tokens) = raw.max_output_tokens {
+        merged.max_output_tokens = Some(max_output_tokens);
+    }
+    if let Some(description) = raw.description {
+        merged.description = Some(description);
     }
     if let Some(thinking_format) = raw.thinking_format {
         merged.thinking_format = Some(thinking_format);
     }
+    if let Some(levels) = raw.supported_reasoning_levels {
+        let normalized = normalize_supported_reasoning_levels(&levels);
+        merged.supported_reasoning_levels = if normalized.is_empty() && !levels.is_empty() {
+            safe_supported_reasoning_levels_for(
+                merged.api.as_str(),
+                merged.thinking_format.as_deref(),
+            )
+        } else {
+            normalized
+        };
+    } else if merged.supported_reasoning_levels.is_empty() {
+        merged.supported_reasoning_levels = safe_supported_reasoning_levels_for(
+            merged.api.as_str(),
+            merged.thinking_format.as_deref(),
+        );
+    }
+    if let Some(speeds) = raw.supported_speeds {
+        merged.supported_speeds = speeds;
+    }
+    match validate_supported_speeds(&merged.id, &merged.api, &merged.supported_speeds) {
+        Ok(speeds) => merged.supported_speeds = speeds,
+        Err(error) if degrade_invalid_user_options => {
+            tracing::warn!(
+                model_id = %merged.id,
+                error = %error,
+                "discarding invalid user supported_speeds; model remains without accelerated speeds"
+            );
+            merged.supported_speeds.clear();
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_context_window_options(
+        &merged.id,
+        merged.context_window,
+        &merged.context_window_options,
+        merged.max_output_tokens,
+    ) {
+        Ok(options) => merged.context_window_options = options,
+        Err(error) if degrade_invalid_user_options => {
+            tracing::warn!(
+                model_id = %merged.id,
+                error = %error,
+                "discarding invalid user context_window_options; model remains a single-tier model"
+            );
+            merged.context_window_options.clear();
+        }
+        Err(error) => return Err(error),
+    }
+
+    validate_model_limit_values(
+        &merged.id,
+        merged
+            .context_window
+            .map(|value| value as usize)
+            .unwrap_or(context.context_window_fallback),
+        merged.max_output_tokens.map(|value| value as usize),
+    )?;
     Ok(merged)
 }
 
@@ -398,10 +646,12 @@ fn apply_partial_capabilities(target: &mut Capabilities, partial: PartialCapabil
 }
 
 fn missing_model_error(model_id: &str, user_path: &Path) -> AppError {
-    AppError::Config(format!(
-        "模型 `{}` 未收录，请补 {} 或切回已收录模型。",
-        model_id.trim(),
-        user_path.display()
+    AppError::Config(tr(
+        "model.notCataloged",
+        &[
+            ("id", model_id.trim()),
+            ("path", &user_path.display().to_string()),
+        ],
     ))
 }
 

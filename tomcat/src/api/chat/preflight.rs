@@ -20,6 +20,7 @@ use serde_json::json;
 use shell_words;
 
 use crate::core::SwitchingCheckpointStore;
+use crate::infra::i18n::tr;
 use crate::infra::{wire, AppConfig, ScopedEventEmitter};
 
 const SKIP_ENV: &str = "PI_SKIP_SEARCH_TOOLS_PREFLIGHT";
@@ -57,7 +58,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
             emit_preflight(
                 &emitter,
                 "ready",
-                "search_files Tier1 tools are already available",
+                &tr("preflight.searchReady", &[]),
                 json!({ "missing": [] }),
             );
             return;
@@ -66,7 +67,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
         emit_preflight(
             &emitter,
             "start",
-            "search_files Tier1 tools missing; attempting background install",
+            &tr("preflight.searchStart", &[]),
             json!({ "missing": missing }),
         );
 
@@ -78,7 +79,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
             emit_preflight(
                 &emitter,
                 "failed",
-                "No supported package manager found for automatic search tool installation",
+                &tr("preflight.searchNoManager", &[]),
                 json!({ "missing": missing_search_tools() }),
             );
             return;
@@ -101,7 +102,10 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
             emit_preflight(
                 &emitter,
                 "progress",
-                &format!("running: {} {}", plan.program, plan.args.join(" ")),
+                &tr(
+                    "preflight.running",
+                    &[("program", plan.program), ("args", &plan.args.join(" "))],
+                ),
                 json!({ "program": plan.program, "args": plan.args }),
             );
 
@@ -142,7 +146,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
                         emit_preflight(
                             &emitter,
                             "success",
-                            "search_files Tier1 tools installation finished",
+                            &tr("preflight.searchDone", &[]),
                             extra,
                         );
                     } else {
@@ -158,7 +162,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
                         emit_preflight(
                             &emitter,
                             "failed",
-                            "search_files Tier1 tools installation failed; Tier2 fallback remains available",
+                            &tr("preflight.searchFailed", &[]),
                             extra,
                         );
                     }
@@ -172,7 +176,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
                     emit_preflight(
                         &emitter,
                         "failed",
-                        "search_files Tier1 tools installation could not be started; Tier2 fallback remains available",
+                        &tr("preflight.searchSpawnFailed", &[]),
                         json!({
                             "error": err.to_string(),
                             "elapsedMs": started.elapsed().as_millis(),
@@ -203,27 +207,17 @@ pub fn start_git_preflight(
             #[cfg(unix)]
             remove_detached_log_marker_file(GIT_DETACHED_LOG_MARKER_NAME);
             checkpoint_switcher.force_activate_shadow();
-            emit_git_preflight(
-                &emitter,
-                "ready",
-                "git 已可用，checkpoint 将使用影子仓库",
-                json!({}),
-            );
+            emit_git_preflight(&emitter, "ready", &tr("preflight.gitReady", &[]), json!({}));
             return;
         }
 
-        emit_git_preflight(
-            &emitter,
-            "start",
-            "git 缺失，正在尝试后台安装以启用 checkpoint",
-            json!({}),
-        );
+        emit_git_preflight(&emitter, "start", &tr("preflight.gitStart", &[]), json!({}));
 
         let Some(plan) = git_install_plan() else {
             emit_git_preflight(
                 &emitter,
                 "failed",
-                "未找到可用于自动安装 git 的包管理器",
+                &tr("preflight.gitNoManager", &[]),
                 json!({}),
             );
             return;
@@ -243,7 +237,7 @@ pub fn start_git_preflight(
                     emit_git_preflight(
                         &emitter,
                         "success",
-                        "git 安装完成，后续 checkpoint 将自动启用",
+                        &tr("preflight.gitDone", &[]),
                         json!({
                             "elapsedMs": started.elapsed().as_millis(),
                         }),
@@ -253,7 +247,7 @@ pub fn start_git_preflight(
                     emit_git_preflight(
                         &emitter,
                         "failed",
-                        "git 安装未成功完成，checkpoint 仍将退化为 Noop",
+                        &tr("preflight.gitFailed", &[]),
                         json!({
                             "elapsedMs": started.elapsed().as_millis(),
                             "stderr": trim_for_event(&String::from_utf8_lossy(&output.stderr)),
@@ -265,7 +259,7 @@ pub fn start_git_preflight(
                     emit_git_preflight(
                         &emitter,
                         "failed",
-                        "git 安装命令无法启动，checkpoint 仍将退化为 Noop",
+                        &tr("preflight.gitCommandFailed", &[]),
                         json!({
                             "elapsedMs": started.elapsed().as_millis(),
                             "error": err.to_string(),
@@ -289,7 +283,7 @@ fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, 
         emit_preflight(
             emitter,
             "already_installing",
-            "search_files Tier1 安装已在后台进行中",
+            &tr("preflight.searchBusy", &[]),
             extra,
         );
         return;
@@ -303,7 +297,7 @@ fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, 
         emit_preflight(
             emitter,
             "failed",
-            "search_files Tier1 tools installation could not prepare log file; Tier2 fallback remains available",
+            &tr("preflight.searchLogFailed", &[]),
             json!({
                 "elapsedMs": started.elapsed().as_millis(),
             }),
@@ -319,11 +313,11 @@ fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, 
                 "elapsedMs": started.elapsed().as_millis(),
             });
             let detached_msg = if plan.program == "brew" {
-                "search_files Tier1 安装已在后台继续（Homebrew 仅 bottle、禁止源码编译）；退出 chat 不影响"
+                tr("preflight.searchDetachedBrew", &[])
             } else {
-                "search_files Tier1 安装已在后台继续，退出 chat 不影响"
+                tr("preflight.searchDetached", &[])
             };
-            emit_preflight(emitter, "detached", detached_msg, extra);
+            emit_preflight(emitter, "detached", &detached_msg, extra);
         }
         Err(err) => {
             tracing::warn!(
@@ -334,7 +328,7 @@ fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, 
             emit_preflight(
                 emitter,
                 "failed",
-                "search_files Tier1 tools installation could not be started; Tier2 fallback remains available",
+                &tr("preflight.searchSpawnFailed", &[]),
                 json!({
                     "error": err.to_string(),
                     "elapsedMs": started.elapsed().as_millis(),
@@ -362,7 +356,7 @@ fn run_unix_git_preflight_install(
         emit_git_preflight(
             emitter,
             "already_installing",
-            "git 安装已在后台进行中；安装完成后下次 checkpoint 操作会自动启用影子仓库",
+            &tr("preflight.gitBusy", &[]),
             extra,
         );
         return;
@@ -372,7 +366,7 @@ fn run_unix_git_preflight_install(
         emit_git_preflight(
             emitter,
             "failed",
-            "git 安装无法创建日志文件，checkpoint 将继续退化为 Noop",
+            &tr("preflight.gitLogFailed", &[]),
             json!({
                 "elapsedMs": started.elapsed().as_millis(),
             }),
@@ -386,7 +380,7 @@ fn run_unix_git_preflight_install(
             emit_git_preflight(
                 emitter,
                 "detached",
-                "git 安装已在后台继续；安装完成后下次 checkpoint 操作会自动启用影子仓库",
+                &tr("preflight.gitDetached", &[]),
                 json!({
                     "elapsedMs": started.elapsed().as_millis(),
                     "logPath": log_path.display().to_string(),
@@ -397,7 +391,7 @@ fn run_unix_git_preflight_install(
             emit_git_preflight(
                 emitter,
                 "failed",
-                "git 安装无法启动，checkpoint 将继续退化为 Noop",
+                &tr("preflight.gitSpawnFailed", &[]),
                 json!({
                     "elapsedMs": started.elapsed().as_millis(),
                     "error": err.to_string(),

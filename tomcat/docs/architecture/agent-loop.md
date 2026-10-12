@@ -22,6 +22,21 @@ agent/chat 进入主循环前，启动顺序新增一条 plan 恢复挂接：
 
 ---
 
+## 正常收尾的输入消费与后台信号
+
+```text
+text-only/合法静默 finalize 成功
+  → 工具预算耗尽：结束，队列留给下一轮
+  → steering / follow-up：按此顺序用统一记账、持久化助手消费
+  → steering / 非 Signal 追加输入：关闭静默许可；后台 Signal：许可不变
+```
+
+`run_inner` 收尾同时检查两种队列，复用 `inject_steering_messages/inject_follow_up_messages` 保留 msg_id、append 与上下文记账；错误/取消不作为正常收尾续跑。静默许可的开关与确认规则只在 [stream-terminal-errors.md](llm/stream-terminal-errors.md)「内部通知的正常空终态」维护。Stopped 的模型通知在 completion subscriber 被过滤，独立的 UI 生命周期通道照常更新；Serve 空闲自然通知仅排队、不启动模型。
+
+**仍存在的风险（本期延期）**：`run_inner` 最后一次查队列之后，经过 chat 监听注销、上下文停车与收尾持久化，直到 Serve `mark_idle` 之前，仍可能接受一条 `queued:true` 的真实输入，却暂时没有消费者，需等下一次输入。admission 与 idle 未在同一临界区，此次不宣称已消除。后续单独设计防丢唤醒，并先用确定性 barrier 固定时序；Signal 空闲不唤醒、中断、维护 busy 的优先级应保留。
+
+原生写入的 commit-aware 停止由 primitive/dispatcher 边界负责，Attempt Loop 不取消丢弃整个 reasoning future；非写盘 compaction 请求在自身边界响应取消。已开始写盘的工具要等真正提交结果及备份登记完成，才能报告停止并恢复文件。
+
 ## 13.1 概述与设计目标
 
 Agent Loop 是 Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（Steering/FollowUp/Abort）、容错重试（Compaction/Backoff）的完整生命周期。本设计与 pi-mono、openclaw 对齐，采用三层嵌套循环，并明确与插件事件系统的发布时机对应关系。
@@ -494,14 +509,15 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 既有三处交互时机保持不变：
 
-- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`run_layer0_cleanup` → `preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll + apply boundary）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
-- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换（ratio >= 0.98 时可化异步为同步等待）→ `messages` 从更新后的 `userTurnsList` 重建
+- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll；成功 apply boundary 时其内部紧接执行 L0）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
+- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换并在内部执行 L0（ratio >= 0.98 时可化异步为同步等待）→ 成功时 `messages` 从更新后的 `ctx_state.messages` 重新拍平，并接回已持久化的本轮输入
 - **③ reasoning loop 内 API 返回 Context Overflow**：L3 物理截断 + 重试（第二层 Attempt Loop）；该路径发布 `ContextOverflowTrimStart` / `ContextOverflowTrimEnd`（JSON wire：`context_overflow_trim_start` / `context_overflow_trim_end`），不再使用 `AutoCompactionStart` / `AutoCompactionEnd`
 
 **context_metrics_update 发射节奏**（单次第三层 `run_reasoning_loop`）：
 
-- 至多 **两次**：(1) **首次**向 LLM 发起 `chat_stream` **之前**（`turn_index == 1`）；(2) **该次 run 正常收尾**——assistant **无** `tool_calls` 时与 timing ⑤ 末尾的 `emit_context_metrics` 同路径；若因 **`max_tool_rounds`** 耗尽退出且最后一轮仍有 `tool_calls`，在该轮 `TurnEnd` **之后**、`return` **之前**再发射一次。
-- **中间**各 tool round（执行完工具、尚未发起下一轮 LLM）**不**发射 `context_metrics_update`，避免 CLI/扩展与「每轮工具后一条」刷屏。
+- **首次**向 LLM 发起 `chat_stream` **之前**（`turn_index == 1`）发一条估算；每一次 provider `Usage` 到达时，`stream_handler` 立即发一条实测 metrics，发生在工具调用被调度之前；assistant **无** `tool_calls` 时 timing ⑤ 再发最终估算，若因 **`max_tool_rounds`** 耗尽退出则在该轮 `TurnEnd` 后再发估算。
+- tool round 之间只有 current-tail guard 实际改写上下文时才追加一条估算 metrics；正常工具执行不会为每一轮额外刷事件。`providerUsageMeasured=true` 仅标记直接来自当前 `Usage` 的事件，所有其余快照均为 `false`。
+- 水位消费者对 cold slot 的 `false` 保持未知；一旦已有 provider 实测基线，`false` 是压缩、提示词变化或预算重算后的刷新，必须更新显示而不能清空。
 
 > 步骤编号（②③⑤）对应 [context-management.md §5.6](context-management.md) 的完整链路图。
 

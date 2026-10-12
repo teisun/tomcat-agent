@@ -17,7 +17,9 @@ fn normal_msg(id: &str) -> ChatMessage {
         thinking_text: None,
         reasoning_continuation: None,
         continuity: None,
+        usage: None,
         summary_title: None,
+        tool_display: None,
         msg_id: Some(id.to_string()),
         kind: MessageKind::Normal,
         timestamp: Some("ts".into()),
@@ -25,9 +27,7 @@ fn normal_msg(id: &str) -> ChatMessage {
 }
 
 fn summary_msg(id: &str) -> ChatMessage {
-    let mut m = ChatMessage::compaction_summary("prev");
-    m.msg_id = Some(id.to_string());
-    m
+    ChatMessage::compaction_summary("prev", id)
 }
 
 #[test]

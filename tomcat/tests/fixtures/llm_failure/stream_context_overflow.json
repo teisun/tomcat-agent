@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "context_length_exceeded",
+    "type": "invalid_request_error",
+    "message": "This request exceeds the context window. Reduce the length of the messages."
+  }
+}

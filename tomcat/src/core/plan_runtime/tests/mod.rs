@@ -1,5 +1,6 @@
 mod catalog_test;
 mod completion_flow_test;
+mod delivery_state_test;
 mod dispatch_test;
 mod file_store_frontmatter_test;
 mod file_store_plan_path_test;
@@ -10,6 +11,7 @@ mod refresh_signals_test;
 mod review_test;
 mod runtime_state_test;
 mod safety_test;
+mod subagent_provider_binding_test;
 mod todo_runtime_test;
 mod verify_test;
 
@@ -27,26 +29,24 @@ pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
                 id: "t1".into(),
                 content: "step 1".into(),
                 status: super::file_store::TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             },
             super::file_store::TodoItem {
                 id: "t2".into(),
                 content: "step 2".into(),
                 status: super::file_store::TodoStatus::InProgress,
+                evidence: Vec::new(),
+                kind: Default::default(),
             },
         ],
+        code_review_pass: false,
+        code_review_rounds: 0,
+        code_review_open_findings: Vec::new(),
+        code_review_disputed_findings: Vec::new(),
+        code_review_handoff: false,
+        code_review_handoff_acknowledged: false,
+        code_review_residual_findings: Vec::new(),
         unknown: serde_yaml::Mapping::new(),
     }
-}
-
-pub(super) fn temp_plans_dir() -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "tomcat_plan_test_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    path
 }

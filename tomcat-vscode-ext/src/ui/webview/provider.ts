@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { isPreviewRewindResponse, rewindErrorDetail } from "../../shared/messageEditProtocol";
+import { layoutInsetStyle } from "./layoutInsets";
+import { withOccurrence } from "../../shared/composerOccurrences";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,25 +16,57 @@ import {
   SERVE_CAPABILITY_LIST_MODELS,
   type InitializeResult,
 } from "../../serveClient/initialize";
+import type { ServeConnectionStatus } from "../../serveClient/ServeConnectionSupervisor";
 import {
   normalizeAskQuestionResponse,
   type AskQuestionWireRequest,
   type AskQuestionWireResponse,
 } from "../../serveClient/protocol";
-import type { SessionRouter } from "../../serveClient/sessionRouter";
+import type { SessionRouter, SessionListPayload } from "../../serveClient/sessionRouter";
 import type { TomcatMessenger } from "../../serveClient/TomcatMessenger";
 import type { ServeContentSegment, ServeEvent } from "../../serveClient/wire";
+import {
+  cacheAttachmentThumbnail,
+  ingestAttachment,
+  type AttachmentUpload,
+} from "../../shared/attachmentIngest";
+import {
+  attachmentResourceRoots,
+  resolveAttachmentUris,
+} from "../../shared/attachmentUris";
+import { isSpeed, type Speed } from "../../shared/modelSpeed";
+import { classifyLink } from "../../shared/linkTarget";
+import {
+  ComposerDraftStore,
+  isDraftEmpty,
+  type ComposerDraft,
+  type DraftAttachmentRef,
+} from "../../shared/composerDraft";
+import {
+  validateAttachmentCandidate,
+} from "../../shared/attachmentProtocol";
+import {
+  parseDraftForkCapture,
+  type DraftForkCapture,
+} from "../../shared/draftForkProtocol";
+import type { PreviewSection } from "../../shared/imagePreviewProtocol";
+import { imagePreviewSections as buildImagePreviewSections } from "./imagePreviewSections";
+import {
+  createDiffPresentation,
+  isDiffViewable,
+} from "../../shared/diffPresentation";
 import {
   createHostFrameMessageId,
   isWebviewIntent,
   PendingMessageTracker,
-  type FileDiffLine,
   type HostEventFrameContent,
   type HostToWebviewFrame,
   type WebviewApprovalCard,
   type WebviewDomAction,
   type WebviewMessageBlock,
+  type WebviewAttachmentView,
   type WebviewMessageSegment,
+  type WebviewMediaRoot,
   type WebviewPendingAttachment,
   type WebviewIntent,
   type WebviewPlanFileCard,
@@ -42,16 +77,42 @@ import {
 import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
+import { HostDraftCoordinator } from "./hostDraftCoordinator";
+import { MessageQueue, type QueueContent } from "./messageQueue";
 import { buildFileReference } from "./contextReferences";
 import { TomcatSessionPool } from "./sessionPool";
-import { WebviewStateStore } from "./state";
+import { SessionPins } from "./sessionPins";
+import {
+  type StateBroadcasterFlushPlan,
+  StateBroadcaster,
+} from "./stateBroadcaster";
+import {
+  type AttachmentUriResolver,
+  type SessionRenderMutation,
+  WebviewStateStore,
+} from "./state";
 
 const HISTORY_PAGE_ENTRIES = 80;
+
+/**
+ * How history pages ask for image attachments.
+ *
+ * `reference` gets hashes instead of inline base64. The default is `inline` to keep the
+ * CLI working unchanged, but for a UI it is the wrong answer by two orders of magnitude:
+ * a page of 80 entries containing eleven photos is ~66MB of base64 that would land on
+ * the extension host's heap, be forwarded into a state snapshot, and be pinned there for
+ * as long as the user stays scrolled back.
+ */
+const HISTORY_ATTACHMENT_MODE = "reference" as const;
+
+/** Where the last known attachment directory is remembered between launches. */
+const ATTACHMENT_ROOT_MEMENTO_KEY = "tomcat.attachmentRoot";
 
 type PendingQuestion = {
   request: AskQuestionWireRequest;
   resolve(response: AskQuestionWireResponse): void;
-  sessionId?: string | null;
+  sessionId: string;
+  settled: boolean;
 };
 
 type DomSnapshot = Extract<
@@ -61,34 +122,56 @@ type DomSnapshot = Extract<
 
 type UserSubmitKind = "prompt" | "steer";
 
-function isMutationTool(toolName: string): boolean {
-  return toolName === "write" || toolName === "edit" || toolName === "hashline_edit";
+type WebviewMessageDelivery = {
+  /**
+   * Workbench hand-off result. Most host frames are best-effort state projections, but
+   * draft-fork completion needs this signal to avoid leaving the composer locked forever.
+   */
+  delivered: Promise<void>;
+};
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-function reconstructDiffPair(diff: FileDiffLine[]): { after: string; before: string } {
-  const before: string[] = [];
-  const after: string[] = [];
-  for (const line of diff) {
-    if (line.tag !== "add") {
-      before.push(line.text);
-    }
-    if (line.tag !== "del") {
-      after.push(line.text);
-    }
-  }
-  return {
-    after: after.join("\n"),
-    before: before.join("\n"),
-  };
+function sessionFileIdentity(value: string): string {
+  try { return fs.realpathSync.native(value); }
+  catch { return path.resolve(value); }
 }
 
 export interface TomcatWebviewProviderDeps {
+  /**
+   * Where to keep composer drafts.
+   *
+   * Only the two storage URIs are needed, not the whole extension context, so tests can
+   * hand over a temp directory without faking half of VS Code.
+   */
+  draftStorage?: Pick<vscode.ExtensionContext, "globalStorageUri" | "storageUri">;
   extensionUri: vscode.Uri;
+  /**
+   * Remembers the backend's attachment directory between launches.
+   *
+   * Resource roots can only be granted by reassigning `webview.options`, and VS Code
+   * reloads the webview when they change. Only `get_state` knows the path, which is not
+   * available until after the webview has loaded — so without a remembered value every
+   * single launch would load the panel twice. The path is stable for a given tomcat data
+   * directory, and a stale value costs nothing: it is re-granted from `get_state` anyway.
+   */
+  attachmentRootMemento?: Pick<vscode.Memento, "get" | "update">;
+  sessionPinStorage?: Pick<vscode.Memento, "get" | "update">;
   getDefaultCwd(): string | undefined;
   ide: VsCodeIde;
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
-  openModelSettings?(route?: "models"): void;
+  openExternal?(href: string): Promise<void> | void;
+  openSettings?(route?: "general" | "models" | "connectors"): void;
+  /** Surface a post-handshake bootstrap failure in the extension host's Output channel/UI. */
+  reportBootstrapFailure?(error: Error): void;
+  refreshPlanPreview?(
+    planId: string | null,
+    path: string | null,
+    state?: string | null,
+  ): Promise<void> | void;
   sessionRouter: SessionRouter;
   showOpenDialog?(
     options: vscode.OpenDialogOptions,
@@ -111,31 +194,127 @@ function parseCapabilityNames(value: unknown): string[] {
     .map(([name]) => name);
 }
 
+function extractPlanPreviewRefreshArgs(
+  event: ServeEvent,
+): { path: string | null; planId: string | null; state: string | null } | null {
+  switch (event.type) {
+    case "plan.create":
+    case "plan.update":
+      return {
+        path: typeof event.path === "string" ? event.path : null,
+        planId: typeof event.planId === "string" ? event.planId : null,
+        state: typeof event.state === "string" ? event.state : null,
+      };
+    case "plan.todos":
+      return {
+        path: null,
+        planId: typeof event.planId === "string" ? event.planId : null,
+        state: null,
+      };
+    default:
+      return null;
+  }
+}
+
 export function parseModelCatalog(payload: unknown): {
   capabilities: Record<string, string[]>;
   ids: string[];
+  modelDetails: Record<string, {
+    capabilities: string[];
+    contextWindow?: number | null;
+    contextWindowOptions: number[];
+    description?: string | null;
+    id: string;
+    modelName?: string | null;
+    selectedContextWindow?: number | null;
+    selectedReasoningLevel?: string | null;
+    supportedReasoningLevels: string[];
+    supportedSpeeds?: Speed[];
+    selectedSpeed?: Speed | null;
+  }>;
+  reasoningLevels: Record<string, string[]>;
 } {
   if (typeof payload !== "object" || payload === null) {
-    return { capabilities: {}, ids: [] };
+    return { capabilities: {}, ids: [], modelDetails: {}, reasoningLevels: {} };
   }
   const models = (payload as { models?: unknown }).models;
   if (!Array.isArray(models)) {
-    return { capabilities: {}, ids: [] };
+    return { capabilities: {}, ids: [], modelDetails: {}, reasoningLevels: {} };
   }
   const ids: string[] = [];
   const capabilities: Record<string, string[]> = {};
+  const modelDetails: Record<string, {
+    capabilities: string[];
+    contextWindow?: number | null;
+    contextWindowOptions: number[];
+    description?: string | null;
+    id: string;
+    modelName?: string | null;
+    selectedContextWindow?: number | null;
+    selectedReasoningLevel?: string | null;
+    supportedReasoningLevels: string[];
+    supportedSpeeds?: Speed[];
+    selectedSpeed?: Speed | null;
+  }> = {};
+  const reasoningLevels: Record<string, string[]> = {};
   for (const entry of models) {
     if (typeof entry !== "object" || entry === null || typeof (entry as { id?: unknown }).id !== "string") {
       continue;
     }
+    // A model without credentials remains visible in Settings but cannot be
+    // selected from an active-session picker.
     if ((entry as { keyPresent?: unknown }).keyPresent === false) {
       continue;
     }
     const id = (entry as { id: string }).id;
+    const modelCapabilities = parseCapabilityNames((entry as { capabilities?: unknown }).capabilities);
+    const supportedReasoningLevels = Array.isArray((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels)
+      ? ((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels as unknown[]).filter(
+          (level): level is string => typeof level === "string",
+        )
+      : [];
+    const speedFields = entry as { supportedSpeeds?: unknown; selectedSpeed?: unknown };
+    const supportedSpeeds = Array.isArray(speedFields.supportedSpeeds)
+      ? speedFields.supportedSpeeds.filter((speed): speed is Speed => isSpeed(speed) && speed !== "standard")
+      : [];
+    const contextWindowOptions = Array.isArray((entry as { contextWindowOptions?: unknown }).contextWindowOptions)
+      ? ((entry as { contextWindowOptions?: unknown }).contextWindowOptions as unknown[]).filter(
+          (value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0,
+        )
+      : [];
+    const optionalNumber = (value: unknown): number | null | undefined =>
+      value === null ? null : typeof value === "number" && Number.isInteger(value) ? value : undefined;
+    const contextWindow = optionalNumber((entry as { contextWindow?: unknown }).contextWindow);
+    const selectedContextWindow = optionalNumber(
+      (entry as { selectedContextWindow?: unknown }).selectedContextWindow,
+    );
     ids.push(id);
-    capabilities[id] = parseCapabilityNames((entry as { capabilities?: unknown }).capabilities);
+    capabilities[id] = modelCapabilities;
+    reasoningLevels[id] = supportedReasoningLevels;
+    modelDetails[id] = {
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      capabilities: modelCapabilities,
+      contextWindowOptions,
+      description:
+        typeof (entry as { description?: unknown }).description === "string"
+          ? (entry as { description: string }).description
+          : null,
+      id,
+      modelName:
+        typeof (entry as { modelName?: unknown }).modelName === "string"
+          ? (entry as { modelName: string }).modelName
+          : null,
+      ...(selectedContextWindow === undefined ? {} : { selectedContextWindow }),
+      selectedReasoningLevel:
+        typeof (entry as { selectedReasoningLevel?: unknown }).selectedReasoningLevel === "string"
+          ? (entry as { selectedReasoningLevel: string }).selectedReasoningLevel
+          : null,
+      supportedReasoningLevels,
+      supportedSpeeds,
+      selectedSpeed: isSpeed(speedFields.selectedSpeed) ? speedFields.selectedSpeed : null,
+    };
   }
-  return { capabilities, ids };
+  return { capabilities, ids, modelDetails, reasoningLevels };
 }
 
 function guessMimeType(filePath: string): string {
@@ -164,10 +343,6 @@ function guessMimeType(filePath: string): string {
   }
 }
 
-function inferAttachmentKind(mimeType: string): "file" | "image" {
-  return mimeType.startsWith("image/") ? "image" : "file";
-}
-
 type PickedUriKind = "attachment" | "reference";
 
 type PickedUriMetadata = {
@@ -177,8 +352,9 @@ type PickedUriMetadata = {
 
 type ResolvedPickedUri =
   | {
-      attachment: WebviewPendingAttachment;
       kind: "attachment";
+      /** Bytes read off disk, on their way to `ingest_attachment`. */
+      upload: AttachmentUpload;
     }
   | {
       kind: "reference";
@@ -216,7 +392,7 @@ export function buildAttachmentOpenDialogOptions(): vscode.OpenDialogOptions {
     canSelectFiles: true,
     canSelectFolders: true,
     canSelectMany: true,
-    openLabel: "Add to Tomcat",
+    openLabel: t("host.addToTomcat"),
   };
 }
 
@@ -225,6 +401,20 @@ function shouldReconcileSessionState(event: ServeEvent): boolean {
     event.type === "agent_end" ||
     event.type === "agent_interrupted" ||
     event.type === "turn_end" ||
+    event.type === "plan.complete" ||
+    event.type === "plan.exit" ||
+    event.type === "plan.pending"
+  );
+}
+
+function shouldForceServeEventFlush(event: ServeEvent): boolean {
+  return (
+    event.type === "message_end" ||
+    event.type === "tool_execution_end" ||
+    event.type === "turn_end" ||
+    event.type === "agent_end" ||
+    event.type === "agent_idle" ||
+    event.type === "agent_interrupted" ||
     event.type === "plan.complete" ||
     event.type === "plan.exit" ||
     event.type === "plan.pending"
@@ -289,25 +479,112 @@ export async function readPlanMetadata(
   }
 }
 
-function formatBridgeError(action: string, error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("Timed out waiting for response")) {
-    return `Unable to ${action}: Tomcat bridge is not responding. Restart Tomcat and try again.`;
-  }
-  if (message.includes("tomcat serve exited")) {
-    return `Unable to ${action}: Tomcat serve exited. Restart Tomcat and try again.`;
-  }
-  if (message.includes("TomcatMessenger has been disposed")) {
-    return `Unable to ${action}: Tomcat bridge is unavailable. Restart Tomcat and try again.`;
-  }
-  return `Unable to ${action}: ${message}`;
+interface PendingDraftForkOperation {
+  captureAccepted: boolean;
+  cwd: string | null;
+  operationId: string;
+  promise: Promise<string>;
+  reject(error: Error): void;
+  resolve(sessionId: string): void;
+  sourceSessionId: string;
 }
 
+function formatBridgeError(action: MessageKey, error: unknown, args: MessageArgs = {}): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const operation = t(action, args);
+  if (message.includes("Timed out waiting for response")) {
+    return t("host.bridge.timeout", { action: operation });
+  }
+  if (message.includes("tomcat serve exited")) {
+    return t("host.bridge.exited", { action: operation });
+  }
+  if (message.includes("TomcatMessenger has been disposed")) {
+    return t("host.bridge.unavailable", { action: operation });
+  }
+  return t("host.bridge.failed", { action: operation, detail: message });
+}
+
+function sessionFileErrorText(error: unknown, label: string, action: MessageKey, args: MessageArgs = {}): string {
+  const message = error instanceof Error ? error.message : String(error);
+  switch (message) {
+    case "binary": return t("host.file.binary", { name: label });
+    case "too_large": return t("host.file.tooLarge", { name: label });
+    case "unavailable": return t("host.file.originalMissing", { name: label });
+    case "unknown_path": return t("host.file.stale");
+    case "not_regular_file": return t("host.file.notRegular", { name: label });
+    case "busy": return t("host.file.busy", { action: t(action === "host.bridge.keep" ? "host.file.keep" : "host.file.undo") });
+  }
+  if (message.startsWith("restore_failed: ")) {
+    return t("host.file.restoreFailed", { detail: message.slice("restore_failed: ".length) });
+  }
+  return formatBridgeError(action, error, args);
+}
+
+function displayDeliveryError(error: string): string {
+  if (error.trim().toLowerCase() === "busy") {
+    return t("host.deliveryBusy");
+  }
+  return error;
+}
+
+function displayRecoveryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("retry_target_stale")) {
+    return t("host.recoveryStale");
+  }
+  if (message.includes("nothing_to_resume")) {
+    return t("host.recoveryIncomplete");
+  }
+  return formatBridgeError("host.bridge.recover", error);
+}
+
+function retryAttachmentRef(attachment: WebviewAttachmentView): DraftAttachmentRef {
+  return {
+    blobSha: attachment.blobSha,
+    providerSha: attachment.providerSha,
+    bytes: attachment.bytes ?? 0,
+    filename: attachment.filename,
+    hasThumb: attachment.hasThumb,
+    id: attachment.id,
+    kind: attachment.kind,
+    mimeType: attachment.mimeType,
+    sourcePath: attachment.path ?? null,
+  };
+}
+
+import { getLocale, subscribeLocale, t, type MessageArgs, type MessageKey } from "../../shared/i18n";
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly contextSearch = new ContextSearchService();
   private readonly domSnapshots = new PendingMessageTracker<DomSnapshot>();
   private readonly historyFetchGen = new Map<string, number>();
+  /**
+   * Unsent composer state, owned by this extension.
+   *
+   * The backend is never told about a keystroke. It only ever hears about attachment
+   * bytes, once, at paste time. See `shared/composerDraft.ts` for why.
+   */
+  private readonly draftStore: ComposerDraftStore;
+  private readonly draftCoordinator = new HostDraftCoordinator();
+  private readonly messageQueue: MessageQueue;
+  private readonly pendingDraftForks = new Map<string, PendingDraftForkOperation>();
+  private readonly pendingDraftForkBySource = new Map<string, PendingDraftForkOperation>();
+  /**
+   * Filesystem root of the backend's attachment store, reported by the handshake.
+   *
+   * Needed to grant the webview read access and to turn hashes into URLs. It is derived
+   * from agent config on the backend side, so the extension cannot compute it.
+   */
+  private attachmentRoot: string | null = null;
+  /** Whether the backend has confirmed the path, as opposed to it being a remembered guess. */
+  private attachmentRootResolved = false;
+  /** Resolves once the handshake has settled the root, so no further reload is pending. */
+  private attachmentRootPrimed?: Promise<void>;
+  private imagePreviewSessionId: string | null = null;
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
+  private readonly finalizedQuestionResults = new Map<
+    string,
+    { request: AskQuestionWireRequest; response: AskQuestionWireResponse; sessionId: string }
+  >();
   private readonly planMetadataCache = new Map<string, PlanMetadataCacheEntry>();
   private readonly sessionsAwaitingErrorHistoryRefresh = new Set<string>();
   private readonly readyWaiters = new Set<{
@@ -317,14 +594,34 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }>();
   private serveEventQueue: Promise<void> = Promise.resolve();
   private readonly sessionPool: TomcatSessionPool;
+  private readonly sessionPins: SessionPins | null;
+  private readonly pendingDeletions = new Map<string, { requestId: string; scopeKey: string; unknown: boolean }>();
+  private diskScopeKey: string | undefined;
+  private sessionFeedback: import("./protocol").SessionActionFeedback | null = null;
   private readonly stateStore: WebviewStateStore;
+  private readonly stateBroadcaster: StateBroadcaster;
   private readonly eventSubscription: { dispose(): void };
+  private readonly workspaceFolderSubscription: vscode.Disposable;
+  private readonly sessionPatchFramesEnabled =
+    process.env.TOMCAT_DISABLE_SESSION_PATCHES !== "1";
   /** Plan paths already auto-opened after review, so repeats don't reopen. */
   private readonly autoOpenedPlanPaths = new Set<string>();
   /** `plan.create` gives us the path; `plan.review` is the actual open trigger. */
   private readonly pendingPlanOpenByPlanId = new Map<string, string>();
+  private readonly observedWebviewErrors: Array<{
+    message: string;
+    stack?: string;
+  }> = [];
+  private readonly fileRefreshes = new Map<string, { dirty: boolean; promise: Promise<void> }>();
+  private readonly fileSubscriptions: vscode.Disposable[] = [];
+  private fileGeneration = 0;
+  private readonly closedFileSessions = new Set<string>();
+  private disposed = false;
   private initialized?: InitializeResult;
   private isReady = false;
+  private serveConnectionStatus: ServeConnectionStatus = "connecting";
+  /** Advances whenever the rendered document is replaced or invalidated. */
+  private webviewGeneration = 0;
   private lastContextSearchIntent: Extract<WebviewIntent, { type: "searchContext" }> | null = null;
   private openFileObserved = false;
   private contextSearchTokenSource?: vscode.CancellationTokenSource;
@@ -333,8 +630,61 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private view?: vscode.WebviewView;
 
   constructor(private readonly deps: TomcatWebviewProviderDeps) {
+    // Restored before the view is ever resolved, so the first `webview.options` already
+    // grants the attachment directory and nothing has to change later.
+    const remembered = deps.attachmentRootMemento?.get<string>(ATTACHMENT_ROOT_MEMENTO_KEY);
+    this.attachmentRoot = typeof remembered === "string" && remembered ? remembered : null;
+    this.draftStore = deps.draftStorage
+      ? ComposerDraftStore.forContext(deps.draftStorage)
+      : // No storage granted (unit tests, and the settings-only host) means drafts live
+        // for the lifetime of the window and no further. Better than refusing to run.
+        new ComposerDraftStore(vscode.Uri.joinPath(deps.extensionUri, ".drafts"));
     this.sessionPool = new TomcatSessionPool(deps.sessionRouter);
+    this.sessionPins = deps.sessionPinStorage ? new SessionPins(deps.sessionPinStorage) : null;
     this.stateStore = new WebviewStateStore();
+    this.fileSubscriptions.push({ dispose: subscribeLocale(() => { void this.postState(); }) });
+    this.messageQueue = new MessageQueue({
+      conditions: (sessionId) => {
+        const session = this.peekState().sessionViews[sessionId];
+        return { busy: !!session?.busy, commandPending: !!session?.commandPending,
+          enabled: this.messageQueueEnabled && !this.disposed && !!session && !this.closedFileSessions.has(sessionId) && !this.sessionBlocked(sessionId)
+            && !["failed", "reconnecting"].includes(this.serveConnectionStatus) };
+      },
+      send: (sessionId, kind, content) => this.sendQueueInput(sessionId, kind, content),
+      changed: (sessionId) => { void this.broadcastSession(sessionId, { force: true }); },
+      confirmed: (sessionId, content, kind) => {
+        this.stateStore.appendLocalUserMessage(sessionId, content.text, {
+          attachments: content.attachments.map(a => this.toAttachmentView(a)),
+          messageId: content.userMessageId, segments: content.segments, submitKind: kind,
+        });
+        this.stateStore.markLocalUserMessageConfirmed(sessionId, content.userMessageId);
+      },
+      failed: (sessionId, error) => { this.stateStore.appendMessage(sessionId, "error", displayDeliveryError(error)); },
+      interrupt: (sessionId) => { void this.deps.messenger.request({ type: "interrupt", sessionId }).catch(error => console.error("Tomcat interrupt failed", error)); },
+    });
+    if (typeof vscode.workspace.onDidSaveTextDocument === "function") {
+      this.fileSubscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
+        if (document.uri.scheme !== "file") return;
+        const state = this.peekState();
+        const sessionId = state.activeSessionId;
+        const files = sessionId ? state.sessionViews[sessionId]?.sessionFiles?.files : undefined;
+        if (!sessionId || !files?.length) return;
+        const saved = sessionFileIdentity(document.uri.fsPath);
+        if (files.some((file) => sessionFileIdentity(file.path) === saved)) {
+          void this.refreshSessionFiles(sessionId);
+        }
+      }));
+    }
+    if (typeof vscode.window.onDidChangeWindowState === "function") {
+      this.fileSubscriptions.push(vscode.window.onDidChangeWindowState((event) => {
+        const sessionId = this.peekState().activeSessionId;
+        if (event.focused && sessionId) void this.refreshSessionFiles(sessionId);
+      }));
+    }
+    this.stateBroadcaster = new StateBroadcaster({
+      delayMs: 16,
+      flush: (plan) => this.flushStateBroadcastPlan(plan),
+    });
     this.eventSubscription = deps.messenger.onEvent((event) => {
       this.serveEventQueue = this.serveEventQueue
         .then(() => this.handleServeEvent(event))
@@ -342,15 +692,134 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           console.error("Tomcat webview failed to process serve event", error);
         });
     });
+    const onDidChangeWorkspaceFolders =
+      (vscode.workspace as typeof vscode.workspace & {
+        onDidChangeWorkspaceFolders?: (
+          listener: (event: vscode.WorkspaceFoldersChangeEvent) => void,
+        ) => vscode.Disposable;
+      }).onDidChangeWorkspaceFolders;
+    this.workspaceFolderSubscription =
+      typeof onDidChangeWorkspaceFolders === "function"
+        ? onDidChangeWorkspaceFolders(() => {
+            this.handleWorkspaceFolderChange();
+          })
+        : new vscode.Disposable(() => undefined);
+  }
+
+  async beginNewSession(cwd?: string | null): Promise<string> {
+    await this.ensureInitialized();
+    const sourceSessionId =
+      this.view?.visible === true && this.isReady
+        ? this.peekState().activeSessionId
+        : null;
+    if (sourceSessionId && this.sessionBlocked(sourceSessionId)) throw new Error(t("session.delete.pending"));
+    if (!sourceSessionId) {
+      const sessionId = await this.sessionPool.createSession(cwd ?? this.deps.getDefaultCwd());
+      await this.selectSession(sessionId);
+      return sessionId;
+    }
+
+    const existing = this.pendingDraftForkBySource.get(sourceSessionId);
+    if (existing) return existing.promise;
+
+    const operationId = randomUUID();
+    let resolve!: (sessionId: string) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<string>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const operation: PendingDraftForkOperation = {
+      captureAccepted: false,
+      cwd: cwd ?? null,
+      operationId,
+      promise,
+      reject,
+      resolve,
+      sourceSessionId,
+    };
+    this.pendingDraftForks.set(operationId, operation);
+    this.pendingDraftForkBySource.set(sourceSessionId, operation);
+    try {
+      await this.requestDraftForkCapture(operation);
+    } catch (error) {
+      this.removePendingDraftFork(operation);
+      operation.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    return promise;
+  }
+
+  /**
+   * Test scaffolding for scenarios that need an isolated session but are not exercising
+   * draft-fork UX. Production new-session requests must continue through beginNewSession,
+   * which preserves the composer draft by asking the webview to capture it first.
+   */
+  async createFreshSessionForTest(cwd?: string | null): Promise<string> {
+    await this.ensureInitialized();
+    const sessionId = await this.sessionPool.createSession(cwd ?? this.deps.getDefaultCwd());
+    await this.selectSession(sessionId);
+    return sessionId;
+  }
+
+  /**
+   * A serve restart starts a new process whose session IDs may overlap the old
+   * process. Discard the old process's local projection before re-bootstrapping,
+   * so a recycled ID cannot point to stale transcript or model state.
+   */
+  async refreshAfterServeRestart(): Promise<void> {
+    this.messageQueue.reset(new Set(this.pendingDeletions.keys()));
+    this.fileGeneration += 1;
+    this.fileRefreshes.clear();
+    this.closedFileSessions.clear();
+    this.initialized = undefined;
+    this.stateStore.resetForReload();
+    this.stateStore.setConnectionStatus(this.serveConnectionStatus);
+    if (!this.isReady) {
+      return;
+    }
+    await this.bootstrapWithConnectionState();
+    await this.postState();
+  }
+
+  /** Retries post-handshake data loading without needlessly restarting a healthy serve process. */
+  async retryBootstrap(): Promise<void> {
+    if (!this.isReady) {
+      return;
+    }
+    await this.bootstrapWithConnectionState();
+    await this.postState();
+  }
+
+  private async requestDraftForkCapture(operation: PendingDraftForkOperation): Promise<void> {
+    await this.postEvent({
+      operationId: operation.operationId,
+      sourceSessionId: operation.sourceSessionId,
+      type: "captureDraftForFork",
+    });
+  }
+
+  private removePendingDraftFork(operation: PendingDraftForkOperation): void {
+    if (this.pendingDraftForks.get(operation.operationId) === operation) {
+      this.pendingDraftForks.delete(operation.operationId);
+    }
+    if (this.pendingDraftForkBySource.get(operation.sourceSessionId) === operation) {
+      this.pendingDraftForkBySource.delete(operation.sourceSessionId);
+    }
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.fileGeneration += 1;
+    this.fileSubscriptions.forEach((subscription) => subscription.dispose());
     this.contextSearchTokenSource?.cancel();
     this.contextSearchTokenSource?.dispose();
     this.contextSearch.dispose();
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.eventSubscription.dispose();
+    this.workspaceFolderSubscription.dispose();
+    this.stateBroadcaster.dispose();
+    this.finalizePendingQuestions("host_disconnected");
     this.domSnapshots.rejectAll(new Error("Tomcat webview disposed"));
     for (const waiter of [...this.readyWaiters]) {
       clearTimeout(waiter.timeout);
@@ -362,15 +831,24 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   resolveWebviewView(view: vscode.WebviewView): void | Thenable<void> {
     this.view = view;
     this.isReady = false;
-    this.stateStore.setReady(false);
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist"),
-        vscode.Uri.joinPath(this.deps.extensionUri, "media"),
-      ],
-    };
+    this.webviewGeneration += 1;
+    this.stateStore.setConnectionStatus(this.serveConnectionStatus);
+    // Attachment URLs are webview-scoped, so the mapping is only valid once there is a
+    // webview to scope them to, and has to be replaced whenever this one is.
+    this.stateStore.setAttachmentUriResolver(this.historyAttachmentResolver());
+    view.webview.options = this.webviewOptions();
     view.webview.html = this.renderHtml(view.webview);
+    // Deliberately not awaited: the first paint should not wait on the backend. But it is
+    // started here, as early as possible, because settling the attachment root can reload
+    // the document (see `adoptAttachmentRoot`) and that must not land mid-interaction.
+    this.attachmentRootPrimed = this.ensureInitialized().then(
+      () => undefined,
+      (error: unknown) => {
+        // Initialization failures surface through the normal bootstrap path; here they
+        // only mean "no attachment root yet", which degrades to images not rendering.
+        console.warn("Tomcat could not resolve the attachment root", error);
+      },
+    );
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.messageSubscription = view.webview.onDidReceiveMessage((message: unknown) => {
@@ -378,12 +856,20 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
     this.visibilitySubscription = view.onDidChangeVisibility(() => {
       if (view.visible) {
-        void this.postState();
+        void this.broadcastFullState({ force: true });
       }
     });
   }
 
+  /** Await pending draft persistence after synchronous disposal stops new UI input. */
+  flushDrafts(): Promise<void> {
+    return this.draftStore.flush();
+  }
+
   async waitUntilReady(timeoutMs = 15_000): Promise<void> {
+    // Granting the attachment root reloads the document and invalidates an earlier
+    // "ready", so a ready flag observed before that point cannot be trusted.
+    await this.attachmentRootPrimed;
     if (this.isReady) {
       return;
     }
@@ -397,15 +883,40 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
+  /**
+   * The webview DOM being ready and the local serve process being ready are
+   * separate facts. The extension host owns the latter through the supervisor.
+   */
+  async setServeConnectionState(status: ServeConnectionStatus): Promise<void> {
+    this.serveConnectionStatus = status;
+    if (status === "reconnecting" || status === "failed") this.messageQueue.reset();
+    // `initialize()` can resolve before its supervisor notification has been delivered. If
+    // bootstrap then fails, that delayed `ready` notification must not erase the user-visible
+    // degraded state. A reconnecting/failed notification still clears it, and a successful
+    // retry restores ready through `bootstrapWithConnectionState`.
+    if (status === "ready" && this.stateStore.snapshot().connectionStatus === "degraded") {
+      return;
+    }
+    this.stateStore.setConnectionStatus(status);
+    if (this.isReady) {
+      await this.postState();
+    }
+  }
+
   async captureDomSnapshot(): Promise<DomSnapshot> {
     await this.waitUntilReady();
     const messageId = createHostFrameMessageId("webview-dom");
     const pending = this.domSnapshots.create(messageId, 20_000);
-    await this.postMessage({
+    // `Webview.postMessage()` is acknowledged by the workbench, not the webview document.
+    // In installed-host tests that acknowledgement can remain pending while the sidebar
+    // changes focus, even though the document still receives the frame. The response
+    // tracker is the actual delivery contract, so do not let the acknowledgement bypass
+    // its timeout and turn a failed snapshot into a hung test.
+    void this.postMessage({
       channel: "event",
       content: { type: "__test.capture_dom" },
       messageId,
-    });
+    }).delivered.catch(() => undefined);
     return pending;
   }
 
@@ -422,6 +933,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   resetForTestReload(): void {
+    for (const operation of this.pendingDraftForks.values()) {
+      operation.reject(new Error("Tomcat webview reloaded before draft fork capture completed"));
+    }
+    this.pendingDraftForks.clear();
+    this.pendingDraftForkBySource.clear();
     this.isReady = false;
     this.lastContextSearchIntent = null;
     this.openFileObserved = false;
@@ -454,49 +970,158 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   async askUser(
     request: AskQuestionWireRequest,
     sessionId?: string | null,
+    signal?: AbortSignal,
   ): Promise<AskQuestionWireResponse> {
+    const ownerSessionId = sessionId ?? request.sessionId ?? this.peekState().activeSessionId;
+    if (!ownerSessionId || this.draftCoordinator.isRetired(ownerSessionId)) {
+      return {
+        requestId: request.requestId,
+        result: { answers: [], cancelled: true, outcome: "host_disconnected" },
+      };
+    }
+    let pending!: PendingQuestion;
     const responsePromise = new Promise<AskQuestionWireResponse>((resolve) => {
-      this.pendingQuestions.set(request.requestId, { request, resolve, sessionId });
+      pending = { request, resolve, sessionId: ownerSessionId, settled: false };
+      this.pendingQuestions.set(`${ownerSessionId}\0${request.requestId}`, pending);
+    }).then((response) => {
+      if (this.draftCoordinator.isRetired(ownerSessionId)) return response;
+      this.finalizedQuestionResults.set(`${ownerSessionId}\0${request.requestId}`, {
+        request,
+        response,
+        sessionId: ownerSessionId,
+      });
+      this.stateStore.resolveApproval(request.requestId, response.result);
+      return response;
     }).finally(() => {
-      this.pendingQuestions.delete(request.requestId);
-      this.stateStore.resolveApproval(request.requestId);
+      this.pendingQuestions.delete(`${ownerSessionId}\0${request.requestId}`);
       void this.postState();
     });
+    const abort = () => this.finalizePendingQuestion(pending, "host_disconnected");
+    signal?.addEventListener("abort", abort, { once: true });
 
     this.stateStore.applyEvent({
       payload: request,
       requestId: request.requestId,
-      sessionId,
+      sessionId: ownerSessionId,
       subtype: "ask_question",
       type: "control_request",
     });
     await this.postEvent({
       payload: request,
       requestId: request.requestId,
-      sessionId,
+      sessionId: ownerSessionId,
       subtype: "ask_question",
       type: "control_request",
     });
     await this.postState();
-    return responsePromise;
+    try {
+      return await responsePromise;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  finalizePendingQuestions(outcome: "host_disconnected" | "interrupted"): void {
+    for (const pending of this.pendingQuestions.values()) {
+      this.finalizePendingQuestion(pending, outcome);
+    }
+  }
+
+  private finalizePendingQuestion(
+    pending: PendingQuestion,
+    outcome: "host_disconnected" | "interrupted",
+  ): void {
+    if (pending.settled) return;
+    pending.settled = true;
+    pending.resolve({
+      requestId: pending.request.requestId,
+      result: { answers: [], cancelled: true, outcome },
+    });
   }
 
   currentState() {
-    return this.stateStore.snapshot();
+    return this.projectCurrentDrafts(this.decorateStateSnapshot(this.stateStore.snapshot()));
+  }
+
+  clearObservedWebviewErrors(): void {
+    this.observedWebviewErrors.length = 0;
+  }
+
+  getObservedWebviewErrors(): Array<{ message: string; stack?: string }> {
+    return [...this.observedWebviewErrors];
+  }
+
+  private peekState(): Readonly<WebviewStateSnapshot> {
+    return this.stateStore.view();
+  }
+
+  private decorateStateSnapshot(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
+    const sessions = snapshot.sessions.filter(session => !this.draftCoordinator.isRetired(session.sessionId));
+    return {
+      ...snapshot,
+      activeSessionId: snapshot.activeSessionId && this.draftCoordinator.isRetired(snapshot.activeSessionId) ? null : snapshot.activeSessionId,
+      sessionViews: Object.fromEntries(Object.entries(snapshot.sessionViews).filter(([id]) => !this.draftCoordinator.isRetired(id))),
+      sessions: sessions.map(session => ({ ...(this.sessionPins ? this.sessionPins.project(session) : session), deleting: this.pendingDeletions.has(session.sessionId) })),
+      pinSupported: !!this.sessionPins,
+      deleteSupported: !!this.initialized && hasServeCapability(this.initialized, "delete_session"),
+      sessionActionFeedback: this.sessionFeedback,
+      mediaRoots: this.view ? this.mediaRootsForWebview(this.view.webview) : [],
+      locale: getLocale(),
+    };
+  }
+
+  /**
+   * State decoration may wait for plan metadata. Re-read each in-memory draft immediately
+   * before publishing so that a keystroke during that wait cannot be sent as an old frame.
+   */
+  private projectCurrentDraft(
+    sessionId: string,
+    session: WebviewStateSnapshot["sessionViews"][string],
+  ): WebviewStateSnapshot["sessionViews"][string] {
+    session = { ...session, deleting: this.pendingDeletions.has(sessionId), commandPending: session.commandPending === true || this.pendingDeletions.has(sessionId) };
+    if (this.messageQueueEnabled) {
+      const queue = this.messageQueue.view(sessionId);
+      session = { ...session, busy: session.busy || this.messageQueue.isRunning(sessionId),
+        messageQueue: { paused: queue.paused, editingId: queue.editingId,
+          items: queue.items.map(item => {
+            const missing = new Set(this.markMissingAttachments(item.attachments).missing.map(a => a.id));
+            return { ...item, attachments: item.attachments.map(attachment => this.toPendingView(attachment, missing.has(attachment.id))) };
+          }),
+        },
+      };
+    }
+    if (!this.draftStore.trackedSessions().includes(sessionId)) {
+      return session;
+    }
+    const draft = this.draftStore.peek(sessionId);
+    const { available, missing } = this.markMissingAttachments(draft.attachments);
+    return {
+      ...session,
+      composerDraft: { segments: draft.segments, text: draft.text },
+      pendingAttachments: [
+        ...available.map((attachment) => this.toPendingView(attachment, false)),
+        ...missing.map((attachment) => this.toPendingView(attachment, true)),
+      ],
+    };
+  }
+
+  private projectCurrentDrafts(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
+    const sessionViews = Object.fromEntries(
+      Object.entries(snapshot.sessionViews).map(([sessionId, session]) => [
+        sessionId,
+        this.projectCurrentDraft(sessionId, session),
+      ]),
+    );
+    return { ...snapshot, sessionViews, messageQueueSupported: this.messageQueueEnabled, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend"), sessionFilesSupported: !!this.initialized && hasServeCapability(this.initialized, "session_files") };
   }
 
   private findToolCard(
+    sessionId: string,
     toolCallId: string,
-  ): { sessionId: string; tool: WebviewToolCard } | undefined {
-    for (const [sessionId, session] of Object.entries(this.currentState().sessionViews)) {
-      const tool = session.timeline.find(
-        (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
-      );
-      if (tool) {
-        return { sessionId, tool };
-      }
-    }
-    return undefined;
+  ): WebviewToolCard | undefined {
+    return this.peekState().sessionViews[sessionId]?.timeline.find(
+      (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+    );
   }
 
   async refreshModelCatalog(): Promise<void> {
@@ -507,7 +1132,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private pendingAttachmentsForSession(sessionId: string): WebviewPendingAttachment[] {
-    return this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
+    return this.peekState().sessionViews[sessionId]?.pendingAttachments ?? [];
   }
 
   private async showOpenDialog(
@@ -520,8 +1145,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const metadata = await readPickedUriMetadata(uri);
     if (classifyPickedUriMetadata(metadata) === "attachment") {
       return {
-        attachment: await this.readPendingAttachment(uri, metadata.mimeType),
         kind: "attachment",
+        upload: await this.readAttachmentUpload(uri, metadata.mimeType),
       };
     }
     return {
@@ -535,43 +1160,149 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async ingestPickedUris(
     sessionId: string,
     uris: readonly vscode.Uri[],
-  ): Promise<void> {
-    const resolved = (
-      await Promise.all(
-        uris.map(async (uri) => {
-          try {
-            return await this.resolvePickedUri(uri);
-          } catch {
-            return null;
-          }
-        }),
-      )
-    ).filter((entry): entry is ResolvedPickedUri => entry !== null);
-    if (!resolved.length) {
-      return;
+    editOperationId?: string,
+  ): Promise<{ attachmentIds: string[]; references: WebviewReference[]; error?: string } | undefined> {
+    const resolved: ResolvedPickedUri[] = [];
+    const errors: string[] = [];
+    for (const uri of uris) {
+      try {
+        resolved.push(await this.resolvePickedUri(uri));
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
     }
 
-    const existing = this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
-    const nextAttachments = [...existing];
+    const references: WebviewReference[] = [];
+    const uploads: AttachmentUpload[] = [];
     for (const entry of resolved) {
       if (entry.kind === "reference") {
-        await this.postInsertReference(sessionId, entry.reference);
-        continue;
+        references.push(entry.reference);
+      } else {
+        uploads.push(entry.upload);
       }
-      nextAttachments.push(entry.attachment);
     }
 
-    if (nextAttachments.length !== existing.length) {
-      this.stateStore.setPendingAttachments(sessionId, nextAttachments);
+    if (editOperationId) {
+      const accepted = await this.ingestUploads(sessionId, uploads, errors, "edit");
+      await this.postEvent({ type: "editContextResult", sessionId, operationId: editOperationId,
+        attachments: accepted.map((a) => this.toPendingView(a, false)), references,
+        error: errors.length ? errors.join("; ") : undefined });
+      return;
+    }
+    const { accepted, insertedReferences } = await this.draftCoordinator.run(
+      sessionId,
+      async () => {
+        const insertedReferences = await this.insertReferencesIntoDraft(sessionId, references);
+        return {
+          accepted: await this.ingestUploads(sessionId, uploads, errors),
+          insertedReferences,
+        };
+      },
+    );
+    await this.postInsertedReferences(sessionId, insertedReferences);
+    // The picker changed one session's durable composer state. Follow its immediate
+    // rendering hint with that session's authoritative projection; unlike a broad state
+    // frame, it cannot be superseded by updates from another session.
+    await this.postSessionView(sessionId);
+    await this.reportAttachmentOutcome(accepted, errors);
+    return { attachmentIds: accepted.map(a => a.id), references: insertedReferences, error: errors.length ? errors.join("; ") : undefined };
+  }
+
+  /**
+   * Hand a batch of uploads to the backend and add whatever it accepts to the draft.
+   *
+   * Per-item outcomes, not all-or-nothing: pasting eleven images where one is oversized
+   * should attach ten and explain the one.
+   */
+  private async ingestUploads(
+    sessionId: string,
+    uploads: AttachmentUpload[],
+    errors: string[],
+    target?: "edit",
+  ): Promise<DraftAttachmentRef[]> {
+    if (uploads.length === 0) return [];
+    const references: DraftAttachmentRef[] = [];
+    for (const upload of uploads) {
+      const outcome = await ingestAttachment(
+        this.deps.messenger,
+        sessionId,
+        randomUUID(),
+        upload,
+      );
+      if (outcome.ok) {
+        references.push(outcome.reference);
+      } else {
+        errors.push(`${upload.filename ?? "attachment"}: ${outcome.error}`);
+      }
+    }
+    if (references.length > 0 && target !== "edit") {
+      await this.saveAttachmentsToDraft(sessionId, references);
       await this.postState();
     }
+    return references;
+  }
+
+  /**
+   * Tell the user only what they need to hear.
+   *
+   * Success is announced to screen readers and left off the screen: the attachment strip
+   * already shows the images, so a "1 attachment added" banner is redundant. Failures do
+   * get a visible message, because nothing else on screen explains an image that is not
+   * there.
+   */
+  private async reportAttachmentOutcome(
+    accepted: DraftAttachmentRef[],
+    errors: string[],
+  ): Promise<void> {
+    if (errors.length === 0 && accepted.length === 0) {
+      return;
+    }
+    await this.postEvent({
+      data: {
+        hasErrors: errors.length > 0,
+        message:
+          errors.length > 0
+            ? errors.join("; ")
+            : `${accepted.length} attachment${accepted.length === 1 ? "" : "s"} added`,
+      },
+      type: "attachmentFeedback",
+    });
+  }
+
+  /**
+   * Grant the webview read access to wherever the backend keeps attachment bytes.
+   *
+   * The path arrives with the `initialize` handshake, which is the earliest it can
+   * possibly be known, and that timing is the whole point: resource roots can only be
+   * granted by reassigning `webview.options`, and VS Code reloads the webview document
+   * when they change. Remembering the path across launches means the reload happens at
+   * most once ever — on the very first run after install, during bootstrap, before the
+   * user can type. Learning it later (on the first paste, as this once did) reloaded the
+   * transcript at the exact moment an image was being attached.
+   */
+  private adoptAttachmentRoot(root: string | null): void {
+    this.attachmentRootResolved = true;
+    if (!root || root === this.attachmentRoot) {
+      return;
+    }
+    this.attachmentRoot = root;
+    void this.deps.attachmentRootMemento?.update(ATTACHMENT_ROOT_MEMENTO_KEY, root);
+    // Every attachment URL is built from this root, so history images resolved before it
+    // arrived have to be resolved again.
+    this.stateStore.setAttachmentUriResolver(this.historyAttachmentResolver());
+    this.reloadWebviewResourceRoots();
   }
 
   private lookupRetryableUserMessage(
     sessionId: string,
     messageId: string,
-  ): { segments?: WebviewMessageSegment[]; submitKind: UserSubmitKind; text: string } | null {
-    const session = this.currentState().sessionViews[sessionId];
+  ): {
+    attachments: DraftAttachmentRef[];
+    segments?: WebviewMessageSegment[];
+    submitKind: UserSubmitKind;
+    text: string;
+  } | null {
+    const session = this.peekState().sessionViews[sessionId];
     const message = session?.timeline.find(
       (item): item is WebviewMessageBlock =>
         item.type === "message" && item.kind === "user" && item.id === messageId,
@@ -585,10 +1316,116 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return null;
     }
     return {
+      attachments: (message.attachments ?? []).map(retryAttachmentRef),
       segments: message.segments,
       submitKind: message.submitKind,
       text: message.text,
     };
+  }
+
+  private lookupErrorRecovery(
+    sessionId: string,
+    errorId: string,
+  ): { action: "resume" | "retry"; targetUserMessageId?: string } | null {
+    const timeline = this.peekState().sessionViews[sessionId]?.timeline ?? [];
+    const errorIndex = timeline.findIndex(
+      (item) => item.type === "message" && item.kind === "error" && item.id === errorId,
+    );
+    const error =
+      errorIndex >= 0 && timeline[errorIndex]?.type === "message"
+        ? timeline[errorIndex]
+        : null;
+    if (!error?.recoveryAction) {
+      return null;
+    }
+    return {
+      action: error.recoveryAction,
+      targetUserMessageId: error.recoveryTargetUserMessageId,
+    };
+  }
+
+  private async refreshInstructionCatalog(sessionId: string): Promise<void> {
+    // A failed best-effort refresh must not turn a committed fork or successful
+    // terminal operation into a failed user action. Keep the last usable catalog.
+    try {
+      const initialized = await this.ensureInitialized();
+      if (!hasServeCapability(initialized, "get_instruction_catalog")) return;
+      const response = await this.deps.messenger.request({ type: "get_instruction_catalog", sessionId });
+      if (!response.success) throw new Error(response.error ?? "Unable to read instruction catalog");
+      const items = (response.payload as { items?: unknown } | undefined)?.items;
+      if (!Array.isArray(items) || !items.every((item) =>
+        typeof item === "object" && item !== null && typeof item.id === "string" &&
+        (item.kind === "command" || item.kind === "skill") &&
+        [item.name, item.description, item.source, item.path].every((value) => typeof value === "string")
+      )) throw new Error("Invalid instruction catalog");
+      if (response.sessionId && response.sessionId !== sessionId) return;
+      this.stateStore.setInstructionCatalog(sessionId, items);
+    } catch (error) {
+      console.warn(`Tomcat could not refresh instructions for ${sessionId}`, error);
+    }
+  }
+
+  private get messageQueueEnabled(): boolean { return !!this.initialized && hasServeCapability(this.initialized, "message_queue"); }
+
+  /** Shared wire construction, with no active-session or draft side effects. */
+  private sendQueueInput(sessionId: string, kind: UserSubmitKind, content: QueueContent) {
+    if (this.sessionBlocked(sessionId)) return Promise.resolve({ success: false, error: t("session.delete.pending"), type: "response" as const });
+    return this.deps.messenger.request({
+      type: kind, sessionId, text: content.text,
+      params: {
+        userMessageId: content.userMessageId,
+        segments: content.segments.map(({ occurrenceId: _occurrence, ...wire }) => wire),
+        attachments: content.attachments.map(a => ({ blobSha: a.blobSha, providerSha: a.providerSha ?? null,
+          kind: a.kind, filename: a.filename, mimeType: a.mimeType })),
+        ...(kind === "steer" ? { onlyIfRunning: true } : {}),
+      },
+    });
+  }
+
+  /** Retire accepted input; return current memory emptiness, not a disk-success receipt. */
+  private async retireSubmittedDraft(sessionId: string, revision: number): Promise<boolean> {
+    try {
+      await this.draftStore.discardIfRevision(sessionId, revision);
+    } catch (error) {
+      console.warn("Tomcat could not clear an accepted draft", error);
+      void vscode.window.showWarningMessage(t("host.draftCleanupFailed", {
+        detail: error instanceof Error ? error.message : String(error),
+      }));
+    }
+    // A newer edit can arrive during disk IO and must retain its own attachment projection.
+    return isDraftEmpty(this.draftStore.peek(sessionId));
+  }
+
+  private async submitQueuedComposer(sessionId: string, intent: Extract<WebviewIntent, { type: "prompt" | "steer" }>): Promise<void> {
+    const claimed = await this.draftCoordinator.run(sessionId, async () => {
+      const draft = this.draftStore.peek(sessionId);
+      const selectedIds = intent.data.attachmentIds ? new Set(intent.data.attachmentIds) : null;
+      const attachments = selectedIds ? draft.attachments.filter(a => selectedIds.has(a.id)) : [...draft.attachments];
+      if (selectedIds && attachments.length !== selectedIds.size) {
+        this.stateStore.appendMessage(sessionId, "error", t("host.attachmentsStale"));
+        return { queued: false, completion: Promise.resolve(false), revision: null, userMessageId: intent.data.userMessageId ?? randomUUID() };
+      }
+      // Never overwrite a newer draft with a snapshot frozen before asynchronous preparation.
+      const matchesDraft = draft.text === intent.data.text && JSON.stringify(draft.segments) === JSON.stringify(intent.data.segments ?? []) && attachments.length === draft.attachments.length;
+      const revision = matchesDraft ? this.draftStore.currentRevision(sessionId) : null;
+      const content: QueueContent = { userMessageId: intent.data.userMessageId ?? randomUUID(), text: intent.data.text,
+        segments: intent.data.segments ?? [], attachments };
+      const submission = this.messageQueue.submit(sessionId, content);
+      if (submission.queued && revision !== null && await this.retireSubmittedDraft(sessionId, revision)) {
+        this.stateStore.clearPendingAttachments(sessionId);
+      }
+      return { ...submission, revision, userMessageId: content.userMessageId };
+    });
+    await this.postState();
+    const accepted = await claimed.completion;
+    if (!claimed.queued && accepted && claimed.revision !== null) {
+      await this.draftCoordinator.run(sessionId, async () => {
+        if (await this.retireSubmittedDraft(sessionId, claimed.revision!)) this.stateStore.clearPendingAttachments(sessionId);
+      });
+      await this.syncImagePreviewPanel(sessionId);
+    }
+    await this.postEvent({ type: "composerSubmissionResult", sessionId, userMessageId: claimed.userMessageId, accepted });
+    await this.postState();
   }
 
   private async sendUserMessage(
@@ -597,18 +1434,46 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     text: string,
     segments?: WebviewMessageSegment[],
     options?: {
+      attachments?: DraftAttachmentRef[];
       messageId?: string;
       retrying?: boolean;
     },
   ): Promise<void> {
+    if (this.sessionBlocked(sessionId)) return;
     const userMessageId = options?.messageId ?? randomUUID();
-    const pendingAttachments =
-      submitKind === "prompt" ? this.pendingAttachmentsForSession(sessionId) : [];
+    const draftAtSubmit = submitKind === "prompt" ? this.draftStore.peek(sessionId) : null;
+    // Steering messages join a turn already in flight and carry no attachments.
+    const attachments = options?.attachments ?? (
+      submitKind === "prompt"
+        ? draftAtSubmit!.attachments
+        : []
+    );
+    const submittedDraft: ComposerDraft | null = draftAtSubmit
+      ? {
+          attachments: [...attachments],
+          segments: [...(segments ?? draftAtSubmit.segments)],
+          text,
+        }
+      : null;
+
+    let submittedRevision: number | null = null;
+    // The prompt payload is the authoritative compose snapshot. Capture it before waiting for
+    // the acknowledgement: on a failed request it remains available, and on success we can
+    // prove whether anything changed after submission. Retried history is deliberately not
+    // written over a newer compose box.
+    if (submittedDraft && !options?.retrying) {
+      this.draftStore.update(sessionId, () => submittedDraft);
+      submittedRevision = this.draftStore.currentRevision(sessionId);
+    }
+
     this.stateStore.setActiveSession(sessionId);
     if (options?.retrying) {
       this.stateStore.markLocalUserMessagePending(sessionId, userMessageId);
     } else {
       this.stateStore.appendLocalUserMessage(sessionId, text, {
+        // The optimistic bubble shows the same references the strip was showing, so the
+        // attachment appears instantly without a byte moving anywhere.
+        attachments: attachments.map((attachment) => this.toAttachmentView(attachment)),
         messageId: userMessageId,
         segments,
         submitKind,
@@ -616,10 +1481,25 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     await this.postState();
     try {
+      if (segments?.some((s) => s.type === "instruction")) {
+        if (!this.initialized || !hasServeCapability(this.initialized, "get_instruction_catalog")) throw new Error(t("host.instructionsUnsupported"));
+        if (submitKind === "steer") throw new Error(t("host.steerInstructionsUnsupported"));
+      }
       const response = await this.deps.messenger.request({
         params: {
-          attachments: pendingAttachments.map((entry) => entry.attachment),
-          segments: segments as ServeContentSegment[] | undefined,
+          // Hashes only. The bytes went across once, at paste time.
+          attachments: attachments.map((attachment) => ({
+            blobSha: attachment.blobSha,
+            filename: attachment.filename,
+            kind: attachment.kind,
+            mimeType: attachment.mimeType,
+            providerSha: attachment.providerSha ?? null,
+          })),
+          segments: segments?.map((segment) => {
+            const {occurrenceId: _occurrence, ...wire} = segment;
+            if (wire.type === "instruction") return {type:wire.type,kind:wire.kind,label:wire.label,resourceId:wire.resourceId};
+            return wire;
+          }),
           userMessageId,
         },
         sessionId,
@@ -627,16 +1507,25 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         type: submitKind,
       });
       if (!response.success) {
+        const rawError = response.error ?? t("host.submitFailed", { kind: submitKind });
         this.stateStore.markLocalUserMessageFailed(
           sessionId,
           userMessageId,
-          response.error ?? `Tomcat ${submitKind} failed`,
+          displayDeliveryError(rawError),
           true,
+          rawError,
         );
       } else {
         this.stateStore.markLocalUserMessageConfirmed(sessionId, userMessageId);
-        if (pendingAttachments.length) {
+        if (
+          submitKind === "prompt"
+          && submittedRevision !== null
+          && await this.retireSubmittedDraft(sessionId, submittedRevision)
+        ) {
+          // The acknowledgement clears only the exact draft revision that it sent.
+          // Returning to identical text later is still a new user edit and must remain.
           this.stateStore.clearPendingAttachments(sessionId);
+          await this.syncImagePreviewPanel(sessionId);
         }
       }
     } catch (error) {
@@ -644,7 +1533,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         sessionId,
         userMessageId,
         formatBridgeError(
-          submitKind === "prompt" ? "send the message" : "send the steering message",
+          submitKind === "prompt" ? "host.bridge.send" : "host.bridge.steer",
           error,
         ),
         false,
@@ -653,6 +1542,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessions();
     await this.postState();
+  }
+
+  /** Reference view for a sent attachment, used by history bubbles. */
+  private toAttachmentView(attachment: DraftAttachmentRef): WebviewAttachmentView {
+    const uris = this.view
+      ? resolveAttachmentUris(this.view.webview, this.attachmentRoot, {
+          blobSha: attachment.blobSha,
+          hasThumb: attachment.hasThumb,
+        })
+      : null;
+    return {
+      blobSha: attachment.blobSha,
+      bytes: attachment.bytes,
+      providerSha: attachment.providerSha,
+      filename: attachment.filename,
+      fullUri: uris?.fullUri ?? null,
+      hasThumb: Boolean(attachment.hasThumb),
+      id: attachment.id,
+      kind: attachment.kind,
+      mimeType: attachment.mimeType,
+      path: attachment.sourcePath ?? null,
+      thumbUri: uris?.thumbUri ?? null,
+    };
   }
 
   private async postContextSearchResult(
@@ -706,8 +1618,38 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
   }
 
+  private async handlePathResolution(
+    intent: Extract<WebviewIntent, { type: "resolvePaths" }>,
+  ): Promise<void> {
+    try {
+      const results = await this.contextSearch.resolvePaths({
+        paths: intent.data.paths,
+      });
+      await this.postEvent({
+        requestId: intent.data.requestId,
+        results,
+        type: "pathsResolved",
+      });
+    } catch (error) {
+      console.error("Tomcat path resolution failed", error);
+      await this.postEvent({
+        requestId: intent.data.requestId,
+        results: [],
+        type: "pathsResolved",
+      });
+    }
+  }
+
+  private async openExternal(href: string): Promise<void> {
+    if (this.deps.openExternal) {
+      await this.deps.openExternal(href);
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(href));
+  }
+
   private lookupApprovalSessionId(requestId: string): string | null {
-    for (const session of Object.values(this.currentState().sessionViews)) {
+    for (const session of Object.values(this.peekState().sessionViews)) {
       const approval = session.timeline.find(
         (item): item is WebviewApprovalCard =>
           item.type === "approval" && item.request.requestId === requestId,
@@ -719,21 +1661,176 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return null;
   }
 
+  private sessionBlocked(sessionId: string): boolean {
+    return this.pendingDeletions.has(sessionId) || this.draftCoordinator.isRetired(sessionId);
+  }
+
+  private async deleteSession(sessionId: string, requestId: string): Promise<void> {
+    if (this.sessionBlocked(sessionId) || !this.peekState().sessions.some(s => s.sessionId === sessionId)) return;
+    const view = this.peekState().sessionViews[sessionId];
+    if (view?.busy || view?.commandPending || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)
+      || [...this.pendingQuestions.values()].some(q => q.sessionId === sessionId && !q.settled)) {
+      this.sessionFeedback = { id: requestId, code: "busy" }; await this.postState(); return;
+    }
+    if (this.pendingDraftForkBySource.has(sessionId)) {
+      this.sessionFeedback = { id: requestId, code: "pending_changes" }; await this.postState(); return;
+    }
+    const operation = { requestId, scopeKey: this.diskScopeKey ?? "", unknown: false };
+    this.pendingDeletions.set(sessionId, operation);
+    this.sessionFeedback = null;
+    await this.postState();
+    let sent = false;
+    let response;
+    try {
+      const initialized = await this.ensureInitialized();
+      if (!hasServeCapability(initialized, "delete_session")) {
+        this.pendingDeletions.delete(sessionId);
+        this.sessionFeedback = { id: requestId, code: "unavailable" }; await this.postState(); return;
+      }
+      if (!operation.scopeKey) {
+        const disk = await this.sessionPool.refresh();
+        if (!disk.sessionKey) throw new Error(t("session.delete.scope"));
+        operation.scopeKey = disk.sessionKey;
+      }
+      await this.draftCoordinator.fence(sessionId);
+      sent = true;
+      response = await this.deps.messenger.request({ type: "delete_session", sessionId, id: requestId });
+    } catch (error) {
+      if (!sent) {
+        this.pendingDeletions.delete(sessionId);
+        this.sessionFeedback = { id: requestId, code: "failed", detail: String(error) };
+      } else {
+        operation.unknown = true;
+        this.sessionFeedback = { id: requestId, code: "unknown" };
+        // A fresh, valid, same-scope disk result is the only alternative to an acknowledgement.
+        try { await this.refreshSessions({ post: false, expectedScope: operation.scopeKey }); } catch { /* Keep the draft and pause this ID. */ }
+      }
+      await this.postState(); return;
+    }
+    if (!response.success) {
+      this.pendingDeletions.delete(sessionId);
+      const code = response.error;
+      this.sessionFeedback = { id: requestId,
+        code: code === "busy" || code === "stop_timeout" ? "busy" : code === "session_in_use" ? "session_in_use" : code === "session_scope_mismatch" ? "session_scope_mismatch" : "failed",
+        ...(code && !["busy", "stop_timeout", "session_in_use", "session_scope_mismatch"].includes(code) ? { detail: code } : {}),
+      };
+      if (this.peekState().activeSessionId === sessionId) {
+        try { await this.selectSession(sessionId); }
+        catch (error) { console.warn("Tomcat could not reopen a session after refused deletion", error); }
+      }
+      await this.postState(); this.messageQueue.dispatch(sessionId); return;
+    }
+    const payload = response.payload;
+    if (!isRecordValue(payload) || !Array.isArray(payload.warnings) || !payload.warnings.every(w => typeof w === "string")) {
+      operation.unknown = true;
+      this.sessionFeedback = { id: requestId, code: "unknown" };
+      try { await this.refreshSessions({ post: false, expectedScope: operation.scopeKey }); } catch { /* Not evidence of absence. */ }
+      await this.postState(); return;
+    }
+    const wasActive = await this.removeDeletedSession(sessionId, requestId, payload.warnings);
+    try {
+      const disk = await this.sessionPool.refresh();
+      if (disk.sessionKey !== operation.scopeKey) throw new Error(t("session.delete.scope"));
+      this.diskScopeKey = disk.sessionKey;
+      this.stateStore.syncSessionList(disk);
+      if (wasActive) await this.selectDeletionFallback(disk);
+    } catch (error) {
+      // removeDeletedSession may set feedback after the initial reset in this method.
+      const feedback = this.sessionFeedback as import("./protocol").SessionActionFeedback | null;
+      const cleanupDetail = feedback?.id === requestId ? feedback.detail : undefined;
+      this.sessionFeedback = { id: requestId, code: "fallback_failed", detail: [cleanupDetail, String(error)].filter(Boolean).join("\n") };
+    }
+    await this.postState();
+  }
+
+  private async removeDeletedSession(sessionId: string, requestId: string, warnings: string[] = []): Promise<boolean> {
+    const wasActive = this.peekState().activeSessionId === sessionId;
+    const retirement = this.draftCoordinator.retire(sessionId);
+    this.pendingDeletions.delete(sessionId);
+    this.bumpHistoryFetchGen(sessionId);
+    this.closedFileSessions.add(sessionId);
+    for (const pending of this.pendingQuestions.values()) {
+      if (pending.sessionId === sessionId) this.finalizePendingQuestion(pending, "interrupted");
+    }
+    await retirement;
+    for (const [key, result] of this.finalizedQuestionResults) if (result.sessionId === sessionId) this.finalizedQuestionResults.delete(key);
+    this.messageQueue.forget(sessionId);
+    this.stateStore.removeSession(sessionId);
+    const cleanupWarnings = [...warnings];
+    try { await this.draftStore.discardStrict(sessionId); } catch (error) { cleanupWarnings.push(String(error)); }
+    try { await this.sessionPins?.setPinned(sessionId, false); } catch (error) { cleanupWarnings.push(String(error)); }
+    if (this.imagePreviewSessionId === sessionId) {
+      const { ImagePreviewPanel } = await import("../imagePreview/ImagePreviewPanel.js");
+      if (this.imagePreviewSessionId === sessionId) { ImagePreviewPanel.getCurrent()?.close(); this.imagePreviewSessionId = null; }
+    }
+    if (cleanupWarnings.length) this.sessionFeedback = { id: requestId, code: "partial_cleanup", detail: cleanupWarnings.join("\n") };
+    return wasActive;
+  }
+
+  private async reconcileDeletions(disk: SessionListPayload): Promise<boolean> {
+    let removedActive = false;
+    if (disk.scope !== "disk" || !disk.sessionKey) return false;
+    for (const [sessionId, operation] of this.pendingDeletions) {
+      if (!operation.unknown || operation.scopeKey !== disk.sessionKey) continue;
+      if (disk.sessions.some(s => s.sessionId === sessionId)) {
+        this.pendingDeletions.delete(sessionId);
+        this.sessionFeedback = { id: operation.requestId, code: "retained" };
+        this.messageQueue.dispatch(sessionId);
+      } else {
+        this.sessionFeedback = null;
+        removedActive = await this.removeDeletedSession(sessionId, operation.requestId) || removedActive;
+      }
+    }
+    return removedActive;
+  }
+
+  private async selectDeletionFallback(disk: SessionListPayload): Promise<void> {
+    const fallback = this.sessionPool.pickDefaultSession(disk);
+    const id = fallback ?? await this.sessionPool.createSession(this.deps.getDefaultCwd());
+    await this.selectSession(id);
+  }
+
   private async bootstrap(): Promise<void> {
-    await this.ensureInitialized();
-    await this.refreshModels();
+    await this.refreshModels({ strict: true });
     const sessions = await this.sessionPool.refresh();
+    await this.reconcileDeletions(sessions);
+    this.diskScopeKey = sessions.sessionKey;
     this.stateStore.syncSessionList(sessions);
     const preferredSessionId =
       this.sessionPool.pickDefaultSession(sessions) ??
-      this.initialized?.sessionId ??
-      null;
+      (this.initialized?.sessionId && !this.draftCoordinator.isRetired(this.initialized.sessionId) ? this.initialized.sessionId : null);
     if (!preferredSessionId) {
       const sessionId = await this.sessionPool.createSession(this.deps.getDefaultCwd());
-      await this.selectSession(sessionId);
+      await this.selectSession(sessionId, { strict: true });
       return;
     }
-    await this.selectSession(preferredSessionId);
+    await this.selectSession(preferredSessionId, { strict: true });
+  }
+
+  private async bootstrapWithConnectionState(): Promise<void> {
+    // A handshake failure belongs to the connection supervisor, which owns process restart and
+    // its fatal-state notification. Only failures after this point are "connected but degraded".
+    await this.ensureInitialized();
+    try {
+      await this.bootstrap();
+      this.stateStore.setConnectionStatus(this.serveConnectionStatus);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      console.error("[Tomcat webview] connected, but bootstrap failed", normalized);
+      this.stateStore.setConnectionStatus("degraded");
+      // Never let a failed state publication hide the original bootstrap failure. In
+      // particular, users still need the host-level Retry action when a bad history
+      // payload prevents the webview from rendering the degraded snapshot.
+      try {
+        await this.postState();
+      } catch (postError) {
+        console.error(
+          "[Tomcat webview] failed to publish degraded bootstrap state",
+          postError,
+        );
+      }
+      this.deps.reportBootstrapFailure?.(normalized);
+    }
   }
 
   private async ensureInitialized(): Promise<InitializeResult> {
@@ -741,20 +1838,97 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return this.initialized;
     }
     this.initialized = await this.deps.initialize();
+    this.stateStore.setSlashCommands(hasServeCapability(this.initialized, "run_slash_command") ? this.initialized.slashCommands ?? [] : []);
+    this.adoptAttachmentRoot(this.initialized.attachmentRoot);
     return this.initialized;
   }
 
   private async handleIntent(intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>): Promise<void> {
+    const data: Record<string, unknown> | undefined = "data" in intent && isRecordValue(intent.data) ? intent.data : undefined;
+    const scoped = data?.sessionId ?? data?.sourceSessionId;
+    if (typeof scoped === "string" && this.sessionBlocked(scoped)) {
+      if (intent.type === "answerQuestion") await this.postEvent({ type: "answerQuestionResult", accepted: false, requestId: intent.data.requestId, sessionId: scoped });
+      if ((intent.type === "prompt" || intent.type === "steer") && intent.data.userMessageId) await this.postEvent({ type: "composerSubmissionResult", accepted: false, userMessageId: intent.data.userMessageId, sessionId: scoped });
+      if ((intent.type === "attachFiles" || intent.type === "pickContext" || intent.type === "resolveDrop") && intent.data?.operationId) await this.postEvent({ type: "composerWorkResult", success: false, operationId: intent.data.operationId, sessionId: scoped, error: t("session.delete.pending") });
+      return;
+    }
     switch (intent.type) {
+      case "deleteSession":
+        await this.deleteSession(intent.data.sessionId, intent.messageId);
+        return;
+      case "setSessionPinned": {
+        const { sessionId, pinned } = intent.data;
+        if (!this.sessionPins || !this.peekState().sessions.some(s => s.sessionId === sessionId)) return;
+        try {
+          await this.sessionPins.setPinned(sessionId, pinned);
+        } catch (error) {
+          void vscode.window.showErrorMessage(t("session.pin.failed", {
+            detail: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        await this.postState();
+        return;
+      }
+      case "webviewError":
+        this.observedWebviewErrors.push({
+          message: intent.data.message,
+          stack: intent.data.stack,
+        });
+        console.error(
+          `[Tomcat webview] ${intent.data.message}`,
+          intent.data.stack ?? "",
+        );
+        return;
       case "ready":
+        // Resolving the attachment root can replace this document. Do not bootstrap a
+        // document that was invalidated while its ready message was waiting for that
+        // root: the replacement document will send its own ready message.
+        const webviewGeneration = this.webviewGeneration;
+        await this.attachmentRootPrimed;
+        if (webviewGeneration !== this.webviewGeneration) {
+          return;
+        }
+        this.messageQueue.cancelEditors();
         this.isReady = true;
-        this.stateStore.setReady(true);
         for (const waiter of [...this.readyWaiters]) {
           clearTimeout(waiter.timeout);
           waiter.resolve();
           this.readyWaiters.delete(waiter);
         }
-        await this.bootstrap();
+        await this.bootstrapWithConnectionState();
+        await this.postState();
+        // History/session refresh may rebuild a timeline while the host-local question is still live.
+        // Re-project pending controls after every DOM-ready handshake; the pending map, not the
+        // disposable webview DOM, owns their live lifecycle.
+        for (const pending of this.pendingQuestions.values()) {
+          if (pending.settled) continue;
+          this.stateStore.applyEvent({
+            payload: pending.request,
+            requestId: pending.request.requestId,
+            sessionId: pending.sessionId,
+            subtype: "ask_question",
+            type: "control_request",
+          });
+        }
+        for (const finalized of this.finalizedQuestionResults.values()) {
+          this.stateStore.applyEvent({
+            payload: finalized.request,
+            requestId: finalized.request.requestId,
+            sessionId: finalized.sessionId,
+            subtype: "ask_question",
+            type: "control_request",
+          });
+          this.stateStore.resolveApproval(
+            finalized.request.requestId,
+            finalized.response.result,
+          );
+        }
+        await this.postState();
+        for (const operation of this.pendingDraftForks.values()) {
+          if (!operation.captureAccepted) {
+            await this.requestDraftForkCapture(operation);
+          }
+        }
         return;
       case "listSessions":
         await this.refreshSessions();
@@ -763,23 +1937,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.refreshCheckpoints(intent.data.sessionId);
         await this.postState();
         return;
+      case "resyncSessionView":
+        await this.postSessionView(intent.data.sessionId);
+        return;
       case "loadOlderHistory":
         await this.loadOlderHistory(intent.data.sessionId);
         return;
       case "newSession": {
-        await this.ensureInitialized();
-        const sessionId = await this.sessionPool.createSession(
-          intent.data?.cwd ?? this.deps.getDefaultCwd(),
-        );
-        await this.selectSession(sessionId);
+        await this.beginNewSession(intent.data?.cwd ?? null);
+        return;
+      }
+      case "forkSession": {
+        await this.handleDraftForkCapture(intent.data);
         return;
       }
       case "switchSession":
         await this.switchSessionView(intent.data.sessionId);
         return;
       case "closeSession": {
+        this.messageQueue.pause(intent.data.sessionId);
+        this.closedFileSessions.add(intent.data.sessionId);
         const closed = await this.sessionPool.release(intent.data.sessionId);
         if (closed) {
+          this.messageQueue.release(intent.data.sessionId);
           await this.refreshSessions();
           const fallback = this.sessionPool.pickDefaultSession(this.currentStateToSessionList());
           if (fallback) {
@@ -797,9 +1977,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "prompt":
       case "steer": {
         await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        const sessionId = this.messageQueueEnabled
+          ? intent.data.sessionId ?? this.peekState().activeSessionId ?? await this.ensureWebviewSession(null)
+          : await this.ensureWebviewSession(intent.data.sessionId ?? null);
         if (!sessionId) {
           await this.postState();
+          return;
+        }
+        if (this.messageQueueEnabled && intent.type === "prompt") {
+          await this.submitQueuedComposer(sessionId, intent);
           return;
         }
         await this.sendUserMessage(
@@ -811,6 +1997,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             messageId: intent.data.userMessageId,
           },
         );
+        return;
+      }
+      case "queueAction": {
+        if (!this.messageQueueEnabled) return;
+        const { sessionId, userMessageId, action } = intent.data;
+        await this.draftCoordinator.run(sessionId, async () => {
+          switch (action) {
+            case "send": this.messageQueue.sendNow(sessionId, userMessageId); break;
+            case "edit": this.messageQueue.edit(sessionId, userMessageId); break;
+            case "cancel": this.messageQueue.edit(sessionId, null); break;
+            case "delete": this.messageQueue.remove(sessionId, userMessageId); break;
+            case "save": this.messageQueue.save(sessionId, { userMessageId, text: intent.data.text!, segments: intent.data.segments!, attachments: intent.data.attachments! }); break;
+          }
+        });
+        await this.postSessionView(sessionId);
         return;
       }
       case "retryUserMessage": {
@@ -832,71 +2033,328 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           {
             messageId: intent.data.messageId,
             retrying: true,
+          attachments: retry.attachments,
           },
         );
         return;
       }
-      case "resolveDrop": {
+      case "recoverErrorTurn": {
         await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSessionWithoutHistory(
-          intent.data.sessionId ?? null,
-        );
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId);
         if (!sessionId) {
           await this.postState();
           return;
         }
-        const uris: vscode.Uri[] = [];
-        for (const rawUri of intent.data.uris) {
-          try {
-            uris.push(vscode.Uri.parse(rawUri));
-          } catch {
-            // Ignore malformed drop payload entries; the editor keeps the rest.
-          }
+        const recovery = this.lookupErrorRecovery(sessionId, intent.data.errorId);
+        if (!recovery || recovery.action !== intent.data.action) {
+          return;
         }
-        await this.ingestPickedUris(sessionId, uris);
+        if (
+          recovery.action === "retry" &&
+          (!recovery.targetUserMessageId || !recovery.targetUserMessageId.trim())
+        ) {
+          return;
+        }
+        this.stateStore.dismissErrorRecovery(sessionId, intent.data.errorId);
+        try {
+          if (recovery.action === "retry") {
+            await this.deps.sessionRouter.retry(sessionId, recovery.targetUserMessageId!);
+          } else {
+            await this.deps.sessionRouter.resume(sessionId);
+          }
+          await this.refreshSessionState(sessionId, { trustBusy: true });
+          // Retry appends a second durable user row, while Resume may append the assistant
+          // continuation. Neither action has a live message event that can reconstruct the
+          // full failed chapter, so refresh the transcript before rendering again.
+          await this.refreshSessionHistory(sessionId);
+          await this.refreshSessions();
+          await this.postState();
+        } catch (error) {
+          this.stateStore.restoreDismissedErrorRecovery(sessionId, intent.data.errorId);
+          this.stateStore.setErrorRecoveryRejection(
+            sessionId,
+            intent.data.errorId,
+            displayRecoveryError(error),
+          );
+          await this.postState();
+        }
+        return;
+      }
+      case "resolveDrop": {
+        let sessionId = intent.data.sessionId ?? this.peekState().activeSessionId ?? "unknown";
+        try {
+          await this.ensureInitialized();
+          const resolvedSessionId = await this.ensureWebviewSessionWithoutHistory(
+            intent.data.sessionId ?? null,
+          );
+          if (!resolvedSessionId) {
+            throw new Error(t("host.droppedNoSession"));
+          }
+          sessionId = resolvedSessionId;
+          const uris: vscode.Uri[] = [];
+          for (const rawUri of intent.data.uris) {
+            try {
+              uris.push(vscode.Uri.parse(rawUri));
+            } catch {
+              // Ignore malformed drop payload entries; the editor keeps the rest.
+            }
+          }
+          const prepared = await this.ingestPickedUris(sessionId, uris, intent.data.target === "edit" ? intent.data.operationId : undefined);
+          await this.postComposerWorkResult(intent.data.operationId, sessionId, prepared?.error, prepared);
+        } catch (error) {
+          await this.postComposerWorkResult(intent.data.operationId, sessionId, error);
+          if (!intent.data.operationId) throw error;
+        }
+        return;
+      }
+      case "getInstructionCatalog": {
+        await this.refreshInstructionCatalog(intent.data.sessionId);
+        await this.postState();
         return;
       }
       case "searchContext":
         await this.handleContextSearch(intent);
         return;
+      case "resolvePaths":
+        await this.handlePathResolution(intent);
+        return;
       case "showWarningMessage":
         await vscode.window.showWarningMessage(intent.data.message);
         return;
       case "pickContext": {
-        await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
+        let sessionId = intent.data?.sessionId ?? this.peekState().activeSessionId ?? "unknown";
+        try {
+          await this.ensureInitialized();
+          const resolvedSessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
+          if (!resolvedSessionId) {
+            throw new Error(t("host.pickedNoSession"));
+          }
+          sessionId = resolvedSessionId;
+          const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
+          const prepared = picks?.length ? await this.ingestPickedUris(sessionId, picks, intent.data?.target === "edit" ? intent.data.operationId : undefined) : undefined;
+          await this.postComposerWorkResult(intent.data?.operationId, sessionId, prepared?.error, prepared);
+        } catch (error) {
+          await this.postComposerWorkResult(intent.data?.operationId, sessionId, error);
+          if (!intent.data?.operationId) throw error;
+        }
+        return;
+      }
+      case "cacheAttachmentThumbnail": {
+        await this.draftCoordinator.run(intent.data.sessionId, () =>
+          this.storeGeneratedThumbnail(intent.data),
+        );
+        return;
+      }
+      case "syncComposerDraft": {
+        const { sessionId, text, segments } = intent.data;
         if (!sessionId) {
-          await this.postState();
           return;
         }
-        const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
-        if (!picks?.length) {
+        try {
+          // Memory is updated synchronously; the disk write is debounced. No protocol
+          // traffic at all — this is the path that used to fire a full draft round trip
+          // on every keystroke.
+          //
+          // Deliberately no `postState()`: the webview is where this draft came from, so
+          // echoing the whole snapshot back at it every 250ms of typing is pure cost. The
+          // snapshot only needs pushing when the host changes something the webview does
+          // not already know about.
+          await this.draftCoordinator.run(sessionId, () =>
+            this.saveDraftContent(sessionId, text, segments),
+          );
+        } catch (error) {
+          console.warn("Tomcat failed to save the Composer draft", error);
+        }
+        return;
+      }
+      case "attachFiles": {
+        const { sessionId, files, operationId } = intent.data;
+        if (!sessionId || files.length === 0) {
+          await this.postComposerWorkResult(operationId, sessionId || "unknown");
           return;
         }
-        await this.ingestPickedUris(sessionId, picks);
+
+        try {
+          const uploads: AttachmentUpload[] = [];
+          const errors: string[] = [];
+        for (const file of files) {
+          // Validate before the bytes go any further. The backend validates again — this
+          // pass exists so the user hears about an oversized paste immediately.
+          const validation = validateAttachmentCandidate(file);
+          if (!validation.ok) {
+            errors.push(`${file.filename ?? "attachment"}: ${validation.error}`);
+            continue;
+          }
+          uploads.push({
+            dataBase64: file.dataBase64,
+            filename: validation.filename,
+            kind: validation.kind,
+            mimeType: validation.mimeType,
+            providerBase64: file.providerBase64,
+            providerMimeType: file.providerMimeType,
+            providerText: file.providerText,
+            sourcePath: typeof file.sourcePath === "string" ? file.sourcePath : null,
+            thumbBase64: file.thumbBase64,
+          });
+          // The webview reports what it could not derive (a thumbnail, an SVG raster).
+          // These are degradations, not failures, but the user should still know.
+          errors.push(
+            ...(file.warnings ?? []).map(
+              (warning) => `${validation.filename}: ${warning}`,
+            ),
+          );
+        }
+
+          const accepted = await this.draftCoordinator.run(sessionId, () =>
+            this.ingestUploads(sessionId, uploads, errors, intent.data.target),
+          );
+          if (intent.data.target === "edit") {
+            await this.postEvent({ type: "editContextResult", operationId: operationId!, sessionId,
+              attachments: accepted.map((a) => this.toPendingView(a, false)), references: [],
+              error: errors.length ? errors.join("; ") : undefined });
+            await this.postComposerWorkResult(operationId, sessionId);
+            return;
+          }
+          await this.postEvent({
+            items: accepted.map((reference) => ({
+              filename: reference.filename,
+              id: reference.id,
+              mimeType: reference.mimeType,
+            })),
+            operationId,
+            sessionId,
+            type: "attachFilesResult",
+          });
+          await this.reportAttachmentOutcome(accepted, errors);
+          await this.postComposerWorkResult(operationId, sessionId, accepted.length < files.length ? errors.join("; ") : undefined, { attachmentIds: accepted.map(a => a.id) });
+        } catch (error) {
+          await this.postComposerWorkResult(operationId, sessionId, error);
+          if (!operationId) throw error;
+        }
+        return;
+      }
+      case "removeDraftAttachment": {
+        const { sessionId, attachmentId } = intent.data;
+        if (!sessionId || !attachmentId) {
+          return;
+        }
+        await this.draftCoordinator.run(sessionId, () =>
+          this.removeDraftAttachment(sessionId, attachmentId),
+        );
+        await this.postState();
+        return;
+      }
+      case "openImagePreview": {
+        const { sessionId, attachmentId } = intent.data;
+        if (!sessionId || !attachmentId) {
+          return;
+        }
+        // Delegate to the ImagePreviewPanel handler
+        await this.openImagePreviewPanel(sessionId, attachmentId);
         return;
       }
       case "removeAttachment": {
-        const sessionId = intent.data.sessionId ?? this.currentState().activeSessionId;
+        const sessionId = intent.data.sessionId ?? this.peekState().activeSessionId;
         if (!sessionId) {
           return;
         }
-        this.stateStore.removePendingAttachment(sessionId, intent.data.attachmentId);
+        await this.draftCoordinator.run(sessionId, () =>
+          this.removeDraftAttachment(sessionId, intent.data.attachmentId),
+        );
         await this.postState();
         return;
       }
       case "interrupt": {
         const sessionId = await this.ensureWebviewSessionWithoutHistory(
-          intent.data?.sessionId ?? this.currentState().activeSessionId,
+          intent.data?.sessionId ?? this.peekState().activeSessionId,
         );
         if (!sessionId) {
           await this.postState();
           return;
         }
-        await this.deps.messenger.request({
-          sessionId,
-          type: "interrupt",
-        });
+        if (this.messageQueueEnabled) this.messageQueue.stop(sessionId);
+        try {
+          await this.deps.messenger.request({
+            sessionId,
+            type: "interrupt",
+          });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          console.error("[Tomcat webview] interrupt request failed", error);
+          await vscode.window.showErrorMessage(t("host.stopFailed", { detail }));
+        }
+        return;
+      }
+      case "previewRewind":
+      case "rewindAndResend": {
+        const { sessionId, messageId } = intent.data;
+        const resultType = intent.type === "previewRewind" ? "previewRewindResult" : "rewindAndResendResult";
+        try {
+          const initialized = await this.ensureInitialized();
+          if (!hasServeCapability(initialized, "rewind_and_resend")) throw new Error(t("host.rewindUnsupported"));
+          const obsoleteIds = new Set(this.peekState().sessionViews[sessionId]?.timeline.map((item) => item.id) ?? []);
+          const response = intent.type === "previewRewind"
+            ? await this.deps.messenger.request({ type: "preview_rewind", sessionId, messageId })
+            : await this.deps.messenger.request({
+                type: "rewind_and_resend",
+                sessionId,
+                messageId,
+                files: intent.data.files,
+                message: {
+                  text: intent.data.text,
+                  segments: intent.data.segments.map(({ occurrenceId: _id, ...segment }) => segment),
+                  attachments: intent.data.attachments.map((a) => ({
+                    kind: a.kind,
+                    blobSha: a.blobSha,
+                    filename: a.filename,
+                    mimeType: a.mimeType,
+                    providerSha: a.providerSha,
+                  })),
+                },
+              });
+          if (response.sessionId && response.sessionId !== sessionId) throw new Error(t("host.rewindSessionMismatch"));
+          const committed = !response.success && response.payload !== null && typeof response.payload === "object"
+            && "committed" in response.payload && response.payload.committed === true;
+          if (intent.type === "rewindAndResend" && (response.success || response.error === "rewind_target_stale" || committed)) {
+            try {
+              await this.refreshSessionHistory(sessionId, { strict: true, replace: obsoleteIds });
+              await this.refreshSessionState(sessionId, { trustBusy: true });
+              await this.refreshCheckpoints(sessionId);
+              if (committed) {
+                this.stateStore.appendMessage(
+                  sessionId,
+                  "error",
+                  t("host.rewindCommitted", { detail: rewindErrorDetail(response.error, response.payload) ?? response.error ?? t("error.unknown") }),
+                );
+              }
+              await this.postState();
+            } catch (error) {
+              // A failed read cannot replace the already received mutation result.
+              console.warn("Tomcat could not refresh the conversation after rewind", error);
+              void vscode.window.showWarningMessage(t("host.historyRefreshFailed", {
+                detail: error instanceof Error ? error.message : String(error),
+              }));
+            }
+          }
+          const preview = intent.type === "previewRewind" && isPreviewRewindResponse(response.payload) ? response.payload : undefined;
+          await this.postEvent({
+            type: resultType,
+            requestId: intent.messageId,
+            sessionId,
+            success: response.success && (intent.type !== "previewRewind" || !!preview),
+            errorDetail: rewindErrorDetail(response.error, response.payload),
+            error: response.error ?? (intent.type === "previewRewind" && !preview ? t("host.rewindPreviewFailed") : undefined),
+            preview,
+          });
+        } catch (error) {
+          await this.postEvent({
+            type: resultType,
+            requestId: intent.messageId,
+            sessionId,
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         return;
       }
       case "restoreCheckpoint": {
@@ -916,7 +2374,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("restore checkpoint", error),
+            formatBridgeError("host.bridge.restore", error),
           );
           await this.postState();
           return;
@@ -928,10 +2386,55 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "runSlashCommand":
+      case "compact": {
+        const initialized = await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(intent.data.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        const session = this.peekState().sessionViews[sessionId];
+        if (session?.busy || session?.commandPending) {
+          this.stateStore.appendMessage(sessionId, "error", t("host.commandBusy"));
+          await this.postState();
+          return;
+        }
+        this.stateStore.setCommandPending(sessionId, true);
+        try {
+          await this.postState();
+          if (intent.type === "runSlashCommand") {
+            if (!hasServeCapability(initialized, "run_slash_command")) throw new Error(t("host.commandUnsupported"));
+            const reply = await this.deps.sessionRouter.runSlashCommand(sessionId, intent.data.text);
+            if (reply.ok) await this.refreshInstructionCatalog(sessionId);
+            if (this.peekState().sessionViews[sessionId]) this.stateStore.appendMessage(sessionId, reply.ok ? "notice" : "error", reply.text);
+          } else {
+            const report = await this.deps.sessionRouter.compact(sessionId);
+            if (!this.peekState().sessionViews[sessionId]) return;
+            await this.refreshSessionState(sessionId, { trustBusy: true });
+            await this.refreshSessionHistory(sessionId);
+            this.stateStore.appendMessage(sessionId, "notice", t("host.compacted", { before: (report.beforeUsageRatio * 100).toFixed(1), after: (report.afterUsageRatio * 100).toFixed(1) }));
+          }
+        } catch (error) {
+          if (this.peekState().sessionViews[sessionId]) {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.stateStore.appendMessage(sessionId, "error", detail.trim() === "busy" ? t("host.commandBusy") : formatBridgeError(intent.type === "compact" ? "host.bridge.compact" : "host.bridge.command", error));
+          }
+        } finally {
+          this.stateStore.setCommandPending(sessionId, false);
+          this.messageQueue.dispatch(sessionId);
+          await this.postState();
+        }
+        return;
+      }
       case "setModel": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
         if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) {
           await this.postState();
           return;
         }
@@ -941,14 +2444,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to switch model",
+              response.error ?? t("host.modelSwitchFailed"),
             );
           }
         } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("switch models", error),
+            formatBridgeError("host.bridge.switchModel", error),
           );
         }
         await this.refreshModels();
@@ -973,25 +2476,77 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to change reasoning effort",
+              response.error ?? t("host.effortFailed"),
             );
+          } else {
+            await this.refreshModels();
           }
         } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("change reasoning effort", error),
+            formatBridgeError("host.bridge.effort", error),
           );
         }
         await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();
         return;
       }
-      case "openModelSettings":
-        if (!hasAnyModelAdminCapability(await this.ensureInitialized())) {
+      case "setSpeed": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
           return;
         }
-        this.deps.openModelSettings?.(intent.data?.route ?? "models");
+        try {
+          const response = await this.deps.messenger.sendSetSpeed(sessionId, intent.data.modelId, intent.data.speed);
+          if (!response.success) {
+            this.stateStore.appendMessage(sessionId, "error", response.error ?? t("plan.host.speedFailed"));
+          } else {
+            await this.refreshModels();
+          }
+        } catch (error) {
+          this.stateStore.appendMessage(sessionId, "error", formatBridgeError("host.bridge.speed", error));
+        }
+        await this.refreshSessionState(sessionId, { trustBusy: true });
+        await this.postState();
+        return;
+      }
+      case "setContextWindow": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        try {
+          const response = await this.deps.messenger.sendSetContextWindow(
+            sessionId,
+            intent.data.modelId,
+            intent.data.contextWindow,
+          );
+          if (!response.success) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              response.error ?? t("host.contextFailed"),
+            );
+          }
+        } catch (error) {
+          this.stateStore.appendMessage(
+            sessionId,
+            "error",
+            formatBridgeError("host.bridge.context", error),
+          );
+        }
+        await this.refreshModels();
+        await this.refreshSessionState(sessionId, { trustBusy: true });
+        await this.postState();
+        return;
+      }
+      case "openSettings":
+        this.deps.openSettings?.(intent.data?.route ?? "general");
         return;
       case "setBuildModel": {
         await vscode.workspace
@@ -1014,6 +2569,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.runPlanBuild(sessionId, intent.data.planId);
           return;
         }
+        if (this.peekState().sessionViews[sessionId]?.busy || this.messageQueue.isRunning(sessionId) || this.messageQueue.hasInFlight(sessionId)) {
+          await this.postState();
+          return;
+        }
         try {
           const response = await this.deps.messenger.sendSetPlanMode({
             action: intent.data.action,
@@ -1024,14 +2583,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             this.stateStore.appendMessage(
               sessionId,
               "error",
-              response.error ?? "Unable to change plan mode",
+              response.error ?? t("host.planModeFailed"),
             );
           }
         } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            formatBridgeError("change plan mode", error),
+            formatBridgeError("host.bridge.planMode", error),
           );
         }
         await this.refreshSessionState(sessionId, { trustBusy: true });
@@ -1041,62 +2600,109 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "openFile":
         this.openFileObserved = true;
         try {
-          await this.deps.ide.showFile(intent.data.path);
+          await this.deps.ide.showFile(intent.data.path, intent.data.line);
         } catch (error) {
-          const sessionId = this.currentState().activeSessionId;
-          if (sessionId) {
-            this.stateStore.appendMessage(
-              sessionId,
-              "error",
-              formatBridgeError(`open file ${intent.data.path}`, error),
-            );
-            await this.postState();
+          await vscode.window.showErrorMessage(
+            formatBridgeError("host.bridge.openFile", error, { path: intent.data.path }),
+          );
+        }
+        return;
+      case "openLink": {
+        const target = classifyLink(intent.data.href);
+        if (target.kind === "external") {
+          await this.openExternal(target.href);
+        } else if (target.kind === "file") {
+          try {
+            await this.deps.ide.showFile(target.path, target.line);
+          } catch {
+            await this.openExternal(intent.data.href);
           }
         }
         return;
+      }
+      case "refreshSessionFiles":
+        await this.refreshSessionFiles(intent.data.sessionId);
+        return;
+      case "openSessionFileDiff": {
+        const { sessionId, sourceTurnId, path: filePath } = intent.data;
+        if (!this.initialized || !hasServeCapability(this.initialized, "session_files") || this.closedFileSessions.has(sessionId)) return;
+        try {
+          const baseline = await this.deps.sessionRouter.getSessionFileBaseline(sessionId, sourceTurnId, filePath);
+          await this.deps.ide.openSessionFileDiff(sessionId, sourceTurnId, filePath, baseline.text);
+        } catch (error) {
+          void vscode.window.showWarningMessage(sessionFileErrorText(error, path.basename(filePath), "host.bridge.openDiff", { path: filePath }));
+          void this.refreshSessionFiles(sessionId);
+        }
+        return;
+      }
+      case "keepSessionFiles":
+      case "restoreSessionFiles": {
+        const { sessionId, sourceTurnId, requestId } = intent.data;
+        const keeping = intent.type === "keepSessionFiles";
+        const paths = intent.type === "restoreSessionFiles" ? intent.data.paths : [];
+        const resultType = keeping ? "keepSessionFilesResult" : "restoreSessionFilesResult";
+        const session = this.peekState().sessionViews[sessionId];
+        let success = false;
+        let detail: string | undefined;
+        const generation = this.fileGeneration;
+        const initialized = this.initialized;
+        if (!initialized || !hasServeCapability(initialized, "session_files") || !session || this.closedFileSessions.has(sessionId)) return;
+        if (session.busy || session.commandPending) {
+          await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: t("host.file.busy", { action: t(keeping ? "host.file.keep" : "host.file.undo") }) });
+          return;
+        }
+        const targets = new Set(paths.map(sessionFileIdentity));
+        const dirty = (vscode.workspace.textDocuments ?? []).find((document) => document.uri.scheme === "file" && document.isDirty && targets.has(sessionFileIdentity(document.uri.fsPath)));
+        if (dirty) {
+          detail = t("host.file.dirty", { name: path.basename(dirty.uri.fsPath) });
+          void vscode.window.showWarningMessage(detail);
+          await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success: false, error: detail });
+          return;
+        }
+        this.stateStore.setCommandPending(sessionId, true);
+        await this.postSessionView(sessionId);
+        try {
+          if (keeping) await this.deps.sessionRouter.keepSessionFiles(sessionId, sourceTurnId);
+          else await this.deps.sessionRouter.restoreSessionFiles(sessionId, sourceTurnId, paths);
+          success = true;
+        } catch (error) {
+          detail = sessionFileErrorText(error, paths.length === 1 ? path.basename(paths[0]) : t("host.file.selected"), keeping ? "host.bridge.keep" : "host.bridge.undo");
+          void vscode.window.showWarningMessage(detail);
+        } finally {
+          if (!this.disposed && generation === this.fileGeneration && initialized === this.initialized && !this.closedFileSessions.has(sessionId)) {
+            this.stateStore.setCommandPending(sessionId, false);
+            this.messageQueue.dispatch(sessionId);
+            await this.refreshSessionFiles(sessionId);
+            await this.postSessionView(sessionId);
+            await this.postEvent({ type: resultType, sessionId, sourceTurnId, requestId, success, error: detail });
+          }
+        }
+        return;
+      }
       case "openDiff": {
-        const toolInfo = this.findToolCard(intent.data.toolCallId);
-        const tool = toolInfo?.tool;
+        const { sessionId, toolCallId } = intent.data;
+        const tool = this.findToolCard(sessionId, toolCallId);
         const displayPath =
           tool?.display?.kind === "file"
             ? tool.display.file
             : typeof tool?.args?.path === "string"
               ? tool.args.path
               : null;
-        if (!tool || !displayPath) {
+        if (!tool || !displayPath || !isDiffViewable(tool)) {
+          await vscode.window.showWarningMessage(t("host.diffUnavailable"));
           return;
         }
         try {
-          if (tool.diff?.length) {
-            const { after, before } = reconstructDiffPair(tool.diff);
-            await this.deps.ide.openReconstructedDiff(
-              intent.data.toolCallId,
-              displayPath,
-              before,
-              after,
-            );
-          } else {
-            await this.deps.ide.showFile(displayPath);
-            const sessionId = toolInfo?.sessionId ?? this.currentState().activeSessionId;
-            if (sessionId) {
-              this.stateStore.appendMessage(
-                sessionId,
-                "notice",
-                "File too large for inline diff. Opened the current file instead.",
-              );
-              await this.postState();
-            }
-          }
+          await this.deps.ide.openDiffPreview(
+            sessionId,
+            toolCallId,
+            displayPath,
+            createDiffPresentation(tool.diff),
+          );
         } catch (error) {
-          const sessionId = this.currentState().activeSessionId;
-          if (sessionId) {
-            this.stateStore.appendMessage(
-              sessionId,
-              "error",
-              formatBridgeError(`open diff ${displayPath}`, error),
-            );
-            await this.postState();
-          }
+          await vscode.window.showErrorMessage(
+            formatBridgeError("host.bridge.openDiff", error, { path: displayPath }),
+          );
         }
         return;
       }
@@ -1107,12 +2713,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           try {
             await this.deps.ide.showFile(intent.data.path);
           } catch {
-            const sessionId = this.currentState().activeSessionId;
+            const sessionId = this.peekState().activeSessionId;
             if (sessionId) {
               this.stateStore.appendMessage(
                 sessionId,
                 "error",
-                formatBridgeError(`open plan file ${intent.data.path}`, error),
+                formatBridgeError("host.bridge.openPlan", error, { path: intent.data.path }),
               );
               await this.postState();
             }
@@ -1120,21 +2726,30 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       case "answerQuestion": {
-        const pending = this.pendingQuestions.get(intent.data.requestId);
-        if (!pending) {
+        const pending = this.pendingQuestions.get(
+          `${intent.data.sessionId}\0${intent.data.requestId}`,
+        );
+        if (!pending || pending.settled) {
           const sessionId =
             this.lookupApprovalSessionId(intent.data.requestId)
-            ?? this.currentState().activeSessionId;
+            ?? this.peekState().activeSessionId;
           if (sessionId) {
             this.stateStore.appendMessage(
               sessionId,
               "notice",
-              "This question is no longer active. Please ask again if you still need it.",
+              t("host.questionInactive"),
             );
             await this.postState();
           }
+          await this.postEvent({
+            accepted: false,
+            requestId: intent.data.requestId,
+            sessionId: intent.data.sessionId,
+            type: "answerQuestionResult",
+          });
           return;
         }
+        pending.settled = true;
         pending.resolve(
           normalizeAskQuestionResponse(intent.data.requestId, intent.data.result),
         );
@@ -1144,32 +2759,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
-    if (
-      event.type === "tool_execution_start" &&
-      isMutationTool(event.toolName) &&
-      typeof this.deps.ide.rememberToolStart === "function"
-    ) {
-      try {
-        await this.deps.ide.rememberToolStart(event.toolCallId, event.args);
-      } catch (error) {
-        console.warn("Tomcat webview failed to capture tool start snapshot", error);
-      }
-    }
-    if (
-      event.type === "tool_execution_end" &&
-      event.display?.kind === "file" &&
-      isMutationTool(event.toolName) &&
-      typeof this.deps.ide.rememberToolResult === "function"
-    ) {
-      try {
-        await this.deps.ide.rememberToolResult(
-          event.toolCallId,
-          event.display.file,
-          event.display.diff?.length ? reconstructDiffPair(event.display.diff) : undefined,
-        );
-      } catch (error) {
-        console.warn("Tomcat webview failed to capture tool result snapshot", error);
-      }
+    if (event.sessionId && this.draftCoordinator.isRetired(event.sessionId)) return;
+    if (event.type === "tool_execution_end" && event.sessionId && ["write", "edit", "hashline_edit"].includes(event.toolName)) {
+      void this.refreshSessionFiles(event.sessionId);
     }
     if (
       event.type === "agent_end"
@@ -1179,22 +2771,52 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     ) {
       this.sessionsAwaitingErrorHistoryRefresh.add(event.sessionId);
     }
-    this.stateStore.applyEvent(event);
+    const mutation = this.stateStore.applyEvent(event);
+    if (event.sessionId && this.messageQueueEnabled) {
+      if (event.type === "agent_start") this.messageQueue.start(event.sessionId);
+      if (event.type === "steering_consumed") this.messageQueue.consumed(event.sessionId, event.userMessageIds);
+      if (event.type === "agent_idle") this.messageQueue.idle(event.sessionId, event.outcome);
+    }
     await this.maybeAutoOpenPlanPreview(event);
+    const previewRefresh = extractPlanPreviewRefreshArgs(event);
+    if (previewRefresh && this.deps.refreshPlanPreview) {
+      try {
+        await this.deps.refreshPlanPreview(
+          previewRefresh.planId,
+          previewRefresh.path,
+          previewRefresh.state,
+        );
+      } catch (error) {
+        console.warn("Tomcat webview failed to refresh the plan preview", error);
+      }
+    }
+    let requiresSessionView = false;
     if (event.sessionId) {
       if (shouldReconcileSessionState(event)) {
         await this.refreshSessionState(event.sessionId, { trustBusy: false });
+        requiresSessionView = true;
       }
       if (event.type === "turn_end") {
         await this.refreshCheckpoints(event.sessionId);
+        requiresSessionView = true;
       }
       if (event.type === "agent_idle" && this.sessionsAwaitingErrorHistoryRefresh.has(event.sessionId)) {
         this.sessionsAwaitingErrorHistoryRefresh.delete(event.sessionId);
         await this.refreshSessionHistory(event.sessionId);
+        requiresSessionView = true;
       }
     }
     await this.postEvent(event);
-    await this.postState();
+    const force = shouldForceServeEventFlush(event);
+    if (!event.sessionId) {
+      await this.broadcastFullState({ force });
+      return;
+    }
+    if (requiresSessionView) {
+      await this.broadcastSession(event.sessionId, { force });
+      return;
+    }
+    await this.broadcastMutation(mutation, { force });
   }
 
   /**
@@ -1247,14 +2869,27 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.domSnapshots.resolve(message.messageId, message.data);
       return;
     }
-    await this.handleIntent(message);
+    if (message.type === "__test.dom_fallback_snapshot") {
+      // Only installed error-boundary E2E uses this shape. Its contract asks
+      // for fallback HTML, while the normal snapshot retains its full metrics.
+      this.domSnapshots.resolve(message.messageId, message.data as DomSnapshot);
+      return;
+    }
+    try { await this.handleIntent(message); }
+    catch (error) {
+      const data: Record<string, unknown> | undefined = "data" in message && isRecordValue(message.data) ? message.data : undefined;
+      const sessionId = data?.sessionId ?? data?.sourceSessionId;
+      if (typeof sessionId === "string" && this.draftCoordinator.isRetired(sessionId)) return;
+      throw error;
+    }
   }
 
   private currentStateToSessionList() {
+    const state = this.peekState();
     return {
-      activeSessionId: this.currentState().activeSessionId,
+      activeSessionId: state.activeSessionId,
       scope: "disk" as const,
-      sessions: this.currentState().sessions.map((session) => ({
+      sessions: state.sessions.map((session) => ({
         busy: session.busy,
         isCurrent: session.isCurrent,
         sessionId: session.sessionId,
@@ -1265,20 +2900,22 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async ensureWebviewSession(sessionId: string | null): Promise<string | null> {
-    const target = sessionId ?? this.currentState().activeSessionId;
+    const target = sessionId ?? this.peekState().activeSessionId;
+    if (target && this.sessionBlocked(target)) return null;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       await this.selectSession(created);
       return created;
     }
     await this.selectSession(target);
-    return target;
+    return this.sessionBlocked(target) ? null : target;
   }
 
   private async ensureWebviewSessionWithoutHistory(
     sessionId: string | null,
   ): Promise<string | null> {
-    const target = sessionId ?? this.currentState().activeSessionId;
+    const target = sessionId ?? this.peekState().activeSessionId;
+    if (target && this.sessionBlocked(target)) return null;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       this.stateStore.setActiveSession(created);
@@ -1289,29 +2926,147 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
     this.stateStore.setActiveSession(target);
     await this.sessionPool.switchTo(target);
-    return target;
+    return this.sessionBlocked(target) ? null : target;
+  }
+
+  private async postComposerWorkResult(
+    operationId: string | undefined,
+    sessionId: string,
+    error?: unknown,
+    prepared?: { attachmentIds?: string[]; references?: WebviewReference[] },
+  ): Promise<void> {
+    if (!operationId) return;
+    await this.postEvent({
+      ...prepared,
+      ...(error === undefined
+        ? {}
+        : { error: error instanceof Error ? error.message : String(error) }),
+      operationId,
+      sessionId,
+      success: error === undefined,
+      type: "composerWorkResult",
+    });
   }
 
   private async postEvent(content: HostEventFrameContent): Promise<void> {
-    await this.postMessage({
+    this.postMessage({
       channel: "event",
       content,
       messageId: createHostFrameMessageId("event"),
     });
   }
 
-  private async postMessage(frame: HostToWebviewFrame): Promise<void> {
-    if (!this.view) {
-      return;
-    }
-    await this.view.webview.postMessage(frame);
+  private postEventWithDelivery(
+    content: HostEventFrameContent,
+  ): Promise<void> {
+    return this.postMessage({
+      channel: "event",
+      content,
+      messageId: createHostFrameMessageId("event"),
+    }).delivered;
   }
 
-  private async postState(): Promise<void> {
+  private async flushStateBroadcastPlan(
+    plan: StateBroadcasterFlushPlan,
+  ): Promise<void> {
     if (!this.view || !this.isReady) {
       return;
     }
-    const snapshot = await this.enrichPlanCards(this.stateStore.snapshot());
+    if (plan.fullState) {
+      await this.postStateFrame();
+      return;
+    }
+    await this.postSessionViews([
+      ...plan.sessionIds,
+      ...(this.sessionPatchFramesEnabled ? [] : plan.sessionPatches.map(patch => patch.sessionId)),
+    ]);
+    if (!this.sessionPatchFramesEnabled) return;
+    for (const patch of plan.sessionPatches) {
+      await this.postSessionPatch(
+        patch.sessionId,
+        patch.seq,
+        patch.ops,
+      );
+    }
+  }
+
+  private async broadcastFullState(
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    this.stateBroadcaster.markFullState();
+    if (options.force) {
+      await this.stateBroadcaster.forceFlush();
+    }
+  }
+
+  private async broadcastSession(
+    sessionId: string | null | undefined,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    if (!sessionId) {
+      if (options.force) {
+        await this.stateBroadcaster.forceFlush();
+      }
+      return;
+    }
+    this.stateBroadcaster.markSession(sessionId);
+    if (options.force) {
+      await this.stateBroadcaster.forceFlush();
+    }
+  }
+
+  private async broadcastMutation(
+    mutation: SessionRenderMutation,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    if (mutation.kind === "patch") {
+      if (this.sessionPatchFramesEnabled) {
+        this.stateBroadcaster.appendPatch(mutation.sessionId, mutation.ops);
+      } else {
+        this.stateBroadcaster.markSession(mutation.sessionId);
+      }
+    } else if (mutation.kind === "session") {
+      this.stateBroadcaster.markSession(mutation.sessionId);
+    }
+    if (options.force) {
+      await this.stateBroadcaster.forceFlush();
+    }
+  }
+
+  private postMessage(frame: HostToWebviewFrame): WebviewMessageDelivery {
+    if (frame.channel !== "state" && "sessionId" in frame.content && typeof frame.content.sessionId === "string" && this.draftCoordinator.isRetired(frame.content.sessionId)) {
+      return { delivered: Promise.resolve() };
+    }
+    const delivered = this.view
+      ? Promise.resolve(this.view.webview.postMessage(frame)).then((accepted) => {
+        if (!accepted) {
+          throw new Error("VS Code rejected the webview message");
+        }
+      })
+      : Promise.reject(new Error("Tomcat webview is not available"));
+    // VS Code's promise only acknowledges the workbench hand-off. It does not provide an
+    // application-level delivery guarantee and, while a WebviewView changes visibility, can
+    // stay pending indefinitely. Host state must never be held behind that acknowledgement:
+    // the webview receives a full snapshot when it becomes visible again.
+    //
+    // Attach a sink for callers that deliberately do not await the delivery signal, while
+    // still returning the original promise to the one reliability-sensitive fork-result path.
+    void delivered.catch(() => undefined);
+    return { delivered };
+  }
+
+  private async postState(): Promise<void> {
+    if (!this.view || !this.isReady) return;
+    await this.broadcastFullState({ force: true });
+  }
+
+  private async postStateFrame(): Promise<void> {
+    if (!this.view || !this.isReady) {
+      return;
+    }
+    const snapshot = this.projectCurrentDrafts(this.decorateStateSnapshot(
+      await this.enrichPlanCards(this.stateStore.snapshot()),
+    ));
     await this.postMessage({
       channel: "state",
       content: snapshot,
@@ -1319,7 +3074,105 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
+  private async postSessionView(sessionId: string): Promise<void> {
+    if (!this.view || !this.isReady) return;
+    await this.broadcastSession(sessionId, { force: true });
+  }
+
+  private async postSessionViews(sessionIds: readonly string[]): Promise<void> {
+    if (!this.view || !this.isReady) return;
+    // Capture the entire batch before metadata IO: later deltas belong to the next
+    // patch, not both that patch and a snapshot captured halfway through this batch.
+    const snapshots = sessionIds.map(sessionId => ({
+      sessionId,
+      view: this.stateStore.snapshotSession(sessionId),
+      tab: this.stateStore.snapshotSessionTab(sessionId),
+    }));
+    for (const { sessionId, view, tab } of snapshots) {
+      if (!view) continue;
+      const enriched = await this.enrichPlanSession(view);
+      await this.postMessage({
+        channel: "sessionView",
+        content: {
+          sessionId,
+          tab: tab ? { ...(this.sessionPins ? this.sessionPins.project(tab) : tab), deleting: this.pendingDeletions.has(sessionId) } : null,
+          view: this.projectCurrentDraft(sessionId, enriched),
+        },
+        messageId: createHostFrameMessageId("session-view"),
+      });
+    }
+  }
+
+  private async postSessionPatch(
+    sessionId: string,
+    seq: number,
+    ops: StateBroadcasterFlushPlan["sessionPatches"][number]["ops"],
+  ): Promise<void> {
+    if (!this.view || !this.isReady || ops.length === 0) {
+      return;
+    }
+    await this.postMessage({
+      channel: "sessionPatch",
+      content: {
+        ops,
+        seq,
+        sessionId,
+      },
+      messageId: createHostFrameMessageId("session-patch"),
+    });
+  }
+
   async postInsertReference(sessionId: string, reference: WebviewReference): Promise<void> {
+    reference = withOccurrence(reference);
+    // Persist first. A webview event is an immediate rendering aid, not the source of
+    // truth: it can arrive while another session is active or after the UI has reloaded.
+    const inserted = await this.draftCoordinator.run(sessionId, () =>
+      this.insertReferenceIntoDraft(sessionId, reference),
+    );
+    if (inserted) {
+      await this.postInsertedReference(sessionId, reference);
+    }
+  }
+
+  /**
+   * Persist a reference while the caller already owns the session's draft lane.
+   * `ingestPickedUris` uses this directly to commit a mixed reference/upload selection
+   * as one queue item; external callers must use `postInsertReference` above.
+   */
+  private async insertReferenceIntoDraft(
+    sessionId: string,
+    reference: WebviewReference,
+  ): Promise<boolean> {
+    return (await this.insertReferencesIntoDraft(sessionId, [reference])).length > 0;
+  }
+
+  /**
+   * Add one picker transaction's references in one draft replacement and one state
+   * projection. Emitting a partial state after each item lets the webview classify the
+   * first reference as a local edit and reject the later, complete snapshot.
+   */
+  private async insertReferencesIntoDraft(
+    sessionId: string,
+    references: readonly WebviewReference[],
+  ): Promise<WebviewReference[]> {
+    const current = this.draftStore.peek(sessionId);
+    const inserted = references.map((reference) => withOccurrence(reference));
+    if (inserted.length === 0) {
+      return inserted;
+    }
+    const draft = await this.draftStore.replaceAndFlush(sessionId, {
+      attachments: current.attachments,
+      segments: [...current.segments, ...inserted],
+      text: current.text,
+    });
+    await this.applyDraftToState(sessionId, draft);
+    return inserted;
+  }
+
+  private async postInsertedReference(
+    sessionId: string,
+    reference: WebviewReference,
+  ): Promise<void> {
     await this.postEvent({
       reference,
       sessionId,
@@ -1327,30 +3180,77 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
-  private async enrichPlanCards(snapshot: WebviewStateSnapshot): Promise<WebviewStateSnapshot> {
-    const sessions = Object.values(snapshot.sessionViews);
+  /**
+   * A picker confirmation may add several references to one durable draft transaction.
+   * Project that transaction to the webview in one frame so Chromium applies the same
+   * complete set in one editor update; one frame being lost must never leave a partial
+   * selection visible.
+   */
+  private async postInsertedReferences(
+    sessionId: string,
+    references: WebviewReference[],
+  ): Promise<void> {
+    if (references.length === 0) {
+      return;
+    }
+    await this.postEvent({
+      references,
+      sessionId,
+      type: "insertReferences",
+    });
+  }
+
+  private async enrichPlanSession(
+    session: WebviewStateSnapshot["sessionViews"][string],
+  ): Promise<WebviewStateSnapshot["sessionViews"][string]> {
+    const planCards = session.timeline.filter(
+      (item): item is WebviewPlanFileCard => item.type === "plan",
+    );
+    const createPlanTools = session.timeline.filter(
+      (item): item is WebviewToolCard =>
+        item.type === "tool" &&
+        item.toolName === "create_plan" &&
+        item.planActivity?.kind === "create" &&
+        typeof item.planPath === "string" &&
+        item.planPath.length > 0,
+    );
     await Promise.all(
-      sessions.map(async (session) => {
-        const planCards = session.timeline.filter(
-          (item): item is WebviewPlanFileCard => item.type === "plan",
-        );
-        await Promise.all(
-          planCards.map(async (item) => {
-            const metadata = await readPlanMetadata(item.path, this.planMetadataCache);
-            if (metadata.title) {
-              item.title = metadata.title;
-            } else {
-              delete item.title;
-            }
-            if (metadata.overview) {
-              item.overview = metadata.overview;
-            } else {
-              delete item.overview;
-            }
-          }),
-        );
+      [...planCards, ...createPlanTools].map(async (item) => {
+        const planPath = item.type === "plan" ? item.path : item.planPath;
+        if (!planPath) {
+          return;
+        }
+        const metadata = await readPlanMetadata(planPath, this.planMetadataCache);
+        if (item.type === "plan") {
+          if (metadata.title) {
+            item.title = metadata.title;
+          } else {
+            delete item.title;
+          }
+          if (metadata.overview) {
+            item.overview = metadata.overview;
+          } else {
+            delete item.overview;
+          }
+          return;
+        }
+        const planActivity = item.planActivity;
+        if (!planActivity) {
+          return;
+        }
+        item.planActivity = {
+          ...planActivity,
+          overview: metadata.overview ?? null,
+          title: metadata.title ?? planActivity.title ?? null,
+        };
       }),
     );
+    return session;
+  }
+
+  private async enrichPlanCards(snapshot: WebviewStateSnapshot): Promise<WebviewStateSnapshot> {
+    const sessions = Object.values(snapshot.sessionViews);
+    await Promise.all(sessions.map((session) => this.enrichPlanSession(session)));
     return snapshot;
   }
 
@@ -1377,12 +3277,68 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
   }
 
+  /** The model the given session is currently running on ("" when unknown). */
+  sessionModel(sessionId: string): string {
+    return this.stateStore.snapshotSession(sessionId)?.model ?? "";
+  }
+
+  /** Same, for the session the user is looking at (plan preview has no sessionId). */
+  activeSessionModel(): string {
+    const activeSessionId = this.stateStore.view().activeSessionId;
+    return activeSessionId ? this.sessionModel(activeSessionId) : "";
+  }
+
+  /**
+   * Ask before building on a model other than the one the session is on.
+   *
+   * `tomcat.plan.buildModel` is a *global* setting, so a value someone picked
+   * weeks ago in another window silently decides which model executes the plan.
+   * The dialog only states facts — the two models and where the value came from
+   * — and leaves the judgement to the user. Returns false when they cancel.
+   */
+  private async confirmBuildModel(buildModel: string, sessionModel: string): Promise<boolean> {
+    if (!buildModel || !sessionModel || buildModel === sessionModel) {
+      return true;
+    }
+    const continueBuild = { title: t("host.continueBuild") };
+    const choice = await vscode.window.showWarningMessage(
+      t("host.buildQuestion", { model: buildModel }),
+      {
+        detail: [
+          t("host.buildSessionModel", { model: sessionModel }),
+          t("host.buildUses", { model: buildModel }),
+          "",
+          t("host.buildSource", { setting: `${TOMCAT_CONFIG_SECTION}.plan.buildModel` }),
+        ].join("\n"),
+        modal: true,
+      },
+      continueBuild,
+    );
+    return choice === continueBuild;
+  }
+
   /**
    * Single build path shared by the chat PlanFileCard and the plan preview
    * editor: apply the global build model (when set) before entering build mode.
    */
   private async runPlanBuild(sessionId: string, planId?: string | null): Promise<void> {
     const buildModel = this.readBuildModelConfig();
+    if (!(await this.confirmBuildModel(buildModel, this.sessionModel(sessionId)))) {
+      // 取消就是彻底取消：既不 build，也不动会话模型。
+      return;
+    }
+    // Settings may have cleared a deleted Build model while the confirmation dialog was
+    // open. Do not replace it with a newly-read value: that value was not confirmed.
+    if (this.readBuildModelConfig() !== buildModel) {
+      this.stateStore.appendMessage(
+        sessionId,
+        "notice",
+        t("host.buildChanged"),
+      );
+      await this.refreshModels();
+      await this.postState();
+      return;
+    }
     try {
       if (buildModel) {
         const modelResponse = await this.deps.messenger.sendSetModel(sessionId, buildModel);
@@ -1390,7 +3346,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            modelResponse.error ?? "Unable to switch model",
+            modelResponse.error ?? t("host.modelSwitchFailed"),
           );
         }
       }
@@ -1403,20 +3359,21 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.stateStore.appendMessage(
           sessionId,
           "error",
-          response.error ?? "Unable to change plan mode",
+          response.error ?? t("host.planModeFailed"),
         );
       }
     } catch (error) {
       this.stateStore.appendMessage(
         sessionId,
         "error",
-        formatBridgeError("change plan mode", error),
+        formatBridgeError("host.bridge.planMode", error),
       );
     }
     if (buildModel) {
       await this.refreshModels();
     }
     await this.refreshSessionState(sessionId, { trustBusy: true });
+    await this.refreshSessionHistory(sessionId);
     await this.postState();
   }
 
@@ -1431,44 +3388,75 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.runPlanBuild(sessionId, planId);
   }
 
-  private async refreshModels(): Promise<void> {
+  private async refreshModels(options: { strict?: boolean } = {}): Promise<void> {
     this.stateStore.setBuildModel(this.readBuildModelConfig());
     const initializeResult = await this.ensureInitialized();
     this.stateStore.setModelAdminSupported(
       hasAnyModelAdminCapability(initializeResult),
     );
     if (!hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS)) {
-      this.stateStore.setAvailableModels([], {});
+      this.stateStore.setAvailableModels([], {}, {});
       return;
     }
-    const response = await this.deps.messenger.sendListModels().catch(() => null);
-    if (!response) {
-      this.stateStore.setAvailableModels([], {});
+    let response;
+    try {
+      response = await this.deps.messenger.sendListModels();
+    } catch (error) {
+      this.stateStore.setAvailableModels([], {}, {});
+      if (options.strict) {
+        throw error;
+      }
       return;
     }
     if (!response.success) {
-      this.stateStore.setAvailableModels([], {});
+      this.stateStore.setAvailableModels([], {}, {});
+      if (options.strict) {
+        throw new Error(response.error ?? "list_models failed during bootstrap");
+      }
       return;
     }
     const catalog = parseModelCatalog(response.payload);
-    this.stateStore.setAvailableModels(catalog.ids, catalog.capabilities);
+    this.stateStore.setAvailableModels(
+      catalog.ids,
+      catalog.capabilities,
+      catalog.reasoningLevels,
+      catalog.modelDetails,
+    );
   }
 
-  private async refreshSessions(): Promise<void> {
+  private async refreshSessions(options: { post?: boolean; expectedScope?: string } = {}): Promise<void> {
     await this.ensureInitialized();
     const sessions = await this.sessionPool.refresh();
+    if (options.expectedScope && sessions.sessionKey !== options.expectedScope) throw new Error(t("session.delete.scope"));
+    const removedActive = await this.reconcileDeletions(sessions);
+    this.diskScopeKey = sessions.sessionKey;
     this.stateStore.syncSessionList(sessions);
-    await this.postState();
+    if (removedActive) {
+      try { await this.selectDeletionFallback(sessions); }
+      catch (error) { this.sessionFeedback = { id: createHostFrameMessageId("delete-fallback"), code: "fallback_failed", detail: String(error) }; }
+    }
+    if (options.post ?? true) {
+      await this.postState();
+    }
   }
 
   private async refreshSessionState(
     sessionId: string,
     options: {
+      strict?: boolean;
       trustBusy?: boolean;
     } = {},
   ): Promise<void> {
-    const state = await this.deps.sessionRouter.getState(sessionId).catch(() => null);
-    if (!state) {
+    let state;
+    try {
+      state = await this.deps.sessionRouter.getState(sessionId);
+    } catch (error) {
+      if (options.strict) {
+        throw error;
+      }
+      return;
+    }
+    if (!state || this.draftCoordinator.isRetired(sessionId)) {
       return;
     }
     this.stateStore.applySessionState(state, { trustBusy: options.trustBusy ?? true });
@@ -1484,29 +3472,81 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return this.historyFetchGen.get(sessionId) ?? 0;
   }
 
-  private async refreshSessionHistory(sessionId: string): Promise<void> {
+  private async refreshSessionHistory(
+    sessionId: string,
+    options: { strict?: boolean; replace?: ReadonlySet<string> } = {},
+  ): Promise<void> {
     if (typeof this.deps.sessionRouter.getMessages !== "function") {
       return;
     }
     const fetchGen = this.bumpHistoryFetchGen(sessionId);
-    const history = await this.deps.sessionRouter.getMessages(sessionId, {
-      limit: HISTORY_PAGE_ENTRIES,
-    }).catch(() => null);
+    let history;
+    try {
+      history = await this.deps.sessionRouter.getMessages(sessionId, {
+        attachmentMode: HISTORY_ATTACHMENT_MODE,
+        limit: HISTORY_PAGE_ENTRIES,
+      });
+    } catch (error) {
+      if (options.strict) {
+        throw error;
+      }
+      return;
+    }
     if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
       return;
     }
     if (!history || history.sessionId !== sessionId) {
       return;
     }
-    this.stateStore.hydrateHistory(sessionId, history);
+    if (options.replace) this.stateStore.replaceHistory(sessionId, history, options.replace);
+    else this.stateStore.hydrateHistory(sessionId, history);
+    await this.syncImagePreviewPanel(sessionId);
   }
 
-  private async refreshCheckpoints(sessionId: string): Promise<void> {
+  private refreshSessionFiles(sessionId: string): Promise<void> {
+    if (this.disposed || this.closedFileSessions.has(sessionId) || !this.initialized || !hasServeCapability(this.initialized, "session_files") || !this.peekState().sessionViews[sessionId]) return Promise.resolve();
+    const existing = this.fileRefreshes.get(sessionId);
+    if (existing) { existing.dirty = true; return existing.promise; }
+    const generation = this.fileGeneration;
+    const initialized = this.initialized;
+    const entry = { dirty: false, promise: Promise.resolve() };
+    entry.promise = (async () => {
+      do {
+        entry.dirty = false;
+        try {
+          const result = await this.deps.sessionRouter.getSessionFiles(sessionId);
+          if (this.disposed || this.closedFileSessions.has(sessionId) || generation !== this.fileGeneration || initialized !== this.initialized || !this.peekState().sessionViews[sessionId]) return;
+          this.stateStore.setSessionFiles(sessionId, { sourceTurnId: result.sourceTurnId ?? null, files: result.files.map((file) => ({ ...file, displayPath: vscode.workspace.asRelativePath?.(file.path, false) ?? file.path })) });
+        } catch (error) {
+          if (this.disposed || this.closedFileSessions.has(sessionId) || generation !== this.fileGeneration || !this.peekState().sessionViews[sessionId]) return;
+          const prior = this.peekState().sessionViews[sessionId].sessionFiles;
+          this.stateStore.setSessionFiles(sessionId, { sourceTurnId: prior?.sourceTurnId ?? null, files: prior?.files ?? [], error: error instanceof Error ? error.message : String(error) });
+        }
+        await this.postSessionView(sessionId);
+      } while (entry.dirty && generation === this.fileGeneration && !this.disposed);
+    })().finally(() => { if (this.fileRefreshes.get(sessionId) === entry) this.fileRefreshes.delete(sessionId); });
+    this.fileRefreshes.set(sessionId, entry);
+    return entry.promise;
+  }
+
+  private async refreshCheckpoints(
+    sessionId: string,
+    options: { strict?: boolean } = {},
+  ): Promise<void> {
+    void this.refreshSessionFiles(sessionId);
     if (typeof this.deps.sessionRouter.listCheckpoints !== "function") {
       return;
     }
-    const checkpoints = await this.deps.sessionRouter.listCheckpoints(sessionId).catch(() => null);
-    if (!checkpoints || checkpoints.sessionId !== sessionId) {
+    let checkpoints;
+    try {
+      checkpoints = await this.deps.sessionRouter.listCheckpoints(sessionId);
+    } catch (error) {
+      if (options.strict) {
+        throw error;
+      }
+      return;
+    }
+    if (!checkpoints || checkpoints.sessionId !== sessionId || this.draftCoordinator.isRetired(sessionId)) {
       return;
     }
     this.stateStore.setCheckpoints(sessionId, checkpoints.checkpoints);
@@ -1516,7 +3556,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (typeof this.deps.sessionRouter.getMessages !== "function") {
       return;
     }
-    const session = this.currentState().sessionViews[sessionId];
+    const session = this.peekState().sessionViews[sessionId];
     if (!session?.hasMoreHistory || session.historyLoading !== false) {
       return;
     }
@@ -1528,9 +3568,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.stateStore.setHistoryLoading(sessionId, true);
     await this.postState();
     const history = await this.deps.sessionRouter.getMessages(sessionId, {
+      attachmentMode: HISTORY_ATTACHMENT_MODE,
       cursor,
       limit: HISTORY_PAGE_ENTRIES,
     }).catch(() => null);
+    if (this.draftCoordinator.isRetired(sessionId)) return;
     if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
       this.stateStore.setHistoryLoading(sessionId, false);
       await this.postState();
@@ -1545,23 +3587,461 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.postState();
   }
 
-  private async readPendingAttachment(
+  /**
+   * Load a session's draft into the snapshot the webview renders from.
+   *
+   * Runs on session open and on switch. Attachments whose bytes the backend no longer
+   * has are marked unavailable rather than dropped: silently deleting an image the user
+   * attached is worse than showing it struck through with a remove button.
+   */
+  private async hydrateDraft(sessionId: string): Promise<void> {
+    try {
+      const draft = await this.draftStore.hydrate(sessionId, (candidate) =>
+        this.sessionExists(candidate),
+      );
+      await this.retainDraftAttachmentLeases(sessionId, draft);
+      await this.applyDraftToState(sessionId, draft);
+      await this.syncImagePreviewPanel(sessionId);
+      await this.postState();
+    } catch (error) {
+      // A draft that will not load must never block the composer. Worst case the user
+      // types again; refusing to render the input box would be unusable.
+      console.warn("Tomcat failed to hydrate the Composer draft", error);
+    }
+  }
+
+  /**
+   * A persisted draft is still user-owned input. Refresh its pending-blob leases whenever
+   * it is hydrated so an idle sidebar cannot lose images to the seven-day pending GC.
+   */
+  private async retainDraftAttachmentLeases(
+    sessionId: string,
+    draft: ComposerDraft,
+  ): Promise<void> {
+    const refs = [...new Map(
+      draft.attachments.map((attachment) => [
+        `${attachment.blobSha}\0${attachment.providerSha ?? ""}`,
+        {
+          blobSha: attachment.blobSha,
+          providerSha: attachment.providerSha ?? null,
+        },
+      ]),
+    ).values()];
+    if (refs.length === 0) {
+      return;
+    }
+    try {
+      await this.deps.sessionRouter.retainAttachmentLeases(sessionId, refs);
+    } catch (error) {
+      // Hydration must remain usable if serve is temporarily offline. The next hydrate
+      // retries the renewal; retaining an old lease is safer than discarding the draft.
+      console.warn("Tomcat could not renew draft attachment leases", error);
+    }
+  }
+
+  /**
+   * Does this session still exist on the backend?
+   *
+   * Used to drop drafts for sessions that were deleted elsewhere, so their files do not
+   * accumulate forever. An unreachable backend answers "yes" — keeping a draft we cannot
+   * verify is the safe direction.
+   */
+  private async sessionExists(sessionId: string): Promise<boolean> {
+    if (this.draftCoordinator.isRetired(sessionId)) return false;
+    const scopeKey = this.diskScopeKey;
+    if (!scopeKey || !this.peekState().sessions.some(s => s.sessionId === sessionId)) return true;
+    try {
+      const payload = await this.sessionPool.refresh();
+      if (payload.scope !== "disk" || payload.sessionKey !== scopeKey) return true;
+      return payload.sessions.some((session) => session.sessionId === sessionId);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * The hash-to-URL mapping handed to the state store for history images.
+   *
+   * History comes from the transcript, which records hashes only, so images rebuilt on a
+   * session switch or a reopened window need this to have any address at all. Bytes that
+   * are gone are reported as unavailable rather than left as an image that will never
+   * load: a placeholder that never resolves reads as a hang.
+   */
+  private historyAttachmentResolver(): AttachmentUriResolver {
+    return (attachment) => {
+      // Thumbnails share the blob store across sessions; live media does not carry
+      // hasThumb. Reuse an existing cached rendition rather than decoding it again.
+      const hasThumb = attachment.hasThumb === true || Boolean(this.attachmentRoot &&
+        /^[0-9a-f]{64}$/.test(attachment.blobSha) &&
+        fs.existsSync(path.join(this.attachmentRoot, "thumbs", attachment.blobSha)));
+      const uris = this.view
+        ? resolveAttachmentUris(this.view.webview, this.attachmentRoot, { ...attachment, hasThumb })
+        : null;
+      return {
+        hasThumb,
+        fullUri: uris?.fullUri ?? null,
+        thumbUri: uris?.thumbUri ?? null,
+        ...(this.hasBlobBytes(attachment.blobSha) ? {} : { unavailable: true }),
+      };
+    };
+  }
+
+  /** Does the backend still hold the bytes for this hash? */
+  private hasBlobBytes(blobSha: string): boolean {
+    // Root unknown yet: assume present. Re-checked once the handshake reports it.
+    if (!this.attachmentRoot) return true;
+    return fs.existsSync(path.join(this.attachmentRoot, "blobs", blobSha));
+  }
+
+  /**
+   * Ask the backend which of a draft's attachments still have bytes behind them.
+   *
+   * One `get_state` call reports the attachment root; presence is then a plain
+   * filesystem check, which is far cheaper than a round trip per attachment.
+   */
+  private markMissingAttachments(
+    attachments: DraftAttachmentRef[],
+  ): { available: DraftAttachmentRef[]; missing: DraftAttachmentRef[] } {
+    const available: DraftAttachmentRef[] = [];
+    const missing: DraftAttachmentRef[] = [];
+    for (const attachment of attachments) {
+      (this.hasBlobBytes(attachment.blobSha) ? available : missing).push(attachment);
+    }
+    return { available, missing };
+  }
+
+  /** Project a draft onto the webview snapshot, resolving hashes to URLs. */
+  private async applyDraftToState(
+    sessionId: string,
+    draft: ComposerDraft,
+  ): Promise<void> {
+    if (this.draftCoordinator.isRetired(sessionId)) return;
+    this.stateStore.setComposerDraft(sessionId, {
+      segments: draft.segments,
+      text: draft.text,
+    });
+    const { available, missing } = this.markMissingAttachments(draft.attachments);
+    if (missing.length > 0) {
+      console.warn(
+        `Tomcat draft for ${sessionId} references ${missing.length} attachment(s) whose bytes are gone`,
+      );
+    }
+    this.stateStore.setPendingAttachments(
+      sessionId,
+      [
+        ...available.map((attachment) => this.toPendingView(attachment, false)),
+        ...missing.map((attachment) => this.toPendingView(attachment, true)),
+      ],
+    );
+  }
+
+  /**
+   * Turn a stored reference into the view the webview renders.
+   *
+   * This is the whole of the host's involvement with image data: it maps hashes to URLs.
+   * It never reads, decodes, or buffers a single image byte.
+   */
+  private toPendingView(
+    attachment: DraftAttachmentRef,
+    unavailable: boolean,
+  ): WebviewPendingAttachment {
+    const uris = this.view
+      ? resolveAttachmentUris(this.view.webview, this.attachmentRoot, {
+          blobSha: attachment.blobSha,
+          hasThumb: attachment.hasThumb,
+        })
+      : null;
+    return {
+      blobSha: attachment.blobSha,
+      bytes: attachment.bytes,
+      providerSha: attachment.providerSha,
+      filename: attachment.filename,
+      fullUri: uris?.fullUri ?? null,
+      hasThumb: Boolean(attachment.hasThumb),
+      id: attachment.id,
+      kind: attachment.kind,
+      label: attachment.filename,
+      mimeType: attachment.mimeType,
+      path: attachment.sourcePath ?? null,
+      thumbUri: uris?.thumbUri ?? null,
+      ...(unavailable ? { unavailable: true } : {}),
+    };
+  }
+
+  /** Record a text/reference edit. Returns as soon as memory is updated. */
+  private async saveDraftContent(
+    sessionId: string,
+    text: string,
+    segments: WebviewMessageSegment[],
+  ): Promise<void> {
+    const draft = this.draftStore.update(sessionId, (current) => ({
+      ...current,
+      segments,
+      text,
+    }));
+    await this.applyDraftToState(sessionId, draft);
+  }
+
+  /**
+   * Store a thumbnail the webview generated, and start using it.
+   *
+   * Runs for attachments that reached the backend without passing through a webview — the
+   * file picker, and images replayed from history — because those have no thumbnail and
+   * the strip will not render an original in place of one. Until this lands the user sees
+   * a placeholder, so it is worth being quick, but a failure is only cosmetic.
+   */
+  private async storeGeneratedThumbnail(data: {
+    blobSha: string;
+    sessionId: string;
+    thumbBase64: string;
+  }): Promise<void> {
+    const stored = await cacheAttachmentThumbnail(
+      this.deps.messenger,
+      data.sessionId,
+      data.blobSha,
+      data.thumbBase64,
+    );
+    if (!stored) {
+      console.warn(`Tomcat could not store a thumbnail for ${data.blobSha}`);
+      return;
+    }
+
+    // The draft holds its own copy of the reference, so flip the flag there too or the
+    // next hydrate would ask the webview to build the same thumbnail again.
+    const draft = this.draftStore.update(data.sessionId, (current) => ({
+      ...current,
+      attachments: current.attachments.map((attachment) =>
+        attachment.blobSha === data.blobSha
+          ? { ...attachment, hasThumb: true }
+          : attachment,
+      ),
+    }));
+    await this.applyDraftToState(data.sessionId, draft);
+    // Other sessions may already reference this shared hash while generation was
+    // in flight. Publish the existing thumbnail to them without changing selection.
+    for (const sessionId of Object.keys(this.peekState().sessionViews)) {
+      this.adoptHistoryThumbnail(sessionId, data.blobSha);
+    }
+    await this.postState();
+  }
+
+  /**
+   * Point history images at a thumbnail that now exists.
+   *
+   * History views are built from the transcript rather than from the draft, so they need
+   * their own pass — otherwise a sent message would keep showing a placeholder for the
+   * rest of the session even though the thumbnail is on disk.
+   */
+  private adoptHistoryThumbnail(sessionId: string, blobSha: string): void {
+    const webview = this.view?.webview;
+    if (!webview) return;
+    const uris = resolveAttachmentUris(webview, this.attachmentRoot, {
+      blobSha,
+      hasThumb: true,
+    });
+    if (!uris) return;
+    this.stateStore.updateHistoryAttachments(sessionId, blobSha, {
+      hasThumb: true,
+      thumbUri: uris.thumbUri,
+    });
+  }
+
+  /** Add freshly ingested attachments to the draft. */
+  private async saveAttachmentsToDraft(
+    sessionId: string,
+    references: DraftAttachmentRef[],
+  ): Promise<void> {
+    const draft = this.draftStore.update(sessionId, (current) => ({
+      ...current,
+      attachments: [...current.attachments, ...references],
+    }));
+    await this.applyDraftToState(sessionId, draft);
+    await this.syncImagePreviewPanel(sessionId);
+  }
+
+  /** Drop one attachment from the draft, leaving text and references alone. */
+  private async removeDraftAttachment(
+    sessionId: string,
+    attachmentId: string,
+  ): Promise<void> {
+    const draft = this.draftStore.update(sessionId, (current) => ({
+      ...current,
+      attachments: current.attachments.filter(
+        (attachment) => attachment.id !== attachmentId,
+      ),
+    }));
+    await this.applyDraftToState(sessionId, draft);
+    await this.syncImagePreviewPanel(sessionId);
+  }
+
+  /**
+   * Build the preview panel's picture list from references.
+   *
+   * Every entry is a URL. The panel loads the full-resolution one for whatever is on
+   * screen and the thumbnail for the filmstrip, which is the difference between decoding
+   * one large bitmap and decoding all of them.
+   */
+  private imagePreviewSections(sessionId: string): PreviewSection[] {
+    return buildImagePreviewSections(this.peekState().sessionViews[sessionId]);
+  }
+
+  private async syncImagePreviewPanel(sessionId: string): Promise<void> {
+    if (this.imagePreviewSessionId !== sessionId) return;
+    const { ImagePreviewPanel } = await import(
+      "../imagePreview/ImagePreviewPanel.js"
+    );
+    if (this.imagePreviewSessionId !== sessionId || this.draftCoordinator.isRetired(sessionId)) return;
+    ImagePreviewPanel.getCurrent()?.updateSections(
+      this.imagePreviewSections(sessionId),
+    );
+  }
+
+  /** Open or reuse the image preview panel for draft and transcript images. */
+  private async openImagePreviewPanel(
+    sessionId: string,
+    attachmentId: string,
+  ): Promise<void> {
+    try {
+      const sections = this.imagePreviewSections(sessionId);
+      if (
+        !sections.some((section) =>
+          section.pictures.some((picture) => picture.id === attachmentId),
+        )
+      ) {
+        return;
+      }
+      const { ImagePreviewPanel } = await import(
+        "../imagePreview/ImagePreviewPanel.js"
+      );
+      this.imagePreviewSessionId = sessionId;
+      ImagePreviewPanel.getInstance(this.deps.extensionUri, this.attachmentRoot).reveal(
+        sections,
+        attachmentId,
+      );
+    } catch (error) {
+      console.warn("Tomcat failed to open the image preview", error);
+    }
+  }
+
+  /**
+   * Read a picked file into an upload, validating before anything crosses the wire.
+   *
+   * Files chosen from disk skip the webview, so there is no thumbnail and no SVG
+   * rasterisation for them. The image still displays (Chromium fetches the full one) and
+   * the thumbnail arrives on a later pass once the webview has seen it.
+   */
+  private async readAttachmentUpload(
     uri: vscode.Uri,
     mimeType = guessMimeType(uri.fsPath || uri.path),
-  ): Promise<WebviewPendingAttachment> {
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    return {
-      attachment: {
-        dataBase64: Buffer.from(bytes).toString("base64"),
-        filename: path.basename(uri.fsPath),
-        kind: inferAttachmentKind(mimeType),
-        mimeType,
-      },
-      id: `${path.basename(uri.fsPath)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: inferAttachmentKind(mimeType),
-      label: path.basename(uri.fsPath),
+  ): Promise<AttachmentUpload> {
+    const bytes = Buffer.from(await vscode.workspace.fs.readFile(uri));
+    const basename = path.basename(uri.fsPath || uri.path);
+    const dataBase64 = bytes.toString("base64");
+    const validation = validateAttachmentCandidate({
+      dataBase64,
+      filename: basename,
       mimeType,
-      path: uri.fsPath,
+    });
+    if (!validation.ok) {
+      throw new Error(`${basename}: ${validation.error}`);
+    }
+    return {
+      dataBase64,
+      filename: validation.filename,
+      kind: validation.kind,
+      mimeType: validation.mimeType,
+      sourcePath: uri.fsPath || uri.path,
+    };
+  }
+
+  /**
+   * Every directory the chat webview is allowed to read from.
+   *
+   * The attachment directories sit in the user's tomcat data directory, nowhere near
+   * `extensionUri`, so they have to be granted explicitly. Omit them and every image
+   * silently fails to load — a failure left deliberately visible, because the
+   * alternative (falling back to `data:` URIs) would quietly restore the half-gigabyte
+   * memory profile this whole design exists to remove.
+   *
+   * Built here rather than inline at the two call sites, so the initial grant and the
+   * regrant after the attachment root is discovered cannot drift apart.
+   */
+  private resourceRoots(): vscode.Uri[] {
+    return [
+      vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist"),
+      vscode.Uri.joinPath(this.deps.extensionUri, "media"),
+      ...this.workspaceMediaRootUris(),
+      vscode.Uri.file(os.tmpdir()),
+      ...attachmentResourceRoots(this.attachmentRoot),
+    ];
+  }
+
+  private webviewOptions(): vscode.WebviewOptions {
+    return {
+      enableScripts: true,
+      localResourceRoots: this.resourceRoots(),
+    };
+  }
+
+  private workspaceMediaRootUris(): vscode.Uri[] {
+    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri);
+  }
+
+  private mediaRootsForWebview(webview: vscode.Webview): WebviewMediaRoot[] {
+    const deduped = new Map<string, WebviewMediaRoot>();
+    for (const root of [...this.workspaceMediaRootUris(), vscode.Uri.file(os.tmpdir())]) {
+      const fsPath = root.fsPath;
+      if (!fsPath || deduped.has(fsPath)) {
+        continue;
+      }
+      deduped.set(fsPath, {
+        fsPath,
+        webviewBase: webview.asWebviewUri(root).toString(),
+      });
+    }
+    return [...deduped.values()];
+  }
+
+  private reloadWebviewResourceRoots(): void {
+    if (!this.view) {
+      return;
+    }
+    // Changing local resource roots rebuilds the document. Mirror first-mount state so
+    // nothing keeps talking to a document VS Code is about to throw away.
+    this.isReady = false;
+    this.webviewGeneration += 1;
+    this.stateStore.setConnectionStatus(this.serveConnectionStatus);
+    this.view.webview.options = this.webviewOptions();
+  }
+
+  private handleWorkspaceFolderChange(): void {
+    this.reloadWebviewResourceRoots();
+  }
+
+  /**
+   * What the host granted and what it believes exists on disk.
+   *
+   * Images reaching a webview depend on three things lining up — the backend's reported
+   * root, the granted resource roots, and the files themselves — and when they do not,
+   * the only symptom is a broken image with no explanation anywhere. This turns that into
+   * something the acceptance report can state outright.
+   */
+  getAttachmentDiagnostics(): {
+    attachmentRoot: string | null;
+    attachmentRootResolved: boolean;
+    blobsDirExists: boolean;
+    resourceRoots: string[];
+    thumbsDirExists: boolean;
+  } {
+    const exists = (...parts: string[]): boolean =>
+      this.attachmentRoot !== null &&
+      fs.existsSync(path.join(this.attachmentRoot, ...parts));
+    return {
+      attachmentRoot: this.attachmentRoot,
+      attachmentRootResolved: this.attachmentRootResolved,
+      blobsDirExists: exists("blobs"),
+      resourceRoots: this.resourceRoots().map((uri) => uri.fsPath),
+      thumbsDirExists: exists("thumbs"),
     };
   }
 
@@ -1589,18 +4069,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       .join("\n    ");
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
   <head>
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"
+      content="default-src 'none'; img-src ${webview.cspSource} blob:; connect-src ${webview.cspSource}; font-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'strict-dynamic';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     ${styleTags}
     <title>Tomcat</title>
   </head>
-  <body>
+  <body class="tc-chat-webview" style="${layoutInsetStyle(vscode.workspace.getConfiguration("tomcat"))}">
     <div id="root"></div>
     ${scriptTags}
   </body>
@@ -1609,33 +4089,207 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private renderFallbackHtml(message: string): string {
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}">
   <body>
     <pre>${message}</pre>
   </body>
 </html>`;
   }
 
-  private async selectSession(sessionId: string): Promise<void> {
+  private async handleDraftForkCapture(value: DraftForkCapture): Promise<void> {
+    const capture = parseDraftForkCapture(value);
+    if (!capture) return;
+    const operation = this.pendingDraftForks.get(capture.operationId);
+    if (
+      !operation
+      || operation.captureAccepted
+      || operation.sourceSessionId !== capture.sourceSessionId
+    ) {
+      return;
+    }
+    operation.captureAccepted = true;
+
+    let targetSessionId: string;
+    try {
+      targetSessionId = await this.executeDraftFork(operation, capture);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      this.removePendingDraftFork(operation);
+      try {
+        await this.postDraftForkResult({
+          error: formatBridgeError("host.bridge.createFromDraft", normalized),
+          operationId: operation.operationId,
+          sourceSessionId: operation.sourceSessionId,
+          success: false,
+          type: "draftForkResult",
+        });
+      } catch (deliveryError) {
+        operation.reject(
+          deliveryError instanceof Error ? deliveryError : new Error(String(deliveryError)),
+        );
+        return;
+      }
+      operation.reject(normalized);
+      return;
+    }
+
+    try {
+      await this.postDraftForkResult({
+        operationId: operation.operationId,
+        sourceSessionId: operation.sourceSessionId,
+        success: true,
+        targetSessionId,
+        type: "draftForkResult",
+      });
+      this.removePendingDraftFork(operation);
+      operation.resolve(targetSessionId);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      this.removePendingDraftFork(operation);
+      // If the successful completion frame itself could not reach the webview, a second
+      // error frame cannot make the compositor recover; both use the same broken bridge.
+      // Rejecting the operation is the reliable host-side terminal state, while the GUI's
+      // bounded cutoff wait is its independent escape hatch.
+      operation.reject(normalized);
+    }
+  }
+
+  /**
+   * A fork result unlocks the only "new session" control in the webview. Treat delivery
+   * as a small reliable hand-off instead of silently dropping it on a transient bridge
+   * failure and leaving the UI permanently pending.
+   */
+  private async postDraftForkResult(
+    event: Extract<HostEventFrameContent, { type: "draftForkResult" }>,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.postEventWithDelivery(event);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async executeDraftFork(
+    operation: PendingDraftForkOperation,
+    capture: DraftForkCapture,
+  ): Promise<string> {
+    return this.draftCoordinator.run(operation.sourceSessionId, async () => {
+      const current = this.draftStore.peek(operation.sourceSessionId);
+      const sourceDraft = await this.draftStore.replaceAndFlush(operation.sourceSessionId, {
+        attachments: current.attachments,
+        segments: capture.segments,
+        text: capture.text,
+      });
+      let targetSessionId: string | null = null;
+      let committed = false;
+      try {
+        targetSessionId = await this.deps.sessionRouter.createDetachedSession(
+          operation.cwd ?? capture.cwd ?? this.deps.getDefaultCwd(),
+        );
+        const leaseRefs = [...new Map(
+          sourceDraft.attachments.map((attachment) => [
+            `${attachment.blobSha}\0${attachment.providerSha ?? ""}`,
+            {
+              blobSha: attachment.blobSha,
+              providerSha: attachment.providerSha ?? null,
+            },
+          ]),
+        ).values()];
+        await this.deps.sessionRouter.retainAttachmentLeases(targetSessionId, leaseRefs);
+        await this.draftStore.installIfEmpty(targetSessionId, sourceDraft);
+        await this.sessionPool.switchTo(targetSessionId);
+        committed = true;
+        await this.adoptCommittedDraftFork(targetSessionId);
+        return targetSessionId;
+      } catch (error) {
+        if (!committed && targetSessionId) {
+          const compensationErrors: string[] = [];
+          await this.draftStore.discardStrict(targetSessionId).catch((cleanupError) => {
+            compensationErrors.push(
+              `draft cleanup: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            );
+          });
+          await this.deps.sessionRouter.discardDetachedSession(targetSessionId).catch((cleanupError) => {
+            compensationErrors.push(
+              `session cleanup: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            );
+          });
+          if (compensationErrors.length > 0) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`${message}; compensation failed (${compensationErrors.join("; ")})`);
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async adoptCommittedDraftFork(sessionId: string): Promise<void> {
+    const refresh = async (label: string, action: () => Promise<void>): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        console.warn(`Tomcat committed draft fork but could not refresh ${label}`, error);
+      }
+    };
+    await refresh("session state", () => this.refreshSessionState(sessionId, { trustBusy: true }));
+    await refresh("session history", () => this.refreshSessionHistory(sessionId));
+    await refresh("checkpoints", () => this.refreshCheckpoints(sessionId));
+    await refresh("session list", () => this.refreshSessions({ post: false }));
+    this.stateStore.setActiveSession(sessionId);
+    await this.hydrateDraft(sessionId);
+    await this.refreshInstructionCatalog(sessionId);
+    await this.postState().catch(() => undefined);
+  }
+
+  private async selectSession(
+    sessionId: string,
+    options: { strict?: boolean } = {},
+  ): Promise<void> {
+    if (this.sessionBlocked(sessionId)) return;
     await this.ensureInitialized();
-    this.stateStore.setActiveSession(sessionId);
     await this.sessionPool.switchTo(sessionId);
-    await this.refreshSessionState(sessionId, { trustBusy: true });
-    await this.refreshSessionHistory(sessionId);
-    await this.refreshCheckpoints(sessionId);
-    await this.refreshSessions();
+    await this.refreshSessionState(sessionId, {
+      strict: options.strict,
+      trustBusy: true,
+    });
+    await this.refreshSessionHistory(sessionId, { strict: options.strict });
+    await this.refreshCheckpoints(sessionId, { strict: options.strict });
+    await this.refreshSessions({ post: false });
+    if (this.sessionBlocked(sessionId)) return;
     this.stateStore.setActiveSession(sessionId);
+
+    // Hydrate composer draft from Rust backend (pending images/text/segments)
+    await this.hydrateDraft(sessionId);
+    await this.refreshInstructionCatalog(sessionId);
+
     await this.postState();
   }
 
   private async switchSessionView(sessionId: string): Promise<void> {
+    if (this.sessionBlocked(sessionId)) return;
+    const previous = this.peekState().activeSessionId;
+    if (previous && this.messageQueue.view(previous).editingId) this.messageQueue.pause(previous);
+    this.closedFileSessions.delete(sessionId);
     await this.ensureInitialized();
     await this.sessionPool.switchTo(sessionId);
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);
-    await this.refreshSessions();
+    await this.refreshSessions({ post: false });
+    if (this.sessionBlocked(sessionId)) return;
     this.stateStore.setActiveSession(sessionId);
+    // Hydrate draft for this session
+    await this.hydrateDraft(sessionId);
+    await this.refreshInstructionCatalog(sessionId);
     await this.postState();
   }
 }

@@ -57,17 +57,27 @@ pub struct BuiltinToolCatalogEntry {
     /// [`render_tool_guidelines_with_policy`] 聚合去重后注入 `tool_instructions.txt`，
     /// 避免在 `description` 里逐工具重复。空切片表示该工具无额外跨工具规则。
     pub prompt_guidelines: &'static [&'static str],
-    /// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
-    /// 默认 `false`：进入 chat_loop 默认 LLM 工具集；`true` 时：
-    /// - 工具仍在 `BUILTIN_TOOL_CATALOG` 中（保持单一事实源、`tool-catalog.md` 文档完整）；
-    /// - 不进 `build_function_definitions_for_chat_default()`（chat_loop 默认视图）；
-    /// - 由 `PlanRuntime::visible_tools_for_mode(PlanState)` 在 PLAN/EXEC 模式时显式合入。
-    ///   详见 [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1 R6。
+    /// 计划相关工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
+    /// 工具始终在稳定的 LLM catalog 中；`true` 表示其 handler 必须按
+    /// `PlanRuntime` 状态实施额外的 mode policy。详情见
+    /// [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1。
     pub plan_only: bool,
     /// 调用本工具是否需要等待用户交互（如 `ask_question` 在 CLI/IDE panel 阻塞 await）。
     /// 这是工具元属性，与 `read_only` / `destructive` 并列；写 catalog 时用作"工具是否会让 chat 主循环让出 stdin"的硬约束声明。
     /// 详见 [`ask-question.md`](../../../../docs/architecture/tools/ask-question.md) §4.2.1。
     pub requires_user_interaction: bool,
+}
+
+/// 工具在进程掉线后能否从持久化的调用声明安全地继续。
+///
+/// 这与 `read_only` 无关：read 不改磁盘却无法证明此前是否已经执行；ask_question
+/// 需要用户交互却没有副作用，重连时重新展示同一问题是安全的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolReplaySafety {
+    /// 工具的已声明但无结果调用可在重连后继续。
+    ReplaySafe,
+    /// 无法区分「没有执行」与「已部分执行但结果丢失」，不能静默重跑。
+    NotReplaySafe,
 }
 
 impl BuiltinToolCatalogEntry {
@@ -80,6 +90,14 @@ impl BuiltinToolCatalogEntry {
         self.display_summary
             .map(str::to_string)
             .unwrap_or_else(|| summarize_tool_description(self.description))
+    }
+
+    /// 恢复契约的唯一权威入口。新增可续跑工具必须在这里显式登记并补回归测试。
+    pub fn replay_safety(&self) -> ToolReplaySafety {
+        match self.name {
+            "ask_question" => ToolReplaySafety::ReplaySafe,
+            _ => ToolReplaySafety::NotReplaySafe,
+        }
     }
 }
 
@@ -103,7 +121,7 @@ pub fn summarize_tool_description(description: &str) -> String {
 }
 
 // ─── 跨工具规则常量（供多个工具共享同一字符串，聚合时按 byte 相等去重） ───
-const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit.";
+const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; prefer edit for prose and Markdown. old_content must be small, unique, exact, and one continuous excerpt—never join distant excerpts. A successful edit returns a bounded, numbered current view around its changes: use that current text for the next edit; if its target is not shown, read again first. For repeated short snippets or line-anchored code edits, use read(hashline=true) -> hashline_edit. hashline_edit may batch non-overlapping ranges from one original snapshot: every anchor is checked before a write, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Prefer continuous ranges for reliability. For distant ranges, prefer edit; if hashline_edit is necessary, take a fresh hashline read covering every target immediately before the call and never mix anchors from separate reads. To modify text created by the batch, read again first. When changing multiple independent files, issue one edit call per file in the SAME tool round instead of serializing file by file.";
 const G_NO_DISPLAY_PREFIX: &str = "When copying from read output, never include display prefixes like `  N\\t` or `N#XX:` in edit.old_content.";
 const G_NO_FAKE_EDIT: &str = "Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.";
 const G_PATH_LINE: &str =
@@ -116,7 +134,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "read",
         label: "Read",
-        description: "Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error.\n",
+        description: "Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error. A wide read costs the same round trip as a narrow one, so when you are new to a file read a window that actually covers it rather than paging through it 40 lines at a time. Use `paths` to read several files in one call.\n",
         display_summary: Some("Read a file from an authorized path."),
         parameters: read_parameters,
         scope: PermissionScope::Read,
@@ -164,7 +182,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "edit",
         label: "Edit File",
-        description: "Edit an existing text file by replacing exact text. Two input shapes:\n  Shape A (single): { path, old_content, new_content, replace_all? }\n  Shape B (preferred, multiple): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both appear, `edits` wins. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
+        description: "Edit one existing text file with exactly `{ path, edits }`. Each segment has mode `replace` (default), `insert_before`, or `insert_after`: insert modes keep `old_content` as an anchor and preserve it. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error; use `replace_all: true` only when you intentionally want every occurrence changed. A successful result includes a bounded, numbered current view around changed ranges; use that exact text for a following edit, or read again if the next target is not shown. For multiple independent files, issue multiple edit calls in the SAME tool round. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). old_content must be a small, unique, continuous exact excerpt; do not combine distant text. Do NOT include `cat -n`/hashline display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.\n",
         display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
         parameters: edit_parameters,
         scope: PermissionScope::Write,
@@ -179,7 +197,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "hashline_edit",
         label: "Hashline Edit File",
-        description: "Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns HashMismatch (no write). Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Use this when substring `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. A fresh read stamp is still required.\n",
+        description: "Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns HashMismatch for every invalid anchor (no write). Multiple non-overlapping segments use one original snapshot: all anchors validate before writing, then spans apply bottom-up, so line-count changes do not shift other batch anchors. Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Prefer normal `edit` for prose and Markdown; use this for repeated short snippets or strong line-level consistency. Prefer continuous ranges; for distant ranges, use a fresh hashline read covering every target. To modify text created by this batch, read again first. A fresh read stamp is still required.\n",
         display_summary: Some("Line-number + content-hash anchored edits (companion to read hashline=true)."),
         parameters: hashline_edit_parameters,
         scope: PermissionScope::Write,
@@ -209,7 +227,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "task_output",
         label: "Bash Task Output",
-        description: "Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until new output, the task finishes, or `timeout_ms` elapses (default 5000, max 30000, `0` == block=false) and adds a `wakeReason` of `new_output` | `finished` | `timeout`. A `timeout` wakeReason is NOT a failure. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.\n",
+        description: "Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `wait_ms` elapses (default 5000; block=true clamps to 5000-600000ms; block=false ignores wait_ms). For builds and tests, prefer `block=true` with `wait_ms` at least 300000, up to 600000, unless another task truly needs the result sooner. Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `wait_window_elapsed`; a `wait_window_elapsed` wakeReason is NOT a failure, so inspect `content` first (`content=\"\"` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.\n",
         display_summary: Some("Tail incremental output from a background bash task."),
         parameters: task_output_parameters,
         scope: PermissionScope::Bash,
@@ -269,7 +287,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "search_files",
         label: "Search Files",
-        description: "Search authorized files by content regex or file-path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden. Use list_dir for a single directory level and read when you already know the path.\n\nUses system `rg` (content) / `fd` (files), falling back to an in-process Rust regex engine when they are missing (no lookaround/back-references; large/binary files skipped). Both honour .gitignore/.ignore.\n",
+        description: "Search authorized files by content regex or file-path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden. Use list_dir for a single directory level and read when you already know the path.\n",
         display_summary: Some("Search authorized files by content or file-path glob."),
         parameters: search_files_parameters,
         scope: PermissionScope::Read,
@@ -312,6 +330,66 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
+        name: "tool_search",
+        label: "Tool Search",
+        description: "Discover deferred tools from connected connectors (MCP now; CLI/A2A/plugins later) that are intentionally kept OUT of your tool set to keep the prompt small and cache-stable. When load_skill is available, before first use in a session you MUST load the \"connectors\" skill via load_skill(\"connectors\") — it teaches the full search -> describe -> call workflow and when to batch calls via code. Modes: tool_search() lists sources (name, type, description, tool_count); tool_search(source=\"…\") lists that source's tool names + short descriptions (no schema); tool_search(query=\"…\") keyword-searches across sources (add source= to scope). Then use tool_describe([names]) to fetch schemas and tool_call(name, arguments) to invoke. Output returns in the conversation, never in the prompt prefix.\n",
+        display_summary: Some("Discover deferred connector tools without expanding the prompt."),
+        parameters: tool_search_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("deferred connector MCP CLI A2A plugin tool search discover"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "tool_describe",
+        label: "Tool Describe",
+        description: "Fetch full input schemas for one or more deferred tools found via tool_search. Pass names (array; a single tool is [\"name\"]). Returns each tool's inputSchema + description in input order; unknown names are reported in errors without failing the rest. Batch related tools in one call to avoid repeated round trips, then tool_call to invoke.\n",
+        display_summary: Some("Fetch schemas for one or more deferred tools."),
+        parameters: tool_describe_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("deferred connector MCP tool schema describe batch"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "tool_call",
+        label: "Tool Call",
+        description: "Invoke one deferred tool found via tool_search/tool_describe. Pass name (e.g. mcp__<source>__<tool>) and arguments matching its inputSchema. Runs through the same trust/permission gate as native connector tools; image results stream back to you. To call one tool many times (fan-out) or filter large results, prefer writing code (see the connectors skill) over many tool_call rounds.\n",
+        display_summary: Some("Invoke a deferred connector tool through its stable name."),
+        parameters: tool_call_parameters,
+        scope: PermissionScope::Bash,
+        category: Some(ToolCategory::Exec),
+        read_only: false,
+        destructive: false,
+        search_hint: Some("deferred connector MCP CLI A2A plugin tool invoke call"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "tool_run_code",
+        label: "Tool Run Code",
+        description: "Run short JavaScript to call deferred connector tools repeatedly and return one compact final value. Before use, load the connectors skill for the allowed callTool(name, arguments) API and examples. Use this only for fan-out, filtering a large result, or aggregation; use tool_call for a short sequential workflow. The code runs in the existing plugin QuickJS VM with the configured heap, timeout, and interrupt limits. It has no host filesystem, shell, network, or arbitrary host API: callTool is its only host capability and uses the same connector trust path as tool_call. Return a JSON-compatible value. MCP image blocks are extracted for vision before final text is truncated.\n",
+        display_summary: Some("Run JS for deferred-tool fan-out and result reduction."),
+        parameters: tool_run_code_parameters,
+        scope: PermissionScope::Bash,
+        category: Some(ToolCategory::Exec),
+        read_only: false,
+        destructive: false,
+        search_hint: Some("deferred connector MCP JavaScript code fan-out aggregate filter"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
         name: "config_get",
         label: "Config Get",
         description: "Read the current value of an allowed tomcat configuration key. Non-sensitive fields (workspace.*, agent.id, primitive.*, llm.default_model, and similar) are readable; sensitive fields (llm.api_key*, security.*, storage.*) are denied. Missing dot-path keys return not_set.\n",
@@ -341,12 +419,42 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         plan_only: false,
         requires_user_interaction: false,
     },
+    BuiltinToolCatalogEntry {
+        name: "package_install",
+        label: "Package Install",
+        description: "Install a local Tomcat package, skill, or plugin after confirmation. Pass a local source path and scope (`scope`, `agent`, or `global`); `scope` requires the session's explicit project root. The operation validates the package before writing and returns a machine-readable `status` (`installed`, `cancelled`, `denied`, or `failed`) plus installed resources and `inventory_dirty` for the next session refresh.\n",
+        display_summary: Some("Install a local package after confirmation."),
+        parameters: package_install_parameters,
+        scope: PermissionScope::Write,
+        category: Some(ToolCategory::Config),
+        read_only: false,
+        destructive: true,
+        search_hint: Some("package install skill plugin source scope global agent"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "dispatch_agent",
+        label: "Dispatch Agent",
+        description: "Delegate high-latency, read-only codebase investigation to one or more explorer subagents running in parallel. Direct `search_files` / `read` calls are the default. Do NOT dispatch for a simple task, project rules or AGENTS/README files, a known file or symbol, confirmation of one implementation, a question that can be answered in one or two batches of direct-tool calls, self-review or final audit of your own Plan, or work already covered by the Plan/Code Reviewer. Use this tool only when all are true: (1) the task crosses multiple unknown subsystems, (2) the questions can be investigated independently in parallel, and (3) returning the necessary raw reads would materially bloat the parent context. Before dispatching, put every currently known independent question into one `tasks` array. After reports return, prefer direct tools to fill evidence gaps. Dispatch again only if the reports reveal a new blocker that direct tools cannot answer. Pass `tasks`: 1-6 entries of `{ id, prompt }`, where `prompt` is self-contained because the subagent sees none of this conversation, and `id` matches answers to questions. Each subagent may only read (`read` / `search_files` / `list_dir` / read-only `bash`) and returns concise findings with `path:line` references plus a conclusion, never raw file contents. Only its final report enters the parent context.\n",
+        display_summary: Some("Run parallel read-only explorer subagents that return findings, not file contents."),
+        parameters: dispatch_agent_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("dispatch agent explorer subagent investigate parallel findings"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
     // ─── PLAN 模式专属工具（T2-P1-002/003）：plan_only=true，默认 chat catalog 不暴露 ───
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
-        display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, and writes frontmatter under an advisory lock. A coding plan may include one final todo with kind `acceptance`; the runtime does not append todos. The runtime then asks the user whether to run an independent advisory review, explaining its benefits, additional model usage and potentially several minutes or longer of waiting. Review runs only with explicit consent; skipping leaves the saved plan available immediately. The result is returned in the tool's `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
+        display_summary: Some("Create a plan file under ~/.tomcat/plans/ and ask before running an advisory review (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,
         category: None,
@@ -355,12 +463,12 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         search_hint: Some("plan create planning goal draft todos reviewer"),
         prompt_guidelines: &[],
         plan_only: true,
-        requires_user_interaction: false,
+        requires_user_interaction: true,
     },
     BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
-        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. When all todos reach `completed` in EXEC, the runtime auto-derives state=completed and resets the reminder/catalog/visible labels. Only frontmatter.todos is mutated; plan body markdown is left untouched.\n",
+        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. A plan completes when it has at least one todo and every todo is completed or cancelled. Starting a final `acceptance` todo returns a verify-skill hint; only frontmatter.todos is mutated.\n",
         display_summary: Some("Apply todo-only incremental ops to the active plan (CHAT/PLAN/EXEC)."),
         parameters: update_plan_parameters,
         scope: PermissionScope::Write,
@@ -375,8 +483,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "todos",
         label: "Todos",
-        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. It NEVER writes the active PlanFile (advance plan todos via `update_plan`); when persistence is configured it is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results. At most one todo may be `in_progress`.\n",
-        display_summary: Some("Maintain a session todo scratchpad (single in_progress; returns full snapshot)."),
+        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. It NEVER writes the active PlanFile (advance plan todos via `update_plan`); when persistence is configured it is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results. At most three independent todos may be `in_progress`.\n",
+        display_summary: Some("Maintain a session todo scratchpad (up to three in_progress; returns full snapshot)."),
         parameters: todos_parameters,
         scope: PermissionScope::Write,
         category: None,
@@ -408,6 +516,12 @@ pub fn builtin_tool_by_name(name: &str) -> Option<&'static BuiltinToolCatalogEnt
     BUILTIN_TOOL_CATALOG.iter().find(|entry| entry.name == name)
 }
 
+/// 供 session hydrate / resume 使用的工具恢复契约查询。
+pub fn is_replay_safe_tool(name: &str) -> bool {
+    builtin_tool_by_name(name)
+        .is_some_and(|entry| entry.replay_safety() == ToolReplaySafety::ReplaySafe)
+}
+
 pub fn build_function_definitions() -> Vec<Value> {
     BUILTIN_TOOL_CATALOG
         .iter()
@@ -424,30 +538,70 @@ pub fn build_function_definitions() -> Vec<Value> {
         .collect()
 }
 
-/// chat_loop 默认 LLM 工具集（不含 `plan_only` 工具）。
+/// The two prompt representations of the stable built-in catalog.
 ///
-/// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）依据 plan-runtime.md
-/// §4.1 R6 在 PLAN/EXEC 模式由 `PlanRuntime::visible_tools_for_mode` 显式合入；
-/// 未启用 `PlanRuntime` 时（or `mode == Chat`），chat_loop 用本 helper 装配 `tool_definitions`，
-/// 避免 plan 工具暴露给 CHAT 期 LLM。
-///
-/// 全集（含 plan_only）仍由 [`build_function_definitions`] 输出，用于
-/// `tool-catalog.md` 文档与 `catalog_and_function_definitions_have_same_names` 回归。
-pub fn build_function_definitions_for_chat_default() -> Vec<Value> {
-    BUILTIN_TOOL_CATALOG
+/// Build this once per request surface so the function array and the system
+/// prompt's human-readable tool list cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct BuiltinToolSurface {
+    pub function_definitions: Vec<Value>,
+    pub identity_tool_lines: String,
+}
+
+pub fn builtin_tool_surface_with_policy(allow_load_skill: bool) -> BuiltinToolSurface {
+    builtin_tool_surface_with_policies(allow_load_skill, false)
+}
+
+/// Builds the stable builtin surface from configuration-only policies. In
+/// particular, deferred connector tools must not appear/disappear with MCP's
+/// asynchronous Ready state, because this surface is part of the prompt prefix.
+pub fn builtin_tool_surface_with_policies(
+    allow_load_skill: bool,
+    allow_connector_tools: bool,
+) -> BuiltinToolSurface {
+    builtin_tool_surface_with_policies_and_install(allow_load_skill, allow_connector_tools, true)
+}
+
+/// Builds a session-aware tool surface. Package installation is omitted while a
+/// session is planning, so the model cannot propose a write-only operation that
+/// the runtime will reject. The execution guard remains authoritative.
+pub fn builtin_tool_surface_with_policies_and_install(
+    allow_load_skill: bool,
+    allow_connector_tools: bool,
+    allow_package_install: bool,
+) -> BuiltinToolSurface {
+    let entries = BUILTIN_TOOL_CATALOG
         .iter()
-        .filter(|entry| !entry.plan_only && entry.name != "load_skill")
-        .map(|entry| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "parameters": (entry.parameters)(),
-                }
-            })
+        .filter(|entry| allow_load_skill || entry.name != "load_skill")
+        .filter(|entry| allow_package_install || entry.name != "package_install")
+        .filter(|entry| {
+            allow_connector_tools
+                || !matches!(
+                    entry.name,
+                    "tool_search" | "tool_describe" | "tool_call" | "tool_run_code"
+                )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    BuiltinToolSurface {
+        function_definitions: entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": entry.name,
+                        "description": entry.description,
+                        "parameters": (entry.parameters)(),
+                    }
+                })
+            })
+            .collect(),
+        identity_tool_lines: entries
+            .iter()
+            .map(|entry| format!("- {}: {}", entry.name, entry.display_summary()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 pub fn render_core_identity_tool_lines() -> String {
@@ -455,12 +609,7 @@ pub fn render_core_identity_tool_lines() -> String {
 }
 
 pub fn render_core_identity_tool_lines_with_policy(allow_load_skill: bool) -> String {
-    BUILTIN_TOOL_CATALOG
-        .iter()
-        .filter(|entry| allow_load_skill || entry.name != "load_skill")
-        .map(|entry| format!("- {}: {}", entry.name, entry.display_summary()))
-        .collect::<Vec<_>>()
-        .join("\n")
+    builtin_tool_surface_with_policy(allow_load_skill).identity_tool_lines
 }
 
 /// 聚合各工具的 [`BuiltinToolCatalogEntry::prompt_guidelines`]，按 catalog 顺序展开、
@@ -557,46 +706,66 @@ fn todo_status_property(description: &str) -> Value {
     })
 }
 
-fn shared_todo_op_item_schema(status_description: &str) -> Value {
+fn shared_todo_op_item_schema(
+    status_description: &str,
+    include_evidence: bool,
+    include_todo_kind: bool,
+) -> Value {
+    let mut set_status_properties = serde_json::json!({
+        "kind": {
+            "type": "string",
+            "const": "set_status",
+            "description": "Operation kind."
+        },
+        "id": {
+            "type": "string",
+            "description": "Target todo id (kebab-case)."
+        },
+        "status": todo_status_property(status_description),
+    });
+    if include_evidence {
+        set_status_properties["evidence"] = serde_json::json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Completion evidence. Only valid with status=`completed`; include concrete verification such as task:<id>, file:<path>, or a command outcome."
+        });
+    }
+    let mut upsert_properties = serde_json::json!({
+        "kind": {
+            "type": "string",
+            "const": "upsert",
+            "description": "Operation kind."
+        },
+        "id": {
+            "type": "string",
+            "description": "Target todo id (kebab-case)."
+        },
+        "content": {
+            "type": "string",
+            "description": "Todo content. Required when creating a brand-new todo."
+        },
+        "status": todo_status_property(status_description)
+    });
+    if include_todo_kind {
+        upsert_properties["todo_kind"] = serde_json::json!({
+            "type": "string",
+            "enum": ["work", "acceptance"],
+            "description": "Todo semantic type. Defaults to work. `kind` already identifies the operation, so todo type uses this separate key. `acceptance` is only for the one final acceptance todo in a plan."
+        });
+    }
     serde_json::json!({
         "oneOf": [
             {
                 "type": "object",
                 "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "const": "upsert",
-                        "description": "Operation kind."
-                    },
-                    "id": {
-                        "type": "string",
-                        "description": "Target todo id (kebab-case)."
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Todo content. Required when creating a brand-new todo."
-                    },
-                    "status": todo_status_property(status_description)
-                },
+                "properties": upsert_properties,
                 "required": ["kind", "id"],
                 "additionalProperties": false
             },
             {
                 "type": "object",
                 "description": "`set_status` only changes status for an existing todo.",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "const": "set_status",
-                        "description": "Operation kind."
-                    },
-                    "id": {
-                        "type": "string",
-                        "description": "Target todo id (kebab-case)."
-                    },
-                    "status": todo_status_property(status_description)
-                },
+                "properties": set_status_properties,
                 "required": ["kind", "id", "status"],
                 "additionalProperties": false
             },
@@ -624,7 +793,21 @@ fn shared_todo_op_item_schema(status_description: &str) -> Value {
 fn read_parameters() -> Value {
     object_schema(
         serde_json::json!({
-            "path": { "type": "string", "description": "Absolute or relative file path to read as UTF-8 text." },
+            "path": { "type": "string", "description": "Absolute or relative file path to read as UTF-8 text. Provide exactly one of `path` or `paths`." },
+            "paths": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "description": "Read several files in one call. Mutually exclusive with `path`. Entries are read in order and share one output budget; anything that does not fit is reported as SKIPPED with a resume call rather than dropped silently. Keep a batch to 3-5 files so the combined result stays small enough to remain inline.",
+                "items": object_schema(
+                    serde_json::json!({
+                        "path": { "type": "string", "description": "File to read." },
+                        "offset": { "type": "integer", "minimum": 1, "description": "Optional 1-based start line for this entry." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "Optional max lines for this entry." }
+                    }),
+                    &["path"],
+                )
+            },
             "offset": {
                 "type": "integer",
                 "minimum": 1,
@@ -638,14 +821,14 @@ fn read_parameters() -> Value {
             },
             "line_numbers": {
                 "type": "boolean",
-                "description": "Render `cat -n` style line numbers (default true). These prefixes are display-only — do not paste `  N\\t...` into edit.old_content."
+                "description": "Render `cat -n` style line numbers (default true). Applies to every entry when using `paths`. These prefixes are display-only — do not paste `  N\\t...` into edit.old_content."
             },
             "hashline": {
                 "type": "boolean",
                 "description": "Render each line as `{line}#{2-char hash}:{content}` for use with hashline_edit. Display-only prefix — do not paste into edit.old_content. Mutually exclusive with line_numbers (hashline wins). Default false."
             }
         }),
-        &["path"],
+        &[],
     )
 }
 
@@ -665,6 +848,80 @@ fn load_skill_parameters() -> Value {
     )
 }
 
+fn tool_search_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "query": {
+                "type": ["string", "null"],
+                "description": "Optional keywords for cross-source search. Omit together with source to list sources."
+            },
+            "source": {
+                "type": ["string", "null"],
+                "description": "Optional connector source name. Without query, lists this source's tool cards; with query, scopes search."
+            },
+            "limit": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 100,
+                "description": "Maximum returned entries. Defaults to 20."
+            },
+            "offset": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Number of entries to skip. Defaults to 0."
+            }
+        }),
+        &[],
+    )
+}
+
+fn tool_describe_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "names": {
+                "type": "array",
+                "minItems": 1,
+                "description": "One or more canonical names returned by tool_search. Batch related tools to fetch schemas together.",
+                "items": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        }),
+        &["names"],
+    )
+}
+
+fn tool_call_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Canonical deferred tool name returned by tool_search."
+            },
+            "arguments": {
+                "type": "object",
+                "description": "Arguments matching the inputSchema returned by tool_describe."
+            }
+        }),
+        &["name", "arguments"],
+    )
+}
+
+fn tool_run_code_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "code": {
+                "type": "string",
+                "minLength": 1,
+                "description": "JavaScript function body. Use await callTool(name, arguments) and return one JSON-compatible final value."
+            }
+        }),
+        &["code"],
+    )
+}
+
 fn write_parameters() -> Value {
     object_schema(
         serde_json::json!({
@@ -677,53 +934,44 @@ fn write_parameters() -> Value {
 }
 
 fn edit_parameters() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Edit a file (read -> edit). Provide Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
-        "properties": {
+    object_schema(
+        serde_json::json!({
             "path": {
                 "type": "string",
-                "description": "Absolute or relative file path to edit."
-            },
-            "old_content": {
-                "type": "string",
-                "description": "Shape A: exact existing text to replace; include enough context to be unique unless `replace_all: true`. Copy real file text, not display prefixes."
-            },
-            "new_content": {
-                "type": "string",
-                "description": "Shape A: replacement text."
-            },
-            "replace_all": {
-                "type": "boolean",
-                "description": "Shape A: replace every occurrence of `old_content` instead of failing on multiple matches. Defaults to false."
+                "description": "Absolute or relative path to the one existing file to edit."
             },
             "edits": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Shape B (preferred): edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected.",
+                "description": "One or more independent segments applied to this file's ORIGINAL snapshot. Overlapping spans are rejected.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "old_content": {
                             "type": "string",
-                            "description": "Exact existing text to replace in this segment (real file text, no display prefixes)."
+                            "description": "Exact existing text or insertion anchor (real file text; no read display prefixes)."
                         },
                         "new_content": {
                             "type": "string",
-                            "description": "Replacement text for this segment."
+                            "description": "Replacement text, or text to insert for insert modes."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["replace", "insert_before", "insert_after"],
+                            "description": "Defaults to replace. Insert modes preserve old_content as the anchor."
                         },
                         "replace_all": {
                             "type": "boolean",
-                            "description": "Replace every occurrence of `old_content` in this segment. Defaults to false."
+                            "description": "Change every occurrence intentionally; defaults to false. Valid only with mode=replace."
                         }
                     },
                     "required": ["old_content", "new_content"],
                     "additionalProperties": false
                 }
             }
-        },
-        "required": ["path"]
-    })
+        }),
+        &["path", "edits"],
+    )
 }
 
 fn bash_parameters() -> Value {
@@ -731,22 +979,15 @@ fn bash_parameters() -> Value {
         serde_json::json!({
             "command": {
                 "type": "string",
-                "description": "Shell command to execute. With `args` set, runs argv-style (no shell); otherwise via `sh -c` (Unix) / `cmd /C` (Windows)."
+                "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / `cmd /C` (Windows)."
             },
             "cwd": {
                 "type": "string",
                 "description": "Optional working directory. Empty means unset. Use an absolute path or `~/...`; shell vars like `$HOME` are NOT expanded here. Defaults to the agent process cwd."
             },
-            "args": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Optional argv elements appended to `command`; when present the command runs argv-style (no shell) — safer for paths with spaces or quotes."
-            },
-            "timeout_ms": {
+            "foreground_wait_ms": {
                 "type": "integer",
-                "minimum": 1,
-                "maximum": 600000,
-                "description": "Optional wall-clock timeout in ms (default 120000, capped at 600000). On timeout the child is killed and `timed_out=true`. Ignored when run_in_background=true."
+                "description": "How long this call waits in the foreground. Values clamp to 8000-16000ms; expiry keeps the same tracked process running. Ignored when run_in_background=true."
             },
             "run_in_background": {
                 "type": "boolean",
@@ -771,13 +1012,13 @@ fn task_output_parameters() -> Value {
             },
             "block": {
                 "type": "boolean",
-                "description": "If true, wait until new output arrives, the task finishes, or `timeout_ms` elapses, and return a `wakeReason`. Default false."
+                "description": "If true, wait until the task finishes or `wait_ms` elapses, and return wakeReason `finished` or `wait_window_elapsed`. Mid-stream output does not interrupt the wait. Default false."
             },
-            "timeout_ms": {
+            "wait_ms": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 30000,
-                "description": "Wait slice in ms for block=true (default 5000, max 30000; `0` == block=false). A timeout is not a failure — inspect `content`/`finished` before waiting again."
+                "maximum": 600000,
+                "description": "Observation window for block=true (default 5000, clamped to 5000-600000ms). Ignored when block=false. It never stops the task."
             }
         }),
         &["task_id"],
@@ -812,7 +1053,7 @@ fn list_dir_parameters() -> Value {
 fn hashline_edit_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; mismatches return HashMismatch.",
+        "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; invalid anchors are all reported and no write occurs.",
         "properties": {
             "path": {
                 "type": "string",
@@ -852,6 +1093,33 @@ fn hashline_edit_parameters() -> Value {
     })
 }
 
+fn dispatch_agent_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "tasks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 6,
+                "description": "Investigation tasks to run in parallel. Keep each one scoped to a single area; split unrelated questions into separate tasks instead of writing one broad prompt.",
+                "items": object_schema(
+                    serde_json::json!({
+                        "id": {
+                            "type": "string",
+                            "description": "Short unique label such as `webview-paste`. Used to match the returned report back to this task. Defaults to `task-<n>` when omitted."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Self-contained question. The subagent cannot see this conversation, so state the goal, the area to look at, and what a useful answer contains."
+                        }
+                    }),
+                    &["prompt"],
+                )
+            }
+        }),
+        &["tasks"],
+    )
+}
+
 fn search_files_parameters() -> Value {
     object_schema(
         serde_json::json!({
@@ -884,7 +1152,7 @@ fn search_files_parameters() -> Value {
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "[content only] Surrounding context lines when output_mode=content. Ignored otherwise."
+                "description": "[content only] Surrounding context lines when output_mode=content. Defaults to 3 so you can judge a hit without a follow-up read; pass 0 for matched lines only. Ignored otherwise."
             },
             "head_limit": {
                 "anyOf": [
@@ -990,12 +1258,24 @@ fn config_set_parameters() -> Value {
     )
 }
 
+fn package_install_parameters() -> Value {
+    let mut schema = object_schema(
+        serde_json::json!({
+            "source": { "type": "string", "description": "Absolute local directory or package.json/plugin.json/SKILL.md to install." },
+            "scope": { "type": "string", "enum": ["scope", "agent", "global"], "description": "Installation scope. Defaults to scope. Scope requires this session to have an explicit project root." }
+        }),
+        &["source"],
+    );
+    schema["additionalProperties"] = Value::Bool(false);
+    schema
+}
+
 // ─── PLAN 模式工具 schema（T2-P1-002/003） ─────────────────────────────────
 
 fn create_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
+        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id. For a coding plan, normally include one final `kind=acceptance` todo and describe its acceptance in plain language in the plan body; omitting it does not block creation.",
         "properties": {
             "goal": {
                 "type": "string",
@@ -1023,7 +1303,12 @@ fn create_plan_parameters() -> Value {
                         "status": {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
-                            "description": "Initial status. Defaults to `pending`; at most one todo may be `in_progress`."
+                            "description": "Initial status. Defaults to `pending`."
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["work", "acceptance"],
+                            "description": "Optional todo semantic type, default `work`. `acceptance` is only for the final acceptance todo; a plan may have at most one."
                         }
                     },
                     "required": ["id", "content"]
@@ -1037,7 +1322,7 @@ fn create_plan_parameters() -> Value {
 fn update_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Apply incremental todo-only ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
+        "description": "Apply todo ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
         "properties": {
             "plan_id": {
                 "type": "string",
@@ -1053,21 +1338,21 @@ fn update_plan_parameters() -> Value {
             },
             "ops": {
                 "type": "array",
-                "description": "Ordered mutations applied atomically (one frontmatter write under advisory lock).",
-                "minItems": 1,
+                "description": "Ordered todo mutations applied atomically.",
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing."
+                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
+                    true,
+                    true,
                 )
             }
-        },
-        "required": ["ops"]
+        }
     })
 }
 
 fn todos_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
+        "description": "Session-local todo scratchpad (visible in CHAT, PLAN, and EXEC). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
         "properties": {
             "new_todos": {
                 "type": "boolean",
@@ -1086,7 +1371,9 @@ fn todos_parameters() -> Value {
                 "description": "Ordered list of mutations applied in order.",
                 "minItems": 1,
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`."
+                    "For `upsert` (optional) and `set_status` (required).",
+                    false,
+                    false,
                 )
             }
         },

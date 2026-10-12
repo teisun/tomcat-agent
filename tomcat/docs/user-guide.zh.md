@@ -242,6 +242,33 @@ tomcat init
 - `base_url`：既可以只填 host，也可以带显式厂商路径。tomcat 会自动补 leaf，所以 `https://api.openai.com` 会拼成 `/v1/...`，而 GLM 这类 `https://open.bigmodel.cn/api/paas/v4` 会保留 `/api/paas/v4/...`
 - `kimi-k2.7-code` / Moonshot 端点说明：当前内置预置默认走 Moonshot 中国站 `https://api.moonshot.cn`，因为本仓 real-LLM 冒烟已按这个端点验证通过。Moonshot 全球站使用 `https://api.moonshot.ai`。如果你的 API Key 是在全球站申请的，请在 `models.toml` 里把 `base_url` 改成 `https://api.moonshot.ai`。
 
+### 模型 Speed 与 Effort（VS Code）
+
+```text
+模型菜单 → 点某一行 Edit
+              Speed   Standard / Fast / Ultrafast
+              ──────────────────────────────────
+              Context 400K / 1M
+              Effort  Low … Xhigh / Max
+```
+
+Speed 是服务加速，Effort 是思考强度，两者互不替代：模型同时支持时，可以 Fast + Max。改某一行的 Speed 不会切换当前模型，也不会改 Context/Effort；选择按模型记住，下次运行生效。
+
+- 默认 **Standard**。声明了速度控制的模型会明确发送 `service_tier = "default"`，防止上游项目默认启用收费加速档。
+- **Fast** 发 `service_tier = "priority"`，**Ultrafast** 发 `service_tier = "ultrafast"`。加速可能更贵，上游也可能拒绝或降档；菜单选中 Fast 不等于服务端真的按 Fast 执行。
+- 模型声明了加速档才出现 Speed 区。`supported_speeds` 只列 `fast`、`ultrafast`，Standard 永远隐含。空列表隐藏 Speed 区，也不发速度字段。
+- 只有上游支持时才在 `supported_reasoning_levels` 里补 `max`；不会自动把已有 Xhigh 偏好改为 Max。
+- Ultrafast 按模型、账号开放：GPT-6 Astra 支持，GPT-5.6 Sol 需要预览权限；GPT-6 Sol 与 GPT-6.1 Sol 不声明支持。**本期不接 Ultra 多代理**，也没有 `reasoning.effort = "ultra"`。
+
+对于确实支持两档加速的 OpenAI Responses 模型，在已有 `[[models]]` 条目中写：
+
+```toml
+supported_speeds = ["fast", "ultrafast"]
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+```
+
+**Tomcat Settings → Models → Edit → Advanced** 里的 **Supported effort levels** 与 **Supported speeds** 都支持英文、中文逗号。输入时原样保留文字，点保存才 trim、去空、去重。中转站配置是用户对能力的声明，不会自动探测网关是否透传。
+
 ### tomcat model —— 不手改文件也能管模型与 Key
 
 如果你不想手动编辑 `models.toml` 或 `.env`，可以直接使用专门的模型管理子命令：
@@ -354,6 +381,20 @@ doctor 逐项检查环境并给出可执行的修复建议：
 ## 3. 配置管理
 
 `tomcat config` 提供对 `tomcat.config.toml` 的读写操作，无需手动编辑文件。
+
+### 显示语言
+
+```text
+Settings → 通用 → 语言 ─┐
+                       ├─ tomcat.config.toml 中的 ui.language
+独立终端 config set ────┘
+```
+
+`ui.language` 支持 `auto`（默认）、`zh-CN`、`en`。在独立终端执行 `tomcat config set ui.language en`（或 `zh-CN` / `auto`）可修改同一份偏好。自动模式下，扩展跟随 VS Code 显示语言，独立 CLI 跟随系统语言。`TOMCAT__UI__LANGUAGE` 是进程级覆盖，例如 `TOMCAT__UI__LANGUAGE=en tomcat --help`。
+
+Settings 保存后当前窗口及 Serve 原地切换，无需重启会话；其他窗口和独立进程下次启动读取。既有对话及已经生成的后端提示不重新翻译；VS Code 原生命令和菜单仍跟随 VS Code 自身语言。命令名、flag、配置键、模型 ID、外部原始诊断均保持不变。
+
+置顶、安全删除和可跳过的计划审查见[扩展使用说明](../../tomcat-vscode-ext/README.zh.md#会话settings-与计划审查)。审查可能需要几分钟或更久，并消耗额外模型用量；跳过直接打开已保存的计划，不启动审查或执行。
 
 ### 查看完整配置
 
@@ -603,7 +644,7 @@ tomcat workspace remove /path/to/project
 
 三层可见范围：
 
-- `scope`：当前项目，落到 `<scope_root>/.tomcat/{plugins,skills,packages}`。
+- `scope`：当前项目，落到 `<scope_root>/<workspace.project_resource_dir>/{plugins,skills,packages}`（默认 `.agents`）。
 - `agent`：当前 agent，落到 `~/.tomcat/agents/<id>/{plugins,skills,packages}`。
 - `global`：全局共享层，落到 `~/.tomcat/{plugins,skills,packages}`。
 
@@ -631,19 +672,25 @@ tomcat packages --visibility agent
 tomcat uninstall my-package --visibility scope
 ```
 
-对话内安装：
+终端对话和 VS Code 输入框都能管理资源：
 
 ```text
-/install ./my-package
-/install ./my-plugin agent
+/reload
+/install './source with space/my-plugin' agent
 /install ./my-skill current-project
+/uninstall my-package agent
 ```
 
-说明：
+```text
+外部 CLI / 手工改文件 → /reload → 本会话 Skill、工具和插件实例更新
+对话内安装 / 卸载     → 自动执行同一套核对，不必再 /reload
+```
 
-- `/install` 里的 `current-project` 只是用户标签，内部映射到 `scope`。
-- code/claw 会话里 `/install` 成功后，当前会话会立即刷新 `SkillSet` 与 plugin catalog/static tool 清单，因此新装的 skill / 静态 plugin 能力无需重进会话即可可见。
-- 这个 live refresh **不会**在安装路径执行插件代码，也**不会**热替换已经加载的 plugin 实例；若当前会话里某个 plugin 已在跑，它会继续沿用旧实例，直到后续正常 runtime 路径重新激活。
+- `/reload` 重扫有效 Skill 和插件资源，汇报增、删、改并更新下一轮模型请求；不重读任意配置，也不重连 MCP。当前**没有每次发送提示词都扫盘**，外部改动后请主动 `/reload`。
+- `current-project` 是 `scope` 的用户标签，也可选 `agent` / `global`。终端 `/install`、`/uninstall` 缺层时弹选择面板；VS Code 不弹交互面板，缺参数返回用法。带空格的路径用引号。斜杠命令 `/install` 不支持 `--force`；要覆盖安装，先 `/uninstall` 再 `/install`，或使用外层命令行 `tomcat install --force`。
+- `/uninstall` 参数是 `tomcat packages` 列出的**包名**，不是工具名；只卸载指定层包账本管理的资源。手工放入的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
+- 包安装本身仍只做静态操作。核对会把已删除插件从共享工具表下架，已获准调用可以收尾。更新插件时，本会话清理旧 VM 登记并通知退出；其他对话在当前轮仍可使用已有的旧 VM，下一轮核对再切换。旧 VM 不能再登记新能力，权限仍按出生时的清单判断。静态 Lazy 插件保持懒加载；Session 插件初始化可能在核对期间执行。无关插件保持不变。
+- VS Code 在输入开头、空格后或换行后输入 `/` 弹菜单；路径和 URL 内不弹。选择只是插入文字，发送才执行；只有开头的共享命令且**纯文字**才被拦截，句中命令、含引用/附件的草稿仍当普通消息。等待回包期间禁用发送、压缩和 Build，结果显示为提示/错误气泡。旧 Serve 未下发命令表时不显示该菜单。
 
 ---
 
@@ -720,6 +767,9 @@ agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中�
 
 | 命令 | 说明 |
 |------|------|
+| `/reload` | 重扫本会话 Skill 与插件工具 |
+| `/install <source> <current-project\|agent\|global>` | 安装并同步资源 |
+| `/uninstall <package-name> <current-project\|agent\|global>` | 卸载账本管理的包并同步 |
 | `/help` | 显示当前支持的本地命令 |
 | `/path <绝对路径>` | 为单个路径打开授权菜单（本次会话 / 写入工作区 / 只读 / 禁止 / 取消） |
 | `/model`（`current` / `list` / `use <id>`） | 查看或切换当前会话模型（catalog 来自内置表 + `models.toml`） |
@@ -733,6 +783,8 @@ agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中�
 | `/plan list` | 列出 `~/.tomcat/plans/` 下计划文件 |
 
 直接拖拽或粘贴路径后回车不会触发授权菜单，会按普通聊天消息发送给 LLM。需要显式授权路径时，请输入 `/path <绝对路径>`。
+
+终端 `/restore` 成功后会把磁盘历史重新装入内存，和 VS Code checkpoint 恢复保持一致；恢复后尾部若是未回答的问题，会自动续问。dry-run 或失败不改变内存上下文。
 
 #### Checkpoint 启动目录建议
 
@@ -1080,6 +1132,6 @@ tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
 
-`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。真正的长生命周期 session VM 仍只会在会话里首次用到该插件时按需创建。
+`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。后续会话激活会立即创建 Session 插件 VM，静态 Lazy 插件则等首次调用；`/install` 与 `/reload` 同步清单后复用这套激活策略。
 
 实现细节见 [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) 与 [src/ext/README.md](../src/ext/README.md)。

@@ -13,18 +13,135 @@ import {
   parsePlanFrontmatter,
   readPlanMetadata,
 } from "../provider";
-import type { HostToWebviewFrame } from "../protocol";
+import type { FileDiffLine, HostToWebviewFrame, WebviewToolDisplayFile } from "../protocol";
+import type { WebviewStateStore } from "../state";
+import { setLocale, translate } from "../../../shared/i18n";
 
 const __testing = (
   vscode as typeof vscode & {
     __testing: {
       registerDirectory(dirPath: string): void;
+      setErrorMessageHandler(handler: ((message: string, items: string[]) => string | undefined) | undefined): void;
+      setWarningMessageHandler(
+        handler:
+          | ((message: string, items: Array<string | vscode.MessageItem>, options?: { detail?: string; modal?: boolean }) => string | vscode.MessageItem | undefined)
+          | undefined,
+      ): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
       setConfiguration(key: string, value: unknown): void;
     };
   }
 ).__testing;
+
+const remoteErrorDetail = "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>";
+const remoteErrorSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-123";
+
+describe("Host message queue integration", () => {
+  function setup() {
+    __testing.reset();
+    const request = vi.fn(async (_message: any) => ({ success: true }));
+    const setModel = vi.fn(), setMode = vi.fn();
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"), getDefaultCwd: () => "/workspace", ide: {} as never,
+      initialize: async () => ({ capabilities: ["message_queue"] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }), request, sendSetModel: setModel, sendSetPlanMode: setMode } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    host.initialized = { capabilities: ["message_queue"] };
+    host.stateStore.setActiveSession("s");
+    host.stateStore.applySessionState({ sessionId: "s", busy: true, model: "A", agentMode: "chat" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s");
+    vi.spyOn(host, "ensureWebviewSessionWithoutHistory").mockResolvedValue("s");
+    return { provider, host, request, setModel, setMode };
+  }
+  it("captures only selected attachments and does not overwrite a newer draft during delayed preparation", async () => {
+    const f = setup();
+    const photo = (id: string) => ({ id, blobSha: "a".repeat(64), bytes: 10, filename: `${id}.png`, kind: "image", mimeType: "image/png" });
+    f.host.draftStore.update("s", () => ({ text: "newer draft", segments: [{ type: "text", text: "newer draft" }], attachments: [photo("prior"), photo("later")] }));
+    await f.host.handleIntent({ type: "prompt", messageId: "frozen", data: { sessionId: "s", text: "frozen", segments: [{ type: "text", text: "frozen" }], attachmentIds: ["prior"], userMessageId: "frozen" } });
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items[0].attachments.map(a => a.id)).toEqual(["prior"]);
+    expect(f.host.draftStore.peek("s").text).toBe("newer draft");
+    expect(f.host.draftStore.peek("s").attachments.map((a: any) => a.id)).toEqual(["prior", "later"]);
+    f.provider.dispose();
+  });
+  it("busy submits remain content-only; picker edits do not send RPC or override the session", async () => {
+    const f = setup();
+    await f.host.handleIntent({ type: "prompt", messageId: "submit", data: { sessionId: "s", text: "X", userMessageId: "X" } });
+    expect(f.request).not.toHaveBeenCalled();
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items[0].text).toBe("X");
+    expect(f.host.draftStore.peek("s").text).toBe("");
+    await f.host.handleIntent({ type: "setModel", messageId: "model", data: { sessionId: "s", modelId: "B" } });
+    await f.host.handleIntent({ type: "setPlanMode", messageId: "mode", data: { sessionId: "s", action: "enter" } });
+    expect(f.setModel).not.toHaveBeenCalled(); expect(f.setMode).not.toHaveBeenCalled();
+    expect(f.provider.currentState().sessionViews.s).toMatchObject({ model: "A", agentMode: "chat" });
+    expect(f.provider.currentState().sessionViews.s).not.toHaveProperty("composerConfig");
+    await f.host.handleIntent({ type: "queueAction", messageId: "now", data: { sessionId: "s", userMessageId: "X", action: "send" } });
+    expect(f.request).toHaveBeenCalledWith(expect.objectContaining({ type: "steer", params: expect.objectContaining({ onlyIfRunning: true, userMessageId: "X" }) }));
+    expect(f.request.mock.calls[0][0].params).not.toHaveProperty("model");
+    expect(f.request.mock.calls[0][0].params).not.toHaveProperty("agentMode");
+    await f.host.handleServeEvent({ type: "steering_consumed", sessionId: "s", userMessageIds: ["X"] });
+    const state = f.provider.currentState().sessionViews.s;
+    expect(state.messageQueue?.items).toEqual([]);
+    expect(state.timeline.filter(item => item.type === "message" && item.id === "X")).toHaveLength(1);
+    f.provider.dispose();
+  });
+  it.each([true, false])("idle pickers use RPC and retain authoritative state after model success=%s", async success => {
+    const f = setup();
+    const backend = { sessionId: "s", busy: false, model: "A", agentMode: "chat" };
+    f.host.stateStore.applySessionState(backend);
+    const refreshModels = vi.spyOn(f.host, "refreshModels").mockResolvedValue(undefined);
+    const refreshSession = vi.spyOn(f.host, "refreshSessionState").mockImplementation(async () => {
+      f.host.stateStore.applySessionState(backend);
+    });
+    f.setModel.mockImplementation(async (_sessionId, model) => {
+      if (success) backend.model = model;
+      return { success, error: success ? undefined : "model_not_found" };
+    });
+    f.setMode.mockImplementation(async () => { backend.agentMode = "plan"; return { success: true }; });
+    await f.host.handleIntent({ type: "setModel", messageId: "model", data: { sessionId: "s", modelId: "B" } });
+    expect(f.setModel).toHaveBeenCalledWith("s", "B");
+    expect(refreshModels).toHaveBeenCalledOnce();
+    expect(f.provider.currentState().sessionViews.s.model).toBe(success ? "B" : "A");
+    await f.host.handleIntent({ type: "setPlanMode", messageId: "mode", data: { sessionId: "s", action: "enter" } });
+    expect(f.setMode).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s", action: "enter" }));
+    expect(refreshSession).toHaveBeenCalledTimes(2);
+    expect(f.provider.currentState().sessionViews.s.agentMode).toBe("plan");
+    expect(f.provider.currentState().sessionViews.s).not.toHaveProperty("composerConfig");
+    f.provider.dispose();
+  });
+  it("Stop retains ordinary queue; idle Enter sends C before retained work without touching another session", async () => {
+    const f = setup();
+    for (const text of ["A", "B"]) await f.host.handleIntent({ type: "prompt", messageId: text, data: { sessionId: "s", text, userMessageId: text } });
+    await f.host.handleIntent({ type: "interrupt", messageId: "stop", data: { sessionId: "s" } });
+    await f.host.handleServeEvent({ type: "agent_idle", sessionId: "s", outcome: "interrupted" });
+    f.host.stateStore.setActiveSession("background");
+    await f.host.handleIntent({ type: "prompt", messageId: "C", data: { sessionId: "s", text: "C", userMessageId: "C" } });
+    expect(f.request.mock.calls.map(c => c[0].type)).toEqual(["interrupt", "prompt"]);
+    expect(f.request.mock.calls[1][0].text).toBe("C");
+    expect(f.request.mock.calls[1][0].params).not.toHaveProperty("model");
+    expect(f.request.mock.calls[1][0].params).not.toHaveProperty("agentMode");
+    expect(f.provider.currentState().activeSessionId).toBe("background");
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items.map(item => item.text)).toEqual(["A", "B"]);
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.paused).toBe(false);
+    f.provider.dispose();
+  });
+  it("serve replacement clears every queue and leaves draft/history intact; Webview readiness alone does not clear", async () => {
+    const f = setup();
+    await f.host.handleIntent({ type: "prompt", messageId: "A", data: { sessionId: "s", text: "A", userMessageId: "A" } });
+    f.host.messageQueue.enqueue("background", { userMessageId: "B", text: "B", attachments: [], segments: [] });
+    f.host.draftStore.update("s", () => ({ text: "new draft", attachments: [], segments: [] }));
+    f.host.stateStore.appendMessage("s", "user", "history");
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items).toHaveLength(1);
+    await f.provider.setServeConnectionState("reconnecting");
+    expect(f.provider.currentState().sessionViews.s.messageQueue?.items).toEqual([]);
+    expect(f.host.messageQueue.view("background").items).toEqual([]);
+    expect(f.host.draftStore.peek("s").text).toBe("new draft");
+    expect(f.provider.currentState().sessionViews.s.timeline.some(item => item.type === "message" && item.text === "history")).toBe(true);
+    f.provider.dispose();
+  });
+});
 
 describe("plan metadata helpers", () => {
   const tempDirs: string[] = [];
@@ -55,15 +172,16 @@ todos:
   });
 
   it("falls back to goal as title when name/title are absent", () => {
+    const title = "在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏";
     const parsed = parsePlanFrontmatter(`---
-goal: 在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏
+goal: ${title}
 draft: ...
 ---
 # body
 `);
 
     expect(parsed).toEqual({
-      title: "在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏",
+      title,
     });
   });
 
@@ -189,10 +307,191 @@ describe("picked uri classification", () => {
     await expect(classifyPickedUri(vscode.Uri.file("/workspace/src/app.ts"))).resolves.toBe("reference");
     await expect(classifyPickedUri(vscode.Uri.file("/workspace/tmp/blob.bin"))).resolves.toBe("reference");
   });
+
+  it("commits a mixed picker selection through one draft lane", async () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    const firstReference = {
+      kind: "file",
+      path: "/workspace/src/first.ts",
+      type: "reference",
+    };
+    const secondReference = {
+      kind: "file",
+      path: "/workspace/src/second.ts",
+      type: "reference",
+    };
+    const attachment = {
+      blobSha: "a".repeat(64),
+      bytes: 12,
+      filename: "diagram.png",
+      id: "attachment-1",
+      kind: "image",
+      mimeType: "image/png",
+    };
+    const run = vi.spyOn(host.draftCoordinator, "run");
+    vi.spyOn(host, "resolvePickedUri")
+      .mockResolvedValueOnce({ kind: "reference", reference: firstReference })
+      .mockResolvedValueOnce({ kind: "attachment", upload: { filename: "diagram.png" } })
+      .mockResolvedValueOnce({ kind: "reference", reference: secondReference });
+    vi.spyOn(host, "ingestUploads").mockImplementation(async (...args: unknown[]) => {
+      const sessionId = args[0] as string;
+      await host.saveAttachmentsToDraft(sessionId, [attachment]);
+      return [attachment];
+    });
+    vi.spyOn(host, "postInsertedReference").mockResolvedValue(undefined);
+    vi.spyOn(host, "reportAttachmentOutcome").mockResolvedValue(undefined);
+
+    await host.ingestPickedUris("s1", [
+      vscode.Uri.file("/workspace/src/first.ts"),
+      vscode.Uri.file("/workspace/assets/diagram.png"),
+      vscode.Uri.file("/workspace/src/second.ts"),
+    ]);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(host.draftStore.peek("s1")).toMatchObject({
+      attachments: [attachment],
+      segments: [firstReference, secondReference],
+    });
+    provider.dispose();
+  });
+});
+
+describe("draft fork delivery", () => {
+  function attachFailingWebview(
+    provider: TomcatWebviewViewProvider,
+    postMessage: ReturnType<typeof vi.fn>,
+  ): void {
+    provider.resolveWebviewView({
+      onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+      show() {},
+      visible: true,
+      webview: {
+        asWebviewUri: (uri: vscode.Uri) => uri,
+        cspSource: "vscode-test-webview",
+        html: "",
+        onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+        options: {},
+        postMessage,
+      },
+    } as unknown as vscode.WebviewView);
+  }
+
+  it("retries a failed fork-result hand-off three times then rejects and clears the operation", async () => {
+    vi.useFakeTimers();
+    try {
+      const postMessage = vi.fn().mockRejectedValue(new Error("bridge down"));
+      const provider = new TomcatWebviewViewProvider({
+        extensionUri: vscode.Uri.file("/workspace/extension"),
+        getDefaultCwd: () => "/workspace",
+        ide: {} as never,
+        initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+        messenger: { onEvent: () => ({ dispose() {} }) } as never,
+        sessionRouter: {} as never,
+      });
+      attachFailingWebview(provider, postMessage);
+      const host = provider as any;
+      const resolve = vi.fn();
+      const reject = vi.fn();
+      const operation = {
+        captureAccepted: false,
+        cwd: null,
+        operationId: "fork-delivery-failure",
+        promise: Promise.resolve("unused"),
+        reject,
+        resolve,
+        sourceSessionId: "s1",
+      };
+      host.pendingDraftForks.set(operation.operationId, operation);
+      host.pendingDraftForkBySource.set(operation.sourceSessionId, operation);
+      vi.spyOn(host, "executeDraftFork").mockResolvedValue("target-session");
+
+      const capture = host.handleDraftForkCapture({
+        cwd: null,
+        operationId: operation.operationId,
+        segments: [],
+        sourceSessionId: "s1",
+        text: "",
+      });
+      await vi.runAllTimersAsync();
+      await capture;
+
+      expect(postMessage).toHaveBeenCalledTimes(3);
+      expect(resolve).not.toHaveBeenCalled();
+      expect(reject).toHaveBeenCalledWith(expect.objectContaining({ message: "bridge down" }));
+      expect(host.pendingDraftForks.size).toBe(0);
+      expect(host.pendingDraftForkBySource.size).toBe(0);
+      provider.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps ordinary event delivery best effort when the bridge rejects", async () => {
+    const postMessage = vi.fn().mockRejectedValue(new Error("bridge down"));
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    attachFailingWebview(provider, postMessage);
+
+    await expect((provider as any).postEvent({
+      data: { hasErrors: false, message: "attached" },
+      type: "attachmentFeedback",
+    })).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    provider.dispose();
+  });
+
+  it("rejects and clears pending draft forks when a test webview reloads", () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    const reject = vi.fn();
+    const operation = {
+      captureAccepted: false,
+      cwd: null,
+      operationId: "reload-fork",
+      promise: Promise.resolve("unused"),
+      reject,
+      resolve: vi.fn(),
+      sourceSessionId: "s1",
+    };
+    host.pendingDraftForks.set(operation.operationId, operation);
+    host.pendingDraftForkBySource.set(operation.sourceSessionId, operation);
+
+    provider.resetForTestReload();
+
+    expect(reject).toHaveBeenCalledOnce();
+    expect(reject.mock.calls[0]?.[0]).toMatchObject({
+      message: "Tomcat webview reloaded before draft fork capture completed",
+    });
+    expect(host.pendingDraftForks.size).toBe(0);
+    expect(host.pendingDraftForkBySource.size).toBe(0);
+    provider.dispose();
+  });
 });
 
 describe("model catalog parsing", () => {
-  it("retains per-model capability metadata for the webview", () => {
+  it("retains per-model metadata and defaults speeds for legacy catalogs", () => {
     expect(
       parseModelCatalog({
         models: [
@@ -200,13 +499,20 @@ describe("model catalog parsing", () => {
             capabilities: {
               reasoning: true,
             },
+            contextWindow: 400000,
+            contextWindowOptions: [400000, 1000000],
+            description: "Fast reasoning model",
             id: "deepseek-v4-flash",
             keyPresent: true,
+            selectedContextWindow: 1000000,
+            selectedReasoningLevel: "max",
+            supportedReasoningLevels: ["high", "max"],
           },
           {
             capabilities: ["vision", "files"],
             id: "gpt-5.4",
             keyPresent: true,
+            supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
           },
           {
             capabilities: null,
@@ -229,7 +535,323 @@ describe("model catalog parsing", () => {
         "text-only": [],
       },
       ids: ["deepseek-v4-flash", "gpt-5.4", "text-only"],
+      modelDetails: {
+        "deepseek-v4-flash": {
+          capabilities: ["reasoning"],
+          contextWindow: 400000,
+          contextWindowOptions: [400000, 1000000],
+          description: "Fast reasoning model",
+          id: "deepseek-v4-flash",
+          modelName: null,
+          selectedContextWindow: 1000000,
+          selectedReasoningLevel: "max",
+          selectedSpeed: null,
+          supportedSpeeds: [],
+          supportedReasoningLevels: ["high", "max"],
+        },
+        "gpt-5.4": {
+          capabilities: ["vision", "files"],
+          contextWindowOptions: [],
+          description: null,
+          id: "gpt-5.4",
+          modelName: null,
+          selectedReasoningLevel: null,
+          selectedSpeed: null,
+          supportedSpeeds: [],
+          supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
+        },
+        "text-only": {
+          capabilities: [],
+          contextWindowOptions: [],
+          description: null,
+          id: "text-only",
+          modelName: null,
+          selectedReasoningLevel: null,
+          selectedSpeed: null,
+          supportedSpeeds: [],
+          supportedReasoningLevels: [],
+        },
+      },
+      reasoningLevels: {
+        "deepseek-v4-flash": ["high", "max"],
+        "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        "text-only": [],
+      },
     });
+  });
+});
+
+describe("error-turn recovery", () => {
+  function createRecoveryProvider(
+    retry: ReturnType<typeof vi.fn>,
+    resume: ReturnType<typeof vi.fn>,
+  ) {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: { retry, resume } as never,
+    });
+  }
+
+  function seedRetryableError(provider: TomcatWebviewViewProvider): void {
+    const host = provider as any;
+    host.stateStore.setActiveSession("s1");
+    host.stateStore.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "keep this exact prompt",
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(host, "refreshSessions").mockResolvedValue(undefined);
+    vi.spyOn(host, "postState").mockResolvedValue(undefined);
+  }
+
+  it("keeps the failed chapter visible while durable Retry starts", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const resume = vi.fn().mockResolvedValue(undefined);
+    const provider = createRecoveryProvider(retry, resume);
+    seedRetryableError(provider);
+    const host = provider as any;
+    const sendUserMessage = vi.spyOn(host, "sendUserMessage");
+
+    await host.handleIntent({
+      data: { action: "retry", errorId: "error-1", sessionId: "s1" },
+      messageId: "retry-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(retry).toHaveBeenCalledWith("s1", "user-1");
+    expect(resume).not.toHaveBeenCalled();
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const failedChapter = host.currentState().sessionViews.s1.timeline.filter(
+      (item: { kind?: string; type: string }) => item.type === "message" && item.kind === "user",
+    );
+    expect(failedChapter).toHaveLength(1);
+    expect(failedChapter[0]).toMatchObject({ abandoned: true, id: "user-1" });
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ id: "error-1", kind: "error" });
+    provider.dispose();
+  });
+
+  it("restores the same card when Retry is rejected", async () => {
+    const retry = vi.fn().mockRejectedValue(new Error("retry_target_stale"));
+    const resume = vi.fn().mockRejectedValue(new Error("bridge unavailable"));
+    const provider = createRecoveryProvider(retry, resume);
+    seedRetryableError(provider);
+    const host = provider as any;
+    const warnings: string[] = [];
+    __testing.setWarningMessageHandler((message) => {
+      warnings.push(message);
+      return undefined;
+    });
+
+    await host.handleIntent({
+      data: { action: "retry", errorId: "error-1", sessionId: "s1" },
+      messageId: "retry-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ recoveryAction: "retry" });
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "user-1",
+      ),
+    ).toMatchObject({ kind: "user", text: "keep this exact prompt" });
+    expect(warnings).toEqual([]);
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({
+      recoveryError: "This error card is out of date and cannot be retried. Refresh the session and enter your request again.",
+    });
+    provider.dispose();
+    __testing.setWarningMessageHandler(undefined);
+  });
+
+  it("keeps Resume on the no-input recovery route", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const resume = vi.fn().mockResolvedValue(undefined);
+    const provider = createRecoveryProvider(retry, resume);
+    const host = provider as any;
+    host.stateStore.setActiveSession("s1");
+    host.stateStore.hydrateHistory("s1", {
+      messages: [
+        { id: "user-1", message: { content: "inspect", role: "user" }, type: "message" },
+        {
+          id: "assistant-1",
+          message: {
+            content: null,
+            role: "assistant",
+            tool_calls: [{ id: "read-1", name: "read" }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-1",
+          message: { content: "contents", role: "tool", tool_call_id: "read-1" },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(host, "refreshSessions").mockResolvedValue(undefined);
+    vi.spyOn(host, "postState").mockResolvedValue(undefined);
+
+    await host.handleIntent({
+      data: { action: "resume", errorId: "error-1", sessionId: "s1" },
+      messageId: "resume-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resume).toHaveBeenCalledWith("s1");
+    expect(retry).not.toHaveBeenCalled();
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ id: "error-1", kind: "error" });
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "user-1",
+      ),
+    ).toMatchObject({ kind: "user", text: "inspect" });
+    provider.dispose();
+  });
+
+  it("distinguishes an unavailable bridge from a stale recovery anchor", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const resume = vi.fn().mockRejectedValue(new Error("bridge unavailable"));
+    const provider = createRecoveryProvider(retry, resume);
+    const host = provider as any;
+    host.stateStore.setActiveSession("s1");
+    host.stateStore.hydrateHistory("s1", {
+      messages: [
+        { id: "user-1", message: { content: "inspect", role: "user" }, type: "message" },
+        {
+          id: "assistant-1",
+          message: {
+            content: null,
+            role: "assistant",
+            tool_calls: [{ id: "read-1", name: "read" }],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-1",
+          message: { content: "contents", role: "tool", tool_call_id: "read-1" },
+          type: "message",
+        },
+        { detail: "failed", id: "error-1", summary: "failed", type: "error" },
+      ],
+      sessionId: "s1",
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
+    vi.spyOn(host, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(host, "postState").mockResolvedValue(undefined);
+    const warnings: string[] = [];
+    __testing.setWarningMessageHandler((message) => {
+      warnings.push(message);
+      return undefined;
+    });
+
+    await host.handleIntent({
+      data: { action: "resume", errorId: "error-1", sessionId: "s1" },
+      messageId: "resume-error-1",
+      type: "recoverErrorTurn",
+    });
+
+    expect(resume).toHaveBeenCalledWith("s1");
+    expect(warnings).toEqual([]);
+    expect(
+      host.currentState().sessionViews.s1.timeline.find(
+        (item: { id?: string; type: string }) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({
+      recoveryAction: "resume",
+      recoveryError: "Unable to recover this turn: bridge unavailable",
+    });
+    provider.dispose();
+    __testing.setWarningMessageHandler(undefined);
+  });
+});
+
+describe("thinking level intent handling", () => {
+  it("routes max through handleWebviewMessage and refreshes session state", async () => {
+    const sendSetThinkingLevel = vi.fn().mockResolvedValue({ success: true });
+    const refreshModels = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendSetThinkingLevel,
+      } as never,
+      sessionRouter: {
+        getState: vi.fn().mockResolvedValue({
+          busy: false,
+          model: "claude-4.6-sonnet",
+          sessionId: "s1",
+          thinkingLevel: "max",
+        }),
+      } as never,
+    });
+    vi.spyOn(provider as any, "ensureInitialized").mockResolvedValue(undefined);
+    vi.spyOn(provider as any, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(provider as any, "refreshModels").mockImplementation(refreshModels);
+    vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
+
+    await (
+      provider as unknown as {
+        handleWebviewMessage(message: unknown): Promise<void>;
+      }
+    ).handleWebviewMessage({
+      data: {
+        level: "max",
+        modelId: "claude-4.6-sonnet",
+        sessionId: "s1",
+      },
+      messageId: "thinking-max",
+      type: "setThinkingLevel",
+    });
+
+    expect(sendSetThinkingLevel).toHaveBeenCalledWith("s1", "claude-4.6-sonnet", "max");
+    expect(refreshModels).toHaveBeenCalledTimes(1);
+    expect(provider.currentState().sessionViews.s1).toMatchObject({
+      model: "claude-4.6-sonnet",
+      thinkingLevel: "max",
+    });
+
+    provider.dispose();
   });
 });
 
@@ -276,7 +898,7 @@ describe("webview html asset resolution", () => {
       extensionUri,
       getDefaultCwd: () => undefined,
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -290,6 +912,20 @@ describe("webview html asset resolution", () => {
     ).renderHtml(createWebview());
 
     expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain('class="tc-chat-webview"');
+    expect(html).toContain('--tc-controls-inset:15px;--tc-content-inset:25px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",10);
+    __testing.setConfiguration("tomcat.layout.contentInset",15);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:10px;--tc-content-inset:15px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",0);
+    __testing.setConfiguration("tomcat.layout.contentInset",0);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:0px;--tc-content-inset:0px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",4);
+    __testing.setConfiguration("tomcat.layout.contentInset",24);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:4px;--tc-content-inset:24px');
+    __testing.setConfiguration("tomcat.layout.controlsInset",undefined);
+    __testing.setConfiguration("tomcat.layout.contentInset",undefined);
+    expect((provider as any).renderHtml(createWebview())).toContain('--tc-controls-inset:15px;--tc-content-inset:25px');
     expect(html).toContain("styles.css");
     provider.dispose();
   });
@@ -309,7 +945,7 @@ describe("webview html asset resolution", () => {
       extensionUri,
       getDefaultCwd: () => undefined,
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -327,6 +963,34 @@ describe("webview html asset resolution", () => {
     expect(html).toContain("codicon.css");
     provider.dispose();
   });
+
+  it("allows dynamic import chunks and mermaid inline styles in the chat webview CSP", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/index.js": "console.log('index');",
+      "gui/dist/styles.css": "body { color: red; }",
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri,
+      getDefaultCwd: () => undefined,
+      ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    const html = (
+      provider as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(createWebview());
+
+    expect(html).toContain("style-src vscode-test-webview 'unsafe-inline';");
+    expect(html).toContain("script-src 'nonce-");
+    expect(html).toContain("'strict-dynamic';");
+    provider.dispose();
+  });
 });
 
 function buildSearchProvider(): {
@@ -338,7 +1002,7 @@ function buildSearchProvider(): {
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {} as never,
-    initialize: async () => ({} as never),
+    initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
     messenger: {
       onEvent: () => ({ dispose() {} }),
     } as never,
@@ -556,71 +1220,52 @@ describe("context search intent handling", () => {
 });
 
 describe("mutation diff stat injection", () => {
-  it("serializes mutation snapshot events so tool results cannot overtake tool starts", async () => {
+  it("serializes serve events while a plan preview refresh is pending", async () => {
     let emitEvent: ((event: Record<string, unknown>) => void) | undefined;
-    let releaseStart:
-      | ((value?: void | PromiseLike<void>) => void)
-      | null = null;
-    const rememberToolStart = vi.fn().mockImplementation(
-      async () =>
-        new Promise<void>((resolve) => {
-          releaseStart = resolve;
-        }),
-    );
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/app.ts",
+    let releaseRefresh!: () => void;
+    const refreshPending = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
     });
+    const refreshPlanPreview = vi.fn().mockReturnValue(refreshPending);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      ide: {
-        rememberToolResult,
-        rememberToolStart,
-      } as never,
-      initialize: async () => ({} as never),
+      ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: (listener: (event: Record<string, unknown>) => void) => {
           emitEvent = listener;
           return { dispose() {} };
         },
       } as never,
+      refreshPlanPreview,
       sessionRouter: {} as never,
     });
-
-    emitEvent?.({
+    const host = provider as unknown as { stateStore: WebviewStateStore; serveEventQueue: Promise<void> };
+    const applyEvent = vi.spyOn(host.stateStore, "applyEvent");
+    const toolEvent = {
       args: { path: "src/app.ts" },
       sessionId: "s1",
       toolCallId: "tool-edit-race",
       toolName: "edit",
       type: "tool_execution_start",
-    });
-    emitEvent?.({
-      display: { file: "src/app.ts", kind: "file" },
-      isError: false,
-      result: "updated file",
-      sessionId: "s1",
-      toolCallId: "tool-edit-race",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
+    };
 
-    await Promise.resolve();
-    expect(rememberToolStart).toHaveBeenCalledTimes(1);
-    expect(rememberToolResult).not.toHaveBeenCalled();
+    try {
+      emitEvent!({ type: "plan.update", sessionId: "s1", planId: "plan-1" });
+      await vi.waitFor(() => expect(refreshPlanPreview).toHaveBeenCalledTimes(1));
+      emitEvent!(toolEvent);
+      await Promise.resolve();
+      expect(applyEvent).not.toHaveBeenCalledWith(toolEvent);
 
-    if (!releaseStart) {
-      throw new Error("Expected queued tool-start release handle.");
+      releaseRefresh();
+      await host.serveEventQueue;
+      expect(applyEvent).toHaveBeenCalledWith(toolEvent);
+    } finally {
+      releaseRefresh();
+      await host.serveEventQueue;
+      provider.dispose();
     }
-    (releaseStart as (value?: void | PromiseLike<void>) => void)(undefined);
-    await vi.waitFor(() => {
-      expect(rememberToolResult).toHaveBeenCalledWith(
-        "tool-edit-race",
-        "src/app.ts",
-        undefined,
-      );
-    });
-
-    provider.dispose();
   });
 
   it("keeps an errored edit tool settled as complete+error through turn_end and agent_idle", async () => {
@@ -628,7 +1273,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -730,9 +1375,9 @@ describe("mutation diff stat injection", () => {
     const getMessages = vi.fn().mockResolvedValue({
       messages: [
         {
-          detail: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+          detail: remoteErrorDetail,
           id: "history-error-1",
-          summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123",
+          summary: remoteErrorSummary,
           type: "error",
         },
       ],
@@ -742,7 +1387,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -768,7 +1413,7 @@ describe("mutation diff stat injection", () => {
         handleServeEvent(event: Record<string, unknown>): Promise<void>;
       }
     ).handleServeEvent({
-      error: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      error: remoteErrorDetail,
       messages: [],
       sessionId: "s1",
       type: "agent_end",
@@ -779,7 +1424,7 @@ describe("mutation diff stat injection", () => {
       .currentState()
       .sessionViews.s1.timeline.find((item) => item.type === "message" && item.kind === "error");
     expect(errorBubble).toMatchObject({
-      text: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      text: remoteErrorDetail,
       type: "message",
     });
     expect(errorBubble && "detailText" in errorBubble ? errorBubble.detailText : undefined).toBeUndefined();
@@ -798,8 +1443,8 @@ describe("mutation diff stat injection", () => {
       .currentState()
       .sessionViews.s1.timeline.find((item) => item.type === "message" && item.kind === "error");
     expect(errorBubble).toMatchObject({
-      detailText: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
-      text: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123",
+      detailText: remoteErrorDetail,
+      text: remoteErrorSummary,
       type: "message",
     });
 
@@ -815,7 +1460,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -865,7 +1510,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -942,7 +1587,7 @@ describe("mutation diff stat injection", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
@@ -976,213 +1621,335 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
-  it("routes openDiff intents into ide.openReconstructedDiff", async () => {
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/app.ts",
-    });
+  it("routes openFile intents into ide.showFile with an optional line number", async () => {
     const showFile = vi.fn().mockResolvedValue(undefined);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {
-        getPreparedChange: () => undefined,
-        openReconstructedDiff,
-        rememberToolResult,
         showFile,
       } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
       sessionRouter: {} as never,
     });
 
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: {
-        added: 1,
-        diff: [
-          { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
-          { newLine: null, oldLine: 2, tag: "del", text: "old line" },
-          { newLine: 2, oldLine: null, tag: "add", text: "new line" },
-        ],
-        file: "src/app.ts",
-        kind: "file",
-        removed: 1,
-      },
+    await provider.dispatchTestIntent({
+      data: { line: 42, path: "src/app.ts" },
+      messageId: "intent-open-file-1",
+      type: "openFile",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/app.ts", 42);
+
+    provider.dispose();
+  });
+
+  it("routes chat links through the shared external-or-file classifier", async () => {
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: { showFile } as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      openExternal,
+      sessionRouter: {} as never,
+    });
+
+    await provider.dispatchTestIntent({
+      data: { href: "src/app.ts:59-103" },
+      messageId: "intent-open-local-link",
+      type: "openLink",
+    });
+    await provider.dispatchTestIntent({
+      data: { href: "https://example.com/docs" },
+      messageId: "intent-open-external-link",
+      type: "openLink",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/app.ts", 59);
+    expect(openExternal).toHaveBeenCalledWith("https://example.com/docs");
+    provider.dispose();
+  });
+
+  it("shows a toast instead of appending a transcript error when openFile fails", async () => {
+    const showFile = vi.fn().mockRejectedValue(new Error("boom"));
+    const toastMessages: string[] = [];
+    __testing.setErrorMessageHandler((message) => {
+      toastMessages.push(message);
+      return undefined;
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {
+        showFile,
+      } as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {} as never,
+    });
+    const stateStore = (provider as unknown as { stateStore: { appendMessage: (...args: unknown[]) => void; setActiveSession(sessionId: string): void } }).stateStore;
+    stateStore.setActiveSession("s1");
+    const appendMessageSpy = vi.spyOn(stateStore, "appendMessage");
+
+    await provider.dispatchTestIntent({
+      data: { line: 42, path: "src/app.ts" },
+      messageId: "intent-open-file-failure",
+      type: "openFile",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/app.ts", 42);
+    expect(appendMessageSpy).not.toHaveBeenCalled();
+    expect(toastMessages).toEqual([
+      expect.stringContaining("Unable to open file src/app.ts"),
+    ]);
+
+    provider.dispose();
+  });
+
+  function createDiffProvider() {
+    const openDiffPreview = vi.fn().mockResolvedValue(undefined);
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {
+        openDiffPreview,
+        showFile,
+      } as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+    const host = provider as unknown as {
+      handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      stateStore: WebviewStateStore;
+    };
+    const recordDiff = async (
+      display: WebviewToolDisplayFile,
+      sessionId = "s1",
+      toolCallId = "tool-edit-1",
+    ) => host.handleServeEvent({
+      display,
       isError: false,
       result: "updated file",
+      sessionId,
+      toolCallId,
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+    const openDiff = async (sessionId = "s1", toolCallId = "tool-edit-1") =>
+      provider.dispatchTestIntent({
+        data: { sessionId, toolCallId },
+        messageId: `open-diff-${sessionId}-${toolCallId}`,
+        type: "openDiff",
+      });
+    return {
+      host, openDiff, openDiffPreview, provider, recordDiff, showFile,
+    };
+  }
+
+  const fullDiff: FileDiffLine[] = [
+    { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
+    { newLine: null, oldLine: 2, tag: "del", text: "old line" },
+    { newLine: 2, oldLine: null, tag: "add", text: "new line" },
+  ];
+  const fullPresentation = {
+    kind: "full",
+    fragments: [{
+      before: "before\nold line\n",
+      after: "before\nnew line\n",
+      oldRange: { start: 1, end: 2 },
+      newRange: { start: 1, end: 2 },
+    }],
+  };
+
+  it("opens stored live diffs", async () => {
+    const test = createDiffProvider();
+    await test.host.handleServeEvent({
+      args: { path: "src/app.ts" },
       sessionId: "s1",
       toolCallId: "tool-edit-1",
       toolName: "edit",
-      type: "tool_execution_end",
-    });
-
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-edit-1" },
-      messageId: "intent-open-diff-1",
-      type: "openDiff",
-    });
-
-    expect(openReconstructedDiff).toHaveBeenCalledWith(
-      "tool-edit-1",
-      "src/app.ts",
-      "before\nold line",
-      "before\nnew line",
-    );
-    expect(showFile).not.toHaveBeenCalled();
-
-    provider.dispose();
-  });
-
-  it("reconstructs live diffs even when prepared changes already exist", async () => {
-    const getPreparedChange = vi.fn().mockReturnValue({
-      displayPath: "src/app.ts",
-      existedBefore: true,
-      hasStructuredDiff: true,
-    });
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/app.ts",
-    });
-    const rememberToolStart = vi.fn().mockResolvedValue(undefined);
-    const showFile = vi.fn().mockResolvedValue(undefined);
-    const provider = new TomcatWebviewViewProvider({
-      extensionUri: vscode.Uri.file("/workspace/extension"),
-      getDefaultCwd: () => "/workspace",
-      ide: {
-        getPreparedChange,
-        openReconstructedDiff,
-        rememberToolResult,
-        rememberToolStart,
-        showFile,
-      } as never,
-      initialize: async () => ({} as never),
-      messenger: {
-        onEvent: () => ({ dispose() {} }),
-      } as never,
-      sessionRouter: {} as never,
-    });
-
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      args: { path: "src/app.ts" },
-      sessionId: "s1",
-      toolCallId: "tool-edit-live",
-      toolName: "edit",
       type: "tool_execution_start",
     });
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: {
-        added: 1,
-        diff: [
-          { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
-          { newLine: null, oldLine: 2, tag: "del", text: "old line" },
-          { newLine: 2, oldLine: null, tag: "add", text: "new line" },
-        ],
-        file: "src/app.ts",
-        kind: "file",
-        removed: 1,
-      },
-      isError: false,
-      result: "updated file",
-      sessionId: "s1",
-      toolCallId: "tool-edit-live",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
+    await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
 
-    expect(rememberToolStart).toHaveBeenCalledWith("tool-edit-live", { path: "src/app.ts" });
-    expect(rememberToolResult).toHaveBeenCalledWith("tool-edit-live", "src/app.ts", {
-      after: "before\nnew line",
-      before: "before\nold line",
-    });
+    await test.openDiff();
 
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-edit-live" },
-      messageId: "intent-open-diff-live",
-      type: "openDiff",
-    });
-
-    expect(getPreparedChange).not.toHaveBeenCalled();
-    expect(openReconstructedDiff).toHaveBeenCalledWith(
-      "tool-edit-live",
-      "src/app.ts",
-      "before\nold line",
-      "before\nnew line",
+    expect(test.openDiffPreview).toHaveBeenCalledWith(
+      "s1", "tool-edit-1", "src/app.ts", fullPresentation,
     );
-    expect(showFile).not.toHaveBeenCalled();
-
-    provider.dispose();
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
   });
 
-  it("falls back to ide.showFile when openDiff has no structured diff", async () => {
-    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
-    const rememberToolResult = vi.fn().mockResolvedValue({
-      displayPath: "src/huge.ts",
+  it("opens separated gap fragments", async () => {
+    const test = createDiffProvider();
+    await test.recordDiff({
+      file: "src/partial.ts",
+      kind: "file",
+      diff: [
+        ...fullDiff,
+        { tag: "gap", text: "90 unmodified lines" },
+        { newLine: 93, oldLine: 93, tag: "ctx", text: "after gap" },
+        { newLine: 94, oldLine: null, tag: "add", text: "added" },
+      ],
     });
-    const showFile = vi.fn().mockResolvedValue(undefined);
-    const provider = new TomcatWebviewViewProvider({
-      extensionUri: vscode.Uri.file("/workspace/extension"),
-      getDefaultCwd: () => "/workspace",
-      ide: {
-        getPreparedChange: () => undefined,
-        openReconstructedDiff,
-        rememberToolResult,
-        showFile,
-      } as never,
-      initialize: async () => ({} as never),
-      messenger: {
-        onEvent: () => ({ dispose() {} }),
-      } as never,
-      sessionRouter: {} as never,
-    });
+    await test.openDiff();
 
-    await (
-      provider as unknown as {
-        handleServeEvent(event: Record<string, unknown>): Promise<void>;
-      }
-    ).handleServeEvent({
-      display: { added: 8, file: "src/huge.ts", kind: "file", removed: 2 },
-      isError: false,
-      result: "updated file",
+    expect(test.openDiffPreview).toHaveBeenCalledWith(
+      "s1", "tool-edit-1", "src/partial.ts", {
+        kind: "fragments",
+        fragments: [
+          fullPresentation.fragments[0],
+          {
+            before: "after gap\n",
+            after: "after gap\nadded\n",
+            oldRange: { start: 93, end: 93 },
+            newRange: { start: 93, end: 94 },
+          },
+        ],
+      },
+    );
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it.each([false, true])("isolates repeated tool IDs across sessions (gaps: %s)", async (hasGap) => {
+    const test = createDiffProvider();
+    const gap: FileDiffLine[] = hasGap ? [{ tag: "gap", text: "earlier lines" }] : [];
+    await test.recordDiff({ file: "src/first.ts", kind: "file", diff: [...gap, ...fullDiff] }, "s1");
+    await test.recordDiff({
+      file: "src/second.ts",
+      kind: "file",
+      diff: [...gap, { newLine: 5, tag: "add", text: "second session" }],
+    }, "s2");
+    test.host.stateStore.setActiveSession("s1");
+    await test.openDiff("s2");
+    await test.openDiff("s1");
+
+    expect(test.openDiffPreview).toHaveBeenNthCalledWith(1,
+      "s2", "tool-edit-1", "src/second.ts", {
+        kind: hasGap ? "fragments" : "full",
+        fragments: [{ before: "", after: "second session\n", newRange: { start: 5, end: 5 } }],
+      },
+    );
+    expect(test.openDiffPreview).toHaveBeenNthCalledWith(2,
+      "s1", "tool-edit-1", "src/first.ts", { ...fullPresentation, kind: hasGap ? "fragments" : "full" },
+    );
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it.each([
+    { display: { file: "src/app.ts", kind: "file" }, reason: "没有保存 diff" },
+    { display: { file: "src/app.ts", kind: "file", diff: fullDiff, expired: true }, reason: "已过期" },
+    { display: { file: "src/app.ts", kind: "file", diff: fullDiff, diffTruncated: true }, reason: "被截断" },
+    { display: { file: "src/app.ts", kind: "file", diff: [fullDiff[0]] }, reason: "没有实际增删" },
+  ] satisfies { display: WebviewToolDisplayFile; reason: string }[])(
+    "reports unavailable diff: $reason without changing the transcript or opening a file",
+    async ({ display }) => {
+      const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+      const test = createDiffProvider();
+      await test.recordDiff(display);
+      const timeline = structuredClone(test.provider.currentState().sessionViews.s1.timeline);
+      await test.openDiff();
+
+      expect(warning).toHaveBeenCalledWith("Cannot view this change: there is no diff available.");
+      expect(test.showFile).not.toHaveBeenCalled();
+      expect(test.openDiffPreview).not.toHaveBeenCalled();
+      expect(test.provider.currentState().sessionViews.s1.timeline).toEqual(timeline);
+      test.provider.dispose();
+    },
+  );
+
+  it.each([
+    ["s2", "tool-edit-1"],
+    ["s1", "missing-tool"],
+  ])("rejects a stale diff request for %s / %s without searching other sessions", async (sessionId, toolCallId) => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+    const test = createDiffProvider();
+    await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
+    await test.openDiff(sessionId, toolCallId);
+
+    expect(warning).toHaveBeenCalledWith("Cannot view this change: there is no diff available.");
+    expect(test.openDiffPreview).not.toHaveBeenCalled();
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it("reports a missing file path instead of silently ignoring the diff request", async () => {
+    const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+    const test = createDiffProvider();
+    await test.recordDiff({ file: "", kind: "file", diff: fullDiff });
+    await test.openDiff();
+    expect(warning).toHaveBeenCalledWith("Cannot view this change: there is no diff available.");
+    expect(test.openDiffPreview).not.toHaveBeenCalled();
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
+  });
+
+  it("reports preview failures in a toast without changing the transcript", async () => {
+    const error = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
+    const test = createDiffProvider();
+    test.openDiffPreview.mockRejectedValue(new Error("editor failed"));
+    await test.recordDiff({ file: "src/app.ts", kind: "file", diff: fullDiff });
+    const timeline = structuredClone(test.provider.currentState().sessionViews.s1.timeline);
+    await test.openDiff();
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Unable to open diff src/app.ts"));
+    expect(test.showFile).not.toHaveBeenCalled();
+    expect(test.provider.currentState().sessionViews.s1.timeline).toEqual(timeline);
+    test.provider.dispose();
+  });
+
+  it("previews rehydrated history from its stored data after the current file changes", async () => {
+    const test = createDiffProvider();
+    const history = {
       sessionId: "s1",
-      toolCallId: "tool-edit-2",
-      toolName: "edit",
-      type: "tool_execution_end",
-    });
+      messages: [{
+        id: "assistant-1",
+        type: "message",
+        message: {
+          role: "assistant",
+          tool_calls: [{
+            id: "tool-edit-1",
+            function: { name: "edit", arguments: '{"path":"src/app.ts"}' },
+          }],
+        },
+      }, {
+        id: "result-1",
+        type: "message",
+        message: {
+          role: "tool",
+          tool_call_id: "tool-edit-1",
+          content: "updated file",
+          tool_display: { file: "src/app.ts", kind: "file", diff: fullDiff },
+        },
+      }],
+    };
+    test.host.stateStore.hydrateHistory("s1", history);
+    await test.openDiff();
+    __testing.registerFile("/workspace/src/app.ts", "completely unrelated current content");
+    test.host.stateStore.hydrateHistory("s1", history);
+    await test.openDiff();
 
-    await provider.dispatchTestIntent({
-      data: { toolCallId: "tool-edit-2" },
-      messageId: "intent-open-diff-2",
-      type: "openDiff",
-    });
-
-    expect(showFile).toHaveBeenCalledWith("src/huge.ts");
-    expect(openReconstructedDiff).not.toHaveBeenCalled();
-    const session = provider.currentState().sessionViews.s1;
-    expect(
-      session.timeline.some(
-        (item) =>
-          item.type === "message" &&
-          item.kind === "notice" &&
-          item.text.includes("File too large for inline diff"),
-      ),
-    ).toBe(true);
-
-    provider.dispose();
+    expect(test.openDiffPreview).toHaveBeenCalledTimes(2);
+    for (const call of test.openDiffPreview.mock.calls) {
+      expect(call).toEqual(["s1", "tool-edit-1", "src/app.ts", fullPresentation]);
+    }
+    expect(test.showFile).not.toHaveBeenCalled();
+    test.provider.dispose();
   });
+
 });
 
 describe("checkpoint intent handling", () => {
@@ -1191,13 +1958,99 @@ describe("checkpoint intent handling", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "s1" } as never),
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
       sessionRouter: sessionRouter as never,
     });
   }
+
+  it.each([true, false])("preserves a rewind receipt when history refresh fails (success=%s)", async success => {
+    setLocale("en");
+    const provider = createCheckpointProvider();
+    const host = provider as any;
+    const response = { success, sessionId: "s1", error: success ? undefined : "server committed failure", payload: { committed: !success } };
+    const request = vi.fn().mockResolvedValue(response);
+    host.deps.messenger.request = request;
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ capabilities: ["rewind_and_resend"] });
+    vi.spyOn(host, "refreshSessionHistory").mockRejectedValue(new Error("history read failed"));
+    const events = vi.spyOn(host, "postEvent").mockResolvedValue(undefined);
+    const warning = vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined);
+    try {
+      await provider.dispatchTestIntent({ type: "rewindAndResend", messageId: "receipt", data: {
+        sessionId: "s1", messageId: "old", files: "keep", text: "new question", segments: [], attachments: [],
+      } });
+      expect(request).toHaveBeenCalledOnce();
+      expect(events).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        type: "rewindAndResendResult", requestId: "receipt", success, error: response.error,
+      }));
+      expect(warning).toHaveBeenCalledWith(translate("en", "host.historyRefreshFailed", { detail: "history read failed" }));
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it("bridges rewindAndResend without touching the main draft and requests replacement history", async () => {
+    const request = vi.fn().mockResolvedValue({success:true,sessionId:"s1",payload:{accepted:true}});
+    const provider = new TomcatWebviewViewProvider({extensionUri:vscode.Uri.file("/workspace/extension"),getDefaultCwd:()=>"/workspace",ide:{} as never,
+      initialize:async()=>({sessionId:"s1",capabilities:["rewind_and_resend"]} as never),messenger:{onEvent:()=>({dispose(){}}),request} as never,sessionRouter:{} as never});
+    vi.spyOn(provider as any,"ensureInitialized").mockResolvedValue({capabilities:["rewind_and_resend"]});
+    const history=vi.spyOn(provider as any,"refreshSessionHistory").mockResolvedValue(undefined);
+    vi.spyOn(provider as any,"refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(provider as any,"refreshCheckpoints").mockResolvedValue(undefined);
+    vi.spyOn(provider as any,"postState").mockResolvedValue(undefined);
+    const events=vi.spyOn(provider as any,"postEvent").mockResolvedValue(undefined);
+    const draft=vi.spyOn((provider as any).draftStore,"update");
+    await (provider as any).handleIntent({type:"rewindAndResend",messageId:"request",data:{sessionId:"s1",messageId:"old",files:"keep",text:"new",segments:[{type:"text",text:"new"}],attachments:[]}});
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({type:"rewind_and_resend",sessionId:"s1",messageId:"old",files:"keep",message:expect.objectContaining({text:"new"})}));
+    expect(history).toHaveBeenCalledWith("s1",expect.objectContaining({strict:true,replace:expect.any(Set)}));
+    expect(draft).not.toHaveBeenCalled();
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({type:"rewindAndResendResult",requestId:"request",success:true}));
+    provider.dispose();
+  });
+
+  it.each([true, false])("keeps rewind failures visible at the correct scope (committed=%s)", async (committed) => {
+    const provider = createCheckpointProvider();
+    const host = provider as any;
+    host.stateStore.hydrateHistory("s1", { sessionId: "s1", messages: [
+      { type: "message", id: "old", message: { role: "user", content: "old question" } },
+    ] });
+    host.deps.messenger.request = vi.fn().mockResolvedValue({
+      success: false, sessionId: "s1", error: committed ? "runtime refresh failed" : "revert_unavailable",
+      payload: committed ? { committed: true } : { revertReason: "no_baselines" },
+    });
+    vi.spyOn(host, "ensureInitialized").mockResolvedValue({ capabilities: ["rewind_and_resend"] });
+    const history = vi.spyOn(host, "refreshSessionHistory").mockImplementation(async () => {
+      host.stateStore.replaceHistory("s1", { sessionId: "s1", messages: [
+        { type: "message", id: "new", message: { role: "user", content: "new question" } },
+      ] }, new Set(["old"]));
+    });
+    vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
+    vi.spyOn(host, "refreshCheckpoints").mockResolvedValue(undefined);
+    const snapshots: unknown[] = [];
+    vi.spyOn(host, "postState").mockImplementation(async () => {
+      snapshots.push(structuredClone(provider.currentState().sessionViews.s1.timeline));
+    });
+    const events = vi.spyOn(host, "postEvent").mockResolvedValue(undefined);
+    await host.handleIntent({ type: "rewindAndResend", messageId: "edit-result", data: {
+      sessionId: "s1", messageId: "old", files: "keep", text: "new question",
+      segments: [{ type: "text", text: "new question" }], attachments: [],
+    } });
+    if (committed) {
+      expect(history).toHaveBeenCalled();
+      expect(snapshots.at(-1)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "user", text: "new question" }),
+        expect.objectContaining({ kind: "error", text: expect.stringContaining("runtime refresh failed") }),
+      ]));
+      expect(provider.currentState().sessionViews.s1.timeline.some((item) => item.id === "old")).toBe(false);
+    } else {
+      expect(history).not.toHaveBeenCalled();
+      expect(provider.currentState().sessionViews.s1.timeline.some((item) => item.type === "message" && item.kind === "error")).toBe(false);
+    }
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "rewindAndResendResult", success: false }));
+    provider.dispose();
+  });
 
   it("dispatches restoreCheckpoint with revertFiles and refreshes state in order", async () => {
     const restoreCheckpoint = vi.fn().mockResolvedValue({
@@ -1390,7 +2243,7 @@ describe("plan build orchestration", () => {
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: {} as never,
-      initialize: async () => ({ sessionId: "s1" } as never),
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
         ...messenger,
@@ -1402,6 +2255,7 @@ describe("plan build orchestration", () => {
   function stubBuildInternals(provider: TomcatWebviewViewProvider): {
     postState: ReturnType<typeof vi.spyOn>;
     refreshModels: ReturnType<typeof vi.spyOn>;
+    refreshSessionHistory: ReturnType<typeof vi.spyOn>;
     refreshSessionState: ReturnType<typeof vi.spyOn>;
   } {
     vi.spyOn(provider as any, "ensureInitialized").mockResolvedValue({ sessionId: "s1" } as never);
@@ -1412,8 +2266,11 @@ describe("plan build orchestration", () => {
     const refreshSessionState = vi
       .spyOn(provider as any, "refreshSessionState")
       .mockResolvedValue(undefined);
+    const refreshSessionHistory = vi
+      .spyOn(provider as any, "refreshSessionHistory")
+      .mockResolvedValue(undefined);
     const postState = vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
-    return { postState, refreshModels, refreshSessionState };
+    return { postState, refreshModels, refreshSessionHistory, refreshSessionState };
   }
 
   afterEach(() => {
@@ -1421,12 +2278,38 @@ describe("plan build orchestration", () => {
     vi.restoreAllMocks();
   });
 
+  it("uses a translated native build question and accepts only the option shown", async () => {
+    const provider = createBuildProvider({});
+    setLocale("en");
+    try {
+      let shown: { message: string; detail: string | undefined; label: string | undefined } | undefined;
+      __testing.setWarningMessageHandler((message, items, options) => {
+        const item = items[0] as vscode.MessageItem;
+        shown = { message, detail: options?.detail, label: item.title };
+        return item;
+      });
+      expect(await (provider as any).confirmBuildModel("gpt-5.6", "gpt-5.4")).toBe(true);
+      expect(shown).toMatchObject({
+        message: translate("en", "host.buildQuestion", { model: "gpt-5.6" }),
+        label: translate("en", "host.continueBuild"),
+      });
+      expect(shown?.detail).toContain(translate("en", "host.buildSessionModel", { model: "gpt-5.4" }));
+      setLocale("zh-CN");
+      expect(await (provider as any).confirmBuildModel("gpt-5.6", "gpt-5.4")).toBe(true);
+      __testing.setWarningMessageHandler((_message, items) => ({ ...(items[0] as vscode.MessageItem) }));
+      expect(await (provider as any).confirmBuildModel("gpt-5.6", "gpt-5.4")).toBe(false);
+    } finally {
+      setLocale("en");
+      provider.dispose();
+    }
+  });
+
   it("buildPlan applies the configured build model before entering build mode", async () => {
     __testing.setConfiguration("tomcat.plan.buildModel", "gpt-5.4");
     const sendSetModel = vi.fn().mockResolvedValue({ success: true });
     const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
     const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
-    const { refreshModels } = stubBuildInternals(provider);
+    const { refreshModels, refreshSessionHistory } = stubBuildInternals(provider);
 
     await provider.buildPlan("plan-1");
 
@@ -1440,7 +2323,28 @@ describe("plan build orchestration", () => {
       sendSetPlanMode.mock.invocationCallOrder[0],
     );
     expect(refreshModels).toHaveBeenCalled();
+    expect(refreshSessionHistory).toHaveBeenCalledWith("s1");
 
+    provider.dispose();
+  });
+
+  it("abandons a build when its confirmed model is cleared while the dialog is open", async () => {
+    __testing.setConfiguration("tomcat.plan.buildModel", "removed-model");
+    const sendSetModel = vi.fn().mockResolvedValue({ success: true });
+    const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
+    const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
+    const { postState, refreshModels } = stubBuildInternals(provider);
+    vi.spyOn(provider as any, "confirmBuildModel").mockImplementation(async () => {
+      __testing.setConfiguration("tomcat.plan.buildModel", "");
+      return true;
+    });
+
+    await provider.buildPlan("plan-1");
+
+    expect(sendSetModel).not.toHaveBeenCalled();
+    expect(sendSetPlanMode).not.toHaveBeenCalled();
+    expect(refreshModels).toHaveBeenCalledTimes(1);
+    expect(postState).toHaveBeenCalledTimes(1);
     provider.dispose();
   });
 
@@ -1494,15 +2398,17 @@ describe("plan preview auto-open after review", () => {
   function makeProvider(
     openWith: ReturnType<typeof vi.fn>,
     showFile: ReturnType<typeof vi.fn>,
+    refreshPlanPreview?: ReturnType<typeof vi.fn>,
   ): TomcatWebviewViewProvider {
     return new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       ide: { openWith, showFile } as never,
-      initialize: async () => ({} as never),
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
+      refreshPlanPreview,
       sessionRouter: {
         getState: vi.fn().mockResolvedValue({ busy: false, sessionId: "s1" }),
         listCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [], sessionId: "s1" }),
@@ -1532,10 +2438,29 @@ describe("plan preview auto-open after review", () => {
     // Repeated create/review + later update for the same path must NOT steal focus again.
     await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
     await emit(provider, { planId: "p1", sessionId: "s1", summary: "still good", type: "plan.review" });
-    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.update" });
+    await emit(provider, {
+      path: planPath,
+      planId: "p1",
+      sessionId: "s1",
+      state: "executing",
+      type: "plan.update",
+    });
     expect(openWith).toHaveBeenCalledTimes(1);
 
     provider.dispose();
+  });
+
+  it.each(["user_skipped", "parent_abort", "not_dispatched"])("opens the saved file once for %s without changing lifecycle", async (reason) => {
+    const openWith = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(openWith, vi.fn());
+    try {
+      const planPath = "/workspace/plans/skipped.plan.md";
+      await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", state: "planning", type: "plan.create" });
+      await emit(provider, { planId: "p1", sessionId: "s1", aborted: true, reviewerStopReason: reason, summary: "not reviewed", type: "plan.review" });
+      await emit(provider, { planId: "p1", sessionId: "s1", aborted: true, reviewerStopReason: reason, type: "plan.review" });
+      expect(openWith).toHaveBeenCalledExactlyOnceWith(planPath, "tomcat.planPreview");
+      expect(provider.currentState().sessionViews.s1.activePlan?.state).toBe("planning");
+    } finally { provider.dispose(); }
   });
 
   it("does not auto-open on plan.update, path-less create, or unknown plan.review", async () => {
@@ -1567,6 +2492,504 @@ describe("plan preview auto-open after review", () => {
     expect(openWith).toHaveBeenCalledWith(planPath, "tomcat.planPreview");
     expect(showFile).toHaveBeenCalledWith(planPath);
 
+    provider.dispose();
+  });
+
+  it("bridges plan.create/update/todos events into the preview refresher", async () => {
+    const refreshPlanPreview = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(undefined),
+      refreshPlanPreview,
+    );
+    const planPath = "/workspace/plans/live.plan.md";
+
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
+    await emit(provider, {
+      path: planPath,
+      planId: "p1",
+      sessionId: "s1",
+      state: "executing",
+      type: "plan.update",
+    });
+    await emit(provider, {
+      planId: "p1",
+      sessionId: "s1",
+      todos: [{ content: "Live item", id: "t1", status: "pending" }],
+      type: "plan.todos",
+    });
+
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(1, "p1", planPath, null);
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(2, "p1", planPath, "executing");
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(3, "p1", null, null);
+
+    provider.dispose();
+  });
+
+  it("does not refresh the preview for unrelated serve events", async () => {
+    const refreshPlanPreview = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(undefined),
+      refreshPlanPreview,
+    );
+
+    await emit(provider, { sessionId: "s1", type: "turn_end" });
+    await emit(provider, {
+      args: "{}",
+      sessionId: "s1",
+      toolCallId: "tc-1",
+      toolName: "read",
+      type: "tool_execution_start",
+    });
+
+    expect(refreshPlanPreview).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("tolerates plan refresh events when no preview refresher is injected", async () => {
+    const provider = makeProvider(vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined));
+
+    await expect(
+      emit(provider, {
+        path: "/workspace/plans/nohook.plan.md",
+        planId: "p1",
+        sessionId: "s1",
+        type: "plan.update",
+      }),
+    ).resolves.toBeUndefined();
+
+    provider.dispose();
+  });
+});
+
+describe("draft fork provider transaction", () => {
+  function makeDraftForkProvider(failAt?: "create" | "retain" | "install" | "switch") {
+    const order: string[] = [];
+    const installedDrafts: unknown[] = [];
+    const router = {
+      createDetachedSession: vi.fn(async () => {
+        order.push("create");
+        if (failAt === "create") throw new Error("create failed");
+        return "target-1";
+      }),
+      discardDetachedSession: vi.fn(async () => {
+        order.push("discard-session");
+        return true;
+      }),
+      retainAttachmentLeases: vi.fn(async (_sessionId: string, attachments: unknown[]) => {
+        order.push("retain");
+        if (failAt === "retain") throw new Error("retain failed");
+        return attachments;
+      }),
+      switchSession: vi.fn(async () => {
+        order.push("switch");
+        if (failAt === "switch") throw new Error("switch failed");
+        return "target-1";
+      }),
+    };
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "source-1", capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: router as never,
+    });
+    const draft = {
+      attachments: [{
+        blobSha: "a".repeat(64),
+        bytes: 4,
+        filename: "image.png",
+        id: "attachment-1",
+        kind: "image" as const,
+        mimeType: "image/png",
+        providerSha: "b".repeat(64),
+      }],
+      segments: [
+        { text: "draft", type: "text" as const },
+        {
+          kind: "file" as const,
+          label: "main.rs",
+          path: "/workspace/main.rs",
+          type: "reference" as const,
+        },
+      ],
+      text: "draft",
+    };
+    const internals = provider as unknown as {
+      adoptCommittedDraftFork(sessionId: string): Promise<void>;
+      draftStore: {
+        discardStrict(sessionId: string): Promise<void>;
+        installIfEmpty(sessionId: string, draft: unknown): Promise<unknown>;
+        peek(sessionId: string): typeof draft;
+        replaceAndFlush(sessionId: string, draft: unknown): Promise<typeof draft>;
+      };
+      executeDraftFork(operation: Record<string, unknown>, capture: Record<string, unknown>): Promise<string>;
+    };
+    internals.draftStore = {
+      discardStrict: async () => { order.push("discard-draft"); },
+      installIfEmpty: async (_sessionId, value) => {
+        order.push("install");
+        if (failAt === "install") throw new Error("install failed");
+        installedDrafts.push(value);
+        return value;
+      },
+      peek: () => draft,
+      replaceAndFlush: async (_sessionId, value) => {
+        order.push("persist");
+        return value as typeof draft;
+      },
+    };
+    internals.adoptCommittedDraftFork = async () => { order.push("select"); };
+    const execute = () => internals.executeDraftFork(
+      {
+        cwd: null,
+        operationId: "operation-1",
+        sourceSessionId: "source-1",
+      },
+      {
+        cwd: null,
+        operationId: "operation-1",
+        segments: draft.segments,
+        sourceSessionId: "source-1",
+        text: draft.text,
+      },
+    );
+    return { execute, installedDrafts, order, provider, router };
+  }
+
+  it("commits in the durable order and retains blob/provider hashes without bytes", async () => {
+    const { execute, installedDrafts, order, provider, router } = makeDraftForkProvider();
+    await expect(execute()).resolves.toBe("target-1");
+    expect(order).toEqual(["persist", "create", "retain", "install", "switch", "select"]);
+    expect(router.retainAttachmentLeases).toHaveBeenCalledWith("target-1", [{
+      blobSha: "a".repeat(64),
+      providerSha: "b".repeat(64),
+    }]);
+    expect(router.discardDetachedSession).not.toHaveBeenCalled();
+    expect(installedDrafts).toEqual([
+      expect.objectContaining({
+        segments: [
+          { text: "draft", type: "text" },
+          {
+            kind: "file",
+            label: "main.rs",
+            path: "/workspace/main.rs",
+            type: "reference",
+          },
+        ],
+      }),
+    ]);
+    provider.dispose();
+  });
+
+  it.each(["create", "retain", "install", "switch"] as const)(
+    "compensates the detached target when %s fails before commit",
+    async (phase) => {
+      const { execute, order, provider, router } = makeDraftForkProvider(phase);
+      await expect(execute()).rejects.toThrow(`${phase} failed`);
+      if (phase === "create") {
+        expect(router.discardDetachedSession).not.toHaveBeenCalled();
+        expect(order).toEqual(["persist", "create"]);
+      } else {
+        expect(order.slice(-2)).toEqual(["discard-draft", "discard-session"]);
+        expect(router.discardDetachedSession).toHaveBeenCalledWith("target-1");
+      }
+      expect(order).not.toContain("select");
+      provider.dispose();
+    },
+  );
+});
+
+describe("serve connection readiness", () => {
+  function createProvider(initialize: () => Promise<unknown>) {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: (async () => ({ capabilities: [], slashCommands: [], ...(await initialize() as object) })) as never,
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: {} as never,
+    });
+  }
+
+  it("does not mark serve ready merely because the webview DOM announces ready", async () => {
+    const provider = createProvider(async () => {
+      throw new Error("serve handshake failed");
+    });
+
+    await expect(
+      provider.dispatchTestIntent({
+        messageId: "webview-ready-before-handshake",
+        type: "ready",
+      }),
+    ).rejects.toThrow("serve handshake failed");
+
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "connecting",
+      ready: false,
+    });
+    provider.dispose();
+  });
+
+  it("derives ready from the supervisor-owned serve connection state", async () => {
+    const provider = createProvider(async () => ({}));
+
+    await provider.setServeConnectionState("ready");
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "ready",
+      ready: true,
+    });
+
+    await provider.setServeConnectionState("reconnecting");
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "reconnecting",
+      ready: false,
+    });
+    provider.dispose();
+  });
+
+  it("waits for attachment-root reload before bootstrapping the replacement document", async () => {
+    let resolveInitialize!: (value: unknown) => void;
+    const initialize = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          resolveInitialize = resolve;
+        }),
+    );
+    const provider = createProvider(initialize);
+    const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
+    provider.resolveWebviewView({
+      onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+      show() {},
+      visible: true,
+      webview: {
+        asWebviewUri: (uri: vscode.Uri) => uri,
+        cspSource: "vscode-test-webview",
+        html: "",
+        onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+        options: {},
+        postMessage: vi.fn().mockResolvedValue(true),
+      },
+    } as unknown as vscode.WebviewView);
+    await provider.setServeConnectionState("ready");
+
+    const invalidatedReady = provider.dispatchTestIntent({
+      messageId: "webview-ready-before-attachment-root",
+      type: "ready",
+    });
+    resolveInitialize({ attachmentRoot: "/storage/attachments", sessionId: "s1" });
+    await invalidatedReady;
+    expect(bootstrap).not.toHaveBeenCalled();
+
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-after-attachment-root",
+      type: "ready",
+    });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    provider.dispose();
+  });
+
+  it("marks the connection degraded and reports a post-handshake bootstrap failure", async () => {
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["list_models"],
+        sessionId: "s1",
+      } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendListModels: async () => {
+          throw new Error("list_models timed out");
+        },
+      } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    await provider.setServeConnectionState("ready");
+
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-bootstrap-timeout",
+      type: "ready",
+    });
+
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "degraded",
+      ready: false,
+    });
+    // The supervisor can deliver its ready notification after `initialize()` resolves.
+    // That notification describes the process, not bootstrap success, so it must not
+    // overwrite the actionable degraded UI state.
+    await provider.setServeConnectionState("ready");
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "degraded",
+      ready: false,
+    });
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "list_models timed out" }),
+    );
+    consoleError.mockRestore();
+    provider.dispose();
+  });
+
+  it("publishes a degraded snapshot for a duplicate-timeline bootstrap failure", async () => {
+    const postMessage = vi.fn().mockResolvedValue(true);
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = createProvider(async () => ({ sessionId: "s1" }));
+    (provider as any).deps.reportBootstrapFailure = reportBootstrapFailure;
+    provider.resolveWebviewView({
+      onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+      show() {},
+      visible: true,
+      webview: {
+        asWebviewUri: (uri: vscode.Uri) => uri,
+        cspSource: "vscode-test-webview",
+        html: "",
+        onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+        options: {},
+        postMessage,
+      },
+    } as unknown as vscode.WebviewView);
+    vi.spyOn(provider as any, "bootstrap").mockRejectedValue(
+      new Error("duplicate timeline id in session s1: duplicate"),
+    );
+
+    await provider.setServeConnectionState("ready");
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-duplicate-timeline",
+      type: "ready",
+    });
+
+    expect(provider.currentState()).toMatchObject({
+      connectionStatus: "degraded",
+      ready: false,
+    });
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "duplicate timeline id in session s1: duplicate" }),
+    );
+    expect(postMessage.mock.calls.some(([frame]) => frame.channel === "state")).toBe(true);
+    consoleError.mockRestore();
+    provider.dispose();
+  });
+
+  it("reports a bootstrap failure even when publishing degraded state fails", async () => {
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "s1", capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    vi.spyOn(provider as any, "bootstrap").mockRejectedValue(new Error("history failed"));
+    vi.spyOn(provider as any, "postState").mockRejectedValueOnce(new Error("state publish failed"));
+
+    await provider.setServeConnectionState("ready");
+    await provider.dispatchTestIntent({
+      messageId: "webview-ready-post-state-failure",
+      type: "ready",
+    });
+
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "history failed" }),
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      "[Tomcat webview] failed to publish degraded bootstrap state",
+      expect.objectContaining({ message: "state publish failed" }),
+    );
+    consoleError.mockRestore();
+    provider.dispose();
+  });
+
+  it("keeps a ready connection when list_models is not an advertised capability", async () => {
+    const sendListModels = vi.fn();
+    const reportBootstrapFailure = vi.fn();
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["get_state"],
+        sessionId: "s1",
+      } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendListModels,
+      } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    vi.spyOn(provider as any, "bootstrap").mockImplementation(async () => {
+      await (provider as any).refreshModels({ strict: true });
+    });
+    (provider as any).isReady = true;
+    await provider.setServeConnectionState("ready");
+
+    await provider.retryBootstrap();
+
+    expect(sendListModels).not.toHaveBeenCalled();
+    expect(reportBootstrapFailure).not.toHaveBeenCalled();
+    expect(provider.currentState()).toMatchObject({
+      availableModels: [],
+      connectionStatus: "ready",
+      ready: true,
+    });
+    provider.dispose();
+  });
+
+  it("returns from degraded to ready when a bootstrap retry succeeds", async () => {
+    const sendListModels = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("first list_models failure"))
+      .mockResolvedValueOnce({
+        payload: { models: [] },
+        success: true,
+      });
+    const reportBootstrapFailure = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["list_models"],
+        sessionId: "s1",
+      } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendListModels,
+      } as never,
+      reportBootstrapFailure,
+      sessionRouter: {} as never,
+    });
+    vi.spyOn(provider as any, "bootstrap").mockImplementation(async () => {
+      await (provider as any).refreshModels({ strict: true });
+    });
+    (provider as any).isReady = true;
+    await provider.setServeConnectionState("ready");
+
+    await provider.retryBootstrap();
+    expect(provider.currentState().connectionStatus).toBe("degraded");
+
+    await provider.retryBootstrap();
+    expect(provider.currentState()).toMatchObject({
+      availableModels: [],
+      connectionStatus: "ready",
+      ready: true,
+    });
+    expect(sendListModels).toHaveBeenCalledTimes(2);
+    expect(reportBootstrapFailure).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
     provider.dispose();
   });
 });

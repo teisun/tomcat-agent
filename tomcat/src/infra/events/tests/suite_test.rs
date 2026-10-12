@@ -25,6 +25,7 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
         args_preview: serde_json::json!({"path": "~/demo.txt"}),
     };
     let end = AgentEvent::ToolExecutionEnd {
+        media: Vec::new(),
         tool_call_id: "c1".into(),
         tool_name: "read".into(),
         result: ToolOutput(serde_json::json!({})),
@@ -33,6 +34,8 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
             added: Some(10),
             removed: Some(2),
             diff: None,
+            diff_truncated: false,
+            expired: false,
         }),
         is_error: false,
     };
@@ -66,6 +69,33 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
     assert_eq!(payload["display"]["file"].as_str(), Some("~/demo.txt"));
     assert_eq!(payload["display"]["added"].as_u64(), Some(10));
     assert_eq!(payload["display"]["removed"].as_u64(), Some(2));
+}
+
+#[test]
+fn tool_owned_media_event_is_reference_only_and_empty_is_omitted() {
+    let event = |media| AgentEvent::ToolExecutionEnd {
+        tool_call_id: "image".into(),
+        tool_name: "read".into(),
+        result: ToolOutput(serde_json::json!("[Image attached]")),
+        display: None,
+        is_error: false,
+        media,
+    };
+    assert!(serde_json::to_value(event(vec![]))
+        .unwrap()
+        .get("media")
+        .is_none());
+    let value = serde_json::to_value(event(vec![ToolMediaRef::InputImageRef {
+        blob_sha: "a".repeat(64),
+        mime_type: "image/png".into(),
+        bytes: 1200,
+    }]))
+    .unwrap();
+    assert_eq!(
+        value["media"][0],
+        serde_json::json!({"type":"input_image_ref","blobSha":"a".repeat(64),"mimeType":"image/png","bytes":1200})
+    );
+    assert!(!value.to_string().contains("image_b64"));
 }
 
 #[test]
@@ -129,9 +159,16 @@ fn wire_envelope_preserves_agent_event_shape_plus_session_id() {
     let event = AgentEvent::ContextMetricsUpdate {
         input_tokens_used: 100,
         context_utilization_ratio: 0.5,
+        provider_usage_measured: true,
         compaction_count: 2,
         compaction_tokens_freed: 128,
         total_tool_result_bytes_persisted: 256,
+        prompt_tokens_total: 2_048,
+        cache_read_tokens_total: 1_536,
+        cache_hit_ratio: Some(0.75),
+        consecutive_miss_max: 2,
+        tail_changed_count: 1,
+        tail_change_miss_tokens: 512,
         preheat_in_progress: false,
         preheat_result_pending: true,
     };
@@ -217,7 +254,12 @@ fn wire_plan_transition_constants_are_stable() {
     assert_eq!(wire::WIRE_PLAN_BUILD, "plan.build");
     assert_eq!(wire::WIRE_PLAN_ENTER, "plan.enter");
     assert_eq!(wire::WIRE_PLAN_EXIT, "plan.exit");
+    assert_eq!(
+        wire::WIRE_SESSION_AGENT_MODE_CHANGED,
+        "session.agent_mode.changed"
+    );
     assert_eq!(wire::WIRE_PLAN_PENDING, "plan.pending");
+    assert_eq!(wire::WIRE_PLAN_STALLED, "plan.stalled");
     assert_eq!(wire::WIRE_PLAN_UPDATE, "plan.update");
     assert_eq!(wire::WIRE_PLAN_COMPLETE, "plan.complete");
 }
@@ -371,9 +413,16 @@ fn context_metrics_update_serializes_preheat_result_pending() {
     let e = AgentEvent::ContextMetricsUpdate {
         input_tokens_used: 100,
         context_utilization_ratio: 0.5,
+        provider_usage_measured: true,
         compaction_count: 0,
         compaction_tokens_freed: 0,
         total_tool_result_bytes_persisted: 0,
+        prompt_tokens_total: 0,
+        cache_read_tokens_total: 0,
+        cache_hit_ratio: None,
+        consecutive_miss_max: 0,
+        tail_changed_count: 0,
+        tail_change_miss_tokens: 0,
         preheat_in_progress: false,
         preheat_result_pending: true,
     };
@@ -384,4 +433,5 @@ fn context_metrics_update_serializes_preheat_result_pending() {
     );
     assert_eq!(j["preheatInProgress"].as_bool(), Some(false));
     assert_eq!(j["preheatResultPending"].as_bool(), Some(true));
+    assert_eq!(j["providerUsageMeasured"].as_bool(), Some(true));
 }

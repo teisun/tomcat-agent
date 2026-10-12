@@ -53,7 +53,7 @@
 | **陈旧可拦截** | 与 [`read.md`](read.md) **§1** 术语、`read_state` **§8** 表一致：`mtime_ms` + `size` 快路径；与 write 同节奏时可要求 **先 read** | 你上次读过之后文件要是被人动过了，先别改，让模型重新读一遍再动手。 |
 | **校验先于写** | 校验阶段**不**创建 `.bak`、**不**改写目标文件；`.bak` 仅覆盖「校验已通过后的写盘途中失败」 | 没算清楚之前别碰文件；备份只防「写一半崩了」。 |
 | **命名对齐 read** | 对外仅 `edit`；无 `edit_file` 运行时别名（与 `read` 的 PR-RA 口径一致） | 工具名就叫 `edit`，别搞两套名字让模型和日志对不上。 |
-| **锚点双轨** | 普通 `edit` 保持子串模型；**行级强一致**走独立 `hashline_edit` + `read hashline=true`（算法与入参字段见 [`read.md`](read.md) **§5**、实施拆节 **§4.2.5**） | 普通替换用子串；要「第几行、还带指纹」那种精细活，用另一个工具，别全塞进 `edit`。 |
+| **锚点双轨** | 普通 `edit` 保持子串模型；**行级强一致**走独立 `hashline_edit` + `read hashline=true`（算法与入参字段见 [`read.md`](read.md) **§5**、实施拆节 **§4.2.5**） | prose / Markdown 优先普通替换；代码里短片段重复、必须锁定行时才用行号加指纹。 |
 
 ### 1.1 观察指标表（与 §10 验收一一对应）
 
@@ -258,8 +258,11 @@ right:
   避免 edit / write 节奏分叉。模型必须先 `read(path)` 再 `edit` / `hashline_edit` / `write(overwrite=true)`，
   staleness 也仍会继续拦「读过又被外部改了」的情况。
 - **文件编辑工作流（本期新增防呆）**：
-  - 默认路径：`read` -> `edit`。
-  - 重复短串、行级强锚点：`read(hashline=true)` -> `hashline_edit`。
+  - prose / Markdown 默认路径：`read` -> `edit`。
+  - 代码中有重复短串、需要行级强锚点：`read(hashline=true)` -> `hashline_edit`。
+  - 一次 `hashline_edit` **可以**批量改多个互不重叠的原快照区间：先校验全部锚点、再从下向上套用，因此上方插入或删除的行数不会改变同批次下方锚点的含义。
+  - 连续区间是模型可靠性建议，不是协议限制；远距离区间优先普通 `edit`。确需一次改时，调用前用一次新鲜的 `read(hashline=true)` 覆盖**全部**目标行，不能混用多次 read 的锚点。
+  - 若后一步要编辑本批新插入的文本，必须在本批写入后重新 `read(hashline=true)`；该文本不属于这次请求的原始快照。
   - `read` 的 `cat -n` / `hashline` 前缀都只是展示噪音，**不能**原样粘进 `edit.old_content`。
 
 #### 2.4.4 PR-H（T2）：体验
@@ -592,6 +595,7 @@ sequenceDiagram
 | `NotFound (line_prefix_suspected)` | `old_content` 每个非空行都像 `read` 的 `cat -n` / `hashline` 展示前缀，且剥离前缀后能在文件里命中 | 去掉 `  N\t...` / `N#XX:...` 前缀后重试；必要时继续走 `read(hashline=true)` -> `hashline_edit` | 你大概率把 `read` 的展示壳一起抄进来了，正文其实能对上。 |
 | `Ambiguous` | `count>1 && !replace_all` | 扩大 `old_content` 或设 `replace_all` | 同一句话出现好几次，你没说全换就不敢动。 |
 | `Overlap` | 多段 span 相交或嵌套（边界相邻 `s2 == e1` 不算） | 按报错里的 `edits[i]` / `edits[j]` 段号和行号定位；若提示“嵌套包含”，删除子段或合并成一段；否则拆成两次 tool_call | 两段改到同一块，逻辑上打架。 |
+| `HashlineValidationFailed` | `hashline_edit` 的一个或多个 start/end 锚点陈旧或越界 | 查看错误里的**全部** `edits[i].pos/end` 项；优先重新 `read(hashline=true)` 覆盖所有目标行，再使用每项给出的最新锚点重试 | 一次把所有失效锚点列出来，别修一个又撞下一个。 |
 | `Stale` | stamp 与 `metadata` 不一致 | **必须**重新 `read` | 磁盘上的文件已经和你脑子里的不一样了。 |
 | `NoPriorRead` | `get` 为空且策略要求先 read | 先 `read(path)` | 会话里没这条文件的 read 记录，先读再改。 |
 | `Oversized` | `new_content` 超上限 | 拆段或 `write` 整文件 | 一段塞太大，要么拆开要么整文件写。 |
@@ -637,7 +641,7 @@ sequenceDiagram
 | T1 NoPriorRead（**T2-P0-016 同 PR 强拒**） | `edit_no_prior_read_rejects_after_t2_p0_016` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06（见 §10.2） |
 | T2 normalize / 行尾 / BOM | `edit_curly_quote_matches_disk_straight_quote`、`edit_desanitize_matches_nbsp_and_zwsp`、`edit_preserves_trailing_newline`、`edit_preserves_crlf_line_endings`、`edit_preserves_bom` | `suite_test.rs` | ✅ 2026-05-06 |
 | T2 `.ipynb` | `edit_rejects_ipynb_before_touching_disk` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
-| T3 `hashline_edit` + read 闭环 | `hashline_edit_replace_matches_read_hashline`、`hashline_edit_rejects_hash_mismatch`；read 侧见 `read.md` §11 `read_with_hashline_*` / `read_tool_tests.rs` | `tool_exec_dedup_test.rs` 等 | ✅ 2026-05-06 |
+| T3 `hashline_edit` + read 闭环 | `hashline_edit_replace_matches_read_hashline`、`hashline_edit_batches_non_overlapping_original_ranges_despite_line_count_changes`、`hashline_edit_cjk_anchor_is_stable_after_lines_are_inserted_above_it`、`hashline_edit_rejects_hash_mismatch`、`hashline_edit_reports_all_mismatched_anchors_without_writing`、`hashline_edit_reports_mismatch_and_out_of_range_together`；read 侧见 `read.md` §11 `read_with_hashline_*` / `read_tool_tests.rs` | `tool_exec_dedup_test.rs` 等 | ✅ |
 | `read` -> `edit` 误用链路 | `read_line_numbers_output_misused_as_edit_old_content_returns_line_prefix_hint`、`read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hint` | `tool_exec_dedup_test.rs` | ✅ 2026-05-26 |
 | T3 secrets | `edit_secrets_hit_denied_reverts_to_no_op`、`edit_secrets_pass_when_no_hit`、`edit_secrets_hit_proceeds_with_allow_all_confirmation` | `suite_test.rs`、`tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | oneOf / 诊断归一 | `edit_oneof_shape_b_edits_array_is_parsed`、`edit_error_codes_normalized` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |

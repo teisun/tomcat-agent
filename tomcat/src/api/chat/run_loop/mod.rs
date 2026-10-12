@@ -1,16 +1,20 @@
-use std::io::{self, Write as IoWrite};
+use std::io::{self, IsTerminal, Write as IoWrite};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::core::agent_loop::AgentRunOutcome;
-use crate::core::compaction::apply::check_before_request;
+use crate::core::compaction::apply::{check_before_request, BoundaryEnv};
 use crate::core::llm::resolver::validate_capabilities;
-use crate::core::llm::{degrade_unsupported_multimodal, ChatMessage, LlmScene};
+use crate::core::llm::{
+    degrade_unsupported_multimodal, ChatMessage, LlmScene, PromptCacheKeyFamily,
+    SystemPromptSnapshot, ToolSurface,
+};
 use crate::core::session::manager::{
-    build_context_from_state, estimate_msg_chars, init_context_state,
+    estimate_msg_chars, init_context_state, init_context_state_with_limits, turn_count,
 };
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
@@ -34,16 +38,39 @@ mod session_title;
 mod thinking_persist;
 mod workspace_state;
 
-use self::background::spawn_completion_subscriber;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
+pub(crate) use self::persist::drain_checkpoint_record_tasks;
 use self::persist::push_turn_message;
+pub(crate) use self::rehydrate::has_resumable_tail_ask_question;
+pub(crate) use self::rehydrate::reload_context_state;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
 pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
-use self::workspace_state::compute_workspace_state;
+pub(crate) use self::workspace_state::runtime_tail_provider;
+
+const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A resumed process may send a zero-input request only after it has repaired a
+/// persisted `ask_question` tail into a completed tool result. An assistant-ended
+/// transcript, including one healed after a crashed non-replay-safe tool call,
+/// has no new causal input: it waits for user input rather than replaying or
+/// continuing the model request.
+pub(crate) fn should_auto_drain_resume(resume_requested: bool, has_pending_question: bool) -> bool {
+    resume_requested && has_pending_question
+}
+
+pub(crate) fn should_resume_after_command(outcome: &ChatCommandOutcome) -> bool {
+    matches!(outcome, ChatCommandOutcome::ResumePendingQuestion)
+}
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_plugin_sessions_on_session_end;
+#[cfg(test)]
+pub(crate) use self::workspace_state::render_plan_runtime_reminder;
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_openai_files_on_session_end;
@@ -54,59 +81,65 @@ pub(crate) use self::persist::{
 };
 #[cfg(test)]
 pub(crate) use self::rehydrate::{
-    is_append_message_chain_invariant, is_fatal_error, try_rehydrate_context_state_after_append_invariant,
+    is_append_message_chain_invariant, is_fatal_error,
+    try_rehydrate_context_state_after_append_invariant,
 };
 #[cfg(test)]
 pub(crate) use self::thinking_persist::{
     register_thinking_persist_listeners, unregister_thinking_persist_listeners,
 };
 
-async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
-    let skill_set = ctx.skill_set_snapshot();
-    let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
-    let mut tools = plan_runtime::catalog::visible_tools_for_mode_with_policy(
-        &ctx.session_runtime.plan_runtime.mode(),
-        allow_load_skill,
-    );
-    match ctx.global_services.tool_registry.list_tools(None).await {
-        Ok(plugin_tools) => {
-            tools.extend(
-                plugin_tools
-                    .iter()
-                    .map(crate::core::tools::contract::registry::tool_to_function_definition),
-            );
-        }
-        Err(err) => {
-            warn!(error = %err, "list plugin tools for LLM definitions failed; continuing with builtins only");
-        }
-    }
-    tools
+pub(crate) async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
+    observe_tool_surface(ctx)
+        .await
+        .function_definitions()
+        .to_vec()
 }
 
-pub(crate) async fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
+async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
-    let plugin_tool_lines = match ctx.global_services.tool_registry.list_tools(None).await {
-        Ok(plugin_tools) => plugin_tools
-            .iter()
-            .map(|tool| format!("- {}: {}", tool.name, tool.description))
-            .collect::<Vec<_>>()
-            .join("\n"),
+    let plugin_tools = match ctx.global_services.tool_registry.list_tools(None).await {
+        Ok(plugin_tools) => plugin_tools,
         Err(err) => {
-            warn!(error = %err, "list plugin tools for system prompt failed; omitting plugin tool lines");
-            String::new()
+            warn!(error = %err, "list plugin tools for prompt surface failed; continuing with builtins only");
+            Vec::new()
         }
     };
-    let builtin_tool_lines =
-        crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
-            allow_load_skill,
-        );
-    let tool_lines = if plugin_tool_lines.is_empty() {
-        builtin_tool_lines
-    } else {
-        format!("{builtin_tool_lines}\n{plugin_tool_lines}")
-    };
-    let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
+    let plugin_signature = plugin_tools
+        .iter()
+        .map(|tool| format!("{}:{}", tool.plugin_id, tool.name))
+        .collect::<Vec<_>>()
+        .join(",");
+    let skill_signature = skill_set
+        .visible_skills()
+        .into_iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "prompt_runtime_snapshot",
+        plugin_tools = %plugin_signature,
+        visible_skills = %skill_signature,
+    );
+    let allow_connector_tools = ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .is_some_and(|connectors| connectors.has_configured_mcp_servers());
+    let allow_package_install =
+        ctx.session_runtime.plan_runtime.mode() != crate::core::session::manager::AgentMode::Plan;
+    ToolSurface::from_plugin_tools_with_runtime_policies(
+        allow_load_skill,
+        allow_connector_tools,
+        allow_package_install,
+        &plugin_tools,
+    )
+}
+
+fn workspace_context(ctx: &ChatContext) -> crate::core::llm::system_prompt::WorkspaceContext {
+    crate::core::llm::system_prompt::WorkspaceContext {
         agent_workspace_dir: ctx
             .scope_services
             .agent_workspace_dir
@@ -125,34 +158,41 @@ pub(crate) async fn build_system_text(ctx: &ChatContext, context_budget_chars: u
             .agent_trail_dir
             .to_string_lossy()
             .to_string(),
-        tool_lines: Some(tool_lines),
-    };
-    let workspace_state = compute_workspace_state(ctx);
-    crate::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
-        workspace_context,
-        workspace_state,
+        tool_lines: None,
+    }
+}
+
+pub(crate) async fn build_prompt_snapshot(
+    ctx: &ChatContext,
+    context_budget_chars: usize,
+) -> SystemPromptSnapshot {
+    let skill_set = ctx.skill_set_snapshot();
+    let tool_surface = observe_tool_surface(ctx).await;
+    SystemPromptSnapshot::new(
+        &workspace_context(ctx),
+        &tool_surface,
         Some(&skill_set),
         Some(&ctx.config.skills),
         context_budget_chars,
+        &ctx.project_rules(context_budget_chars).0,
     )
 }
 
-pub(crate) fn sync_context_state_system_prompt_len(
-    context_state: &mut crate::core::ContextState,
-    old_len: usize,
-    new_len: usize,
-) {
-    if old_len == new_len {
-        return;
-    }
-    if new_len >= old_len {
-        context_state.estimate_context_chars += new_len - old_len;
-    } else {
-        context_state.estimate_context_chars = context_state
-            .estimate_context_chars
-            .saturating_sub(old_len - new_len);
-    }
-    context_state.invalidate_api_usage();
+pub(crate) async fn refresh_prompt_snapshot(
+    ctx: &ChatContext,
+    context_budget_chars: usize,
+    snapshot: &mut SystemPromptSnapshot,
+) -> bool {
+    let skill_set = ctx.skill_set_snapshot();
+    let tool_surface = observe_tool_surface(ctx).await;
+    snapshot.refresh(
+        &workspace_context(ctx),
+        &tool_surface,
+        Some(&skill_set),
+        Some(&ctx.config.skills),
+        context_budget_chars,
+        &ctx.project_rules(context_budget_chars).0,
+    )
 }
 
 const AUTO_TURN_BUDGET: u32 = 8;
@@ -164,21 +204,12 @@ fn current_user_prompt(ctx: &ChatContext) -> String {
         .get_session(ctx.session_runtime.session.current_session_key())
         .ok()
         .flatten();
+    let active_plan = ctx.session_runtime.plan_runtime.active_plan();
     user_prompt_for_mode_with_model(
-        &ctx.session_runtime.plan_runtime.mode(),
+        ctx.session_runtime.plan_runtime.mode(),
+        active_plan.as_ref(),
         &ctx.effective_model(entry.as_ref()),
     )
-}
-
-fn append_failed_turn_message(
-    context_state: &mut crate::core::ContextState,
-    message: ChatMessage,
-    account_chars: bool,
-) {
-    if account_chars {
-        context_state.on_message_appended(estimate_msg_chars(&message));
-    }
-    context_state.messages.push(message);
 }
 
 fn drain_follow_up_messages(ctx: &ChatContext) -> Vec<ChatMessage> {
@@ -227,35 +258,30 @@ fn drain_planned_turn_messages(
     compose_planned_turn_messages_from_message(input_message, drain_follow_up_messages(ctx))
 }
 
-type PlannedAppendOutcome = (Vec<ChatMessage>, Vec<(ChatMessage, bool)>);
-
-fn append_planned_messages_with_rehydrate_retry(
+pub(crate) fn append_planned_messages_with_rehydrate_retry(
     ctx: &ChatContext,
     system_text: &str,
-    system_text_with_reminder: &str,
     context_config: &crate::infra::ContextConfig,
     planned_messages: &[ChatMessage],
+    message_append_sink: &Arc<dyn crate::core::session::manager::MessageAppendSink>,
     context_state: &mut crate::core::ContextState,
-) -> Result<PlannedAppendOutcome, AppError> {
+    messages: &mut Vec<ChatMessage>,
+) -> Result<Option<String>, AppError> {
     let mut next_pending_idx = 0usize;
     let mut retried_after_rehydrate = false;
+    let mut first_appended_id = None;
     loop {
-        let mut messages = build_context_from_state(context_state);
-        let mut appended_messages = Vec::new();
-        messages.insert(0, ChatMessage::system(system_text_with_reminder));
-
+        let messages_before_append = messages.len();
         let mut append_error = None;
         for message in planned_messages.iter().skip(next_pending_idx) {
-            if let Err(err) = push_turn_message(
-                &mut messages,
-                &ctx.session_runtime.message_append_sink,
-                message.clone(),
-            ) {
+            if let Err(err) = push_turn_message(messages, message_append_sink, message.clone()) {
                 append_error = Some(err);
                 break;
             }
             context_state.on_message_appended(estimate_msg_chars(message));
-            appended_messages.push((message.clone(), false));
+            if first_appended_id.is_none() {
+                first_appended_id = messages.last().and_then(|message| message.msg_id.clone());
+            }
         }
 
         if let Some(err) = append_error {
@@ -268,14 +294,73 @@ fn append_planned_messages_with_rehydrate_retry(
                     context_state,
                 )
             {
-                next_pending_idx += appended_messages.len();
+                next_pending_idx += messages.len().saturating_sub(messages_before_append);
+                *messages = std::mem::take(&mut context_state.messages);
                 retried_after_rehydrate = true;
                 continue;
             }
+            // `messages` was taken from the inter-turn parking slot. An ordinary
+            // append failure cannot be repaired by rehydration, so park the list
+            // before returning rather than relying on an outer recovery caller.
+            context_state.messages = std::mem::take(messages);
             return Err(err);
         }
 
-        return Ok((messages, appended_messages));
+        return Ok(first_appended_id);
+    }
+}
+
+use crate::infra::i18n::tr;
+
+/// Only interactive terminals may consume an answer; piped first input belongs to chat.
+fn prompt_project_trust(ctx: &ChatContext) {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return;
+    }
+    let Some(project_dir) = ctx.scope_services.session_project_root.as_deref() else {
+        return;
+    };
+    let result = crate::core::security::project_trust::ProjectTrustStore::root_for(project_dir)
+        .and_then(|root| {
+            Ok((
+                root,
+                crate::core::security::project_trust::ProjectTrustStore::open(&ctx.config)?,
+            ))
+        });
+    let (root, store) = match result {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("[project trust] {error}");
+            return;
+        }
+    };
+    match store.is_trusted(&root) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("[project trust] {error}");
+            return;
+        }
+    }
+    print!(
+        "{}",
+        tr(
+            "terminal.trustProject",
+            &[("path", &root.display().to_string())]
+        )
+    );
+    if io::stdout().flush().is_err() {
+        return;
+    }
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    {
+        if let Err(error) = store.trust(&root).and_then(|_| {
+            crate::core::connector::ConnectorRegistry::project_trusted(&ctx.config, &root)
+        }) {
+            eprintln!("[project trust] {error}");
+        }
     }
 }
 
@@ -296,13 +381,25 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
     if resume {
         println!(
-            "恢复会话: {}",
-            ctx.session_runtime.session.current_session_key()
+            "{}",
+            tr(
+                "terminal.resumed",
+                &[("key", ctx.session_runtime.session.current_session_key())]
+            )
         );
     }
-    println!("tomcat 对话模式 (模型: {})", model);
-    println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
-    println!("输入 /help 查看命令列表。\n");
+    println!("{}", tr("terminal.welcome", &[("model", &model)]));
+    println!("{}", tr("terminal.inputHint", &[]));
+    println!("{}", tr("terminal.helpHint", &[]));
+    if let Some(error) = ctx
+        .scope_services
+        .scope_container
+        .connector_load_error
+        .as_deref()
+    {
+        println!("{}", tr("terminal.mcpUnavailable", &[("detail", error)]));
+    }
+    prompt_project_trust(ctx);
 
     let mut rl = input::make_readline_editor()?;
 
@@ -322,26 +419,33 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     if ctx.config.skills.enabled {
         let _ = ctx.await_skill_discovery().await;
     }
-    let context_budget_chars = crate::infra::config::compute_context_budget_chars(context_config);
-    let mut system_text = build_system_text(ctx, context_budget_chars).await;
+    let initial_main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
+    let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+        initial_main_call.limits.input_budget_tokens,
+    );
+    let mut prompt_snapshot = build_prompt_snapshot(ctx, context_budget_chars).await;
     persist::schedule_checkpoint_prune(ctx);
     // ResumePlan 目前恒为 Continue；保留 hook，未来若恢复逻辑需要 tail，可在这里恢复
     // `read_entries_tail(..., 64)` 预读。
     let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
-    let mut context_state =
-        init_context_state(&ctx.session_runtime.session, context_config, &system_text)?;
+    let mut context_state = init_context_state_with_limits(
+        &ctx.session_runtime.session,
+        context_config,
+        prompt_snapshot.system_text(),
+        &initial_main_call.limits,
+    )?;
     if let Err(err) = ctx
         .session_runtime
         .plan_runtime
-        .attach_from_event(context_state.latest_plan_event.clone())
+        .attach_from_resume_state(context_state.resume_control.clone())
     {
-        tracing::warn!(error = %err, "plan_runtime attach_from_event failed; continuing with Chat mode");
+        tracing::warn!(error = %err, "plan_runtime attach_from_resume_state failed; continuing with Chat mode");
     }
     let session_id = ctx
         .session_runtime
         .session
         .current_session_id()?
-        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?;
     let root_event_emitter = Arc::new(ScopedEventEmitter::new(
         ctx.global_services.event_bus.clone(),
         session_id.clone(),
@@ -371,6 +475,21 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     }
 
     let mut auto_turn_count: u32 = 0;
+    // `--resume` must not replay an assistant-ended transcript. Its only zero-input
+    // responsibility is resolving a persisted ask_question tail into a tool result,
+    // which then becomes the causal input of the resumed request.
+    let has_pending_resume_question = if resume {
+        match has_resumable_tail_ask_question(&ctx.session_runtime.session) {
+            Ok(pending) => pending,
+            Err(error) => {
+                warn!(error = %error, "failed to inspect pending ask_question state for --resume");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let mut resume_without_input = should_auto_drain_resume(resume, has_pending_resume_question);
     let mut fatal_error: Option<AppError> = None;
 
     let exit_reason = loop {
@@ -384,24 +503,29 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         }
 
         let queued_follow_ups = !ctx.session_runtime.follow_up_queue.lock().is_empty();
-        let auto_drain = queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET;
+        let auto_drain =
+            resume_without_input || (queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET);
         if !auto_drain {
             if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
                 eprintln!(
-                    "\n[bg] auto-turn budget exhausted ({}); falling back to user input.",
-                    AUTO_TURN_BUDGET
+                    "{}",
+                    tr(
+                        "terminal.autoBudget",
+                        &[("count", &AUTO_TURN_BUDGET.to_string())]
+                    )
                 );
             }
             auto_turn_count = 0;
         }
 
+        let mut instruction_message = None;
         let input = if auto_drain {
             String::new()
         } else {
             let raw = match rl.readline(&current_user_prompt(ctx)) {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {
-                    println!("\n再见！");
+                    println!("{}", tr("terminal.goodbye", &[]));
                     context_state.preheat.abort();
                     break "chat_eof_exit";
                 }
@@ -420,7 +544,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     continue;
                 }
                 Err(error) => {
-                    eprintln!("输入错误: {}", error);
+                    eprintln!(
+                        "{}",
+                        tr("terminal.inputError", &[("detail", &error.to_string())])
+                    );
                     context_state.preheat.abort();
                     break "chat_input_error_exit";
                 }
@@ -429,22 +556,40 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             if trimmed.is_empty() {
                 continue;
             } else {
-                let (parsed, history_line) =
-                    match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl).await {
-                        ChatCommandOutcome::Continue {
-                            line,
-                            echo_user,
-                            history_line,
-                        } => {
-                            if echo_user {
-                                print!("{}{}", current_user_prompt(ctx), line);
-                                println!();
-                                io::stdout().flush().map_err(AppError::Io)?;
-                            }
-                            (line, history_line)
+                let (parsed, history_line) = match dispatch_chat_command(
+                    ctx,
+                    parse_chat_command(&trimmed),
+                    &mut rl,
+                    &mut context_state,
+                    prompt_snapshot.system_text(),
+                )
+                .await
+                {
+                    ChatCommandOutcome::Continue {
+                        line,
+                        echo_user,
+                        history_line,
+                    } => {
+                        if echo_user {
+                            print!("{}{}", current_user_prompt(ctx), line);
+                            println!();
+                            io::stdout().flush().map_err(AppError::Io)?;
                         }
-                        ChatCommandOutcome::Handled => continue,
-                    };
+                        (line, history_line)
+                    }
+                    ChatCommandOutcome::UserMessage {
+                        message,
+                        history_line,
+                    } => {
+                        instruction_message = Some(*message);
+                        (history_line.clone(), Some(history_line))
+                    }
+                    command_outcome @ (ChatCommandOutcome::Handled
+                    | ChatCommandOutcome::ResumePendingQuestion) => {
+                        resume_without_input = should_resume_after_command(&command_outcome);
+                        continue;
+                    }
+                };
                 let history_line = history_line.unwrap_or_else(|| parsed.clone());
                 let _ = rl.add_history_entry(&history_line);
                 parsed
@@ -453,9 +598,15 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         if input.is_empty() {
             auto_turn_count += 1;
+            resume_without_input = false;
         } else {
             auto_turn_count = 0;
         }
+
+        // The prior turn's snapshot may still be running while the user types.
+        // Before this input can execute tools and mutate the worktree, finish it
+        // so checkpoint order matches turn order without delaying agent_idle.
+        drain_checkpoint_record_tasks(ctx, CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT).await;
 
         let turn_token = {
             let mut guard = ctx.session_runtime.cancel_token.lock();
@@ -467,43 +618,55 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 &ctx.session_runtime
                     .session
                     .current_session_id()?
-                    .ok_or_else(|| AppError::Config("无当前会话".to_string()))?,
+                    .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?,
                 turn_token.child_token(),
             )
             .map_err(|error| {
-                AppError::Config(format!("agent_registry root rearm 失败: {error}"))
+                AppError::Config(tr(
+                    "terminal.rearmFailed",
+                    &[("detail", &error.to_string())],
+                ))
             })?;
 
-        let next_system_text = build_system_text(ctx, context_budget_chars).await;
-        sync_context_state_system_prompt_len(
+        let input_message =
+            instruction_message.or_else(|| (!input.is_empty()).then(|| ChatMessage::user(&input)));
+        let outcome = run_chat_turn_with_message_and_snapshot(
+            ctx,
+            input_message,
+            &mut prompt_snapshot,
             &mut context_state,
-            system_text.len(),
-            next_system_text.len(),
-        );
-        system_text = next_system_text;
-
-        let outcome =
-            run_chat_turn(ctx, &input, &system_text, &mut context_state, turn_token).await?;
+            turn_token,
+        )
+        .await?;
 
         match outcome {
             AgentRunOutcome::Completed(_) => {}
             AgentRunOutcome::Interrupted(_) => {
+                if let Err(error) = ctx.session_runtime.plan_runtime.park_executing_plan() {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to park executing plan after user interruption"
+                    );
+                }
                 if ctx
                     .session_runtime
                     .hard_exit_requested
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    eprintln!("\n^C 已中断，正在退出...");
+                    eprintln!("{}", tr("terminal.interruptedExit", &[]));
                     context_state.preheat.abort();
                     break "hard_interrupt_exit";
                 }
-                eprintln!("\n^C 已中断（partial 已保存）");
+                eprintln!("{}", tr("terminal.interrupted", &[]));
             }
             AgentRunOutcome::Failed(error) => {
                 let fatal = rehydrate::is_fatal_error(&error);
-                eprintln!("\n[错误] {}", error);
+                eprintln!(
+                    "{}",
+                    tr("terminal.error", &[("detail", &error.to_string())])
+                );
                 if fatal {
-                    eprintln!("(致命错误，退出对话)");
+                    eprintln!("{}", tr("terminal.fatal", &[]));
                     context_state.preheat.abort();
                     fatal_error = Some(error);
                     break "chat_fatal_exit";
@@ -516,6 +679,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!();
     };
 
+    drain_checkpoint_record_tasks(ctx, CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT).await;
     cleanup::cleanup_chat_session_resources(ctx, exit_reason).await;
     events::stderr::unregister_chat_session_stderr_listeners(
         &*ctx.global_services.event_bus,
@@ -542,6 +706,36 @@ pub async fn run_chat_turn(
     run_chat_turn_with_message(ctx, input_message, system_text, context_state, turn_token).await
 }
 
+pub(crate) async fn run_chat_turn_with_message_and_snapshot(
+    ctx: &ChatContext,
+    input_message: Option<ChatMessage>,
+    prompt_snapshot: &mut SystemPromptSnapshot,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
+    ctx.sync_resource_inventory_before_turn().await?;
+    let entry = ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())?;
+    context_state.apply_limits(&ctx.resolve_call(LlmScene::Main, entry.as_ref())?.limits);
+    let previous_system_len = prompt_snapshot.system_text().len();
+    if refresh_prompt_snapshot(ctx, context_state.context_budget_chars, prompt_snapshot).await {
+        context_state
+            .replace_system_prompt_chars(previous_system_len, prompt_snapshot.system_text().len());
+    }
+    let system_text = prompt_snapshot.system_text().to_string();
+    run_chat_turn_with_message_and_tool_definitions(
+        ctx,
+        input_message,
+        &system_text,
+        prompt_snapshot.tool_definitions().to_vec(),
+        context_state,
+        turn_token,
+    )
+    .await
+}
+
 pub async fn run_chat_turn_with_message(
     ctx: &ChatContext,
     input_message: Option<ChatMessage>,
@@ -549,14 +743,61 @@ pub async fn run_chat_turn_with_message(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
+    ctx.sync_resource_inventory_before_turn().await?;
+    let tool_definitions = build_tool_definitions(ctx).await;
+    run_chat_turn_with_message_and_tool_definitions(
+        ctx,
+        input_message,
+        system_text,
+        tool_definitions,
+        context_state,
+        turn_token,
+    )
+    .await
+}
+
+async fn run_chat_turn_with_message_and_tool_definitions(
+    ctx: &ChatContext,
+    input_message: Option<ChatMessage>,
+    system_text: &str,
+    tool_definitions: Vec<serde_json::Value>,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
+    // A root user reply is the explicit boundary that may reopen an execution
+    // paused on an unresolved P0. Never infer acknowledgement from model text.
+    if input_message.is_some() {
+        if let Err(error) = ctx
+            .session_runtime
+            .plan_runtime
+            .refresh_code_review_budget_after_user_message()
+        {
+            tracing::warn!(error = %error, "failed to refresh code-review budget after user input");
+        }
+    }
     ctx.session_runtime
         .plan_runtime
         .attach_cancel_hook(turn_token.clone());
+    let recovered_pending_question = if input_message.is_none() {
+        rehydrate::resume_tail_ask_questions(ctx).await?
+    } else {
+        rehydrate::skip_tail_ask_questions_for_new_input(ctx)?
+    };
+    if recovered_pending_question {
+        // The recovered or skipped tool result is already durable. Reload instead of manually
+        // splicing it into the live context, so supersede+append and the normal append path
+        // share one source of truth.
+        *context_state = init_context_state(
+            &ctx.session_runtime.session,
+            &ctx.config.context,
+            system_text,
+        )?;
+    }
     let session_id = ctx
         .session_runtime
         .session
         .current_session_id()?
-        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?;
     let root_event_emitter = Arc::new(ScopedEventEmitter::new(
         ctx.global_services.event_bus.clone(),
         session_id.clone(),
@@ -568,88 +809,58 @@ pub async fn run_chat_turn_with_message(
         .get_session(ctx.session_runtime.session.current_session_key())?;
     let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
+    // A session can switch models between turns. Recompute the input budget
+    // before appending/sending this turn so compaction observes the selected
+    // model's actual limits rather than the global fallback.
+    context_state.apply_limits(&main_call.limits);
     // 会话标题优先走 title_model；若其未配置/未解析，则降级到主模型。
     // turn 折叠标题仍维持 title_call 语义，不在此处一起降级。
     let title_call = ctx.resolve_call(LlmScene::Title, entry.as_ref()).ok();
-    let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
+    let compaction_output_limit = compaction_call.output_limit_for_request(None).0;
     let title_provider = title_call.as_ref().map(|c| c.provider_impl.clone());
-    let (session_title_provider, session_title_model) = title_call
+    let (session_title_provider, session_title_model, session_title_output_limit) = title_call
         .as_ref()
-        .map(|c| (c.provider_impl.clone(), c.model.clone()))
-        .unwrap_or_else(|| (main_provider.clone(), main_call.model.clone()));
-    let model = main_call.model.clone();
+        .map(|c| {
+            (
+                c.provider_impl.clone(),
+                c.model.clone(),
+                c.output_limit_for_request(None).0,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                main_call.provider_impl.clone(),
+                main_call.model.clone(),
+                main_call.output_limit_for_request(None).0,
+            )
+        });
     let title_model = title_call
         .as_ref()
         .map(|c| c.model.clone())
         .unwrap_or_default();
-    let thinking_level = Some(ctx.global_services.model_thinking.get(&model));
+    let title_output_limit = title_call
+        .as_ref()
+        .and_then(|c| c.output_limit_for_request(None).0)
+        .or_else(|| main_call.output_limit_for_request(None).0);
+    let thinking_model_id = main_call.catalog_id.clone();
+    // 让 reviewer / verifier 在下一次派发时跟上会话当前的模型。
+    //
+    // 这里记的必须是 catalog id（`fcodex/claude-opus-4-8`），不是 `main_call.model`
+    // 那个发给 provider 的线上模型名（`claude-opus-4-8`）。真实解析点在
+    // `plan_runtime/prod_reviewer.rs::resolve_subagent_runtime()` 与
+    // `plan_runtime/verify.rs::dispatch()`：子 Agent 会拿这个 catalog id 回 catalog 重新
+    // resolve 出成对的 `{provider_impl, wire_model}`。上一轮 404 事故就是因为只带了线上名，
+    // 命中了另一个 provider 的同名条目；这条注释现在对应的是已落地的不变量，而不再只是意图。
+    ctx.session_runtime
+        .plan_runtime
+        .set_session_model(&thinking_model_id);
+    let thinking_level = Some(ctx.resolve_thinking_level(&thinking_model_id));
+    let speed = ctx.resolve_speed(&thinking_model_id);
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
-    let plan_mode = ctx.session_runtime.plan_runtime.mode();
-    let system_text_with_reminder = match &plan_mode {
-        plan_runtime::PlanState::Planning => {
-            format!(
-                "{}{}",
-                system_text,
-                *plan_runtime::reminders::PLANNER_REMINDER
-            )
-        }
-        plan_runtime::PlanState::Executing { plan_id } => format!(
-            "{}{}",
-            system_text,
-            plan_runtime::reminders::render_executor_reminder(plan_id)
-        ),
-        _ => system_text.to_string(),
-    };
     let planned_messages = drain_planned_turn_messages(ctx, input_message);
-    let (messages, appended_messages) = append_planned_messages_with_rehydrate_retry(
-        ctx,
-        system_text,
-        &system_text_with_reminder,
-        &context_config,
-        &planned_messages,
-        context_state,
-    )?;
-    maybe_emit_rule_session_title(
-        &ctx.session_runtime.session,
-        &appended_messages,
-        &root_event_emitter,
-    );
-    maybe_spawn_semantic_session_title(
-        &ctx.session_runtime.session,
-        &appended_messages,
-        session_title_provider,
-        session_title_model,
-        root_event_emitter.clone(),
-        session_id.clone(),
-    );
-    info!(
-        target: "tomcat_chat_diag",
-        phase = "chat_after_user_append",
-        ratio = context_state.usage_ratio(),
-        compaction_count = context_state.session_obs.compaction_count,
-        turns = context_state.turn_count()
-    );
-
-    context_state.preheat.try_restart_if_pending(
-        context_state.usage_ratio(),
-        &context_state.messages,
-        &context_state.transcript_path,
-        compaction_provider.clone(),
-        &context_config,
-        Arc::clone(&root_event_emitter),
-    );
-    check_before_request(context_state, &root_event_emitter).await;
-    info!(
-        target: "tomcat_chat_diag",
-        phase = "chat_after_timing2_check",
-        session_stderr_listeners_active = true,
-        message_stream_listener_registered = false,
-        ratio = context_state.usage_ratio(),
-        compaction_count = context_state.session_obs.compaction_count
-    );
     if let Err(error) = ctx.global_services.model_catalog.with_catalog(|catalog| {
         validate_capabilities(
             catalog,
@@ -660,9 +871,6 @@ pub async fn run_chat_turn_with_message(
             &planned_messages,
         )
     }) {
-        for (message, account_chars) in appended_messages {
-            append_failed_turn_message(context_state, message, account_chars);
-        }
         let _ = ctx
             .session_runtime
             .session
@@ -675,7 +883,83 @@ pub async fn run_chat_turn_with_message(
         });
         return Ok(AgentRunOutcome::Failed(error));
     }
-    let mut messages = messages;
+    let mut messages = std::mem::take(&mut context_state.messages);
+    let first_appended_id = append_planned_messages_with_rehydrate_retry(
+        ctx,
+        system_text,
+        &context_config,
+        &planned_messages,
+        &ctx.session_runtime.message_append_sink,
+        context_state,
+        &mut messages,
+    )?;
+    maybe_emit_rule_session_title(
+        &ctx.session_runtime.session,
+        &planned_messages,
+        &root_event_emitter,
+    );
+    maybe_spawn_semantic_session_title(
+        &ctx.session_runtime.session,
+        &planned_messages,
+        session_title_provider,
+        session_title_model,
+        session_title_output_limit,
+        root_event_emitter.clone(),
+        session_id.clone(),
+    );
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "chat_after_user_append",
+        ratio = context_state.usage_ratio(),
+        compaction_count = context_state.session_obs.compaction_count,
+        turns = turn_count(&messages)
+    );
+
+    context_state.preheat.try_restart_if_pending(
+        context_state.usage_ratio(),
+        &messages,
+        &context_state.transcript_path,
+        PromptCacheKeyFamily::Compaction.key_for(&session_id),
+        compaction_provider.clone(),
+        compaction_output_limit,
+        &context_config,
+        Arc::clone(&root_event_emitter),
+        Some(
+            ctx.session_runtime
+                .plan_runtime
+                .control_snapshot(Some(main_call.wire_model())),
+        ),
+    );
+    let boundary_env = BoundaryEnv {
+        config: &context_config,
+        work_dir: ctx.scope_services.agent_trail_dir.as_path(),
+        session_id: &session_id,
+        read_file_state: ctx.session_runtime.read_file_state.as_ref(),
+    };
+    let mut turn_start = first_appended_id
+        .as_deref()
+        .and_then(|id| {
+            messages
+                .iter()
+                .position(|message| message.msg_id.as_deref() == Some(id))
+        })
+        .unwrap_or(messages.len());
+    let _boundary_applied = check_before_request(
+        context_state,
+        &mut messages,
+        &root_event_emitter,
+        &boundary_env,
+        &mut turn_start,
+    )
+    .await;
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "chat_after_timing2_check",
+        session_stderr_listeners_active = true,
+        message_stream_listener_registered = false,
+        ratio = context_state.usage_ratio(),
+        compaction_count = context_state.session_obs.compaction_count
+    );
     if let std::borrow::Cow::Owned(degraded) =
         degrade_unsupported_multimodal(&messages, &main_call.capabilities)
     {
@@ -684,44 +968,71 @@ pub async fn run_chat_turn_with_message(
 
     let render_cli_output = !ctx.session_runtime.suppress_cli_output;
     let renderer = Arc::new(Mutex::new(MarkdownRenderer::new()));
+    let unattended_execution = ctx
+        .session_runtime
+        .plan_runtime
+        .executing_plan_id()
+        .is_some();
     let config = AgentLoopConfig {
-        max_attempts: ctx.config.llm.agent_max_attempts,
+        // 长时间无人 PLAN/EXEC 不应因一次 Connect/429 直接把工作交还用户；
+        // 普通交互仍尊重用户配置的短重试预算。
+        max_attempts: if unattended_execution {
+            ctx.config.llm.agent_max_attempts.max(10)
+        } else {
+            ctx.config.llm.agent_max_attempts
+        },
+        system_prompt: Some(system_text.to_string()),
+        unattended_retry: false,
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
-        model,
         thinking_level,
+        speed,
         session_id: session_id.clone(),
-        tool_definitions: build_tool_definitions(ctx).await,
+        tool_definitions,
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
+        compaction_output_limit,
         title_provider: title_provider.clone(),
         title_model,
+        title_output_limit,
         agent_trail_dir: ctx
             .scope_services
             .agent_trail_dir
             .to_string_lossy()
             .to_string(),
         read_file_state: ctx.session_runtime.read_file_state.clone(),
-        openai_files_runtime: ctx.openai_files_runtime_for(main_provider.as_ref()),
+        openai_files_runtime: ctx.openai_files_runtime_for(&main_call),
         checkpoint_store: ctx.scope_services.checkpoint_store.clone(),
         message_append_sink: Some(ctx.session_runtime.message_append_sink.clone()),
         parent_session_id: None,
         spawn_depth: 0,
         subagent_type: crate::core::agent_loop::SubagentType::User,
-        review_kind: None,
         plan_runtime: Some(ctx.session_runtime.plan_runtime.clone()),
         skill_set: Some(ctx.scope_services.skill_set.clone()),
+        ephemeral_tail_provider: Some(runtime_tail_provider(ctx)),
     };
     let mut agent_loop = AgentLoop::new(
-        main_provider,
+        main_call,
         ctx.global_services.primitive.clone(),
         ctx.global_services.event_bus.clone(),
         config,
         turn_token,
     );
     agent_loop = agent_loop.with_tool_registry(ctx.global_services.tool_registry.clone());
+    if let Some(connectors) = ctx.global_services.connector_registry.clone() {
+        agent_loop = agent_loop.with_connector_registry(connectors);
+    }
+    agent_loop = agent_loop.with_plugin_engine_config(crate::ext::PluginEngineConfig {
+        quickjs_heap_mb: ctx.config.plugin.js_heap_mb,
+        call_timeout_ms: ctx.config.plugin.call_timeout_ms,
+        interrupt_budget: ctx.config.plugin.interrupt_budget,
+        idle_ttl_ms: ctx.config.plugin.idle_ttl_ms,
+    });
     if let Some(backend) = ctx.global_services.config_backend.clone() {
         agent_loop = agent_loop.with_config_backend(backend);
+    }
+    if let Some(backend) = ctx.global_services.package_install_backend.clone() {
+        agent_loop = agent_loop.with_package_install_backend(backend);
     }
     agent_loop = agent_loop.with_bash_task_registry(ctx.session_runtime.bash_task_registry.clone());
     agent_loop = agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());
@@ -756,7 +1067,7 @@ pub async fn run_chat_turn_with_message(
             .session_runtime
             .session
             .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            .ok_or_else(|| AppError::Config(tr("terminal.noSession", &[])))?;
         Some(thinking_persist::register_thinking_persist_listeners(
             &*ctx.global_services.event_bus,
             transcript_path,
@@ -766,11 +1077,13 @@ pub async fn run_chat_turn_with_message(
     };
 
     if render_cli_output {
+        let active_plan = ctx.session_runtime.plan_runtime.active_plan();
         print!(
             "\n{}",
             agent_prompt_for_mode(
                 &ctx.config.agent.id,
-                &ctx.session_runtime.plan_runtime.mode()
+                ctx.session_runtime.plan_runtime.mode(),
+                active_plan.as_ref(),
             )
         );
         io::stdout().flush().map_err(AppError::Io)?;
@@ -782,7 +1095,7 @@ pub async fn run_chat_turn_with_message(
         session_stderr_listeners_active = true,
         message_stream_listener_registered = true
     );
-    let outcome = agent_loop.run(messages).await;
+    let outcome = agent_loop.run_turn(messages, turn_start).await;
     if let Some(ids) = &thinking_persist_listener_ids {
         thinking_persist::unregister_thinking_persist_listeners(
             &*ctx.global_services.event_bus,

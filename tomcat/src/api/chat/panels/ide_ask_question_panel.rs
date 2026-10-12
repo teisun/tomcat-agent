@@ -1,9 +1,8 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
-use crate::core::plan_runtime::panels::{AskQuestionPanel, AskQuestionResult, Question};
+use crate::core::plan_runtime::panels::{
+    AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination, Question,
+};
 
 /// IDE 端占位实现。
 ///
@@ -16,11 +15,8 @@ impl AskQuestionPanel for IdeAskQuestionPanel {
     async fn ask(
         &self,
         _questions: Vec<Question>,
-        _cancel_signal: Arc<AtomicBool>,
+        _termination: AskQuestionTermination,
     ) -> AskQuestionResult {
-        AskQuestionResult {
-            answers: vec![],
-            cancelled: true,
-        }
+        AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected)
     }
 }

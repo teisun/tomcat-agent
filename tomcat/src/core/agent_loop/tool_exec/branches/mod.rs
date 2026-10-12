@@ -1,7 +1,9 @@
 pub(super) mod background_unavailable;
 pub(super) mod bash;
-pub(super) mod bash_background;
+pub(super) mod code;
 pub(super) mod config;
+pub(super) mod connector;
+pub(super) mod dispatch_agent;
 pub(super) mod edit;
 pub(super) mod hashline_edit;
 pub(super) mod list_dir;
@@ -17,8 +19,10 @@ pub(super) mod web_search;
 pub(super) mod write;
 
 pub(super) use bash::handle_bash;
-pub(super) use bash_background::handle_bash_background;
-pub(super) use config::{handle_config_get, handle_config_set};
+pub(super) use code::handle_tool_run_code;
+pub(super) use config::{handle_config_get, handle_config_set, handle_package_install};
+pub(super) use connector::{handle_tool_call, handle_tool_describe, handle_tool_search};
+pub(super) use dispatch_agent::handle_dispatch_agent;
 pub(super) use edit::handle_edit;
 pub(super) use hashline_edit::handle_hashline_edit;
 pub(super) use list_dir::handle_list_dir;
@@ -32,3 +36,6 @@ pub(super) use task_stop::handle_task_stop;
 pub(super) use web_fetch::handle_web_fetch;
 pub(super) use web_search::handle_web_search;
 pub(super) use write::handle_write;
+
+#[cfg(test)]
+mod tests;

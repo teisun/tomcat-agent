@@ -98,7 +98,12 @@ pub(crate) fn build_outbound_client(
         // Explicit llm.proxy should still honor NO_PROXY/no_proxy from the ambient environment.
         let proxy = reqwest::Proxy::all(proxy_url)
             .map(|proxy| proxy.no_proxy(reqwest::NoProxy::from_env()))
-            .map_err(|err| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, err)))?;
+            .map_err(|err| {
+                AppError::Config(crate::infra::i18n::tr(
+                    "config.proxyInvalid",
+                    &[("detail", &err.without_url().to_string())],
+                ))
+            })?;
         builder = builder.proxy(proxy);
     }
     // If no explicit proxy was configured, leave system proxy discovery enabled.

@@ -13,12 +13,15 @@ pub enum ResumeHydrationMode {
 /// 详见 `docs/architecture/context-management.md`。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContextConfig {
-    /// LLM 上下文窗口大小（token 数），默认 400,000（GPT-5.4）。
-    #[serde(default = "default_context_window")]
-    pub context_window: usize,
-    /// LLM 最大输出 token 数，默认 128,000。
-    #[serde(default = "default_max_output_tokens")]
-    pub max_output_tokens: usize,
+    /// 模型目录未声明上下文窗口时的保守兜底（token 数）。
+    #[serde(default = "default_context_window", alias = "context_window")]
+    pub context_window_fallback: usize,
+    /// 额外本地输出预留。它不发给 provider，且永远不能低于模型的输出能力。
+    ///
+    /// 旧配置的 `max_output_tokens` 作为兼容别名读取；新配置不应再把模型能力
+    /// 写在这里。
+    #[serde(default, alias = "max_output_tokens")]
+    pub output_reserve_tokens: Option<usize>,
     /// 受保护的最近 user turn 数（不参与 Layer 1 placeholder 压缩），默认 5。
     #[serde(default = "default_keep_recent_turns")]
     pub keep_recent_turns: usize,
@@ -51,10 +54,6 @@ pub struct ContextConfig {
 
 fn default_context_window() -> usize {
     400_000
-}
-
-fn default_max_output_tokens() -> usize {
-    128_000
 }
 
 fn default_keep_recent_turns() -> usize {
@@ -92,8 +91,8 @@ fn default_resume_lazy_threshold() -> usize {
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            context_window: default_context_window(),
-            max_output_tokens: default_max_output_tokens(),
+            context_window_fallback: default_context_window(),
+            output_reserve_tokens: None,
             keep_recent_turns: default_keep_recent_turns(),
             compaction_model: default_compaction_model(),
             layer0_single_result_max_chars: default_layer0_single_result_max_chars(),
@@ -107,13 +106,26 @@ impl Default for ContextConfig {
     }
 }
 
-/// 计算上下文预算（字符数）。
-/// 公式：`(context_window - max_output_tokens) * 4`
-/// 其中 `*4` 将 token 转为近似字符数（chars/4 启发式）。
-/// 对齐 context-management.md §4.6。
+/// 将一个已解析的输入预算换成字符预算（chars/4 近似估算）。
+pub fn compute_context_budget_chars_from_tokens(input_budget_tokens: usize) -> usize {
+    input_budget_tokens * 4
+}
+
+/// 模型尚未解析时的兼容预算。生产聊天路径应使用
+/// `EffectiveModelLimits::input_budget_tokens`，不能把本函数的回退值当作模型事实。
+pub fn fallback_input_budget_tokens(config: &ContextConfig) -> usize {
+    let unknown_model_reserve = (config.context_window_fallback / 4).min(128_000);
+    let conservative_reserve = config
+        .output_reserve_tokens
+        .unwrap_or(0)
+        .max(unknown_model_reserve);
+    config
+        .context_window_fallback
+        .saturating_sub(conservative_reserve)
+}
+
+/// 兼容尚未解析模型能力的调用点。主聊天请求在解析到
+/// `EffectiveModelLimits` 后必须改用其 `input_budget_tokens`。
 pub fn compute_context_budget_chars(config: &ContextConfig) -> usize {
-    let available_tokens = config
-        .context_window
-        .saturating_sub(config.max_output_tokens);
-    available_tokens * 4
+    compute_context_budget_chars_from_tokens(fallback_input_budget_tokens(config))
 }

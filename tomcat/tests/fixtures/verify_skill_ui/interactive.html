@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Tomcat interactive UI acceptance fixture</title>
+    <link rel="icon" href="data:,">
+    <style>
+      body { font-family: sans-serif; margin: 2rem; }
+      #details { display: none; margin-top: 1rem; padding: 1rem; background: #e8f5e9; }
+      #trigger:hover + #details, #details.open { display: block; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Interactive fixture</h1>
+      <button id="trigger" aria-expanded="false">Show details</button>
+      <section id="details" role="status">INTERMEDIATE_TOKEN</section>
+    </main>
+    <script>
+      const trigger = document.querySelector("#trigger");
+      const details = document.querySelector("#details");
+      trigger.addEventListener("click", () => {
+        const open = details.classList.toggle("open");
+        trigger.setAttribute("aria-expanded", String(open));
+      });
+    </script>
+  </body>
+</html>

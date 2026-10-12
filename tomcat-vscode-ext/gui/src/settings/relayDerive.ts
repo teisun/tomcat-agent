@@ -1,3 +1,5 @@
+import type { SettingsModelView } from "../../../src/shared/settingsProtocol";
+
 export const RELAY_ID_SEPARATOR = "/";
 
 const KNOWN_SECOND_LEVEL_SUFFIXES = new Set([
@@ -102,6 +104,46 @@ export function envNameForRelaySlug(slug: string, api = "openai"): string {
   }
   const family = api.trim() === "anthropic-messages" ? "ANTHROPIC" : "OPENAI";
   return `${normalized}_${family}_API_KEY`;
+}
+
+/**
+ * Canonicalizes user input solely for endpoint equality. This is deliberately
+ * narrower than heuristic derivation: if parsing fails, it returns null so the
+ * caller can fall back to deriveRelayFields instead of guessing a match.
+ */
+export function normalizeRelayEndpoint(baseUrl: string): string | null {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return null;
+  const candidate = hasScheme(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    parsed.hash = "";
+    parsed.search = "";
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reuses credentials metadata only from an explicitly configured user relay.
+ * Exact endpoint matching is deterministic and always takes precedence over
+ * brand/host heuristics.
+ */
+export function findConfiguredRelayByBaseUrl(
+  models: readonly SettingsModelView[],
+  baseUrl: string,
+): SettingsModelView | null {
+  const target = normalizeRelayEndpoint(baseUrl);
+  if (!target) return null;
+  return (
+    models.find(
+      (model) =>
+        model.source === "user" &&
+        typeof model.baseUrl === "string" &&
+        normalizeRelayEndpoint(model.baseUrl) === target,
+    ) ?? null
+  );
 }
 
 export function deriveRelayFields(

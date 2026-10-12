@@ -1,21 +1,94 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::api::chat::ChatContext;
+use crate::core::agent_loop::EphemeralTailProvider;
 use crate::core::llm::system_prompt::{PathRuleSummary, WorkspaceRootDescriptor, WorkspaceState};
-use crate::core::permission::PathRuleMode;
+use crate::core::llm::system_prompt::{
+    SystemPromptSection, WorkspaceContext, WorkspaceStateSection,
+};
+use crate::core::permission::{PathRuleMode, PermissionGate, SessionGrants};
 use crate::resolve_workspace_roots_paths;
 
-pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
-    let cfg = &ctx.config;
-    let agent_definition_dir = ctx.scope_services.agent_definition_dir.clone();
+pub(crate) fn runtime_tail_provider(ctx: &ChatContext) -> Arc<dyn EphemeralTailProvider> {
+    Arc::new(RuntimeTailProvider {
+        config: ctx.config.clone(),
+        agent_definition_dir: ctx.scope_services.agent_definition_dir.clone(),
+        agent_trail_dir: ctx.scope_services.agent_trail_dir.clone(),
+        session_grants: ctx.session_runtime.session_grants.clone(),
+        gate: Arc::clone(&ctx.global_services.gate),
+        plan_runtime: Arc::clone(&ctx.session_runtime.plan_runtime),
+    })
+}
+
+pub(crate) fn render_plan_runtime_reminder(
+    plan_runtime: &crate::core::plan_runtime::PlanRuntime,
+) -> Option<String> {
+    match plan_runtime.mode() {
+        crate::core::session::AgentMode::Plan => {
+            Some((*crate::core::plan_runtime::reminders::PLANNER_REMINDER).to_string())
+        }
+        crate::core::session::AgentMode::Chat => plan_runtime.executing_plan_id().map(|plan_id| {
+            crate::core::plan_runtime::reminders::render_executor_reminder(&plan_id)
+        }),
+    }
+}
+
+struct RuntimeTailProvider {
+    config: crate::AppConfig,
+    agent_definition_dir: PathBuf,
+    agent_trail_dir: PathBuf,
+    session_grants: SessionGrants,
+    gate: Arc<dyn PermissionGate>,
+    plan_runtime: Arc<crate::core::plan_runtime::PlanRuntime>,
+}
+
+impl EphemeralTailProvider for RuntimeTailProvider {
+    fn render_ephemeral_tail(&self) -> String {
+        let mut sections = Vec::new();
+        if let Some(reminder) = render_plan_runtime_reminder(&self.plan_runtime) {
+            sections.push(reminder);
+        }
+
+        let state = compute_workspace_state(
+            &self.config,
+            &self.agent_definition_dir,
+            &self.agent_trail_dir,
+            &self.session_grants,
+            self.gate.as_ref(),
+        );
+        let context = WorkspaceContext {
+            agent_workspace_dir: String::new(),
+            agent_definition_dir: self.agent_definition_dir.to_string_lossy().to_string(),
+            agent_plans_dir: crate::core::plan_runtime::file_store::plans_dir()
+                .map(|path| crate::infra::platform::format_home_path(path.as_path()))
+                .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
+            agent_trail_dir: self.agent_trail_dir.to_string_lossy().to_string(),
+            tool_lines: None,
+        };
+        let rendered_state = WorkspaceStateSection::new(state).render(&context);
+        sections.push(format!(
+            "<system_reminder kind=\"workspace_state\">\n{rendered_state}\n</system_reminder>"
+        ));
+        sections.join("\n\n")
+    }
+}
+
+fn compute_workspace_state(
+    cfg: &crate::AppConfig,
+    agent_definition_dir: &Path,
+    agent_trail_dir: &Path,
+    session_grants: &SessionGrants,
+    gate: &dyn PermissionGate,
+) -> WorkspaceState {
     let workspace_roots = resolve_workspace_roots_paths(cfg).unwrap_or_default();
     let agent_plans_dir = crate::infra::config::resolve_plans_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
     let agent_trail_readonly_dirs: Vec<PathBuf> = vec![
-        Some(ctx.scope_services.agent_trail_dir.clone()),
+        Some(agent_trail_dir.to_path_buf()),
         crate::infra::config::resolve_sessions_dir(cfg).ok(),
         crate::infra::config::resolve_log_dir(cfg).ok(),
         crate::infra::config::resolve_audit_dir(cfg).ok(),
@@ -40,14 +113,12 @@ pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let session_set: HashSet<String> = ctx
-        .session_runtime
-        .session_grants
+    let session_set: HashSet<String> = session_grants
         .snapshot()
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let effective_roots = ctx.global_services.gate.effective_roots();
+    let effective_roots = gate.effective_roots();
     let mut read_write = Vec::new();
     let mut seen_rw = HashSet::new();
     for path in effective_roots.read_write {
@@ -109,7 +180,7 @@ pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
         .map(|rule| rule.path.clone())
         .collect();
     let mut path_rules = Vec::new();
-    for rule in ctx.global_services.gate.effective_path_rules() {
+    for rule in gate.effective_path_rules() {
         path_rules.push(PathRuleSummary {
             path: rule.path.clone(),
             mode: match rule.mode {
@@ -126,3 +197,7 @@ pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
         path_rules,
     }
 }
+
+#[cfg(test)]
+#[path = "tests/workspace_state_test.rs"]
+mod tests;

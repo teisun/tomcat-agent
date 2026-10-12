@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import {
@@ -102,6 +102,61 @@ describe("fuzzyRank", () => {
 });
 
 describe("ContextSearchService", () => {
+  it("resolves files, directories, and missing paths for Markdown chips", async () => {
+    __testing.registerFile("/workspace/src/app.ts", "export const app = true;\n");
+    __testing.registerDirectory("/workspace/docs");
+    const service = new ContextSearchService();
+
+    await expect(
+      service.resolvePaths({ paths: ["src/app.ts", "docs", "missing.md"] }),
+    ).resolves.toEqual([
+      {
+        kind: "file",
+        path: "src/app.ts",
+        resolvedPath: "/workspace/src/app.ts",
+      },
+      {
+        kind: "directory",
+        path: "docs",
+        resolvedPath: "/workspace/docs",
+      },
+      {
+        kind: "missing",
+        path: "missing.md",
+        resolvedPath: "/workspace/missing.md",
+      },
+    ]);
+    service.dispose();
+  });
+
+  it("uses the warm @-mention index before falling back to stat", async () => {
+    __testing.registerFile("/workspace/src/app.ts", "export const app = true;\n");
+    const service = new ContextSearchService();
+    await service.search({ query: "app" });
+    const stat = vi.spyOn(vscode.workspace.fs, "stat");
+
+    await expect(service.resolvePaths({ paths: ["src/app.ts"] })).resolves.toMatchObject([
+      { kind: "file", path: "src/app.ts" },
+    ]);
+    expect(stat).not.toHaveBeenCalled();
+    stat.mockRestore();
+    service.dispose();
+  });
+
+  it("invalidates direct path results when the workspace watcher sees a create", async () => {
+    const service = new ContextSearchService();
+    await expect(service.resolvePaths({ paths: ["src/new.ts"] })).resolves.toMatchObject([
+      { kind: "missing", path: "src/new.ts" },
+    ]);
+
+    __testing.registerFile("/workspace/src/new.ts", "export const fresh = true;\n");
+
+    await expect(service.resolvePaths({ paths: ["src/new.ts"] })).resolves.toMatchObject([
+      { kind: "file", path: "src/new.ts" },
+    ]);
+    service.dispose();
+  });
+
   it("respects files.exclude when building the cache", async () => {
     __testing.registerFile("/workspace/generated/foo.ts", "export const generated = true;\n");
     __testing.registerFile("/workspace/src/foo.ts", "export const source = true;\n");
@@ -128,6 +183,19 @@ describe("ContextSearchService", () => {
     expect(result.matches).toHaveLength(2);
     expect(result.truncated).toBe(true);
     service.dispose();
+  });
+
+  it.each(["missing-directory/", "app"])("reports a saturated index even with few matches: %s", async query => {
+    process.env[CONTEXT_SEARCH_MAX_FILES_ENV] = "2";
+    __testing.registerFile("/workspace/src/app.ts", "one");
+    __testing.registerFile("/workspace/src/other.ts", "two");
+    __testing.registerFile("/workspace/missing-directory/nested.txt", "not indexed");
+    const service = new ContextSearchService();
+    try {
+      const result = await service.search({ query });
+      expect(result.matches.length).toBeLessThan(20);
+      expect(result.truncated).toBe(true);
+    } finally { service.dispose(); }
   });
 
   it("recomputes open-file weighting without rebuilding cached candidates", async () => {
@@ -184,6 +252,23 @@ describe("ContextSearchService", () => {
     });
 
     service.dispose();
+  });
+
+  it("does not clear a create invalidation that arrives during findFiles", async () => {
+    __testing.registerFile("/workspace/src/one.ts", "one");
+    const service = new ContextSearchService();
+    let finish!: (files: vscode.Uri[]) => void;
+    const staleListing = new Promise<vscode.Uri[]>((resolve) => { finish = resolve; });
+    const find = vi.spyOn(vscode.workspace, "findFiles").mockReturnValueOnce(staleListing);
+    try {
+      const searching = service.search({ query: "two" });
+      __testing.registerFile("/workspace/src/two.ts", "two");
+      finish([vscode.Uri.file("/workspace/src/one.ts")]);
+      const result = await searching;
+      expect(result.matches.map((match) => match.reference.path)).toContain("src/two.ts");
+      await service.search({ query: "two" });
+      expect(find).toHaveBeenCalledTimes(2);
+    } finally { find.mockRestore(); service.dispose(); }
   });
 
   it("does not surface empty directories as candidates", async () => {

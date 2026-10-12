@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::connector::ConnectorRegistry;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmProvider, ResolvedCall};
 use crate::core::session::manager::ContextState;
 use crate::core::session::manager::MessageAppendSink;
 use crate::core::tools::contract::registry::ToolRegistry;
@@ -54,17 +55,21 @@ pub enum LoopError {
 
 /// 子 Agent 类型枚举。**仅** internal dispatch 用，**不**进 OpenAI function schema。
 ///
-/// `User` 是父 Agent（顶层 chat_loop）的默认；`Reviewer` / `Verifier` 由
+/// `User` 是父 Agent（顶层 chat_loop）的默认；`PlanReviewer` / `CodeReviewer` / `Verifier` 由
 /// `PlanRuntime::dispatch_*` 通过 `AgentRegistry::spawn_subagent_internal` 设入。未来
 /// `dispatch_agent` 工具的通用子 Agent 类型在 Phase 3 全量阶段补充。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentType {
     /// 顶层 chat_loop 的 user-facing Agent；reviewer 不可使用此值。
     User,
-    /// reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
-    Reviewer,
+    /// plan reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
+    PlanReviewer,
+    /// code reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
+    CodeReviewer,
     /// verifier 内联子 Agent。详见 `docs/architecture/plan-exec-code-verification.md`。
     Verifier,
+    /// 只读勘察子 Agent：替主 Agent 读代码，只回结论不回原文。
+    Explorer,
 }
 
 impl SubagentType {
@@ -73,34 +78,66 @@ impl SubagentType {
         matches!(self, SubagentType::User)
     }
 
+    pub fn is_reviewer(self) -> bool {
+        matches!(
+            self,
+            SubagentType::PlanReviewer | SubagentType::CodeReviewer
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             SubagentType::User => "user",
-            SubagentType::Reviewer => "reviewer",
+            SubagentType::PlanReviewer => "plan_reviewer",
+            SubagentType::CodeReviewer => "code_reviewer",
             SubagentType::Verifier => "verifier",
+            SubagentType::Explorer => "explorer",
         }
     }
+}
+
+/// Produces runtime-only instruction text for the next main-agent request.
+///
+/// The result is appended only to the outgoing `ChatRequest`; it must never
+/// become part of `ContextState.messages` or the persisted transcript.
+pub trait EphemeralTailProvider: Send + Sync {
+    fn render_ephemeral_tail(&self) -> String;
 }
 
 // ─── 配置与结果 ─────────────────────────────────────────────────────────────
 
 pub struct AgentLoopConfig {
     pub max_attempts: u32,
+    /// 请求组装时置于消息列表之前的稳定 system prompt。
+    ///
+    /// 它不是会话历史：不会进入 `ContextState.messages`，也不会落盘到主会话
+    /// transcript。子 agent 的初始 transcript 仍显式写入相同 system 行，保证
+    /// 既有审计格式不变。
+    pub system_prompt: Option<String>,
+    /// Explicitly select the larger retry budget for a headless child agent.
+    ///
+    /// This is intentionally independent from `plan_runtime`: read-only reviewers must not
+    /// receive plan-writing capabilities merely to gain a transport retry budget.
+    pub unattended_retry: bool,
     /// 单次 Attempt 最大工具轮次。默认 `usize::MAX`（不限制）；
     /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
     pub retry_base_delay_ms: u64,
-    pub model: String,
     pub thinking_level: Option<crate::core::llm::ThinkingLevel>,
+    pub speed: Option<crate::core::llm::Speed>,
     pub session_id: String,
     pub tool_definitions: Vec<serde_json::Value>,
     pub context_config: ContextConfig,
     /// Compaction / preheat 场景专用的 provider；未设置时回落主对话 provider。
     pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    /// 已按 compaction 模型能力解析的 provider 输出上限。
+    pub compaction_output_limit: Option<u32>,
     /// Title / utility 场景专用 provider；未设置时回落主对话 provider。
     pub title_provider: Option<Arc<dyn LlmProvider>>,
     /// `LlmScene::Title` 解析后的 model id。
     pub title_model: String,
+    /// 已按 title 模型能力解析的 provider 输出上限。
+    pub title_output_limit: Option<u32>,
     /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
     pub agent_trail_dir: String,
     /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 表。
@@ -125,38 +162,46 @@ pub struct AgentLoopConfig {
     /// 派生深度。顶层 chat_loop 为 0；`spawn_subagent_internal` 时设为 `parent.spawn_depth + 1`。
     /// `AgentRegistry::spawn_subagent_internal` 会校验 `spawn_depth + 1 <= MAX_SPAWN_DEPTH`（默认 2）。
     pub spawn_depth: u32,
-    /// 子 Agent 类型。顶层永远为 `User`；reviewer / verifier 子 Agent 分别为
-    /// `Reviewer` / `Verifier`。既参与 catalog 过滤，也参与 plan-only 工具防套娃。
+    /// 子 Agent 类型。顶层永远为 `User`；plan/code reviewer 与 verifier 子 Agent
+    /// 走各自的枚举位。既参与 catalog 过滤，也参与 plan-only 工具防套娃。
     pub subagent_type: SubagentType,
-    /// reviewer 的更细分运行形态：`Plan`（create_plan 后计划审稿）或 `Code`
-    ///（verifier 前代码审查）。仅 reviewer 子 Agent 需要；其它 Agent 为 `None`。
-    pub review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
-    /// - 读取当前 `PlanState` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
+    /// - 读取 `AgentMode` 与 active plan 生命周期做写路径策略
+    ///   (`safety::enforce_write_path_policy`) 守卫
     ///
-    /// 顶层 chat_loop 必填；reviewer 子 Agent 与脱离 PlanRuntime 的单测/独立 AgentLoop 可为 `None`，
-    /// 此时 tool_exec 收到这四个工具的调用会返回 `ToolError::PlanRuntimeUnavailable` 文案。
+    /// 顶层 chat_loop 必填；只有会真正写 plan 的 PlanReviewer 应保留 `Some`。
+    /// CodeReviewer / Verifier / Explorer 与脱离 PlanRuntime 的单测/独立 AgentLoop
+    /// 应为 `None`，此时 tool_exec 收到这四个工具的调用会返回
+    /// `ToolError::PlanRuntimeUnavailable` 文案。
     pub plan_runtime: Option<Arc<crate::core::plan_runtime::PlanRuntime>>,
     /// Skill 目录账本：root chat 透传共享 `SkillSet`，`load_skill` 按名解析用；
     /// reviewer/verifier 或无 Skill 上下文的独立 loop 可为 `None`。
     pub skill_set: Option<Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
+    /// Runtime facts (permissions, current plan guidance) appended to each
+    /// main-agent request after persisted messages. Subagents may use a
+    /// separate provider; utility calls leave this empty.
+    pub ephemeral_tail_provider: Option<Arc<dyn EphemeralTailProvider>>,
 }
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
             max_attempts: DEFAULT_AGENT_MAX_ATTEMPTS,
+            system_prompt: None,
+            unattended_retry: false,
             max_tool_rounds: usize::MAX,
             retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-            model: String::new(),
             thinking_level: None,
+            speed: None,
             session_id: String::new(),
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
             compaction_provider: None,
+            compaction_output_limit: None,
             title_provider: None,
             title_model: String::new(),
+            title_output_limit: None,
             agent_trail_dir: String::new(),
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,
@@ -165,9 +210,9 @@ impl Default for AgentLoopConfig {
             parent_session_id: None,
             spawn_depth: 0,
             subagent_type: SubagentType::User,
-            review_kind: None,
             plan_runtime: None,
             skill_set: None,
+            ephemeral_tail_provider: None,
         }
     }
 }
@@ -271,10 +316,13 @@ pub type BackgroundCompletionRoutes = Arc<Mutex<HashMap<String, CompletionRoute>
 // ─── AgentLoop 结构体 ───────────────────────────────────────────────────────
 
 pub struct AgentLoop {
+    pub(super) binding: ResolvedCall,
     pub(super) llm: Arc<dyn LlmProvider>,
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) emitter: ScopedEventEmitter,
     pub(super) session_manager: Option<crate::core::session::manager::SessionManager>,
+    pub(super) file_baselines:
+        Option<Arc<crate::core::checkpoint::file_baselines::TurnFileBaselines>>,
     /// 可选 `config_get` / `config_set` 后端（plan §6 / PR-7）。
     ///
     /// 注入路径：`ChatContext::from_config` 在创建 `AgentLoop` 前构造
@@ -282,6 +330,9 @@ pub struct AgentLoop {
     /// CLI / 单测路径继续传 `None`，工具命中时返回"未启用"错误（不影响
     /// 4 原语的 execute_tool 主流程）。
     pub(super) config_backend: Option<super::config_backend::SharedConfigBackend>,
+    /// Optional typed package-install backend.  It is separate from `config_backend`
+    /// because its configuration and project-root snapshot must not drift during a session.
+    pub(super) package_install_backend: Option<super::config_backend::SharedPackageInstallBackend>,
     /// T2-P0-016 PR-I：bash 后台任务三件套（task_output / task_stop / task_list）
     /// 共享的注册表。注入路径：`ChatContext::from_config` 用 `agent_trail_dir/tool-results`
     /// 作 persist_dir 构造一份 `Arc<BashTaskRegistry>`，通过
@@ -300,8 +351,14 @@ pub struct AgentLoop {
     pub(super) todos_runtime: Option<Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     /// 插件工具共享注册表。未注入时 AgentLoop 仅支持内置工具。
     pub(super) tool_registry: Option<Arc<dyn ToolRegistry>>,
+    /// 连接器目录服务。仅供稳定内置元工具 `tool_search` / `tool_describe` /
+    /// `tool_call` 查询和调用 deferred 工具；MCP 工具本身绝不注册到 ToolRegistry。
+    pub(super) connector_registry: Option<Arc<ConnectorRegistry>>,
+    /// `tool_run_code` 复用插件 QuickJS VM 的同一资源预算；未注入时该工具返回
+    /// 明确错误，纯 AgentLoop 单测不必装配插件运行时。
+    pub(super) plugin_engine_config: Option<crate::ext::PluginEngineConfig>,
     pub(super) config: AgentLoopConfig,
-    pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
+    pub(super) steering_queue: Arc<Mutex<super::SteeringInbox>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]
     /// 注入 session 级共享 queue；不注入时保持原有"单次 AgentLoop 私有"语义。
     /// 一层 conversation loop 在每个 attempt 成功后 drain 此 queue 进入下一次
@@ -330,9 +387,14 @@ pub struct AgentLoop {
     /// conversation loop 再把共享 `follow_up_queue` 续进一个新 attempt，绕过硬预算。
     pub(super) reasoning_turn_budget_exhausted: bool,
     pub(super) start_idx: usize,
-    /// 首次进入 `run()` 时 `messages` 中自该下标起（含）为**不得被 L3 rebuild 覆盖**的尾部
-    ///（当前用户句 / steering + 后续 assistant/tool）。用于 overflow 后只替换 transcript 段。
-    pub(super) context_tail_start: usize,
+    /// completion guard 连续注入次数。模型一旦重新调用工具就归零；
+    /// 触顶后停止注入并交还用户，避免在同一个坎上无限打转。
+    pub(super) completion_guard_injections: u32,
+    /// A visible normal terminal answer was accepted in this run; real input revokes it.
+    pub(super) silent_reply_allowed: bool,
+    /// Whether the last model reply was a normal, error-free stop with no text or tools.
+    /// Updated for accepted and retried replies alike; transport failures are not replies.
+    pub(super) last_reply_silent: bool,
 }
 
 pub(super) fn unix_ts_ms() -> i64 {
@@ -403,6 +465,8 @@ pub(super) struct StreamOutcome {
     pub(super) thinking_text: Option<String>,
     pub(super) reasoning_continuation: Option<crate::core::llm::ReasoningContinuation>,
     pub(super) continuity: Option<crate::core::llm::ContinuityMetadata>,
+    /// 本次 provider 最后报告的 token usage；由调用方归属到 assistant transcript 消息。
+    pub(super) usage: Option<crate::core::llm::TokenUsage>,
     pub(super) aborted: bool,
 }
 
@@ -425,4 +489,16 @@ pub(super) struct OverflowTrimStats {
     pub(super) ratio_before: f64,
     pub(super) ratio_after: f64,
     pub(super) applied: bool,
+}
+
+/// `handle_unsupported_multimodal_retry` 的结果统计。
+///
+/// - `applied == true`：消息已按临时能力集降级，并发出一条用户可见的 notice；
+/// - `degraded_vision / degraded_files`：本次是否真的把图片 / 文件 part 改写成了占位文本。
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct UnsupportedMultimodalRetryStats {
+    pub(super) applied: bool,
+    pub(super) degraded_vision: bool,
+    pub(super) degraded_files: bool,
 }

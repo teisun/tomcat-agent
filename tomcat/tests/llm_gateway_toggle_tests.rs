@@ -1,8 +1,7 @@
 mod common;
 
 use common::serve::{
-    extract_json_body, response, spawn_scripted_openai_stream_server, sse_delta, sse_done,
-    sse_finish,
+    extract_json_body, response, spawn_scripted_openai_stream_server, ScriptedPart,
 };
 use futures_util::StreamExt;
 use serial_test::serial;
@@ -13,7 +12,7 @@ use tomcat::{
 
 fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
     let catalog = Arc::new(ModelCatalog::load(cfg).expect("load model catalog"));
-    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog);
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, common::model_prefs_for(cfg));
     resolver
         .resolve(LlmScene::Main, None)
         .expect("resolve main model")
@@ -21,27 +20,79 @@ fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
 
 #[test]
 #[serial(env_lock)]
-fn default_openai_target_uses_gateway_model_and_key() {
+fn default_responses_target_uses_idatatlas_terra_configuration() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
 
     unsafe {
         std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
-        std::env::set_var(common::OPENAI_GATEWAY_TEST_API_KEY_ENV, "gateway-stub");
+        std::env::set_var(common::IDATATLAS_TEST_API_KEY_ENV, "idatatlas-stub");
     }
 
     common::apply_openai_app_config(&mut cfg);
     let resolved = resolve_main_call(&cfg);
+    let catalog = ModelCatalog::load(&cfg).expect("load model catalog");
+    let entry = catalog
+        .lookup(common::IDATATLAS_TEST_DEFAULT_MODEL)
+        .expect("idatatlas Terra entry");
 
-    assert_eq!(cfg.llm.default_model, "gpt-5.4_litellm-sunmi");
-    assert_eq!(resolved.provider, "litellm-sunmi");
+    assert_eq!(cfg.llm.default_model, common::IDATATLAS_TEST_DEFAULT_MODEL);
+    assert_eq!(resolved.provider, "idatatlas");
     assert_eq!(resolved.api, "openai-responses");
-    assert_eq!(resolved.model, "gpt-5.4");
-    assert_eq!(resolved.key_source, common::OPENAI_GATEWAY_TEST_API_KEY_ENV);
+    assert_eq!(resolved.model, "gpt-5.6-terra");
+    assert_eq!(resolved.key_source, common::IDATATLAS_TEST_API_KEY_ENV);
+    assert_eq!(entry.context_window, Some(400_000));
+    assert_eq!(entry.context_window_options, vec![400_000, 1_000_000]);
+    assert_eq!(entry.max_output_tokens, Some(128_000));
+    assert_eq!(
+        entry.supported_reasoning_levels,
+        vec!["low", "medium", "high", "xhigh"]
+    );
+    assert!(entry.capabilities.vision);
+    assert!(entry.capabilities.files);
+    assert!(entry.capabilities.tools);
+    assert!(entry.capabilities.reasoning);
+    assert!(!entry.capabilities.web_search);
 
     unsafe {
-        std::env::remove_var(common::OPENAI_GATEWAY_TEST_API_KEY_ENV);
+        std::env::remove_var(common::IDATATLAS_TEST_API_KEY_ENV);
+    }
+}
+
+/// 派发子 Agent 只能用 catalog id，不能用 `ResolvedCall::model` 那个线上模型名。
+///
+/// 两者在 relay 型条目上必然不同：`idatatlas/gpt-5.6-terra` 走到线上是 `gpt-5.6-terra`。子 Agent
+/// 拿到线上名后会再回 catalog 查一次 provider，于是有两种结局 —— 查不到就 404，查到了
+/// 同名的另一个条目就更糟：复审在你完全不知情的情况下换了个账号组跑。
+#[test]
+#[serial(env_lock)]
+fn wire_model_name_is_not_a_catalog_id_so_subagents_must_dispatch_by_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+
+    unsafe {
+        std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
+        std::env::set_var(common::IDATATLAS_TEST_API_KEY_ENV, "idatatlas-stub");
+    }
+    common::apply_openai_app_config(&mut cfg);
+
+    let catalog = ModelCatalog::load(&cfg).expect("load model catalog");
+    let id = cfg.llm.default_model.clone();
+    let wire = resolve_main_call(&cfg).model;
+
+    assert_ne!(id, wire, "网关条目的 catalog id 与线上名本就不同");
+    let by_id = catalog.lookup(&id).expect("catalog id 必须能查回条目");
+    assert_eq!(by_id.provider, "idatatlas");
+
+    assert!(
+        catalog.lookup(&wire).is_none(),
+        "线上名 `{wire}` 不是 catalog id；子 Agent 必须保留 id `{id}`"
+    );
+
+    unsafe {
+        std::env::remove_var(common::IDATATLAS_TEST_API_KEY_ENV);
     }
 }
 
@@ -101,13 +152,49 @@ fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
     }
 }
 
+#[test]
+#[serial(env_lock)]
+fn responses_target_override_keeps_fcodex_provider_and_credential_mapping() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().into_owned());
+    std::env::set_var(
+        common::OPENAI_TEST_MODEL_ENV,
+        common::FCODEX_TEST_DEFAULT_MODEL,
+    );
+    std::env::set_var(common::FCODEX_TEST_API_KEY_ENV, "fcodex-stub");
+    common::apply_openai_app_config(&mut cfg);
+    let catalog = Arc::new(ModelCatalog::load(&cfg).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, common::model_prefs_for(&cfg));
+    let resolved = resolver
+        .resolve(LlmScene::Main, None)
+        .map(|call| vec![call.provider, call.api, call.model, call.key_source])
+        .map_err(|error| error.to_string());
+    std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
+    std::env::remove_var(common::FCODEX_TEST_API_KEY_ENV);
+    assert_eq!(
+        (
+            common::openai_test_api_key_env_for_model(common::FCODEX_TEST_DEFAULT_MODEL),
+            resolved
+        ),
+        (
+            common::FCODEX_TEST_API_KEY_ENV,
+            Ok(vec![
+                "fcodex".into(),
+                "openai-responses".into(),
+                "gpt-5.6-sol".into(),
+                common::FCODEX_TEST_API_KEY_ENV.into(),
+            ])
+        ),
+    );
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn gateway_model_routes_with_wire_name_in_request_body() {
     let server = spawn_scripted_openai_stream_server(vec![response(vec![
-        sse_delta("ok"),
-        sse_finish("stop"),
-        sse_done(),
+        ScriptedPart { delay_ms: 0, body: "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"mock\",\"content_index\":0,\"delta\":\"ok\"}\n\n".into() },
+        ScriptedPart { delay_ms: 0, body: "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n".into() },
     ])]);
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cfg = AppConfig::default();
@@ -140,25 +227,35 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
 
     let resolved = resolve_main_call(&cfg);
     assert_eq!(resolved.model, "gpt-5.4");
+    assert_eq!(resolved.base_url.as_deref(), Some(server.base_url.as_str()));
 
-    let mut stream = resolved
-        .provider_impl
-        .chat_stream(ChatRequest {
-            messages: vec![ChatMessage::user("Say ok")],
-            model: resolved.model.clone(),
-            temperature: None,
-            max_tokens: Some(16),
-            stream: Some(true),
-            model_override: None,
-            thinking_level: None,
-            tools: None,
-        })
-        .await
-        .expect("start chat stream");
-
-    while let Some(item) = stream.next().await {
-        item.expect("stream item");
-    }
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("Say ok")],
+        model: resolved.model.clone(),
+        temperature: None,
+        max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        speed: None,
+        cache_key: None,
+        tools: None,
+    };
+    resolved.apply_resolved_output_limit(&mut request);
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut stream = resolved
+            .provider_impl
+            .chat_stream(request)
+            .await
+            .expect("start chat stream");
+        while let Some(item) = stream.next().await {
+            item.expect("stream item");
+        }
+    })
+    .await
+    .expect("local gateway fixture must complete within 20 seconds");
 
     let request = server
         .captured_requests()

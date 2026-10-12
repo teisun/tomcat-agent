@@ -1,121 +1,48 @@
-import DOMPurify from "dompurify";
-import { Marked, Renderer, type Token, type Tokens } from "marked";
-import { useEffect, useMemo, useRef, type MouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
-/**
- * Render markdown while tagging each top-level block element with a
- * `data-source-line` attribute holding its 1-based line in the original plan
- * file. This mirrors VS Code's built-in markdown preview (`data-line` +
- * `code-line`) and lets a rendered text selection map back to exact source
- * lines regardless of inline formatting.
- *
- * marked (unlike markdown-it) exposes no `token.map`, so we derive each block's
- * body-relative start line by accumulating newlines in `token.raw`, then look up
- * the absolute file line via `sourceLineMap`. marked v16 ignores a subclassed
- * Renderer passed to `use()` (it only copies own-enumerable methods), so we pass
- * plain methods that delegate to `Renderer.prototype[name]` for default output.
- */
-const BLOCK_RENDERERS = [
-  "heading",
-  "paragraph",
-  "list",
-  "code",
-  "blockquote",
-  "hr",
-  "table",
-] as const;
+import { buildDecoratedHtml, flashCopyButton, setCopyButtonCopiedState } from "./markdown/markdownDecorators";
+import { renderMermaidBlocks } from "./markdown/markdownRuntime";
+import type { PathResolution } from "../types";
 
-type TokenWithSourceLine = Token & { _sourceLine?: number };
-
-function injectSourceLine(html: string, line: number | undefined): string {
-  if (!line || line <= 0) {
-    return html;
-  }
-  return html.replace(/^(\s*)<([a-zA-Z][\w-]*)/u, `$1<$2 data-source-line="${line}"`);
+interface MarkdownBodyProps {
+  markdown: string;
+  onOpenFile?(path: string, line?: number): void;
+  onOpenLink(href: string): void;
+  resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
+  /** 1-based source file line for each line of `markdown` (see planDocument). */
+  sourceLineMap?: number[];
 }
 
-function createSourceLineMarked(): Marked {
-  const proto = Renderer.prototype as unknown as Record<
-    string,
-    (token: TokenWithSourceLine) => string
-  >;
-  const renderer: Record<string, (token: TokenWithSourceLine) => string> = {};
-  for (const name of BLOCK_RENDERERS) {
-    renderer[name] = function rendererWithSourceLine(
-      this: Renderer,
-      token: TokenWithSourceLine,
-    ): string {
-      const base = proto[name].call(this, token);
-      return injectSourceLine(base, token._sourceLine);
-    };
+function sameSourceLineMap(
+  previous: readonly number[] | undefined,
+  next: readonly number[] | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
   }
-  const instance = new Marked({ gfm: true });
-  instance.use({ renderer });
-  return instance;
-}
-
-const markedInstance = createSourceLineMarked();
-
-function renderPlanMarkdown(markdown: string, sourceLineMap?: number[]): string {
-  const tokens = markedInstance.lexer(markdown) as Tokens.Generic[] as TokenWithSourceLine[];
-  if (sourceLineMap && sourceLineMap.length > 0) {
-    let bodyLine = 1;
-    for (const token of tokens) {
-      const absolute = sourceLineMap[bodyLine - 1];
-      if (typeof absolute === "number") {
-        token._sourceLine = absolute;
-      }
-      bodyLine += (token.raw.match(/\n/gu) ?? []).length;
-    }
+  if (!previous || !next || previous.length !== next.length) {
+    return false;
   }
-  return markedInstance.parser(tokens as unknown as Token[]);
+  return previous.every((line, index) => line === next[index]);
 }
 
 /**
- * Render mermaid fenced code blocks (```mermaid```) into inline SVG diagrams,
- * matching Cursor's plan preview. Mermaid is loaded lazily (its own chunk) so
- * plans without diagrams pay nothing, and rendering runs against the already
- * sanitized DOM. Failures fall back to the original code block untouched.
+ * Find decorations are real inline nodes. Unrelated host-state updates must not
+ * ask React to reset MarkdownBody's `dangerouslySetInnerHTML`, because doing so
+ * detaches those nodes between a Find navigation click and its reveal call.
  */
-async function renderMermaidBlocks(container: HTMLElement, isCancelled: () => boolean): Promise<void> {
-  const blocks = Array.from(container.querySelectorAll<HTMLElement>("code.language-mermaid"));
-  if (blocks.length === 0) {
-    return;
-  }
-  const mermaid = (await import("mermaid")).default;
-  if (isCancelled()) {
-    return;
-  }
-  const dark =
-    document.body.classList.contains("vscode-dark") ||
-    document.body.classList.contains("vscode-high-contrast");
-  mermaid.initialize({
-    fontFamily: "var(--vscode-font-family, sans-serif)",
-    securityLevel: "strict",
-    startOnLoad: false,
-    theme: dark ? "dark" : "default",
-  });
-
-  for (const [index, code] of blocks.entries()) {
-    const host = code.closest("pre") ?? code;
-    const graph = code.textContent ?? "";
-    const id = `tc-mermaid-${Date.now().toString(36)}-${index}`;
-    try {
-      const { svg } = await mermaid.render(id, graph);
-      if (isCancelled()) {
-        return;
-      }
-      const figure = document.createElement("figure");
-      figure.className = "tc-plan-preview__mermaid";
-      figure.setAttribute("data-testid", "plan-mermaid");
-      figure.innerHTML = svg;
-      host.replaceWith(figure);
-    } catch {
-      if (!isCancelled()) {
-        host.setAttribute("data-mermaid-error", "1");
-      }
-    }
-  }
+function areMarkdownBodyPropsEqual(
+  previous: Readonly<MarkdownBodyProps>,
+  next: Readonly<MarkdownBodyProps>,
+): boolean {
+  return (
+    previous.markdown === next.markdown &&
+    previous.onOpenFile === next.onOpenFile &&
+    previous.onOpenLink === next.onOpenLink &&
+    previous.resolvePaths === next.resolvePaths &&
+    sameSourceLineMap(previous.sourceLineMap, next.sourceLineMap)
+  );
 }
 
 /**
@@ -123,24 +50,69 @@ async function renderMermaidBlocks(container: HTMLElement, isCancelled: () => bo
  * webview directly — clicks are intercepted and forwarded to the host via
  * `onOpenLink`, matching the strict CSP (no inline scripts, no navigation).
  */
-export function MarkdownBody({
+export const MarkdownBody = memo(function MarkdownBody({
   markdown,
+  onOpenFile,
   onOpenLink,
+  resolvePaths,
   sourceLineMap,
-}: {
-  markdown: string;
-  onOpenLink(href: string): void;
-  /** 1-based source file line for each line of `markdown` (see planDocument). */
-  sourceLineMap?: number[];
-}) {
+}: MarkdownBodyProps) {
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const containerRef = useRef<HTMLDivElement>(null);
-  const html = useMemo(() => {
-    const rendered = renderPlanMarkdown(markdown, sourceLineMap);
-    return DOMPurify.sanitize(rendered, {
-      ADD_ATTR: ["data-source-line"],
-      USE_PROFILES: { html: true },
-    });
-  }, [markdown, sourceLineMap]);
+  const [pathResolutions, setPathResolutions] = useState<ReadonlyMap<string, PathResolution>>(
+    () => new Map(),
+  );
+  const html = useMemo(
+    () => buildDecoratedHtml(markdown, { pathResolutions, sourceLineMap }),
+    [markdown, pathResolutions, sourceLineMap],
+  );
+  const htmlMarkup = useMemo(() => ({ __html: html }), [html]);
+  useEffect(() => {
+    for (const button of containerRef.current?.querySelectorAll<HTMLElement>("[data-tc-copy-code]") ?? []) {
+      setCopyButtonCopiedState(button, button.classList.contains("is-copied"), t);
+    }
+    for (const link of containerRef.current?.querySelectorAll<HTMLElement>("[data-tc-default-image-label]") ?? []) {
+      link.textContent = t("image.label"); link.title = t("image.label");
+    }
+  }, [html, t]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !resolvePaths) {
+      return;
+    }
+    const paths = [
+      ...new Set(
+        Array.from(container.querySelectorAll<HTMLElement>("[data-tc-path-candidate]"))
+          .map((node) => node.dataset.tcPathCandidate)
+          .filter((path): path is string => Boolean(path)),
+      ),
+    ];
+    if (paths.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    void resolvePaths(paths).then(
+      (results) => {
+        if (cancelled) {
+          return;
+        }
+        setPathResolutions((current) => {
+          const next = new Map(current);
+          for (const result of results) {
+            next.set(result.path, result);
+          }
+          return next;
+        });
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [html, resolvePaths]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -148,13 +120,41 @@ export function MarkdownBody({
       return;
     }
     let cancelled = false;
-    void renderMermaidBlocks(container, () => cancelled);
+    const resolvedFontSize = Number.parseFloat(
+      container.ownerDocument.defaultView?.getComputedStyle(container).fontSize ?? "",
+    );
+    void renderMermaidBlocks(container, () => cancelled, {
+      fontSize: Number.isFinite(resolvedFontSize) ? resolvedFontSize : undefined,
+    });
     return () => {
       cancelled = true;
     };
   }, [html]);
 
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    const copyButton = target?.closest<HTMLElement>("[data-tc-copy-code]");
+    if (copyButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const card = copyButton.closest(".tc-code-card");
+      const codeText = card?.querySelector("pre code")?.textContent ?? "";
+      if (typeof navigator?.clipboard?.writeText === "function") {
+        void navigator.clipboard.writeText(codeText).then(
+          () => flashCopyButton(copyButton, (key, args) => tRef.current(key, args)),
+          () => undefined,
+        );
+      }
+      return;
+    }
+    const fileTarget = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-tc-file-path]");
+    if (fileTarget) {
+      event.preventDefault();
+      event.stopPropagation();
+      const line = fileTarget.dataset.tcLine ? Number(fileTarget.dataset.tcLine) : undefined;
+      onOpenFile?.(fileTarget.dataset.tcFilePath ?? "", Number.isFinite(line) ? line : undefined);
+      return;
+    }
     const anchor = (event.target as HTMLElement | null)?.closest("a");
     if (!anchor) {
       return;
@@ -170,9 +170,9 @@ export function MarkdownBody({
     <div
       className="tc-plan-preview__body"
       data-testid="plan-markdown-body"
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={htmlMarkup}
       onClick={handleClick}
       ref={containerRef}
     />
   );
-}
+}, areMarkdownBodyPropsEqual);

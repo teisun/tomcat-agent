@@ -3,7 +3,7 @@
 //! `core` 只持有稳定的数据结构、trait 与默认/测试实现；CLI 等具体表现层实现位于
 //! `api/chat/panels/`。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,6 +16,13 @@ pub const CUSTOM_OPTION_ID: &str = "__custom__";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
+    /// Runtime-owned presentation option. Model tool arguments cannot disable free text.
+    #[serde(
+        default = "allow_custom_default",
+        skip_deserializing,
+        skip_serializing_if = "is_true"
+    )]
+    pub allow_custom: bool,
     pub id: String,
     pub prompt: String,
     pub options: Vec<QuestionOption>,
@@ -40,15 +47,116 @@ pub struct Answer {
     pub picked_recommended: bool,
 }
 
+pub(crate) fn allow_custom_default() -> bool {
+    true
+}
+pub(crate) fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Canonical terminal state for one `ask_question` request.
+///
+/// `Answered` includes mixed batches where individual answers are marked `skipped`; `Skipped`
+/// means the user skipped the whole request. `CancelledUnknown` is read-only compatibility for
+/// history/wire payloads produced before terminal reasons were explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskQuestionOutcome {
+    Answered,
+    Skipped,
+    Interrupted,
+    HostDisconnected,
+    CancelledUnknown,
+}
+
+impl AskQuestionOutcome {
+    pub fn legacy_cancelled(self) -> bool {
+        !matches!(self, Self::Answered)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskQuestionResult {
     pub answers: Vec<Answer>,
-    #[serde(default)]
-    pub cancelled: bool,
+    pub outcome: AskQuestionOutcome,
+}
+
+impl AskQuestionResult {
+    pub fn answered(answers: Vec<Answer>) -> Self {
+        Self {
+            answers,
+            outcome: AskQuestionOutcome::Answered,
+        }
+    }
+
+    pub fn terminal(outcome: AskQuestionOutcome) -> Self {
+        debug_assert!(!matches!(outcome, AskQuestionOutcome::Answered));
+        Self {
+            answers: Vec::new(),
+            outcome,
+        }
+    }
+
+    pub fn legacy_cancelled(&self) -> bool {
+        self.outcome.legacy_cancelled()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskQuestionIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskQuestionTerminationReason {
+    Interrupted,
+    HostDisconnected,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AskQuestionTermination {
+    state: Arc<AtomicU8>,
+}
+
+impl AskQuestionTermination {
+    pub fn interrupt(&self) {
+        let _ = self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    pub fn host_disconnected(&self) {
+        let _ = self
+            .state
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    pub fn reason(&self) -> Option<AskQuestionTerminationReason> {
+        match self.state.load(Ordering::Acquire) {
+            1 => Some(AskQuestionTerminationReason::Interrupted),
+            2 => Some(AskQuestionTerminationReason::HostDisconnected),
+            _ => None,
+        }
+    }
+
+    pub fn result(&self) -> Option<AskQuestionResult> {
+        self.reason().map(|reason| match reason {
+            AskQuestionTerminationReason::Interrupted => {
+                AskQuestionResult::terminal(AskQuestionOutcome::Interrupted)
+            }
+            AskQuestionTerminationReason::HostDisconnected => {
+                AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected)
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -56,8 +164,18 @@ pub trait AskQuestionPanel: Send + Sync {
     async fn ask(
         &self,
         questions: Vec<Question>,
-        cancel_signal: Arc<AtomicBool>,
+        termination: AskQuestionTermination,
     ) -> AskQuestionResult;
+
+    async fn ask_with_identity(
+        &self,
+        identity: AskQuestionIdentity,
+        questions: Vec<Question>,
+        termination: AskQuestionTermination,
+    ) -> AskQuestionResult {
+        let _ = identity;
+        self.ask(questions, termination).await
+    }
 }
 
 /// 测试专用：构造时给一组预编排的 `AskQuestionResult`；按调用顺序返回。
@@ -96,32 +214,27 @@ impl AskQuestionPanel for MockAskQuestionPanel {
     async fn ask(
         &self,
         _questions: Vec<Question>,
-        cancel_signal: Arc<AtomicBool>,
+        termination: AskQuestionTermination,
     ) -> AskQuestionResult {
-        if self.honor_cancel && cancel_signal.load(Ordering::Relaxed) {
-            return AskQuestionResult {
-                answers: vec![],
-                cancelled: true,
-            };
+        if self.honor_cancel {
+            if let Some(result) = termination.result() {
+                return result;
+            }
         }
         if let Some(d) = self.delay {
             let start = std::time::Instant::now();
             while start.elapsed() < d {
-                if self.honor_cancel && cancel_signal.load(Ordering::Relaxed) {
-                    return AskQuestionResult {
-                        answers: vec![],
-                        cancelled: true,
-                    };
+                if self.honor_cancel {
+                    if let Some(result) = termination.result() {
+                        return result;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
         let mut q = self.queue.lock();
         if q.is_empty() {
-            AskQuestionResult {
-                answers: vec![],
-                cancelled: true,
-            }
+            AskQuestionResult::terminal(AskQuestionOutcome::CancelledUnknown)
         } else {
             q.remove(0)
         }

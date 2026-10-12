@@ -24,8 +24,8 @@
 //!   （详见 `read.md` §4.4）。
 //! - **content_hash 仍计算并存储**：用于诊断 + 给 hashline_edit 复用，
 //!   但 dedup 路径**不**强制比对（避免每次 read 之前再读一遍文件计算 hash）。
-//! - **`(offset, limit)` 进 key**：同一文件的「前 50 行」与「100..150 行」
-//!   是不同窗口；window 不同视为不同 read，互不命中 dedup。
+//! - **行范围 + 渲染形态进 key**：同一文件的「前 50 行」与「100..150 行」是不同
+//!   请求；普通行号与 hashline 同样是不同模型输入，任一不同都不可命中 dedup。
 //!
 //! ## 并发模型
 //!
@@ -35,8 +35,33 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
+
+/// `read` 返回给模型的文本排版。
+///
+/// 它是 dedup 身份的一部分：同一段源文件，纯文本、普通行号和 hashline 的输出字节
+/// 不同；模型为 edit 索要 hashline 时，不能拿先前的普通行号结果冒充。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRenderMode {
+    Plain,
+    LineNumbers,
+    Hashline,
+}
+
+impl ReadRenderMode {
+    /// 对齐 executor 的渲染优先级：`hashline` 覆盖 `line_numbers`。
+    pub const fn resolve(line_numbers: bool, hashline: bool) -> Self {
+        if hashline {
+            Self::Hashline
+        } else if line_numbers {
+            Self::LineNumbers
+        } else {
+            Self::Plain
+        }
+    }
+}
 
 /// 一条「上次成功 read 的指纹」。
 ///
@@ -57,15 +82,31 @@ pub struct ReadStamp {
     /// 上次 read 是否为分窗读（`true` ⇔ 至少有一个 `offset` / `limit` 被显式传入）。
     /// 影响 §3.2.3 的「partial view 不与 full read 互相命中」语义。
     pub is_partial_view: bool,
+    /// 上次 read 返回给模型的文本排版。排版不同即使源文件和行区间相同也不可 dedup：
+    /// 例如普通行号不能替代 edit 所需的 hashline 锚点。
+    pub render_mode: ReadRenderMode,
+    /// 上次**实际**读回来的行区间（1-based 闭区间）。非文本结果为 `None`。
+    ///
+    /// 判定覆盖必须用实际读到的区间而不是请求的窗口：不带 `limit` 的整读同样会被
+    /// 默认行数上限截断，拿请求窗口当「读全了」会把没读到的部分也判成命中。
+    pub covered_lines: Option<(u64, u64)>,
+    /// 上次读是否读到了文件末尾（`!truncated`）。决定「无上界的请求」能否被覆盖。
+    pub reached_eof: bool,
+    /// 产生这条 stamp 的 tool_call_id。工具结果被落盘或替换成占位符后按它失效 ——
+    /// 内容已经不在上下文里了，再回一句「和上次一样」就是在说谎。
+    pub tool_call_id: Option<String>,
 }
 
 impl ReadStamp {
-    /// 判断「同一窗口的下一次 read 是否可短路成 `FILE_UNCHANGED` stub」。
+    /// 判断「这次 read 是否已经被上一次读覆盖」，覆盖则可短路成 `FILE_UNCHANGED` stub。
     ///
-    /// 命中条件（与 `read.md` §3.2.2 一致）：
+    /// 命中条件：
     /// - mtime + size 都未变（文件主体未被 touch / 改写）；
-    /// - 请求的 `(offset, limit)` 与上次完全一致（窗口对齐）；
-    /// - `is_partial_view` 也一致（避免「整文件 vs 分窗」误命中）。
+    /// - 请求区间**落在**上次实际读到的区间里。
+    /// - 请求与上次的渲染形态相同。
+    ///
+    /// 用「区间包含」而不是「(offset, limit) 完全相等」：读过 L1684-1733 之后再要
+    /// L1684-1703，内容明明就在上下文里，按精确匹配却会判成全新读、白读一遍。
     ///
     /// **不**比对 `content_hash`：哈希在每次 read **之后** 才能算出，dedup 想做的
     /// 就是「跳过这次 read」，所以前提里不能再要求读一遍文件。
@@ -75,13 +116,45 @@ impl ReadStamp {
         current_size: u64,
         offset: Option<u64>,
         limit: Option<u64>,
+        render_mode: ReadRenderMode,
     ) -> bool {
-        let request_partial = offset.is_some() || limit.is_some();
-        self.mtime_ms == current_mtime_ms
-            && self.size == current_size
-            && self.offset == offset
-            && self.limit == limit
-            && self.is_partial_view == request_partial
+        self.covers(current_mtime_ms, current_size, offset, limit, render_mode)
+            .is_some()
+    }
+
+    /// 命中时返回上次实际读到的行区间，供提示语写清覆盖关系。
+    pub fn covers(
+        &self,
+        current_mtime_ms: i64,
+        current_size: u64,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        render_mode: ReadRenderMode,
+    ) -> Option<(u64, u64)> {
+        if self.mtime_ms != current_mtime_ms
+            || self.size != current_size
+            || self.render_mode != render_mode
+        {
+            return None;
+        }
+        let (covered_start, covered_end) = self.covered_lines?;
+        let requested_start = offset.unwrap_or(1);
+        if requested_start < covered_start {
+            return None;
+        }
+        // 上次读到了文件末尾，那么从 covered_start 往后都在上下文里，请求要多少都够；
+        // 没读到末尾时，请求必须有明确上界且不超过已读到的最后一行。
+        let covered = if self.reached_eof {
+            true
+        } else {
+            match limit {
+                Some(limit) => {
+                    requested_start.saturating_add(limit).saturating_sub(1) <= covered_end
+                }
+                None => false,
+            }
+        };
+        covered.then_some((covered_start, covered_end))
     }
 }
 
@@ -89,14 +162,33 @@ impl ReadStamp {
 ///
 /// 由 [`crate::core::agent_loop::AgentLoopConfig::read_file_state`] 持有；
 /// 测试可直接 `ReadFileState::default()` + `Arc::new` 注入。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReadFileState {
     inner: RwLock<HashMap<PathBuf, ReadStamp>>,
+    refresh_mutation_stamp: AtomicBool,
+}
+
+impl Default for ReadFileState {
+    fn default() -> Self {
+        Self::with_mutation_stamp_refresh(true)
+    }
 }
 
 impl ReadFileState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_mutation_stamp_refresh(enabled: bool) -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            refresh_mutation_stamp: AtomicBool::new(enabled),
+        }
+    }
+
+    /// 是否允许成功的局部变更把 ReadStamp 前移到刚写入的版本。
+    pub fn mutation_stamp_refresh_enabled(&self) -> bool {
+        self.refresh_mutation_stamp.load(Ordering::Relaxed)
     }
 
     /// 查找 `path` 上次 read 的 stamp（`None` ⇔ 未 read 过）。
@@ -114,6 +206,18 @@ impl ReadFileState {
     #[allow(dead_code)]
     pub fn invalidate(&self, path: &Path) {
         self.inner.write().remove(path);
+    }
+
+    /// 让某次工具调用产生的所有 stamp 失效，返回失效条数。
+    ///
+    /// 调用时机是「这条工具结果已经从上下文里消失」（落盘成引用 / 被换成占位符）。
+    /// 只删还挂在这次调用名下的 stamp：之后如果有新的 read 覆盖了同一个文件，
+    /// 那份内容仍然看得见，不该被旧调用的清理波及。
+    pub fn invalidate_tool_call(&self, tool_call_id: &str) -> usize {
+        let mut guard = self.inner.write();
+        let before = guard.len();
+        guard.retain(|_, stamp| stamp.tool_call_id.as_deref() != Some(tool_call_id));
+        before - guard.len()
     }
 
     /// 清空整张表；语义上对应「会话结束」的一次性回收。

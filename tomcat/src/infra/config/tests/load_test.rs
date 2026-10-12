@@ -8,8 +8,82 @@
 //!   防止 example 与代码失去同步。
 
 use super::super::*;
+use crate::infra::config::load::removed_ask_question_timeout_sources;
 use serial_test::serial;
 use std::io::Write;
+
+#[test]
+#[serial(env_lock)]
+fn mcp_example_defaults_and_explicit_sixty_second_start_are_loadable() {
+    let example = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tomcat.config.toml.example"),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tomcat.config.toml");
+    std::fs::write(&path, &example).unwrap();
+    let defaults = load_config(Some(&path)).unwrap();
+    assert_eq!(defaults.connector.mcp.startup_timeout_ms, 30_000);
+    assert_eq!(defaults.connector.mcp.call_timeout_ms, 120_000);
+    assert_eq!(defaults.connector.mcp.max_concurrent_calls, 16);
+
+    let slower = example.replace("startup_timeout_ms = 30000", "startup_timeout_ms = 60000");
+    assert_ne!(slower, example);
+    std::fs::write(&path, slower).unwrap();
+    let overridden = load_config(Some(&path)).unwrap();
+    assert_eq!(overridden.connector.mcp.startup_timeout_ms, 60_000);
+}
+
+#[test]
+#[serial(env_lock)]
+fn mcp_runtime_env_overrides_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[connector.mcp]\nstartup_timeout_ms = 41000\ncall_timeout_ms = 91000\n",
+    )
+    .unwrap();
+    let configured = load_config(Some(&path)).unwrap();
+    assert_eq!(configured.connector.mcp.startup_timeout_ms, 41_000);
+    assert_eq!(configured.connector.mcp.call_timeout_ms, 91_000);
+    assert_eq!(configured.connector.mcp.max_concurrent_calls, 16);
+    unsafe { std::env::set_var("TOMCAT__CONNECTOR__MCP__MAX_CONCURRENT_CALLS", "3") };
+    let overridden = load_config(Some(&path));
+    unsafe { std::env::remove_var("TOMCAT__CONNECTOR__MCP__MAX_CONCURRENT_CALLS") };
+    assert_eq!(overridden.unwrap().connector.mcp.max_concurrent_calls, 3);
+}
+
+#[test]
+#[serial(env_lock)]
+fn removed_ask_question_timeout_sources_are_reported_but_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[ask_question]\ntimeout_ms = 1\n[log]\nlevel = \"info\"\n",
+    )
+    .unwrap();
+    unsafe {
+        std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "1");
+        std::env::set_var("TOMCAT__ASK_QUESTION__TIMEOUT_MS", "1");
+    }
+    let sources = removed_ask_question_timeout_sources(Some(&path));
+    let cfg = load_config(Some(&path)).expect("removed timeout keys must not reject config");
+    unsafe {
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+        std::env::remove_var("TOMCAT__ASK_QUESTION__TIMEOUT_MS");
+    }
+    assert_eq!(
+        sources,
+        vec![
+            "ask_question.timeout_ms",
+            "TOMCAT_ASK_QUESTION_TIMEOUT_MS",
+            "TOMCAT__ASK_QUESTION__TIMEOUT_MS",
+        ]
+    );
+    assert_eq!(cfg.log.level, "info");
+}
 
 #[test]
 fn load_config_none_path_returns_default_or_env() {
@@ -51,6 +125,31 @@ fn load_config_accepts_preflight_section() {
     assert!(validate_config(&cfg).is_ok());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+#[serial(env_lock)]
+fn load_config_defaults_and_env_overrides_project_resource_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[workspace]\nproject_resource_dir = \".team-agents\"\n",
+    )
+    .unwrap();
+
+    let configured = load_config(Some(&path)).unwrap();
+    assert_eq!(configured.workspace.project_resource_dir, ".team-agents");
+
+    unsafe { std::env::set_var("TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR", "tools/agents") };
+    let overridden = load_config(Some(&path)).unwrap();
+    unsafe { std::env::remove_var("TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR") };
+    assert_eq!(overridden.workspace.project_resource_dir, "tools/agents");
+
+    assert_eq!(
+        AppConfig::default().workspace.project_resource_dir,
+        ".agents"
+    );
 }
 
 #[test]

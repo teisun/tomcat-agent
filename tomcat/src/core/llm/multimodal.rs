@@ -3,19 +3,36 @@ use std::borrow::Cow;
 use super::catalog::Capabilities;
 use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart};
 
-pub(crate) const UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER: &str = "[图片已省略：当前模型不支持图片输入]";
-pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str = "[文件已省略：当前模型不支持文件输入]";
+pub(crate) const UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER: &str =
+    "[Image omitted: the current model does not support image input]";
+pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str =
+    "[File omitted: the current model does not support file input]";
+
+pub(crate) fn degrade_placeholder(part: &ChatMessageContentPart) -> String {
+    match part {
+        ChatMessageContentPart::InputImage { .. }
+        | ChatMessageContentPart::InputImageRef { .. } => {
+            UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER.to_string()
+        }
+        ChatMessageContentPart::InputFile { .. } => UNSUPPORTED_FILE_INPUT_PLACEHOLDER.to_string(),
+        ChatMessageContentPart::InputText { .. }
+        | ChatMessageContentPart::InputReference { .. } => String::new(),
+    }
+}
 
 fn unsupported_placeholder_for_part(
     part: &ChatMessageContentPart,
     capabilities: &Capabilities,
-) -> Option<&'static str> {
+) -> Option<String> {
     match part {
-        ChatMessageContentPart::InputImage { .. } if !capabilities.vision => {
-            Some(UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER)
+        ChatMessageContentPart::InputImage { .. }
+        | ChatMessageContentPart::InputImageRef { .. }
+            if !capabilities.vision =>
+        {
+            Some(degrade_placeholder(part))
         }
         ChatMessageContentPart::InputFile { .. } if !capabilities.files => {
-            Some(UNSUPPORTED_FILE_INPUT_PLACEHOLDER)
+            Some(degrade_placeholder(part))
         }
         _ => None,
     }

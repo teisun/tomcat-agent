@@ -1,12 +1,5 @@
-/**
- * Tomcat plugin authoring types.
- *
- * Runtime note:
- * - `pi` is injected by the Tomcat host at runtime.
- * - Plugin source files should NOT import `pi_bridge.js`.
- * - For JS projects, enable `// @ts-check` or add this file to `jsconfig.json`.
- * - For TS projects, include this file via `tsconfig.json` or a triple-slash reference.
- */
+// Tomcat plugin authoring types.
+// The host injects the `tomcat` bridge at runtime. Plugin source must not import a bridge file.
 
 type TomcatJsonValue =
   | null
@@ -14,7 +7,8 @@ type TomcatJsonValue =
   | number
   | string
   | TomcatJsonValue[]
-  | { [key: string]: TomcatJsonValue };
+  // The bridge omits undefined object properties when serializing JSON.
+  | { [key: string]: TomcatJsonValue | undefined };
 
 type TomcatRole = "system" | "user" | "assistant" | "tool" | string;
 
@@ -185,11 +179,33 @@ interface TomcatPluginAPI {
   emit(eventName: string, payload?: TomcatJsonValue): unknown;
   once(eventName: string, handler: (data: TomcatJsonValue, ctx: TomcatPluginContext) => void): number;
 
-  exec(command: string, args?: string[], options?: { cwd?: string }): Promise<{
+  /** Execute a complete shell command (Unix sh -c / Windows cmd /C).
+   * args is only an empty placeholder for the existing third-argument options;
+   * separate argv is unsupported and rejected before submitting the command.
+   */
+  exec(command: string, args?: [], options?: { cwd?: string; foregroundWaitMs?: number }): Promise<{
     stdout?: string;
     stderr?: string;
     exitCode?: number;
+    state?: 'finished' | 'running_in_background' | 'stopped';
+    foregroundWaitExpired?: boolean;
+    taskId?: string;
+    logPath?: string;
+    recentOutput?: string;
   }>;
+  taskOutput(
+    taskId: string,
+    options?: { since?: number; block?: boolean; waitMs?: number }
+  ): Promise<{
+    taskId: string;
+    content: string;
+    startOffset: number;
+    nextOffset: number;
+    finished: boolean;
+    exitCode?: number;
+    wakeReason?: 'finished' | 'wait_window_elapsed';
+  }>;
+  taskStop(taskId: string): Promise<{ taskId: string; stopped: boolean }>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string, options?: { overwrite?: boolean }): Promise<unknown>;
   editFile(path: string, edits: TomcatJsonValue): Promise<unknown>;
@@ -232,6 +248,8 @@ interface TomcatPluginAPI {
 }
 
 declare global {
+  const tomcat: TomcatPluginAPI;
+  /** @deprecated Compatibility alias. New plugins must use `tomcat`. */
   const pi: TomcatPluginAPI;
 }
 

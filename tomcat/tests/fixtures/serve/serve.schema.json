@@ -1,9 +1,111 @@
 {
+  "ui_preferences": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "UiPreferences",
+    "type": "object",
+    "required": [
+      "effective",
+      "envOverride",
+      "language"
+    ],
+    "properties": {
+      "effective": {
+        "$ref": "#/definitions/Locale"
+      },
+      "envOverride": {
+        "type": "boolean"
+      },
+      "language": {
+        "$ref": "#/definitions/UiLanguage"
+      }
+    },
+    "definitions": {
+      "Locale": {
+        "type": "string",
+        "enum": [
+          "en",
+          "zh-CN"
+        ]
+      },
+      "UiLanguage": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "en",
+          "zh-CN"
+        ]
+      }
+    }
+  },
+  "delete_session_outcome": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "DeleteSessionOutcome",
+    "type": "object",
+    "required": [
+      "warnings"
+    ],
+    "properties": {
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
   "serve_command": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "ServeCommand",
     "description": "UI 通过 stdin 发送给 `tomcat serve` 的命令帧。",
     "oneOf": [
+      {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "delete_session"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "language",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "$ref": "#/definitions/UiLanguage"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_ui_language"
+            ]
+          }
+        }
+      },
       {
         "type": "object",
         "required": [
@@ -104,6 +206,247 @@
         }
       },
       {
+        "description": "在不追加用户消息的前提下，基于当前 transcript 继续请求模型。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "resume"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "files",
+          "message",
+          "messageId",
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "files": {
+            "$ref": "#/definitions/RewindFiles"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "$ref": "#/definitions/RewindMessage"
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "rewind_and_resend"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "messageId",
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "preview_rewind"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_session_files"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "path",
+          "sessionId",
+          "sourceTurnId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_session_file_baseline"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "paths",
+          "sessionId",
+          "sourceTurnId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "restore_session_files"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "sourceTurnId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "keep_session_files"
+            ]
+          }
+        }
+      },
+      {
+        "description": "复制指定失败输入为新的活 user message，然后重新开一轮。",
+        "type": "object",
+        "required": [
+          "messageId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messageId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "retry"
+            ]
+          }
+        }
+      },
+      {
         "type": "object",
         "required": [
           "type"
@@ -191,6 +534,90 @@
             "type": "string",
             "enum": [
               "restore_checkpoint"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_instruction_catalog"
+            ]
+          }
+        }
+      },
+      {
+        "description": "Execute a resource command from the initialize handshake's shared table.",
+        "type": "object",
+        "required": [
+          "text",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "run_slash_command"
+            ]
+          }
+        }
+      },
+      {
+        "description": "主动压缩当前会话上下文，保留摘要以继续会话。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "compact"
             ]
           }
         }
@@ -291,6 +718,76 @@
             "type": "string",
             "enum": [
               "set_thinking_level"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "model",
+          "speed",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "speed": {
+            "$ref": "#/definitions/Speed"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_speed"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "contextWindow",
+          "model",
+          "type"
+        ],
+        "properties": {
+          "contextWindow": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_context_window"
             ]
           }
         }
@@ -414,6 +911,426 @@
       {
         "type": "object",
         "required": [
+          "path",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_project_trust"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "projectRoot",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projectRoot": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "trust_project"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "context",
+          "type"
+        ],
+        "properties": {
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_connectors"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_connector_tools"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "args",
+          "command",
+          "context",
+          "name",
+          "scope",
+          "type"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "auth": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "env": {
+            "default": {},
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "headers": {
+            "default": {},
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "oauth": true,
+          "scope": {
+            "$ref": "#/definitions/ConnectorScope"
+          },
+          "trustProject": {
+            "default": false,
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "add_connector"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "remove_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "test_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "login_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "cancel_login_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "logout_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "reload_connector"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "exclude": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_connector_tool_filter"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "enabled",
+          "rawName",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rawName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_connector_tool_enabled"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "type"
         ],
         "properties": {
@@ -424,7 +1341,9 @@
             ]
           },
           "params": {
-            "default": {},
+            "default": {
+              "detached": false
+            },
             "allOf": [
               {
                 "$ref": "#/definitions/NewSessionParams"
@@ -476,7 +1395,9 @@
             ]
           },
           "params": {
-            "default": {},
+            "default": {
+              "attachmentMode": "inline"
+            },
             "allOf": [
               {
                 "$ref": "#/definitions/GetMessagesParams"
@@ -519,6 +1440,31 @@
             "type": "string",
             "enum": [
               "close_session"
+            ]
+          }
+        }
+      },
+      {
+        "description": "回滚一个尚未进入 live registry 的 detached 会话。幂等；绝不激活目标。",
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "discard_detached_session"
             ]
           }
         }
@@ -657,9 +1603,136 @@
             ]
           }
         }
+      },
+      {
+        "description": "把一份附件字节交给后端收好，换回内容哈希。\n\n**这是全协议唯一携带图片字节的命令。** 它在粘贴/拖入/选择文件时逐张调用一次， 之后所有环节（打字、快照、发送、历史渲染）只传哈希。 `r-test-payload-contract` 用 schema 静态扫描守住这条不变量。",
+        "type": "object",
+        "required": [
+          "attachment",
+          "type"
+        ],
+        "properties": {
+          "attachment": {
+            "$ref": "#/definitions/IngestAttachmentInput"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "ingest_attachment"
+            ]
+          }
+        }
+      },
+      {
+        "description": "为 detached 目标会话批量保留现有 blob/provider rendition 租约，不携带字节。",
+        "type": "object",
+        "required": [
+          "params",
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "$ref": "#/definitions/RetainAttachmentLeasesParams"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "retain_attachment_leases"
+            ]
+          }
+        }
+      },
+      {
+        "description": "补交一张历史图的缩略图（见 [`CacheThumbnailInput`]）。",
+        "type": "object",
+        "required": [
+          "thumbnail",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thumbnail": {
+            "$ref": "#/definitions/CacheThumbnailInput"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "cache_attachment_thumbnail"
+            ]
+          }
+        }
       }
     ],
     "definitions": {
+      "AttachmentMode": {
+        "description": "历史消息里的图片附件以什么形态回给调用方。",
+        "oneOf": [
+          {
+            "description": "原样回 transcript 里的 base64。**默认值**，保证 CLI 与既有调用方行为不变。",
+            "type": "string",
+            "enum": [
+              "inline"
+            ]
+          },
+          {
+            "description": "UI 只回内容哈希引用；字节始终保留在 `attachments/blobs/`。\n\nwebview 走这一条：字节由 Chromium 通过资源 URI 自己去拉，完全不进 JS 内存。",
+            "type": "string",
+            "enum": [
+              "reference"
+            ]
+          }
+        ]
+      },
+      "CacheThumbnailInput": {
+        "description": "`cache_attachment_thumbnail` 的入参。\n\n历史消息里的图片没有经过 `ingest_attachment`（它们的字节来自 transcript）， 所以缩略图要在 webview 第一次渲染那个会话时补生成一次，然后由后端存下来复用。 之后再打开同一个会话就直接拿 192px 的缩略图，不必再解一遍原图。",
+        "type": "object",
+        "required": [
+          "sourceSha",
+          "thumbBase64"
+        ],
+        "properties": {
+          "sourceSha": {
+            "description": "缩略图所派生自的那份字节的 sha256。",
+            "type": "string"
+          },
+          "thumbBase64": {
+            "type": "string"
+          }
+        }
+      },
       "Capabilities": {
         "type": "object",
         "properties": {
@@ -685,10 +1758,39 @@
           }
         }
       },
+      "ConnectorContext": {
+        "description": "The VS Code host—not the active chat session or process cwd—selects the workspace whose connector configuration is being managed.",
+        "type": "object",
+        "properties": {
+          "workspaceRoot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConnectorScope": {
+        "description": "Scope is part of connector identity. A Workspace request must carry an explicit project context; Global never falls back to process cwd.",
+        "type": "string",
+        "enum": [
+          "global",
+          "workspace"
+        ]
+      },
       "GetMessagesParams": {
         "description": "`get_messages` 的分页/裁剪参数。",
         "type": "object",
         "properties": {
+          "attachmentMode": {
+            "default": "inline",
+            "allOf": [
+              {
+                "$ref": "#/definitions/AttachmentMode"
+              }
+            ]
+          },
           "cursor": {
             "type": [
               "string",
@@ -712,6 +1814,58 @@
             "minimum": 0.0
           }
         }
+      },
+      "IngestAttachmentInput": {
+        "description": "`ingest_attachment` 的入参。\n\n三份字节各有明确分工，都由 webview 侧的 Chromium 产出： - `data_base64`：原始字节，用于显示与（非 SVG 时）发给模型 - `thumb_base64`：192px 缩略图，附件条与 filmstrip 只加载它 - `provider_base64`：仅 SVG 需要 —— 模型的视觉接口不认 SVG，webview 用 canvas 转成 PNG",
+        "type": "object",
+        "required": [
+          "dataBase64",
+          "kind",
+          "mimeType"
+        ],
+        "properties": {
+          "dataBase64": {
+            "type": "string"
+          },
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/definitions/ServeAttachmentKind"
+          },
+          "mimeType": {
+            "type": "string"
+          },
+          "providerBase64": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerMimeType": {
+            "description": "`provider_base64` 的 MIME（SVG 转出的 PNG 即 `image/png`）。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thumbBase64": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "InstructionKind": {
+        "type": "string",
+        "enum": [
+          "command",
+          "skill"
+        ]
       },
       "ListSessionsScope": {
         "description": "`list_sessions` 的可选枚举范围。",
@@ -766,8 +1920,33 @@
             "format": "uint32",
             "minimum": 0.0
           },
+          "contextWindowOptions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
+          },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
           },
           "modelName": {
             "type": [
@@ -777,6 +1956,24 @@
           },
           "provider": {
             "type": "string"
+          },
+          "supportedReasoningLevels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "supportedSpeeds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
           },
           "thinkingFormat": {
             "type": [
@@ -796,6 +1993,10 @@
               "null"
             ]
           },
+          "detached": {
+            "default": false,
+            "type": "boolean"
+          },
           "mode": {
             "anyOf": [
               {
@@ -808,14 +2009,93 @@
           }
         }
       },
+      "RetainAttachmentLeaseRef": {
+        "description": "`retain_attachment_leases` 的单个附件引用。只有内容哈希会过 wire；原始字节仍只允许 `ingest_attachment` 携带。`provider_sha` 省略时 provider 与原始 blob 共用同一份字节。",
+        "type": "object",
+        "required": [
+          "blobSha"
+        ],
+        "properties": {
+          "blobSha": {
+            "type": "string"
+          },
+          "providerSha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RetainAttachmentLeasesParams": {
+        "description": "`retain_attachment_leases` 的入参。后端会把所有 blob/provider SHA 合并去重后原子保留。",
+        "type": "object",
+        "required": [
+          "attachments"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/RetainAttachmentLeaseRef"
+            }
+          }
+        }
+      },
+      "RewindFiles": {
+        "description": "File policy for a historical user-message replacement.",
+        "type": "string",
+        "enum": [
+          "keep",
+          "revert"
+        ]
+      },
+      "RewindMessage": {
+        "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeAttachment"
+            }
+          },
+          "onlyIfRunning": {
+            "description": "Strict steering never implicitly starts an idle session.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeContentSegment"
+            }
+          },
+          "text": {
+            "type": "string"
+          },
+          "userMessageId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ServeAttachment": {
-        "description": "多模态消息中的单个附件描述。",
+        "description": "多模态消息中的单个附件描述。\n\n**这里只有引用，没有字节。** 字节在粘贴那一刻就已经通过 `ingest_attachment` 交给后端了， 发送时只说「用那份哈希对应的字节」。这让打字与发送两条路径的载荷都与图片大小无关。\n\n`blob_sha` 与 `file_id` 二选一：前者是本机 ingest 过的字节，后者是已上传到 provider 的文件。",
         "type": "object",
         "required": [
           "kind"
         ],
         "properties": {
-          "dataBase64": {
+          "blobSha": {
+            "description": "已经过 `ingest_attachment` 校验并落盘的字节的 sha256。",
             "type": [
               "string",
               "null"
@@ -841,6 +2121,13 @@
               "string",
               "null"
             ]
+          },
+          "providerSha": {
+            "description": "发给模型用的那份字节的 sha256。仅 SVG 会与 `blob_sha` 不同（webview 转出的 PNG）。 省略则表示模型直接用 `blob_sha`。",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -854,6 +2141,32 @@
       },
       "ServeContentSegment": {
         "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "label",
+              "resourceId",
+              "type"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/definitions/InstructionKind"
+              },
+              "label": {
+                "type": "string"
+              },
+              "resourceId": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "instruction"
+                ]
+              }
+            }
+          },
           {
             "type": "object",
             "required": [
@@ -939,6 +2252,13 @@
               "$ref": "#/definitions/ServeAttachment"
             }
           },
+          "onlyIfRunning": {
+            "description": "Strict steering never implicitly starts an idle session.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "segments": {
             "type": "array",
             "items": {
@@ -968,6 +2288,22 @@
           "enter",
           "exit",
           "build"
+        ]
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
+        ]
+      },
+      "UiLanguage": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "en",
+          "zh-CN"
         ]
       }
     }
@@ -1148,14 +2484,40 @@
         "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
         "type": "object",
         "required": [
+          "outcome",
           "type"
         ],
         "properties": {
+          "outcome": {
+            "$ref": "#/definitions/AgentIdleOutcome"
+          },
           "type": {
             "type": "string",
             "enum": [
               "agent_idle"
             ]
+          }
+        }
+      },
+      {
+        "description": "Input was archived and appended at a safe point, not necessarily answered yet.",
+        "type": "object",
+        "required": [
+          "type",
+          "userMessageIds"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "steering_consumed"
+            ]
+          },
+          "userMessageIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1457,6 +2819,12 @@
           "isError": {
             "type": "boolean"
           },
+          "media": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ToolMediaRef"
+            }
+          },
           "result": {
             "$ref": "#/definitions/ToolOutput"
           },
@@ -1721,16 +3089,35 @@
       {
         "type": "object",
         "required": [
+          "cacheReadTokensTotal",
           "compactionCount",
           "compactionTokensFreed",
+          "consecutiveMissMax",
           "contextUtilizationRatio",
           "inputTokensUsed",
           "preheatInProgress",
           "preheatResultPending",
+          "promptTokensTotal",
+          "providerUsageMeasured",
+          "tailChangeMissTokens",
+          "tailChangedCount",
           "totalToolResultBytesPersisted",
           "type"
         ],
         "properties": {
+          "cacheHitRatio": {
+            "description": "`None` means the provider has not reported cache-read usage yet.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "cacheReadTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
           "compactionCount": {
             "type": "integer",
             "format": "uint32",
@@ -1739,6 +3126,11 @@
           "compactionTokensFreed": {
             "type": "integer",
             "format": "uint",
+            "minimum": 0.0
+          },
+          "consecutiveMissMax": {
+            "type": "integer",
+            "format": "uint32",
             "minimum": 0.0
           },
           "contextUtilizationRatio": {
@@ -1755,6 +3147,25 @@
           },
           "preheatResultPending": {
             "type": "boolean"
+          },
+          "promptTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "providerUsageMeasured": {
+            "description": "`true` only after the provider has returned usage for this loaded context. `false` means the ratio is the pre-request chars/4 fallback estimate.",
+            "type": "boolean"
+          },
+          "tailChangeMissTokens": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "tailChangedCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
           },
           "totalToolResultBytesPersisted": {
             "type": "integer",
@@ -1901,7 +3312,7 @@
         }
       },
       {
-        "description": "L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。",
+        "description": "L0 落盘 + 占位符在成功 boundary 应用后的释放估算 tokens（不计入 L1/L2）。",
         "type": "object",
         "required": [
           "persistTokensFreed",
@@ -2038,15 +3449,34 @@
       }
     },
     "definitions": {
+      "AgentIdleOutcome": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "interrupted",
+          "failed"
+        ]
+      },
       "AssistantMessageEvent": {
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
       "DiffTag": {
-        "type": "string",
-        "enum": [
-          "add",
-          "del",
-          "ctx"
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "add",
+              "del",
+              "ctx"
+            ]
+          },
+          {
+            "description": "连续未改动区域的省略标记。`text` 说明省略了多少行； 这不是文件内容，故没有行号。",
+            "type": "string",
+            "enum": [
+              "gap"
+            ]
+          }
         ]
       },
       "FileDiffLine": {
@@ -2065,6 +3495,15 @@
             "minimum": 0.0
           },
           "oldLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "skippedLines": {
+            "description": "Number of unchanged source lines omitted by a `gap` row.\n\n`text` remains a human-readable fallback for historical transcripts, but consumers must use this structured field when it is present.",
             "type": [
               "integer",
               "null"
@@ -2110,6 +3549,14 @@
                   "$ref": "#/definitions/FileDiffLine"
                 }
               },
+              "diffTruncated": {
+                "description": "Inline diff reached its rendering budget. Any retained prefix is safe to show, but the host must identify it as incomplete.",
+                "type": "boolean"
+              },
+              "expired": {
+                "description": "Historical diff payload was compacted after its retention window elapsed.",
+                "type": "boolean"
+              },
               "file": {
                 "type": "string"
               },
@@ -2126,6 +3573,36 @@
                 ],
                 "format": "uint32",
                 "minimum": 0.0
+              }
+            }
+          },
+          {
+            "description": "一次调用碰了多个文件（批量 `read` / `edit`）。折叠时看 summary，展开时逐文件； 失败项必须留在列表里 —— 只报成功的那几个会让人以为整批都成了。",
+            "type": "object",
+            "required": [
+              "files",
+              "kind",
+              "summary"
+            ],
+            "properties": {
+              "expired": {
+                "description": "Every file diff in this historical batch was compacted after retention elapsed.",
+                "type": "boolean"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/ToolDisplayFileEntry"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "files"
+                ]
+              },
+              "summary": {
+                "type": "string"
               }
             }
           },
@@ -2167,6 +3644,135 @@
           }
         ]
       },
+      "ToolDisplayFileEntry": {
+        "description": "[`ToolDisplay::Files`] 里的单个文件条目。",
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "added": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "diff": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/definitions/FileDiffLine"
+            }
+          },
+          "diffTruncated": {
+            "description": "Inline diff reached its rendering budget.",
+            "type": "boolean"
+          },
+          "expired": {
+            "description": "Historical diff payload was compacted after its retention window elapsed.",
+            "type": "boolean"
+          },
+          "file": {
+            "type": "string"
+          },
+          "note": {
+            "description": "失败原因或跳过原因。`status` 为 `Failed` / `Skipped` 时必有值。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "range": {
+            "description": "批量 `read` 用：这一段的行号区间，例如 `L1-900 (900 lines)`。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "removed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "status": {
+            "description": "缺省表示「正常，无需强调」（批量 read 的普通条目）。",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ToolDisplayFileStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ToolDisplayFileStatus": {
+        "description": "[`ToolDisplayFileEntry::status`]：这个文件在这次调用里的结局。",
+        "oneOf": [
+          {
+            "description": "改动已落盘。",
+            "type": "string",
+            "enum": [
+              "applied"
+            ]
+          },
+          {
+            "description": "这个文件失败了，磁盘内容保持原样。",
+            "type": "string",
+            "enum": [
+              "failed"
+            ]
+          },
+          {
+            "description": "没轮到它（批量 read 的输出预算用尽）。",
+            "type": "string",
+            "enum": [
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "ToolMediaRef": {
+        "description": "Reference-only tool media, shared by live events and history attachment views.",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "blobSha",
+              "bytes",
+              "mimeType",
+              "type"
+            ],
+            "properties": {
+              "blobSha": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "input_image_ref"
+                ]
+              }
+            }
+          }
+        ]
+      },
       "ToolOutput": {
         "description": "占位：工具输出。"
       }
@@ -2188,6 +3794,14 @@
       }
     ],
     "definitions": {
+      "AgentIdleOutcome": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "interrupted",
+          "failed"
+        ]
+      },
       "AssistantMessageEvent": {
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
@@ -2276,11 +3890,22 @@
         ]
       },
       "DiffTag": {
-        "type": "string",
-        "enum": [
-          "add",
-          "del",
-          "ctx"
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "add",
+              "del",
+              "ctx"
+            ]
+          },
+          {
+            "description": "连续未改动区域的省略标记。`text` 说明省略了多少行； 这不是文件内容，故没有行号。",
+            "type": "string",
+            "enum": [
+              "gap"
+            ]
+          }
         ]
       },
       "FileDiffLine": {
@@ -2299,6 +3924,15 @@
             "minimum": 0.0
           },
           "oldLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "skippedLines": {
+            "description": "Number of unchanged source lines omitted by a `gap` row.\n\n`text` remains a human-readable fallback for historical transcripts, but consumers must use this structured field when it is present.",
             "type": [
               "integer",
               "null"
@@ -2352,6 +3986,63 @@
           }
         }
       },
+      "ServeCacheObservation": {
+        "description": "Cache metrics collected during the active build. A missing `cacheHitRatio` means the provider did not report cache-read usage, not that every request missed.",
+        "type": "object",
+        "required": [
+          "cacheObservedPromptTokensTotal",
+          "cacheObservedRequestCount",
+          "cacheReadTokensTotal",
+          "consecutiveMissMax",
+          "promptTokensTotal",
+          "tailChangeMissTokens",
+          "tailChangedCount"
+        ],
+        "properties": {
+          "cacheHitRatio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "cacheObservedPromptTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "cacheObservedRequestCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "cacheReadTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "consecutiveMissMax": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "promptTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "tailChangeMissTokens": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "tailChangedCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
       "ServeEvent": {
         "anyOf": [
           {
@@ -2371,9 +4062,54 @@
           }
         ]
       },
+      "ServeFinding": {
+        "type": "object",
+        "required": [
+          "area",
+          "note",
+          "severity"
+        ],
+        "properties": {
+          "area": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          }
+        }
+      },
       "ServePlanEvent": {
         "description": "`plan.*` 自定义事件的 schema 入口。",
         "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "agentMode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.agent_mode.changed"
+                ]
+              }
+            }
+          },
           {
             "type": "object",
             "required": [
@@ -2570,6 +4306,44 @@
               "type"
             ],
             "properties": {
+              "childSessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transcriptPath": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.review.started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
               "aborted": {
                 "type": [
                   "boolean",
@@ -2608,9 +4382,9 @@
               "type"
             ],
             "properties": {
-              "aborted": {
+              "childSessionId": {
                 "type": [
-                  "boolean",
+                  "string",
                   "null"
                 ]
               },
@@ -2620,7 +4394,114 @@
                   "null"
                 ]
               },
+              "reviewAttemptId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "round": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
               "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "toolCallId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transcriptPath": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.code_review.started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "aborted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "changesSummary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "childSessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "findings": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/ServeFinding"
+                }
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reviewAttemptId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "round": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "skipReason": {
                 "type": [
                   "string",
                   "null"
@@ -2632,10 +4513,60 @@
                   "null"
                 ]
               },
+              "toolCallId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "type": {
                 "type": "string",
                 "enum": [
                   "plan.code_review"
+                ]
+              },
+              "verdict": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "childSessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "taskId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "transcriptPath": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.explorer.started"
                 ]
               }
             }
@@ -2759,11 +4690,86 @@
             }
           },
           {
+            "description": "轮次预算用尽后的 review 收口事件：正常路径无条件放行进 acceptance 并携带残余； 基础设施连续故障时仍可能以 handoff outcome 交还用户。",
             "type": "object",
             "required": [
               "type"
             ],
             "properties": {
+              "codeReviewPass": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "residualFindings": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.code_review.exhausted"
+                ]
+              },
+              "unresolvedFindings": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "cacheObservation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/ServeCacheObservation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "path": {
                 "type": [
                   "string",
@@ -2830,6 +4836,55 @@
                 "type": "string",
                 "enum": [
                   "plan.pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "idleNudges": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "remainingWork": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.stalled"
                 ]
               }
             }
@@ -2943,6 +4998,12 @@
           "content": {
             "type": "string"
           },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "id": {
             "type": "string"
           },
@@ -2952,7 +5013,7 @@
         }
       },
       "ServeToolEvent": {
-        "description": "`tool.*` 自定义事件的 schema 入口（当前仅 `tool.summary_updated`）。\n\n单条工具卡片（bash）的标题在命令执行后由 utility 模型异步生成，通过该事件 按 `toolCallId` 热更新到前端；仅 live 生效，历史重载回落客户端占位。",
+        "description": "`tool.*` 自定义事件的 schema 入口（`tool.summary_updated` / `background_task_finished`）。\n\n单条工具卡片（bash）的标题在命令执行后由 utility 模型异步生成，通过该事件 按 `toolCallId` 热更新到前端；仅 live 生效，历史重载回落客户端占位。",
         "oneOf": [
           {
             "type": "object",
@@ -2980,6 +5041,47 @@
                 "type": "string",
                 "enum": [
                   "tool.summary_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "exitCode",
+              "taskId",
+              "type"
+            ],
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "exitCode": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "logPath": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "taskId": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "background_task_finished"
                 ]
               }
             }
@@ -3067,6 +5169,14 @@
                   "$ref": "#/definitions/FileDiffLine"
                 }
               },
+              "diffTruncated": {
+                "description": "Inline diff reached its rendering budget. Any retained prefix is safe to show, but the host must identify it as incomplete.",
+                "type": "boolean"
+              },
+              "expired": {
+                "description": "Historical diff payload was compacted after its retention window elapsed.",
+                "type": "boolean"
+              },
               "file": {
                 "type": "string"
               },
@@ -3083,6 +5193,36 @@
                 ],
                 "format": "uint32",
                 "minimum": 0.0
+              }
+            }
+          },
+          {
+            "description": "一次调用碰了多个文件（批量 `read` / `edit`）。折叠时看 summary，展开时逐文件； 失败项必须留在列表里 —— 只报成功的那几个会让人以为整批都成了。",
+            "type": "object",
+            "required": [
+              "files",
+              "kind",
+              "summary"
+            ],
+            "properties": {
+              "expired": {
+                "description": "Every file diff in this historical batch was compacted after retention elapsed.",
+                "type": "boolean"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/ToolDisplayFileEntry"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "files"
+                ]
+              },
+              "summary": {
+                "type": "string"
               }
             }
           },
@@ -3119,6 +5259,135 @@
               },
               "text": {
                 "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "ToolDisplayFileEntry": {
+        "description": "[`ToolDisplay::Files`] 里的单个文件条目。",
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "added": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "diff": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/definitions/FileDiffLine"
+            }
+          },
+          "diffTruncated": {
+            "description": "Inline diff reached its rendering budget.",
+            "type": "boolean"
+          },
+          "expired": {
+            "description": "Historical diff payload was compacted after its retention window elapsed.",
+            "type": "boolean"
+          },
+          "file": {
+            "type": "string"
+          },
+          "note": {
+            "description": "失败原因或跳过原因。`status` 为 `Failed` / `Skipped` 时必有值。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "range": {
+            "description": "批量 `read` 用：这一段的行号区间，例如 `L1-900 (900 lines)`。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "removed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "status": {
+            "description": "缺省表示「正常，无需强调」（批量 read 的普通条目）。",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ToolDisplayFileStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ToolDisplayFileStatus": {
+        "description": "[`ToolDisplayFileEntry::status`]：这个文件在这次调用里的结局。",
+        "oneOf": [
+          {
+            "description": "改动已落盘。",
+            "type": "string",
+            "enum": [
+              "applied"
+            ]
+          },
+          {
+            "description": "这个文件失败了，磁盘内容保持原样。",
+            "type": "string",
+            "enum": [
+              "failed"
+            ]
+          },
+          {
+            "description": "没轮到它（批量 read 的输出预算用尽）。",
+            "type": "string",
+            "enum": [
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "ToolMediaRef": {
+        "description": "Reference-only tool media, shared by live events and history attachment views.",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "blobSha",
+              "bytes",
+              "mimeType",
+              "type"
+            ],
+            "properties": {
+              "blobSha": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "input_image_ref"
+                ]
               }
             }
           }
@@ -3178,14 +5447,40 @@
             "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
             "type": "object",
             "required": [
+              "outcome",
               "type"
             ],
             "properties": {
+              "outcome": {
+                "$ref": "#/definitions/AgentIdleOutcome"
+              },
               "type": {
                 "type": "string",
                 "enum": [
                   "agent_idle"
                 ]
+              }
+            }
+          },
+          {
+            "description": "Input was archived and appended at a safe point, not necessarily answered yet.",
+            "type": "object",
+            "required": [
+              "type",
+              "userMessageIds"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "steering_consumed"
+                ]
+              },
+              "userMessageIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -3487,6 +5782,12 @@
               "isError": {
                 "type": "boolean"
               },
+              "media": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/ToolMediaRef"
+                }
+              },
               "result": {
                 "$ref": "#/definitions/ToolOutput"
               },
@@ -3751,16 +6052,35 @@
           {
             "type": "object",
             "required": [
+              "cacheReadTokensTotal",
               "compactionCount",
               "compactionTokensFreed",
+              "consecutiveMissMax",
               "contextUtilizationRatio",
               "inputTokensUsed",
               "preheatInProgress",
               "preheatResultPending",
+              "promptTokensTotal",
+              "providerUsageMeasured",
+              "tailChangeMissTokens",
+              "tailChangedCount",
               "totalToolResultBytesPersisted",
               "type"
             ],
             "properties": {
+              "cacheHitRatio": {
+                "description": "`None` means the provider has not reported cache-read usage yet.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "cacheReadTokensTotal": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
               "compactionCount": {
                 "type": "integer",
                 "format": "uint32",
@@ -3769,6 +6089,11 @@
               "compactionTokensFreed": {
                 "type": "integer",
                 "format": "uint",
+                "minimum": 0.0
+              },
+              "consecutiveMissMax": {
+                "type": "integer",
+                "format": "uint32",
                 "minimum": 0.0
               },
               "contextUtilizationRatio": {
@@ -3785,6 +6110,25 @@
               },
               "preheatResultPending": {
                 "type": "boolean"
+              },
+              "promptTokensTotal": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "providerUsageMeasured": {
+                "description": "`true` only after the provider has returned usage for this loaded context. `false` means the ratio is the pre-request chars/4 fallback estimate.",
+                "type": "boolean"
+              },
+              "tailChangeMissTokens": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "tailChangedCount": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
               },
               "totalToolResultBytesPersisted": {
                 "type": "integer",
@@ -3931,7 +6275,7 @@
             }
           },
           {
-            "description": "L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。",
+            "description": "L0 落盘 + 占位符在成功 boundary 应用后的释放估算 tokens（不计入 L1/L2）。",
             "type": "object",
             "required": [
               "persistTokensFreed",
@@ -4107,11 +6451,34 @@
         "format": "uint32",
         "minimum": 0.0
       },
+      "contextWindowOptions": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "description": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "id": {
         "type": "string"
       },
       "keyPresent": {
         "type": "boolean"
+      },
+      "maxOutputTokens": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0.0
       },
       "modelName": {
         "type": [
@@ -4122,8 +6489,46 @@
       "provider": {
         "type": "string"
       },
+      "selectedContextWindow": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0.0
+      },
+      "selectedReasoningLevel": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "selectedSpeed": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/Speed"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "source": {
         "$ref": "#/definitions/ModelSource"
+      },
+      "supportedReasoningLevels": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "supportedSpeeds": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/Speed"
+        }
       },
       "thinkingFormat": {
         "type": [
@@ -4163,6 +6568,14 @@
         "enum": [
           "builtin",
           "user"
+        ]
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
         ]
       }
     }
@@ -4295,11 +6708,34 @@
             "format": "uint32",
             "minimum": 0.0
           },
+          "contextWindowOptions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
           "keyPresent": {
             "type": "boolean"
+          },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
           },
           "modelName": {
             "type": [
@@ -4310,8 +6746,46 @@
           "provider": {
             "type": "string"
           },
+          "selectedContextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "selectedReasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selectedSpeed": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Speed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source": {
             "$ref": "#/definitions/ModelSource"
+          },
+          "supportedReasoningLevels": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supportedSpeeds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
           },
           "thinkingFormat": {
             "type": [
@@ -4320,6 +6794,14 @@
             ]
           }
         }
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
+        ]
       }
     }
   },
@@ -4333,6 +6815,12 @@
     "properties": {
       "model": {
         "$ref": "#/definitions/ModelView"
+      },
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     },
     "definitions": {
@@ -4403,11 +6891,34 @@
             "format": "uint32",
             "minimum": 0.0
           },
+          "contextWindowOptions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
           "keyPresent": {
             "type": "boolean"
+          },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
           },
           "modelName": {
             "type": [
@@ -4418,8 +6929,46 @@
           "provider": {
             "type": "string"
           },
+          "selectedContextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "selectedReasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selectedSpeed": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Speed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source": {
             "$ref": "#/definitions/ModelSource"
+          },
+          "supportedReasoningLevels": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supportedSpeeds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
           },
           "thinkingFormat": {
             "type": [
@@ -4428,6 +6977,14 @@
             ]
           }
         }
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "ultrafast"
+        ]
       }
     }
   },
@@ -4441,6 +6998,13 @@
     "properties": {
       "modelId": {
         "type": "string"
+      },
+      "warnings": {
+        "description": "模型文件已提交删除后，目录缓存刷新失败等不会推翻提交结果的辅助警告。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     }
   },
@@ -4502,6 +7066,508 @@
             "type": "string"
           }
         }
+      }
+    }
+  },
+  "connector_reload_receipt": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ReloadReceipt",
+    "type": "object",
+    "required": [
+      "accepted",
+      "configKey",
+      "generation",
+      "recoveryTimeoutMs"
+    ],
+    "properties": {
+      "accepted": {
+        "type": "boolean"
+      },
+      "configKey": {
+        "type": "string"
+      },
+      "generation": {
+        "type": "string"
+      },
+      "recoveryTimeoutMs": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    }
+  },
+  "connector_recovery_progress": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RecoveryStatus",
+    "type": "object",
+    "required": [
+      "maxAttempts",
+      "phase",
+      "remainingMs"
+    ],
+    "properties": {
+      "maxAttempts": {
+        "type": "integer",
+        "format": "uint8",
+        "minimum": 0.0
+      },
+      "phase": {
+        "type": "string"
+      },
+      "remainingMs": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    }
+  },
+  "list_connector_tools_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ListConnectorToolsPayload",
+    "type": "object",
+    "required": [
+      "attempt",
+      "configKey",
+      "generation",
+      "tools"
+    ],
+    "properties": {
+      "attempt": {
+        "type": "integer",
+        "format": "uint8",
+        "minimum": 0.0
+      },
+      "configKey": {
+        "type": "string"
+      },
+      "generation": {
+        "description": "Decimal text avoids losing the backend u64 identity in JavaScript.",
+        "type": "string"
+      },
+      "tools": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/ConnectorToolPayload"
+        }
+      }
+    },
+    "definitions": {
+      "ConnectorToolPayload": {
+        "type": "object",
+        "required": [
+          "description",
+          "enabled",
+          "label",
+          "modelName",
+          "rawName"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "modelName": {
+            "type": "string"
+          },
+          "rawName": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "project_trust_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ProjectTrustPayload",
+    "type": "object",
+    "required": [
+      "projectRoot",
+      "trusted"
+    ],
+    "properties": {
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "projectRoot": {
+        "type": "string"
+      },
+      "trusted": {
+        "type": "boolean"
+      }
+    }
+  },
+  "set_connector_tool_enabled_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SetConnectorToolEnabledResponse",
+    "description": "The result of setting one tool's desired enabled state. These fields describe this command's durable write and current-process cache synchronization; they are not an asynchronous job or a second tool catalog.",
+    "type": "object",
+    "required": [
+      "configKey",
+      "configSaved",
+      "enabled",
+      "rawName",
+      "runtimeApplied"
+    ],
+    "properties": {
+      "configKey": {
+        "type": "string"
+      },
+      "configSaved": {
+        "type": "boolean"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "rawName": {
+        "type": "string"
+      },
+      "runtimeApplied": {
+        "type": "boolean"
+      }
+    }
+  },
+  "ingest_attachment_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "IngestAttachmentResponse",
+    "description": "`ingest_attachment` 的响应。\n\n从这里开始，这份附件在系统里的身份就是这几个哈希，不再是字节。",
+    "type": "object",
+    "required": [
+      "blobSha",
+      "bytes",
+      "filename",
+      "hasThumb",
+      "mimeType"
+    ],
+    "properties": {
+      "blobSha": {
+        "description": "原始字节的 sha256。",
+        "type": "string"
+      },
+      "bytes": {
+        "description": "原始字节数（十进制），扩展层用它做草稿总量预算。",
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      },
+      "filename": {
+        "type": "string"
+      },
+      "hasThumb": {
+        "description": "缩略图是否已就绪。\n\n缩略图按**源字节的哈希**存在 `thumbs/<blob_sha>`，而不是按它自己的哈希存。 理由：没有任何人会问「给我哈希是 Y 的那张缩略图」，大家问的都是 「给我 blob X 的小图」。按自身哈希存会让它变成一份普通 blob —— 于是要占租约、 要参与 GC，而它本质上只是可随时重建的派生数据。所以这里只回一个布尔值， URI 也就固定是 `thumbs/<blobSha>`，历史图与新粘贴的图走同一套路径。",
+        "type": "boolean"
+      },
+      "mimeType": {
+        "type": "string"
+      },
+      "providerSha": {
+        "description": "发给模型用的那份字节的 sha256；仅 SVG 会与 `blob_sha` 不同。",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    }
+  },
+  "retain_attachment_leases_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RetainAttachmentLeasesResponse",
+    "description": "`retain_attachment_leases` 的响应。按字典序返回实际保留的去重 SHA 集合。",
+    "type": "object",
+    "required": [
+      "retainedShas"
+    ],
+    "properties": {
+      "retainedShas": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "preview_rewind_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "PreviewRewindResponse",
+    "type": "object",
+    "required": [
+      "revertAvailable",
+      "revertPaths"
+    ],
+    "properties": {
+      "revertAvailable": {
+        "type": "boolean"
+      },
+      "revertPaths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "revertReason": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/RevertReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "definitions": {
+      "RevertReason": {
+        "type": "string",
+        "enum": [
+          "no_baselines",
+          "expired",
+          "git_head_moved"
+        ]
+      }
+    }
+  },
+  "session_files_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFilesResponse",
+    "type": "object",
+    "required": [
+      "files",
+      "sessionId"
+    ],
+    "properties": {
+      "files": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/SessionFile"
+        }
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "definitions": {
+      "SessionFile": {
+        "type": "object",
+        "required": [
+          "path",
+          "restorable",
+          "status"
+        ],
+        "properties": {
+          "added": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "blockedReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/SessionFileBlockedReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "removed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "restorable": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/definitions/SessionFileStatus"
+          }
+        }
+      },
+      "SessionFileBlockedReason": {
+        "type": "string",
+        "enum": [
+          "backup_missing",
+          "not_regular_file"
+        ]
+      },
+      "SessionFileStatus": {
+        "type": "string",
+        "enum": [
+          "added",
+          "modified",
+          "deleted"
+        ]
+      }
+    }
+  },
+  "session_file_baseline_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFileBaselineResponse",
+    "type": "object",
+    "required": [
+      "existed",
+      "path",
+      "sessionId",
+      "sourceTurnId",
+      "text"
+    ],
+    "properties": {
+      "existed": {
+        "type": "boolean"
+      },
+      "path": {
+        "type": "string"
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      }
+    }
+  },
+  "session_files_restore_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFilesRestoreResponse",
+    "type": "object",
+    "required": [
+      "restored",
+      "sessionId",
+      "sourceTurnId"
+    ],
+    "properties": {
+      "restored": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": "string"
+      }
+    }
+  },
+  "session_files_keep_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SessionFilesKeepResponse",
+    "type": "object",
+    "required": [
+      "sessionId",
+      "sourceTurnId"
+    ],
+    "properties": {
+      "sessionId": {
+        "type": "string"
+      },
+      "sourceTurnId": {
+        "type": "string"
+      }
+    }
+  },
+  "shared_slash_command": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SharedSlashCommand",
+    "type": "object",
+    "required": [
+      "name",
+      "summary",
+      "usage"
+    ],
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "summary": {
+        "type": "string"
+      },
+      "usage": {
+        "type": "string"
+      }
+    }
+  },
+  "slash_reply": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SlashReply",
+    "type": "object",
+    "required": [
+      "ok",
+      "text"
+    ],
+    "properties": {
+      "ok": {
+        "type": "boolean"
+      },
+      "text": {
+        "type": "string"
+      }
+    }
+  },
+  "instruction_card": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "InstructionCard",
+    "type": "object",
+    "required": [
+      "description",
+      "id",
+      "kind",
+      "name",
+      "path",
+      "source"
+    ],
+    "properties": {
+      "description": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "kind": {
+        "$ref": "#/definitions/InstructionKind"
+      },
+      "name": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "source": {
+        "type": "string"
+      }
+    },
+    "definitions": {
+      "InstructionKind": {
+        "type": "string",
+        "enum": [
+          "command",
+          "skill"
+        ]
       }
     }
   }

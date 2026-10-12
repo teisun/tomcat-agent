@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,13 +6,27 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::core::plan_runtime::panels::{
-    Answer, AskQuestionPanel, AskQuestionResult, Question, QuestionOption,
+    Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
+    AskQuestionTermination, Question, QuestionOption,
 };
+use crate::infra::event_bus::EventListenerId;
 use crate::infra::{wire, EventBus, ScopedEventEmitter};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
+
+struct ResponseListenerGuard {
+    event_bus: Arc<dyn EventBus>,
+    listener_id: EventListenerId,
+}
+
+impl Drop for ResponseListenerGuard {
+    fn drop(&mut self) {
+        self.event_bus.off(self.listener_id);
+    }
+}
 
 /// `ask_question` 宿主桥接请求。
 ///
@@ -26,6 +40,10 @@ pub struct AskQuestionWireRequest {
     pub request_id: String,
     #[serde(alias = "response_event")]
     pub response_event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(with = "wire_questions")]
     pub questions: Vec<Question>,
 }
@@ -43,6 +61,11 @@ pub struct AskQuestionWireResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireQuestion {
+    #[serde(
+        default = "crate::core::plan_runtime::panels::allow_custom_default",
+        skip_serializing_if = "crate::core::plan_runtime::panels::is_true"
+    )]
+    allow_custom: bool,
     id: String,
     prompt: String,
     options: Vec<WireQuestionOption>,
@@ -54,6 +77,7 @@ impl From<Question> for WireQuestion {
             id: value.id,
             prompt: value.prompt,
             options: value.options.into_iter().map(Into::into).collect(),
+            allow_custom: value.allow_custom,
         }
     }
 }
@@ -64,6 +88,7 @@ impl From<WireQuestion> for Question {
             id: value.id,
             prompt: value.prompt,
             options: value.options.into_iter().map(Into::into).collect(),
+            allow_custom: value.allow_custom,
         }
     }
 }
@@ -144,24 +169,35 @@ impl From<WireAnswer> for Answer {
 #[serde(rename_all = "camelCase")]
 struct WireAskQuestionResult {
     answers: Vec<WireAnswer>,
-    #[serde(default)]
-    cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outcome: Option<AskQuestionOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cancelled: Option<bool>,
 }
 
 impl From<AskQuestionResult> for WireAskQuestionResult {
     fn from(value: AskQuestionResult) -> Self {
+        let cancelled = value.legacy_cancelled();
         Self {
             answers: value.answers.into_iter().map(Into::into).collect(),
-            cancelled: value.cancelled,
+            outcome: Some(value.outcome),
+            cancelled: Some(cancelled),
         }
     }
 }
 
 impl From<WireAskQuestionResult> for AskQuestionResult {
     fn from(value: WireAskQuestionResult) -> Self {
+        let outcome = value.outcome.unwrap_or_else(|| {
+            if value.cancelled.unwrap_or(false) {
+                AskQuestionOutcome::CancelledUnknown
+            } else {
+                AskQuestionOutcome::Answered
+            }
+        });
         Self {
             answers: value.answers.into_iter().map(Into::into).collect(),
-            cancelled: value.cancelled,
+            outcome,
         }
     }
 }
@@ -230,6 +266,7 @@ pub fn ask_question_response_event_name(request_id: &str) -> String {
 /// `plan.ask_question`，并向 request 指定的 `response_event` 回包即可。
 pub struct EventBusAskQuestionPanel {
     event_bus: Arc<dyn EventBus>,
+    request_id_instance: String,
     request_emitter: ScopedEventEmitter,
     next_request_seq: AtomicU64,
     request_id_prefix: String,
@@ -240,6 +277,7 @@ impl EventBusAskQuestionPanel {
         Self {
             request_emitter: ScopedEventEmitter::new_optional(event_bus.clone(), None),
             event_bus,
+            request_id_instance: Uuid::new_v4().simple().to_string(),
             next_request_seq: AtomicU64::new(0),
             request_id_prefix: "askq".to_string(),
         }
@@ -257,7 +295,10 @@ impl EventBusAskQuestionPanel {
 
     fn next_request_id(&self) -> String {
         let seq = self.next_request_seq.fetch_add(1, Ordering::Relaxed);
-        format!("{}-{seq}", self.request_id_prefix)
+        format!(
+            "{}-{}-{seq}",
+            self.request_id_prefix, self.request_id_instance
+        )
     }
 }
 
@@ -266,10 +307,20 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
     async fn ask(
         &self,
         questions: Vec<Question>,
-        cancel_signal: Arc<AtomicBool>,
+        termination: AskQuestionTermination,
     ) -> AskQuestionResult {
-        if cancel_signal.load(Ordering::Relaxed) {
-            return cancelled_result();
+        self.ask_with_identity(AskQuestionIdentity::default(), questions, termination)
+            .await
+    }
+
+    async fn ask_with_identity(
+        &self,
+        identity: AskQuestionIdentity,
+        questions: Vec<Question>,
+        termination: AskQuestionTermination,
+    ) -> AskQuestionResult {
+        if let Some(result) = termination.result() {
+            return result;
         }
 
         let request_id = self.next_request_id();
@@ -278,31 +329,40 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
         let tx = Arc::new(Mutex::new(Some(tx)));
         let request_id_for_listener = request_id.clone();
         let tx_for_listener = tx.clone();
-        let listener_id = self.event_bus.once(
+        let listener_id = self.event_bus.on(
             &response_event,
             Box::new(move |ctx| {
-                let parsed = serde_json::from_value::<AskQuestionWireResponse>(ctx.payload).ok();
-                let result = match parsed {
-                    Some(resp) if resp.request_id == request_id_for_listener => resp.result,
-                    _ => cancelled_result(),
+                let Ok(resp) = serde_json::from_value::<AskQuestionWireResponse>(ctx.payload)
+                else {
+                    return Ok(());
                 };
+                if resp.request_id != request_id_for_listener {
+                    return Ok(());
+                }
                 if let Some(tx) = tx_for_listener.lock().take() {
-                    let _ = tx.send(result);
+                    let _ = tx.send(resp.result);
                 }
                 Ok(())
             }),
         );
 
+        let _listener_guard = ResponseListenerGuard {
+            event_bus: Arc::clone(&self.event_bus),
+            listener_id,
+        };
+
         let request = AskQuestionWireRequest {
             request_id,
             response_event: response_event.clone(),
+            session_id: identity.session_id,
+            tool_call_id: identity.tool_call_id,
             questions,
         };
         let payload = match serde_json::to_value(&request) {
             Ok(payload) => payload,
             Err(_) => {
-                self.event_bus.off(listener_id);
-                return cancelled_result();
+                // This is a local serialization defect, not evidence that the host dropped.
+                return AskQuestionResult::terminal(AskQuestionOutcome::CancelledUnknown);
             }
         };
         if self
@@ -310,32 +370,36 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
             .emit_payload(ask_question_request_event_name(), payload)
             .is_err()
         {
-            self.event_bus.off(listener_id);
-            return cancelled_result();
+            return confirmed_host_disconnect(&termination);
         }
 
+        let termination_for_wait = termination.clone();
         let cancel_wait = async move {
-            while !cancel_signal.load(Ordering::Relaxed) {
+            while termination_for_wait.reason().is_none() {
                 tokio::time::sleep(CANCEL_POLL_MS).await;
             }
+            termination_for_wait
+                .result()
+                .expect("termination reason was observed")
         };
         tokio::pin!(cancel_wait);
 
         let result = tokio::select! {
             response = rx => match response {
                 Ok(result) => result,
-                Err(_) => cancelled_result(),
+                Err(_) => confirmed_host_disconnect(&termination),
             },
-            _ = &mut cancel_wait => cancelled_result(),
+            result = &mut cancel_wait => result,
         };
-        self.event_bus.off(listener_id);
         result
     }
 }
 
-fn cancelled_result() -> AskQuestionResult {
-    AskQuestionResult {
-        answers: vec![],
-        cancelled: true,
-    }
+/// Only transport failures that prove the live host path disappeared receive the
+/// `host_disconnected` terminal label. Local failures must not masquerade as a host action.
+pub(super) fn confirmed_host_disconnect(termination: &AskQuestionTermination) -> AskQuestionResult {
+    termination.host_disconnected();
+    termination
+        .result()
+        .expect("host_disconnected was just recorded")
 }

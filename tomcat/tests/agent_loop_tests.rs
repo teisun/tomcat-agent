@@ -158,6 +158,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -172,6 +173,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -179,8 +181,7 @@ impl PrimitiveExecutor for MockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -227,6 +228,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -241,6 +243,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -248,8 +251,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
@@ -300,6 +302,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -314,6 +317,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -321,8 +325,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
         Ok(BashResult {
@@ -342,13 +345,16 @@ impl PrimitiveExecutor for SlowMockPrimitive {
     }
 }
 
-/// `read_file` 人工延迟，确保后台 bash 能在前台工具批次执行期间自然完成。
+/// `read_file` 人工延迟，确保后台 bash 能在前台工具批次执行期间**完整走完**完成链路：
+/// 后台命令 `sleep 1`（~1000ms）退出后，还要经过 output drain → preview barrier ACK →
+/// lifecycle 广播 → 测试订阅者入队，这条链路比进程退出本身多出数百毫秒。取 2500ms 给足
+/// 余量，让 follow-up 稳定地在前台批次结束前入队、随后被同一回合 drain 进第 3 次请求。
 struct MidturnDelayPrimitive;
 
 #[async_trait]
 impl PrimitiveExecutor for MidturnDelayPrimitive {
     async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         Ok(format!("content:{}", path))
     }
     async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
@@ -369,6 +375,7 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -383,6 +390,7 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -390,8 +398,7 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -414,12 +421,16 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
 
 fn default_config(session_id: &str) -> AgentLoopConfig {
     AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: session_id.to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0, // 集成测试中将延迟置零，避免等待
         ..Default::default()
     }
+}
+
+fn loop_binding(provider: Arc<dyn LlmProvider>, model: &str) -> ResolvedCall {
+    ResolvedCall::from_parts_unchecked(provider, model, model)
 }
 
 fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
@@ -469,16 +480,14 @@ impl FixedResolver {
             reasoning: lower.starts_with("gpt-5."),
             web_search: false,
         };
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            base_url: Some("https://api.openai.com".to_string()),
-            key_source: "DEEPSEEK_API_KEY".to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities,
-        }
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = "openai-responses".to_string();
+        call.provider = "openai".to_string();
+        call.base_url = Some("https://api.openai.com".to_string());
+        call.key_source = "DEEPSEEK_API_KEY".to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = capabilities;
+        call
     }
 }
 
@@ -504,7 +513,6 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
@@ -571,7 +579,7 @@ fn spawn_test_completion_subscriber(ctx: &ChatContext) -> tokio::task::JoinHandl
                     let exit_code = match final_status {
                         BashTaskStatus::Finished { exit_code } => exit_code,
                         BashTaskStatus::Stopped => -1,
-                        BashTaskStatus::Running => continue,
+                        BashTaskStatus::Running | BashTaskStatus::DrainingOutput => continue,
                     };
                     let tail = registry.tail_log(&task_id, 4096).await;
                     let text = format!(
@@ -604,7 +612,13 @@ async fn test_agent_loop_simple_text_response() -> Result<(), Box<dyn std::error
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-simple");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("say hello")];
 
     info!("Act: 调用 AgentLoop::run()");
@@ -672,7 +686,13 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
 
     let config = default_config("sess-abort");
     let abort_signal = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort_signal.clone());
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort_signal.clone(),
+    );
     let messages = vec![ChatMessage::user("read files")];
 
     info!("Act: 在后台线程 20ms 后触发 abort()，同时 run() 执行中");
@@ -717,7 +737,13 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-followup");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     agent.follow_up("continue please".to_string());
     let messages = vec![ChatMessage::user("first message")];
@@ -870,6 +896,168 @@ async fn test_run_chat_turn_drains_background_followup_within_same_turn(
     Ok(())
 }
 
+/// Deterministic checkpoint regression: interrupt a blocking task_output through the EventBus,
+/// then reuse the exact same ChatContext for the next user turn. No OS signal or wall-clock
+/// sleep participates in the interrupt barrier.
+#[tokio::test]
+async fn test_same_chat_context_recovers_after_task_output_interrupt_without_signal(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tomcat::core::agent_loop::CompletionRoute;
+    use tomcat::core::tools::primitive::BashTaskStatus;
+
+    common::setup_logging();
+    const ENV_KEY: &str = "TOMCAT_CHECKPOINT_CONTEXT_RECOVERY_KEY";
+    let (dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let registry = ctx.session_runtime.bash_task_registry.clone();
+    let ticket = registry
+        .spawn("sleep 60".to_string(), Some(dir.path().to_path_buf()))
+        .await?;
+    let task_id = ticket.task_id.clone();
+
+    let wait_args = serde_json::json!({
+        "task_id": task_id,
+        "since": 0,
+        "block": true,
+        "wait_ms": 30_000,
+    })
+    .to_string();
+    let stop_args = serde_json::json!({ "task_id": ticket.task_id }).to_string();
+    let llm = Arc::new(RecordingMockLlm::new(vec![
+        tool_call_stream("call_wait", "task_output", &wait_args),
+        tool_call_stream("call_stop", "task_stop", &stop_args),
+        text_stream("RECOVERED_CONTEXT_E2E"),
+    ]));
+    let requests = llm.requests.clone();
+    install_fixed_resolver(&mut ctx, llm, "gpt-5.4");
+
+    let first_cancel = CancellationToken::new();
+    let cancel_from_update = first_cancel.clone();
+    ctx.global_services.event_bus.on(
+        wire::WIRE_TOOL_EXECUTION_UPDATE,
+        Box::new(move |event: EventContext| {
+            if event
+                .payload
+                .get("toolName")
+                .and_then(|value| value.as_str())
+                == Some("task_output")
+            {
+                cancel_from_update.cancel();
+            }
+            Ok(())
+        }),
+    );
+
+    let system_text = "checkpoint deterministic integration";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )?;
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_chat_turn(
+            &ctx,
+            "wait for the background task",
+            system_text,
+            &mut state,
+            first_cancel,
+        ),
+    )
+    .await
+    .map_err(|_| "first checkpoint turn timed out")??;
+    assert!(first.is_interrupted(), "first turn must end as Interrupted");
+    assert!(
+        !ctx.session_runtime
+            .completion_routes
+            .lock()
+            .contains_key(&ticket.task_id),
+        "cancelled task_output must release ToolWillDeliver route",
+    );
+    assert!(matches!(
+        registry.get_info(&ticket.task_id).map(|info| info.status),
+        Some(BashTaskStatus::Running | BashTaskStatus::DrainingOutput)
+    ));
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_chat_turn(
+            &ctx,
+            "continue after interrupt",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .map_err(|_| "second checkpoint turn timed out")??;
+    let recovered = match second {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("same ChatContext followup should complete, actual={other:?}"),
+    };
+    assert!(recovered.final_text.contains("RECOVERED_CONTEXT_E2E"));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        registry.wait_for_finish(&ticket.task_id),
+    )
+    .await
+    .map_err(|_| "stopped background task was not reaped")??;
+    assert!(matches!(
+        registry.get_info(&ticket.task_id).map(|info| info.status),
+        Some(BashTaskStatus::Stopped)
+    ));
+    assert_ne!(
+        ctx.session_runtime
+            .completion_routes
+            .lock()
+            .get(&ticket.task_id),
+        Some(&CompletionRoute::ToolWillDeliver),
+        "no stale completion claim may survive the second turn",
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "wait, stop, then recovered text requests"
+    );
+    assert!(requests[1].messages.iter().any(|message| {
+        message
+            .text_content()
+            .is_some_and(|text| text == "continue after interrupt")
+    }));
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.role == tomcat::core::llm::ChatMessageRole::Tool
+                && message
+                    .text_content()
+                    .is_some_and(|text| text == "[interrupted]")
+        }),
+        "second request must hydrate the interrupted task_output tool round"
+    );
+    drop(requests);
+
+    let transcript = fs::read_to_string(
+        ctx.session_runtime
+            .session
+            .current_transcript_path()?
+            .ok_or("transcript path should exist")?,
+    )?;
+    let interrupted_round = transcript
+        .find("call_wait")
+        .expect("task_output tool round");
+    let followup = transcript
+        .find("continue after interrupt")
+        .expect("second user turn");
+    let stopped = transcript.find("call_stop").expect("task_stop tool round");
+    let recovered = transcript
+        .find("RECOVERED_CONTEXT_E2E")
+        .expect("recovered assistant text");
+    assert!(interrupted_round < followup && followup < stopped && stopped < recovered);
+
+    unsafe { std::env::remove_var(ENV_KEY) };
+    Ok(())
+}
+
 /// [工具错误不终止 Loop] 工具执行出错后错误内容回注 LLM，Loop 继续并返回最终文本
 ///
 /// 验证：run() 返回 Ok（不 panic），final_text 包含 LLM 在收到错误后的回复
@@ -891,7 +1079,13 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-tool-error");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("run bash")];
 
     info!("Act: 调用 run()，工具首次执行将 Err");
@@ -936,14 +1130,20 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-retry".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望自动重试后成功");
@@ -982,14 +1182,20 @@ async fn test_agent_loop_gateway_503_retries_and_succeeds() -> Result<(), Box<dy
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-503-retry".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         agent.run(vec![ChatMessage::user("hi")]),
@@ -1036,14 +1242,20 @@ async fn test_agent_loop_retryable_503_exhaustion_emits_auto_retry_end(
         }),
     );
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-503-fail".to_string(),
         max_attempts: 2,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         agent.run(vec![ChatMessage::user("hi")]),
@@ -1112,7 +1324,13 @@ async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn 
 
     let config = default_config("sess-tool-pi-mono-order");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("run ls")];
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -1161,14 +1379,20 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: "sess-fatal".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望立即返回 Err（无重试）");
@@ -1227,7 +1451,13 @@ async fn test_agent_loop_events_published_in_correct_order(
 
     let config = default_config("sess-events");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()");
@@ -1283,7 +1513,13 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-steering");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     // 预注入 Steering 消息，工具批次第一个完成后将被检测并跳过剩余工具
     agent.steer("redirect me now".to_string());
@@ -1305,10 +1541,11 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后：首次 LLM 请求前 + 本轮最终回复后各一次
+/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后：首次 LLM 请求前发估算，
+/// provider 每次返回 Usage 时立即发实测，最终回复后再发边界处理快照
 ///
 /// 验证：至少一次 context_metrics_update，payload 含合法字段；首次 metrics 出现在首次 turn_end 之前
-/// 意义：ContextMetricsUpdate 双点发射（中间 tool round 不发）——可观测性与 CLI 刷屏平衡
+/// 意义：水位不等待整次 Agent 回合结束，工具链运行期间也能显示首个真实 usage
 #[tokio::test]
 async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -1347,7 +1584,13 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
 
     let config = default_config("sess-ctx-metrics");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     use tomcat::ContextState;
     agent.set_context_state(Some(ContextState {
@@ -1359,6 +1602,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -1425,10 +1669,10 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// [边界：空消息列表] 传入空消息列表时 run() 不崩溃，返回 Ok 且 final_text 为空
+/// [边界：空消息列表] 传入空消息列表时，出站不变量必须拒绝畸形 LLM 请求
 ///
-/// 验证：run([]) 返回 Ok("")（鲁棒性边界：不触发 panic，符合 INTEGRATION_TEST_ROBUSTNESS §2）
-/// 意义：防御性边界——空上下文不应导致 AgentLoop 崩溃
+/// 验证：run([]) 返回 Failed(llm_request invariant)，且不会把空请求发给 LLM。
+/// 意义：防御性边界——拒绝不完整 transcript 比伪造一个空回合安全。
 #[tokio::test]
 async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -1442,22 +1686,27 @@ async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn s
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-empty");
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
 
     info!("Act: run([]) 调用");
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))
         .await
-        .map_err(|_| "run() 超时 10s")?
-        .unwrap();
+        .map_err(|_| "run() 超时 10s")?;
 
-    info!(
-        "Assert: 返回 Ok，final_text 为空字符串: {:?}",
-        result.final_text
-    );
+    info!("Assert: 出站守卫拒绝空 messages");
     assert!(
-        result.final_text.is_empty(),
-        "空消息时 final_text 应为空，实际: {:?}",
-        result.final_text
+        matches!(
+            &outcome,
+            tomcat::AgentRunOutcome::Failed(error)
+                if error.to_string().contains("tail is not a user input or completed tool result")
+        ),
+        "空 messages 应在 llm_request 出站守卫处失败，实际: {outcome:?}"
     );
 
     Ok(())

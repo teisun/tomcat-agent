@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -16,15 +16,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
+use super::files_api::{FilesApiAdapter, OpenAiFilesAdapter};
 use crate::core::llm::provider::LlmProvider;
-use crate::core::llm::retry_delay::provider_retry_delay;
+use crate::core::llm::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::infra::config::LlmFilesConfig;
 use crate::infra::error::{
     is_retryable_llm_error, llm_error_with_source, llm_http_status_error_with_summary, AppError,
     LlmErrorStage,
 };
+use crate::infra::i18n::tr;
 
-static NEXT_FILES_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 const PROVIDER_NAME: &str = "openai-files";
 
 /// `< 1MiB`：默认走 inline（A 通道）。
@@ -70,7 +71,7 @@ impl FilePurpose {
 ///
 /// `reqwest::Client` clone 后共享同一连接池，满足「与 provider 同生命周期/同连接池」要求。
 #[derive(Debug, Clone)]
-pub struct OpenAiFilesProviderContext {
+pub struct FilesApiProviderContext {
     pub client: reqwest::Client,
     pub base_url: String,
     pub api_key: String,
@@ -94,22 +95,16 @@ pub struct OpenAiFilesClient {
     api_key: String,
     retry_count: u32,
     expires_after_seconds: u64,
-    #[cfg_attr(not(test), allow(dead_code))]
-    instance_id: u64,
 }
 
 impl OpenAiFilesClient {
-    pub fn from_provider_context(
-        ctx: OpenAiFilesProviderContext,
-        files_cfg: &LlmFilesConfig,
-    ) -> Self {
+    pub fn from_provider_context(ctx: FilesApiProviderContext, files_cfg: &LlmFilesConfig) -> Self {
         Self {
             client: ctx.client,
             base_url: ctx.base_url.trim_end_matches('/').to_string(),
             api_key: ctx.api_key,
             retry_count: ctx.retry_count,
             expires_after_seconds: files_cfg.expires_after_seconds,
-            instance_id: NEXT_FILES_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -127,17 +122,11 @@ impl OpenAiFilesClient {
             api_key,
             retry_count,
             expires_after_seconds,
-            instance_id: NEXT_FILES_CLIENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
     pub fn expires_after_seconds(&self) -> u64 {
         self.expires_after_seconds
-    }
-
-    #[cfg(test)]
-    pub(crate) fn instance_id(&self) -> u64 {
-        self.instance_id
     }
 
     fn files_base_url(&self) -> String {
@@ -158,7 +147,10 @@ impl OpenAiFilesClient {
             return llm_error_with_source(
                 PROVIDER_NAME,
                 LlmErrorStage::Connect,
-                format!("OpenAI Files {op} 请求连接失败"),
+                tr(
+                    "files.connect",
+                    &[("provider", "OpenAI Files"), ("operation", op)],
+                ),
                 err,
             );
         }
@@ -166,14 +158,20 @@ impl OpenAiFilesClient {
             return llm_error_with_source(
                 PROVIDER_NAME,
                 LlmErrorStage::ReadTimeout,
-                format!("OpenAI Files {op} 读/空闲超时"),
+                tr(
+                    "files.idle",
+                    &[("provider", "OpenAI Files"), ("operation", op)],
+                ),
                 err,
             );
         }
         llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::Send,
-            format!("OpenAI Files {op} 请求发送失败"),
+            tr(
+                "files.send",
+                &[("provider", "OpenAI Files"), ("operation", op)],
+            ),
             err,
         )
     }
@@ -183,14 +181,20 @@ impl OpenAiFilesClient {
             return llm_error_with_source(
                 PROVIDER_NAME,
                 LlmErrorStage::ReadTimeout,
-                format!("OpenAI Files {op} 读响应超时"),
+                tr(
+                    "files.readTimeout",
+                    &[("provider", "OpenAI Files"), ("operation", op)],
+                ),
                 err,
             );
         }
         llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::BodyRead,
-            format!("OpenAI Files {op} 读响应失败"),
+            tr(
+                "files.read",
+                &[("provider", "OpenAI Files"), ("operation", op)],
+            ),
             err,
         )
     }
@@ -199,23 +203,29 @@ impl OpenAiFilesClient {
         llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::Parse,
-            format!("OpenAI Files {op} 解析响应失败"),
+            tr(
+                "files.parse",
+                &[("provider", "OpenAI Files"), ("operation", op)],
+            ),
             err,
         )
     }
 
     fn classify_http_error(&self, status: reqwest::StatusCode, body: &str, op: &str) -> AppError {
         let lower = body.to_ascii_lowercase();
-        let inline_hint =
-            "建议改走 inline 通道（image_b64/file_b64）或切换支持 OpenAI Files API 的 provider";
+        let inline_hint = tr("files.inlineHint", &[]);
         if status == reqwest::StatusCode::UNAUTHORIZED || lower.contains("invalid_api_key") {
             return llm_http_status_error_with_summary(
                 PROVIDER_NAME,
                 status.as_u16(),
-                format!(
-                    "OpenAI Files {op} 失败：API Key 无效（HTTP {}）。{}",
-                    status.as_u16(),
-                    inline_hint
+                tr(
+                    "files.invalidKey",
+                    &[
+                        ("provider", "OpenAI Files"),
+                        ("operation", op),
+                        ("status", &status.as_u16().to_string()),
+                        ("hint", &inline_hint),
+                    ],
                 ),
             );
         }
@@ -226,10 +236,13 @@ impl OpenAiFilesClient {
             return llm_http_status_error_with_summary(
                 PROVIDER_NAME,
                 status.as_u16(),
-                format!(
-                    "OpenAI Files {op} 失败：Project/组织未启用 Files（HTTP {}）。{}",
-                    status.as_u16(),
-                    inline_hint
+                tr(
+                    "files.projectDisabled",
+                    &[
+                        ("operation", op),
+                        ("status", &status.as_u16().to_string()),
+                        ("hint", &inline_hint),
+                    ],
                 ),
             );
         }
@@ -237,10 +250,13 @@ impl OpenAiFilesClient {
             return llm_http_status_error_with_summary(
                 PROVIDER_NAME,
                 status.as_u16(),
-                format!(
-                    "OpenAI Files {op} 失败：purpose 不被接受（HTTP {}）。{}",
-                    status.as_u16(),
-                    inline_hint
+                tr(
+                    "files.purposeRejected",
+                    &[
+                        ("operation", op),
+                        ("status", &status.as_u16().to_string()),
+                        ("hint", &inline_hint),
+                    ],
                 ),
             );
         }
@@ -248,9 +264,13 @@ impl OpenAiFilesClient {
             return llm_http_status_error_with_summary(
                 PROVIDER_NAME,
                 status.as_u16(),
-                format!(
-                    "OpenAI Files {op} 失败：文件超过 OpenAI 上限（HTTP {}）。",
-                    status.as_u16()
+                tr(
+                    "files.tooLarge",
+                    &[
+                        ("provider", "OpenAI Files"),
+                        ("operation", op),
+                        ("status", &status.as_u16().to_string()),
+                    ],
                 ),
             );
         }
@@ -258,9 +278,15 @@ impl OpenAiFilesClient {
             PROVIDER_NAME,
             status.as_u16(),
             format!(
-                "OpenAI Files {op} 失败（HTTP {}）：{}",
-                status.as_u16(),
-                body
+                "{}: {body}",
+                tr(
+                    "files.http",
+                    &[
+                        ("provider", "OpenAI Files"),
+                        ("operation", op),
+                        ("status", &status.as_u16().to_string())
+                    ]
+                )
             ),
         )
     }
@@ -277,15 +303,21 @@ impl OpenAiFilesClient {
         bytes: &[u8],
     ) -> Result<OpenAiFileMeta, AppError> {
         if bytes.is_empty() {
-            return Err(AppError::Llm(
-                "OpenAI Files upload: 空文件不可上传".to_string(),
-            ));
+            return Err(AppError::Llm(tr(
+                "files.empty",
+                &[("provider", "OpenAI Files")],
+            )));
         }
 
         let part = reqwest::multipart::Part::bytes(bytes.to_vec())
             .file_name(filename.to_string())
             .mime_str(mime_type)
-            .map_err(|e| AppError::Llm(format!("OpenAI Files upload: mime 无效: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "files.mime",
+                    &[("provider", "OpenAI Files"), ("detail", &e.to_string())],
+                ))
+            })?;
         let mut form = reqwest::multipart::Form::new()
             .text("purpose", purpose.as_str().to_string())
             .part("file", part);
@@ -344,7 +376,7 @@ impl OpenAiFilesClient {
                             self.retry_count,
                             e
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -353,7 +385,12 @@ impl OpenAiFilesClient {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("OpenAI Files upload 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "OpenAI Files"), ("operation", "upload")],
+            ))
+        }))
     }
 
     async fn get_once(&self, file_id: &str) -> Result<Option<OpenAiFileMeta>, AppError> {
@@ -390,7 +427,7 @@ impl OpenAiFilesClient {
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
                         let delay = provider_retry_delay(attempt);
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -399,7 +436,12 @@ impl OpenAiFilesClient {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("OpenAI Files get 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "OpenAI Files"), ("operation", "get")],
+            ))
+        }))
     }
 
     async fn delete_once(&self, file_id: &str) -> Result<(), AppError> {
@@ -439,7 +481,7 @@ impl OpenAiFilesClient {
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
                         let delay = provider_retry_delay(attempt);
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -448,7 +490,12 @@ impl OpenAiFilesClient {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("OpenAI Files delete 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "OpenAI Files"), ("operation", "delete")],
+            ))
+        }))
     }
 
     async fn list_once(&self) -> Result<Vec<OpenAiFileMeta>, AppError> {
@@ -498,7 +545,7 @@ impl OpenAiFilesClient {
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
                         let delay = provider_retry_delay(attempt);
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -507,7 +554,12 @@ impl OpenAiFilesClient {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("OpenAI Files list 重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| {
+            AppError::Llm(tr(
+                "files.retries",
+                &[("provider", "OpenAI Files"), ("operation", "list")],
+            ))
+        }))
     }
 }
 
@@ -559,7 +611,7 @@ pub struct CleanupSummary {
 
 #[derive(Debug)]
 pub struct OpenAiFilesRuntime {
-    client: OpenAiFilesClient,
+    adapter: Arc<dyn FilesApiAdapter>,
     pub cache: FileIdCache,
     session_files: DashMap<String, CleanupRecord>,
     delete_queue: DashMap<String, CleanupRecord>,
@@ -569,8 +621,12 @@ pub struct OpenAiFilesRuntime {
 
 impl OpenAiFilesRuntime {
     pub fn new(client: OpenAiFilesClient, registry_path: PathBuf) -> Self {
+        Self::new_with_adapter(Arc::new(OpenAiFilesAdapter::new(client)), registry_path)
+    }
+
+    pub fn new_with_adapter(adapter: Arc<dyn FilesApiAdapter>, registry_path: PathBuf) -> Self {
         let this = Self {
-            client,
+            adapter,
             cache: FileIdCache::default(),
             session_files: DashMap::new(),
             delete_queue: DashMap::new(),
@@ -579,10 +635,6 @@ impl OpenAiFilesRuntime {
         };
         this.load_registry_from_disk();
         this
-    }
-
-    pub fn client(&self) -> &OpenAiFilesClient {
-        &self.client
     }
 
     pub fn registry_path_for_session(sessions_dir: &Path, session_id: &str) -> PathBuf {
@@ -613,9 +665,12 @@ impl OpenAiFilesRuntime {
 
     fn read_bytes_and_sha(path: &Path) -> Result<(Vec<u8>, [u8; 32]), AppError> {
         let bytes = std::fs::read(path).map_err(|e| {
-            AppError::Llm(format!(
-                "OpenAI Files cache: 读取 {} 失败: {e}",
-                path.display()
+            AppError::Llm(tr(
+                "files.cacheRead",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         let mut hasher = Sha256::new();
@@ -716,9 +771,12 @@ impl OpenAiFilesRuntime {
     ) -> Result<OpenAiFileMeta, AppError> {
         let cache_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let meta = std::fs::metadata(path).map_err(|e| {
-            AppError::Llm(format!(
-                "OpenAI Files cache: 无法 stat 路径 {}: {e}",
-                path.display()
+            AppError::Llm(tr(
+                "files.cacheStat",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         let now = SystemTime::now();
@@ -842,17 +900,17 @@ impl OpenAiFilesRuntime {
                 Ok(out)
             } else {
                 self.cache.by_hash.remove(&hash_key);
-                let uploaded = self.client.upload(purpose, filename, mime, &bytes).await?;
+                let uploaded = self.adapter.upload(purpose, filename, mime, &bytes).await?;
                 let expires_at = uploaded
                     .expires_at
                     .and_then(Self::epoch_to_system_time)
                     .or_else(|| {
-                        if self.client.expires_after_seconds() == 0 {
+                        if self.adapter.expires_after_seconds() == 0 {
                             None
                         } else {
                             Some(
                                 SystemTime::now()
-                                    + Duration::from_secs(self.client.expires_after_seconds()),
+                                    + Duration::from_secs(self.adapter.expires_after_seconds()),
                             )
                         }
                     });
@@ -884,17 +942,17 @@ impl OpenAiFilesRuntime {
                 Ok(uploaded)
             }
         } else {
-            let uploaded = self.client.upload(purpose, filename, mime, &bytes).await?;
+            let uploaded = self.adapter.upload(purpose, filename, mime, &bytes).await?;
             let expires_at = uploaded
                 .expires_at
                 .and_then(Self::epoch_to_system_time)
                 .or_else(|| {
-                    if self.client.expires_after_seconds() == 0 {
+                    if self.adapter.expires_after_seconds() == 0 {
                         None
                     } else {
                         Some(
                             SystemTime::now()
-                                + Duration::from_secs(self.client.expires_after_seconds()),
+                                + Duration::from_secs(self.adapter.expires_after_seconds()),
                         )
                     }
                 });
@@ -951,7 +1009,7 @@ impl OpenAiFilesRuntime {
         let mut failed = 0usize;
         for (file_id, mut record) in merged {
             record.reason = reason.to_string();
-            match self.client.delete(&file_id).await {
+            match self.adapter.delete(&file_id).await {
                 Ok(()) => {
                     deleted += 1;
                     self.session_files.remove(&file_id);
@@ -983,12 +1041,9 @@ pub fn build_runtime_for_provider(
     sessions_dir: &Path,
     session_id: &str,
 ) -> Option<OpenAiFilesRuntime> {
-    if !provider.supports_openai_files_api() {
-        return None;
-    }
-    let client = provider.openai_files_client(files_cfg)?;
+    let adapter = provider.files_adapter(files_cfg)?;
     let registry_path = OpenAiFilesRuntime::registry_path_for_session(sessions_dir, session_id);
-    Some(OpenAiFilesRuntime::new(client, registry_path))
+    Some(OpenAiFilesRuntime::new_with_adapter(adapter, registry_path))
 }
 
 fn system_time_to_epoch(ts: SystemTime) -> Option<i64> {

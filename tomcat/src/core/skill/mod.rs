@@ -2,12 +2,14 @@
 //!
 //! v1 先落地 `Skill` / `SkillFrontmatter` 基础契约；发现、catalog 与工具分发在后续阶段接入。
 
+pub mod builtin;
 pub mod catalog;
 pub mod discovery;
 pub mod frontmatter;
 pub mod load;
 pub mod model;
 
+pub use builtin::materialize_builtin_skills;
 pub use catalog::{
     available_skill_names_csv, compute_skill_prompt_budget_chars, render_available_skills_block,
     render_skill_inventory, visible_skill_names_csv, AvailableSkillsRender,

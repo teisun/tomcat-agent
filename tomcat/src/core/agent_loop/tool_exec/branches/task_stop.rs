@@ -17,10 +17,10 @@ pub(in super::super) async fn handle_task_stop(
     let task_id = args
         .get("task_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "task_stop 缺少 task_id".to_string())?;
+        .ok_or_else(|| "task_stop: missing required field `task_id`".to_string())?;
     registry
         .stop(task_id)
         .await
-        .map(|_| format!("已停止: {}", task_id))
+        .map(|_| format!("Stopped: {task_id}"))
         .map_err(|e| e.to_string())
 }

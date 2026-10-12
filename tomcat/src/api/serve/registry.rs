@@ -10,13 +10,14 @@ use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::core::llm::SystemPromptSnapshot;
 use crate::infra::event_bus::EventListenerId;
 use crate::{api::chat::ChatContext, AppError, ContextState, SessionMode};
 
 /// 单会话 turn 之间需要延续的上下文快照。
 pub struct SessionTurnState {
     pub context_state: ContextState,
-    pub system_text: String,
+    pub prompt_snapshot: SystemPromptSnapshot,
     pub context_budget_chars: usize,
 }
 
@@ -27,9 +28,22 @@ pub struct SessionSlot {
     pub mode: SessionMode,
     pub cwd: Option<String>,
     pub busy: AtomicBool,
+    /// Admission is busy during maintenance, but no agent turn is running.
+    pub(super) command_job: AtomicBool,
+    /// A restart recovered an unanswered ask_question before the frontend
+    /// completed the initialize handshake. It must be re-armed only after the
+    /// client is ready to receive the new response route.
+    pub resume_pending_ask_question: AtomicBool,
     pub terminal_emitted: AtomicBool,
     pub turn_state: Mutex<Option<SessionTurnState>>,
+    /// 最近一次向该会话前端广播的可信水位（实测定基后的后续估算也会刷新它）。
+    ///
+    /// 它刻意不放进 `turn_state`：运行中的 turn 会临时取走后者，重连时仍须回放
+    /// 已广播的水位。`None` 表示本进程加载该会话后尚未收到 provider 的 usage，
+    /// 以避免把冷启动的 fallback 估算显示成实测值。
+    pub last_context_ratio: Mutex<Option<f64>>,
     pub run_task: Mutex<Option<JoinHandle<()>>>,
+    pub background_task_listener: Mutex<Option<JoinHandle<()>>>,
     pub listener_ids: Mutex<Vec<EventListenerId>>,
 }
 
@@ -47,11 +61,23 @@ impl SessionSlot {
             mode,
             cwd,
             busy: AtomicBool::new(false),
+            command_job: AtomicBool::new(false),
+            resume_pending_ask_question: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
             turn_state: Mutex::new(Some(turn_state)),
+            last_context_ratio: Mutex::new(None),
             run_task: Mutex::new(None),
+            background_task_listener: Mutex::new(None),
             listener_ids: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn is_command_job_running(&self) -> bool {
+        self.command_job.load(Ordering::SeqCst)
+    }
+
+    pub fn is_turn_running(&self) -> bool {
+        self.is_busy() && !self.is_command_job_running()
     }
 
     pub fn is_busy(&self) -> bool {
@@ -95,11 +121,35 @@ pub struct SessionSummary {
     pub interrupted: bool,
 }
 
+/// Trusted routing context outlives the final live runtime; it never retains a runtime or lock.
+#[derive(Clone)]
+pub(super) struct SessionScope {
+    pub key: String,
+    pub mode: SessionMode,
+    pub cwd: Option<String>,
+}
+
+impl SessionScope {
+    fn from_slot(slot: &SessionSlot) -> Self {
+        Self {
+            key: slot
+                .ctx
+                .session_runtime
+                .session
+                .current_session_key()
+                .to_owned(),
+            mode: slot.mode,
+            cwd: slot.cwd.clone(),
+        }
+    }
+}
+
 /// 进程内 `sessionId -> SessionSlot` 的注册表。
 pub struct ChatContextRegistry {
     slots: DashMap<String, Arc<SessionSlot>>,
     order: Mutex<Vec<String>>,
     active_session_id: RwLock<Option<String>>,
+    last_closed_scope: RwLock<Option<SessionScope>>,
     max_sessions: usize,
 }
 
@@ -109,6 +159,7 @@ impl ChatContextRegistry {
             slots: DashMap::new(),
             order: Mutex::new(Vec::new()),
             active_session_id: RwLock::new(None),
+            last_closed_scope: RwLock::new(None),
             max_sessions,
         }
     }
@@ -161,6 +212,15 @@ impl ChatContextRegistry {
         self.active_session_id.read().clone()
     }
 
+    pub(super) fn current_scope(&self) -> Option<SessionScope> {
+        let active = self.active_session_id.read();
+        active
+            .as_deref()
+            .and_then(|id| self.get(id))
+            .map(|slot| SessionScope::from_slot(&slot))
+            .or_else(|| self.last_closed_scope.read().clone())
+    }
+
     pub fn set_active_session(&self, session_id: &str) -> Result<(), AppError> {
         if !self.slots.contains_key(session_id) {
             return Err(AppError::Config("unknown_session".to_string()));
@@ -170,12 +230,16 @@ impl ChatContextRegistry {
     }
 
     pub fn remove(&self, session_id: &str) -> Option<Arc<SessionSlot>> {
+        let mut active = self.active_session_id.write();
         let removed = self.slots.remove(session_id).map(|(_, slot)| slot);
         if removed.is_some() {
             self.order.lock().retain(|existing| existing != session_id);
-            let mut active = self.active_session_id.write();
             if active.as_deref() == Some(session_id) {
                 *active = self.order.lock().first().cloned();
+                if active.is_none() {
+                    *self.last_closed_scope.write() =
+                        removed.as_ref().map(|slot| SessionScope::from_slot(slot));
+                }
             }
         }
         removed
@@ -188,7 +252,7 @@ impl ChatContextRegistry {
             .filter_map(|session_id| {
                 self.get(&session_id).map(|slot| SessionSummary {
                     session_id,
-                    busy: slot.is_busy(),
+                    busy: slot.is_turn_running(),
                     interrupted: slot.is_interrupted(),
                 })
             })

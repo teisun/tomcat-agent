@@ -1,5 +1,7 @@
-import fs from "node:fs";
-import path from "node:path";
+import {
+  assertRepositoryVersions,
+  readCargoPackageVersion,
+} from "../../../scripts/release-version-core.mjs";
 
 export const CLI_BUNDLE_TARGETS = [
   "aarch64-apple-darwin",
@@ -7,18 +9,8 @@ export const CLI_BUNDLE_TARGETS = [
   "x86_64-unknown-linux-gnu",
 ];
 
-export function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, "utf8"));
-}
-
 export function parseCargoVersion(cargoTomlText) {
-  const packageSectionMatch = cargoTomlText.match(/\[package\][\s\S]*?(?=\n\[|$)/);
-  const packageSection = packageSectionMatch ? packageSectionMatch[0] : cargoTomlText;
-  const versionMatch = packageSection.match(/^\s*version\s*=\s*"([^"]+)"/m);
-  if (!versionMatch) {
-    throw new Error("Could not locate Cargo package version");
-  }
-  return versionMatch[1];
+  return readCargoPackageVersion(cargoTomlText);
 }
 
 export function expectedCliTag(version) {
@@ -35,46 +27,37 @@ export function assertEqual(actual, expected, label) {
   }
 }
 
-export function readExtensionVersions(repoRoot) {
-  const extensionManifest = readJson(path.join(repoRoot, "tomcat-vscode-ext", "package.json"));
-  const guiManifest = readJson(path.join(repoRoot, "tomcat-vscode-ext", "gui", "package.json"));
-  const extensionLock = readJson(path.join(repoRoot, "tomcat-vscode-ext", "package-lock.json"));
-  const guiLock = readJson(path.join(repoRoot, "tomcat-vscode-ext", "gui", "package-lock.json"));
-  const bundledCliVersion = extensionManifest.tomcat?.bundledCliVersion;
-
-  if (!bundledCliVersion || typeof bundledCliVersion !== "string") {
-    throw new Error("tomcat-vscode-ext/package.json is missing tomcat.bundledCliVersion");
-  }
-
+export function readRepositoryVersions(repoRoot) {
+  const snapshot = assertRepositoryVersions(repoRoot);
   return {
-    bundledCliVersion,
-    extensionLockVersion: extensionLock.packages?.[""]?.version,
-    extensionVersion: extensionManifest.version,
-    guiLockVersion: guiLock.packages?.[""]?.version,
-    guiVersion: guiManifest.version,
+    bundledCliVersion: snapshot.versions.extension.bundledCli,
+    cliVersion: snapshot.versions.cli,
+    extensionLockTopLevelVersion: snapshot.mirrors.extensionLock.topLevelVersion,
+    extensionLockVersion: snapshot.mirrors.extensionLock.rootPackageVersion,
+    extensionVersion: snapshot.versions.extension.version,
   };
 }
 
-export function validateCliReleaseTag(tag, cargoVersion) {
-  assertEqual(tag, expectedCliTag(cargoVersion), "CLI release tag");
+// Kept as the extension guard's public name; it now validates every repository mirror first.
+export function readExtensionVersions(repoRoot) {
+  return readRepositoryVersions(repoRoot);
+}
+
+export function validateCliReleaseTag(tag, cliVersion) {
+  assertEqual(tag, expectedCliTag(cliVersion), "CLI release tag");
 }
 
 export function validateExtensionReleaseTag(tag, versions) {
   assertEqual(tag, expectedExtTag(versions.extensionVersion), "Extension release tag");
   assertEqual(
-    versions.guiVersion,
+    versions.extensionLockTopLevelVersion,
     versions.extensionVersion,
-    "GUI package version",
+    "Extension package-lock top-level version",
   );
   assertEqual(
     versions.extensionLockVersion,
     versions.extensionVersion,
-    "Extension package-lock version",
-  );
-  assertEqual(
-    versions.guiLockVersion,
-    versions.extensionVersion,
-    "GUI package-lock version",
+    "Extension package-lock root package version",
   );
 }
 

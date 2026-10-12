@@ -4,7 +4,7 @@ use tracing::warn;
 use crate::api::chat::ChatContext;
 use crate::core::tools::primitive::{BackgroundTaskLifecycleEvent, BashTaskStatus};
 
-pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
+pub(crate) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
     let registry = ctx.session_runtime.bash_task_registry.clone();
     let routes = ctx.session_runtime.completion_routes.clone();
     let queue = ctx.session_runtime.follow_up_queue.clone();
@@ -46,8 +46,8 @@ pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
                     }
                     let exit_code = match final_status {
                         BashTaskStatus::Finished { exit_code } => exit_code,
-                        BashTaskStatus::Stopped => -1,
-                        BashTaskStatus::Running => continue,
+                        BashTaskStatus::Stopped => continue,
+                        BashTaskStatus::Running | BashTaskStatus::DrainingOutput => continue,
                     };
                     let tail = registry.tail_log(&task_id, 4096).await;
                     let text = format!(
@@ -57,10 +57,15 @@ pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
                         log_path = log_path,
                         cmd = command.replace('"', "\\\""),
                     );
-                    queue.lock().push(crate::core::llm::ChatMessage::user(text));
+                    let mut signal = crate::core::llm::ChatMessage::user(text);
+                    signal.kind = crate::core::llm::MessageKind::Signal;
+                    queue.lock().push(signal);
                     eprintln!(
-                        "\n[bg] task {} finished (exit={}); queued for next turn.",
-                        task_id, exit_code
+                        "{}",
+                        crate::infra::i18n::tr(
+                            "terminal.bgFinished",
+                            &[("id", &task_id), ("code", &exit_code.to_string())]
+                        )
                     );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

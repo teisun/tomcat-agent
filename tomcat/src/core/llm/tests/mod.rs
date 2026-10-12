@@ -19,15 +19,21 @@
 // 不再隶属 `tests` 父模块的兄弟链），故提升到 `pub(crate)`。
 mod admin_test;
 mod auth_test;
+mod binding_invariant_test;
 mod catalog_test;
+mod endpoint_test;
+mod http_client_test;
 pub(crate) mod mocks;
 mod multimodal_test;
+mod prompt_cache_key_test;
 mod registry_test;
 mod replay_policy_test;
 mod resolver_test;
+mod retry_delay_test;
 mod system_prompt_test;
 mod thinking_policy_test;
 mod token_usage_test;
+mod tool_result_media_test;
 mod types_test;
 // `openai_test` / `openai_responses_test` 由各自被测源文件通过 `#[cfg(test)] #[path]`
 // 内挂为子模块，避免为测试放宽可见性

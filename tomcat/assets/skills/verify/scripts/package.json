@@ -1,0 +1,9 @@
+{
+  "name": "tomcat-verify-browser-tools",
+  "private": true,
+  "type": "module",
+  "description": "Managed browser tools for the Tomcat verify skill",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

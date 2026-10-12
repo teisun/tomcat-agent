@@ -6,8 +6,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard::{self, GuardRoute, GuardRouteReason};
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::MockPrimitiveExecutor;
+use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
+use crate::core::compaction::test_support::{assert_tail_invariant, durable_ids};
 use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, MessageKind,
@@ -140,6 +141,7 @@ fn build_precheck_decision_collapses_when_history_only_room_is_not_enough() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -161,16 +163,14 @@ async fn mid_turn_guard_fits_is_noop() {
         current_tail_compactable_min_chars: 1,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("read one file");
     let assistant = assistant_with_tool_calls(&[("tc1", "read")]);
     let tool = ChatMessage::tool("tc1", &"x".repeat(2_000));
-    let mut messages = vec![system, user, assistant, tool];
+    let mut messages = vec![user, assistant, tool];
     let original = snapshot_messages(&messages);
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -183,6 +183,7 @@ async fn mid_turn_guard_fits_is_noop() {
         post_usage_appended_chars: tail_chars,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -202,6 +203,58 @@ async fn mid_turn_guard_fits_is_noop() {
 }
 
 #[tokio::test]
+async fn over_budget_without_preheat_still_collapses() {
+    let mut agent = make_agent(ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        ..Default::default()
+    });
+    let mut user = ChatMessage::user("apply a write");
+    user.msg_id = Some("tail-user".to_string());
+    let mut assistant = assistant_with_tool_calls(&[("tc1", "write")]);
+    assistant.msg_id = Some("tail-assistant".to_string());
+    let mut tool = ChatMessage::tool("tc1", &"x".repeat(8_000));
+    tool.msg_id = Some("tail-tool".to_string());
+    let mut messages = vec![user, assistant, tool];
+    let total_chars: usize = messages.iter().map(estimate_msg_chars).sum();
+
+    agent.start_idx = 0;
+    let before_tail_ids = durable_ids(&messages, agent.start_idx);
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: total_chars,
+        context_budget_chars: 4_000,
+        context_budget_tokens: 1_000,
+        last_api_usage: None,
+        post_usage_appended_chars: total_chars,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
+        &mut agent,
+        &mut messages,
+    )
+    .await
+    .unwrap()
+    .expect("guard should emit a decision");
+
+    assert_eq!(decision.route, GuardRoute::Collapse);
+    assert_eq!(decision.route_reason, GuardRouteReason::NotEnoughReducible);
+    assert!(decision.after_collapse.is_some());
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(
+        agent.start_idx, 1,
+        "collapse summary is history; the active-tail cursor must advance past it"
+    );
+    assert_tail_invariant(&before_tail_ids, &messages, agent.start_idx);
+}
+
+#[tokio::test]
 async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
     let mut agent = make_agent(ContextConfig {
         keep_recent_turns: 1,
@@ -209,7 +262,6 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
         current_tail_compactable_min_chars: 1,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let old_user = ChatMessage::user("old turn");
     let old_tool = ChatMessage::tool("old_tc", &"h".repeat(16_000));
     let recent_user = ChatMessage::user("current turn");
@@ -217,7 +269,6 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
     let current_a = ChatMessage::tool("tc1", &"a".repeat(2_000));
     let current_b = ChatMessage::tool("tc2", &"b".repeat(2_000));
     let mut messages = vec![
-        system,
         old_user.clone(),
         old_tool.clone(),
         recent_user.clone(),
@@ -225,10 +276,9 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
         current_a.clone(),
         current_b.clone(),
     ];
-    let total_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let total_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 4;
-    agent.context_tail_start = 4;
+    agent.start_idx = 3;
     agent.set_context_state(Some(ContextState {
         messages: vec![old_user, old_tool, recent_user],
         estimate_context_chars: total_chars,
@@ -238,6 +288,7 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -265,13 +316,105 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
 }
 
 #[tokio::test]
+async fn mid_turn_guard_boundary_runs_layer0_before_rebuilding_messages() {
+    let mut agent = make_agent(ContextConfig {
+        keep_recent_turns: 1,
+        layer0_single_result_max_chars: 1_000,
+        layer0_placeholder_threshold_chars: 100,
+        current_tail_compactable_min_chars: 1,
+        ..Default::default()
+    });
+    let mut covered_start = ChatMessage::user("covered start");
+    covered_start.msg_id = Some("covered-start".to_string());
+    let mut covered_end = ChatMessage::user("covered end");
+    covered_end.msg_id = Some("covered-end".to_string());
+    let mut old_turn = ChatMessage::user("old tool turn");
+    old_turn.msg_id = Some("old-tool-turn".to_string());
+    let mut latest_turn = ChatMessage::user("latest tool turn");
+    latest_turn.msg_id = Some("latest-tool-turn".to_string());
+    let old_tool_content = "o".repeat(500);
+    let latest_tool_content = "n".repeat(2_000);
+    let old_tool = ChatMessage::tool("old-tool-call", &old_tool_content);
+    let latest_tool = ChatMessage::tool("latest-tool-call", &latest_tool_content);
+    let state_messages = vec![
+        covered_start,
+        covered_end,
+        old_turn,
+        old_tool,
+        latest_turn,
+        latest_tool,
+    ];
+    let total_chars: usize = state_messages.iter().map(estimate_msg_chars).sum();
+    let mut state = ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: total_chars,
+        context_budget_chars: 800,
+        context_budget_tokens: 200,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.preheat.restore_completed(CompactionResult {
+        summary_text: "summary".to_string(),
+        covered_start_id: "covered-start".to_string(),
+        covered_end_id: "covered-end".to_string(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some("cmp-boundary".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    });
+    let mut messages = state_messages;
+    agent.start_idx = messages.len();
+    agent.set_context_state(Some(state));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages[0].kind,
+        MessageKind::CompactionSummary,
+        "the working list must observe the applied boundary"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message.text_content() == Some(TOOL_RESULT_PLACEHOLDER) }),
+        "the working list must observe L0's placeholder, proving L0 ran during apply"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message
+                .text_content()
+                .is_some_and(|text| text.starts_with("[Tool result persisted:"))
+        }),
+        "the mid-turn path must also receive L0-A persistence"
+    );
+    let after_first_reduction = snapshot_messages(&messages);
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_messages(&messages),
+        after_first_reduction,
+        "the follow-up compact_tool_results safety pass must be idempotent after boundary-owned L0"
+    );
+}
+
+#[tokio::test]
 async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
     let mut agent = make_agent(ContextConfig {
         current_tail_compactable_min_chars: 1,
         current_tail_single_result_max_chars: 10_000,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("read everything");
     let assistant = assistant_with_tool_calls(&[
         ("tc1", "read"),
@@ -281,7 +424,6 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
         ("tc5", "read"),
     ]);
     let mut messages = vec![
-        system,
         user,
         assistant,
         ChatMessage::tool("tc1", &"x".repeat(12_000)),
@@ -290,10 +432,9 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
         ChatMessage::tool("tc4", &"p".repeat(3_000)),
         ChatMessage::tool("tc5", &"q".repeat(3_000)),
     ];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -306,6 +447,7 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
         post_usage_appended_chars: tail_chars,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -343,13 +485,81 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
 }
 
 #[tokio::test]
+async fn tail_placeholder_waves_still_run_after_a_preheat_boundary() {
+    let mut agent = make_agent(ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        current_tail_single_result_max_chars: 20_000,
+        ..Default::default()
+    });
+    let mut historical = ChatMessage::user("old context");
+    historical.msg_id = Some("historical".to_string());
+    let tail_user = ChatMessage::user("read the active files");
+    let tail_assistant = assistant_with_tool_calls(&[
+        ("tc1", "read"),
+        ("tc2", "read"),
+        ("tc3", "read"),
+        ("tc4", "read"),
+        ("tc5", "read"),
+    ]);
+    let mut messages = vec![historical.clone(), tail_user];
+    messages.push(tail_assistant);
+    for index in 1..=5 {
+        messages.push(ChatMessage::tool(&format!("tc{index}"), &"x".repeat(3_000)));
+    }
+    let total_chars: usize = messages.iter().map(estimate_msg_chars).sum();
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(CompactionResult {
+        summary_text: "summary".to_string(),
+        covered_start_id: "historical".to_string(),
+        covered_end_id: "historical".to_string(),
+        covered_count: 1,
+        transcript_compaction_entry_id: Some("cmp-historical".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    });
+    agent.start_idx = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![historical],
+        estimate_context_chars: total_chars,
+        context_budget_chars: 12_000,
+        context_budget_tokens: 3_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(
+        messages[agent.start_idx].text_content(),
+        Some("read the active files"),
+        "the surviving active turn remains the tail after the history boundary"
+    );
+    assert!(
+        messages[agent.start_idx..]
+            .iter()
+            .any(|message| message.text_content() == Some(TOOL_RESULT_PLACEHOLDER)),
+        "when the boundary alone is insufficient, normal tail placeholder waves still run"
+    );
+}
+
+#[tokio::test]
 async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
     let mut agent = make_agent(ContextConfig {
         current_tail_compactable_min_chars: 1,
         current_tail_single_result_max_chars: 20_000,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("read more");
     let assistant = assistant_with_tool_calls(&[
         ("tc1", "read"),
@@ -361,7 +571,7 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
         ("tc7", "read"),
         ("tc8", "read"),
     ]);
-    let mut messages = vec![system, user, assistant];
+    let mut messages = vec![user, assistant];
     for (idx, ch) in ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
         .into_iter()
         .enumerate()
@@ -370,10 +580,9 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
         let tool_text = ch.to_string().repeat(4_000);
         messages.push(ChatMessage::tool(&tool_id, &tool_text));
     }
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -386,6 +595,7 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
         post_usage_appended_chars: tail_chars,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -413,13 +623,86 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
 }
 
 #[tokio::test]
+async fn current_tail_guard_catches_a_single_turn_that_jumps_from_low_watermark() {
+    let mut agent = make_agent(ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        current_tail_single_result_max_chars: 20_000,
+        ..Default::default()
+    });
+    let user = ChatMessage::user("read the three generated artifacts");
+    let assistant = assistant_with_tool_calls(&[("tc1", "read"), ("tc2", "read"), ("tc3", "read")]);
+    let mut messages = vec![
+        user,
+        assistant,
+        ChatMessage::tool("tc1", &"a".repeat(50_000)),
+        ChatMessage::tool("tc2", &"b".repeat(50_000)),
+        ChatMessage::tool("tc3", &"c".repeat(50_000)),
+    ];
+    let initial_chars = 128_000usize;
+    let context_budget_chars = 320_000usize;
+    let appended_tool_chars: usize = messages.iter().skip(2).map(estimate_msg_chars).sum();
+    assert!(
+        initial_chars as f64 / (context_budget_chars as f64) < 0.50,
+        "fixture must begin below the Layer 0 pressure gate"
+    );
+    assert!(
+        (initial_chars + appended_tool_chars) as f64 / (context_budget_chars as f64) > 0.85,
+        "three large tool results must cross the high-water mark in one turn"
+    );
+
+    agent.start_idx = 0;
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: initial_chars,
+        context_budget_chars,
+        context_budget_tokens: 60_000,
+        last_api_usage: Some(ApiUsage {
+            prompt_tokens: 32_000,
+            completion_tokens: 0,
+        }),
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    for message in messages.iter().skip(2) {
+        state.on_message_appended(estimate_msg_chars(message));
+    }
+    agent.set_context_state(Some(state));
+
+    let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
+        &mut agent,
+        &mut messages,
+    )
+    .await
+    .unwrap()
+    .expect("the overflow guard must make a reduction decision");
+
+    assert_eq!(decision.route, GuardRoute::Reduce);
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message.role == crate::core::llm::ChatMessageRole::Tool)
+            .all(|message| {
+                message
+                    .text_content()
+                    .is_some_and(|text| text.starts_with("[Tool result persisted:"))
+            }),
+        "the current-tail guard must retain a bounded disk reference instead of sending the 150K payload onward"
+    );
+    assert_eq!(decision.after_collapse, None);
+}
+
+#[tokio::test]
 async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompactable_raw() {
     let mut agent = make_agent(ContextConfig {
         current_tail_compactable_min_chars: 1,
         current_tail_single_result_max_chars: 20_000,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("inspect mixed tools");
     let assistant = assistant_with_tool_calls(&[
         ("tc1", "search_files"),
@@ -431,7 +714,6 @@ async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompa
         ("tc7", "write"),
     ]);
     let mut messages = vec![
-        system,
         user,
         assistant,
         ChatMessage::tool("tc1", &"a".repeat(4_000)),
@@ -442,10 +724,9 @@ async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompa
         ChatMessage::tool("tc6", &"f".repeat(4_000)),
         ChatMessage::tool("tc7", &"g".repeat(4_000)),
     ];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -458,6 +739,7 @@ async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompa
         post_usage_appended_chars: tail_chars,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -497,7 +779,6 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
         current_tail_single_result_max_chars: 20_000,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("read everything");
     let assistant = assistant_with_tool_calls(&[
         ("tc1", "read"),
@@ -507,7 +788,6 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
         ("tc5", "read"),
     ]);
     let mut messages = vec![
-        system,
         user,
         assistant,
         ChatMessage::tool("tc1", &"x".repeat(12_000)),
@@ -516,10 +796,9 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
         ChatMessage::tool("tc4", &"p".repeat(3_000)),
         ChatMessage::tool("tc5", &"q".repeat(3_000)),
     ];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -532,6 +811,7 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
         post_usage_appended_chars: tail_chars,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -567,7 +847,6 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
         current_tail_single_result_max_chars: 20_000,
         ..Default::default()
     });
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("read four files");
     let assistant = assistant_with_tool_calls(&[
         ("tc1", "read"),
@@ -576,7 +855,6 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
         ("tc4", "read"),
     ]);
     let mut messages = vec![
-        system,
         user,
         assistant,
         ChatMessage::tool("tc1", &"a".repeat(8_000)),
@@ -584,10 +862,9 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
         ChatMessage::tool("tc3", &"c".repeat(8_000)),
         ChatMessage::tool("tc4", &"d".repeat(8_000)),
     ];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -600,6 +877,7 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
         post_usage_appended_chars: tail_chars,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -613,22 +891,20 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
     .unwrap()
     .expect("guard should emit a decision");
 
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert!(decision.after_collapse.is_some());
 }
 
 #[tokio::test]
 async fn collapse_post_weigh_keeps_going_even_if_summary_is_still_over_budget() {
     let mut agent = make_agent_with_summary(ContextConfig::default(), "s".repeat(6_000));
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));
     let assistant = ChatMessage::assistant("a".repeat(4_000));
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -638,6 +914,7 @@ async fn collapse_post_weigh_keeps_going_even_if_summary_is_still_over_budget() 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -651,8 +928,8 @@ async fn collapse_post_weigh_keeps_going_even_if_summary_is_still_over_budget() 
     .unwrap()
     .expect("guard should emit a decision");
 
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert!(
         agent.context_state.as_ref().unwrap().is_over_budget(),
         "test fixture expects collapse summary to remain overweight"
@@ -668,14 +945,12 @@ async fn collapse_post_weigh_keeps_going_even_if_summary_is_still_over_budget() 
 #[tokio::test]
 async fn collapse_handles_missing_msg_ids_without_sink() {
     let mut agent = make_agent(ContextConfig::default());
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));
     let assistant = ChatMessage::assistant("a".repeat(4_000));
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -685,6 +960,7 @@ async fn collapse_handles_missing_msg_ids_without_sink() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -694,10 +970,10 @@ async fn collapse_handles_missing_msg_ids_without_sink() {
         .await
         .unwrap();
 
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert!(
-        messages[1].msg_id.is_some(),
+        messages[0].msg_id.is_some(),
         "summary should still get a stable anchor id"
     );
 }
@@ -714,7 +990,7 @@ fn make_agent_with_summary(context_config: ContextConfig, summary_text: String) 
         ..Default::default()
     };
     AgentLoop::new(
-        Arc::new(ChatOnlyMockLlm { summary_text }),
+        test_binding(Arc::new(ChatOnlyMockLlm { summary_text }), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         config,
@@ -732,6 +1008,7 @@ fn context_state(estimate_context_chars: usize, context_budget_tokens: usize) ->
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

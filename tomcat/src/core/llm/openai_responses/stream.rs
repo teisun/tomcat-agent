@@ -22,7 +22,9 @@ use crate::core::llm::types::{
     ContinuityMetadata, ProviderRefs, ReasoningContinuation, ReasoningFormat, StreamEvent,
     ThinkingSource,
 };
-use crate::infra::error::{llm_error_with_source, AppError, LlmErrorStage};
+use crate::infra::error::{
+    llm_error_with_source, llm_stream_interrupted_error, AppError, LlmErrorStage,
+};
 
 const PROVIDER_NAME: &str = "openai-responses";
 
@@ -41,6 +43,14 @@ pub(super) struct ResponsesStream<S> {
     reasoning: ReasoningState,
     source_profile: ProviderCompatProfile,
     continuity_enabled: bool,
+    /// 已成功解码出的有效 provider 事件数。首帧就解析失败通常是中转流被截断/
+    /// SSE keepalive 嗅探错误，可重试；已经收到事件之后再解析失败则是协议错误。
+    seen_valid_event: bool,
+    /// 只有协议终止事件才算响应终结，EOF 本身不是完成证据。
+    terminal_seen: bool,
+    finished: bool,
+    /// EOF 残留产生的正常事件交付完后，至多交付一次中断错误。
+    eof_error: Option<AppError>,
 }
 
 #[derive(Debug)]
@@ -244,25 +254,54 @@ impl<S> ResponsesStream<S> {
             reasoning: ReasoningState::default(),
             source_profile,
             continuity_enabled,
+            seen_valid_event: false,
+            terminal_seen: false,
+            finished: false,
+            eof_error: None,
         }
     }
 
     fn process_chunk(&mut self, raw: &str) -> Result<Vec<StreamEvent>, AppError> {
+        let seen_valid_event = self.seen_valid_event;
         let value: Value = serde_json::from_str(raw).map_err(|e| {
-            llm_error_with_source(
-                PROVIDER_NAME,
-                LlmErrorStage::Parse,
-                "解析 Responses chunk 失败".to_string(),
-                anyhow::anyhow!("{e} | raw={raw}"),
-            )
+            let summary = format!(
+                "{} | raw={raw}",
+                crate::infra::i18n::tr("llm.responsesChunkParse", &[("detail", &e.to_string())])
+            );
+            if seen_valid_event {
+                llm_error_with_source(
+                    PROVIDER_NAME,
+                    LlmErrorStage::Parse,
+                    summary,
+                    anyhow::anyhow!("{e} | raw={raw}"),
+                )
+            } else {
+                llm_stream_interrupted_error(PROVIDER_NAME, summary)
+            }
         })?;
-        Ok(responses_chunk_to_events_with_state(
-            &value,
+        Ok(self.process_value(&value))
+    }
+
+    fn process_value(&mut self, value: &Value) -> Vec<StreamEvent> {
+        self.terminal_seen |= matches!(
+            value.get("type").and_then(Value::as_str),
+            Some(
+                "response.completed"
+                    | "response.done"
+                    | "response.incomplete"
+                    | "response.failed"
+                    | "error"
+            )
+        );
+        let events = responses_chunk_to_events_with_state(
+            value,
             &mut self.tool_calls,
             &mut self.reasoning,
             &self.source_profile,
             self.continuity_enabled,
-        ))
+        );
+        self.seen_valid_event |= !events.is_empty();
+        events
     }
 }
 
@@ -276,21 +315,24 @@ where
         if let Some(evt) = self.pending.next() {
             return Poll::Ready(Some(Ok(evt)));
         }
+        if let Some(error) = self.eof_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
+        if self.finished {
+            return Poll::Ready(None);
+        }
 
         loop {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     self.buffer.extend_from_slice(&bytes);
                     if self.mode.is_none() {
-                        // 首次探测：若 buffer 含 "data: " 字面量则按 SSE，否则若已经看到 \n 则按 NDJSON。
-                        if buffer_starts_with_sse(&self.buffer) {
-                            self.mode = Some(false);
-                        } else if self.buffer.contains(&b'\n') {
-                            self.mode = Some(true);
-                        } else {
-                            // 数据不够判，继续读
+                        let Some(is_ndjson) = sniff_stream_mode(&self.buffer) else {
+                            // 只有 SSE 注释/空行不构成任何一方证据；继续读，绝不能因为
+                            // `:\n` 里有换行就锁成 NDJSON（中转站 keepalive 的真实形态）。
                             continue;
-                        }
+                        };
+                        self.mode = Some(is_ndjson);
                     }
                     let is_ndjson = self.mode.unwrap();
                     match drain_buffer(&mut self.buffer, is_ndjson) {
@@ -317,27 +359,65 @@ where
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
-                    // 流结束：把残留 buffer 当作最后一帧再尝试解析。
-                    if !self.buffer.is_empty() {
-                        let is_ndjson = self.mode.unwrap_or(true);
-                        let drained = drain_buffer(&mut self.buffer, is_ndjson);
-                        if let Ok(chunks) = drained {
-                            let mut events = Vec::new();
-                            for raw in chunks {
-                                if let Ok(mut evs) = self.process_chunk(&raw) {
-                                    events.append(&mut evs);
-                                }
-                            }
-                            if let Some((first, rest)) = events.split_first() {
-                                let first = first.clone();
-                                #[allow(clippy::unnecessary_to_owned)]
-                                let pending_vec = rest.to_vec();
-                                self.pending = pending_vec.into_iter();
-                                return Poll::Ready(Some(Ok(first)));
-                            }
+                    self.finished = true;
+                    let is_ndjson = self.mode.unwrap_or(true);
+                    // 有分隔符的完整帧仍使用原来的严格解析与错误分类。
+                    let chunks = match drain_buffer(&mut self.buffer, is_ndjson) {
+                        Ok(chunks) => chunks,
+                        Err(error) => return Poll::Ready(Some(Err(error))),
+                    };
+                    let mut events = Vec::new();
+                    for raw in chunks {
+                        match self.process_chunk(&raw) {
+                            Ok(parsed) => events.extend(parsed),
+                            Err(error) => return Poll::Ready(Some(Err(error))),
                         }
                     }
-                    return Poll::Ready(None);
+
+                    // 仅 EOF 的未分隔残留宽松解析；不从半帧猜终态，也不泄露 raw。
+                    let residual = std::mem::take(&mut self.buffer);
+                    let mut discarded_bytes = 0;
+                    match std::str::from_utf8(&residual) {
+                        Ok(raw) => {
+                            let chunks = if is_ndjson {
+                                let trimmed = raw.trim();
+                                if trimmed.is_empty() || trimmed.starts_with(':') {
+                                    Vec::new()
+                                } else {
+                                    vec![trimmed]
+                                }
+                            } else {
+                                raw.lines()
+                                    .map(str::trim)
+                                    .filter_map(|line| line.strip_prefix("data: "))
+                                    .filter(|data| *data != "[DONE]")
+                                    .collect()
+                            };
+                            for raw in chunks {
+                                match serde_json::from_str::<Value>(raw) {
+                                    Ok(value) => events.extend(self.process_value(&value)),
+                                    Err(_) => discarded_bytes = residual.len(),
+                                }
+                            }
+                        }
+                        Err(_) => discarded_bytes = residual.len(),
+                    }
+                    if !self.terminal_seen {
+                        self.eof_error = Some(llm_stream_interrupted_error(
+                            PROVIDER_NAME,
+                            crate::infra::i18n::tr(
+                                "llm.responsesClosed",
+                                &[("bytes", &discarded_bytes.to_string())],
+                            ),
+                        ));
+                    }
+                    self.pending = events.into_iter();
+                    return Poll::Ready(
+                        self.pending
+                            .next()
+                            .map(Ok)
+                            .or_else(|| self.eof_error.take().map(Err)),
+                    );
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -345,12 +425,26 @@ where
     }
 }
 
-fn buffer_starts_with_sse(buf: &[u8]) -> bool {
-    // 任一 SSE 帧都包含 `data: ` 行；`event: ` 也是 SSE 标志。
-    let prefix_data = b"data: ";
-    let prefix_event = b"event: ";
-    buf.windows(prefix_data.len()).any(|w| w == prefix_data)
-        || buf.windows(prefix_event.len()).any(|w| w == prefix_event)
+fn sniff_stream_mode(buf: &[u8]) -> Option<bool> {
+    for complete_line in buf
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| line.last() == Some(&b'\n'))
+    {
+        let line = std::str::from_utf8(complete_line).ok()?.trim();
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        // SSE comments may precede these fields. `id:` / `retry:` 也是合法 SSE 字段；
+        // 即使还没收到 data，也不能把它们误判成 NDJSON。
+        if ["data:", "event:", "id:", "retry:"]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        {
+            return Some(false);
+        }
+        return Some(true);
+    }
+    None
 }
 
 /// 从 buffer 中按当前模式榨取已完成的 chunk JSON 字符串列表。
@@ -369,12 +463,12 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::Parse,
-                    "NDJSON UTF-8 错误".to_string(),
+                    crate::infra::i18n::tr("llm.utf8Error", &[("format", "NDJSON")]),
                     e,
                 )
             })?;
             let s = s.trim();
-            if s.is_empty() {
+            if s.is_empty() || s.starts_with(':') {
                 continue;
             }
             out.push(s.to_string());
@@ -389,7 +483,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::Parse,
-                    "SSE UTF-8 错误".to_string(),
+                    crate::infra::i18n::tr("llm.utf8Error", &[("format", "SSE")]),
                     e,
                 )
             })?;
@@ -426,7 +520,7 @@ fn push_terminal_events(
             reason: meta
                 .finish_reason
                 .clone()
-                .unwrap_or_else(|| format!("error:{message}")),
+                .unwrap_or_else(|| "error".to_string()),
             message,
             code: meta.error_code.clone(),
         });
@@ -447,10 +541,28 @@ fn push_terminal_events(
             .get("total_tokens")
             .and_then(Value::as_u64)
             .map(|v| v as u32);
+        let cache_read_tokens = usage
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .map(|value| value as u32);
+        let reasoning_tokens = usage
+            .get("output_tokens_details")
+            .and_then(|details| details.get("reasoning_tokens"))
+            .or_else(|| usage.get("reasoning_output_tokens"))
+            .and_then(Value::as_u64)
+            .map(|value| value as u32);
+        let text_tokens = reasoning_tokens
+            .filter(|reasoning| *reasoning <= completion)
+            .map(|reasoning| completion.saturating_sub(reasoning));
         events.push(StreamEvent::Usage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
+            cache_read_tokens,
+            cache_write_tokens: None,
+            reasoning_tokens,
+            text_tokens,
         });
     }
 }

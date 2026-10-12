@@ -40,52 +40,56 @@ const LOCK_RETRY_MAX_MS: u64 = 80;
 pub enum PlanError {
     /// 抢 advisory file lock 超时；`waited_ms` 是实际等待毫秒数；
     /// `holder_pid` 为侧车 lock 文件内当前持有锁的进程 pid（用于调试）。
-    #[error("plan 文件锁繁忙（等待 {waited_ms} ms 仍未释放；可能由 pid={holder_pid:?} 持有）")]
+    #[error("{}", crate::infra::i18n::tr("planFile.lockBusy", &[("waited", &.waited_ms.to_string()), ("pid", &format!("{:?}", .holder_pid))]))]
     LockBusy {
         waited_ms: u64,
         holder_pid: Option<i32>,
     },
 
     /// 目标 plan 文件不存在。
-    #[error("plan 文件不存在: {path}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.notFound", &[("path", .path)]))]
     NotFound { path: String },
 
     /// 找不到 frontmatter 开头/结尾的 `---` 分隔符。
-    #[error("plan 文件缺少 frontmatter 分隔符 ---")]
+    #[error("{}", crate::infra::i18n::tr("planFile.delimiter", &[]))]
     FrontmatterDelimMissing,
 
     /// `serde_yaml` 反序列化失败。
-    #[error("frontmatter YAML 解析失败: {0}")]
+    #[error("{prefix}: {0}", prefix = crate::infra::i18n::tr("planFile.yaml", &[]))]
     YamlParse(String),
 
     /// 必填字段缺失（serde 已用 default 兜底，runtime 显式校验）。
-    #[error("frontmatter 缺少必填字段: {field}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.missingField", &[("field", .field)]))]
     MissingField { field: String },
 
     /// `schema_version` 与当前 runtime 不兼容。
-    #[error("frontmatter schema_version 不兼容: 实际 {actual}, 期望 {expected}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.schema", &[("actual", &.actual.to_string()), ("expected", &.expected.to_string())]))]
     SchemaVersion { actual: i32, expected: i32 },
 
     /// `plan_id` 未通过 `assert_plan_id_safe_for_disk`（路径穿越 / 非法字符）。
-    #[error("非法 plan_id: {reason}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.invalidId", &[("reason", .reason)]))]
     InvalidPlanId { reason: String },
 
-    /// 单一文件最多一个 in_progress；写盘前校验。
-    #[error("plan 文件最多允许一个 in_progress todo，当前: {count}")]
+    /// 单一文件最多允许有限数量的 in_progress；写盘前校验。
+    #[error("{}", crate::infra::i18n::tr("planFile.progressLimit", &[("limit", &MAX_IN_PROGRESS_TODOS.to_string()), ("count", &.count.to_string())]))]
     MultipleInProgress { count: usize },
 
     /// todo id 在单文件内必须唯一。
-    #[error("plan 文件 todo id 重复: {id}")]
+    #[error("{}", crate::infra::i18n::tr("planFile.duplicateTodo", &[("id", .id)]))]
     DuplicateTodoId { id: String },
 
+    /// 验收 todo 是最终收口步骤，一个 plan 只能有一个。
+    #[error("{}", crate::infra::i18n::tr("planFile.acceptanceLimit", &[]))]
+    MultipleAcceptanceTodos,
+
     /// 写盘 IO 错误（rename / open / write 等）。
-    #[error("plan 文件 IO 错误: {0}")]
+    #[error("{prefix}: {0}", prefix = crate::infra::i18n::tr("planFile.io", &[]))]
     Io(#[from] std::io::Error),
 }
 
 // ─── frontmatter / 子结构 ──────────────────────────────────────────────────
 
-/// PlanFile.frontmatter.state 的枚举形态；与 [`super::PlanState`] 没有 1:1 映射
+/// PlanFile.frontmatter.state 的枚举形态；它与会话 `AgentMode` 是正交概念。
 /// （后者是 runtime in-memory 状态机，含 Chat）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -107,7 +111,7 @@ impl PlanFileState {
     }
 }
 
-/// 单个 todo 的状态。**单一文件**最多一个 `in_progress`（写盘前校验）。
+/// 单个 todo 的状态。单一文件最多允许 [`MAX_IN_PROGRESS_TODOS`] 个 `in_progress`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -116,6 +120,36 @@ pub enum TodoStatus {
     Completed,
     Cancelled,
 }
+
+/// Todo 的语义类型。
+///
+/// `Acceptance` 是 LLM 写入的最终验收步骤。运行时只在该步骤开始时向 LLM 返回
+/// verify 提示；它不会创建、推进或校验该 todo。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoKind {
+    #[default]
+    Work,
+    Acceptance,
+    /// Old plan files may carry a kind this runtime no longer understands.
+    /// Keep their todos visible and treat them like ordinary todos without
+    /// retaining any gate-specific behaviour.
+    #[serde(other)]
+    Unknown,
+}
+
+impl TodoKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TodoKind::Work => "work",
+            TodoKind::Acceptance => "acceptance",
+            TodoKind::Unknown => "unknown",
+        }
+    }
+}
+
+/// 同时进行的 todo 上限：允许有限并行，仍保持面板和收口状态可读。
+pub const MAX_IN_PROGRESS_TODOS: usize = 3;
 
 impl TodoStatus {
     pub fn as_str(&self) -> &'static str {
@@ -133,6 +167,12 @@ pub struct TodoItem {
     pub id: String,
     pub content: String,
     pub status: TodoStatus,
+    /// Immutable work description stays in `content`; execution proof accumulates here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// 旧计划 / session scratchpad 没有该字段时默认普通工作项。
+    #[serde(default)]
+    pub kind: TodoKind,
 }
 
 /// PlanFile 顶部 YAML frontmatter；**v1 schema**。
@@ -151,9 +191,43 @@ pub struct PlanFileFrontmatter {
     pub created_at: String,
     pub schema_version: i32,
     pub todos: Vec<TodoItem>,
+    /// 最近一次 review gate 是否已放行（可能是预算耗尽后的放行）。
+    #[serde(default)]
+    pub code_review_pass: bool,
+    /// Completed code-review rounds for this plan.
+    #[serde(default)]
+    pub code_review_rounds: u32,
+    /// Blocking findings carried to the next review or returned to the executor
+    /// when no code changed after the review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_review_open_findings: Vec<crate::core::plan_runtime::review::Finding>,
+    /// P1 trade-offs explicitly accepted by the executor. Kept with the other
+    /// review state so a process restart preserves the reviewer brief.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_review_disputed_findings: Vec<crate::core::plan_runtime::DisputedFinding>,
+    /// Review budget ended with an unresolved P0. Unattended execution must
+    /// stop until a new user message explicitly starts a fresh review window.
+    #[serde(default)]
+    pub code_review_handoff: bool,
+    /// Set when a new root-user message acknowledges the handoff and refreshes
+    /// the review budget. This makes the P0 trade-off auditable.
+    #[serde(default)]
+    pub code_review_handoff_acknowledged: bool,
+    /// 评审预算耗尽时带入 acceptance 的剩余 P0/P1 finding 摘要。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_review_residual_findings: Vec<String>,
     /// 未来扩展字段；read 时收集，write 时原样写回（保前向兼容）。
     #[serde(flatten)]
     pub unknown: serde_yaml::Mapping,
+}
+
+impl PlanFileFrontmatter {
+    /// `max=0` disables the review gate; it is not an exhausted review budget.
+    pub fn code_review_budget_exhausted(&self, max_code_review_rounds: u32) -> bool {
+        max_code_review_rounds > 0
+            && self.code_review_rounds > 0
+            && self.code_review_rounds >= max_code_review_rounds
+    }
 }
 
 /// `PlanFile = frontmatter + 自由 body`。
@@ -264,15 +338,16 @@ fn enforce_required_fields(fm: &PlanFileFrontmatter) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// 写盘前对 frontmatter 做不变量校验（单 in_progress / id 唯一）。
+/// 写盘前对 frontmatter 做不变量校验（有限 in_progress / id 唯一）。
 pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), PlanError> {
     enforce_required_fields(fm)?;
+    validate_single_acceptance(&fm.todos)?;
     let in_progress_count = fm
         .todos
         .iter()
         .filter(|t| matches!(t.status, TodoStatus::InProgress))
         .count();
-    if in_progress_count > 1 {
+    if in_progress_count > MAX_IN_PROGRESS_TODOS {
         return Err(PlanError::MultipleInProgress {
             count: in_progress_count,
         });
@@ -286,9 +361,25 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
     Ok(())
 }
 
+/// A plan may have one final acceptance todo at most. Both tool write paths
+/// call this before writing, and file serialization repeats the check so raw
+/// runtime writers cannot bypass the invariant.
+pub fn validate_single_acceptance(todos: &[TodoItem]) -> Result<(), PlanError> {
+    if todos
+        .iter()
+        .filter(|todo| matches!(todo.kind, TodoKind::Acceptance))
+        .take(2)
+        .count()
+        > 1
+    {
+        return Err(PlanError::MultipleAcceptanceTodos);
+    }
+    Ok(())
+}
+
 // ─── 读 / 写 / lock（高层 API） ────────────────────────────────────────────
 
-fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
+fn read_plan_text(path: &Path) -> Result<String, PlanError> {
     let bytes = std::fs::read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PlanError::NotFound {
@@ -298,15 +389,18 @@ fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
             PlanError::Io(e)
         }
     })?;
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    parse_plan_file(&text)
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
+    parse_plan_file(&read_plan_text(path)?)
 }
 
 fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), PlanError> {
     let parent = path.parent().ok_or_else(|| {
         PlanError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "plan 路径无父目录",
+            crate::infra::i18n::tr("planStore.noParent", &[]),
         ))
     })?;
     std::fs::create_dir_all(parent).map_err(PlanError::Io)?;

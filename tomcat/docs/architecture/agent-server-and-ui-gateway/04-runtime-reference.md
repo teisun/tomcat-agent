@@ -5,7 +5,7 @@
 
 | 变量                             | 取值                   | 含义                                                             | 优先级        | 说人话              |
 | ------------------------------ | -------------------- | -------------------------------------------------------------- | ---------- | ---------------- |
-| `TOMCAT_AGENT_ACTIVE`          | `1`                  | 标记当前已在 agent 会话内，serve 子进程继承后拒绝嵌套变更类命令（复用既有门禁）                 | env（最高）    | 防止 agent 自己又开自己。 |
+| `TOMCAT_AGENT_ACTIVE`          | `1`                  | 标记当前已在 agent 会话内；拒绝嵌套变更类命令和 `serve --stdio/--ws`，但允许只导出 schema 后退出的 `serve --print-schema` | env（最高）    | 防止 agent 自己又开自己；纯类型生成不受影响。 |
 | `serve.transport`              | `stdio`/`ws`(Phase2) | serve 默认传输                                                     | config     | 默认走管道。           |
 | `serve.max_sessions`           | usize                | 单 serve 进程并发会话数上限（默认对齐 `MAX_CONCURRENT_AGENTS=16`，含子 Agent 占额） | config     | 一个进程最多开几个会话 tab。 |
 | `serve.session_idle_unload_ms` | u32                  | **预留字段，本期未接线**：未来空闲会话（无活跃 run/订阅）多久后回收 `ChatContext`，`0`=不回收（对标 codex 30min）    | config     | 先留配置名，本期还不会真的自动清。    |
@@ -17,6 +17,35 @@
 
 
 `serve.transport` 与 `--stdio/--ws` CLI 参数同义；CLI 参数 > env > config。
+
+---
+
+## 6.1 stdin 调度：队列只做快事
+
+```text
+stdin 一行命令
+   ├─ interrupt → 立即处理（绕过 FIFO）
+   └─ 普通命令 → FIFO 验证/路由
+                  ├─ 快查询/状态修改 → 直接回包
+                  ├─ compact / run_slash_command → 占本会话忙门 → 后台 job
+                  │                                  ↓ 完成/错误/panic
+                  │                            清句柄、先置闲 → 回包
+                  └─ test_connector / login_connector → 后台任务 → 回包
+
+                         等待时 FIFO 可继续处理其它会话
+```
+
+`src/api/serve/stdin.rs::run_stdio_loop` 保持普通命令的接纳顺序，`interrupt` 仍绕过队列。耗时的模型压缩、包文件事务和连接测试不在全局 worker 里等待。
+
+`session_job.rs::spawn_session_job` 用现有忙标记和 `run_task` 管理 compact/共享命令，不新增平行生命周期。启动与完成共用句柄锁，避免立即完成留下旧句柄，或旧任务清除新任务。完成先清句柄、置闲再发响应；panic 也复位并回错误；关闭/EOF 按现有关闭预算回收。忙时 prompt/steer/follow_up 拒绝，不能往正在压缩的历史中追加。
+
+这些是维护命令，不制造 `agent_start/end/idle` 假事件；`get_state.busy` 仍表示 agent turn。VS Code 以自己的 `commandPending` 等待回包，禁用发送/压缩/Build，不能用普通 `agent_idle` 提前解除等待。`test_connector` 是连接级命令，不带 sessionId，也不占 session 忙门。
+
+## 6.2 会话内共享资源命令
+
+握手增加 `run_slash_command` capability 与 `slashCommands: [{name, usage, summary}]`；内容来自 Rust `SHARED_SLASH_COMMANDS`，不是 UI 硬编码。调用帧是 `{type:"run_slash_command", id, sessionId, text}`，原始 text 经共享解析器处理。外层响应成功时 payload 为 `SlashReply {ok, text}`：业务失败显示错误气泡，传输/忙失败仍是外层错误。未知命令、缺参数返回文本，不写用户 transcript、不调用模型。
+
+`/reload` 重扫 Skill + 插件；`/install`、`/uninstall` 静态事务后调用同一核对引擎。旧 Serve 没有表时客户端使用空表，不展示资源菜单。外部 CLI/手工改动请主动 `/reload`；它不重载任意配置或 MCP。参见 [package-manager](../package-manager.md#当前会话内前门与清单同步)。
 
 ---
 
@@ -139,7 +168,7 @@ stdin EOF / 管道关闭
 | 多会话单写者「快会话饿死慢会话」                  | 中           | writer 按 sessionId **round-robin 公平轮转**（修正 codex 全局队列 + openclaw 连接级 `bufferedAmount` 的公平缺口，见 §2.5.2）；每会话独立 pressure 计数                                                 | 别让一个刷屏会话把另一个会话的事件堵死。    |
 | 多会话误用进程级可变态（cwd/secret 等）         | 中           | 进程级只共享**只读/线程安全** `Arc<dyn …>`（`GlobalServices`）；会话级隔离 `ScopeServices/SessionRuntime`（per `ChatContext`）；规避 hermes 全局 `secret callback`/`completion_queue` 串台教训（§2.5.2） | 水电共用、房间各锁；别把某会话的私货塞进全局。 |
 | 协议演进两端漂移                          | 中           | `--print-schema` 生成 + fixture 快照测试锁定（对标 codex `schema_fixtures.rs`）                                                                                                     | 改协议时 CI 立刻报两边对不上。       |
-| 嵌套调用污染会话/全局态                      | 中           | 复用 `guard_nested_invocation` + `TOMCAT_AGENT_ACTIVE=1`，serve 子进程继承后拒绝变更类命令                                                                                              | 防 agent 自己开自己改坏状态。      |
+| 嵌套调用污染会话/全局态                      | 中           | 复用 `guard_nested_invocation` + `TOMCAT_AGENT_ACTIVE=1`，拦截变更类命令和 `serve --stdio/--ws`；`serve --print-schema` 只导出 schema 后退出，扩展构建显式定向到临时目录 | 防 agent 自己又开自己改坏状态，同时保住协议类型生成。 |
 | Phase 2 联网鉴权缺失                    | 高（仅 Phase2） | 默认 loopback 绑定 + token + origin 校验（对标 openclaw `auth.ts`/`origin-check.ts`）；非 loopback 必须显式开                                                                            | 真要联网默认只本机 + 要口令。        |
 | 中断时工具 Start/End 不配平               | 中           | interrupt 收口路径强制对已发 `tool_execution_start` 补 `tool_execution_end`（对齐现有 §状态机约束）                                                                                          | 急停也要把 UI 的「进行中」收干净。     |
 

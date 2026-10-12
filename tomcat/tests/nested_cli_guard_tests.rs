@@ -5,6 +5,7 @@ use tomcat::{AppConfig, SessionManager};
 fn cmd() -> Command {
     let mut c = assert_cmd::cargo::cargo_bin_cmd!("tomcat");
     c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
+    c.env("TOMCAT__UI__LANGUAGE", "en");
     c
 }
 

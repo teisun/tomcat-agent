@@ -1,22 +1,35 @@
 use std::sync::Arc;
 
 use crate::core::agent_loop::types::{BackgroundCompletionRoutes, CompletionRoute, ToolCallInfo};
-use crate::core::tools::primitive::{BashTaskRegistry, WakeReason};
+use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
+use crate::core::tools::primitive::BashTaskRegistry;
 use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::{AgentEvent, ToolOutput};
 
 use super::super::ToolExecCtx;
 
-const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS: u64 = 5_000;
-const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS: u64 = 30_000;
+const TASK_OUTPUT_BLOCK_DEFAULT_WAIT_MS: u64 = 5_000;
+const TASK_OUTPUT_BLOCK_MIN_WAIT_MS: u64 = 5_000;
+const TASK_OUTPUT_BLOCK_MAX_WAIT_MS: u64 = 600_000;
 const TASK_OUTPUT_TICK_MS: u64 = 500;
-const TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES: u64 = 4_096;
+const TASK_OUTPUT_WAIT_TAIL_MAX_BYTES: u64 = 4_096;
+
+fn clamp_block_wait_ms(wait_ms_raw: Option<u64>) -> u64 {
+    match wait_ms_raw {
+        Some(0) => TASK_OUTPUT_BLOCK_MIN_WAIT_MS,
+        Some(v) => v.clamp(TASK_OUTPUT_BLOCK_MIN_WAIT_MS, TASK_OUTPUT_BLOCK_MAX_WAIT_MS),
+        None => TASK_OUTPUT_BLOCK_DEFAULT_WAIT_MS,
+    }
+}
 
 pub(in super::super) async fn handle_task_output(
     ctx: &ToolExecCtx<'_>,
     tc: &ToolCallInfo,
     args: &serde_json::Value,
 ) -> Result<String, String> {
+    if args.get("timeout_ms").is_some() {
+        return Err("task_output: legacy timeout_ms is unsupported; use wait_ms".to_string());
+    }
     let Some(registry) = ctx.bash_task_registry.as_ref() else {
         return Err(super::background_unavailable::bash_background_unavailable(
             "task_output",
@@ -26,17 +39,13 @@ pub(in super::super) async fn handle_task_output(
     let task_id = args
         .get("task_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "task_output 缺少 task_id".to_string())?;
+        .ok_or_else(|| "task_output: missing required field `task_id`".to_string())?;
     let since = args.get("since").and_then(|v| v.as_u64());
     let block_param = args.get("block").and_then(|v| v.as_bool()).unwrap_or(false);
-    let timeout_ms_raw = args.get("timeout_ms").and_then(|v| v.as_u64());
+    let wait_ms_raw = args.get("wait_ms").and_then(|v| v.as_u64());
 
-    let timeout_ms = match timeout_ms_raw {
-        Some(0) => 0,
-        Some(v) => v.min(TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS),
-        None => TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS,
-    };
-    let block = block_param && timeout_ms > 0;
+    let wait_ms = clamp_block_wait_ms(wait_ms_raw);
+    let block = block_param;
 
     if !block {
         return registry
@@ -50,7 +59,7 @@ pub(in super::super) async fn handle_task_output(
         registry,
         task_id,
         since,
-        timeout_ms,
+        wait_ms,
         ctx.cancel,
         tc,
         ctx.event_emitter,
@@ -64,7 +73,7 @@ async fn handle_task_output_blocking(
     registry: &Arc<BashTaskRegistry>,
     task_id: &str,
     since: Option<u64>,
-    timeout_ms: u64,
+    wait_ms: u64,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
     event_emitter: Option<&ScopedEventEmitter>,
@@ -94,7 +103,7 @@ async fn handle_task_output_blocking(
     }
 
     let started = Instant::now();
-    let deadline = TokioInstant::now() + Duration::from_millis(timeout_ms);
+    let deadline = TokioInstant::now() + Duration::from_millis(wait_ms);
 
     let mut ticker = tokio::time::interval(Duration::from_millis(TASK_OUTPUT_TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -104,8 +113,8 @@ async fn handle_task_output_blocking(
         tc,
         task_id,
         since_value,
-        timeout_ms,
-        timeout_ms.saturating_sub(elapsed_ms(started)),
+        wait_ms,
+        wait_ms.saturating_sub(elapsed_ms(started)),
         "waiting_for_output",
         None,
     );
@@ -117,12 +126,14 @@ async fn handle_task_output_blocking(
                 if let Some(routes) = completion_routes {
                     routes.lock().remove(task_id);
                 }
-                return Err("task_output(block=true) 已被取消".to_string());
+                // This is a terminal tool result, not a tool failure. Returning the shared
+                // interruption sentinel lets the dispatcher persist a complete assistant/tool
+                // pair before the enclosing turn observes cancellation and becomes aborted.
+                return Err(INTERRUPTED_TOOL_RESULT_TEXT.to_string());
             }
-            wait = registry.wait_for_change(task_id, since) => {
+            wait = registry.wait_for_finish(task_id) => {
                 match wait {
-                    Ok(WakeReason::NewOutput) => break BlockingWakeKind::NewOutput,
-                    Ok(WakeReason::Finished) => break BlockingWakeKind::Finished,
+                    Ok(()) => break BlockingWakeKind::Finished,
                     Err(e) => {
                         if let Some(routes) = completion_routes {
                             routes.lock().remove(task_id);
@@ -132,16 +143,16 @@ async fn handle_task_output_blocking(
                 }
             }
             _ = sleep_until(deadline) => {
-                break BlockingWakeKind::Timeout;
+                break BlockingWakeKind::WaitWindowElapsed;
             }
             _ = ticker.tick() => {
-                let remaining = timeout_ms.saturating_sub(elapsed_ms(started));
+                let remaining = wait_ms.saturating_sub(elapsed_ms(started));
                 emit_task_output_update(
                         event_emitter,
                     tc,
                     task_id,
                     since_value,
-                    timeout_ms,
+                    wait_ms,
                     remaining,
                     "waiting_for_output",
                     None,
@@ -158,16 +169,11 @@ async fn handle_task_output_blocking(
             BlockingWakeKind::Finished => {
                 g.insert(task_id.to_string(), CompletionRoute::Delivered);
             }
-            BlockingWakeKind::Timeout => {
+            BlockingWakeKind::WaitWindowElapsed => {
                 if delivered {
                     g.insert(task_id.to_string(), CompletionRoute::Delivered);
                 } else {
                     g.remove(task_id);
-                }
-            }
-            BlockingWakeKind::NewOutput => {
-                if delivered {
-                    g.insert(task_id.to_string(), CompletionRoute::Delivered);
                 }
             }
         }
@@ -178,9 +184,8 @@ async fn handle_task_output_blocking(
 
 #[derive(Debug, Clone, Copy)]
 enum BlockingWakeKind {
-    NewOutput,
     Finished,
-    Timeout,
+    WaitWindowElapsed,
 }
 
 async fn finish_blocking_with(
@@ -189,38 +194,33 @@ async fn finish_blocking_with(
     since_value: u64,
     wake: BlockingWakeKind,
 ) -> Result<(String, bool), String> {
-    let mut chunk = match wake {
-        BlockingWakeKind::Finished | BlockingWakeKind::NewOutput | BlockingWakeKind::Timeout => {
-            registry
-                .read_output(task_id, Some(since_value))
+    let chunk = match wake {
+        BlockingWakeKind::Finished => registry
+            .read_output(task_id, Some(since_value))
+            .await
+            .map_err(|e| e.to_string())?,
+        BlockingWakeKind::WaitWindowElapsed => {
+            let snapshot = registry
+                .read_output_tail(task_id, Some(since_value), TASK_OUTPUT_WAIT_TAIL_MAX_BYTES)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            if snapshot.finished {
+                registry
+                    .read_output(task_id, Some(since_value))
+                    .await
+                    .map_err(|e| e.to_string())?
+            } else {
+                snapshot
+            }
         }
     };
-    if matches!(wake, BlockingWakeKind::Timeout) && chunk.content.is_empty() {
-        if let Ok(snapshot) = registry
-            .tail_output_chunk(task_id, TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES)
-            .await
-        {
-            if !snapshot.content.is_empty() {
-                chunk = snapshot;
-            }
-        }
-    }
     let wake_reason = match wake {
         BlockingWakeKind::Finished => "finished",
-        BlockingWakeKind::NewOutput => {
+        BlockingWakeKind::WaitWindowElapsed => {
             if chunk.finished {
                 "finished"
             } else {
-                "new_output"
-            }
-        }
-        BlockingWakeKind::Timeout => {
-            if chunk.finished {
-                "finished"
-            } else {
-                "timeout"
+                "wait_window_elapsed"
             }
         }
     };
@@ -232,10 +232,7 @@ async fn finish_blocking_with(
         );
     }
     let delivered = matches!(wake, BlockingWakeKind::Finished)
-        || matches!(
-            wake,
-            BlockingWakeKind::NewOutput | BlockingWakeKind::Timeout
-        ) && chunk.finished;
+        || matches!(wake, BlockingWakeKind::WaitWindowElapsed) && chunk.finished;
     Ok((value.to_string(), delivered))
 }
 
@@ -250,7 +247,7 @@ fn emit_task_output_update(
     tc: &ToolCallInfo,
     task_id: &str,
     since: u64,
-    timeout_ms: u64,
+    wait_ms: u64,
     remaining_ms: u64,
     phase: &str,
     wake_reason: Option<&str>,
@@ -275,8 +272,8 @@ fn emit_task_output_update(
         serde_json::Value::Number(serde_json::Number::from(since)),
     );
     partial.insert(
-        "timeoutMs".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(timeout_ms)),
+        "waitMs".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(wait_ms)),
     );
     partial.insert(
         "remainingMs".to_string(),
@@ -294,192 +291,5 @@ fn emit_task_output_update(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::infra::{wire, DefaultEventBus, EventBus, EventContext};
-
-    async fn wait_until_finished(
-        registry: &Arc<crate::core::tools::primitive::BashTaskRegistry>,
-        task_id: &str,
-    ) -> crate::core::tools::primitive::BashTaskOutputChunk {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            let chunk = registry
-                .read_output(task_id, Some(0))
-                .await
-                .expect("read_output");
-            if chunk.finished {
-                return chunk;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "task {task_id} did not finish within 3s; last chunk={chunk:?}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    }
-
-    async fn wait_until_has_output(
-        registry: &Arc<crate::core::tools::primitive::BashTaskRegistry>,
-        task_id: &str,
-        since: u64,
-    ) -> crate::core::tools::primitive::BashTaskOutputChunk {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            let chunk = registry
-                .read_output(task_id, Some(since))
-                .await
-                .expect("read_output");
-            if !chunk.content.is_empty() {
-                return chunk;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "task {task_id} produced no output within 3s from offset {since}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn finish_blocking_with_new_output_and_finished_marks_delivered() {
-        use crate::core::tools::primitive::BashTaskRegistry;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
-        let ticket = registry
-            .spawn("echo done; exit 0".to_string(), None, None)
-            .await
-            .expect("spawn");
-
-        let _ = wait_until_finished(&registry, &ticket.task_id).await;
-
-        let (text, delivered) =
-            finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::NewOutput)
-                .await
-                .expect("finish_blocking_with");
-        let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
-
-        assert_eq!(
-            chunk["wakeReason"],
-            serde_json::Value::String("finished".into())
-        );
-        assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
-        assert!(delivered, "NewOutput + finished must claim Delivered");
-    }
-
-    #[tokio::test]
-    async fn finish_blocking_with_timeout_returns_tail_snapshot_when_no_new_output() {
-        use crate::core::tools::primitive::BashTaskRegistry;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
-        let ticket = registry
-            .spawn("printf SNAPSHOT_TIMEOUT; sleep 3".to_string(), None, None)
-            .await
-            .expect("spawn");
-
-        let first = wait_until_has_output(&registry, &ticket.task_id, 0).await;
-        assert!(
-            first.content.contains("SNAPSHOT_TIMEOUT"),
-            "首个增量应包含 token，实际 {:?}",
-            first.content
-        );
-
-        let (text, delivered) = finish_blocking_with(
-            &registry,
-            &ticket.task_id,
-            first.next_offset,
-            BlockingWakeKind::Timeout,
-        )
-        .await
-        .expect("finish_blocking_with");
-        let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
-
-        assert_eq!(
-            chunk["wakeReason"],
-            serde_json::Value::String("timeout".into())
-        );
-        assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
-        let content = chunk["content"].as_str().unwrap_or_default();
-        assert!(
-            content.contains("SNAPSHOT_TIMEOUT"),
-            "timeout 应回最近输出快照，实际 {:?}",
-            content
-        );
-        assert!(!delivered, "running timeout 不应 claim Delivered");
-    }
-
-    #[tokio::test]
-    async fn finish_blocking_with_timeout_promotes_finished_race() {
-        use crate::core::tools::primitive::BashTaskRegistry;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
-        let ticket = registry
-            .spawn("printf FINISHED_TIMEOUT".to_string(), None, None)
-            .await
-            .expect("spawn");
-
-        let _ = wait_until_finished(&registry, &ticket.task_id).await;
-        let (text, delivered) =
-            finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::Timeout)
-                .await
-                .expect("finish_blocking_with");
-        let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
-
-        assert_eq!(
-            chunk["wakeReason"],
-            serde_json::Value::String("finished".into())
-        );
-        assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
-        assert!(delivered, "timeout 命中已 finished 应 claim Delivered");
-    }
-
-    #[test]
-    fn task_output_update_event_inherits_scoped_session_id() {
-        let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
-        let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
-        let captured_cb = Arc::clone(&captured);
-        bus.on(
-            wire::WIRE_TOOL_EXECUTION_UPDATE,
-            Box::new(move |ctx: EventContext| {
-                *captured_cb.lock().unwrap() = Some(ctx);
-                Ok(())
-            }),
-        );
-        let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "sid-task-output");
-        let tc = ToolCallInfo {
-            id: "call-task".to_string(),
-            name: "task_output".to_string(),
-            arguments: r#"{"task_id":"task-1","since":0,"block":true,"timeout_ms":150}"#
-                .to_string(),
-        };
-
-        emit_task_output_update(
-            Some(&emitter),
-            &tc,
-            "task-1",
-            0,
-            150,
-            100,
-            "waiting_for_output",
-            None,
-        );
-
-        let ctx = captured
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("应捕获到 tool_execution_update");
-        assert_eq!(ctx.session_id.as_deref(), Some("sid-task-output"));
-        assert_eq!(
-            ctx.payload.get("sessionId").and_then(|v| v.as_str()),
-            Some("sid-task-output")
-        );
-        assert_eq!(
-            ctx.payload.get("toolName").and_then(|v| v.as_str()),
-            Some("task_output")
-        );
-    }
-}
+#[path = "tests/task_output_test.rs"]
+mod tests;

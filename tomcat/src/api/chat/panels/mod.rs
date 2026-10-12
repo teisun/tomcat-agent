@@ -4,7 +4,8 @@ pub mod cli_todos_panel;
 pub mod ide_ask_question_panel;
 
 pub use crate::core::plan_runtime::panels::{
-    next_panel_snapshot_id, Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel,
+    next_panel_snapshot_id, Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel,
+    AskQuestionResult, AskQuestionTermination, AskQuestionTerminationReason, MockAskQuestionPanel,
     NoopTodosPanel, Question, QuestionOption, RefreshNotifier, TodosPanel, TodosPanelSnapshot,
     CUSTOM_OPTION_ID,
 };

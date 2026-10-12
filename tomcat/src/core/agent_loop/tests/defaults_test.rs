@@ -22,10 +22,6 @@ fn agent_loop_config_default_includes_subagent_fields() {
         SubagentType::User,
         "default subagent_type should be User (chat_loop), not Reviewer"
     );
-    assert!(
-        cfg.review_kind.is_none(),
-        "default review_kind should be None for non-reviewer loops"
-    );
     assert_eq!(
         cfg.max_attempts, DEFAULT_AGENT_MAX_ATTEMPTS,
         "default max_attempts should track llm config defaults"
@@ -39,9 +35,11 @@ fn agent_loop_config_default_includes_subagent_fields() {
 #[test]
 fn subagent_type_root_and_as_str_are_correct() {
     assert!(SubagentType::User.is_root());
-    assert!(!SubagentType::Reviewer.is_root());
+    assert!(!SubagentType::PlanReviewer.is_root());
+    assert!(!SubagentType::CodeReviewer.is_root());
     assert!(!SubagentType::Verifier.is_root());
     assert_eq!(SubagentType::User.as_str(), "user");
-    assert_eq!(SubagentType::Reviewer.as_str(), "reviewer");
+    assert_eq!(SubagentType::PlanReviewer.as_str(), "plan_reviewer");
+    assert_eq!(SubagentType::CodeReviewer.as_str(), "code_reviewer");
     assert_eq!(SubagentType::Verifier.as_str(), "verifier");
 }

@@ -7,7 +7,7 @@ use crate::core::plan_runtime::file_store::{
     self, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
     DEFAULT_LOCK_TIMEOUT_MS, PLAN_FILE_SCHEMA_VERSION,
 };
-use crate::core::plan_runtime::PlanState;
+use crate::core::session::AgentMode;
 use crate::AppConfig;
 use serial_test::serial;
 
@@ -134,7 +134,16 @@ fn run_plan_build_returns_continue_for_existing_plan() {
                 id: "todo-1".to_string(),
                 content: "build the release".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             }],
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## Draft\n- build the release\n".to_string(),
@@ -160,11 +169,19 @@ fn run_plan_build_returns_continue_for_existing_plan() {
             );
         }
         ChatCommandOutcome::Handled => panic!("/plan build 成功时不应被当作纯本地 handled"),
+        ChatCommandOutcome::UserMessage { .. } | ChatCommandOutcome::ResumePendingQuestion => {
+            panic!("/plan build must not resume an old question")
+        }
     }
 
-    assert!(
-        matches!(ctx.session_runtime.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-001"),
-        "build 成功后 runtime 应切到 Executing"
+    assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
+    assert_eq!(
+        ctx.session_runtime
+            .plan_runtime
+            .executing_plan_id()
+            .as_deref(),
+        Some("ship-001"),
+        "build 成功后 active plan 应变为 executing"
     );
 }
 
@@ -200,7 +217,16 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
                 id: "todo-1".to_string(),
                 content: "build the release".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             }],
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## Draft\n- build the release\n".to_string(),
@@ -208,7 +234,7 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
     file_store::write_plan(&plan_path, &plan, DEFAULT_LOCK_TIMEOUT_MS).expect("write plan");
     ctx.session_runtime
         .plan_runtime
-        .set_active_planning_plan(plan_id.to_string(), plan_path.clone());
+        .bind_plan_file_for_test(plan_path.clone());
 
     let outcome = run(&ctx, PlanCommand::Build { plan_target: None });
 
@@ -223,15 +249,23 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
             );
         }
         ChatCommandOutcome::Handled => panic!("/plan build 默认源成功时不应被当作 handled"),
+        ChatCommandOutcome::UserMessage { .. } | ChatCommandOutcome::ResumePendingQuestion => {
+            panic!("/plan build must not resume an old question")
+        }
     }
-    assert!(
-        matches!(ctx.session_runtime.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-default")
+    assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
+    assert_eq!(
+        ctx.session_runtime
+            .plan_runtime
+            .executing_plan_id()
+            .as_deref(),
+        Some("ship-default")
     );
 }
 
 #[test]
 #[serial(env_lock)]
-fn run_plan_exit_allows_pending_back_to_chat() {
+fn run_plan_exit_returns_plan_mode_to_chat() {
     const API_ENV: &str = "TOMCAT_CMD_PLAN_EXIT_PENDING_TEST_KEY";
 
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
@@ -244,14 +278,9 @@ fn run_plan_exit_allows_pending_back_to_chat() {
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    ctx.session_runtime
-        .plan_runtime
-        .set_mode_pending("pending-plan".into());
+    ctx.session_runtime.plan_runtime.enter_plan().unwrap();
 
     let outcome = run(&ctx, PlanCommand::Exit);
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
-    assert!(matches!(
-        ctx.session_runtime.plan_runtime.mode(),
-        PlanState::Chat
-    ));
+    assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
 }

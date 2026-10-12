@@ -19,6 +19,7 @@ use reqwest::redirect::Policy;
 use crate::infra::http_client::{
     build_outbound_client, OutboundClientErrorKind, OutboundClientOptions,
 };
+use crate::infra::i18n::tr;
 use crate::infra::{AppConfig, AppError, ToolsWebFetchConfig};
 
 use self::cache::{CacheKey, WebFetchCache};
@@ -106,7 +107,7 @@ fn build_web_fetch_http_client(
     build_outbound_client(
         options,
         OutboundClientErrorKind::Tool,
-        "创建 web_fetch HTTP 客户端失败",
+        &tr("webFetch.client", &[]),
     )
 }
 

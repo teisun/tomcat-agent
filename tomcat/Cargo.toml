@@ -1,6 +1,6 @@
 [package]
 name = "tomcat"
-version = "0.1.13"
+version = "0.1.72"
 edition = "2021"
 license = "MIT"
 
@@ -8,33 +8,60 @@ license = "MIT"
 name = "tomcat"
 path = "src/main.rs"
 
+[[bin]]
+name = "test_streamable_http_server"
+path = "tests/support/test_streamable_http_server.rs"
+test = false
+required-features = ["test-streamable-http-server"]
+
+[[test]]
+name = "connector_http_tests"
+path = "tests/connector_http_tests.rs"
+required-features = ["test-streamable-http-server"]
+
+[features]
+# The fake Streamable HTTP/OAuth server is executable test infrastructure, not
+# production connector code. Keep its HTTP server stack out of normal builds.
+test-streamable-http-server = [
+    "dep:axum",
+    "rmcp/server",
+    "rmcp/transport-streamable-http-server",
+]
+
 [dependencies]
 thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = { version = "0.8", features = ["chrono"] }
-config = "0.14"
+# 主配置只支持 TOML；不要编译 config 未使用的 JSON/YAML/INI/RON/JSON5
+# 加载器及其传递依赖。
+config = { version = "0.14", default-features = false, features = ["toml"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
+sys-locale = "0.3.2"
 async-trait = "0.1"
+axum = { version = "0.8", optional = true }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing-appender = "0.2"
-reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+# 直连 HTTP 调用与 rmcp 的远程 MCP/OAuth transport 统一 reqwest 版本；
+# 显式保留现有调用的 JSON、流式、表单、查询参数和 multipart 能力。
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy", "json", "stream", "form", "query", "multipart"] }
 futures-util = "0.3"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "string"] }
 dialoguer = "0.11"
 toml = "0.8"
 tempfile = "3.10"
 parking_lot = "0.12"
 dashmap = "6"
 rustyline = "18.0.0"
-syntect = "5"
+# 终端语法高亮无需 Oniguruma 的 C 构建依赖，改用纯 Rust 正则后端。
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 ctrlc = { version = "3", features = ["termination"] }
 swc_common = "18.0.1"
 swc_ecma_ast = "20.0.1"
@@ -42,7 +69,6 @@ swc_ecma_codegen = "23.0.0"
 swc_ecma_parser = "34.0.0"
 swc_ecma_transforms_base = "37.0.0"
 swc_ecma_transforms_typescript = "41.0.0"
-swc_ecma_visit = "20.0.0"
 sha2 = "0.10"
 fs2 = "0.4"
 serde_yaml = "0.9"
@@ -62,6 +88,9 @@ getrandom = "0.4.2"
 uuid = { version = "1.23.3", features = ["v4"] }
 aes-gcm = "0.10.3"
 ed25519-dalek = "2.2.0"
+# Do not use rmcp's `reqwest` feature: it enables reqwest/rustls and feature unification would
+# silently reintroduce a second TLS backend. Keep this aligned with the direct reqwest feature.
+rmcp = { version = "=3.4.0", default-features = false, features = ["auth", "client", "reqwest-native-tls", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 # Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
 # （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。
@@ -77,6 +106,14 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 
+[profile.fast]
+# 本地迭代：保留 release 的优化和符号裁剪，但禁用串行全程序 LTO；
+# 不影响正式 release 产物。
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 [dev-dependencies]
 tempfile = "3.10"
 assert_cmd = "2"
@@ -88,7 +125,9 @@ dotenvy = "0.15"
 tokio = { version = "1.0", features = ["test-util"] }
 serial_test = "3.4.0"
 wiremock = "0.6.5"
-tokio-rustls = "0.26.4"
-rcgen = "0.14.8"
-jsonschema = "0.46.5"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+# Schema fixture tests compile in-memory schemas only; HTTP resolution would
+# activate reqwest's rustls feature in the test graph.
+jsonschema = { version = "0.46.5", default-features = false }
 

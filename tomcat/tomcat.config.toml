@@ -55,6 +55,12 @@ enable_audit_log = true
 audit_log_retention_days = 90
 enable_plugin_safety_scan = false
 
+[tools.bash]
+# 前台最多观察 8–16 秒；到期后命令继续作为 tracked background task 运行，不会被终止。
+foreground_wait_ms = 16000
+# stdout / stderr 各自的内存字符上限；超限内容会截断并把完整输出写入 tool-results。
+max_output_chars = 30000
+
 [primitive]
 path_rules = []
 bash_approval_required = []

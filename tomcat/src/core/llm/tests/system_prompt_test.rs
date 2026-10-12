@@ -4,6 +4,29 @@ use crate::infra::config::SkillsConfig;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+fn build_system_prompt_with_state(context: WorkspaceContext, state: WorkspaceState) -> String {
+    build_system_prompt_with_state_and_skills(context, state, None, None, 0)
+}
+
+fn build_system_prompt_with_state_and_skills(
+    context: WorkspaceContext,
+    state: WorkspaceState,
+    skill_set: Option<&SkillSet>,
+    skill_cfg: Option<&SkillsConfig>,
+    context_budget_chars: usize,
+) -> String {
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(WorkspaceStateSection::new(state)));
+    if let (Some(skill_set), Some(skill_cfg)) = (skill_set, skill_cfg) {
+        if let Some(section) =
+            AvailableSkillsSection::from_skill_set(skill_set, context_budget_chars, skill_cfg)
+        {
+            builder.register(Box::new(section));
+        }
+    }
+    builder.build(&context)
+}
+
 #[test]
 fn build_system_prompt_contains_tools_and_workspace() {
     let prompt = build_system_prompt("/home/user/workspace");
@@ -26,10 +49,49 @@ fn build_system_prompt_contains_tools_and_workspace() {
 }
 
 #[test]
-fn build_system_prompt_contains_current_time() {
+fn planner_reminder_persists_plans_with_the_tool_for_each_changed_part() {
+    let prompt = crate::core::prompts::load(crate::core::prompts::PromptKey::PlannerReminder);
+    assert!(prompt.contains("New plan: use `create_plan`"));
+    assert!(prompt.contains("Existing plan body or `## Goal`: call `read`, then use `edit`"));
+    assert!(prompt.contains("Existing `frontmatter.todos`: use `update_plan`"));
+    assert!(prompt.contains("Do NOT emit a plan/proposal as prose"));
+}
+
+#[test]
+fn planning_surface_omits_package_install_but_chat_surface_keeps_it() {
+    let planning = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, false, &[]);
+    let chat = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, true, &[]);
+    let has = |surface: &ToolSurface, name: &str| {
+        surface
+            .function_definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"].as_str() == Some(name))
+    };
+
+    assert!(!has(&planning, "package_install"));
+    assert!(has(&chat, "package_install"));
+}
+
+#[test]
+fn build_system_prompt_omits_dynamic_time() {
     let prompt = build_system_prompt("/tmp");
-    assert!(prompt.contains("Current date and time:"));
+    assert!(!prompt.contains("Current date and time:"));
+    assert!(!prompt.contains("{now}"));
     assert!(prompt.contains("Agent workspace directory"));
+}
+
+#[test]
+fn build_system_prompt_is_deterministic_for_identical_inputs() {
+    assert_eq!(
+        build_system_prompt("/tmp"),
+        build_system_prompt("/tmp"),
+        "static inputs must produce byte-identical system prompts"
+    );
+    assert_eq!(
+        build_system_prompt_with_state(fixture_context(), fixture_state()),
+        build_system_prompt_with_state(fixture_context(), fixture_state()),
+        "identical workspace state must produce byte-identical system prompts"
+    );
 }
 
 #[test]
@@ -71,8 +133,28 @@ fn build_system_prompt_contains_edit_workflow_guidance() {
         "system prompt 应包含 hashline_edit 工作流"
     );
     assert!(
+        prompt.contains("prefer edit for prose and Markdown"),
+        "system prompt 应引导 prose / Markdown 使用普通 edit"
+    );
+    assert!(
+        prompt.contains("never mix anchors from separate reads"),
+        "system prompt 应禁止混用多次 read 的 hashline 锚点"
+    );
+    assert!(
+        prompt.contains("line-count changes do not shift other batch anchors"),
+        "system prompt 应说明 hashline 批量编辑采用原快照语义"
+    );
+    assert!(
         prompt.contains("never include display prefixes"),
         "system prompt 应提醒不要把 read 展示前缀粘进 old_content"
+    );
+    assert!(
+        prompt.contains("small, unique, exact, and one continuous excerpt"),
+        "system prompt 应要求 old_content 是小且唯一的连续原文"
+    );
+    assert!(
+        prompt.contains("use that current text for the next edit"),
+        "system prompt 应引导模型使用 edit 成功回传的当前视图"
     );
 }
 
@@ -87,8 +169,25 @@ fn build_system_prompt_contains_parallel_and_verification_sections() {
         prompt.contains("Finishing and verifying"),
         "system prompt 应包含收尾/验证段"
     );
-    // 收尾段引用 EXEC Mini 验证，不复制全文。
-    assert!(prompt.contains("Mini verification P0-P6"));
+    assert!(prompt.contains("For ordinary CHAT changes"));
+    assert!(prompt.contains("In PLAN or EXEC"));
+    assert!(prompt.contains("task_output"));
+    assert!(!prompt.contains("Mini verification"));
+}
+
+#[test]
+fn build_system_prompt_contains_output_conventions_section() {
+    let prompt = build_system_prompt("/tmp");
+    assert!(prompt.contains("Output conventions"));
+    assert!(prompt.contains("clickable file link"));
+    assert!(prompt.contains("![mockup](docs/mockup.png)"));
+    assert!(prompt.contains("use `![alt](path)` only"));
+    assert!(prompt.contains("Do not emit `file://`, `vscode://`"));
+    assert!(prompt.contains(
+        "Only local workspace or temporary-directory filesystem paths can render inline"
+    ));
+    assert!(prompt.contains("workspace-relative path"));
+    assert!(prompt.contains("Do not emit bare filenames"));
 }
 
 #[test]
@@ -106,6 +205,9 @@ fn build_system_prompt_injects_aggregated_tool_guidelines() {
 fn new_sections_sit_in_priority_order() {
     let prompt = build_system_prompt("/tmp");
     let tool_pos = prompt.find("Guidelines:").expect("tool instructions");
+    let output_pos = prompt
+        .find("Output conventions")
+        .expect("output conventions");
     let parallel_pos = prompt.find("Parallel tool calls").expect("parallel");
     let paged_pos = prompt.find("Tool result persisted").expect("paged");
     let bg_pos = prompt.find("Background bash tasks").expect("background");
@@ -113,12 +215,16 @@ fn new_sections_sit_in_priority_order() {
         .find("Finishing and verifying")
         .expect("verification");
     let ctx_pos = prompt
-        .find("Current date and time:")
+        .find("Agent workspace directory (agent_workspace_dir):")
         .expect("workspace ctx");
-    // tool(20) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
+    // tool(20) < output(21) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
     assert!(
-        tool_pos < parallel_pos,
-        "parallel 应在 tool_instructions 之后"
+        tool_pos < output_pos,
+        "output conventions 应在 tool_instructions 之后"
+    );
+    assert!(
+        output_pos < parallel_pos,
+        "output conventions 应在 parallel 之前"
     );
     assert!(parallel_pos < paged_pos, "parallel 应在 paged 之前");
     assert!(paged_pos < bg_pos, "paged 应在 background 之前");
@@ -180,7 +286,290 @@ fn custom_section_appears_in_output() {
     assert!(output.contains("CUSTOM_CONTENT"));
 }
 
-// ── WorkspaceStateSection（plan §8 / PR-8） ──────────────────────────────────
+#[test]
+fn system_prompt_reflects_runtime_permission_skill_and_plugin_tool_changes() {
+    let baseline = build_system_prompt_with_state(fixture_context(), fixture_state());
+
+    let mut permission_state = fixture_state();
+    permission_state.read_write.push(WorkspaceRootDescriptor {
+        path: "/Users/yan/newly-authorized".into(),
+        label: "session_grant".into(),
+        alias: None,
+        description: Some("granted during the session".into()),
+    });
+    let permission_changed = build_system_prompt_with_state(fixture_context(), permission_state);
+    assert_ne!(baseline, permission_changed);
+    assert!(permission_changed.contains("/Users/yan/newly-authorized"));
+
+    let skills = fixture_skill_set();
+    let skills_baseline = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let mut changed_skills = fixture_skill_set();
+    changed_skills.by_name.insert(
+        "deploy".into(),
+        Skill {
+            name: "deploy".into(),
+            description: "Deploy the current release".into(),
+            file_path: PathBuf::from("/tmp/deploy/SKILL.md"),
+            base_dir: PathBuf::from("/tmp/deploy"),
+            source: SkillSource::Project,
+            allowed_tools: Some(vec!["bash".into()]),
+            disable_model_invocation: false,
+        },
+    );
+    let skills_changed = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&changed_skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert_ne!(skills_baseline, skills_changed);
+    assert!(skills_changed.contains("Deploy the current release"));
+
+    let mut plugin_context = fixture_context();
+    plugin_context.tool_lines = Some(format!(
+        "{}\n- plugin_echo: Echo text through the plugin runtime.",
+        crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(false)
+    ));
+    let plugin_changed = build_system_prompt_with_state(plugin_context, fixture_state());
+    assert_ne!(baseline, plugin_changed);
+    assert!(plugin_changed.contains("plugin_echo"));
+}
+
+#[test]
+fn stable_system_prompt_excludes_runtime_workspace_state() {
+    let skills = fixture_skill_set();
+    let first = build_system_prompt_with_skills(
+        fixture_context(),
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let second = build_system_prompt_with_skills(
+        fixture_context(),
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert_eq!(first, second);
+    assert!(!first.contains("Workspace State"));
+
+    let mut granted = fixture_state();
+    granted.read_write.push(WorkspaceRootDescriptor {
+        path: "/Users/yan/newly-authorized".into(),
+        label: "session_grant".into(),
+        alias: None,
+        description: Some("granted during the session".into()),
+    });
+    let runtime_tail = WorkspaceStateSection::new(granted).render(&fixture_context());
+    assert!(runtime_tail.contains("/Users/yan/newly-authorized"));
+    assert!(!first.contains("/Users/yan/newly-authorized"));
+}
+
+#[test]
+fn user_instructions_invalidate_snapshot_without_leaking_into_default_builders() {
+    let context = fixture_context();
+    let surface = ToolSurface::from_plugin_tools(false, &[]);
+    let rules = "## User Custom Instructions\n\n### Source: .cursor/rules/team.mdc\nDescription: team\nRULE_OLD";
+    let mut snapshot = SystemPromptSnapshot::new(&context, &surface, None, None, 400_000, rules);
+    assert!(snapshot.system_text().contains(rules));
+    assert!(!snapshot.refresh(&context, &surface, None, None, 400_000, rules));
+    assert!(snapshot.refresh(
+        &context,
+        &surface,
+        None,
+        None,
+        400_000,
+        &rules.replace("OLD", "NEW")
+    ));
+    assert!(!snapshot.system_text().contains("RULE_OLD"));
+    assert!(snapshot.refresh(&context, &surface, None, None, 400_000, ""));
+    assert!(!snapshot.system_text().contains("User Custom Instructions"));
+    assert!(
+        !SystemPromptSnapshot::new(&context, &surface, None, None, 400_000, "")
+            .system_text()
+            .contains("RULE_OLD")
+    );
+}
+
+fn plugin_tool(name: &str, description: &str) -> crate::core::tools::contract::registry::Tool {
+    crate::core::tools::contract::registry::Tool {
+        name: name.to_string(),
+        label: name.to_string(),
+        description: description.to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+        plugin_id: "test-plugin".to_string(),
+        is_enabled: true,
+        created_at: 0,
+    }
+}
+
+#[test]
+fn system_prompt_snapshot_reuses_unchanged_surface_and_rebuilds_with_plugin_change() {
+    let skills = fixture_skill_set();
+    let context = fixture_context();
+    let first_surface =
+        ToolSurface::from_plugin_tools(false, &[plugin_tool("plugin_alpha", "alpha tool")]);
+    let mut snapshot = SystemPromptSnapshot::new(
+        &context,
+        &first_surface,
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+        "",
+    );
+    let stable_text = snapshot.system_text().to_string();
+    let stable_tools = snapshot.tool_definitions().to_vec();
+    let stable_signature = snapshot.signature().to_string();
+
+    assert!(
+        !snapshot.refresh(
+            &context,
+            &first_surface,
+            Some(&skills),
+            Some(&SkillsConfig::default()),
+            400_000,
+            "",
+        ),
+        "unchanged prompt inputs must preserve a byte-identical snapshot"
+    );
+    assert_eq!(snapshot.system_text(), stable_text);
+    assert_eq!(snapshot.tool_definitions(), stable_tools);
+    assert_eq!(snapshot.signature(), stable_signature);
+
+    let changed_surface = ToolSurface::from_plugin_tools(
+        false,
+        &[
+            plugin_tool("plugin_alpha", "alpha tool"),
+            plugin_tool("plugin_beta", "beta tool"),
+        ],
+    );
+    assert!(
+        snapshot.refresh(
+            &context,
+            &changed_surface,
+            Some(&skills),
+            Some(&SkillsConfig::default()),
+            400_000,
+            "",
+        ),
+        "a plugin catalog change must rebuild both representations together"
+    );
+    assert!(snapshot.system_text().contains("- plugin_beta: beta tool"));
+    assert_ne!(snapshot.signature(), stable_signature);
+    let tool_names = snapshot
+        .tool_definitions()
+        .iter()
+        .filter_map(|definition| definition["function"]["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(tool_names.contains(&"plugin_beta"));
+}
+
+#[test]
+fn tool_surface_is_byte_stable_when_registry_observation_order_changes() {
+    let alpha = plugin_tool("plugin_alpha", "alpha tool");
+    let beta = plugin_tool("plugin_beta", "beta tool");
+    let alphabetic = ToolSurface::from_plugin_tools(false, &[alpha.clone(), beta.clone()]);
+    let reverse_observation = ToolSurface::from_plugin_tools(false, &[beta, alpha]);
+
+    assert_eq!(
+        alphabetic.signature(),
+        reverse_observation.signature(),
+        "the registry may not perturb cache affinity by changing observation order"
+    );
+    assert_eq!(
+        alphabetic.function_definitions(),
+        reverse_observation.function_definitions()
+    );
+    assert_eq!(
+        alphabetic.identity_tool_lines(),
+        reverse_observation.identity_tool_lines()
+    );
+}
+
+#[test]
+fn deferred_connector_surface_is_static_and_does_not_contain_mcp_schemas() {
+    let before_any_mcp_connects = ToolSurface::from_plugin_tools_with_policies(false, true, &[]);
+    let after_many_mcp_catalog_changes =
+        ToolSurface::from_plugin_tools_with_policies(false, true, &[]);
+    let disabled = ToolSurface::from_plugin_tools_with_policies(false, false, &[]);
+
+    assert_eq!(
+        before_any_mcp_connects.signature(),
+        after_many_mcp_catalog_changes.signature(),
+        "connection lifecycle never participates in the prompt-facing surface"
+    );
+    let deferred_names = before_any_mcp_connects
+        .function_definitions()
+        .iter()
+        .filter_map(|definition| definition["function"]["name"].as_str())
+        .filter(|name| name.starts_with("tool_"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deferred_names,
+        vec!["tool_call", "tool_describe", "tool_run_code", "tool_search"]
+    );
+    assert!(
+        !before_any_mcp_connects
+            .identity_tool_lines()
+            .contains("mcp__fake__capture"),
+        "no concrete MCP name or schema may reach the cache prefix; the constant canonical-name syntax is allowed"
+    );
+    assert!(
+        !disabled
+            .function_definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"].as_str() == Some("tool_search")),
+        "the stable surface is gated by config, not connection state"
+    );
+}
+
+#[test]
+fn connectors_skill_index_is_static_in_the_prompt_cache_signature() {
+    let context = fixture_context();
+    let skills = fixture_skill_set();
+    let surface = ToolSurface::from_plugin_tools_with_policies(true, true, &[]);
+    let first = SystemPromptSnapshot::new(
+        &context,
+        &surface,
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+        "",
+    );
+    let after_connector_catalog_changes = SystemPromptSnapshot::new(
+        &context,
+        &surface,
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+        "",
+    );
+
+    assert_eq!(
+        first.system_text(),
+        after_connector_catalog_changes.system_text(),
+        "the skill index remains static while tool_search carries live connector data"
+    );
+    assert_eq!(
+        first.signature(),
+        after_connector_catalog_changes.signature(),
+        "the prompt-cache signature must include a byte-stable connectors entry"
+    );
+    assert!(
+        first.system_text().contains(
+            "<skill name=\"connectors\">Discover and invoke deferred connector tools through tool_search, tool_describe, and tool_call; use code only for fan-out or local result reduction.</skill>"
+        ),
+        "connectors must contribute fixed metadata only, never a live MCP catalog"
+    );
+    assert!(!first.system_text().contains("mcp__playwright__"));
+}
 
 fn fixture_state() -> WorkspaceState {
     WorkspaceState {
@@ -236,14 +625,16 @@ fn fixture_context() -> WorkspaceContext {
 
 #[test]
 fn workspace_state_section_renders_read_write() {
-    let s = WorkspaceStateSection::new(fixture_state()).render(&fixture_context());
+    let state = fixture_state();
+    let description = state.read_write[1].description.clone().unwrap();
+    let s = WorkspaceStateSection::new(state).render(&fixture_context());
     assert!(s.contains("Workspace State"));
     assert!(s.contains("/Users/yan/.tomcat/workspace-main"));
     assert!(s.contains("[agent_definition_dir]"));
     assert!(!s.contains("[agent_workspace_dir]"));
     assert!(s.contains("/Users/yan/scratch"));
     assert!(s.contains("alias=scratch"));
-    assert!(s.contains("desc=\"用户附加根\""));
+    assert!(s.contains(&format!("desc={description:?}")));
     assert!(!s.contains("[dragged_path]"));
 }
 
@@ -311,7 +702,7 @@ fn build_system_prompt_with_state_includes_workspace_state() {
     assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("edit"));
     assert!(!prompt.contains("edit_file"));
-    assert!(prompt.contains("Current date and time"));
+    assert!(!prompt.contains("Current date and time"));
 }
 
 #[test]
@@ -321,7 +712,7 @@ fn workspace_state_priority_between_paged_reading_and_workspace_context() {
     let paged_pos = prompt.find("Tool result persisted").expect("paged section");
     let state_pos = prompt.find("Workspace State").expect("state section");
     let ctx_pos = prompt
-        .find("Current date and time:")
+        .find("Agent workspace directory (agent_workspace_dir):")
         .expect("workspace ctx");
     assert!(paged_pos < state_pos, "state 应在 paged 之后");
     assert!(state_pos < ctx_pos, "state 应在 workspace ctx 之前");
@@ -468,6 +859,23 @@ fn fixture_skill_set() -> SkillSet {
             source: SkillSource::Project,
             allowed_tools: None,
             disable_model_invocation: true,
+        },
+    );
+    by_name.insert(
+        "connectors".into(),
+        Skill {
+            name: "connectors".into(),
+            description: "Discover and invoke deferred connector tools through tool_search, tool_describe, and tool_call; use code only for fan-out or local result reduction.".into(),
+            file_path: PathBuf::from("/tmp/connectors/SKILL.md"),
+            base_dir: PathBuf::from("/tmp/connectors"),
+            source: SkillSource::Managed,
+            allowed_tools: Some(vec![
+                "tool_search".into(),
+                "tool_describe".into(),
+                "tool_call".into(),
+                "tool_run_code".into(),
+            ]),
+            disable_model_invocation: false,
         },
     );
     SkillSet {

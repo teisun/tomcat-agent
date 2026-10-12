@@ -30,7 +30,7 @@
 
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
-| **TodoItem** | 单个最小执行步骤 | `TodoItem { id, content, status }` | `id` 在同一份 TodoFile 内唯一；`status ∈ {pending, in_progress, completed, cancelled}`；同一文件最多一个 `in_progress` | 一条待办，且一次只能真正在做一条。 |
+| **TodoItem** | 单个最小执行步骤 | `TodoItem { id, content, status }` | `id` 在同一份 TodoFile 内唯一；`status ∈ {pending, in_progress, completed, cancelled}`；同一文件最多三个互不依赖的 `in_progress` | 一条待办；互不依赖时可并行最多三条。 |
 | **TodoFile** | 一份 session-local scratchpad 文件 | `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md` | frontmatter 记录 `todos_id` / `session_id` / `title?` / `created_at` / `schema_version`；正文固定 `## Todos` 列表 | 一份清单一个文件。 |
 | **`active_todos_id`** | 当前 session 正在使用的 scratchpad 逻辑 id | `PlanRuntime.active_todos_id`（仅内存） | 首次调用时自动生成；`new_todos=true` 时显式切换到新 id；**不参与文件命名** | 当前会话“正在用哪块白板”的内存指针。 |
 | **`new_todos`** | 清空当前 scratchpad 并重新开始 | `todos` 顶层布尔入参 | 以空列表作为初始状态，再应用本次 `ops`；同一 `session_id` 文件被覆盖写 | 换一块新白板，但文件路径不变。 |
@@ -70,7 +70,7 @@
 | G2 | `todos` 永远只写 session TodoFile，不写 PlanFile | 工具职责单一，不和 `update_plan` 重叠。 |
 | G3 | 与 `update_plan` 共享同一套 todo-op 语义（`upsert` / `set_status` / `remove`） | LLM 在两个工具间切换时不用重新学习一套 op。 |
 | G4 | `new_todos` / `title` / `replace` 只影响 session scratchpad | 新建白板、命名白板、整表替换都只发生在本地清单。 |
-| G5 | 同一份 TodoFile 最多一个 `in_progress` | 避免清单失真。 |
+| G5 | 同一份 TodoFile 最多三个互不依赖的 `in_progress` | 允许有限并行，同时避免面板失焦。 |
 | G6 | 成功调用总是返回完整 `items` 快照 | LLM 无需再 `read` `.todo.md` 才知道当前状态。 |
 | G7 | 持久化是增强项，不是主流程前提 | 即使磁盘异常，内存态也能继续推进。 |
 | G8 | TodosPanel 只消费 `panel_snapshot_id + items` 快照 | UI 不额外保留第二份“真相”。 |
@@ -131,7 +131,7 @@ checkbox 与状态的映射：
 
 - `ops` 必须全部是 `kind = "upsert"`；
 - `ops` 不能为空；
-- 替换后的整表仍要满足“最多一个 `in_progress`”。
+- 替换后的整表仍要满足“最多三个互不依赖的 `in_progress`”。
 
 这保证 `todos` 和 `update_plan` 在“重写一组待办”这件事上的协议一致。
 
@@ -154,7 +154,7 @@ checkbox 与状态的映射：
 ```json
 {
   "name": "todos",
-  "description": "Track a session-local todo list (a personal scratchpad you can keep across tool calls).\n\nWhen to use: any multi-step work (3+ distinct steps), multiple user tasks, or whenever you want a checklist to keep yourself organized across turns. Mark one item in_progress before starting it; mark it completed as soon as it's done.\n\nWhen NOT to use: single trivial step or pure Q&A.\n\nReturn value: every successful call returns a full items snapshot under `items` (id/content/status). You do NOT need to re-read the file to know the current state.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress at any time; use ops (upsert/set_status/remove) or replace=true for full list replacement. new_todos=true clears the current scratchpad and overwrites the same `todos/<session_id>.todo.md` file.",
+  "description": "Track a session-local todo list (a personal scratchpad you can keep across tool calls).\n\nWhen to use: any multi-step work (3+ distinct steps), multiple user tasks, or whenever you want a checklist to keep yourself organized across turns. Mark an item in_progress before starting it; mark it completed as soon as it's done. At most three independent todos may be in_progress.\n\nWhen NOT to use: single trivial step or pure Q&A.\n\nReturn value: every successful call returns a full items snapshot under `items` (id/content/status). You do NOT need to re-read the file to know the current state.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most three independent in_progress at any time; use ops (upsert/set_status/remove) or replace=true for full list replacement. new_todos=true clears the current scratchpad and overwrites the same `todos/<session_id>.todo.md` file.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -220,7 +220,7 @@ checkbox 与状态的映射：
 返回约束：
 
 - `items` 始终是**完整快照**；
-- `active_in_progress` 为当前唯一 `in_progress` 的 `id`，否则为 `null`；
+- `active_in_progress` 为列表中**第一条** `in_progress` 的 `id`（允许多个时仍只投影一条给面板），否则为 `null`；
 - `panel_snapshot_id` 来自 `TodosPanelSnapshot`，UI 用它做去重 / 防回退；
 - `scope` 对 `todos` 固定为 `"session"`。
 
@@ -234,7 +234,7 @@ checkbox 与状态的映射：
 
 | 约束 | 处理 | 说人话 |
 |------|------|--------|
-| 两条 todo 同时 `in_progress` | tool error，整批回滚 | 一次只准真正在做一条。 |
+| 超过三条 todo 同时 `in_progress` | tool error，整批回滚 | 最多三个互不依赖并行；第四个硬拒。 |
 | `set_status` / `remove` 指向未知 `id` | tool error | 不能瞎编 id。 |
 | `replace=true` 但 `ops` 含非 `upsert` | tool error | 整表替换只能给最终态。 |
 | `replace=true` 且 `ops` 为空 | tool error | 不允许靠空替换清空表。 |
@@ -294,7 +294,7 @@ CLI 默认渲染形态：
 | 类型 | 测试 | 说人话 |
 |------|------|--------|
 | 单元：全模式可见 | `todos_visible_in_all_modes` | 任何模式都要能调 `todos`。 |
-| 单元：单进行中约束 | `todos_state_enforces_single_in_progress` | 两个进行中必须拒绝。 |
+| 单元：in_progress 上限 | `todos_state_allows_independent_in_progress_items` / `ops_test::allows_three_in_progress_but_rejects_four_after_batch` | 最多三个互不依赖；第四个硬拒。 |
 | 单元：TodoFile round-trip | `todo_file_roundtrips_markdown_with_status_checkboxes` | `.todo.md` 要能稳定序列化。 |
 | 单元：new_todos 覆盖 | `todos_new_todos_overwrites_same_session_file` | 换新白板会覆盖同一个 session 文件。 |
 | 单元：多 session 隔离 | `todos_runtime_isolates_multiple_sessions_without_purge` | 不同 session_id 各写各的文件，互不影响。 |

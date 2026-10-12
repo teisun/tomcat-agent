@@ -1,7 +1,7 @@
 //! `ask_question` 工具实现（plan-runtime.md §AQ-A/B/C/E, [ask-question.md]）。
 //!
 //! 语义：
-//! - 仅 `Planning` 模式可见；EXEC/CHAT/Pending/Completed 调用 → `InvisibleInMode`。
+//! - 计划执行时不可用；其它会话阶段均可调用。
 //! - 入参校验：
 //!   - `questions.len() ∈ [1, 4]`
 //!   - 每题 `options.len() ∈ [2, 4]`、`option.id` 唯一、保留 `__custom__` 拒
@@ -12,111 +12,85 @@
 //! - **选中 `__custom__`** → 必带 `custom_text`（非空、≤ 500）；
 //!   未选中 `__custom__` → 不得携带 `custom_text`（防止 LLM 误用）。
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use crate::core::plan_runtime::{
-    panels::{AskQuestionPanel, AskQuestionResult, Question, CUSTOM_OPTION_ID},
-    state::PlanState,
+    panels::{
+        AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
+        AskQuestionTermination, Question, CUSTOM_OPTION_ID,
+    },
     PlanRuntime,
 };
 
 use super::ToolError;
 
-/// `ask_question` 执行入口。`panel` 通常来自 `ChatContext.ask_question_panel`；
-/// `cancel_signal` 来自 chat_loop 当前回合的 `CancellationToken` adapter。
-///
-/// N13：等待用户回答的墙钟超时取自（优先级从高到低）：
-/// 1. 环境变量 `TOMCAT_ASK_QUESTION_TIMEOUT_MS`（解析失败/0 视为不超时）；
-/// 2. `[ask_question].timeout_ms`（由 caller 通过 [`execute_with_timeout`] 传入）；
-/// 3. 默认 300_000 ms（5 分钟）。
-///
-/// 超时后返回 `cancelled: true` 而非 `Err`——与 Ctrl-C 路径同口径。
+/// `ask_question` execution entry. It has deliberately no deadline: only a user response,
+/// explicit turn interruption, or an unrecoverable host-channel closure may settle the wait.
 pub async fn execute(
     runtime: &PlanRuntime,
     panel: &dyn AskQuestionPanel,
     raw_args: &serde_json::Value,
-    cancel_signal: Arc<AtomicBool>,
+    termination: AskQuestionTermination,
 ) -> Result<serde_json::Value, ToolError> {
-    execute_with_timeout(runtime, panel, raw_args, cancel_signal, None).await
+    execute_for_tool(runtime, panel, raw_args, termination, None).await
 }
 
-/// 与 [`execute`] 同语义，但显式接受 caller 提供的超时（毫秒）。`config_timeout_ms == Some(0)`
-/// 或环境变量 `TOMCAT_ASK_QUESTION_TIMEOUT_MS=0` 表示无超时。
-pub async fn execute_with_timeout(
+pub async fn execute_for_tool(
     runtime: &PlanRuntime,
     panel: &dyn AskQuestionPanel,
     raw_args: &serde_json::Value,
-    cancel_signal: Arc<AtomicBool>,
-    config_timeout_ms: Option<u64>,
+    termination: AskQuestionTermination,
+    tool_call_id: Option<&str>,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    // B11：CHAT / Planning / Pending / Completed 都可见；EXEC 隐藏（防止 agent loop 阻塞）。
-    if matches!(mode, PlanState::Executing { .. }) {
-        return Err(ToolError::InvisibleInMode {
+    // Executing plans reject questions to avoid blocking the agent loop.
+    if runtime.executing_plan_id().is_some() {
+        return Err(ToolError::RejectedInMode {
             tool: "ask_question",
             mode: mode.as_str().to_string(),
+            guidance: "The plan is executing; record any clarification needed as an open question in the plan".into(),
         });
     }
     let questions = parse_and_validate_questions(raw_args)?;
-    let timeout_ms = resolve_timeout_ms(config_timeout_ms);
-    let ask_fut = panel.ask(questions.clone(), cancel_signal);
-    let result = if let Some(ms) = timeout_ms {
-        match tokio::time::timeout(std::time::Duration::from_millis(ms), ask_fut).await {
-            Ok(r) => r,
-            Err(_) => AskQuestionResult {
-                cancelled: true,
-                answers: vec![],
+    let result = panel
+        .ask_with_identity(
+            AskQuestionIdentity {
+                session_id: runtime.current_session_id(),
+                tool_call_id: tool_call_id.map(str::to_owned),
             },
-        }
-    } else {
-        ask_fut.await
-    };
-    if result.cancelled {
-        let payload = serde_json::json!({
-            "cancelled": true,
-            "answers": [],
-        });
-        write_ask_question_transcript(runtime, &questions, &payload);
-        return Ok(payload);
+            questions.clone(),
+            termination,
+        )
+        .await;
+    if matches!(result.outcome, AskQuestionOutcome::Answered) {
+        validate_answers(&questions, &result)?;
+    } else if !result.answers.is_empty() {
+        return Err(ToolError::Internal(format!(
+            "terminal ask_question outcome {:?} must not carry answers",
+            result.outcome
+        )));
     }
-    validate_answers(&questions, &result)?;
     let payload = answer_to_json(&result);
-    write_ask_question_transcript(runtime, &questions, &payload);
+    write_ask_question_transcript(runtime, &questions, &payload, tool_call_id);
     Ok(payload)
-}
-
-/// 解析超时（毫秒）：env > config > 默认 300_000。`Some(0)` / env `0` → `None`（不超时）。
-fn resolve_timeout_ms(config_timeout_ms: Option<u64>) -> Option<u64> {
-    if let Ok(s) = std::env::var("TOMCAT_ASK_QUESTION_TIMEOUT_MS") {
-        if let Ok(n) = s.trim().parse::<u64>() {
-            return if n == 0 { None } else { Some(n) };
-        }
-    }
-    let cfg = config_timeout_ms.unwrap_or(300_000);
-    if cfg == 0 {
-        None
-    } else {
-        Some(cfg)
-    }
 }
 
 fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>, ToolError> {
     let questions: Vec<Question> = match raw.get("questions") {
         Some(v) => serde_json::from_value(v.clone())
-            .map_err(|e| ToolError::BadArgs(format!("questions 反序列化失败: {e}")))?,
+            .map_err(|e| ToolError::BadArgs(format!("Could not deserialize questions: {e}")))?,
         None => {
             return Err(ToolError::BadArgs(
-                "ask_question 缺少 questions 字段".into(),
+                "ask_question requires a questions field".to_string(),
             ))
         }
     };
     if questions.is_empty() {
-        return Err(ToolError::BadArgs("questions 至少 1 题".into()));
+        return Err(ToolError::BadArgs(
+            "questions must contain at least one question".to_string(),
+        ));
     }
     if questions.len() > 4 {
         return Err(ToolError::BadArgs(format!(
-            "questions 最多 4 题，当前 {}",
+            "questions allows at most 4 questions; received {}",
             questions.len()
         )));
     }
@@ -124,7 +98,10 @@ fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>
     let mut seen_qid = std::collections::HashSet::new();
     for q in &questions {
         if !seen_qid.insert(&q.id) {
-            return Err(ToolError::BadArgs(format!("question.id 重复: {}", q.id)));
+            return Err(ToolError::BadArgs(format!(
+                "Duplicate question.id: {}",
+                q.id
+            )));
         }
         validate_single_question(q)?;
     }
@@ -134,13 +111,13 @@ fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>
 fn validate_single_question(q: &Question) -> Result<(), ToolError> {
     if q.prompt.trim().is_empty() {
         return Err(ToolError::BadArgs(format!(
-            "question {}: prompt 不可为空",
+            "question {}: prompt cannot be empty",
             q.id
         )));
     }
     if q.options.len() < 2 || q.options.len() > 4 {
         return Err(ToolError::BadArgs(format!(
-            "question {}: options 必须 2-4 个，当前 {}",
+            "question {}: options must contain 2–4 entries; received {}",
             q.id,
             q.options.len()
         )));
@@ -150,19 +127,19 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
     for opt in &q.options {
         if opt.id == CUSTOM_OPTION_ID {
             return Err(ToolError::BadArgs(format!(
-                "question {}: option.id 不得使用保留值 \"{}\"",
-                q.id, CUSTOM_OPTION_ID
+                "question {}: option.id cannot use reserved value \"{CUSTOM_OPTION_ID}\"",
+                q.id
             )));
         }
         if !seen.insert(&opt.id) {
             return Err(ToolError::BadArgs(format!(
-                "question {}: option.id 重复 \"{}\"",
+                "question {}: duplicate option.id \"{}\"",
                 q.id, opt.id
             )));
         }
         if opt.label.trim().is_empty() {
             return Err(ToolError::BadArgs(format!(
-                "question {}: option {} label 不可为空",
+                "question {}: option {} label cannot be empty",
                 q.id, opt.id
             )));
         }
@@ -171,10 +148,7 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
         }
     }
     if recommended_count != 1 {
-        return Err(ToolError::BadArgs(format!(
-            "question {}: 必须**恰好**一个 recommended=true 选项（当前 {}）",
-            q.id, recommended_count
-        )));
+        return Err(ToolError::BadArgs(format!("question {}: exactly one option must have recommended=true (received {recommended_count})", q.id)));
     }
     Ok(())
 }
@@ -182,7 +156,7 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
 fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Result<(), ToolError> {
     if result.answers.len() != questions.len() {
         return Err(ToolError::Internal(format!(
-            "panel 返回答案数 {} 与问题数 {} 不一致",
+            "Panel returned {} answers for {} questions",
             result.answers.len(),
             questions.len()
         )));
@@ -190,26 +164,26 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
     for (q, ans) in questions.iter().zip(result.answers.iter()) {
         if ans.question_id != q.id {
             return Err(ToolError::Internal(format!(
-                "panel 返回 question_id={} 与问题 {} 不匹配",
+                "Panel returned question_id={}, which does not match question {}",
                 ans.question_id, q.id
             )));
         }
         if ans.skipped {
             if !ans.option_ids.is_empty() {
                 return Err(ToolError::Internal(format!(
-                    "question {}: skipped=true 时 option_ids 必须为空",
+                    "question {}: skipped=true requires empty option_ids",
                     q.id
                 )));
             }
             if ans.custom_text.is_some() {
                 return Err(ToolError::Internal(format!(
-                    "question {}: skipped=true 时不应携带 custom_text",
+                    "question {}: skipped=true must not include custom_text",
                     q.id
                 )));
             }
             if ans.picked_recommended {
                 return Err(ToolError::Internal(format!(
-                    "question {}: skipped=true 时 picked_recommended 必须为 false",
+                    "question {}: skipped=true requires picked_recommended=false",
                     q.id
                 )));
             }
@@ -217,7 +191,7 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
         }
         if ans.option_ids.len() != 1 {
             return Err(ToolError::Internal(format!(
-                "question {}: 单选题应只选 1 个，实际 {}",
+                "question {}: exactly 1 choice is required; received {}",
                 q.id,
                 ans.option_ids.len()
             )));
@@ -225,16 +199,13 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
         let has_custom = ans.option_ids.iter().any(|id| id == CUSTOM_OPTION_ID);
         if has_custom {
             let text = ans.custom_text.as_deref().unwrap_or("");
-            if text.is_empty() || text.len() > 500 {
-                return Err(ToolError::Internal(format!(
-                    "question {}: 选中 __custom__ 时 custom_text 必须 1-500 字符（当前 {}）",
-                    q.id,
-                    text.len()
-                )));
+            let char_count = text.chars().count();
+            if char_count == 0 || char_count > 500 {
+                return Err(ToolError::Internal(format!("question {}: selecting __custom__ requires custom_text of 1–500 characters (received {char_count})", q.id)));
             }
         } else if ans.custom_text.is_some() {
             return Err(ToolError::Internal(format!(
-                "question {}: 未选 __custom__ 时不应携带 custom_text",
+                "question {}: custom_text must not be present unless __custom__ is selected",
                 q.id
             )));
         }
@@ -245,8 +216,8 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
             }
             if !q.options.iter().any(|o| &o.id == oid) {
                 return Err(ToolError::Internal(format!(
-                    "question {}: 答案中含未知 option_id={}",
-                    q.id, oid
+                    "question {}: answer contains unknown option_id={oid}",
+                    q.id
                 )));
             }
         }
@@ -256,7 +227,8 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
 
 fn answer_to_json(result: &AskQuestionResult) -> serde_json::Value {
     serde_json::json!({
-        "cancelled": result.cancelled,
+        "outcome": result.outcome,
+        "cancelled": result.legacy_cancelled(),
         "answers": result
             .answers
             .iter()
@@ -282,6 +254,7 @@ fn write_ask_question_transcript(
     runtime: &PlanRuntime,
     questions: &[Question],
     payload: &serde_json::Value,
+    tool_call_id: Option<&str>,
 ) {
     let mut extra = serde_json::json!({
         "event": crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
@@ -289,13 +262,15 @@ fn write_ask_question_transcript(
         "result": payload,
         "mode": runtime.mode().as_str(),
     });
-    let plan_id = runtime
-        .mode()
-        .active_plan_id()
-        .map(ToOwned::to_owned)
-        .or_else(|| runtime.active_planning_plan_id());
+    let plan_id = runtime.active_plan().map(|plan| plan.id);
     if let (Some(obj), Some(plan_id)) = (extra.as_object_mut(), plan_id) {
         obj.insert("plan_id".into(), serde_json::Value::String(plan_id));
+    }
+    if let (Some(obj), Some(tool_call_id)) = (extra.as_object_mut(), tool_call_id) {
+        obj.insert(
+            "tool_call_id".into(),
+            serde_json::Value::String(tool_call_id.to_string()),
+        );
     }
     runtime.write_transcript_custom(extra);
 }

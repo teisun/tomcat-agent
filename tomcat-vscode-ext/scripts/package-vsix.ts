@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import { assertBuildArtifacts } from "./buildArtifacts";
 
 type PackageManifest = {
   name: string;
@@ -21,7 +22,10 @@ export const PREBUILT_VSIX_ENV = "TOMCAT_PREBUILT_VSIX";
 const REQUIRED_FILES = [
   "LICENSE",
   "README.md",
+  "README.zh.md",
   "package.json",
+  "package.nls.json",
+  "package.nls.zh-cn.json",
   "gui/dist/index.js",
   "media/icon.png",
   "media/tomcat.svg",
@@ -46,7 +50,10 @@ const ROOT_ASSETS = [
   "CHANGELOG.md",
   "LICENSE",
   "README.md",
+  "README.zh.md",
   "package.json",
+  "package.nls.json",
+  "package.nls.zh-cn.json",
 ] as const;
 
 const DIRECTORY_ASSETS = [
@@ -63,13 +70,19 @@ function run(command: string, args: string[], cwd: string, capture = false): str
   return capture ? result : "";
 }
 
-function resolveVsceBinary(extensionRoot: string): string {
+export const assertPrebuiltArtifactsFresh = assertBuildArtifacts;
+
+function resolveLocalBin(extensionRoot: string, name: string): string {
   return path.join(
     extensionRoot,
     "node_modules",
     ".bin",
-    process.platform === "win32" ? "vsce.cmd" : "vsce",
+    process.platform === "win32" ? `${name}.cmd` : name,
   );
+}
+
+function resolveVsceBinary(extensionRoot: string): string {
+  return resolveLocalBin(extensionRoot, "vsce");
 }
 
 function runVsce(
@@ -118,6 +131,9 @@ export function buildVscePackageArgs(outPath: string, target?: string): string[]
 }
 
 function shouldIncludeOutPath(relativePath: string): boolean {
+  if (path.posix.basename(relativePath) === ".DS_Store") {
+    return false;
+  }
   if (
     relativePath === "test" ||
     relativePath === "tests" ||
@@ -161,6 +177,9 @@ function copyFilteredOut(sourceRoot: string, targetRoot: string, relativePath = 
 function copyDirectory(sourcePath: string, targetPath: string): void {
   fs.mkdirSync(targetPath, { recursive: true });
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    if (entry.name === ".DS_Store") {
+      continue;
+    }
     const sourceChild = path.join(sourcePath, entry.name);
     const targetChild = path.join(targetPath, entry.name);
     if (entry.isDirectory()) {
@@ -218,11 +237,35 @@ export function listPublishableFiles(
     .filter((line) => line.length > 0);
 }
 
+/**
+ * Ask the same unzipper Cursor/VS Code uses. vsce can print DONE on a bad zip;
+ * we refuse to keep that file. Do not reimplement zip parsing here.
+ */
+export function assertVsixExtractable(vsixPath: string): void {
+  const extensionRoot = path.resolve(__dirname, "..");
+  const archivePath = path.resolve(vsixPath);
+  try {
+    execFileSync(
+      resolveLocalBin(extensionRoot, "tsx"),
+      [path.join(__dirname, "vsix-extractable.ts"), archivePath],
+      { cwd: extensionRoot, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
+    );
+  } catch (error) {
+    const stderr =
+      error && typeof error === "object" && "stderr" in error
+        ? String((error as { stderr: unknown }).stderr).trim()
+        : "";
+    throw new Error(
+      `VSIX is not extractable by Cursor/VS Code: ${stderr || archivePath}`,
+    );
+  }
+}
+
 export function assertPublishableFiles(
   fileList: readonly string[],
   options: Pick<PackageVsixOptions, "bundleBinaryPath" | "target"> = {},
 ): void {
-  const requiredFiles = [...REQUIRED_FILES];
+  const requiredFiles: string[] = [...REQUIRED_FILES];
   if (options.bundleBinaryPath) {
     requiredFiles.push(bundledExecutableRelativePath(options.target));
   }
@@ -240,6 +283,9 @@ export function assertPublishableFiles(
   }
 
   for (const file of fileList) {
+    if (path.posix.basename(file) === ".DS_Store") {
+      throw new Error(`VSIX source should not include macOS metadata: ${file}`);
+    }
     if (/^out\/.+\/tests\//.test(file)) {
       throw new Error(`VSIX source should not include compiled test output: ${file}`);
     }
@@ -254,6 +300,8 @@ export function packageVsix(options: PackageVsixOptions = {}): string {
 
   if (!options.skipBuild) {
     run("npm", ["run", "build"], extensionRoot);
+  } else {
+    assertPrebuiltArtifactsFresh(extensionRoot);
   }
   const publishRoot = preparePublishDirectory(extensionRoot, options);
   try {
@@ -265,6 +313,12 @@ export function packageVsix(options: PackageVsixOptions = {}): string {
       publishRoot,
       extensionRoot,
     );
+    try {
+      assertVsixExtractable(outPath);
+    } catch (error) {
+      fs.rmSync(outPath, { force: true });
+      throw error;
+    }
     return outPath;
   } finally {
     fs.rmSync(publishRoot, { force: true, recursive: true });
@@ -280,6 +334,7 @@ export function resolvePrebuiltVsixPath(env: NodeJS.ProcessEnv = process.env): s
   if (!fs.existsSync(resolved)) {
     throw new Error(`${PREBUILT_VSIX_ENV} points to a missing file: ${resolved}`);
   }
+  assertVsixExtractable(resolved);
   return resolved;
 }
 

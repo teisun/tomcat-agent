@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -211,4 +212,114 @@ async fn serve_writer_round_robins_across_sessions() {
     assert!(lines[0].contains("\"sessionId\":\"s1\""));
     assert!(lines[1].contains("\"sessionId\":\"s2\""));
     assert!(lines[2].contains("\"sessionId\":\"s1\""));
+}
+
+fn shell_preview(session: &str, call: &str, task: &str, output: &str, offset: u64) -> OutFrame {
+    OutFrame::Event(serde_json::json!({
+        "type": "tool_execution_update",
+        "sessionId": session,
+        "toolCallId": call,
+        "toolName": "bash",
+        "partialResult": {
+            "taskId": task,
+            "output": output,
+            "startOffset": offset,
+            "nextOffset": offset + output.len() as u64,
+            "truncated": false
+        }
+    }))
+}
+
+#[test]
+fn shell_previews_replace_by_tool_call_and_stay_bounded() {
+    let mut buffers = HashMap::new();
+    let mut order = VecDeque::new();
+    let mut global = VecDeque::new();
+    let config = WriterConfig {
+        delta_coalesce_ms: 0,
+        max_buffered_frames: 2,
+    };
+    enqueue_frame(
+        shell_preview("s", "c1", "t1", "old", 0),
+        &mut buffers,
+        &mut order,
+        &mut global,
+        config,
+    );
+    enqueue_frame(
+        shell_preview("s", "c2", "t2", "other", 0),
+        &mut buffers,
+        &mut order,
+        &mut global,
+        config,
+    );
+    enqueue_frame(
+        shell_preview("s", "c1", "t1", "latest", 3),
+        &mut buffers,
+        &mut order,
+        &mut global,
+        config,
+    );
+
+    let buffer = buffers.get("s").expect("session");
+    assert_eq!(buffer.frames.len(), 2);
+    let latest = buffer
+        .frames
+        .iter()
+        .find(|frame| shell_preview_key(&frame.frame).as_deref() == Some("c1"))
+        .expect("c1");
+    let OutFrame::Event(value) = &latest.frame else {
+        panic!("event")
+    };
+    assert_eq!(value["partialResult"]["output"], "latest");
+    assert_eq!(value["partialResult"]["truncated"], true);
+}
+
+#[test]
+fn shell_preview_pressure_never_drops_completion_or_task_output_updates() {
+    let mut buffers = HashMap::new();
+    let mut order = VecDeque::new();
+    let mut global = VecDeque::new();
+    let config = WriterConfig {
+        delta_coalesce_ms: 0,
+        max_buffered_frames: 1,
+    };
+    enqueue_frame(
+        shell_preview("s", "c1", "t1", "preview", 0),
+        &mut buffers,
+        &mut order,
+        &mut global,
+        config,
+    );
+    enqueue_frame(
+        event("s", "tool_execution_end", None),
+        &mut buffers,
+        &mut order,
+        &mut global,
+        config,
+    );
+    enqueue_frame(
+        OutFrame::Event(serde_json::json!({
+            "type": "tool_execution_update",
+            "sessionId": "s",
+            "toolCallId": "task-output-call",
+            "toolName": "task_output",
+            "partialResult": {"taskId": "t1", "output": "countdown"}
+        })),
+        &mut buffers,
+        &mut order,
+        &mut global,
+        config,
+    );
+
+    let buffer = buffers.get("s").expect("session");
+    assert!(buffer
+        .frames
+        .iter()
+        .any(|frame| frame.frame.wire_type() == Some("tool_execution_end")));
+    assert!(buffer.frames.iter().any(|frame| match &frame.frame {
+        OutFrame::Event(value) =>
+            value.get("toolName").and_then(serde_json::Value::as_str) == Some("task_output"),
+        _ => false,
+    }));
 }

@@ -9,35 +9,44 @@ use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
-use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan_scoped, replay_requirement_for_profile, CaptureMode,
-    ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
+    plan_scoped, replay_requirement_for_profile, CaptureMode, ProviderCompatProfile, ReplayAction,
+    ReplayDowngradeReport, ReplayWindow,
 };
-use crate::infra::config::LlmRuntimeConfig;
+use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::AppError;
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
-    llm_http_status_error, llm_http_status_error_with_stage, LlmErrorStage,
+    llm_http_status_error, llm_http_status_error_with_stage, llm_stream_interrupted_error,
+    LlmErrorStage,
 };
 
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
-use super::super::retry_delay::provider_retry_delay;
+use super::super::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
+use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
+use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse,
-    ContinuityMetadata, ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatRequest, ChatResponse, ContinuityMetadata,
+    FileSource, ImageSource, ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource,
     TokenUsage,
 };
-use crate::core::llm::{degrade_unsupported_multimodal, Capabilities};
+use crate::core::llm::{
+    build_openai_compatible_files_adapter, degrade_unsupported_multimodal, Capabilities,
+    FilesApiProviderContext,
+};
+
+use crate::infra::i18n::tr;
 
 const PROVIDER_NAME: &str = "openai";
 
@@ -45,7 +54,10 @@ fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::IdleTimeout,
-        format!("流式空闲超时: stream_timeout_sec={}s", stream_timeout_sec),
+        tr(
+            "llm.idleTimeout",
+            &[("seconds", &stream_timeout_sec.to_string())],
+        ),
     )
 }
 
@@ -53,9 +65,9 @@ fn non_stream_stale_timeout_error(non_stream_stale_timeout_sec: u64) -> AppError
     llm_error(
         PROVIDER_NAME,
         LlmErrorStage::NonStreamStale,
-        format!(
-            "非流式请求长时间无响应: non_stream_stale_timeout_sec={}s",
-            non_stream_stale_timeout_sec
+        tr(
+            "llm.nonStreamStale",
+            &[("seconds", &non_stream_stale_timeout_sec.to_string())],
         ),
     )
 }
@@ -65,7 +77,7 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::Connect,
-            format!("{prefix}连接失败"),
+            tr("llm.connectFailed", &[("action", prefix)]),
             err,
         );
     }
@@ -73,9 +85,12 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::ReadTimeout,
-            format!(
-                "{prefix}读/空闲超时（等待响应头）: http_read_timeout_sec={}s",
-                http_read_timeout_sec
+            tr(
+                "llm.headersTimeout",
+                &[
+                    ("action", prefix),
+                    ("seconds", &http_read_timeout_sec.to_string()),
+                ],
             ),
             err,
         );
@@ -83,7 +98,7 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64)
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::Send,
-        format!("{prefix}发送失败"),
+        tr("llm.sendFailed", &[("action", prefix)]),
         err,
     )
 }
@@ -93,9 +108,12 @@ fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec:
         return llm_error_with_source(
             PROVIDER_NAME,
             LlmErrorStage::ReadTimeout,
-            format!(
-                "{prefix}超时: http_read_timeout_sec={}s",
-                http_read_timeout_sec
+            tr(
+                "llm.readTimeout",
+                &[
+                    ("action", prefix),
+                    ("seconds", &http_read_timeout_sec.to_string()),
+                ],
             ),
             err,
         );
@@ -103,7 +121,7 @@ fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec:
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::BodyRead,
-        format!("{prefix}失败"),
+        tr("llm.failed", &[("action", prefix)]),
         err,
     )
 }
@@ -112,7 +130,7 @@ fn map_parse_error(prefix: &str, err: impl Into<anyhow::Error>) -> AppError {
     llm_error_with_source(
         PROVIDER_NAME,
         LlmErrorStage::Parse,
-        format!("{prefix}失败"),
+        tr("llm.failed", &[("action", prefix)]),
         err,
     )
 }
@@ -152,34 +170,145 @@ fn parts_to_completions_text(parts: &[ChatMessageContentPart]) -> String {
                 text.push_str(&reference.to_prompt_text());
             }
             ChatMessageContentPart::InputImage { .. }
+            | ChatMessageContentPart::InputImageRef { .. }
             | ChatMessageContentPart::InputFile { .. } => {}
         }
     }
     text
 }
 
-/// Chat Completions 只走纯文本 `content: "..."`。
-///
-/// 这里先按纯文本模型能力把不支持的多模态附件降级成占位符文本，再把
-/// `InputText` + `InputReference`
-/// 按顺序合并成单个字符串，避免把 Responses 专用的 `input_*` part 形态误送给
-/// `/v1/chat/completions`。
-fn normalize_for_completions(messages: &[ChatMessage]) -> Cow<'_, [ChatMessage]> {
-    let degraded = degrade_unsupported_multimodal(messages, &Capabilities::default());
-    let needs_normalize = degraded
-        .iter()
-        .any(|msg| matches!(msg.content, Some(ChatMessageContent::Parts(_))));
-    if !needs_normalize {
+fn parts_need_multimodal_content(parts: &[ChatMessageContentPart]) -> bool {
+    parts.iter().any(|part| {
+        matches!(
+            part,
+            ChatMessageContentPart::InputImage { .. }
+                | ChatMessageContentPart::InputImageRef { .. }
+                | ChatMessageContentPart::InputFile { .. }
+        )
+    })
+}
+
+fn part_to_completions_content(
+    part: &ChatMessageContentPart,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Value {
+    match part {
+        ChatMessageContentPart::InputText { text } => json!({
+            "type": "text",
+            "text": text,
+        }),
+        ChatMessageContentPart::InputReference { reference } => json!({
+            "type": "text",
+            "text": reference.to_prompt_text(),
+        }),
+        ChatMessageContentPart::InputImage { source, detail } => {
+            let mut image_url = serde_json::Map::new();
+            match source {
+                ImageSource::Inline(inline) => {
+                    image_url.insert(
+                        "url".to_string(),
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data)),
+                    );
+                }
+                ImageSource::Uploaded(uploaded) => {
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    let token = adapter.reference_token(&uploaded.file_id);
+                    match adapter.image_ref_slot() {
+                        ImageRefSlot::UrlField => {
+                            image_url.insert("url".to_string(), Value::String(token));
+                        }
+                        ImageRefSlot::FileIdField => {
+                            image_url.insert("file_id".to_string(), Value::String(token));
+                        }
+                    }
+                }
+            }
+            if let Some(detail) = detail.as_deref().filter(|value| !value.trim().is_empty()) {
+                image_url.insert("detail".to_string(), Value::String(detail.to_string()));
+            }
+            json!({
+                "type": "image_url",
+                "image_url": image_url,
+            })
+        }
+        // References are a transcript-only representation and are materialized before
+        // reaching a provider. Keep this defensive fallback visible instead of silently
+        // sending an invalid wire shape.
+        ChatMessageContentPart::InputImageRef { .. } => json!({
+            "type": "text",
+            "text": degrade_placeholder(part),
+        }),
+        ChatMessageContentPart::InputFile { source } => {
+            let mut file = serde_json::Map::new();
+            match source {
+                FileSource::Inline(inline) => {
+                    file.insert(
+                        "filename".to_string(),
+                        Value::String(inline.filename.clone()),
+                    );
+                    file.insert(
+                        "file_data".to_string(),
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data)),
+                    );
+                }
+                FileSource::Uploaded(uploaded) => {
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    file.insert(
+                        "file_id".to_string(),
+                        Value::String(adapter.reference_token(&uploaded.file_id)),
+                    );
+                    if let Some(filename) = uploaded
+                        .filename
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        file.insert("filename".to_string(), Value::String(filename.to_string()));
+                    }
+                }
+            }
+            json!({
+                "type": "file",
+                "file": file,
+            })
+        }
+    }
+}
+
+fn normalize_for_completions<'a>(
+    messages: &'a [ChatMessage],
+    capabilities: &Capabilities,
+) -> Cow<'a, [ChatMessage]> {
+    let degraded = degrade_unsupported_multimodal(messages, capabilities);
+    let needs_flatten = degraded.iter().any(|message| {
+        matches!(
+            message.content.as_ref(),
+            Some(ChatMessageContent::Parts(parts)) if !parts_need_multimodal_content(parts)
+        )
+    });
+    if !needs_flatten {
         return degraded;
     }
 
-    let mut normalized = Vec::with_capacity(degraded.len());
-    for message in degraded.iter() {
-        let mut next = message.clone();
-        if let Some(ChatMessageContent::Parts(parts)) = &message.content {
-            next.content = Some(ChatMessageContent::Text(parts_to_completions_text(parts)));
+    let mut normalized = degraded.into_owned();
+    for message in &mut normalized {
+        let Some(ChatMessageContent::Parts(parts)) = message.content.as_ref() else {
+            continue;
+        };
+        if parts_need_multimodal_content(parts) {
+            continue;
         }
-        normalized.push(next);
+        let text = parts_to_completions_text(parts);
+        message.content = Some(ChatMessageContent::Text(text));
     }
     Cow::Owned(normalized)
 }
@@ -203,8 +332,49 @@ fn chat_completions_reasoning_content(message: &ChatMessage) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-fn inject_reasoning_content(message: ChatMessage, reasoning_content: &str) -> Value {
+fn transport_message_value(
+    message: ChatMessage,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Value {
+    let content = message.content.clone();
+    let role = message.role.clone();
+    let is_tool_calling_assistant =
+        matches!(role, ChatMessageRole::Assistant) && message.tool_calls.is_some();
     let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
+    if let Value::Object(ref mut object) = value {
+        // `kind` belongs to the transcript ledger, not the OpenAI-compatible wire schema.
+        object.remove("kind");
+        // OpenAI's chat-completions schema permits `content: null` for a tool-only assistant
+        // message. Some compatible gateways reject the omitted field, so keep the wire shape
+        // explicit whenever this assistant turn is carried solely by `tool_calls`.
+        if is_tool_calling_assistant && !object.contains_key("content") {
+            object.insert("content".to_string(), Value::Null);
+        }
+    }
+    if let Some(content) = content {
+        let content_value = match content {
+            ChatMessageContent::Text(text) => Value::String(text),
+            ChatMessageContent::Parts(parts) => {
+                if matches!(role, ChatMessageRole::User) {
+                    Value::Array(
+                        parts
+                            .iter()
+                            .map(|part| part_to_completions_content(part, files_adapter))
+                            .collect(),
+                    )
+                } else {
+                    Value::String(parts_to_completions_text(&parts))
+                }
+            }
+        };
+        if let Value::Object(ref mut obj) = value {
+            obj.insert("content".to_string(), content_value);
+        }
+    }
+    value
+}
+
+fn inject_reasoning_content(mut value: Value, reasoning_content: &str) -> Value {
     if let Value::Object(ref mut obj) = value {
         obj.insert(
             "reasoning_content".to_string(),
@@ -214,17 +384,85 @@ fn inject_reasoning_content(message: ChatMessage, reasoning_content: &str) -> Va
     value
 }
 
+/// Promote request-only runtime state into the instruction prefix.
+///
+/// Chat Completions does not have a top-level `instructions` field. A trailing
+/// user message would move behind newly appended assistant/tool history on
+/// every Agent loop iteration, so it cannot remain in the durable
+/// `messages[]` history. Use an existing *leading* system message when
+/// possible; otherwise insert a synthetic one before all durable messages.
+/// This preserves history order only: when the tail changes it also changes
+/// the leading cache prefix, so cache-read usage is the source of truth.
+fn promote_runtime_tail_to_system(messages: &mut Vec<Value>, runtime_tail: &str) {
+    if runtime_tail.is_empty() {
+        return;
+    }
+
+    let leading_system = messages
+        .first_mut()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"));
+    let Some(Value::Object(system)) = leading_system else {
+        messages.insert(
+            0,
+            json!({
+                "role": "system",
+                "content": runtime_tail,
+            }),
+        );
+        return;
+    };
+
+    let mut merged = system
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged.push_str(runtime_tail);
+    system.insert("content".to_string(), Value::String(merged));
+}
+
+fn flush_tool_media(out: &mut Vec<Value>, media: &mut Vec<Value>) {
+    if media.is_empty() {
+        return;
+    }
+    let mut content =
+        vec![json!({"type":"text","text":crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO})];
+    content.append(media);
+    out.push(json!({"role":"user","content":content}));
+}
+
 fn transport_messages(
     messages: &[ChatMessage],
     model: &str,
     continuity_enabled: bool,
+    files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Vec<Value> {
     let target = ProviderCompatProfile::chat_completions(model);
+    use crate::core::llm::tool_result_media::{
+        media_parts, tool_result_media_mode, tool_result_text, ToolResultMediaMode,
+    };
+    debug_assert_eq!(tool_result_media_mode("openai"), ToolResultMediaMode::Split);
+    let mut deferred_media = Vec::new();
+    let runtime_tail = ephemeral_tail_texts(messages)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let window = ReplayWindow::compute(messages);
     let mut report = ReplayDowngradeReport::default();
-    let mut out = Vec::with_capacity(messages.len());
+    let mut out = Vec::with_capacity(messages.len() + usize::from(!runtime_tail.is_empty()));
     for (idx, original) in messages.iter().enumerate() {
-        let in_window = window.contains(idx);
+        // Runtime state is promoted into the leading system instruction below.
+        // Excluding it here keeps the durable wire history append-only.
+        if is_ephemeral_tail(original) {
+            continue;
+        }
+        if original.role != ChatMessageRole::Tool {
+            flush_tool_media(&mut out, &mut deferred_media);
+        }
+        let in_window = window.contains(idx) || target.preserves_thinking_history();
         let action = if continuity_enabled {
             plan_scoped(&target, original, in_window)
         } else {
@@ -232,16 +470,17 @@ fn transport_messages(
         };
         if continuity_enabled {
             if in_window {
-                report.record_in_window(&target, original, &action);
+                report.record_replay_decision(&target, original, &action);
             } else {
                 report.record_stripped_old_history(original);
             }
         }
-        let value = match action {
+        let mut value = match action {
             ReplayAction::KeepOpaque => {
                 let message = original.without_completion_metadata();
+                let transport = transport_message_value(message, files_adapter);
                 if let Some(reasoning_content) = chat_completions_reasoning_content(original) {
-                    inject_reasoning_content(message, &reasoning_content)
+                    inject_reasoning_content(transport, &reasoning_content)
                 } else {
                     if continuity_enabled
                         && original.reasoning_continuation.is_some()
@@ -258,20 +497,23 @@ fn transport_messages(
                             "reasoning_content continuity marked KeepOpaque but payload missing; sending request without local hard intercept"
                         );
                     }
-                    serde_json::to_value(message).unwrap_or_else(|_| json!({}))
+                    transport
                 }
             }
-            ReplayAction::ConvertToText(text) => {
-                serde_json::to_value(apply_text_downgrade(original, &text))
-                    .unwrap_or_else(|_| json!({}))
-            }
             ReplayAction::StripOpaque => {
-                serde_json::to_value(original.without_completion_metadata())
-                    .unwrap_or_else(|_| json!({}))
+                transport_message_value(original.without_completion_metadata(), files_adapter)
             }
         };
+        if original.role == ChatMessageRole::Tool && media_parts(original).next().is_some() {
+            deferred_media.extend(
+                media_parts(original).map(|p| part_to_completions_content(p, files_adapter)),
+            );
+            value["content"] = Value::String(tool_result_text(original));
+        }
         out.push(value);
     }
+    flush_tool_media(&mut out, &mut deferred_media);
+    promote_runtime_tail_to_system(&mut out, &runtime_tail);
     if continuity_enabled {
         report.emit(&target);
     }
@@ -413,6 +655,7 @@ struct OpenAiRequestBody {
     messages: Vec<Value>,
     temperature: Option<f32>,
     #[serde(rename = "max_completion_tokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -422,7 +665,11 @@ struct OpenAiRequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -435,31 +682,36 @@ struct StreamOptionsBody {
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
+    route_provider: String,
     /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
     api_base_fallback: Option<String>,
     api_key: String,
     catalog_model_id: String,
     default_model: String,
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
-    semaphore: Option<Semaphore>,
+    semaphore: Option<Arc<Semaphore>>,
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
     http_read_timeout_sec: u64,
+    files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
+    files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
     thinking_cfg: crate::infra::config::ThinkingConfig,
     /// 用户显式配置的 thinking format；`Auto` 时按当前 wire(`openai`) 决定。
     configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
+    capabilities: Capabilities,
 }
 
-fn apply_stream_idle_timeout<S>(
+fn apply_stream_idle_timeout<S, T>(
     stream: S,
     stream_timeout_sec: u64,
-) -> Pin<Box<dyn Stream<Item = Result<Bytes, AppError>> + Send>>
+) -> Pin<Box<dyn Stream<Item = Result<T, AppError>> + Send>>
 where
-    S: Stream<Item = Result<Bytes, AppError>> + Send + 'static,
+    S: Stream<Item = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
 {
     if stream_timeout_sec == 0 {
         return Box::pin(stream);
@@ -477,10 +729,25 @@ where
 
 impl OpenAiProvider {
     /// 从模型条目 + 全局运行时配置构建。
+    #[cfg(test)]
     pub fn new(
         entry: &ModelEntry,
         runtime: &LlmRuntimeConfig,
         credential: &Credential,
+    ) -> Result<Self, AppError> {
+        Self::with_route(
+            entry,
+            runtime,
+            credential,
+            &super::ProviderRoute::new(runtime)?,
+        )
+    }
+
+    pub(super) fn with_route(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+        route: &super::ProviderRoute,
     ) -> Result<Self, AppError> {
         let base_url = entry
             .base_url
@@ -491,13 +758,8 @@ impl OpenAiProvider {
             .trim_end_matches('/')
             .to_string();
 
-        let client = build_http_client(runtime, None)?;
-
-        let semaphore = if runtime.max_concurrent_requests > 0 {
-            Some(Semaphore::new(runtime.max_concurrent_requests as usize))
-        } else {
-            None
-        };
+        let client = route.client.clone();
+        let semaphore = route.semaphore.clone();
 
         let api_base_fallback = runtime
             .api_base_fallback
@@ -514,6 +776,7 @@ impl OpenAiProvider {
         Ok(Self {
             client,
             base_url,
+            route_provider: entry.provider.trim().to_string(),
             api_base_fallback,
             api_key: credential.value.clone(),
             catalog_model_id: entry.id.clone(),
@@ -523,9 +786,12 @@ impl OpenAiProvider {
             stream_timeout_sec: runtime.stream_timeout_sec,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
             http_read_timeout_sec: runtime.http_read_timeout_sec,
+            files_adapter: std::sync::OnceLock::new(),
+            files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
             continuity_enabled: runtime.reasoning_continuity.enabled,
+            capabilities: entry.capabilities.clone(),
         })
     }
 
@@ -568,6 +834,33 @@ impl OpenAiProvider {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
 
+    fn cached_files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
+        if !self.capabilities.files {
+            return None;
+        }
+        let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
+            self.files_expires_after_seconds
+        } else {
+            files_cfg.expires_after_seconds
+        };
+        let cfg = LlmFilesConfig {
+            expires_after_seconds: expires,
+        };
+        let adapter = self.files_adapter.get_or_init(|| {
+            build_openai_compatible_files_adapter(
+                &self.route_provider,
+                FilesApiProviderContext {
+                    client: self.client.clone(),
+                    base_url: self.base_url.clone(),
+                    api_key: self.api_key.clone(),
+                    retry_count: self.retry_count,
+                },
+                &cfg,
+            )
+        });
+        Some(adapter.clone())
+    }
+
     async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
     where
         F: Future<Output = Result<T, AppError>>,
@@ -599,16 +892,29 @@ impl OpenAiProvider {
             &thinking_cfg,
             thinking_format,
         );
+        let files_cfg = LlmFilesConfig {
+            expires_after_seconds: self.files_expires_after_seconds,
+        };
+        let files_adapter = self.cached_files_adapter(&files_cfg);
         let body = OpenAiRequestBody {
             model: model.clone(),
-            messages: transport_messages(messages, &model, self.continuity_enabled),
+            messages: transport_messages(
+                messages,
+                &model,
+                self.continuity_enabled,
+                files_adapter.as_deref(),
+            ),
             temperature: request.temperature,
-            max_tokens: request.max_tokens,
+            max_tokens: request.resolved_output_limit,
             stream: false,
             tools: request.tools.clone(),
             stream_options: None,
             reasoning_effort: thinking_fields.reasoning_effort,
+            service_tier: request
+                .speed
+                .map(crate::core::llm::endpoint::openai_service_tier),
             thinking: thinking_fields.thinking,
+            prompt_cache_key: request.cache_key.clone(),
         };
 
         let url = build_path_aware_endpoint(base_url, "chat/completions");
@@ -621,21 +927,28 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| map_send_error("请求", e, self.http_read_timeout_sec))?;
+            .map_err(|e| {
+                map_send_error(
+                    &tr("llm.action.request", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
 
         let status = resp.status();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| map_body_read_error("读取响应", e, self.http_read_timeout_sec))?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            map_body_read_error(
+                &tr("llm.action.readResponse", &[]),
+                e,
+                self.http_read_timeout_sec,
+            )
+        })?;
 
         if !status.is_success() {
             return Err(map_http_status_error(status, &bytes));
         }
 
-        let response: ChatResponse =
-            serde_json::from_slice(&bytes).map_err(|e| map_parse_error("解析响应", e))?;
-        Ok(response)
+        parse_non_stream_response(&bytes)
     }
 
     /// 判断是否为可重试错误（429、5xx、超时等）。
@@ -663,13 +976,22 @@ impl OpenAiProvider {
             .json(body)
             .send()
             .await
-            .map_err(|e| map_send_error("流式请求", e, self.http_read_timeout_sec))?;
+            .map_err(|e| {
+                map_send_error(
+                    &tr("llm.action.streamRequest", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
         let status = resp.status();
         if !status.is_success() {
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| map_body_read_error("读取错误响应", e, self.http_read_timeout_sec))?;
+            let bytes = resp.bytes().await.map_err(|e| {
+                map_body_read_error(
+                    &tr("llm.action.readErrorResponse", &[]),
+                    e,
+                    self.http_read_timeout_sec,
+                )
+            })?;
             return Err(map_http_status_error(status, &bytes));
         }
         Ok(resp)
@@ -693,13 +1015,13 @@ impl OpenAiProvider {
                         self.retry_count,
                         err
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("流式建连重试耗尽".to_string())))
+        Err(last_err.unwrap_or_else(|| AppError::Llm(tr("llm.streamRetriesExhausted", &[]))))
     }
 
     async fn stream_post_with_base_fallback(
@@ -730,14 +1052,12 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
-        let normalized_messages = normalize_for_completions(&request.messages);
+        let normalized_messages = normalize_for_completions(&request.messages, &self.capabilities);
 
         let _permit = if let Some(ref sem) = self.semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| AppError::Llm(format!("限流信号量关闭: {}", e)))?,
-            )
+            Some(sem.acquire().await.map_err(|e| {
+                AppError::Llm(tr("llm.semaphoreClosed", &[("detail", &e.to_string())]))
+            })?)
         } else {
             None
         };
@@ -764,7 +1084,7 @@ impl LlmProvider for OpenAiProvider {
                             self.retry_count,
                             e
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep_provider_retry_delay(delay).await?;
                         last_err = Some(e);
                     } else {
                         last_err = Some(e);
@@ -773,7 +1093,7 @@ impl LlmProvider for OpenAiProvider {
                 }
             }
         }
-        let err = last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+        let err = last_err.unwrap_or_else(|| AppError::Llm(tr("llm.retriesExhausted", &[])));
         // 自动降级：连接/网络错误且配置了 fallback 时，用 fallback base 再试一次。
         if Self::is_connect_or_network_error(&err) {
             if let Some(ref fallback) = self.api_base_fallback {
@@ -798,14 +1118,12 @@ impl LlmProvider for OpenAiProvider {
         request: ChatRequest,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
-        let normalized_messages = normalize_for_completions(&request.messages);
+        let normalized_messages = normalize_for_completions(&request.messages, &self.capabilities);
 
         let _permit = if let Some(ref sem) = self.semaphore {
-            Some(
-                sem.acquire()
-                    .await
-                    .map_err(|e| AppError::Llm(format!("限流信号量关闭: {}", e)))?,
-            )
+            Some(sem.acquire().await.map_err(|e| {
+                AppError::Llm(tr("llm.semaphoreClosed", &[("detail", &e.to_string())]))
+            })?)
         } else {
             None
         };
@@ -817,38 +1135,49 @@ impl LlmProvider for OpenAiProvider {
             &thinking_cfg,
             thinking_format,
         );
+        let files_cfg = LlmFilesConfig {
+            expires_after_seconds: self.files_expires_after_seconds,
+        };
+        let files_adapter = self.cached_files_adapter(&files_cfg);
         let body = OpenAiRequestBody {
             model: model.clone(),
             messages: transport_messages(
                 normalized_messages.as_ref(),
                 &model,
                 self.continuity_enabled,
+                files_adapter.as_deref(),
             ),
             temperature: request.temperature,
-            max_tokens: request.max_tokens,
+            max_tokens: request.resolved_output_limit,
             stream: true,
             tools: request.tools.clone(),
             stream_options: Some(StreamOptionsBody {
                 include_usage: true,
             }),
             reasoning_effort: thinking_fields.reasoning_effort,
+            service_tier: request
+                .speed
+                .map(crate::core::llm::endpoint::openai_service_tier),
             thinking: thinking_fields.thinking,
+            prompt_cache_key: request.cache_key.clone(),
         };
 
         let resp = self.stream_post_with_base_fallback(&body).await?;
 
         let http_read_timeout_sec = self.http_read_timeout_sec;
         let stream_timeout_sec = self.stream_timeout_sec;
-        let bytes_stream = resp
-            .bytes_stream()
-            .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
-        let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
+        let bytes_stream = resp.bytes_stream().map_err(move |e| {
+            map_body_read_error(&tr("llm.action.readStream", &[]), e, http_read_timeout_sec)
+        });
         let event_stream = SseEventStream::new(
             bytes_stream,
             ProviderCompatProfile::chat_completions(&model),
             self.continuity_enabled,
         );
-        Ok(Box::new(event_stream))
+        Ok(Box::new(apply_stream_idle_timeout(
+            event_stream,
+            stream_timeout_sec,
+        )))
     }
 
     /// Trait 启发式 token 估算：`chars / 3`（保守上估，留出英文场景余量）。
@@ -873,6 +1202,10 @@ impl LlmProvider for OpenAiProvider {
             .sum();
         Ok((total_chars / 3).max(1) as u32)
     }
+
+    fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
+        self.cached_files_adapter(files_cfg)
+    }
 }
 
 /// 将 Bytes 流解析为 StreamEvent 流；缓冲 SSE 行，按 "data: {...}\n\n" 解析。
@@ -883,6 +1216,13 @@ struct SseEventStream<S> {
     /// 已解析待输出的事件队列（同一 chunk 可能解析出多个事件）。
     pending: std::vec::IntoIter<StreamEvent>,
     reasoning: OpenAiReasoningState,
+    /// 首个有效事件前的畸形帧往往是中转站截断/拼接问题，允许上层重试；已开始输出后
+    /// 才损坏则保留 Parse，避免掩盖协议不兼容。
+    seen_valid_event: bool,
+    terminal_seen: bool,
+    finished: bool,
+    /// EOF 正常事件排空之后，至多交付一次中断错误。
+    eof_error: Option<AppError>,
 }
 
 #[derive(Debug)]
@@ -1013,16 +1353,32 @@ impl<S> SseEventStream<S> {
                 continuity_enabled,
                 ..OpenAiReasoningState::default()
             },
+            seen_valid_event: false,
+            terminal_seen: false,
+            finished: false,
+            eof_error: None,
         }
+    }
+}
+
+fn map_completions_stream_parse_error(error: AppError, seen_valid_event: bool) -> AppError {
+    if seen_valid_event {
+        error
+    } else {
+        llm_stream_interrupted_error(
+            PROVIDER_NAME,
+            tr("llm.firstChatSseInvalid", &[("detail", &error.to_string())]),
+        )
     }
 }
 
 fn drain_ready_sse_events(
     buffer: &mut Vec<u8>,
     reasoning: &mut OpenAiReasoningState,
+    terminal_seen: &mut bool,
 ) -> Result<Vec<StreamEvent>, AppError> {
     let mut events = Vec::new();
-    while let Some(iter) = parse_sse_buffer(buffer, reasoning)? {
+    while let Some(iter) = parse_sse_buffer(buffer, reasoning, terminal_seen)? {
         events.extend(iter);
     }
     Ok(events)
@@ -1042,51 +1398,75 @@ where
         if let Some(evt) = this.pending.next() {
             return Poll::Ready(Some(Ok(evt)));
         }
+        if let Some(error) = this.eof_error.take() {
+            return Poll::Ready(Some(Err(error)));
+        }
+        if this.finished {
+            return Poll::Ready(None);
+        }
 
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     this.buffer.extend_from_slice(&bytes);
-                    match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
+                    match drain_ready_sse_events(
+                        &mut this.buffer,
+                        &mut this.reasoning,
+                        &mut this.terminal_seen,
+                    ) {
                         Ok(events) => {
                             if let Some((first, rest)) = events.split_first() {
+                                this.seen_valid_event = true;
                                 #[allow(clippy::unnecessary_to_owned)]
                                 let pending_vec = rest.to_vec();
                                 this.pending = pending_vec.into_iter();
                                 return Poll::Ready(Some(Ok(first.clone())));
                             }
                         }
-                        Err(e) => return Poll::Ready(Some(Err(e))),
+                        Err(error) => {
+                            return Poll::Ready(Some(Err(map_completions_stream_parse_error(
+                                error,
+                                this.seen_valid_event,
+                            ))));
+                        }
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
+                    this.finished = true;
+                    let mut events = Vec::new();
                     if !this.buffer.is_empty() {
-                        match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
-                            Ok(events) => {
-                                if let Some((first, rest)) = events.split_first() {
-                                    #[allow(clippy::unnecessary_to_owned)]
-                                    let pending_vec = rest.to_vec();
-                                    this.pending = pending_vec.into_iter();
-                                    return Poll::Ready(Some(Ok(first.clone())));
-                                }
-                            }
-                            Err(e) => return Poll::Ready(Some(Err(e))),
+                        // 只对 EOF 未分隔残留宽松解析，半帧 JSON / UTF-8 丢弃。
+                        // 完整但缺空行的尾帧仍可消费，是否中断只由终止信号决定。
+                        this.buffer.extend_from_slice(b"\n\n");
+                        if let Ok(parsed) = drain_ready_sse_events(
+                            &mut this.buffer,
+                            &mut this.reasoning,
+                            &mut this.terminal_seen,
+                        ) {
+                            events.extend(parsed);
                         }
+                        this.buffer.clear();
                     }
-                    let flushed = this.reasoning.flush_scrubber();
-                    if let Some((first, rest)) = flushed.split_first() {
-                        #[allow(clippy::unnecessary_to_owned)]
-                        let pending_vec = rest.to_vec();
-                        this.pending = pending_vec.into_iter();
-                        return Poll::Ready(Some(Ok(first.clone())));
-                    }
+                    events.extend(this.reasoning.flush_scrubber());
                     if let Some(snapshot) = this.reasoning.maybe_snapshot() {
-                        return Poll::Ready(Some(Ok(snapshot)));
+                        events.push(snapshot);
                     }
-                    return Poll::Ready(None);
+                    if !this.terminal_seen {
+                        this.eof_error = Some(llm_stream_interrupted_error(
+                            PROVIDER_NAME,
+                            "stream closed before finish_reason or [DONE]",
+                        ));
+                    }
+                    this.pending = events.into_iter();
+                    return Poll::Ready(
+                        this.pending
+                            .next()
+                            .map(Ok)
+                            .or_else(|| this.eof_error.take().map(Err)),
+                    );
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -1098,6 +1478,7 @@ where
 fn parse_sse_buffer(
     buffer: &mut Vec<u8>,
     reasoning: &mut OpenAiReasoningState,
+    terminal_seen: &mut bool,
 ) -> Result<Option<std::vec::IntoIter<StreamEvent>>, AppError> {
     let sep = b"\n\n";
     let pos = buffer.windows(sep.len()).position(|w| w == sep);
@@ -1115,13 +1496,17 @@ fn parse_sse_buffer(
         let line = line.trim();
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
+                *terminal_seen = true;
                 continue;
             }
-            let parsed: OpenAiStreamChunk =
-                serde_json::from_str(data).map_err(|e| map_parse_error("解析 SSE 行", e))?;
+            let parsed: OpenAiStreamChunk = serde_json::from_str(data)
+                .map_err(|e| map_parse_error(&tr("llm.action.parseSse", &[]), e))?;
             events.extend(openai_chunk_to_stream_events_with_state(parsed, reasoning));
         }
     }
+    *terminal_seen |= events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::FinishReason { .. }));
     Ok(Some(events.into_iter()))
 }
 
@@ -1129,7 +1514,51 @@ fn parse_sse_buffer(
 #[serde(rename_all = "snake_case")]
 struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
-    usage: Option<TokenUsage>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct OpenAiUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: Option<u32>,
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u32>,
+}
+
+impl From<OpenAiUsage> for TokenUsage {
+    fn from(usage: OpenAiUsage) -> Self {
+        Self {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cache_read_tokens: usage
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            cache_write_tokens: None,
+            total_tokens: usage.total_tokens,
+            reasoning_tokens: None,
+            text_tokens: None,
+        }
+    }
+}
+
+fn parse_non_stream_response(bytes: &[u8]) -> Result<ChatResponse, AppError> {
+    let raw: Value = serde_json::from_slice(bytes)
+        .map_err(|e| map_parse_error(&tr("llm.action.parseResponse", &[]), e))?;
+    let mut response: ChatResponse = serde_json::from_value(raw.clone())
+        .map_err(|e| map_parse_error(&tr("llm.action.parseResponse", &[]), e))?;
+    if let Some(usage) = raw.get("usage").filter(|usage| !usage.is_null()) {
+        let usage: OpenAiUsage = serde_json::from_value(usage.clone())
+            .map_err(|e| map_parse_error(&tr("llm.action.parseUsage", &[]), e))?;
+        response.usage = Some(usage.into());
+    }
+    Ok(response)
 }
 
 #[derive(serde::Deserialize)]
@@ -1230,10 +1659,15 @@ fn openai_chunk_to_stream_events_with_state(
     }
 
     if let Some(usage) = chunk.usage {
+        let usage: TokenUsage = usage.into();
         events.push(StreamEvent::Usage {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            reasoning_tokens: None,
+            text_tokens: None,
         });
     }
 

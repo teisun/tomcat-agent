@@ -8,7 +8,7 @@ pub(in super::super) async fn handle_load_skill(
     let (name, file) = parse_load_skill_args(args)?;
     let skill_set = ctx
         .skill_set
-        .ok_or_else(|| "load_skill runtime 未注入".to_string())?;
+        .ok_or_else(|| "load_skill runtime was not supplied".to_string())?;
     let (skill, visible_names, hidden_from_model) = {
         let snapshot = skill_set.read();
         (
@@ -23,7 +23,7 @@ pub(in super::super) async fn handle_load_skill(
         None => {
             if hidden_from_model {
                 return Err(format!(
-                    "skill `{name}` 仅用户可用，模型不可通过 load_skill 调用"
+                    "Skill `{name}` is user-only; the model may not invoke it through load_skill"
                 ));
             }
             let available = if visible_names.is_empty() {
@@ -31,7 +31,9 @@ pub(in super::super) async fn handle_load_skill(
             } else {
                 visible_names
             };
-            return Err(format!("未知 skill `{name}`。当前可用技能: {available}"));
+            return Err(format!(
+                "Unknown Skill `{name}`. Available Skills: {available}"
+            ));
         }
     };
 

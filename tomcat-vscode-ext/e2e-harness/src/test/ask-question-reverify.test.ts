@@ -31,6 +31,7 @@ type TomcatApi = {
     focusWebview(): Promise<void>;
     getWebviewState(): {
       activeSessionId: string | null;
+      sessionViews: Record<string, { timeline: Array<{ type: string; request?: { questions: Array<{ id: string; prompt: string; options: Array<{ id: string; label: string }> }> } }> }>;
     };
     sendWebviewDomAction(action: {
       edge?: "bottom" | "top";
@@ -136,17 +137,20 @@ suite("Tomcat ask_question reverify", () => {
       api,
       (snapshot) =>
         snapshot.approvalCount === 1 &&
-        snapshot.html.includes("你更喜欢在什么时候写代码?") &&
-        snapshot.html.includes("白天") &&
-        snapshot.html.includes("晚上") &&
-        snapshot.html.includes("TypeScript") &&
-        snapshot.html.includes("Rust") &&
+        snapshot.approvalOptionStates.some((entry) => entry.testId === "approval-option-q1-day") &&
+        snapshot.approvalOptionStates.some(entry => entry.testId === "approval-option-q1-night") &&
+        snapshot.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q1-")) &&
         snapshot.html.includes("Other...")
           ? snapshot
           : undefined,
       10_000,
     );
     screenshots.push(await captureScreenshot("02-ask-question-initial.png"));
+    const firstQuestion = api.__testing.getWebviewState().sessionViews[initialState.activeSessionId].timeline
+      .find(item => item.type === "approval")!.request!.questions.find(question => question.id === "q1")!;
+    const dayLabel = firstQuestion.options.find(option => option.id === "day")!.label;
+    assert.ok(initialApproval.html.includes(firstQuestion.prompt));
+    for (const option of firstQuestion.options) assert.ok(initialApproval.html.includes(option.label));
 
     await sendDomAction(api, {
       kind: "clickTestId",
@@ -163,6 +167,19 @@ suite("Tomcat ask_question reverify", () => {
       5_000,
     );
     screenshots.push(await captureScreenshot("03-ask-question-first-selection.png"));
+
+    await sendDomAction(api, { kind: "clickTestId", testId: "approval-next-question" });
+    const secondPage = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.html.includes("TypeScript") &&
+        snapshot.html.includes("Rust") &&
+        snapshot.approvalOptionStates.some((entry) => entry.testId === "approval-option-q2-ts") &&
+        snapshot.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q2-"))
+          ? snapshot
+          : undefined,
+      5_000,
+    );
 
     await sendDomAction(api, {
       kind: "clickTestId",
@@ -261,13 +278,15 @@ suite("Tomcat ask_question reverify", () => {
         customInputAppears: {
           passed: customVisible.approvalInputTestIds.includes("approval-custom-q2"),
         },
-        optionMatrixVisible: {
+        questionPagesRenderIndividually: {
           passed:
-            initialApproval.html.includes("白天") &&
-            initialApproval.html.includes("晚上") &&
-            initialApproval.html.includes("TypeScript") &&
-            initialApproval.html.includes("Rust") &&
-            initialApproval.html.includes("Other..."),
+            initialApproval.approvalOptionStates.some(entry => entry.testId === "approval-option-q1-day") &&
+            initialApproval.approvalOptionStates.some(entry => entry.testId === "approval-option-q1-night") &&
+            initialApproval.html.includes("Other...") &&
+            initialApproval.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q1-")) &&
+            secondPage.html.includes("TypeScript") &&
+            secondPage.html.includes("Rust") &&
+            secondPage.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q2-")),
         },
         selectionStateVisible: {
           passed:
@@ -284,7 +303,7 @@ suite("Tomcat ask_question reverify", () => {
         submitAfterCustomText: {
           passed:
             !readyToContinue.disabledTestIds.includes("approval-continue") &&
-            continued.messageTexts.some((text) => /q1=白天/i.test(text)) &&
+            continued.messageTexts.some((text) => text.includes(`q1=${dayLabel}`)) &&
             continued.messageTexts.some((text) => /q2=Go/i.test(text)),
         },
       },

@@ -87,10 +87,10 @@ pub(super) fn acquire_assets_lock(work_dir: &Path) -> Result<std::fs::File, AppE
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(_) => {
-                return Err(AppError::Config(
-                    "资源锁超时（10s），请检查是否有其他 tomcat 进程卡住，或手动删除 ~/.tomcat/assets/.lock"
-                        .to_string(),
-                ));
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "config.assetsLockTimeout",
+                    &[],
+                )));
             }
         }
     }

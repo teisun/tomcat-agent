@@ -131,6 +131,41 @@ describe("groupTimelineByAssistantResponse", () => {
     expect(grouped).toHaveLength(2);
   });
 
+  it("does not consume a live approval whose toolCallId matches a grouped tool", () => {
+    const timeline: WebviewTimelineItem[] = [
+      thinking("thinking-1", "assistant-1"),
+      tool("ask-call-1", "ask-call-1", "assistant-1"),
+      {
+        id: "approval:ask-call-1",
+        live: true,
+        request: {
+          questions: [{
+            id: "q1",
+            options: [{ id: "yes", label: "Yes", recommended: true }],
+            prompt: "Proceed?",
+          }],
+          requestId: "request-1",
+          responseEvent: "response-1",
+          toolCallId: "ask-call-1",
+        },
+        resolved: false,
+        sessionId: "s1",
+        type: "approval",
+      },
+    ];
+
+    const grouped = groupTimelineByAssistantResponse(timeline);
+    expect(grouped).toHaveLength(2);
+    expect(grouped[0]).toMatchObject({
+      assistantMessageId: "assistant-1",
+      type: "assistant-response-group",
+    });
+    expect(grouped[1]).toMatchObject({
+      id: "approval:ask-call-1",
+      type: "approval",
+    });
+  });
+
   it("groups read/bash/web_search from one turn into a single group", () => {
     const timeline: WebviewTimelineItem[] = [
       thinking("t1", "a1", "deciding"),

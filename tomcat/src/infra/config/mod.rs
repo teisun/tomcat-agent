@@ -10,6 +10,7 @@ mod env_file;
 mod load;
 pub mod lock;
 mod types;
+pub mod ui;
 
 #[cfg(test)]
 mod tests;
@@ -18,46 +19,52 @@ mod tests;
 pub use append::append_workspace_entry_to_disk;
 pub use append::{append_path_rule_to_disk, append_workspace_root_to_disk};
 pub use assets::ensure_embedded_assets;
-pub use default_model::write_default_model;
+pub use default_model::{clear_model_references, write_default_model};
+pub(crate) use env_file::env_file_error;
 pub use env_file::{read_env_entries, write_env_entries};
 pub use load::{
     ensure_work_dir_structure, get_work_dir, load_config, load_config_for_init,
     load_config_toml_file, resolve_agent_definition_dir, resolve_agent_dir,
     resolve_agent_trail_dir, resolve_assets_dir, resolve_audit_dir, resolve_checkpoints_dir,
     resolve_dot_tomcat_temp_dir, resolve_log_dir, resolve_memory_dir, resolve_model_thinking_path,
-    resolve_plans_dir, resolve_plugins_dir, resolve_sessions_dir, resolve_tmp_dir,
-    resolve_workspace_dir, resolve_workspace_roots_paths, validate_config,
+    resolve_plans_dir, resolve_plugins_dir, resolve_project_resource_dir, resolve_sessions_dir,
+    resolve_tmp_dir, resolve_workspace_dir, resolve_workspace_roots_paths, validate_config,
 };
 pub use lock::with_config_lock;
+pub use types::UiLanguage;
 #[allow(unused_imports)]
 pub use types::WorkspaceEntry;
 #[allow(unused_imports)]
 pub use types::{
-    compute_context_budget_chars, AgentConfig, AppConfig, CheckpointConfig, ContextConfig,
-    LlmConfig, LlmFilesConfig, LlmRuntimeConfig, LogConfig, OpenAiResponsesConfig, PreflightConfig,
-    PrimitiveConfig, ReasoningContinuityConfig, ResumeHydrationMode, SecurityConfig, SessionConfig,
-    SkillsConfig, SplashConfig, ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WorkspaceConfig,
-    DEFAULT_AGENT_MAX_ATTEMPTS, DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL,
+    compute_context_budget_chars, compute_context_budget_chars_from_tokens,
+    fallback_input_budget_tokens, AgentConfig, AppConfig, CheckpointConfig, ConnectorConfig,
+    ContextConfig, LlmConfig, LlmFilesConfig, LlmRuntimeConfig, LogConfig, McpRuntimeConfig,
+    OpenAiResponsesConfig, PreflightConfig, PrimitiveConfig, ReasoningContinuityConfig,
+    ResumeHydrationMode, SecurityConfig, SessionConfig, SkillsConfig, SplashConfig, ThinkingConfig,
+    ThinkingDisplay, ToolCliVerbosity, WorkspaceConfig, DEFAULT_AGENT_MAX_ATTEMPTS,
+    DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL, DEFAULT_MCP_CALL_TIMEOUT_MS,
+    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DEFAULT_MCP_STARTUP_TIMEOUT_MS,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），
 // 这里先 re-export 保证 `tomcat::infra::config::PlanConfig` 可用而不污染默认 import。
 #[allow(unused_imports)]
-pub use types::{AskQuestionConfig, PlanConfig, ReviewerConfig, TodosConfig};
+pub use types::{PlanConfig, ReviewerConfig, TodosConfig};
 #[allow(unused_imports)]
 pub use types::{
     ServeConfig, ServeTransport, ToolsBashConfig, ToolsConfig, ToolsReadConfig,
     ToolsWebFetchConfig, ToolsWebSearchConfig, ToolsWriteConfig,
     DEFAULT_SKILLS_MAX_DESCRIPTION_CHARS, DEFAULT_SKILLS_MAX_SKILLS,
     DEFAULT_SKILLS_PROMPT_BUDGET_FLOOR_CHARS, DEFAULT_SKILLS_PROMPT_BUDGET_PCT,
-    DEFAULT_SKILLS_SYSTEM_ENABLED, DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
-    DEFAULT_TOOLS_BASH_TIMEOUT_MS, DEFAULT_TOOLS_READ_MAX_BYTES,
-    DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES, DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS,
-    DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS, DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES,
-    DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS, DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS,
-    DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS, DEFAULT_TOOLS_WEB_SEARCH_BACKEND,
-    DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY,
-    DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS, DEFAULT_TOOLS_WEB_SEARCH_COUNT,
-    DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL,
-    DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS, DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
-    MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
+    DEFAULT_SKILLS_SYSTEM_ENABLED, DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS,
+    DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_READ_MAX_BYTES,
+    DEFAULT_TOOLS_READ_REFRESH_MUTATION_STAMP, DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES,
+    DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS, DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS,
+    DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES, DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS,
+    DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS, DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS,
+    DEFAULT_TOOLS_WEB_SEARCH_BACKEND, DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL,
+    DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY, DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS,
+    DEFAULT_TOOLS_WEB_SEARCH_COUNT, DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL,
+    DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS,
+    DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF, MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
+    MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
 };

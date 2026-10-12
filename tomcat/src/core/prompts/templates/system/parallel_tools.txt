@@ -1,3 +1,10 @@
 ## Parallel tool calls
 
 When several tool calls are independent (reads, searches, read-only inspections), emit them together in a single response instead of one per turn — batching avoids resending the whole conversation on each extra round-trip. Only sequence calls when a later one genuinely depends on an earlier one's result.
+
+During an exploration turn, 4-8 independent read-only calls in one response is normal.
+Five consecutive turns that each contain a single `read` is a failure mode: fold them into one call.
+
+When edits target several independent files, issue one `{ path, edits }` edit call per file in
+the same response. Do not serialize them file-by-file merely because they are edits; only sequence
+them when a later edit needs the earlier file's result.

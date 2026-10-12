@@ -17,11 +17,18 @@ pub(crate) use super::writer::*;
 pub(crate) use super::*;
 
 mod ask_question_test;
+mod attachment_test;
 mod commands_test;
+mod confirmation_test;
 mod control_test;
 mod event_pump_test;
+mod instruction_prompt_test;
 mod ndjson_test;
 mod registry_test;
+mod rewind_and_resend_test;
 mod schema_test;
+mod session_delete_test;
+mod session_files_test;
+mod session_job_test;
 mod stdin_test;
 mod writer_test;

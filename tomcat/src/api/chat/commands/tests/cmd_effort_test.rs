@@ -3,7 +3,7 @@
 use super::super::cmd_effort::{apply_level, parse_effort_level};
 use super::super::{help_text, parse_chat_command, ChatCommand};
 use crate::core::llm::ThinkingLevel;
-use crate::ModelThinkingStore;
+use crate::ModelPrefsStore;
 
 #[test]
 fn effort_levels_parse_correctly() {
@@ -67,13 +67,13 @@ fn effort_unknown_arg_is_usage_error() {
 fn apply_level_persists_model_override() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("model-thinking.json");
-    let store = ModelThinkingStore::load(&path, ThinkingLevel::Medium).unwrap();
+    let store = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
 
     apply_level(&store, "gpt-5.4", ThinkingLevel::Xhigh).unwrap();
-    assert_eq!(store.get("gpt-5.4"), ThinkingLevel::Xhigh);
+    assert_eq!(store.reasoning_for("gpt-5.4"), ThinkingLevel::Xhigh);
 
-    let reloaded = ModelThinkingStore::load(&path, ThinkingLevel::Medium).unwrap();
-    assert_eq!(reloaded.get("gpt-5.4"), ThinkingLevel::Xhigh);
+    let reloaded = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
+    assert_eq!(reloaded.reasoning_for("gpt-5.4"), ThinkingLevel::Xhigh);
 }
 
 #[test]

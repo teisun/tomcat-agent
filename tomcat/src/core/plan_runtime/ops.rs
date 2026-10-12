@@ -3,7 +3,7 @@
 //! `todos`（session scratchpad）与 `update_plan`（PlanFile.frontmatter.todos[]）共享同一
 //! op 引擎：增/改/删/标状态。语义不变量：
 //!
-//! - 同一列表最多一个 `in_progress`；尝试设第二个 → `OpError::MultipleInProgress`。
+//! - 同一列表最多三个 `in_progress`；让互不依赖的 todo 可并行推进，同时避免面板失焦。
 //! - `id` 单列表内唯一；`AddTodo` 重复 id → `OpError::DuplicateId`。
 //! - `RemoveTodo` 不存在 id → `OpError::TodoNotFound`。
 //! - 操作按入参顺序串行；任一失败立即返回，已应用的 op 不回滚（调用方负责拷贝原始
@@ -12,7 +12,7 @@
 //! op 与 [`file_store::TodoItem`] / [`file_store::TodoStatus`] 解耦，便于复用到
 //! session todo 文件（`~/.tomcat/agents/.../todos/<session_id>.todo.md`）。
 
-use super::file_store::{TodoItem, TodoStatus};
+use super::file_store::{TodoItem, TodoStatus, MAX_IN_PROGRESS_TODOS};
 
 /// 增量操作。`update_plan` 把 OpenAI tool args 直接反序列化到本枚举。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,11 +29,11 @@ pub enum TodoOp {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OpError {
-    #[error("todo 不存在: {0}")]
+    #[error("todo not found: {0}")]
     TodoNotFound(String),
-    #[error("todo id 已存在: {0}")]
+    #[error("todo id already exists: {0}")]
     DuplicateId(String),
-    #[error("最多允许一个 in_progress，本次操作会产生 {count} 个")]
+    #[error("At most {limit} in_progress entries are allowed; this operation would produce {count}", limit = MAX_IN_PROGRESS_TODOS)]
     MultipleInProgress { count: usize },
 }
 
@@ -46,7 +46,7 @@ pub fn apply_todos_ops(todos: &mut Vec<TodoItem>, ops: &[TodoOp]) -> Result<(), 
     for op in ops {
         apply_one(todos, op)?;
     }
-    enforce_single_in_progress(todos)?;
+    enforce_in_progress_limit(todos)?;
     Ok(())
 }
 
@@ -86,13 +86,13 @@ fn apply_one(todos: &mut Vec<TodoItem>, op: &TodoOp) -> Result<(), OpError> {
     }
 }
 
-/// 收尾不变量：在 apply 完所有 op 后强制单 in_progress。
-fn enforce_single_in_progress(todos: &[TodoItem]) -> Result<(), OpError> {
+/// 收尾不变量：在 apply 完所有 op 后限制同时进行的 todo 数。
+fn enforce_in_progress_limit(todos: &[TodoItem]) -> Result<(), OpError> {
     let count = todos
         .iter()
         .filter(|t| matches!(t.status, TodoStatus::InProgress))
         .count();
-    if count > 1 {
+    if count > MAX_IN_PROGRESS_TODOS {
         return Err(OpError::MultipleInProgress { count });
     }
     Ok(())

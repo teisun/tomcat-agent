@@ -24,9 +24,10 @@ use tokio_util::sync::CancellationToken;
 use tomcat::core::llm::thinking_policy::ThinkingFormat;
 use tomcat::core::llm::{ChatMessage, StreamEvent};
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFileState, TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFileState, TodoKind, TodoStatus,
 };
 use tomcat::core::plan_runtime::{PlanRuntime, TranscriptAppender};
+use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::{
     init_context_state, run_chat_turn, wire, AgentLoop, AgentLoopConfig, AgentRunOutcome,
@@ -226,6 +227,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn edit_file(
@@ -240,6 +242,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -247,8 +250,7 @@ impl PrimitiveExecutor for MockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{command}"),
@@ -271,14 +273,18 @@ impl PrimitiveExecutor for MockPrimitive {
 
 fn default_config(session_id: &str, title: Arc<dyn LlmProvider>) -> AgentLoopConfig {
     AgentLoopConfig {
-        model: "mock-model".to_string(),
         session_id: session_id.to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         title_provider: Some(title),
         title_model: "utility-flash".to_string(),
         ..Default::default()
     }
+}
+
+fn loop_binding(provider: Arc<dyn LlmProvider>, model: &str) -> ResolvedCall {
+    ResolvedCall::from_parts_unchecked(provider, model, model)
 }
 
 struct SceneResolver {
@@ -324,16 +330,14 @@ impl LlmResolver for SceneResolver {
             }
             _ => (Arc::clone(&self.main), self.main_model.clone()),
         };
-        Ok(ResolvedCall {
-            provider_impl,
-            model,
-            api: "mock".to_string(),
-            provider: "mock".to_string(),
-            base_url: None,
-            key_source: "test".to_string(),
-            thinking_format: ThinkingFormat::Openai,
-            capabilities: Capabilities::default(),
-        })
+        let mut call = ResolvedCall::from_parts_unchecked(provider_impl, &model, &model);
+        call.api = "mock".to_string();
+        call.provider = "mock".to_string();
+        call.base_url = None;
+        call.key_source = "test".to_string();
+        call.thinking_format = ThinkingFormat::Openai;
+        call.capabilities = Capabilities::default();
+        Ok(call)
     }
 }
 
@@ -364,7 +368,6 @@ fn install_scene_resolver(
     default_model: &str,
     title_model: &str,
 ) {
-    ctx.global_services.llm = main.clone();
     ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
         main,
         title,
@@ -381,7 +384,6 @@ fn install_scene_resolver_without_title(
     default_model: &str,
     title_model: &str,
 ) {
-    ctx.global_services.llm = main.clone();
     ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
         main,
         title,
@@ -497,7 +499,13 @@ async fn run_and_collect_summaries(
     let event_bus: Arc<dyn EventBus> = Arc::new(tomcat::DefaultEventBus::new());
     let captured = capture_turn_summary_events(&*event_bus);
     let config = default_config(session_id, title);
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new());
+    let mut agent = AgentLoop::new(
+        loop_binding(llm, "mock-model"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    );
     let messages = vec![ChatMessage::user("please review the files")];
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
@@ -539,7 +547,12 @@ fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.to_string());
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Chat),
+        plan_path: Some(path),
+        plan_id: Some(plan_id.to_string()),
+    })
+    .expect("bind executing plan");
 }
 
 /// 挂一个 transcript appender spy，记录所有 `write_transcript_custom` 入参。
@@ -816,7 +829,7 @@ async fn update_plan_emits_plan_todos_event() {
     let rt = PlanRuntime::new("session-a");
     let captured = attach_transcript_spy(&rt);
 
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -826,6 +839,7 @@ async fn update_plan_emits_plan_todos_event() {
                 id: "t1".into(),
                 content: "step 1".into(),
                 status: TodoStatus::Pending,
+                kind: TodoKind::Work,
             }],
         },
     )
@@ -896,6 +910,7 @@ async fn todos_tool_emits_session_todos_event() {
                 id: "t1".into(),
                 content: Some("chat scratchpad".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -968,12 +983,13 @@ async fn session_title_updated_emitted_after_first_user() {
     )
     .expect("init_context_state");
 
+    let user_input = "请帮我整理 transcript UI";
     info!(target: "test", phase = "act", "run_chat_turn 写入首条 user，并等待异步 title event");
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "请帮我整理 transcript UI",
+            user_input,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -1000,10 +1016,7 @@ async fn session_title_updated_emitted_after_first_user() {
     info!(target: "test", phase = "assert", "captured session.title_updated = {:?}", captured.lock().unwrap());
     assert_eq!(
         captured.lock().unwrap().clone(),
-        vec![
-            "请帮我整理 transcript UI".to_string(),
-            "Semantic session title".to_string(),
-        ],
+        vec![user_input.to_string(), "Semantic session title".to_string(),],
         "首条 user 后应先 emit 规则标题，再异步 emit 语义 session 标题"
     );
     assert_eq!(title.call_count(), 1, "title provider 应被调用一次");

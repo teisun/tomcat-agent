@@ -8,6 +8,7 @@
 pub enum PromptKey {
     SystemCoreIdentity,
     SystemToolInstructions,
+    SystemOutputConventions,
     SystemParallelTools,
     SystemPagedReading,
     SystemBackgroundShellMonitor,
@@ -23,6 +24,8 @@ pub enum PromptKey {
     ReviewerCodeBrief,
     Verifier,
     VerifierBrief,
+    Explorer,
+    ExplorerBrief,
 }
 
 /// 读取内置 prompt 模板原文。
@@ -30,6 +33,9 @@ pub fn load(key: PromptKey) -> &'static str {
     match key {
         PromptKey::SystemCoreIdentity => include_str!("templates/system/core_identity.txt"),
         PromptKey::SystemToolInstructions => include_str!("templates/system/tool_instructions.txt"),
+        PromptKey::SystemOutputConventions => {
+            include_str!("templates/system/output_conventions.txt")
+        }
         PromptKey::SystemParallelTools => include_str!("templates/system/parallel_tools.txt"),
         PromptKey::SystemPagedReading => include_str!("templates/system/paged_reading.txt"),
         PromptKey::SystemBackgroundShellMonitor => {
@@ -47,6 +53,8 @@ pub fn load(key: PromptKey) -> &'static str {
         PromptKey::ReviewerCodeBrief => include_str!("templates/reviewer/code_review_brief.txt"),
         PromptKey::Verifier => include_str!("templates/verifier/verify.txt"),
         PromptKey::VerifierBrief => include_str!("templates/verifier/verify_brief.txt"),
+        PromptKey::Explorer => include_str!("templates/explorer/explorer.txt"),
+        PromptKey::ExplorerBrief => include_str!("templates/explorer/explorer_brief.txt"),
     }
 }
 

@@ -54,8 +54,7 @@ impl PrimitiveExecutor for UnusedPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms_override: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }
@@ -100,7 +99,7 @@ impl PrimitiveExecutor for EditOkPrimitive {
         unreachable!()
     }
     async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
-        unreachable!()
+        Ok("## Goal\n\nupdated smoke\n\n## Notes\n".to_string())
     }
     async fn list_dir(
         &self,
@@ -130,6 +129,7 @@ impl PrimitiveExecutor for EditOkPrimitive {
             added: Some(1),
             removed: Some(1),
             diff: None,
+            diff_truncated: false,
         })
     }
     async fn execute_bash(
@@ -137,8 +137,7 @@ impl PrimitiveExecutor for EditOkPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms_override: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }
@@ -185,8 +184,7 @@ async fn reviewer_blocks_non_whitelisted_tool() {
         None,
         None,
         None,
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        SubagentType::PlanReviewer,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -196,7 +194,7 @@ async fn reviewer_blocks_non_whitelisted_tool() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具"));
+        .contains("reviewer sub-Agent may not call"));
 }
 
 #[tokio::test]
@@ -217,8 +215,7 @@ async fn reviewer_blocks_web_search_tool() {
         None,
         None,
         None,
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        SubagentType::PlanReviewer,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -228,7 +225,7 @@ async fn reviewer_blocks_web_search_tool() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具 `web_search`"));
+        .contains("reviewer sub-Agent may not call `web_search`"));
 }
 
 #[tokio::test]
@@ -250,8 +247,7 @@ async fn code_reviewer_blocks_write_capable_tools() {
         None,
         None,
         None,
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Code),
+        SubagentType::CodeReviewer,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -261,7 +257,7 @@ async fn code_reviewer_blocks_write_capable_tools() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("仅允许 read/search_files/list_dir/bash"));
+        .contains("allowed: read/search_files/list_dir/bash"));
 }
 
 #[tokio::test]
@@ -282,8 +278,7 @@ async fn reviewer_blocks_create_plan_subagent() {
         None,
         None,
         None,
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        SubagentType::PlanReviewer,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -293,7 +288,7 @@ async fn reviewer_blocks_create_plan_subagent() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具 `create_plan`"));
+        .contains("reviewer sub-Agent may not call `create_plan`"));
 }
 
 #[tokio::test]
@@ -302,6 +297,10 @@ async fn verifier_blocks_non_whitelisted_tools() {
     for (name, arguments) in [
         ("update_plan", "{}"),
         ("web_search", r#"{"query":"rust async"}"#),
+        (
+            "package_install",
+            r#"{"source":"/tmp/never-installs","scope":"agent"}"#,
+        ),
         ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
         (
             "edit",
@@ -324,7 +323,6 @@ async fn verifier_blocks_non_whitelisted_tools() {
             None,
             None,
             SubagentType::Verifier,
-            None,
             &tokio_util::sync::CancellationToken::new(),
             &tc,
             None,
@@ -335,7 +333,7 @@ async fn verifier_blocks_non_whitelisted_tools() {
         assert!(
             outcome
                 .model_text
-                .contains(&format!("verifier 子 Agent 禁止调用工具 `{name}`")),
+                .contains(&format!("verifier sub-Agent may not call `{name}`")),
             "{name} 拒绝文案异常: {}",
             outcome.model_text
         );
@@ -367,7 +365,6 @@ async fn verifier_web_fetch_requires_runtime_after_whitelist() {
         None,
         None,
         SubagentType::Verifier,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -377,7 +374,9 @@ async fn verifier_web_fetch_requires_runtime_after_whitelist() {
 
     assert!(outcome.is_error, "未注入 runtime 时应返回结构化错误");
     assert!(
-        outcome.model_text.contains("web_fetch runtime 未注入"),
+        outcome
+            .model_text
+            .contains("web_fetch runtime was not supplied"),
         "runtime 缺失文案异常: {}",
         outcome.model_text
     );
@@ -428,7 +427,6 @@ async fn verifier_web_fetch_succeeds_when_runtime_is_present() {
         None,
         None,
         SubagentType::Verifier,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -496,8 +494,7 @@ async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
         None,
         None,
         None,
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        SubagentType::PlanReviewer,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -512,5 +509,118 @@ async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
     );
     assert!(outcome
         .model_text
-        .contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
+        .contains("Edited: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
+}
+
+#[tokio::test]
+async fn explorer_blocks_every_write_and_nesting_tool() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    for (name, arguments) in [
+        ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
+        (
+            "edit",
+            r#"{"path":"/tmp/demo.txt","old_string":"a","new_string":"b"}"#,
+        ),
+        ("update_plan", "{}"),
+        ("dispatch_agent", r#"{"tasks":[{"prompt":"nested"}]}"#),
+        (
+            "package_install",
+            r#"{"source":"/tmp/never-installs","scope":"agent"}"#,
+        ),
+    ] {
+        let tc = ToolCallInfo {
+            id: format!("tc_{name}"),
+            name: name.into(),
+            arguments: arguments.into(),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            SubagentType::Explorer,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+            None,
+            None,
+        )
+        .await;
+        assert!(outcome.is_error, "{name} 应被 explorer 白名单拒绝");
+        assert!(
+            outcome.model_text.contains(&format!(
+                "explorer sub-Agent is read-only and may not call `{name}`"
+            )),
+            "{name} 拒绝文案异常: {}",
+            outcome.model_text
+        );
+    }
+}
+
+#[tokio::test]
+async fn package_install_rejects_plan_mode_before_backend_lookup() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let runtime = crate::core::plan_runtime::PlanRuntime::new("install-plan-guard");
+    runtime.enter_plan().unwrap();
+    let tc = ToolCallInfo {
+        id: "tc_install_plan".into(),
+        name: "package_install".into(),
+        arguments: r#"{"source":"/tmp/never-installs","scope":"agent"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        Some(&runtime),
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome.model_text.contains("unavailable in Plan mode"));
+}
+
+#[tokio::test]
+async fn package_install_without_backend_is_a_zero_write_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let tc = ToolCallInfo {
+        id: "tc_install_missing_backend".into(),
+        name: "package_install".into(),
+        arguments: r#"{"source":"/tmp/never-installs","scope":"agent"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome
+        .model_text
+        .contains("no installation backend is available for this session"));
 }

@@ -18,11 +18,13 @@ fn write_header_and_read_header() {
         id: "sid_001".to_string(),
         timestamp: "2025-01-01T00:00:00.000Z".to_string(),
         cwd: Some("/tmp".to_string()),
+        project_root: Some("/workspace".to_string()),
     };
     write_header(&path, &header).unwrap();
     let read = read_header(&path).unwrap();
     assert_eq!(read.id, "sid_001");
     assert_eq!(read.version, Some(3));
+    assert_eq!(read.project_root.as_deref(), Some("/workspace"));
 }
 
 #[test]

@@ -318,7 +318,7 @@
 │  • image_to_video_parameters(): prompt + image + last_image? + duration ...│
 │  • description 提示"耗时约 1-2 分钟、结果是视频文件路径、不回灌"            │
 └───────────────────────────────┬────────────────────────────────────────────┘
-        │ visible_tools_for_mode_with_policy 过滤后给 LLM
+        │ stable ToolSurface 下发给 LLM；handler 再按会话状态执行 policy
         ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  src/core/agent_loop/tool_exec/  (目录模块)                                 │

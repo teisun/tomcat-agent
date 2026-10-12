@@ -1,4 +1,3 @@
-use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::tools::web_search::backend::BackendFailure;
 use crate::core::tools::web_search::plugin_backend::PluginSearchInvoker;
 use crate::ext::{
@@ -7,12 +6,13 @@ use crate::ext::{
 };
 use crate::infra::{DefaultEventBus, TracingAuditRecorder};
 use crate::{
-    AppError, Capabilities, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
-    LlmProvider, LlmResolver, LlmScene, ResolvedCall, StreamEvent,
+    AppError, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, LlmResolver,
+    LlmScene, ResolvedCall, StreamEvent,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures_util::stream;
-use rcgen::generate_simple_self_signed;
+use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};
 use serde_json::json;
 use serial_test::serial;
 use std::fs;
@@ -23,11 +23,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio_rustls::rustls::{
-    self,
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-};
-use tokio_rustls::TlsAcceptor;
+use tokio_native_tls::TlsAcceptor;
 
 fn plugin_function_fixture(
     plugin_id: &str,
@@ -234,6 +230,80 @@ fn function_search_harness_with_net_fetch(
     (invoker, function_registry, manager, dispatcher)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
+    let fixture = plugin_function_fixture_with_manifest(
+        "birth-fetch",
+        json!({
+            "requiredPermissions": ["net:fetch"], "allowedHosts": ["example.com"]
+        }),
+        "pi.on('noop', function(){});",
+    );
+    let (_, _, manager, dispatcher) =
+        function_search_harness_with_net_fetch(Duration::from_secs(3));
+    let manifest = crate::ext::parse_manifest(
+        &fs::read_to_string(fixture.path().join("plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manager
+        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .unwrap();
+    manager.set_catalog_fingerprint("birth-fetch", 1);
+    let old_handle = manager
+        .start_session_vm("old", "birth-fetch")
+        .await
+        .unwrap();
+    manager.retire_plugin("birth-fetch").unwrap();
+    let fetch = || HostRequest {
+        module: "net".into(),
+        method: "fetch".into(),
+        params: json!({"url":"http://example.com"}),
+        call_id: None,
+    };
+    let error = dispatcher
+        .dispatch_async(&old_handle.instance_id, fetch())
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(error.contains("ssrf_rejected"), "{error}");
+    let mut updated = manifest;
+    updated.required_permissions.clear();
+    manager
+        .register_catalog_plugin(fixture.path(), updated)
+        .unwrap();
+    manager.set_catalog_fingerprint("birth-fetch", 2);
+    let new_handle = manager
+        .start_session_vm("new", "birth-fetch")
+        .await
+        .unwrap();
+    let error = dispatcher
+        .dispatch_async(&old_handle.instance_id, fetch())
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(error.contains("ssrf_rejected"), "{error}");
+    let error = dispatcher
+        .dispatch_async(&new_handle.instance_id, fetch())
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert!(error.contains("permission_denied"), "{error}");
+    manager.end_session("old").await.unwrap();
+    manager.end_session("new").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while old_handle.current_state() != crate::ext::VmActorState::Stopped
+            || new_handle.current_state() != crate::ext::VmActorState::Stopped
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 fn function_search_harness_with_custom_net_fetch(
     timeout: Duration,
     client: reqwest::Client,
@@ -278,23 +348,23 @@ struct HttpsTestServer {
 
 impl HttpsTestServer {
     async fn start(
-        hostname: &str,
+        _hostname: &str,
         status_line: &str,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
         delay: Duration,
     ) -> Self {
-        let certified = generate_simple_self_signed(vec![hostname.to_string()])
-            .expect("generate self-signed cert");
-        let cert_chain = vec![CertificateDer::from(certified.cert.der().to_vec())];
-        let private_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
-            certified.signing_key.serialize_der(),
-        ));
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, private_key)
-            .expect("build rustls server config");
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let encoded = include_str!("../../../tests/fixtures/native-tls-test-identity.p12.b64")
+            .split_whitespace()
+            .collect::<String>();
+        let pkcs12 = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode native TLS test identity");
+        let identity =
+            Identity::from_pkcs12(&pkcs12, "tomcat-test").expect("load native TLS test identity");
+        let acceptor = TlsAcceptor::from(
+            NativeTlsAcceptor::new(identity).expect("build native TLS server acceptor"),
+        );
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind https test server");
@@ -393,16 +463,12 @@ impl LlmResolver for FixedResolver {
         _scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
-        Ok(ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: session_override.unwrap_or("mimo-v2.5-pro").to_string(),
-            api: "openai".to_string(),
-            provider: "mimo".to_string(),
-            base_url: None,
-            key_source: "test".to_string(),
-            thinking_format: ThinkingFormat::Doubao,
-            capabilities: Capabilities::default(),
-        })
+        let model = session_override.unwrap_or("mimo-v2.5-pro").to_string();
+        Ok(ResolvedCall::from_parts_unchecked(
+            self.provider.clone(),
+            model.clone(),
+            model,
+        ))
     }
 }
 
@@ -524,7 +590,11 @@ async fn plugin_function_invoker_requires_session_id() {
         .await
         .expect_err("missing session_id should fail before runtime access");
     assert!(
-        err.to_string().contains("插件宿主函数执行缺少 session_id"),
+        err.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plugin.functionSession",
+            &[("function", "echo_host"), ("point", "test.echo")]
+        )),
         "error should explain the missing session id: {err}"
     );
 }
@@ -603,7 +673,11 @@ pi.registerFunction("nextCount", function () {
         .await
         .expect_err("hung plugin function should time out");
     assert!(
-        err.to_string().contains("插件宿主函数执行超时: nextCount"),
+        err.to_string().contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plugin.functionTimeout",
+            &[("name", "nextCount")]
+        )),
         "timeout error should mention the function name: {err}"
     );
     assert_eq!(
@@ -816,9 +890,14 @@ async fn official_web_search_backend_function_returns_missing_key_sentinel_for_t
         .iter()
         .any(|name| name == "TAVILY_API_KEY"));
 
+    let instance_id = manager
+        .start_session_vm("s1", "tomcat.web-search-backends")
+        .await
+        .expect("start session VM for preflight")
+        .instance_id;
     let preflight = dispatcher
         .dispatch_async(
-            "s1/tomcat.web-search-backends",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1015,10 +1094,15 @@ async fn net_fetch_hostcall_denies_plugins_without_permission() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin without net:fetch");
+    let instance_id = manager
+        .start_session_vm("s1", "no-net-permission")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/no-net-permission",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1031,6 +1115,7 @@ async fn net_fetch_hostcall_denies_plugins_without_permission() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(response
         .error
@@ -1055,6 +1140,11 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with net:fetch policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-policy")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let cases = vec![
         (
@@ -1104,7 +1194,7 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
     for (params, expected_code) in cases {
         let response = dispatcher
             .dispatch_async(
-                "s1/net-fetch-policy",
+                &instance_id,
                 HostRequest {
                     module: "net".to_string(),
                     method: "fetch".to_string(),
@@ -1125,6 +1215,7 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
             response.error
         );
     }
+    manager.end_session("s1").await.expect("end session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1155,10 +1246,15 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with redirect policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-redirect")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/net-fetch-redirect",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1171,6 +1267,7 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(
         response
@@ -1208,10 +1305,15 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with size limit");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-large-body")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/net-fetch-large-body",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1224,6 +1326,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(
         response
@@ -1261,10 +1364,15 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with timeout policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-timeout")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let response = dispatcher
         .dispatch_async(
-            "s1/net-fetch-timeout",
+            &instance_id,
             HostRequest {
                 module: "net".to_string(),
                 method: "fetch".to_string(),
@@ -1277,6 +1385,7 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
         .await
         .expect("hostcall should resolve with HostResponse");
 
+    manager.end_session("s1").await.expect("end session");
     assert!(!response.ok);
     assert!(response.error.as_deref().unwrap_or("").contains("timeout"));
 }
@@ -1306,6 +1415,11 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with concurrency policy");
+    let instance_id = manager
+        .start_session_vm("s1", "net-fetch-concurrency")
+        .await
+        .expect("start session VM")
+        .instance_id;
 
     let request = HostRequest {
         module: "net".to_string(),
@@ -1319,21 +1433,23 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
     let dispatcher_b = dispatcher.clone();
     let request_first = request.clone();
     let request_second = request;
+    let first_instance_id = instance_id.clone();
     let first = tokio::spawn(async move {
         dispatcher_a
-            .dispatch_async("s1/net-fetch-concurrency", request_first)
+            .dispatch_async(&first_instance_id, request_first)
             .await
             .expect("first hostcall response")
     });
     let second = tokio::spawn(async move {
         dispatcher_b
-            .dispatch_async("s1/net-fetch-concurrency", request_second)
+            .dispatch_async(&instance_id, request_second)
             .await
             .expect("second hostcall response")
     });
 
     let first = first.await.expect("join first");
     let second = second.await.expect("join second");
+    manager.end_session("s1").await.expect("end session");
     assert!(
         first.ok,
         "first request should succeed, got {:?}",
@@ -1530,7 +1646,11 @@ async fn ext_plugin_search_invoker_without_registered_provider_stays_incompatibl
 
     match err {
         BackendFailure::Incompatible { detail } => {
-            assert!(detail.contains("未找到名为 `mimo` 的 web_search 插件后端"));
+            assert!(detail.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "plugin.searchMissing",
+                &[("name", "mimo")]
+            )));
         }
         other => panic!("unexpected error: {other:?}"),
     }

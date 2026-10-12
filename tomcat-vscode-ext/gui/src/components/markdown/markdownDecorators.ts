@@ -1,0 +1,255 @@
+import { t as defaultT, type Translator } from "../../../../src/shared/i18n";
+import { fileChipIconClass } from "../FileChip";
+import { COPY_FLASH_MS } from "../copyFeedback";
+import { parseCodeFenceInfo } from "./codeFence";
+import { basenameOf, detectInlineFilePath, inferLanguageFromPath } from "./inlinePath";
+import { rewriteLocalImages } from "./localImages";
+import { renderMarkdownHtml, sanitizeMarkdownHtml } from "./markdownRuntime";
+import { highlightToHtml } from "./richRenderRuntime";
+import type { PathResolution, WebviewMediaRoot } from "../../types";
+
+function withLocationSuffix(label: string, line?: number, column?: number): string {
+  if (typeof line !== "number") {
+    return label;
+  }
+  return typeof column === "number" ? `${label}:${line}:${column}` : `${label}:${line}`;
+}
+
+function displayFileLabel(path: string, line?: number, column?: number): string {
+  return withLocationSuffix(path, line, column);
+}
+
+function displayBasenameLabel(path: string, line?: number, column?: number): string {
+  return withLocationSuffix(basenameOf(path), line, column);
+}
+
+export function normalizeHighlightLanguage(value: string | undefined): string {
+  if (!value) {
+      return "plaintext";
+  }
+  switch (value.toLowerCase()) {
+    case "cjs":
+    case "js":
+    case "jsx":
+    case "mjs":
+      return "javascript";
+    case "html":
+      return "xml";
+    case "md":
+      return "markdown";
+    case "py":
+      return "python";
+    case "rb":
+      return "ruby";
+    case "rs":
+      return "rust";
+    case "sh":
+    case "shell":
+    case "zsh":
+      return "bash";
+    case "text":
+    case "txt":
+      return "plaintext";
+    case "ts":
+    case "tsx":
+      return "typescript";
+    case "yml":
+      return "yaml";
+    default:
+      return value.toLowerCase();
+  }
+}
+
+function createCopyButton(documentRef: Document): HTMLButtonElement {
+  const copyButton = documentRef.createElement("button");
+  copyButton.className = "tc-code-card__copy";
+  copyButton.dataset.tcCopyCode = "1";
+  copyButton.dataset.testid = "assistant-code-copy";
+  copyButton.type = "button";
+  copyButton.title = defaultT("code.copy");
+  copyButton.setAttribute("aria-label", defaultT("code.copy"));
+
+  const copyIcon = documentRef.createElement("span");
+  copyIcon.setAttribute("aria-hidden", "true");
+  copyIcon.className = "tc-code-card__copy-icon codicon codicon-copy";
+  copyButton.appendChild(copyIcon);
+
+  return copyButton;
+}
+
+export function setCopyButtonCopiedState(button: HTMLElement, copied: boolean, t: Translator = defaultT): void {
+  button.classList.toggle("is-copied", copied);
+  const label = t(copied ? "common.copied" : "code.copy");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  const icon = button.querySelector<HTMLElement>(".tc-code-card__copy-icon");
+  if (!icon) {
+    return;
+  }
+  icon.classList.toggle("codicon-copy", !copied);
+  icon.classList.toggle("codicon-check", copied);
+}
+
+export function flashCopyButton(button: HTMLElement, t: Translator = defaultT): void {
+  const existingTimer = button.dataset.tcCopyResetTimer;
+  if (existingTimer) {
+    window.clearTimeout(Number(existingTimer));
+  }
+  setCopyButtonCopiedState(button, true, t);
+  button.dataset.tcCopyResetTimer = String(
+    window.setTimeout(() => {
+      setCopyButtonCopiedState(button, false, t);
+      delete button.dataset.tcCopyResetTimer;
+    }, COPY_FLASH_MS),
+  );
+}
+
+export function decorateCodeCards(container: HTMLElement): void {
+  const documentRef = container.ownerDocument;
+  const blocks = Array.from(container.querySelectorAll<HTMLPreElement>("pre")).filter(
+    (pre) => !pre.closest(".tc-code-card"),
+  );
+  for (const pre of blocks) {
+    const code = pre.querySelector("code");
+    if (!code || code.classList.contains("language-mermaid")) {
+      continue;
+    }
+    const parsed = parseCodeFenceInfo(pre.getAttribute("data-fence-info"));
+    if (parsed.isMermaid) {
+      continue;
+    }
+
+    const language = normalizeHighlightLanguage(parsed.language ?? inferLanguageFromPath(parsed.filePath ?? ""));
+    const rawText = code.textContent ?? "";
+    const highlighted = highlightToHtml(rawText, language);
+    code.classList.remove(...[...code.classList].filter((className) => className.startsWith("language-")));
+    code.classList.add("hljs", `language-${highlighted.language}`);
+    code.dataset.tcHighlighted = "1";
+    code.innerHTML = highlighted.html;
+
+    const wrapper = documentRef.createElement("section");
+    wrapper.className = "tc-code-card";
+    wrapper.setAttribute("data-testid", "assistant-code-card");
+    const copyButton = createCopyButton(documentRef);
+
+    if (parsed.filePath) {
+      const header = documentRef.createElement("div");
+      header.className = "tc-code-card__header";
+
+      const meta = documentRef.createElement("div");
+      meta.className = "tc-code-card__meta";
+
+      const fileButton = documentRef.createElement("button");
+      fileButton.className = "tc-code-card__file";
+      fileButton.dataset.tcFilePath = parsed.filePath;
+      fileButton.dataset.testid = "assistant-code-file";
+      fileButton.type = "button";
+      if (typeof parsed.line === "number") {
+        fileButton.dataset.tcLine = String(parsed.line);
+      }
+      fileButton.title = displayFileLabel(parsed.filePath, parsed.line);
+
+      const icon = documentRef.createElement("span");
+      icon.className = `tc-code-card__file-icon codicon ${fileChipIconClass(parsed.filePath)}`;
+      icon.setAttribute("aria-hidden", "true");
+      fileButton.appendChild(icon);
+
+      const label = documentRef.createElement("span");
+      label.className = "tc-code-card__file-label";
+      label.textContent = displayBasenameLabel(parsed.filePath, parsed.line);
+      fileButton.appendChild(label);
+
+      meta.appendChild(fileButton);
+
+      header.append(meta, copyButton);
+      pre.replaceWith(wrapper);
+      wrapper.append(header, pre);
+      continue;
+    }
+
+    wrapper.classList.add("tc-code-card--bare");
+    pre.replaceWith(wrapper);
+    wrapper.append(pre, copyButton);
+  }
+}
+
+export function linkifyInlineFilePaths(
+  container: HTMLElement,
+  pathResolutions?: ReadonlyMap<string, PathResolution>,
+): void {
+  const documentRef = container.ownerDocument;
+  const inlineCodes = Array.from(container.querySelectorAll<HTMLElement>("code")).filter(
+    (node) => !node.closest("pre"),
+  );
+  for (const code of inlineCodes) {
+    const text = code.textContent ?? "";
+    const match = detectInlineFilePath(text);
+    if (!match) {
+      continue;
+    }
+    const resolution = pathResolutions?.get(match.path);
+    if (!resolution) {
+      code.dataset.tcPathCandidate = match.path;
+      continue;
+    }
+    if (resolution.kind === "missing") {
+      continue;
+    }
+    const link = documentRef.createElement("a");
+    link.className = "tc-inline-path";
+    link.dataset.tcFilePath = resolution.resolvedPath;
+    link.dataset.testid = "assistant-clickable-path";
+    link.href = "#";
+    link.title = match.originalText;
+    if (resolution.kind === "directory") {
+      link.dataset.tcDirectory = "true";
+    }
+    if (typeof match.line === "number") {
+      link.dataset.tcLine = String(match.line);
+    }
+
+    const icon = documentRef.createElement("span");
+    icon.className = `tc-inline-path__icon codicon ${
+      resolution.kind === "directory" ? "codicon-folder" : fileChipIconClass(match.path)
+    }`;
+    icon.setAttribute("aria-hidden", "true");
+    link.appendChild(icon);
+
+    const label = documentRef.createElement("span");
+    label.className = "tc-inline-path__label";
+    label.textContent = basenameOf(match.originalText);
+    link.appendChild(label);
+
+    code.replaceWith(link);
+  }
+}
+
+type MarkdownDecorationOptions = {
+  mediaRoots?: WebviewMediaRoot[];
+  pathResolutions?: ReadonlyMap<string, PathResolution>;
+};
+
+export function buildDecoratedHtml(
+  markdown: string,
+  options?: MarkdownDecorationOptions & { sourceLineMap?: number[] },
+): string {
+  return decorateMarkdownHtml(renderMarkdownHtml(markdown, options?.sourceLineMap), options);
+}
+
+// Both whole-document previews and chat blocks retain the same sanitizer and
+// local-media boundary; parsing a block again would lose document references.
+export function decorateMarkdownHtml(
+  renderedHtml: string,
+  options?: MarkdownDecorationOptions,
+): string {
+  const safeHtml = sanitizeMarkdownHtml(renderedHtml);
+  if (typeof document === "undefined") {
+    return safeHtml;
+  }
+  const container = document.createElement("div");
+  container.innerHTML = safeHtml;
+  decorateCodeCards(container);
+  rewriteLocalImages(container, options?.mediaRoots ?? []);
+  linkifyInlineFilePaths(container, options?.pathResolutions);
+  return container.innerHTML;
+}

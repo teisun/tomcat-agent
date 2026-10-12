@@ -561,7 +561,7 @@ interface ContextSearchMatch {
 | `TOMCAT_CONTEXT_SEARCH_DEBOUNCE_MS` | 整数（默认 `150`） | 前端搜索防抖窗口 | env | 打字停多久才真正发查询 |
 | `TOMCAT_CONTEXT_SEARCH_DISABLE` | `1` / `true` | 关闭 `@` 触发（回退到仅 `+`/拖拽/选区） | env | 出问题时的总开关 |
 
-`findFiles` 的排除口径不额外配置：传 `exclude=undefined` 即复用用户的 `files.exclude` + `search.exclude`，与 VS Code Quick Open 行为一致（尊重用户既有忽略规则）。
+`findFiles` 传 `exclude=undefined` 使用 VS Code 默认文件排除（`files.exclude`），不承诺应用 `search.exclude` 或 `.gitignore`。候选仍只从有界返回集派生；大工作区未收录的目录需用既有 `+`/拖拽选择。
 
 ---
 
@@ -572,10 +572,10 @@ interface ContextSearchMatch {
 ```text
 无工作区文件夹      → host 回 matches:[]；前端一次性 showWarningMessage("打开文件夹后可用 @")，不弹菜单
 无匹配              → host 回 matches:[]（truncated:false）；下拉显示空态「未找到匹配文件」
-命中超 CAP          → host 截断到 LIMIT + truncated:true；下拉底部提示「仅显示前 N 条，输入更精确关键词」
-缓存超 MAX_FILES    → 停止收集 + truncated:true（同上提示），已收集部分仍可搜
+命中超 CAP          → host 截断到 LIMIT + truncated:true；提示搜索范围有限及 +/拖拽入口
+缓存达 MAX_FILES    → truncated:true，即使当前零/少量命中也提示范围有限；已收集部分仍可搜
 findFiles 抛错/取消 → host catch → 回 matches:[]（被取消的请求因 requestId 过期而被前端丢弃，无副作用）
-重复引用            → command 阶段 editorHasReference 命中 → 删 @query 但不插 chip（幂等）
+重复引用            → 每次用户添加保留新的 occurrence；同一 occurrence 重放幂等
 陈旧响应            → 前端 requestId !== latest → 静默丢弃（不渲染、不报错）
 host 内部异常       → 记 console.error + 回空结果；不 throw 到 intent 边界（避免打断 webview 消息循环）
 ```
@@ -615,7 +615,7 @@ host 内部异常       → 记 console.error + 回空结果；不 throw 到 int
 | `@folder` 搜不到空目录 | 低 | 目录由文件路径派生，空目录不出现在候选（§3.2.1 已知取舍）；空目录引用价值低，需要时用 `+`/拖拽兜底 | 完全空的文件夹 `@` 搜不到，用 + 号加 |
 | `@` 触发与中文 IME 冲突 | 中 | 复用既有 `isComposingRef`（`compositionstart/end`）守卫，组字期不触发 suggestion，不误发送 | 中文输入时打 @ 不乱弹、回车不误发 |
 | Enter 在下拉开时误发送消息 | 高 | `isMentionOpenRef` 门控：open 态 keydown 直接 `return false` 交 suggestion 消费（§3.2.3） | 菜单开着按回车是选中，不是发送 |
-| `@` 引用与 `+`/拖拽产出不一致 | 中 | 统一走 `buildFileReference` + `ReferenceNode`；`referenceIdentity` 跨入口去重；集成测试断言同形 | 三个入口插进去的 chip 必须一模一样 |
+| `@` 引用与 `+`/拖拽产出不一致 | 中 | 统一走 `buildFileReference` + `ReferenceNode`；`occurrenceId` 保留每次用户添加、只去除同次投递回声；集成测试断言同形 | 三个入口插进去的 chip 必须一模一样 |
 | 无工作区 / 多根工作区路径歧义 | 低 | 无工作区回空 + 提示；多根用 `asRelativePath`（既有 `contextReferences.ts` 口径），必要时 label 带根名 | 没打开文件夹给提示；多根用相对路径 |
 | 后端被误改导致协议扩散 | 中 | 关键承诺测试：git diff 不含 `*.rs`、`wire.d.ts`、`serve.schema.json`；serve schema fixture 无 diff（§8） | 用测试兜住「真没碰后端」 |
 | 缓存与磁盘不同步（新建文件搜不到） | 低 | `FileSystemWatcher` create/delete 失效缓存；兜底可加 TTL 定时重建（P2） | 新建的文件也能很快搜到 |

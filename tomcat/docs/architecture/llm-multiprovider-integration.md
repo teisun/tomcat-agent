@@ -75,13 +75,13 @@ Anthropic…                                                           Completio
 
 - **`LlmProvider`**（[`src/core/llm/provider.rs`](../../../src/core/llm/provider.rs)）：**`chat` / `chat_stream` / `count_tokens`**。
 - **`resolve_llm`**（[`src/core/llm/registry.rs`](../../../src/core/llm/registry.rs)）：按 **`LlmConfig.provider`** 字符串构造 **`Arc<dyn LlmProvider>`**（当前登记 **`openai`** → Completions、**`openai-responses`** → Responses）。
-- **`ChatMessage` / `ChatRequest`**（[`src/core/llm/types.rs`](../../../src/core/llm/types.rs)）：与 OpenAI **messages** 对齐；`ChatMessageContent` 支持 **Parts**，**`ChatMessageContentPart` 已升级为 `#[serde(tag = "type")]` 三态枚举**：`InputText` / `InputImage` / `InputFile`，**Responses 路径已通 inline base64 + 已知 `file_id` 双通道**；Completions 路径见 §4 拒绝策略。
+- **`ChatMessage` / `ChatRequest`**（[`src/core/llm/types.rs`](../../../src/core/llm/types.rs)）：统一承载内部对话语义；`ChatMessageContent` 支持 **Parts**，**`ChatMessageContentPart` 为三态枚举**：`InputText` / `InputImage` / `InputFile`。当前三条 wire 家族都从它翻译：**Responses**（`input_image` / `input_file`）、**Chat Completions**（`image_url` / `file` content 数组）、**Anthropic Messages**（`image` / `document` block）。
 
 ### 2.2 HTTP 与能力边界
 
 - **`OpenAiProvider`**（[`src/core/llm/openai.rs`](../../../src/core/llm/openai.rs)）：固定 **`POST {base}/v1/chat/completions`**，body 为 **`OpenAiRequestBody`**（model、messages、temperature、max_tokens、tools、stream）。**`[llm] provider = "openai"`** 时选用。
 - **`OpenAiResponsesProvider`**（[`src/core/llm/openai_responses.rs`](../../../src/core/llm/openai_responses.rs)）：固定 **`POST {base}/v1/responses`**；同一套 **`ChatRequest` / `ChatMessage`** 在实现内翻译为 **`input` + `instructions` + tools 映射**；流式 **SSE / NDJSON** → **`StreamEvent`**。**默认** **`[llm] provider = "openai-responses"`**。
-- **结论（架构边界）**：主线默认 **Responses**；退回 Completions 仅通过 **`provider = "openai"`**。**vision / `input_file`（PDF）** 等增值能力仍按 **§6.5.3 / §6.6** 演进。
+- **结论（架构边界）**：主线默认 **Responses**；但多模态不再是 Responses 独占。当前 **OpenAI Responses / OpenAI Completions / Anthropic Messages** 都能消费同一份 `ChatMessageContentPart`，差异被切成两层：**wire 函数**负责各家消息 JSON，**`FilesApiAdapter`** 负责各厂商上传/删除与极小的引用提示（如 Moonshot `ms://`、Anthropic beta 头）。
 
 ### 2.3 全链路 ASCII（入口 → Agent → LLM HTTP）
 
@@ -103,8 +103,10 @@ Anthropic…                                                           Completio
          ├─ OpenAiProvider ─────────► POST …/v1/chat/completions
          └─ OpenAiResponsesProvider ─► POST …/v1/responses
          │
-         ├─ stream: true  → SSE / NDJSON → StreamEvent::…
-         └─ stream: false → JSON → ChatResponse
+         ├─ chat_stream → SSE / NDJSON → StreamEvent::…
+         └─ chat / chat_collect → ChatResponse
+                              ├─ 普通 wire：JSON
+                              └─ 必须流式的 Responses 中转站：缓冲 SSE / NDJSON
 ```
 
 ### 2.4 配置：Provider 类型 vs 模型字符串 vs 场景键
@@ -145,6 +147,8 @@ DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `
 调用方（Agent Loop、Compaction、测试）**只依赖 trait**，不依赖 `OpenAiProvider` 具体类型：
 
 - **`chat(ChatRequest) -> ChatResponse`**：非流式。
+- **`chat_collect(ChatRequest) -> ChatResponse`**：完整响应语义；默认复用 `chat`，但
+  Responses 中转站可在 adapter 内缓冲其强制要求的流式传输。
 - **`chat_stream(ChatRequest) -> Stream<StreamEvent>`**：流式；SSE 解析在实现内完成。
 - **`count_tokens`**：预算 / 观测用（实现精度依模型而定）。
 
@@ -152,7 +156,7 @@ DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `
 
 - 序列化目标与 **`OpenAiRequestBody`** 对齐（见 [`openai.rs`](../../../src/core/llm/openai.rs)）。
 - **工具**：`tools` 为 OpenAI function 形状；Compaction 路径 **显式 `tools: None`**（见 `generate_summary` 注释——双保险不加 tool schema）。
-- **缺口（冻结陈述）**：多模态 **需在 `types` + `openai` 序列化** 补 **`image_url`** 等 part；**Responses 线** 需 **`POST /v1/responses` 请求体 + 流解析**（见 **§6.5**）；**PDF `input_file`** 在 Responses 接通后再扩展映射层（§6.5.3）。
+- **当前冻结结论**：调用方继续只组 **一份** `ChatRequest` / `ChatMessageContentPart`；多模态差异不再由上层分支。具体该发 `input_file`、`image_url.file_id`、`image_url.url=ms://...`、还是 Anthropic `document.source={type:file,...}`，统一由各 wire 家族函数在 provider 内部决定（见 **§6.5.3–§6.6**）。
 
 #### 3.2.1 Completions / Responses：**注册表 id 管的是「谁翻译」，不是「两套 ChatRequest」**
 
@@ -160,13 +164,15 @@ DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `
 |------|----------|
 | 换 API 要不要组 **两套** `ChatRequest` 字段？ | **通常不要。** Agent 仍按现有习惯组 **一份** `ChatRequest`（`model`、`messages`、`tools`、`stream` 等）。 |
 | `provider` / 注册表 id 干什么用？ | 只决定 **`Arc<dyn LlmProvider>` 用哪一个实现**：例如 **`openai`** → Completions 适配器；**`openai-responses`** → Responses 适配器。**差别在 Provider 内部**：同一坨 **`messages`**，前者序列化成 **`messages[]`** POST，后者 **翻译成 `input` + `instructions`（及工具形状）** 再 POST。 |
-| 调用方要不要知道当前是 Completions 还是 Responses？ | **不需要。** 协议差异 **封装在 `XxxProvider::chat` / `chat_stream`** 里。 |
-| 何时才要在 `ChatRequest` 上 **加新字段**？ | 仅当引入 **某一端独有、且无法从现有 `ChatMessage` 推断** 的能力时（例如 **仅 Responses 支持的 PDF / `input_file`**），再 **扩展类型或走专用入口**——那是 **能力扩展**，与「同一对话走哪条 HTTP」的日常切换 **分开**。 |
+| 调用方要不要知道当前是 Completions 还是 Responses？ | **不需要。** 协议差异 **封装在 `XxxProvider::chat` / `chat_collect` / `chat_stream`** 里。 |
+| 何时才要在 `ChatRequest` 上 **加新字段**？ | 仅当引入 **现有 `ChatMessageContentPart` 无法表达** 的新能力时才扩类型。图片 / PDF / `file_id` / inline base64 现在都能由现有 part 表达；差异留在 provider 内部 wire，而不是再裂出多套 `ChatRequest`。 |
 
 ### 3.3 流式与非流式
 
 - **stream: true**：字节级 SSE → **`StreamEvent`**（content delta、tool_calls 分片、usage 等，以代码为准）。
-- **stream: false**：单次 JSON **`ChatResponse`**。
+- **完整响应调用**：`chat` 通常使用单次 JSON；`chat_collect` 的返回值同样是
+  **`ChatResponse`**，但 Responses adapter 可以缓冲 SSE/NDJSON，兼容禁止 `stream:false`
+  的中转站。调用方无需分支。
 
 ### 3.4 配置-driven 的客户端参数
 
@@ -229,7 +235,8 @@ User input
 usage_ratio / policy 触发 preheat
     → 上层解析 compaction_provider + compaction_model
     → generate_summary(snapshot, compaction_provider, compaction_model)
-    → chat(ChatRequest { model: compaction_model, tools: None, stream: false })
+    → chat_collect(ChatRequest { model: compaction_model, tools: None, stream: false })
+       （逻辑上收集完整摘要；Responses adapter 必要时缓冲其流式 wire）
     → 摘要文本 → transcript / compaction 状态机（与主对话模型独立）
 ```
 
@@ -325,9 +332,15 @@ tomcat **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire 收�
                └────────────► POST …/v1/responses   (stream, tools 映射, SSE/NDJSON 解析)
 ```
 
-#### 6.5.3 PDF / `input_file`（Responses 增值能力）— 已实现 wire
+#### 6.5.3 多模态 `Parts`（统一内部表示）— 已实现 wire
 
-**已实现**（T2-P0-012）：`ChatMessageContentPart::{InputImage, InputFile}` 三态枚举落地，`OpenAiResponsesProvider::part_to_responses_value` 把内部 part 翻译成 Responses 的 `input_image` / `input_file`，wire 默认走 **inline base64 data URL**（`data:{mime};base64,{b64}`），**`file_id` 通道**已在 schema 留好（`image_file_id` / `file_file_id` helper），方便调用方传入由其它途径取得的 OpenAI Files API id。
+**当前冻结实现**：`ChatMessageContentPart::{InputText, InputImage, InputFile}` 继续是**唯一内部表示**；调用方不区分 Responses / Completions / Anthropic。当前已存在三条 wire 翻译函数：
+
+- **Responses**：`part_to_responses_value` → `input_text` / `input_image` / `input_file`
+- **Chat Completions**：`part_to_completions_content` → `text` / `image_url` / `file`
+- **Anthropic Messages**：`content_part_to_block` → `text` / `image` / `document`
+
+同一条 `InputImage` / `InputFile`，最终 JSON 由**当前 provider 所属 wire 家族**决定；上层不再因为“这次走的是 completions / anthropic”而改组消息。
 
 构造 helper（[`types.rs`](../../../src/core/llm/types.rs)）：
 
@@ -339,15 +352,28 @@ tomcat **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire 收�
 | `image_file_id(file_id)` | B：已知 id | 非空 |
 | `file_file_id(file_id, filename?)` | B：已知 id | 非空 |
 
-`build_responses_input` 角色规则：仅 **`User`** 把非文本 part 透传 Responses；`System` / `Assistant` / `Tool` 出现非文本 part 时 **`tracing::warn!` 并丢弃非文本部分**（保留 wire 兼容、避免 API 4xx）。
+**降级规则**：若模型能力 `vision/files=false`，wire 不会硬发非法 JSON，而是统一退化为占位文本（共享 `degrade_placeholder(part)`）；因此“能力门控”仍在 provider 内收口，而不是由上层删 part。
 
-**Files 上传管理（multipart `POST /v1/files` + 生命周期 + reuse cache）**：拆为独立任务 **T2-P0-015 | llm-files-upload-manager**；详细方案见 **[§6.5.4](#654-files-上传管理)** 与专文 [`llm-files-upload-manager.md`](llm-files-upload-manager.md)。
+**Files 上传管理**：详见 **[§6.5.4](#654-files-上传管理)** 与专文 [`llm-files-upload-manager.md`](llm-files-upload-manager.md)。核心原则是：**上传/删除是厂商适配层，消息 JSON 是 wire 家族职责**。
 
 #### 6.5.4 Files 上传管理
 
 **任务与专文**：[`docs/agents/TASK_BOARD_002/tasks/T2-P0-015.md`](../agents/TASK_BOARD_002/tasks/T2-P0-015.md)；架构冻结版 [`docs/architecture/llm-files-upload-manager.md`](llm-files-upload-manager.md)。
 
-**目标摘要**：在 **T2-P0-012** 已落地的 A（inline）/ B（`file_id`）wire 之上，新增 **`OpenAiFilesClient`**（`POST/GET/DELETE …/v1/files`）、`reqwest` **`multipart`** feature、以及 **`ChatMessageContentPart` 异步 upload helper**；**是否走 Files 上传**由 **当前 `LlmProvider` 实现是否声明支持 OpenAI Files API** 决定（不支持则 helper 提示 inline），**非** TOML `enabled` 开关。用 **双索引 reuse cache**（① `path → mtime+size+sha256+file_id` ＋ ② `sha256 → file_id`，借鉴 [`read_state.rs::ReadStamp`](../../src/core/tools/pipeline/read_state.rs) 「mtime+size 快路径，hash 兜底」）解决**同字节去重**与**同路径改了别拿旧答案**；用 **`expires_after`（默认 86400s / 24h；唯一 TOML：`[llm.files] expires_after_seconds`，env 覆盖键 `TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS`）** 作服务端兜底，**会话退出实现内默认 DELETE** 作客户端手刹，双轨控制账户侧堆积。`OpenAiResponsesProvider` / [`part_to_responses_value`](../../../src/core/llm/openai_responses/payload.rs) **不修改**「`file_id` 优先于 inline」的翻译顺序。
+**目标摘要**：在 A（inline）/ B（`file_id`）两条通道不变的前提下，把“怎么上传/删除文件”从 wire 里抽走，形成 **`FilesApiAdapter`**：
+
+- `upload(...)` / `delete(...)`：厂商存储差异
+- `reference_token(file_id)`：给 wire 一个最小提示（OpenAI / Anthropic 原样；Moonshot 变 `ms://...`）
+- `image_ref_slot()`：告诉 wire 图片引用该落 `file_id` 还是 URL 槽（Moonshot 用 URL 槽）
+
+于是：
+
+- **`OpenAiFilesRuntime`** 继续负责缓存/去重/清理，但现在持有 `Arc<dyn FilesApiAdapter>`
+- **`LlmProvider::files_adapter()`** 代替旧的 OpenAI 专用 files client 能力门闸
+- **OpenAI / Moonshot / Anthropic** 各自实现上传端点、鉴权、purpose 映射与删除
+- **具体消息 JSON 仍由 wire 家族拼装**，避免把 Responses / Completions / Anthropic 三种形状塞回适配层
+
+这层拆分解决了两个过去绑死的问题：一是 **Moonshot `ms://`** 与 **Anthropic beta header** 不再污染通用消息层；二是同一个上传适配器可以同时服务 **Responses** 和 **Completions**，但两条 wire 仍能各自生成不同 JSON。
 
 **inline vs upload 默认决策树**（与专文 §3.3 一致，实现可配置）：
 
@@ -359,11 +385,22 @@ tomcat **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire 收�
 
 **竞品结论（索引）**：专文 §2 记录五仓 **负向检索**结论——无主路径将 `/v1/files` 作为 Responses **输入**链路的可抄实现；本实现属 **自研增量**。
 
-### 6.6 仅 vision（Completions 路径，低风险增量）—— 与 §6.5 互斥落地
+### 6.6 Completions / Anthropic 多模态（现状）
 
-**当前选型**：默认走 §6.5 Responses 路径（默认 `provider = "openai-responses"`），多模态附件由 `OpenAiResponsesProvider` 翻译 input_image / input_file。
+**Chat Completions 路径**（`OpenAiProvider`）现已支持多模态 `user` 消息：
 
-**Completions 路径**（`OpenAiProvider`）**不实现** vision/file 翻译：`chat` / `chat_stream` 入口扫描 `messages`，发现任何非 `InputText` 的 `ChatMessageContentPart` 立即返回**结构化非可重试**错误「`provider=openai 不支持多模态附件，请改用 provider=openai-responses`」（[`openai.rs::reject_multimodal_parts`](../../../src/core/llm/openai.rs)）。如未来确有 Completions 网关 vision 需求，再单独评估补 `image_url` 翻译；与 §6.5 互斥即可。
+- inline 图片 → `image_url.url = data:...`
+- inline 文件/PDF → `file.file_data = base64`
+- uploaded 图片/文件 → wire 读取 adapter 提示，自行拼 `file_id` 或 Moonshot `ms://...`
+
+**Anthropic Messages 路径**现也已打通：
+
+- inline 图片 → `image.source = { type: "base64", ... }`
+- uploaded 图片 → `image.source = { type: "file", file_id }`
+- inline PDF/文件 → `document.source = { type: "base64", ... }`
+- uploaded PDF/文件 → `document.source = { type: "file", file_id }`
+
+换句话说，当前不再是“只有 Responses 能吃附件”。真正的边界变成：**哪条 wire 家族负责把统一的 `Parts` 翻译成那家 API 认得的 JSON**。
 
 ---
 
@@ -377,7 +414,7 @@ tomcat **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire 收�
 | [**Agent Loop**](agent-loop.md) | 主循环、工具、容错 |
 | [**宿主核心层**](host-core-layer.md) | LLM 在分层中的位置 |
 | [**Architecture.md**](../openspec/specs/Architecture.md) | 总目录入口 |
-| [**OpenAI Files 上传管理**](llm-files-upload-manager.md) | `POST /v1/files`、缓存、生命周期、测试矩阵（T2-P0-015） |
+| [**Files API 上传管理**](llm-files-upload-manager.md) | `FilesApiAdapter`、缓存、生命周期、OpenAI/Moonshot/Anthropic 上传差异 |
 
 ---
 

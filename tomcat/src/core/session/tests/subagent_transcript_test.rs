@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use crate::core::agent_loop::SubagentType;
+use crate::core::llm::ChatMessage;
 use crate::core::session::subagent_transcript::{
-    open_subagent_transcript, subagent_transcript_path, JsonlFileAppendSink,
+    open_subagent_transcript, persist_initial_messages, subagent_transcript_path,
+    JsonlFileAppendSink,
 };
 use crate::core::session::{MessageAppendSink, SessionHeader, TranscriptEntry};
 
@@ -96,7 +98,7 @@ fn jsonl_file_append_sink_serializes_concurrent_appends() {
     let sink = Arc::new(JsonlFileAppendSink::new(
         path.clone(),
         "child-2",
-        SubagentType::Reviewer,
+        SubagentType::PlanReviewer,
         "gpt-5",
         "parent-2",
     ));
@@ -127,6 +129,49 @@ fn jsonl_file_append_sink_serializes_concurrent_appends() {
         .map(str::to_owned)
         .collect();
     assert_eq!(lines.len(), 10);
+}
+
+#[test]
+fn seed_system_and_user_brief_are_persisted_before_subagent_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let trail = dir.path().to_string_lossy().to_string();
+    let sink = open_subagent_transcript(
+        &trail,
+        "child-seed",
+        SubagentType::CodeReviewer,
+        "model",
+        "parent-seed",
+    )
+    .unwrap();
+    let initial = vec![
+        ChatMessage::system("reviewer rules"),
+        ChatMessage::user("workspace_hint: /real/project/root"),
+    ];
+
+    persist_initial_messages(Some(&sink), &initial);
+
+    let path = subagent_transcript_path(&trail, "child-seed").unwrap();
+    let lines = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 4, "header + meta + system + user");
+    let _: SessionHeader = serde_json::from_str(&lines[0]).unwrap();
+    let _: TranscriptEntry = serde_json::from_str(&lines[1]).unwrap();
+    let system: TranscriptEntry = serde_json::from_str(&lines[2]).unwrap();
+    let TranscriptEntry::Message(system) = system else {
+        panic!("seed system message must be persisted");
+    };
+    assert_eq!(system.message["role"], "system");
+    let user: TranscriptEntry = serde_json::from_str(&lines[3]).unwrap();
+    let TranscriptEntry::Message(user) = user else {
+        panic!("seed user brief must be persisted");
+    };
+    assert_eq!(user.message["role"], "user");
+    assert!(user.message["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("/real/project/root")));
 }
 
 #[test]

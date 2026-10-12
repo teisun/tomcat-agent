@@ -1,21 +1,19 @@
+import type { Speed } from "../../src/shared/modelSpeed";
+import type { AttachmentCandidate } from "../../src/shared/attachmentProtocol";
+import type {
+  DraftForkCapture,
+  DraftForkResult,
+} from "../../src/shared/draftForkProtocol";
+import type { PathResolution } from "../../src/shared/pathResolution";
+import type { FileDiffLine, SharedSlashCommand } from "../../src/serveClient/wire";
+
+export type { PathResolution } from "../../src/shared/pathResolution";
+export type { FileDiffLine } from "../../src/serveClient/wire";
+
 export type WebviewReferenceKind = "selection" | "file";
 
-export type WebviewMessageSegment =
-  | {
-      text: string;
-      type: "text";
-    }
-  | {
-      kind: WebviewReferenceKind;
-      label: string;
-      lineEnd?: number | null;
-      lineStart?: number | null;
-      path: string;
-      text?: string | null;
-      type: "reference";
-    };
-
-export type WebviewReference = Extract<WebviewMessageSegment, { type: "reference" }>;
+import type { WebviewReference, WebviewMessageSegment } from "../../src/ui/webview/protocol";
+export type { WebviewReference, WebviewInstruction, WebviewMessageSegment } from "../../src/ui/webview/protocol";
 
 export interface ContextSearchMatch {
   description?: string | null;
@@ -27,11 +25,18 @@ export interface WebviewDomAction {
     | "clickTestId"
     | "dragOverTestId"
     | "dragLeaveTestId"
+    | "focusTestId"
+    | "pasteClipboardFiles"
+    | "pressKeyOnTestId"
+    | "probeAttachmentFetch"
+    | "probeFullResolutionMemory"
+    | "probeImagePipeline"
     | "scrollIntoView"
     | "scrollToEdge"
     | "setInputValue"
     | "setRootWidth";
   edge?: "bottom" | "top";
+  files?: AttachmentCandidate[];
   index?: number;
   scrollBlock?: "center" | "end" | "nearest" | "start";
   testId?: string;
@@ -39,14 +44,34 @@ export interface WebviewDomAction {
   widthPx?: number | null;
 }
 
+import type { SessionFileIntent, SessionFilesView } from "../../src/shared/sessionFiles";
+import type { MessageEditIntent } from "../../src/shared/messageEditProtocol";
 export interface WebviewMessageBlock {
+  rewindEligible?: boolean;
+  /** A durable failed input superseded by a copy-forward retry. */
+  abandoned?: boolean;
   assistantMessageId?: string;
   detailText?: string | null;
+  failureDomain?: string | null;
+  failureKind?: string | null;
   deliveryError?: string | null;
+  deliveryErrorDetail?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
+  label?: string | null;
+  /**
+   * Images attached to this message, as references rather than bytes.
+   *
+   * The bytes stay on disk in the backend and reach Chromium over the webview resource
+   * protocol, so scrolling back through a long transcript costs DOM nodes, not
+   * megabytes of base64 pinned on the JavaScript heap.
+   */
+  attachments?: WebviewAttachmentView[];
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
+  recoveryAction?: "resume" | "retry";
+  recoveryError?: string | null;
+  statusCode?: number | null;
   segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";
   text: string;
@@ -65,6 +90,7 @@ export interface WebviewBoundaryBlock {
   coveredCount?: number | null;
   id: string;
   summary?: string | null;
+  title?: string | null;
   type: "boundary";
 }
 
@@ -94,21 +120,35 @@ export interface WebviewTodo {
   status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
-export type FileDiffTag = "add" | "ctx" | "del";
-
-export interface FileDiffLine {
-  newLine?: number | null;
-  oldLine?: number | null;
-  tag: FileDiffTag;
-  text: string;
-}
-
 export interface WebviewToolDisplayFile {
   added?: number | null;
   diff?: FileDiffLine[] | null;
+  diffTruncated?: boolean | null;
+  expired?: boolean | null;
   file: string;
   kind: "file";
   removed?: number | null;
+}
+
+export type WebviewToolDisplayFileStatus = "applied" | "failed" | "skipped";
+
+export interface WebviewToolDisplayFileEntry {
+  added?: number | null;
+  diff?: FileDiffLine[] | null;
+  diffTruncated?: boolean | null;
+  expired?: boolean | null;
+  file: string;
+  note?: string | null;
+  range?: string | null;
+  removed?: number | null;
+  status?: WebviewToolDisplayFileStatus | null;
+}
+
+export interface WebviewToolDisplayFiles {
+  expired?: boolean | null;
+  files: WebviewToolDisplayFileEntry[];
+  kind: "files";
+  summary: string;
 }
 
 export interface WebviewToolDisplayPlan {
@@ -123,24 +163,53 @@ export interface WebviewToolDisplayText {
 
 export type WebviewToolDisplay =
   | WebviewToolDisplayFile
+  | WebviewToolDisplayFiles
   | WebviewToolDisplayPlan
   | WebviewToolDisplayText;
 
-export type WebviewToolStatus = "complete" | "interrupted" | "running" | "streaming";
+export type WebviewToolStatus =
+  "complete" | "interrupted" | "running" | "streaming";
 
 export interface WebviewToolDiffStat {
   added: number;
   removed: number;
 }
 
+export interface WebviewPlanActivity {
+  applied?: number;
+  checked?: number;
+  completed?: number;
+  kind: "create" | "update";
+  overview?: string | null;
+  stateAfter?: WebviewPlanFileState | null;
+  stateBefore?: WebviewPlanFileState | null;
+  title?: string | null;
+  total?: number;
+}
+
 export interface WebviewToolCard {
+  attachments?: WebviewAttachmentView[];
   args?: Record<string, unknown>;
   assistantMessageId?: string;
+  backgroundExitCode?: number;
+  backgroundRunning?: boolean;
+  backgroundTaskId?: string;
+  liveOutput?: string;
+  liveOutputOffset?: number;
+  liveOutputSequence?: number;
+  liveOutputTruncated?: boolean;
+  logPath?: string;
   display?: WebviewToolDisplay;
   diff?: FileDiffLine[];
+  diffTruncated?: boolean;
+  diffExpired?: boolean;
   diffStat?: WebviewToolDiffStat;
   id: string;
   isError: boolean;
+  planActivity?: WebviewPlanActivity;
+  planId?: string | null;
+  planPath?: string | null;
+  startedAt?: number;
   status: WebviewToolStatus;
   summary?: string;
   /** utility-flash 异步生成的命令"目的"短句（bash 卡片标题）；live-only。 */
@@ -150,17 +219,15 @@ export interface WebviewToolCard {
   type: "tool";
 }
 
-export type WebviewPlanState =
-  | "chat"
-  | "planning"
-  | "executing"
-  | "pending"
-  | "completed";
+export type WebviewPlanFileState =
+  "planning" | "executing" | "pending" | "completed";
+
+export type WebviewAgentMode = "chat" | "plan";
 
 export interface WebviewPlanFileRef {
   path: string;
   planId?: string | null;
-  state: WebviewPlanState | null;
+  state: WebviewPlanFileState | null;
 }
 
 export interface WebviewPlanFileCard extends WebviewPlanFileRef {
@@ -171,6 +238,34 @@ export interface WebviewPlanFileCard extends WebviewPlanFileRef {
   type: "plan";
 }
 
+export type WebviewReviewVerdict =
+  | "aborted"
+  | "fail"
+  | "partial"
+  | "pass"
+  | "skipped";
+
+export interface WebviewReviewFinding {
+  area: string;
+  note: string;
+  severity: string;
+}
+
+export interface WebviewReviewRow {
+  anchorToolCallId?: string | null;
+  findings?: WebviewReviewFinding[];
+  id: string;
+  planId: string;
+  reviewAttemptId: string;
+  round?: number | null;
+  rounds?: number | null;
+  startedAt?: number | null;
+  status: "done" | "running";
+  summary?: string | null;
+  type: "review";
+  verdict?: WebviewReviewVerdict;
+}
+
 export interface WebviewApprovalOption {
   id: string;
   label: string;
@@ -178,6 +273,7 @@ export interface WebviewApprovalOption {
 }
 
 export interface WebviewApprovalQuestion {
+  allowCustom?: boolean;
   id: string;
   options: WebviewApprovalOption[];
   prompt: string;
@@ -193,58 +289,101 @@ export interface AskQuestionAnswer {
   skipped?: boolean;
 }
 
+export const ASK_QUESTION_OUTCOMES = [
+  "answered",
+  "skipped",
+  "interrupted",
+  "host_disconnected",
+  "cancelled_unknown",
+] as const;
+
+export type AskQuestionOutcome = (typeof ASK_QUESTION_OUTCOMES)[number];
+
 export interface AskQuestionResult {
   answers: AskQuestionAnswer[];
   cancelled: boolean;
+  outcome?: AskQuestionOutcome;
 }
 
 export interface WebviewApprovalCard {
   id: string;
+  live: boolean;
   request: {
     questions: WebviewApprovalQuestion[];
     requestId: string;
     responseEvent: string;
+    /** Durable identity shared with the corresponding ask_question tool card. */
+    toolCallId?: string;
   };
   resolved: boolean;
   sessionId?: string | null;
   type: "approval";
 }
 
-export interface WebviewPendingAttachment {
-  attachment: {
-    dataBase64?: string | null;
-    fileId?: string | null;
-    filename?: string | null;
-    kind: "file" | "image";
-    mimeType?: string | null;
-  };
+/** An image the webview may render, identified by hash instead of carrying bytes. */
+export interface WebviewAttachmentView {
+  providerSha?: string | null;
+  /** sha256 of the original bytes; the backend's name for this attachment. */
+  blobSha: string;
+  /** Original byte count, for display only. */
+  bytes?: number;
+  filename: string;
+  /** Full-resolution URL. Only the preview panel should load this. */
+  fullUri?: string | null;
+  /** True once a downsampled version exists in the backend. */
+  hasThumb?: boolean;
   id: string;
   kind: "file" | "image";
+  mimeType: string;
+  /** Downsampled URL, or null until a thumbnail has been generated. */
+  thumbUri?: string | null;
+  /**
+   * The backend no longer has these bytes.
+   *
+   * Applies to history as much as to a draft: a transcript keeps naming an image after
+   * its blob has been garbage-collected, and a message that quietly renders an empty
+   * square is worse than one that says the image is gone.
+   */
+  unavailable?: boolean;
+}
+
+export interface WebviewPendingAttachment extends WebviewAttachmentView {
   label: string;
-  mimeType?: string | null;
   path?: string | null;
 }
 
+export interface WebviewComposerDraft {
+  segments: WebviewMessageSegment[];
+  text: string;
+}
+
 export interface WebviewSessionSnapshot {
+  messageQueue?: import("../../src/ui/webview/protocol").WebviewMessageQueue;
+  sessionFiles?: SessionFilesView;
+  instructionCatalog?: import("../../src/serveClient/wire").InstructionCard[];
+  activePlan?: WebviewPlanFileRef | null;
+  agentMode: WebviewAgentMode;
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
+  commandPending?: boolean;
+  composerDraft?: WebviewComposerDraft;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
   historyLoading?: boolean;
   model?: string | null;
   planTodos: WebviewTodo[];
+  deleting?: boolean;
   sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   pendingAttachments: WebviewPendingAttachment[];
-  planFile?: WebviewPlanFileRef | null;
-  planId?: string | null;
-  planState?: WebviewPlanState | null;
   sessionId: string;
   timeline: WebviewTimelineItem[];
 }
 
 export interface WebviewSessionTab {
+  isPinned?: boolean;
+  deleting?: boolean;
   busy: boolean;
   isCurrent: boolean;
   ownedByThisFrontend: boolean;
@@ -253,12 +392,50 @@ export interface WebviewSessionTab {
   updatedAt: number | null;
 }
 
+export interface WebviewMediaRoot {
+  fsPath: string;
+  webviewBase: string;
+}
+
+export interface WebviewModelInfo {
+  capabilities: string[];
+  contextWindow?: number | null;
+  contextWindowOptions: number[];
+  description?: string | null;
+  id: string;
+  modelName?: string | null;
+  selectedContextWindow?: number | null;
+  selectedReasoningLevel?: string | null;
+  supportedReasoningLevels: string[];
+  supportedSpeeds?: Speed[];
+  selectedSpeed?: Speed | null;
+}
+
+export type WebviewConnectionStatus =
+  | "connecting"
+  | "reconnecting"
+  | "ready"
+  | "degraded"
+  | "failed";
+
 export interface WebviewStateSnapshot {
+  pinSupported?: boolean;
+  deleteSupported?: boolean;
+  sessionActionFeedback?: import("../../src/ui/webview/protocol").SessionActionFeedback | null;
+  locale?: import("../../src/shared/i18n").Locale;
+  messageQueueSupported?: boolean;
+  sessionFilesSupported?: boolean;
+  rewindSupported?: boolean;
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
+  availableModelDetails?: Record<string, WebviewModelInfo>;
+  availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
+  connectionStatus?: WebviewConnectionStatus;
+  mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
+  slashCommands?: SharedSlashCommand[];
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
@@ -270,13 +447,36 @@ export type WebviewTimelineItem =
   | WebviewCheckpointMarker
   | WebviewMessageBlock
   | WebviewPlanFileCard
+  | WebviewReviewRow
   | WebviewThinkingBlock
   | WebviewToolCard;
+
+export type WebviewSessionPatchOp =
+  | {
+      id: string;
+      text: string;
+      type: "appendText";
+    }
+  | {
+      afterId?: string | null;
+      beforeId?: string | null;
+      item: WebviewTimelineItem;
+      type: "upsert";
+    }
+  | {
+      id: string;
+      type: "remove";
+    };
 
 export type HostToWebviewFrame =
   | {
       channel: "event";
       content:
+        | {
+            requestId: string;
+            results: PathResolution[];
+            type: "pathsResolved";
+          }
         | {
             matches: ContextSearchMatch[];
             query: string;
@@ -292,6 +492,32 @@ export type HostToWebviewFrame =
             type: "insertReference";
           }
         | {
+            references: WebviewReference[];
+            sessionId: string;
+            type: "insertReferences";
+          }
+        | {
+            error?: string;
+            operationId: string;
+            sessionId: string;
+            success: boolean;
+            type: "composerWorkResult";
+            attachmentIds?: string[];
+            references?: WebviewReference[];
+          }
+        | {
+            accepted: boolean;
+            requestId: string;
+            sessionId: string;
+            type: "answerQuestionResult";
+          }
+        | (DraftForkResult & { type: "draftForkResult" })
+        | {
+            operationId: string;
+            sourceSessionId: string;
+            type: "captureDraftForFork";
+          }
+        | {
             type: "__test.capture_dom";
           }
         | {
@@ -302,18 +528,43 @@ export type HostToWebviewFrame =
       messageId: string;
     }
   | {
+      channel: "sessionPatch";
+      content: {
+        ops: WebviewSessionPatchOp[];
+        seq: number;
+        sessionId: string;
+      };
+      messageId: string;
+    }
+  | {
+      channel: "sessionView";
+      content: {
+        sessionId: string;
+        tab?: WebviewSessionTab | null;
+        view: WebviewSessionSnapshot;
+      };
+      messageId: string;
+    }
+  | {
       channel: "state";
       content: WebviewStateSnapshot;
       messageId: string;
     };
 
 export type WebviewIntent =
+  | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
+  | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
+  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "queueAction" }>
+  | SessionFileIntent
+  | MessageEditIntent
+  | { messageId: string; type: "getInstructionCatalog"; data: { sessionId: string } }
   | {
       messageId: string;
       type: "answerQuestion";
       data: {
         requestId: string;
         result: AskQuestionResult;
+        sessionId: string;
       };
     }
   | {
@@ -336,6 +587,14 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "webviewError";
+      data: {
+        message: string;
+        stack?: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "loadOlderHistory";
       data: {
         sessionId: string;
@@ -350,18 +609,26 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "forkSession";
+      data: DraftForkCapture;
+    }
+  | {
+      messageId: string;
       type: "prompt" | "steer";
       data: {
         segments?: WebviewMessageSegment[];
         sessionId?: string | null;
         text: string;
         userMessageId?: string;
+        attachmentIds?: string[];
       };
     }
   | {
       messageId: string;
       type: "pickContext";
       data?: {
+        target?: "edit";
+        operationId?: string;
         sessionId?: string | null;
       };
     }
@@ -370,6 +637,64 @@ export type WebviewIntent =
       type: "retryUserMessage";
       data: {
         messageId: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resyncSessionView";
+      data: {
+        sessionId: string;
+      };
+    }
+  /**
+   * A thumbnail the webview generated for an attachment the backend had none for.
+   *
+   * The only message that carries image bytes besides the paste path, and it carries the
+   * small end: a 192px PNG, never the original.
+   */
+  | {
+      messageId: string;
+      type: "cacheAttachmentThumbnail";
+      data: {
+        blobSha: string;
+        sessionId: string;
+        thumbBase64: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "syncComposerDraft";
+      data: {
+        segments: WebviewMessageSegment[];
+        sessionId: string;
+        text: string;
+      };
+    }
+  | {
+      messageId: string;
+      /**
+       * The one message in the whole system that carries image bytes.
+       *
+       * Everything downstream of ingest speaks in hashes. Downsampling and SVG
+       * rasterisation happen here, before the send, because a webview is the only place
+       * in this system with a decoder that can resize *during* decode rather than
+       * after — which is the difference between a 4000x3000 paste costing 48 KB and
+       * costing 48 MB.
+       */
+      type: "attachFiles";
+      data: {
+        target?: "edit";
+        files: AttachmentCandidate[];
+        operationId?: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openImagePreview" | "removeDraftAttachment";
+      data: {
+        attachmentId: string;
         sessionId: string;
       };
     }
@@ -400,16 +725,26 @@ export type WebviewIntent =
       messageId: string;
       type: "setThinkingLevel";
       data: {
-        level: "high" | "low" | "medium" | "xhigh";
+        level: string;
+        modelId: string;
+        sessionId?: string | null;
+      };
+    }
+  | { messageId: string; type: "setSpeed"; data: { speed: Speed; modelId: string; sessionId?: string | null } }
+  | {
+      messageId: string;
+      type: "setContextWindow";
+      data: {
+        contextWindow: number;
         modelId: string;
         sessionId?: string | null;
       };
     }
   | {
       messageId: string;
-      type: "openModelSettings";
+      type: "openSettings";
       data?: {
-        route?: "models" | null;
+        route?: "general" | "models" | "connectors" | null;
       };
     }
   | {
@@ -425,13 +760,30 @@ export type WebviewIntent =
       messageId: string;
       type: "openFile" | "openPlanFile";
       data: {
+        line?: number;
         path: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openLink";
+      data: {
+        href: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resolvePaths";
+      data: {
+        paths: string[];
+        requestId: string;
       };
     }
   | {
       messageId: string;
       type: "openDiff";
       data: {
+        sessionId: string;
         toolCallId: string;
       };
     }
@@ -439,6 +791,8 @@ export type WebviewIntent =
       messageId: string;
       type: "resolveDrop";
       data: {
+        target?: "edit";
+        operationId?: string;
         sessionId?: string | null;
         uris: string[];
       };
@@ -478,9 +832,32 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "runSlashCommand";
+      data: { sessionId?: string | null; text: string };
+    }
+  | {
+      messageId: string;
+      type: "compact";
+      data: {
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "recoverErrorTurn";
+      data: {
+        action: "resume" | "retry";
+        errorId: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "__test.dom_snapshot";
       data: {
         activeSessionId: string | null;
+        answerCardCount: number;
+        answerOutcomes: string[];
         approvalCount: number;
         approvalInputTestIds: string[];
         approvalOptionStates: Array<{
@@ -492,6 +869,8 @@ export type WebviewIntent =
           {
             top: number;
             width: number;
+            left: number;
+            right: number;
           }
         >;
         composerFooterPlanStatus: string | null;
@@ -504,8 +883,10 @@ export type WebviewIntent =
         fileChipTopWithinStream: number | null;
         fileChipVisible: boolean;
         historyLoaderVisible: boolean;
+        historyAttachmentThumbCount: number;
         html: string;
         jumpToLatestVisible: boolean;
+        planCardTopWithinStream: number | null;
         latestUserTopWithinStream: number | null;
         messageTexts: string[];
         modelDropdownBottom: number | null;
@@ -515,6 +896,10 @@ export type WebviewIntent =
         modelDropdownRight: number | null;
         modelDropdownTop: number | null;
         overflowAnchor: string | null;
+        pendingAttachmentStripClientWidth: number;
+        pendingAttachmentStripOverflowing: boolean;
+        pendingAttachmentStripScrollWidth: number;
+        pendingAttachmentThumbCount: number;
         sessionTabs: string[];
         sessionGroupHeaders: string[];
         sessionMoreButtons: string[];
@@ -534,6 +919,8 @@ export type WebviewIntent =
         }>;
         toolTitles: string[];
         assistantResponseGroups: number;
+        assistantClickablePathCount: number;
+        assistantCodeCardCount: number;
         groupFoldTitles: string[];
         userPromptPill: boolean;
         assistantNoCard: boolean;
@@ -544,7 +931,9 @@ export type WebviewIntent =
         planNoticeReplayed: boolean;
         planStateText: string | null;
         progressRow: boolean;
+        loadingShimmerCount: number;
         planTodos: number;
+        standaloneThinkingTitles: string[];
         todoWidgetExpanded: boolean;
         todoWidgetItemCount: number;
         todoWidgetTitle: string | null;
@@ -559,9 +948,17 @@ export type WebviewIntent =
         editDiffBadgeCount: number;
         commandBlockCount: number;
       };
+    }
+  | {
+      messageId: string;
+      type: "__test.dom_fallback_snapshot";
+      data: {
+        html: string;
+      };
     };
 
 export interface VsCodeApiLike {
+  getState?(): unknown;
   postMessage(message: WebviewIntent): void;
   setState?(state: unknown): void;
 }

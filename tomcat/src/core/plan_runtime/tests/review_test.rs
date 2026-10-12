@@ -1,18 +1,20 @@
 use std::path::Path;
 
-use super::super::review::{
-    build_code_review_prompt, build_review_prompt, code_review_system_prompt_text,
-    normalize_for_code_review_result, parse_review_block, resolve_internal_tools,
-    reviewer_allowed_tools_for, reviewer_system_prompt_text, ReviewKind, ReviewSummary,
-    CODE_REVIEWER_ALLOWED_TOOLS, PLAN_REVIEWER_ALLOWED_TOOLS,
+use super::super::code_reviewer::{
+    build_code_review_prompt, code_review_system_prompt_text,
+    code_reviewer_allowed_tools_with_policy, CodeReviewPromptInput, CodeReviewSummary,
+    CODE_REVIEWER_ALLOWED_TOOLS,
 };
+use super::super::plan_reviewer::{
+    build_review_prompt, plan_reviewer_allowed_tools_with_policy, reviewer_system_prompt_text,
+    PlanReviewSummary, PLAN_REVIEWER_ALLOWED_TOOLS,
+};
+use super::super::review::{parse_review_block, resolve_internal_tools};
 
 #[test]
 fn parse_review_block_happy_path() {
     let text = "noise\n<review>\nsummary: ok looks good\nchanges_summary: none\napplied_changes: false\n</review>\ntail";
     let r = parse_review_block(text).unwrap();
-    assert!(!r.aborted);
-    assert_eq!(r.kind, ReviewKind::Plan);
     assert_eq!(r.verdict, None);
     assert_eq!(r.summary, "ok looks good");
     assert_eq!(r.changes_summary, "none");
@@ -93,13 +95,42 @@ fn parse_review_block_preserves_findings_alongside_long_summary() {
 }
 
 #[test]
-fn aborted_summary_serializes_correctly() {
-    let s = ReviewSummary::aborted_with("timeout");
+fn plan_review_summary_serializes_correctly() {
+    let s = PlanReviewSummary::aborted_with("timeout");
     let j = s.to_json();
-    assert_eq!(j["kind"], "plan");
     assert_eq!(j["aborted"], serde_json::Value::Bool(true));
     assert_eq!(j["summary"], "timeout");
     assert_eq!(j["reviewer_stop_reason"], "aborted");
+}
+
+#[test]
+fn code_review_summary_serializes_findings_and_turns() {
+    let s = CodeReviewSummary {
+        aborted: false,
+        verdict: Some("fail".into()),
+        summary: "needs a null check".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+        findings: vec![super::super::review::Finding::new(
+            "concern".into(),
+            "logic".into(),
+            "missing null check".into(),
+        )],
+        reviewer_turns_used: 2,
+        reviewer_turns_limit: 64,
+        reviewer_stop_reason: "completed".into(),
+        child_session_id: "child-1".into(),
+    };
+    let j = s.to_json();
+    assert_eq!(j["verdict"], "fail");
+    assert_eq!(j["findings"][0]["area"], "logic");
+    assert_eq!(j["reviewer_turns_used"], 2);
+    assert_eq!(j["child_session_id"], "child-1");
+    assert_eq!(j["non_blocking_findings"], 1);
+    assert!(j["p2_guidance"]
+        .as_str()
+        .unwrap()
+        .contains("do not create a todo"));
 }
 
 #[test]
@@ -116,8 +147,10 @@ fn reviewer_system_prompt_contains_constraints() {
 fn code_review_system_prompt_contains_verdict_and_bash() {
     let p = code_review_system_prompt_text();
     assert!(p.contains("verdict: pass|fail|partial|aborted"));
+    assert!(p.contains("P0 / P1 / P2"));
     assert!(p.contains("read, search_files, list_dir, bash"));
     assert!(p.contains("STRICTLY read-only") || p.contains("stay read-only"));
+    assert!(p.contains("leave `cwd` empty") || p.contains("use `.`"));
 }
 
 #[test]
@@ -134,20 +167,89 @@ fn build_review_prompt_includes_plan_and_workspace_paths() {
     assert!(prompt.contains("do not guess"));
 }
 
+/// The plan reviewer advises on the final acceptance todo and can add it while
+/// the plan is still being written.
 #[test]
-fn build_code_review_prompt_includes_diff_context() {
-    let prompt = build_code_review_prompt(
+fn build_review_prompt_asks_the_plan_reviewer_to_check_the_final_acceptance_todo() {
+    let prompt = build_review_prompt(
         "plan-1",
         "body",
         Path::new("/tmp/plan-1.plan.md"),
         Some(Path::new("/repo/root")),
-        " src/lib.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
-        &["src/lib.rs".into(), "tests/lib.rs".into()],
     );
-    assert!(prompt.contains("git diff --stat HEAD"));
+    assert!(prompt.contains("one final `kind=Acceptance` todo"));
+    assert!(prompt.contains("human-readable acceptance section"));
+    assert!(prompt.contains("`todo_kind` is `acceptance`"));
+}
+
+#[test]
+fn build_code_review_prompt_first_round_lists_the_complete_changed_file_set() {
+    let prompt = build_code_review_prompt(CodeReviewPromptInput {
+        plan_id: "plan-1",
+        plan_text: "body",
+        plan_path: Path::new("/tmp/plan-1.plan.md"),
+        workspace_root: Some(Path::new("/repo/root")),
+        changed_files: &["src/lib.rs".into(), "tests/lib.rs".into()],
+        review_files: &[],
+        round: 1,
+        is_incremental: false,
+        open_findings: &[],
+        disputed_findings: &[],
+    });
+    assert!(prompt.contains("git diff --name-only HEAD"));
+    assert!(prompt.contains("git ls-files --others --exclude-standard"));
     assert!(prompt.contains("src/lib.rs"));
     assert!(prompt.contains("tests/lib.rs"));
+    assert!(!prompt.contains("Incremental review"));
+    assert!(!prompt.contains("git diff --stat HEAD"));
+    assert!(prompt.contains("verify that artifact exists in the workspace"));
+    assert!(prompt.contains("basis: plan_mismatch"));
     assert!(prompt.contains("STRICTLY read-only"));
+    assert!(prompt.contains("use `.`"));
+    assert!(prompt.contains("do not guess an absolute root"));
+}
+
+#[test]
+fn build_code_review_prompt_follow_up_round_uses_the_current_complete_diff() {
+    let open_findings = vec![super::super::review::Finding::new(
+        "P1".into(),
+        "src/frozen.rs".into(),
+        "must be checked again only to verify this prior finding".into(),
+    )];
+    let prompt = build_code_review_prompt(CodeReviewPromptInput {
+        plan_id: "plan-1",
+        plan_text: "body",
+        plan_path: Path::new("/tmp/plan-1.plan.md"),
+        workspace_root: Some(Path::new("/repo/root")),
+        changed_files: &["src/delta.rs".into(), "src/frozen.rs".into()],
+        review_files: &["src/delta.rs".into(), "src/frozen.rs".into()],
+        round: 8,
+        is_incremental: true,
+        open_findings: &open_findings,
+        disputed_findings: &[],
+    });
+    assert!(prompt.contains("Follow-up review (round 8)."));
+    assert!(prompt.contains("src/delta.rs"));
+    assert!(prompt.contains("src/frozen.rs"));
+    assert!(prompt.contains("timestamp cannot provide a reliable per-file delta"));
+    assert!(prompt.contains("Open findings from the previous review round"));
+    assert!(!prompt.contains("git diff --stat HEAD"));
+}
+
+#[test]
+fn reset_review_infra_retries_clears_only_transient_infrastructure_retries() {
+    let runtime = super::super::PlanRuntime::new("review-delta-state");
+    assert_eq!(runtime.max_code_review_rounds(), 4);
+    assert_eq!(
+        crate::infra::config::PlanConfig::default().max_code_review_rounds,
+        4
+    );
+    assert_eq!(runtime.review_infra_retries("plan-a"), 0);
+    assert_eq!(runtime.bump_review_infra_retry("plan-a"), 1);
+
+    runtime.reset_review_infra_retries("plan-a");
+
+    assert_eq!(runtime.review_infra_retries("plan-a"), 0);
 }
 
 #[test]
@@ -159,46 +261,76 @@ fn parse_review_block_with_verdict() {
 }
 
 #[test]
+fn parse_review_block_assigns_round_local_references_and_tiers() {
+    let text = "<review>\nfindings:\n  - { severity: P0, area: \"logic\", note: \"missing authorization\" }\n  - { severity: P1, basis: \"user_defect\", area: \"ui\", note: \"dialog cannot close\" }\n  - { severity: P2, area: \"style\", note: \"rename helper\" }\nverdict: fail\nsummary: found issues\nchanges_summary: none\napplied_changes: false\n</review>";
+    let review = parse_review_block(text).expect("review parses");
+    assert_eq!(review.findings[0].reference, "F01");
+    assert_eq!(review.findings[1].reference, "F02");
+    assert_eq!(review.findings[2].reference, "F03");
+    assert!(review.findings[0].blocks());
+    assert!(review.findings[1].blocks());
+    assert!(!review.findings[2].blocks());
+}
+
+#[test]
+fn code_review_downgrades_uncited_plan_mismatch_but_keeps_cited_p1() {
+    let text = "<review>\nfindings:\n  - { severity: P1, basis: \"plan_mismatch\", area: \"oauth\", note: \"does not follow plan\" }\n  - { severity: P1, basis: \"plan_mismatch\", plan_ref: \"§6.3 R1: use mtime\", area: \"review\", note: \"uses a content hash\" }\nverdict: fail\nsummary: found issues\nchanges_summary: none\napplied_changes: false\n</review>";
+    let review = CodeReviewSummary::from_parsed(
+        parse_review_block(text).expect("review parses"),
+        "## Plan\n§6.3 R1: use mtime\n",
+    );
+
+    assert_eq!(review.findings[0].severity, "P2");
+    assert!(!review.findings[0].blocks());
+    assert_eq!(review.findings[1].severity, "P1");
+    assert!(review.findings[1].blocks());
+    assert_eq!(
+        review.findings[1].plan_ref.as_deref(),
+        Some("§6.3 R1: use mtime")
+    );
+}
+
+#[test]
 fn normalize_for_code_review_fills_missing_verdict() {
-    let mut summary = ReviewSummary {
+    let mut summary = CodeReviewSummary {
         aborted: false,
+        verdict: None,
         summary: "needs follow-up".into(),
         changes_summary: "none".into(),
         applied_changes: false,
         ..Default::default()
     };
-    let warnings = normalize_for_code_review_result(&mut summary);
-    assert_eq!(summary.kind, ReviewKind::Code);
+    let warnings = summary.normalize_for_result();
     assert_eq!(summary.verdict.as_deref(), Some("partial"));
-    assert!(warnings.iter().any(|w| w.contains("未返回 verdict")));
+    assert!(warnings.iter().any(|w| w.contains("returned no verdict")));
 }
 
 #[test]
 fn normalize_for_code_review_forces_aborted() {
-    let mut summary = ReviewSummary::aborted_with_kind(ReviewKind::Code, "timeout");
+    let mut summary = CodeReviewSummary::aborted_with("timeout");
     summary.verdict = None;
-    let warnings = normalize_for_code_review_result(&mut summary);
+    let warnings = summary.normalize_for_result();
     assert_eq!(summary.verdict.as_deref(), Some("aborted"));
     assert!(warnings
         .iter()
-        .any(|w| w.contains("verdict 已规范化为 aborted")));
+        .any(|w| w.contains("verdict normalized to aborted")));
 }
 
 #[test]
-fn reviewer_allowed_tools_change_by_kind() {
+fn reviewer_allowed_tools_match_split_constants() {
     assert_eq!(
-        reviewer_allowed_tools_for(ReviewKind::Plan),
+        plan_reviewer_allowed_tools_with_policy(false),
         PLAN_REVIEWER_ALLOWED_TOOLS
     );
     assert_eq!(
-        reviewer_allowed_tools_for(ReviewKind::Code),
+        code_reviewer_allowed_tools_with_policy(false),
         CODE_REVIEWER_ALLOWED_TOOLS
     );
 }
 
 #[test]
 fn resolve_internal_tools_filters_plan_allowed_tools() {
-    let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Plan));
+    let tools = resolve_internal_tools(PLAN_REVIEWER_ALLOWED_TOOLS);
     let names: std::collections::BTreeSet<String> = tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -215,7 +347,7 @@ fn resolve_internal_tools_filters_plan_allowed_tools() {
 
 #[test]
 fn resolve_internal_tools_filters_code_allowed_tools() {
-    let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Code));
+    let tools = resolve_internal_tools(CODE_REVIEWER_ALLOWED_TOOLS);
     let names: std::collections::BTreeSet<String> = tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -224,9 +356,21 @@ fn resolve_internal_tools_filters_code_allowed_tools() {
     assert!(names.contains("search_files"));
     assert!(names.contains("list_dir"));
     assert!(names.contains("bash"));
+    for tool in ["task_output", "task_stop", "task_list"] {
+        assert!(
+            names.contains(tool),
+            "code reviewer cannot finish its own Bash work without {tool}"
+        );
+    }
     assert!(!names.contains("todos"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("edit"));
     assert!(!names.contains("create_plan"));
     assert!(!names.contains("write"));
+}
+
+#[test]
+fn reviewer_allowed_tools_can_opt_in_to_load_skill() {
+    assert!(plan_reviewer_allowed_tools_with_policy(true).contains(&"load_skill"));
+    assert!(code_reviewer_allowed_tools_with_policy(true).contains(&"load_skill"));
 }

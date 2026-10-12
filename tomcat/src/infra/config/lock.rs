@@ -1,7 +1,7 @@
-//! `tomcat.config.toml` 文件级互斥锁。
+//! Stable advisory file locks for configuration and session I/O.
 //!
-//! 用 `fs2::FileExt::lock_exclusive` 在写入磁盘前抢占独占锁，
-//! 防止多个 `tomcat` 进程并发写入造成 TOML 损坏。
+//! The lock has its own inode so atomic replacement of the data file cannot split ownership.
+//! Keep lock files in place: unlinking one while callers hold/wait on it defeats exclusion.
 //!
 //! 用法：
 //!
@@ -28,6 +28,35 @@ pub fn with_config_lock<R>(
     config_path: &Path,
     f: impl FnOnce() -> Result<R, AppError>,
 ) -> Result<R, AppError> {
+    let lock = acquire_config_lock(config_path)?;
+    let res = f();
+    let _ = FileExt::unlock(&lock);
+    res
+}
+
+/// Hold the existing advisory lock across a caller-owned synchronous operation.
+/// Closing the returned file releases the lock, including on early return or panic.
+pub(crate) fn acquire_config_lock(config_path: &Path) -> Result<std::fs::File, AppError> {
+    let lock = open_lock_file(config_path)?;
+    lock.lock_exclusive().map_err(AppError::Io)?;
+    Ok(lock)
+}
+
+/// Background housekeeping skips an already-busy file instead of delaying its writer.
+pub(crate) fn try_acquire_config_lock(
+    config_path: &Path,
+) -> Result<Option<std::fs::File>, AppError> {
+    let lock = open_lock_file(config_path)?;
+    match FileExt::try_lock_exclusive(&lock) {
+        Ok(()) => Ok(Some(lock)),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Ok(None)
+        }
+        Err(error) => Err(AppError::Io(error)),
+    }
+}
+
+fn open_lock_file(config_path: &Path) -> Result<std::fs::File, AppError> {
     let lock_path = lock_path_for(config_path);
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
@@ -39,10 +68,7 @@ pub fn with_config_lock<R>(
         .truncate(false)
         .open(&lock_path)
         .map_err(AppError::Io)?;
-    lock.lock_exclusive().map_err(AppError::Io)?;
-    let res = f();
-    let _ = FileExt::unlock(&lock);
-    res
+    Ok(lock)
 }
 
 fn lock_path_for(config_path: &Path) -> std::path::PathBuf {

@@ -137,78 +137,42 @@ Created -> Running -> Idle -> Running
 | 堆预算 | `js_heap_mb` | 不让单实例把 JS 堆吃穿。 |
 | 错误降级 | `catch_unwind` + `Error` 态 | 真出事时先把当前实例标红关掉，别拖垮别的实例。 |
 
-### `call_timeout_ms` 到底量什么
-
-`ExecutionGuardState` 用 QuickJS 的中断钩子周期性调用 `should_interrupt()`。它有两条触发线：
-
-1. **墙钟超时**：`started_at.elapsed() >= call_timeout_ms`
-2. **指令预算**：`interrupt_count > interrupt_budget`
-
-设计意图是：**只拦「不向宿主让出的纯同步死循环」**，而不是把「VM 在等下一条事件」也算进执行时间。
-
-长生命周期 session VM 的空闲路径是：
+### 同名插件不等于同一个运行实例
 
 ```text
-web_search 等命令跑完
-  -> 回到 __pi_start_event_loop
-  -> 每 ~50ms：await __pi_wait_for_event(50)
-  -> 宿主没事件：返回 { type: "__tick" }
-  -> JS continue，继续等
+逻辑 key：session / plugin（用于找到当前实例）
+                      │
+          旧 VM：session / nonce-A / plugin → 原 birth / 原通道
+          新 VM：session / nonce-B / plugin → 新 birth / 新通道
+                      ↑ 不复用宿主身份
 ```
 
-修复前的问题：`__tick` 路径**不会**调用 `__pi_budget_reset()`，而 `__pi_wait_for_event` 返回后宿主也**没有**刷新守卫。于是 `started_at` 一直停在上次命令结束时刻；空闲累计超过 `call_timeout_ms`（默认 30s）后，下一次 tick 迭代一跑 JS 就命中超时 → `VmActor` 记 `Error`，用户会看到「结果已经返回了，过一会又冒 `execution exceeded 30000ms timeout`」。
+- VM 创建时分配内部实例 ID，保存在既有 `VmActorHandle` 并由 host binding 捕获；对外 session/plugin 选择、JS 请求格式和持久化格式不变，复用已有 UUID 依赖。
+- 权限查询必须匹配具体实例；runtime 已移除或被替换时，不退回最新 catalog。同一插件在其他会话仍存活的旧 VM 继续使用原 birth，不因 catalog 更新被强停；能力重新注册仍受当前 fingerprint 限制。
+- 同步入口和后台任务真正开始分发时都拒绝已退役实例的新操作；已退役的事件等待返回既有 `__shutdown`，让正常关停仍落到 `Stopped`。已经开始的操作不因此获得“立即撤销所有副作用”的新保证，也不改变既有 actor 关停方式。
+- 清理使用被移除 handle 的实例 ID，而不是再算一次可复用逻辑 key；删除注册项时在现有 DashMap 内比较实例 ID。目录检查不刷新 idle TTL，回收在删除时重查当前闲置时间；仍有人持有的 start mutex 不被清理成另一个锁。
+- 实现：`tomcat/src/ext/plugin/manager.rs`、`tomcat/src/ext/runtime_manager.rs`、`tomcat/src/ext/dispatcher/dispatch.rs`。回归：`tomcat/src/ext/plugin/tests/suite_test.rs` 的 `retired_instance_cannot_borrow_replacement_authority_or_channels`，以及 `tomcat/src/ext/tests/runtime_manager_test.rs` 的延迟移除/start-gate 用例；CLI/Serve 现有关闭测试继续观察真实返回的实例。
 
-修复后：在 Rust 侧 `__pi_wait_for_event` 绑定里，**每次等待返回**（含 `__tick`、`command_invoke`、`__shutdown`）都调用 `guard.reset()`。空闲等待不再计入 `call_timeout_ms`；真正的不让出死循环（例如 `while (true) {}`）仍会按时被拦截。
+### 两类执行的预算边界
 
-```366:380:tomcat/src/ext/runtime/instance.rs
-    let wait_bridge = bridge.clone();
-    let wait_guard = guard.clone();
-    let wait_fn = Function::new(
-        ctx.clone(),
-        Async(move |timeout_ms: u64| {
-            let wait_bridge = wait_bridge.clone();
-            let wait_guard = wait_guard.clone();
-            async move {
-                let result = wait_bridge.wait_for_event(timeout_ms).await;
-                wait_guard.reset();
-                result.map_err(|e| js_runtime_error(e.to_string()))
-            }
-        }),
-    )?;
-    globals.set("__pi_wait_for_event", wait_fn)?;
+`ExecutionGuardState` 由 Rust 持有，QuickJS 中断钩子检查墙钟预算与 interrupt 次数。它不是多进程硬隔离；普通插件 SDK 与 agent snippet 的运行窗口也不同。
+
+```text
+普通插件：初始化 SDK → 开始用户窗口 → 事件 / timer / host-poll
+                                     └→ 沿用每事件预算 reset
+                         等待宿主事件 → pause → 返回后 resume/reset
+
+agent snippet：可信 SDK 单独 eval → Rust 开始预算 → 用户 JS 单独 eval
+                                                 ├→ 可运行 JS：累计计费
+                                                 └→ 真 host-work 等待且 VM 让出：排除等待时间
 ```
 
-守卫本体与 reset 语义：
+- **普通插件**保留既有兼容行为：`__pi_wait_for_event` 在等待期间暂停超时，返回后恢复/刷新；SDK 的 event、timer 和 poll 路径仍可以刷新当前窗口。这里不新增对任意恶意插件的硬隔离保证。
+- **Agent code** 的预算覆盖整个 snippet，不安装 `__pi_budget_reset`、`__pi_resume_timeout` 和插件 idle-wait 入口。它不能通过循环调用内部函数或反复桥接 poll 清零计数；现有 Rust poll 边界只排除真实宿主工作等待，可运行的 JS 不能借同轮尚未结束的 host call 免计费。
+- **可信初始化与用户代码分开评估**，仍在同一个 QuickJS context 内复用同一份 SDK。预算从 Rust 开始，不让用户声明与可信 bootstrap 同次解析；不另建 VM、计时器或持久状态。
+- **取消和收尾不变**：agent 只等待顶层 promise，未 await 的 timer 不拖延结果；宿主调用的取消/排空由原调用者负责。heap 限制与普通插件事件循环不变。
 
-```38:74:tomcat/src/ext/runtime/instance.rs
-struct ExecutionGuardState {
-    started_at: Mutex<Instant>,
-    interrupt_count: AtomicU64,
-    reason: Mutex<Option<InterruptReason>>,
-    timeout: Duration,
-    budget: u64,
-}
-
-impl ExecutionGuardState {
-    fn reset(&self) {
-        *self.started_at.lock() = Instant::now();
-        self.interrupt_count.store(0, Ordering::SeqCst);
-        *self.reason.lock() = None;
-    }
-
-    fn should_interrupt(&self) -> bool {
-        if !self.timeout.is_zero() && self.started_at.lock().elapsed() >= self.timeout {
-            *self.reason.lock() = Some(InterruptReason::Timeout);
-            return true;
-        }
-        // ...
-    }
-}
-```
-
-为什么放在宿主侧而不是只改 JS：`pi_bridge.js` 里 `__tick` 分支是 `continue`，不会走 `__pi_budget_reset()`；异步 hostcall 的 poll 循环虽然会 reset，但**空闲 event loop 不走那条路**。宿主是「让出边界」的权威，在 `__pi_wait_for_event` 返回处 reset 可以保证 JS 侧不会漏掉。
-
-回归测试：`instance.rs` 中 `wait_for_event_refreshes_timeout_budget_between_idle_ticks`；集成/E2E 见 `runtime_session_vm_survives_idle_beyond_call_timeout`、`test_chat_path_web_search_survives_idle_gap_between_turns`。
+实现入口：`src/ext/runtime/instance.rs::execute_script_with_control`、`install_host_globals`、`ExecutionGuardState`。回归已移到 `src/ext/runtime/tests/instance_test.rs`：`agent_code_cannot_reset_its_execution_guard`、`agent_code_does_not_receive_plugin_budget_or_idle_controls`、`agent_host_wait_exceeds_short_vm_window_but_local_work_still_times_out`、`wait_for_event_refreshes_timeout_budget_between_idle_ticks`。集成/E2E 沿用 `runtime_session_vm_survives_idle_beyond_call_timeout`、`test_chat_path_web_search_survives_idle_gap_between_turns`。
 
 这套模型的结论是：
 

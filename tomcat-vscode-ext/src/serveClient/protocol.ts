@@ -1,9 +1,11 @@
+import { isUiPreferences, t, type UiPreferences } from "../shared/i18n";
 import type {
   ControlFrame,
   OutFrame,
   ResponseFrame,
   ServeCommand,
   ServeEvent,
+  SharedSlashCommand,
 } from "./wire";
 
 export type ControlRequestFrame = Extract<ControlFrame, { type: "control_request" }>;
@@ -16,9 +18,14 @@ export type RequestCommand = Exclude<
 >;
 
 export interface InitializePayload {
+  uiPreferences?: UiPreferences | null;
   protocolVersion: number;
+  /** Absolute path of the attachment directory, absent on older servers. */
+  attachmentRoot?: string | null;
   capabilities: string[];
+  slashCommands?: SharedSlashCommand[];
   sessionId?: string | null;
+  serverVersion?: string | null;
 }
 
 export interface AskQuestionOption {
@@ -28,6 +35,7 @@ export interface AskQuestionOption {
 }
 
 export interface AskQuestion {
+  allowCustom?: boolean;
   id: string;
   prompt: string;
   options: AskQuestionOption[];
@@ -36,6 +44,8 @@ export interface AskQuestion {
 export interface AskQuestionWireRequest {
   requestId: string;
   responseEvent: string;
+  sessionId?: string;
+  toolCallId?: string;
   questions: AskQuestion[];
 }
 
@@ -47,9 +57,22 @@ export interface AskQuestionAnswer {
   pickedRecommended: boolean;
 }
 
+export type AskQuestionOutcome =
+  | "answered"
+  | "skipped"
+  | "interrupted"
+  | "host_disconnected"
+  | "cancelled_unknown";
+
 export interface AskQuestionResult {
   answers: AskQuestionAnswer[];
+  /** Legacy compatibility. New peers also send `outcome`; there is no timeout outcome. */
   cancelled: boolean;
+  outcome?: AskQuestionOutcome;
+}
+
+export function askQuestionOutcome(result: AskQuestionResult): AskQuestionOutcome {
+  return result.outcome ?? (result.cancelled ? "cancelled_unknown" : "answered");
 }
 
 export interface AskQuestionWireResponse {
@@ -106,13 +129,32 @@ export function parseInitializePayload(payload: unknown): InitializePayload {
     throw new Error("initialize payload is missing capabilities");
   }
 
+  const slashCommands = payload.slashCommands;
+  if (slashCommands !== undefined && (!Array.isArray(slashCommands) || !slashCommands.every((command) =>
+    isRecord(command) && typeof command.name === "string" && typeof command.usage === "string" && typeof command.summary === "string"
+  ))) {
+    throw new Error("initialize payload has invalid slashCommands");
+  }
+
   return {
     protocolVersion: payload.protocolVersion,
+    ...(isUiPreferences(payload.uiPreferences) ? { uiPreferences: payload.uiPreferences } : {}),
+    attachmentRoot:
+      typeof payload.attachmentRoot === "string" && payload.attachmentRoot.length > 0
+        ? payload.attachmentRoot
+        : null,
     capabilities: payload.capabilities,
+    slashCommands: (slashCommands ?? []) as SharedSlashCommand[],
     sessionId:
       payload.sessionId === undefined || payload.sessionId === null
         ? null
         : String(payload.sessionId),
+    serverVersion:
+      payload.serverVersion === undefined || payload.serverVersion === null
+        ? null
+        : typeof payload.serverVersion === "string"
+          ? payload.serverVersion
+          : null,
   };
 }
 
@@ -128,6 +170,7 @@ function isAskQuestionOption(value: unknown): value is AskQuestionOption {
 function isAskQuestion(value: unknown): value is AskQuestion {
   return (
     isRecord(value) &&
+    (value.allowCustom === undefined || typeof value.allowCustom === "boolean") &&
     typeof value.id === "string" &&
     typeof value.prompt === "string" &&
     Array.isArray(value.options) &&
@@ -154,7 +197,13 @@ export function isAskQuestionResult(value: unknown): value is AskQuestionResult 
     isRecord(value) &&
     Array.isArray(value.answers) &&
     value.answers.every(isAskQuestionAnswer) &&
-    typeof value.cancelled === "boolean"
+    typeof value.cancelled === "boolean" &&
+    (value.outcome === undefined ||
+      value.outcome === "answered" ||
+      value.outcome === "skipped" ||
+      value.outcome === "interrupted" ||
+      value.outcome === "host_disconnected" ||
+      value.outcome === "cancelled_unknown")
   );
 }
 
@@ -175,9 +224,18 @@ export function parseAskQuestionRequest(payload: unknown): AskQuestionWireReques
     throw new Error("ask_question payload is missing questions");
   }
 
+  if (
+    (payload.sessionId !== undefined && typeof payload.sessionId !== "string") ||
+    (payload.toolCallId !== undefined && typeof payload.toolCallId !== "string")
+  ) {
+    throw new Error("ask_question payload has invalid durable identity");
+  }
+
   return {
     requestId: payload.requestId,
     responseEvent: payload.responseEvent,
+    sessionId: payload.sessionId,
+    toolCallId: payload.toolCallId,
     questions: payload.questions,
   };
 }
@@ -195,6 +253,9 @@ export function normalizeAskQuestionResponse(
   payload: AskQuestionResult | AskQuestionWireResponse,
 ): AskQuestionWireResponse {
   if (isAskQuestionWireResponse(payload)) {
+    if (payload.requestId !== requestId) {
+      throw new Error("ask_question response requestId mismatch");
+    }
     return payload;
   }
 
@@ -214,7 +275,7 @@ export function assertRequiredCapabilities(capabilities: string[]): void {
   );
   if (missing.length > 0) {
     throw new Error(
-      `tomcat serve is missing required capabilities: ${missing.join(", ")}`,
+      t("protocol.missingCapabilities", { capabilities: missing.join(", ") }),
     );
   }
 }

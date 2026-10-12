@@ -1,6 +1,13 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(test)]
+use std::path::PathBuf;
+
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
+use crate::infra::i18n::tr;
 use crate::infra::{write_file_atomic, AppError};
 
 use super::super::model::{PackageRegistryFile, PluginRegistryFile};
@@ -30,24 +37,25 @@ pub(super) struct RegistrySnapshot {
 }
 
 impl RegistrySnapshot {
-    pub(super) fn capture_package(path: &Path) -> Self {
+    pub(super) fn capture_package(path: &Path) -> Result<Self, AppError> {
         Self::capture(path)
     }
 
-    pub(super) fn capture_plugin(path: &Path) -> Self {
+    pub(super) fn capture_plugin(path: &Path) -> Result<Self, AppError> {
         Self::capture(path)
     }
 
-    fn capture(path: &Path) -> Self {
+    fn capture(path: &Path) -> Result<Self, AppError> {
         match fs::read_to_string(path) {
-            Ok(raw_json) => Self {
+            Ok(raw_json) => Ok(Self {
                 existed: true,
                 raw_json,
-            },
-            Err(_) => Self {
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
                 existed: false,
                 raw_json: String::new(),
-            },
+            }),
+            Err(error) => Err(AppError::Io(error)),
         }
     }
 
@@ -57,7 +65,10 @@ impl RegistrySnapshot {
         }
         let mut registry: PackageRegistryFile =
             serde_json::from_str(&self.raw_json).map_err(|error| {
-                AppError::Config(format!("package registry snapshot 损坏: {error}"))
+                AppError::Config(tr(
+                    "package.registrySnapshot",
+                    &[("kind", "package"), ("detail", &error.to_string())],
+                ))
             })?;
         registry.normalize();
         Ok(registry)
@@ -67,8 +78,12 @@ impl RegistrySnapshot {
         if !self.existed {
             return Ok(PluginRegistryFile::default());
         }
-        serde_json::from_str(&self.raw_json)
-            .map_err(|error| AppError::Config(format!("plugin registry snapshot 损坏: {error}")))
+        serde_json::from_str(&self.raw_json).map_err(|error| {
+            AppError::Config(tr(
+                "package.registrySnapshot",
+                &[("kind", "plugin"), ("detail", &error.to_string())],
+            ))
+        })
     }
 
     pub(super) fn restore(&self, path: &Path) -> Result<(), AppError> {
@@ -86,18 +101,56 @@ fn load_registry<T>(path: &Path) -> Result<T, AppError>
 where
     T: serde::de::DeserializeOwned + Default,
 {
-    if !path.exists() {
-        return Ok(T::default());
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    serde_json::from_str(&raw).map_err(|error| {
+        AppError::Config(tr(
+            "package.registryCorrupt",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
+        ))
+    })
+}
+
+#[cfg(test)]
+static FAIL_NEXT_SAVE_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn fail_next_save_for_test(path: &Path) {
+    *FAIL_NEXT_SAVE_PATH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(path.to_path_buf());
+}
+
+#[cfg(test)]
+fn consume_save_failure(path: &Path) -> bool {
+    let slot = FAIL_NEXT_SAVE_PATH.get_or_init(|| Mutex::new(None));
+    let mut pending = slot.lock().unwrap();
+    if pending.as_deref() == Some(path) {
+        *pending = None;
+        true
+    } else {
+        false
     }
-    let raw = fs::read_to_string(path).map_err(AppError::Io)?;
-    serde_json::from_str(&raw)
-        .map_err(|error| AppError::Config(format!("registry 损坏: {} ({error})", path.display())))
 }
 
 fn save_registry<T>(path: &Path, registry: &T) -> Result<(), AppError>
 where
     T: serde::Serialize,
 {
+    #[cfg(test)]
+    if consume_save_failure(path) {
+        return Err(AppError::Config(format!(
+            "测试注入的 registry 保存失败: {}",
+            path.display()
+        )));
+    }
     let json = serde_json::to_vec_pretty(registry).map_err(AppError::Serialize)?;
     write_file_atomic(path, &json)
 }

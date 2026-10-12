@@ -1,8 +1,19 @@
+import { useState } from "react";
+import { LocaleProvider } from "../i18n/LocaleProvider";
+import { translate } from "../../../src/shared/i18n";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { WebviewApprovalCard, WebviewApprovalQuestion } from "../types";
-import { ApprovalCard } from "./ApprovalCard";
+import type {
+  AskQuestionResult,
+  WebviewApprovalCard,
+  WebviewApprovalQuestion,
+} from "../types";
+import {
+  ApprovalCard,
+  createApprovalAnswerDraft,
+  type ApprovalAnswerDraft,
+} from "./ApprovalCard";
 
 function buildQuestion(
   id: string,
@@ -25,6 +36,7 @@ function buildItem(
 ): WebviewApprovalCard {
   return {
     id: "approval-1",
+    live: true,
     request: {
       questions,
       requestId: "request-1",
@@ -37,10 +49,64 @@ function buildItem(
   };
 }
 
+function ControlledApprovalCard({
+  item,
+  onAnswer,
+  pendingGroupCount = 1,
+  presentation = "default",
+}: {
+  item: WebviewApprovalCard;
+  onAnswer: (sessionId: string, requestId: string, result: AskQuestionResult) => void;
+  pendingGroupCount?: number;
+  presentation?: "default" | "pending";
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [draft, setDraft] = useState<ApprovalAnswerDraft>(() => createApprovalAnswerDraft(item));
+  return (
+    <ApprovalCard
+      collapsed={collapsed}
+      draft={draft}
+      item={item}
+      onAnswer={onAnswer}
+      onCollapsedChange={setCollapsed}
+      onDraftChange={(_sessionId, _requestId, next) => setDraft(next)}
+      pendingGroupCount={pendingGroupCount}
+      presentation={presentation}
+    />
+  );
+}
+
 describe("ApprovalCard", () => {
+  it.each(["en", "zh-CN"] as const)("keeps fixed-choice questions free of custom controls and submits explicit consent (%s)", (locale) => {
+    const answer = vi.fn();
+    const question = { ...buildQuestion("review", "Review this plan?"), allowCustom: false };
+    render(<LocaleProvider locale={locale}><ControlledApprovalCard item={buildItem([question])} onAnswer={answer} /></LocaleProvider>);
+    expect(screen.queryByTestId("approval-option-review-__custom__")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(answer).not.toHaveBeenCalled();
+    const radio = screen.getByTestId("approval-option-review-review-a");
+    radio.focus();
+    expect(document.activeElement).toBe(radio);
+    fireEvent.click(radio);
+    const submit = screen.getByTestId("approval-continue");
+    if (locale === "en") expect(submit.textContent).toBe(translate("en", "question.continue"));
+    fireEvent.click(submit);
+    expect(answer).toHaveBeenCalledOnce();
+    expect(answer.mock.calls[0][2].answers[0].optionIds).toEqual(["review-a"]);
+  });
+
+  it("ignores stale custom draft state when the runtime disables custom answers", () => {
+    const answer = vi.fn();
+    render(<ApprovalCard item={buildItem([{ ...buildQuestion("q1", "Review?"), allowCustom: false }])}
+      draft={{ q1: { optionId: "__custom__", customText: "stale" } }} onDraftChange={vi.fn()} onAnswer={answer} />);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect((screen.getByTestId("approval-continue") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("approval-skip"));
+    expect(answer.mock.calls[0][2]).toMatchObject({ outcome: "skipped", answers: [] });
+  });
   it("renders numbered questions, coded options, recommended badge, and action buttons", () => {
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "When do you prefer to code?"),
           buildQuestion("q2", "Which language do you want to use?"),
@@ -51,6 +117,8 @@ describe("ApprovalCard", () => {
 
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("2 of 2")).toBeTruthy();
+    expect(screen.getByText("2 of 2").className).toBe("tc-chip tc-chip--warning");
+    expect(screen.getByRole("heading", { name: "Questions" }).querySelector(".codicon-question")).toBeNull();
     expect(screen.getByText("1.")).toBeTruthy();
     expect(screen.getByText("2.")).toBeTruthy();
     expect(screen.getAllByText("A")).toHaveLength(2);
@@ -61,9 +129,122 @@ describe("ApprovalCard", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
+  it("uses the active question count, navigation, and an icon-only collapsible pending dock", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ControlledApprovalCard
+        item={buildItem([
+          buildQuestion("q1", "Pick a time"),
+          buildQuestion("q2", "Pick a language"),
+        ])}
+        onAnswer={onAnswer}
+        pendingGroupCount={2}
+        presentation="pending"
+      />,
+    );
+
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("1 of 2");
+    expect(screen.getByTestId("approval-question-count").className).toBe("tc-approval-card__count");
+    expect(screen.getAllByRole("radio", { name: "Option A Recommended" })).toHaveLength(1);
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.queryByText("Pick a language")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-option-q1-q1-a"));
+    expect(screen.getByRole("heading", { name: "Questions" }).querySelector(".codicon-question")).toBeTruthy();
+    expect(screen.getByTestId("approval-next-question").getAttribute("title")).toBe("Next question");
+    expect((screen.getByTestId("approval-previous-question") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("approval-next-question") as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText("1 more question group waiting")).toBeTruthy();
+    expect(screen.getByTestId("approval-collapse").getAttribute("title")).toBe("Collapse questions");
+    expect(screen.getByTestId("approval-collapse").querySelector(".codicon-chevron-down")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
+    expect((screen.getByTestId("approval-previous-question") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("approval-next-question") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.queryByText("Pick a time")).toBeNull();
+    expect(screen.getByText("Pick a language")).toBeTruthy();
+    fireEvent.scroll(screen.getByTestId("approval-questions-body"), { target: { scrollTop: 100 } });
+    fireEvent(window, new Event("resize"));
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
+    expect(onAnswer).not.toHaveBeenCalled();
+
+    const secondAnswer = screen.getByTestId("approval-option-q2-q2-a");
+    fireEvent.click(secondAnswer);
+    secondAnswer.focus();
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    expect(document.activeElement).toBe(screen.getByTestId("approval-collapse"));
+    expect(screen.queryByTestId("approval-questions-body")).toBeNull();
+    expect(screen.queryByTestId("approval-continue")).toBeNull();
+    expect(screen.getByTestId("approval-collapse").getAttribute("aria-label")).toBe("Expand questions");
+    expect(screen.getByTestId("approval-collapse").querySelector(".codicon-chevron-right")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
+    expect(screen.getByTestId("approval-option-q2-q2-a").getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByTestId("approval-option-q1-q1-a")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-previous-question"));
+    expect(screen.getByTestId("approval-questions-body").scrollTop).toBe(0);
+    expect(screen.getByTestId("approval-option-q1-q1-a").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("retains Other text across pages and submits the full ordered batch once", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("q1", "First?"), buildQuestion("q2", "Second?")])}
+        onAnswer={onAnswer}
+        presentation="pending"
+      />,
+    );
+    fireEvent.click(screen.getByTestId("approval-option-q1-__custom__"));
+    expect(document.activeElement).toBe(screen.getByTestId("approval-custom-q1"));
+    fireEvent.change(screen.getByTestId("approval-custom-q1"), { target: { value: "  My answer  " } });
+    expect((screen.getByTestId("approval-continue") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    expect(screen.queryByTestId("approval-custom-q1")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-option-q2-q2-a"));
+    fireEvent.click(screen.getByTestId("approval-previous-question"));
+    expect((screen.getByTestId("approval-custom-q1") as HTMLInputElement).value).toBe("  My answer  ");
+    fireEvent.click(screen.getByTestId("approval-continue"));
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
+      answers: [
+        { questionId: "q1", optionIds: ["__custom__"], customText: "My answer", pickedRecommended: false },
+        { questionId: "q2", optionIds: ["q2-a"], pickedRecommended: true },
+      ],
+      cancelled: false,
+      outcome: "answered",
+    });
+  });
+
+  it("starts a replacement request on its first page", () => {
+    const onAnswer = vi.fn();
+    const { rerender } = render(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("q1", "First?"), buildQuestion("q2", "Second?")])}
+        onAnswer={onAnswer}
+        presentation="pending"
+      />,
+    );
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    rerender(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("new", "New question?")], {
+          request: { requestId: "request-2", responseEvent: "response-2", questions: [buildQuestion("new", "New question?")] },
+        })}
+        onAnswer={onAnswer}
+        presentation="pending"
+      />,
+    );
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("1 of 1");
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.getByText("New question?")).toBeTruthy();
+  });
+
   it("does not render resolved cards", () => {
     const { container } = render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([buildQuestion("q1", "Proceed?")], { resolved: true })}
         onAnswer={vi.fn()}
       />,
@@ -72,10 +253,23 @@ describe("ApprovalCard", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("renders a passive restoring card without answer controls for history-only approvals", () => {
+    render(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("q1", "Proceed?")], { live: false })}
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("approval-card-restoring")).toBeTruthy();
+    expect(screen.queryByTestId("approval-continue")).toBeNull();
+    expect(screen.queryByTestId("approval-skip")).toBeNull();
+  });
+
   it("keeps Continue disabled until every question is answered", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "Pick a time"),
           buildQuestion("q2", "Pick a language"),
@@ -99,7 +293,7 @@ describe("ApprovalCard", () => {
 
   it("keeps radio selection exclusive within a question and independent across questions", () => {
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "Pick a time"),
           buildQuestion("q2", "Pick a language"),
@@ -126,7 +320,7 @@ describe("ApprovalCard", () => {
   it("submits ordered batch answers with pickedRecommended flags", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard
+      <ControlledApprovalCard
         item={buildItem([
           buildQuestion("q1", "Pick a time"),
           buildQuestion("q2", "Pick a language"),
@@ -139,7 +333,7 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByTestId("approval-option-q2-q2-b"));
     fireEvent.click(screen.getByTestId("approval-continue"));
 
-    expect(onAnswer).toHaveBeenCalledWith("request-1", {
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
       answers: [
         {
           optionIds: ["q1-a"],
@@ -153,13 +347,14 @@ describe("ApprovalCard", () => {
         },
       ],
       cancelled: false,
+      outcome: "answered",
     });
   });
 
   it("requires non-empty custom text for Other and trims it on submit", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
+      <ControlledApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
     );
 
     fireEvent.click(screen.getByTestId("approval-option-q1-__custom__"));
@@ -177,7 +372,7 @@ describe("ApprovalCard", () => {
     expect((continueButton as HTMLButtonElement).disabled).toBe(false);
 
     fireEvent.click(continueButton);
-    expect(onAnswer).toHaveBeenCalledWith("request-1", {
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
       answers: [
         {
           customText: "Svelte",
@@ -187,27 +382,29 @@ describe("ApprovalCard", () => {
         },
       ],
       cancelled: false,
+      outcome: "answered",
     });
   });
 
   it("submits a cancelled result when Skip is clicked", () => {
     const onAnswer = vi.fn();
     render(
-      <ApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
+      <ControlledApprovalCard item={buildItem([buildQuestion("q1", "Pick a time")])} onAnswer={onAnswer} />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Skip" }));
 
-    expect(onAnswer).toHaveBeenCalledWith("request-1", {
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
       answers: [],
       cancelled: true,
+      outcome: "skipped",
     });
   });
 
   it("isolates local selection state between multiple cards", () => {
     render(
       <>
-        <ApprovalCard
+        <ControlledApprovalCard
           item={buildItem([buildQuestion("q1", "Pick a time")], {
             id: "approval-1",
             request: {
@@ -218,7 +415,7 @@ describe("ApprovalCard", () => {
           })}
           onAnswer={vi.fn()}
         />
-        <ApprovalCard
+        <ControlledApprovalCard
           item={buildItem([buildQuestion("q2", "Pick a language")], {
             id: "approval-2",
             request: {

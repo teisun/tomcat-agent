@@ -36,8 +36,15 @@ impl SessionGrants {
     /// 添加一个授权路径（已规范化）。
     pub fn add(&self, path: PathBuf, trigger: GrantTrigger) {
         if let Ok(mut g) = self.inner.lock() {
-            g.paths.insert(path.clone());
+            let inserted = g.paths.insert(path.clone());
             g.triggers.insert(path, trigger);
+            if inserted {
+                tracing::info!(
+                    target: "tomcat_chat_diag",
+                    phase = "session_grant_added",
+                    trigger = ?trigger,
+                );
+            }
         }
     }
 

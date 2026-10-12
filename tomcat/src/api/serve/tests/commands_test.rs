@@ -2,27 +2,429 @@ use super::*;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serial_test::serial;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
 use crate::core::llm::{
-    Capabilities, ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource,
-    ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
+    Capabilities, ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest,
+    ChatResponse, ChatResponseChoice, ContextRefKind, FileSource, ImageSource, LlmProvider,
+    MessageKind, ModelEntryInput, StreamEvent,
 };
 use crate::{
     init_context_state, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
-    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore,
-    ListOptions, RestoreOptions,
+    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
+    RestoreOptions,
 };
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_shared_slash_handshake_reload_and_rejected_inputs_do_not_write_transcript() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", home.path().as_os_str());
+    let _api_key = install_test_api_key();
+    let (state, buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlRequest {
+            request_id: "slash-init".into(),
+            subtype: "initialize".into(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::Value::Null,
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |frame| frame["requestId"] == "slash-init").await;
+    let handshake = lines
+        .iter()
+        .find(|frame| frame["requestId"] == "slash-init")
+        .unwrap();
+    assert_eq!(
+        handshake["payload"]["slashCommands"],
+        serde_json::to_value(crate::api::chat::commands::shared_slash_commands()).unwrap()
+    );
+    assert!(handshake["payload"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("run_slash_command")));
+    let before = slot
+        .ctx
+        .session_runtime
+        .session
+        .get_entries(256)
+        .unwrap()
+        .len();
+    for (index, text) in [
+        "/reload",
+        "/foo",
+        "/model list",
+        "reload",
+        "/reload now",
+        "/install x",
+        "/install 'unterminated",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("slash-{index}");
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::RunSlashCommand {
+                id: Some(id.clone()),
+                session_id: Some(slot.session_id.clone()),
+                text: text.into(),
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |frame| frame["id"] == id).await;
+        let reply = lines.iter().find(|frame| frame["id"] == id).unwrap();
+        assert_eq!(reply["success"], true, "{reply:?}");
+        assert_eq!(reply["payload"]["ok"], index == 0);
+        let message = reply["payload"]["text"].as_str().unwrap();
+        let token = text.split_whitespace().next().unwrap();
+        let command = token.trim_start_matches('/');
+        if index > 0 && index <= 3 {
+            assert!(
+                message.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "serve.unknownCommand",
+                    &[("command", token), ("available", "")]
+                )) && message.contains("/uninstall")
+            );
+        } else if index > 3 {
+            assert!(message.contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                &format!("slash.{command}.usage"),
+                &[]
+            )));
+        }
+        assert!(!slot.is_busy() && !slot.is_command_job_running());
+        assert!(slot.run_task.lock().is_none());
+    }
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .get_entries(256)
+            .unwrap()
+            .len(),
+        before
+    );
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_shared_slash_busy_rejects_without_executing() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    assert!(slot.mark_busy());
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RunSlashCommand {
+            id: Some("slash-busy".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "/reload".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |frame| frame["id"] == "slash-busy").await;
+    assert_eq!(
+        lines
+            .iter()
+            .find(|frame| frame["id"] == "slash-busy")
+            .unwrap()["error"],
+        "busy"
+    );
+    assert!(!slot.is_command_job_running());
+    assert!(slot.run_task.lock().is_none());
+    slot.mark_idle();
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_shared_slash_install_and_uninstall_agent_with_quoted_source() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("HOME", home.path().as_os_str());
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.skills.enabled = true;
+    let source = temp.path().join("source with spaces");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: remote-hello\ndescription: greeting\n---\nhello",
+    )
+    .unwrap();
+    let (state, buffer, _work, slot) = build_initialized_state_with_config(temp, cfg).await;
+    for (id, text, installed) in [
+        (
+            "remote-install",
+            format!("/install '{}' agent", source.display()),
+            true,
+        ),
+        (
+            "remote-uninstall",
+            "/uninstall remote-hello agent".into(),
+            false,
+        ),
+    ] {
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::RunSlashCommand {
+                id: Some(id.into()),
+                session_id: Some(slot.session_id.clone()),
+                text,
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |frame| frame["id"] == id).await;
+        let response = lines.iter().find(|frame| frame["id"] == id).unwrap();
+        assert_eq!(response["payload"]["ok"], true, "{response:?}");
+        assert_eq!(
+            slot.ctx
+                .skill_set_snapshot()
+                .by_name
+                .contains_key("remote-hello"),
+            installed
+        );
+        assert!(!slot.is_busy());
+    }
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
+}
+
+// ── 附件测试脚手架 ────────────────────────────────────────────────────
+//
+// 协议上只有 ingest_attachment 携带字节，因此测试也必须先把字节交给后端换回哈希，
+// 再用哈希去发送 —— 这跟真实客户端走的是同一条路。
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_turn_state_lease_roundtrip_preserves_parked_messages() {
+    let _api_key = install_test_api_key();
+    let (_state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let mut history = ChatMessage::user("durable historical request");
+    history.msg_id = Some("history-user".to_string());
+    let mut active_tail = ChatMessage::user("durable active request");
+    active_tail.msg_id = Some("tail-user".to_string());
+    let expected_ids = vec!["history-user", "tail-user"];
+    {
+        let mut turn_state = slot.turn_state.lock();
+        turn_state
+            .as_mut()
+            .expect("idle slot has parked turn state")
+            .context_state
+            .messages = vec![history, active_tail];
+    }
+
+    {
+        let mut lease = TurnStateLease::acquire(Arc::clone(&slot)).expect("acquire turn lease");
+        assert!(
+            slot.turn_state.lock().is_none(),
+            "the slot must not expose a second authoritative list while leased"
+        );
+        assert_eq!(
+            lease
+                .context_state_mut()
+                .messages
+                .iter()
+                .filter_map(|message| message.msg_id.as_deref())
+                .collect::<Vec<_>>(),
+            expected_ids,
+            "the lease receives the exact parked list"
+        );
+    }
+
+    let turn_state = slot.turn_state.lock();
+    assert_eq!(
+        turn_state
+            .as_ref()
+            .expect("drop must return turn state to the slot")
+            .context_state
+            .messages
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .collect::<Vec<_>>(),
+        expected_ids,
+        "dropping the lease must return the same parked list without rebuilding it"
+    );
+}
+
+/// 1x1 PNG，最小的合法位图。
+fn test_png_bytes() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0x60,
+        0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]
+}
+
+fn test_pdf_bytes() -> Vec<u8> {
+    b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n".to_vec()
+}
+
+/// `/compact` calls the non-streaming compaction scene, unlike normal agent turns.
+/// Keep this explicit so the serve command E2E catches accidental routing to chat_stream.
+struct CompactOnlyProvider {
+    streams: parking_lot::Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+}
+
+impl CompactOnlyProvider {
+    fn with_streams(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: parking_lot::Mutex::new(streams.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CompactOnlyProvider {
+    fn provider_name(&self) -> &str {
+        "compact_only"
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AppError> {
+        Ok(ChatResponse {
+            id: Some("compact-summary".to_string()),
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant("Compacted conversation summary."),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        let events = self.streams.lock().pop_front().ok_or_else(|| {
+            AppError::Llm("unexpected chat_stream after manual compact".to_string())
+        })?;
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+/// A scripted stream whose final Usage can be held back so tests can inspect
+/// serve state while a second request is still in flight.
+struct ChannelMockLlm {
+    streams: parking_lot::Mutex<VecDeque<mpsc::UnboundedReceiver<Result<StreamEvent, AppError>>>>,
+}
+
+impl ChannelMockLlm {
+    fn new(streams: Vec<mpsc::UnboundedReceiver<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: parking_lot::Mutex::new(streams.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ChannelMockLlm {
+    fn provider_name(&self) -> &str {
+        "channel-mock"
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("channel mock chat not used".to_string()))
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        let receiver = self
+            .streams
+            .lock()
+            .pop_front()
+            .ok_or_else(|| AppError::Llm("ChannelMockLlm: no more streams".to_string()))?;
+        Ok(Box::new(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(receiver),
+        ))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+/// 把字节落进这个会话的 blob store，返回它的 sha —— 等价于走一遍 ingest_attachment。
+fn ingest_test_bytes(slot: &Arc<crate::api::serve::registry::SessionSlot>, bytes: &[u8]) -> String {
+    let sha = slot
+        .ctx
+        .session_runtime
+        .session
+        .attachment_store()
+        .put(bytes)
+        .expect("store attachment bytes");
+    slot.ctx
+        .session_runtime
+        .session
+        .attachment_store()
+        .mark_pending(&slot.session_id, &sha)
+        .expect("lease attachment bytes");
+    sha
+}
+
+/// 一个不存在于任何 blob store 里的、格式合法的 sha —— 用来验证伪造哈希被拒。
+fn forged_sha() -> String {
+    "f".repeat(64)
+}
+
+/// 在临时 store 上装配一条消息。
+///
+/// `build_user_message_with_instructions` 只依赖 blob store 而不依赖整个 session slot，
+/// 所以这类纯装配逻辑的测试不需要拉起一个会话。
+fn build_message_for_test(
+    text: &str,
+    params: &ServeMessageParams,
+) -> Result<crate::core::llm::ChatMessage, String> {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let store = crate::core::session::attachments::AttachmentBlobStore::new(tmp.path());
+    crate::api::serve::commands::build_user_message_with_instructions(
+        &store,
+        text.to_string(),
+        params,
+        crate::api::serve::commands::AttachmentBytes::Archival,
+        &[],
+    )
+}
 
 struct CurrentDirGuard {
     previous: std::path::PathBuf,
@@ -69,6 +471,45 @@ fn count_event(lines: &[serde_json::Value], event_type: &str) -> usize {
         .iter()
         .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some(event_type))
         .count()
+}
+
+fn latest_user_request_parts(request: &ChatRequest) -> &[ChatMessageContentPart] {
+    let user_message = latest_persisted_user_request(request);
+    let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
+        panic!(
+            "expected multimodal user parts, got {:?}",
+            user_message.content
+        );
+    };
+    parts
+}
+
+fn latest_persisted_user_request(request: &ChatRequest) -> &ChatMessage {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            matches!(message.role, crate::core::llm::ChatMessageRole::User)
+                && message.kind != crate::core::llm::MessageKind::EphemeralTail
+        })
+        .expect("persisted user message")
+}
+
+fn request_has_input_file(request: &ChatRequest) -> bool {
+    latest_user_request_parts(request)
+        .iter()
+        .any(|part| matches!(part, ChatMessageContentPart::InputFile { .. }))
+}
+
+fn request_has_file_placeholder(request: &ChatRequest) -> bool {
+    latest_user_request_parts(request).iter().any(|part| {
+        matches!(
+            part,
+            ChatMessageContentPart::InputText { text }
+                if text.contains(UNSUPPORTED_FILE_INPUT_PLACEHOLDER)
+        )
+    })
 }
 
 fn first_event_index(lines: &[serde_json::Value], event_type: &str) -> Option<usize> {
@@ -154,6 +595,72 @@ fn latest_user_entry(
         .expect("latest user entry")
 }
 
+fn unsupported_file_input_stream(message: &str) -> Vec<Result<StreamEvent, crate::AppError>> {
+    vec![
+        Ok(StreamEvent::LlmError {
+            reason: "error:invalid_request_error".to_string(),
+            message: message.to_string(),
+            code: Some("invalid_request_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:invalid_request_error".to_string(),
+        }),
+    ]
+}
+
+fn content_filter_stream() -> Vec<Result<StreamEvent, crate::AppError>> {
+    vec![
+        Ok(StreamEvent::LlmError {
+            reason: "error".to_string(),
+            message: "content_filter".to_string(),
+            code: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error".to_string(),
+        }),
+    ]
+}
+
+fn ok_text_stream(text: &str) -> Vec<Result<StreamEvent, crate::AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+async fn prompt_with_pdf_attachment(
+    state: &Arc<ServeState>,
+    slot: &Arc<crate::api::serve::registry::SessionSlot>,
+    id: &str,
+    text: &str,
+) {
+    handle_command(
+        Arc::clone(state),
+        ServeCommand::Prompt {
+            id: Some(id.to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: text.to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("notes.pdf".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    blob_sha: Some(ingest_test_bytes(slot, &test_pdf_bytes())),
+                    provider_sha: None,
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+}
+
 #[derive(Debug, Clone)]
 struct ScriptedHttpResponse {
     status: u16,
@@ -188,7 +695,9 @@ struct RecordingHttpServer {
 
 impl RecordingHttpServer {
     async fn start(initial_responses: Vec<ScriptedHttpResponse>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
         let addr = listener.local_addr().expect("local addr");
         let base_url = format!("http://{addr}");
         let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -343,6 +852,47 @@ impl CheckpointStore for FixedCheckpointStore {
     }
 }
 
+struct SlowCheckpointStore {
+    calls: Arc<AtomicUsize>,
+    sleep: Duration,
+}
+
+impl CheckpointStore for SlowCheckpointStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        std::thread::sleep(self.sleep);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CheckpointId::null())
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Ok(CheckpointDiff::default())
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Ok(CheckpointRestoreReport::default())
+    }
+
+    fn prune(&self, _policy: crate::RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
 fn install_checkpoint_store(
     state: &Arc<ServeState>,
     session_id: &str,
@@ -406,6 +956,144 @@ async fn serve_command_routes_by_session_id() {
         &first_slot.ctx.agent_registry,
         &second_slot.ctx.agent_registry
     ));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn detached_new_session_does_not_change_live_or_durable_current() {
+    let _api_key = install_test_api_key();
+    let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let active_before = state.registry.active_session_id().unwrap();
+    let durable_before = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap();
+    let disk_before = slot.ctx.session_runtime.session.list_session_ids().unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::NewSession {
+            id: Some("detached-1".to_string()),
+            params: NewSessionParams {
+                detached: true,
+                ..NewSessionParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(state.registry.len(), 1, "detached session is disk-only");
+    assert_eq!(state.registry.active_session_id(), Some(active_before));
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .current_session_id()
+            .unwrap(),
+        durable_before,
+    );
+    let disk_after = slot.ctx.session_runtime.session.list_session_ids().unwrap();
+    assert_eq!(disk_after.len(), disk_before.len() + 1);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target_leases() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let source_id = slot.session_id.clone();
+    let active_before = state.registry.active_session_id();
+    let current_before = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap();
+    let store = slot.ctx.session_runtime.session.attachment_store();
+    let blob_sha = store.put(b"draft original").unwrap();
+    let provider_sha = store.put(b"draft provider rendition").unwrap();
+    store.mark_pending(&source_id, &blob_sha).unwrap();
+    store.mark_pending(&source_id, &provider_sha).unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::NewSession {
+            id: Some("detached-create".to_string()),
+            params: NewSessionParams {
+                detached: true,
+                ..NewSessionParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let create_response = wait_for_line(&buffer, |line| line["id"] == "detached-create")
+        .await
+        .into_iter()
+        .find(|line| line["id"] == "detached-create")
+        .expect("detached response");
+    let target_id = create_response["sessionId"].as_str().unwrap().to_string();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RetainAttachmentLeases {
+            id: Some("retain-target".to_string()),
+            session_id: target_id.clone(),
+            params: RetainAttachmentLeasesParams {
+                attachments: vec![RetainAttachmentLeaseRef {
+                    blob_sha: blob_sha.clone(),
+                    provider_sha: Some(provider_sha.clone()),
+                }],
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let retained = store.list_pending(&target_id).unwrap();
+    assert_eq!(retained.len(), 2, "blob + provider rendition both retained");
+    assert_eq!(state.registry.active_session_id(), active_before);
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .current_session_id()
+            .unwrap(),
+        current_before
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::DiscardDetachedSession {
+            id: Some("discard-target".to_string()),
+            session_id: target_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(slot
+        .ctx
+        .session_runtime
+        .session
+        .get_session_by_id(&target_id)
+        .unwrap()
+        .is_none());
+    assert!(store.list_pending(&target_id).unwrap().is_empty());
+    assert_eq!(state.registry.active_session_id(), active_before);
+    assert_eq!(store.list_pending(&source_id).unwrap().len(), 2);
+    assert!(store.exists(&blob_sha) && store.exists(&provider_sha));
+
+    handle_command(
+        state,
+        ServeCommand::DiscardDetachedSession {
+            id: Some("discard-target-again".to_string()),
+            session_id: target_id,
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -620,10 +1308,14 @@ async fn serve_prompt_drives_agent_run() {
         Ok(StreamEvent::Usage {
             prompt_tokens: 1,
             completion_tokens: 1,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             total_tokens: Some(2),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ];
-    let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
     let session_id = state.registry.active_session_id().unwrap();
 
     handle_command(
@@ -665,6 +1357,701 @@ async fn serve_prompt_drives_agent_run() {
         }),
         "expected agent_end, got {lines:?}"
     );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-usage".to_string()),
+            session_id: Some(session_id),
+        },
+    )
+    .await
+    .unwrap();
+    let state_lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-usage")
+    })
+    .await;
+    let state_response = state_lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-usage")
+        })
+        .expect("get_state response after usage");
+    assert!(
+        state_response["payload"]["contextUtilizationRatio"]
+            .as_f64()
+            .is_some_and(|ratio| ratio > 0.0),
+        "get_state must replay the nonzero provider measurement: {state_response:?}"
+    );
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "matching metrics event must populate the slot cache"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_second_prompt_keeps_waterline_while_usage_is_pending() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (first_tx, first_rx) = mpsc::unbounded_channel();
+    for event in [
+        StreamEvent::ContentDelta {
+            delta: "first".to_string(),
+        },
+        StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        },
+        StreamEvent::Usage {
+            prompt_tokens: 120,
+            completion_tokens: 10,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(130),
+            reasoning_tokens: None,
+            text_tokens: None,
+        },
+    ] {
+        first_tx.send(Ok(event)).expect("queue first stream event");
+    }
+    drop(first_tx);
+
+    let (second_tx, second_rx) = mpsc::unbounded_channel();
+    for event in [
+        StreamEvent::ContentDelta {
+            delta: "second".to_string(),
+        },
+        StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        },
+    ] {
+        second_tx
+            .send(Ok(event))
+            .expect("queue second stream prefix");
+    }
+    let provider: Arc<dyn LlmProvider> = Arc::new(ChannelMockLlm::new(vec![first_rx, second_rx]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    let session_id = slot.session_id.clone();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("waterline-first".to_string()),
+            session_id: Some(session_id.clone()),
+            text: "first".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("first prompt");
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(session_id.as_str())
+    })
+    .await;
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "the first provider Usage must establish a displayable waterline"
+    );
+    buffer.0.lock().clear();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("waterline-second".to_string()),
+            session_id: Some(session_id.clone()),
+            text: "second".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("second prompt");
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str)
+            == Some(wire::WIRE_CONTEXT_METRICS_UPDATE)
+            && line
+                .get("providerUsageMeasured")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+    })
+    .await;
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "the second request's pre-Usage estimate must refresh, never blank, the waterline"
+    );
+
+    second_tx
+        .send(Ok(StreamEvent::Usage {
+            prompt_tokens: 150,
+            completion_tokens: 12,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(162),
+            reasoning_tokens: None,
+            text_tokens: None,
+        }))
+        .expect("release second Usage");
+    drop(second_tx);
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(session_id.as_str())
+    })
+    .await;
+    assert!(
+        slot.last_context_ratio.lock().is_some(),
+        "the second provider Usage must continue to refresh the established waterline"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_rejects_a_dangling_ask_question_before_hydration_repairs_it() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_streams(vec![ok_text_stream("must not run")]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "restart-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed dangling ask_question");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-dangling-ask".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("resume-dangling-ask")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("resume-dangling-ask")
+        })
+        .expect("structured Resume rejection");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(response["error"].as_str(), Some("nothing_to_resume"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let provider: Arc<dyn LlmProvider> = Arc::new(DeterministicMockLlm::new(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "attach-resumed".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]]));
+    ensure_work_dir_structure(&cfg).expect("work dir");
+    let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
+    let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
+    let state = ServeState::new(cfg.clone(), writer, shared_model_prefs).expect("serve state");
+    let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let sessions_dir = crate::resolve_sessions_dir(&cfg).expect("sessions dir");
+    std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let session_key =
+        crate::session_key_for_agent(&cfg.agent.id, crate::SessionMode::Code, &cwd_path);
+    let session_manager = crate::SessionManager::new_scoped(sessions_dir, session_key);
+    let cwd_string = Some(cwd_path.to_string_lossy().to_string());
+    let current_entry = session_manager
+        .ensure_current_session(cwd_string.clone())
+        .expect("current session");
+    session_manager
+        .pin_session(&current_entry.session_id)
+        .expect("pin current session");
+    let overrides = crate::api::chat::ChatContextOverrides::default()
+        .suppress_cli_output()
+        .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
+        .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
+        .with_session_cwd_override(cwd_path.clone());
+    let mut ctx = crate::api::chat::ChatContext::from_config_with_mode_and_overrides(
+        cfg.clone(),
+        crate::SessionMode::Code,
+        overrides,
+    )
+    .expect("chat context");
+    state.shared_event_bus.register_session_bus(
+        current_entry.session_id.clone(),
+        ctx.global_services.event_bus.clone(),
+    );
+    let ask_panel = state.ask_question.panel_for_session(
+        ctx.global_services.event_bus.clone(),
+        &current_entry.session_id,
+    );
+    ctx.session_runtime
+        .plan_runtime
+        .attach_ask_question_panel(ask_panel);
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        provider,
+        "gpt-5.4",
+        ctx.global_services.model_catalog.snapshot(),
+    ));
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "auto-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed pending ask_question before hook registration");
+    let context_budget_chars =
+        crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
+    let context_state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        prompt_snapshot.system_text(),
+    )
+    .expect("context state");
+    let slot = Arc::new(crate::api::serve::registry::SessionSlot::new(
+        current_entry.session_id.clone(),
+        Arc::new(ctx),
+        crate::SessionMode::Code,
+        cwd_string,
+        crate::api::serve::registry::SessionTurnState {
+            context_state,
+            prompt_snapshot,
+            context_budget_chars,
+        },
+    ));
+    state
+        .registry
+        .insert(Arc::clone(&slot))
+        .expect("insert initial session");
+    register_slot_hooks(&state, &slot);
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlRequest {
+            request_id: "initialize-before-rearm".to_string(),
+            subtype: "initialize".to_string(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::Value::Null,
+        },
+    )
+    .await
+    .expect("initialize handshake");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+    })
+    .await;
+    let request = lines
+        .iter()
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+        })
+        .expect("slot attach should rearm pending ask_question");
+    assert_eq!(
+        request["payload"]["toolCallId"].as_str(),
+        Some("auto-ask-1")
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlResponse {
+            request_id: request["requestId"]
+                .as_str()
+                .expect("control request id")
+                .to_string(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::json!({
+                "requestId": request["payload"]["requestId"],
+                "result": {
+                    "outcome": "answered",
+                    "cancelled": false,
+                    "answers": [{
+                        "questionId": "q1",
+                        "optionIds": ["yes"],
+                        "pickedRecommended": true
+                    }]
+                }
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "re-armed attach flow should finish the recovered turn: {lines:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_skips_pending_ask_question_before_persisting_new_input() {
+    let new_prompt = "跳过旧问题，继续做别的";
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "new prompt handled".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "skip-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed dangling ask_question");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("new-prompt-after-question".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: new_prompt.to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "a new prompt must not be blocked by the old pending question: {lines:?}"
+    );
+
+    let entries = session_message_entries(&slot);
+    let skip = entries
+        .iter()
+        .find(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && message
+                    .message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("skip-ask-1")
+        })
+        .expect("old ask_question should be recorded as skipped before prompt append");
+    let result: serde_json::Value = serde_json::from_str(
+        skip.message["content"]
+            .as_str()
+            .expect("tool result content"),
+    )
+    .expect("skip result JSON");
+    assert_eq!(result["outcome"], "skipped");
+    assert_eq!(result["cancelled"], true);
+
+    let skipped_index = entries
+        .iter()
+        .position(|message| message.id == skip.id)
+        .expect("skip entry index");
+    let prompt_index = entries
+        .iter()
+        .position(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+                && message
+                    .message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(new_prompt)
+        })
+        .expect("new prompt should be persisted");
+    assert!(
+        skipped_index < prompt_index,
+        "skipped tool result must precede the new user message"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_replaces_legacy_synthetic_ask_question_result() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "已根据选择继续".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "需要一个选择",
+            "tool_calls": [{
+                "id": "legacy-ask-1",
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                }
+            }]
+        }))
+        .expect("seed ask_question declaration");
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "legacy-ask-1",
+            "content": "{\"answers\":[],\"cancelled\":true,\"outcome\":\"host_disconnected\"}"
+        }))
+        .expect("seed legacy synthetic ask_question result");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-legacy-ask".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+    })
+    .await;
+    let request = lines
+        .iter()
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+        })
+        .expect("legacy result should be retried through the host");
+    assert_eq!(
+        request["payload"]["toolCallId"].as_str(),
+        Some("legacy-ask-1")
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ControlResponse {
+            request_id: request["requestId"]
+                .as_str()
+                .expect("control request id")
+                .to_string(),
+            session_id: Some(slot.session_id.clone()),
+            payload: serde_json::json!({
+                "requestId": request["payload"]["requestId"],
+                "result": {
+                    "outcome": "answered",
+                    "cancelled": false,
+                    "answers": [{
+                        "questionId": "q1",
+                        "optionIds": ["no"],
+                        "pickedRecommended": false
+                    }]
+                }
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    let results = session_message_entries(&slot)
+        .into_iter()
+        .filter(|message| {
+            message
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("tool")
+                && message
+                    .message
+                    .get("tool_call_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("legacy-ask-1")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.len(),
+        2,
+        "legacy placeholder should be superseded and followed by one real result"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|message| {
+                message
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            })
+            .count(),
+        1,
+        "there must be exactly one active result after recovery"
+    );
+    let result: serde_json::Value = serde_json::from_str(
+        results
+            .iter()
+            .find(|message| {
+                message
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            })
+            .expect("active recovered result")
+            .message["content"]
+            .as_str()
+            .expect("tool result content"),
+    )
+    .expect("ask_question result JSON");
+    assert_eq!(result["outcome"], "answered");
+    assert_eq!(result["answers"][0]["option_ids"][0], "no");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_turn_completion_keeps_busy_until_run_task_lock_is_available() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+    let provider: Arc<dyn LlmProvider> = Arc::new(ChannelMockLlm::new(vec![stream_rx]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("locked-turn".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "controlled completion".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    stream_tx
+        .send(Ok(StreamEvent::ContentDelta {
+            delta: "reply".into(),
+        }))
+        .unwrap();
+    wait_for_line(&buffer, |frame| frame["type"] == "message_update").await;
+
+    let (locked_tx, locked_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held_slot = Arc::clone(&slot);
+    // Hold the synchronous mutex on a separate thread, not across an async await.
+    let holder = tokio::task::spawn_blocking(move || {
+        let running = held_slot.run_task.lock();
+        assert!(running.is_some());
+        locked_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let still_busy = held_slot.is_busy();
+        drop(running);
+        still_busy
+    });
+    locked_rx.await.unwrap();
+    stream_tx
+        .send(Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        }))
+        .unwrap();
+    drop(stream_tx);
+    // A returned lease proves the model run has finished; cleanup is still locked.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while slot.turn_state.lock().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("turn must return its context state");
+    // Let the completion poll reach the held mutex, without relying on racing two jobs.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before_release = read_ndjson_lines(&buffer);
+    release_tx.send(()).unwrap();
+    let busy_while_locked = holder.await.unwrap();
+    let lines = wait_for_line(&buffer, |frame| frame["type"] == "agent_idle").await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while slot.run_task.lock().is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        busy_while_locked,
+        "completion must acquire run_task before marking idle"
+    );
+    assert_eq!(count_event(&before_release, "agent_idle"), 0);
+    assert_eq!(count_event(&lines, "agent_idle"), 1);
+    assert!(!slot.is_busy());
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -680,6 +2067,15 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
         }),
     ];
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    install_checkpoint_store(
+        &state,
+        &slot.session_id,
+        Arc::new(SlowCheckpointStore {
+            calls: Arc::clone(&checkpoint_calls),
+            sleep: Duration::from_millis(500),
+        }),
+    );
 
     handle_command(
         Arc::clone(&state),
@@ -693,10 +2089,19 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
     .await
     .unwrap();
 
-    let lines = wait_for_line(&buffer, |line| {
-        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
-    })
-    .await;
+    let lines = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+        }),
+    )
+    .await
+    .expect("agent_idle must not wait for a slow TurnEnd checkpoint");
+    assert_eq!(
+        checkpoint_calls.load(Ordering::SeqCst),
+        0,
+        "agent_idle must be emitted before the slow TurnEnd checkpoint finishes",
+    );
     assert_eq!(
         count_event(&lines, "agent_end"),
         1,
@@ -734,6 +2139,14 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-idle"))
         .expect("state-after-idle response");
     assert_eq!(response["payload"]["busy"].as_bool(), Some(false));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while checkpoint_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("TurnEnd checkpoint should still be recorded in the background");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -784,6 +2197,87 @@ async fn serve_prompt_with_precancelled_turn_emits_agent_idle_once() {
         !slot.is_busy(),
         "precancelled interrupted turn should leave the slot idle"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_interrupt_emits_idle_without_waiting_for_slow_checkpoint() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+    let provider: Arc<dyn LlmProvider> = Arc::new(ChannelMockLlm::new(vec![stream_rx]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    install_checkpoint_store(
+        &state,
+        &slot.session_id,
+        Arc::new(SlowCheckpointStore {
+            calls: Arc::clone(&checkpoint_calls),
+            sleep: Duration::from_millis(500),
+        }),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-interrupt-background-checkpoint".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "start then interrupt".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    stream_tx
+        .send(Ok(StreamEvent::ContentDelta {
+            delta: "partial reply".to_string(),
+        }))
+        .expect("active stream receiver");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("message_update")
+        }),
+    )
+    .await
+    .expect("stream delta should reach the event writer");
+
+    let started = Instant::now();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Interrupt {
+            id: Some("interrupt-background-checkpoint".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+        }),
+    )
+    .await
+    .expect("agent_idle must not wait for a slow Interrupt checkpoint");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "Interrupt checkpoint must not delay agent_idle"
+    );
+    assert_eq!(count_event(&lines, "agent_interrupted"), 1);
+    assert_eq!(count_event(&lines, "agent_idle"), 1);
+    assert!(!slot.is_busy());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while checkpoint_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Interrupt checkpoint should still be recorded in the background");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -839,7 +2333,8 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("file-vision".to_string()),
                 }],
                 ..ServeMessageParams::default()
@@ -856,12 +2351,7 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
 
     let captured = requests.0.lock();
     assert_eq!(captured.len(), 1, "expected exactly one LLM request");
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!(
             "expected multimodal parts user message, got {:?}",
@@ -900,7 +2390,8 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("file-follow-up".to_string()),
                 }],
                 user_message_id: Some("follow-up-fixed-id".to_string()),
@@ -965,7 +2456,8 @@ async fn serve_prompt_invalid_attachment_returns_error() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: Some("Zm9v".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_png_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1015,7 +2507,8 @@ async fn serve_prompt_file_attachment_without_filename_returns_error() {
                     kind: ServeAttachmentKind::File,
                     filename: None,
                     mime_type: Some("application/pdf".to_string()),
-                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_pdf_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1067,7 +2560,8 @@ async fn serve_prompt_non_pdf_file_attachment_returns_error() {
                     kind: ServeAttachmentKind::File,
                     filename: Some("notes.md".to_string()),
                     mime_type: Some("text/markdown".to_string()),
-                    data_base64: Some("IyBoaQ==".to_string()),
+                    blob_sha: Some(forged_sha()),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1119,7 +2613,8 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
                     kind: ServeAttachmentKind::File,
                     filename: Some("notes.pdf".to_string()),
                     mime_type: Some("application/pdf".to_string()),
-                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_pdf_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -1135,12 +2630,7 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
         panic!(
             "expected multimodal parts user message, got {:?}",
@@ -1152,14 +2642,226 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
         &parts[0],
         ChatMessageContentPart::InputText { text } if text == "summarize file"
     ));
+    let expected_pdf = base64::engine::general_purpose::STANDARD.encode(test_pdf_bytes());
     assert!(matches!(
         &parts[1],
         ChatMessageContentPart::InputFile {
             source: FileSource::Inline(ref inline),
         } if inline.filename == "notes.pdf"
             && inline.mime_type == "application/pdf"
-            && inline.data == "JVBERi0xLjQK"
+            && inline.data == expected_pdf
     ));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_retries_stream_terminal_refusal_and_surfaces_the_retry_error() {
+    let _api_key = install_test_api_key();
+    let refusal = unsupported_file_input_stream(
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+    );
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![refusal, ok_text_stream("retry ok")])
+            .await;
+
+    prompt_with_pdf_attachment(&state, &slot, "retry-once-ok", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "auto_retry_start"), 1);
+    assert_eq!(
+        count_event(&lines, "llm_error"),
+        1,
+        "each terminal stream error must remain visible while the retry proceeds"
+    );
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "transient refusal should be retried once"
+    );
+    assert!(
+        recorded.iter().all(request_has_input_file),
+        "the raw retry path must keep input_file unchanged on both attempts",
+    );
+    let transcript = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .expect("read transcript");
+    assert!(
+        transcript.contains("retry ok"),
+        "assistant success should reach transcript"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
+    let _api_key = install_test_api_key();
+    let refusal_message = "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+            ok_text_stream("degraded retry ok"),
+        ])
+        .await;
+
+    prompt_with_pdf_attachment(&state, &slot, "retry-degrade-ok", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "auto_retry_start"), 2);
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("llm_notice")
+                && line["finishReason"] == "unsupported_multimodal_degraded"
+                && line["message"]
+                    == crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "agentLoop.attachmentsDegraded",
+                        &[],
+                    )
+        }),
+        "degrade retry should surface a notice: {lines:?}"
+    );
+    // Provider-call ladder is pinned in `run_basic_test`; this serve test keeps its scope
+    // to the real stdout/session stack: the user should see the notice and still land on a
+    // successful assistant turn.
+    assert_eq!(
+        count_event(&lines, "llm_error"),
+        2,
+        "both terminal refusals must remain visible before the degraded retry"
+    );
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        3,
+        "second refusal should produce original + raw retry + degraded retry",
+    );
+    assert!(
+        recorded[..2].iter().all(request_has_input_file),
+        "the first two attempts must keep input_file before degradation",
+    );
+    assert!(
+        !request_has_input_file(&recorded[2]),
+        "the degraded retry must strip input_file from the final request",
+    );
+    assert!(
+        request_has_file_placeholder(&recorded[2]),
+        "the degraded retry must carry the file placeholder text",
+    );
+    let transcript = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .expect("read transcript");
+    assert!(
+        transcript.contains("degraded retry ok"),
+        "successful degraded retry should still persist assistant output",
+    );
+    assert!(
+        !requests.0.lock().is_empty(),
+        "integration stack should issue provider requests",
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_exhausted_stream_terminal_refusal_surfaces_one_final_error() {
+    let _api_key = install_test_api_key();
+    let refusal_message = "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+            unsupported_file_input_stream(refusal_message),
+        ])
+        .await;
+
+    prompt_with_pdf_attachment(&state, &slot, "retry-exhausted", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+    })
+    .await;
+
+    assert_eq!(
+        count_event(&lines, "llm_error"),
+        4,
+        "each exhausted terminal refusal must remain visible for diagnosis"
+    );
+    let final_errors = lines
+        .iter()
+        .filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+        })
+        .count();
+    assert_eq!(final_errors, 1, "terminal refusal should render once");
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        4,
+        "four consecutive refusals should consume the full retry budget",
+    );
+    assert!(
+        request_has_file_placeholder(&recorded[2]) && request_has_file_placeholder(&recorded[3]),
+        "degraded attempts must stay degraded until the retry budget is exhausted",
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_content_filter_stream_refusal_does_not_retry() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![content_filter_stream()]).await;
+
+    prompt_with_pdf_attachment(&state, &slot, "content-filter-terminal", "summarize file").await;
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("content_filter"))
+    })
+    .await;
+
+    assert_eq!(count_event(&lines, "auto_retry_start"), 0);
+    assert_eq!(
+        requests.0.lock().len(),
+        1,
+        "content_filter must remain fatal"
+    );
 }
 
 #[tokio::test]
@@ -1193,12 +2895,7 @@ async fn serve_prompt_uses_requested_user_message_id_for_transcript_and_context(
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     assert_eq!(user_message.msg_id.as_deref(), Some("user-fixed-id"));
     drop(captured);
     assert_eq!(count_message_entries_with_id(&slot, "user-fixed-id"), 1);
@@ -1232,12 +2929,7 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
     .await;
 
     let captured = requests.0.lock();
-    let user_message = captured[0]
-        .messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
-        .expect("user message");
+    let user_message = latest_persisted_user_request(&captured[0]);
     assert!(matches!(
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "plain text"
@@ -1291,15 +2983,14 @@ fn build_user_message_preserves_segment_order_and_appends_attachments() {
             kind: ServeAttachmentKind::Image,
             filename: None,
             mime_type: None,
-            data_base64: None,
+            blob_sha: None,
+            provider_sha: None,
             file_id: Some("image-file-id".to_string()),
         }],
         ..ServeMessageParams::default()
     };
 
-    let message =
-        crate::api::serve::commands::build_user_message("fallback text".to_string(), &params)
-            .expect("build message");
+    let message = build_message_for_test("fallback text", &params).expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
         other => panic!("expected multipart content, got {other:?}"),
@@ -1348,8 +3039,7 @@ fn build_user_message_accepts_reference_only_segments() {
         ..ServeMessageParams::default()
     };
 
-    let message = crate::api::serve::commands::build_user_message(String::new(), &params)
-        .expect("build message");
+    let message = build_message_for_test("", &params).expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
         other => panic!("expected multipart content, got {other:?}"),
@@ -1380,7 +3070,7 @@ fn build_user_message_accepts_non_pdf_file_references_without_attachment_validat
         ..ServeMessageParams::default()
     };
 
-    let message = crate::api::serve::commands::build_user_message(String::new(), &params)
+    let message = build_message_for_test("", &params)
         .expect("non-PDF file references should stay on the context-reference path");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
@@ -1471,7 +3161,7 @@ async fn serve_prompt_duplicate_user_message_id_falls_back_to_generated_entry_id
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_steer_ignores_attachments() {
+async fn serve_steer_preserves_attachments() {
     let _api_key = install_test_api_key();
     let stream = vec![Ok(StreamEvent::FinishReason {
         reason: "stop".to_string(),
@@ -1490,7 +3180,8 @@ async fn serve_steer_ignores_attachments() {
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("ignored-file".to_string()),
                 }],
                 user_message_id: Some("steer-fixed-id".to_string()),
@@ -1515,7 +3206,7 @@ async fn serve_steer_ignores_attachments() {
         .expect("steering message");
     assert!(matches!(
         &steering_message.content,
-        Some(ChatMessageContent::Text(text)) if text == "just steer"
+        Some(ChatMessageContent::Parts(parts)) if parts.iter().any(|p| matches!(p, ChatMessageContentPart::InputImage { .. }))
     ));
     assert_eq!(steering_message.msg_id.as_deref(), Some("steer-fixed-id"));
     drop(captured);
@@ -1524,7 +3215,7 @@ async fn serve_steer_ignores_attachments() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_busy_steer_queues_and_persists_requested_user_message_id() {
+async fn serve_busy_steer_defers_archival_until_consumption() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
     slot.busy.store(true, Ordering::SeqCst);
@@ -1556,12 +3247,169 @@ async fn serve_busy_steer_queues_and_persists_requested_user_message_id() {
 
     let queue = slot.ctx.session_runtime.steering_queue.lock();
     assert_eq!(queue.len(), 1, "expected one queued steering message");
-    assert_eq!(queue[0].msg_id.as_deref(), Some("steer-busy-fixed-id"));
+    assert!(
+        queue[0].msg_id.is_none(),
+        "queued input is not archived yet"
+    );
     drop(queue);
     assert_eq!(
         count_message_entries_with_id(&slot, "steer-busy-fixed-id"),
-        1
+        0
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn strict_steer_rejects_idle_and_closed_inbox_without_archival() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    for closed_busy in [false, true] {
+        slot.busy.store(closed_busy, Ordering::SeqCst);
+        slot.ctx
+            .session_runtime
+            .steering_queue
+            .lock()
+            .close_and_clear();
+        let id = format!("strict-{closed_busy}");
+        handle_command(
+            state.clone(),
+            ServeCommand::Steer {
+                id: Some(id.clone()),
+                session_id: Some(slot.session_id.clone()),
+                text: "too late".into(),
+                params: ServeMessageParams {
+                    only_if_running: Some(true),
+                    user_message_id: Some(id.clone()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let frames = wait_for_line(&buffer, |f| f["id"] == id).await;
+        assert_eq!(
+            frames.iter().find(|f| f["id"] == id).unwrap()["error"],
+            "not_running"
+        );
+        assert_eq!(count_message_entries_with_id(&slot, &id), 0);
+        assert!(slot.ctx.session_runtime.steering_queue.lock().is_empty());
+        assert_eq!(
+            slot.is_busy(),
+            closed_busy,
+            "rejection must not start a task"
+        );
+        assert!(slot.run_task.lock().is_none());
+        assert!(frames.iter().all(|frame| frame["type"] != "agent_start"));
+    }
+    slot.mark_idle();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn live_steering_consumed_precedes_idle_and_stop_or_failure_discards_it() {
+    let _api_key = install_test_api_key();
+    for outcome in ["completed", "interrupted", "failed"] {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (next_tx, next_rx) = mpsc::unbounded_channel();
+        next_tx
+            .send(Ok(StreamEvent::ContentDelta {
+                delta: "steered".into(),
+            }))
+            .unwrap();
+        next_tx
+            .send(Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }))
+            .unwrap();
+        drop(next_tx);
+        let (state, buffer, _temp, slot) = build_initialized_state_with_provider(
+            temp,
+            cfg,
+            Arc::new(ChannelMockLlm::new(vec![rx, next_rx])),
+        )
+        .await;
+        handle_command(
+            state.clone(),
+            ServeCommand::Prompt {
+                id: Some("start".into()),
+                session_id: Some(slot.session_id.clone()),
+                text: "task".into(),
+                params: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        tx.send(Ok(StreamEvent::ContentDelta {
+            delta: "waiting".into(),
+        }))
+        .unwrap();
+        wait_for_line(&buffer, |f| f["type"] == "message_update").await;
+        handle_command(
+            state.clone(),
+            ServeCommand::Steer {
+                id: Some("insert".into()),
+                session_id: Some(slot.session_id.clone()),
+                text: "supplement".into(),
+                params: ServeMessageParams {
+                    only_if_running: Some(true),
+                    user_message_id: Some("live-steer".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        wait_for_line(&buffer, |f| f["id"] == "insert").await;
+        assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 0);
+        match outcome {
+            "completed" => {
+                tx.send(Ok(StreamEvent::FinishReason {
+                    reason: "stop".into(),
+                }))
+                .unwrap();
+            }
+            "interrupted" => {
+                handle_command(
+                    state.clone(),
+                    ServeCommand::Interrupt {
+                        id: Some("stop".into()),
+                        session_id: Some(slot.session_id.clone()),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            _ => {
+                tx.send(Err(crate::infra::error::llm_http_status_error(
+                    "mock", 401, "denied",
+                )))
+                .unwrap();
+            }
+        }
+        drop(tx);
+        let frames = wait_for_line(&buffer, |f| f["type"] == "agent_idle").await;
+        let idle = frames
+            .iter()
+            .position(|f| f["type"] == "agent_idle")
+            .unwrap();
+        assert_eq!(frames[idle]["outcome"], outcome);
+        assert!(slot.ctx.session_runtime.steering_queue.lock().is_empty());
+        assert!(!slot.ctx.session_runtime.steering_queue.lock().is_open());
+        let consumed = frames.iter().position(|f| f["type"] == "steering_consumed");
+        if outcome == "completed" {
+            assert!(consumed.unwrap() < idle);
+            assert_eq!(frames[consumed.unwrap()]["userMessageIds"][0], "live-steer");
+            assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 1);
+        } else {
+            assert!(consumed.is_none());
+            assert_eq!(count_message_entries_with_id(&slot, "live-steer"), 0);
+        }
+        cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1672,6 +3520,249 @@ async fn serve_get_messages_returns_cursor_metadata_and_continuous_pages() {
             .len(),
         4
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn transcript_migration_preserves_get_messages_image_and_display_semantics() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let image_bytes = b"migration fixture image";
+    let image_b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    crate::core::session::transcript::append_entry(
+        &transcript,
+        &crate::core::session::transcript::TranscriptEntry::Message(
+            crate::core::session::transcript::MessageEntry {
+                id: Some("legacy-user-image".to_string()),
+                parent_id: None,
+                timestamp: "2020-01-01T00:00:00.000Z".to_string(),
+                message: serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "input_image",
+                        "mime_type": "image/png",
+                        "image_b64": image_b64
+                    }]
+                }),
+            },
+        ),
+    )
+    .unwrap();
+    crate::core::session::transcript::append_entry(
+        &transcript,
+        &crate::core::session::transcript::TranscriptEntry::Message(
+            crate::core::session::transcript::MessageEntry {
+                id: Some("legacy-tool-display".to_string()),
+                parent_id: None,
+                timestamp: "2020-01-01T00:00:01.000Z".to_string(),
+                message: serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": "legacy-tool-call",
+                    "content": "edited",
+                    "tool_display": {
+                        "kind": "file",
+                        "file": "src/lib.rs",
+                        "added": 1,
+                        "removed": 0,
+                        "diff": [{"tag": "add", "newLine": 1, "text": "new"}]
+                    }
+                }),
+            },
+        ),
+    )
+    .unwrap();
+
+    let sessions_dir = transcript.parent().unwrap();
+    // Re-running after a torn sidecar append must not hide the migrated display.
+    let sidecar =
+        crate::core::session::tool_display_sidecar::tool_display_sidecar_path(&transcript);
+    std::fs::write(
+        &sidecar,
+        b"{\"toolCallId\":\"interrupted\",\"display\":\"\xe5",
+    )
+    .unwrap();
+
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/migrate_transcripts_v2.py");
+    let migration = StdCommand::new("python3")
+        .env("TOMCAT_MIGRATION_TEST_ALLOW_RUNNING_SERVE", "1")
+        .arg(script)
+        .arg("--sessions-dir")
+        .arg(sessions_dir)
+        .output()
+        .expect("run transcript migration script");
+    assert!(
+        migration.status.success(),
+        "migration failed: {}",
+        String::from_utf8_lossy(&migration.stderr)
+    );
+    let rewritten = std::fs::read_to_string(&transcript).unwrap();
+    assert!(!rewritten.contains("image_b64"));
+    assert!(!rewritten.contains("tool_display"));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-migrated".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                attachment_mode: AttachmentMode::Reference,
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-migrated")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-migrated"))
+        .expect("migrated get_messages response");
+    let messages = response["payload"]["messages"]
+        .as_array()
+        .expect("messages");
+    let image = messages
+        .iter()
+        .find_map(|entry| {
+            entry["message"]["content"]
+                .as_array()
+                .and_then(|content| content.first())
+        })
+        .expect("migrated image message");
+    assert_eq!(image["type"], "input_image_ref");
+    let sha = image["blob_sha"].as_str().expect("migrated image sha");
+    assert_eq!(
+        std::fs::read(sessions_dir.join("attachments/blobs").join(sha)).unwrap(),
+        image_bytes
+    );
+    let tool = messages
+        .iter()
+        .find(|entry| entry["message"]["tool_call_id"] == "legacy-tool-call")
+        .expect("migrated tool result");
+    assert_eq!(tool["message"]["content"], "edited");
+    assert_eq!(tool["message"]["tool_display"]["kind"], "file");
+    assert_eq!(tool["message"]["tool_display"]["expired"], true);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_messages_keeps_assistant_and_tool_result_atomic_by_tool_call_id() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let seed_id = append_history_message(&slot, "user", "seed");
+    let assistant_id = slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "ask-call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "ask_question",
+                        "arguments": "{\"questions\":[{\"id\":\"q1\"}]}"
+                    }
+                }]
+            }),
+        )
+        .expect("append assistant ask_question call");
+    let tool_id = slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "ask-call-1",
+                "content": "{\"answers\":[],\"cancelled\":true,\"outcome\":\"skipped\"}",
+                "tool_display": {
+                    "kind": "file",
+                    "file": "src/lib.rs",
+                    "added": 1,
+                    "removed": 0,
+                    "diff": [{"tag": "add", "newLine": 1, "text": "new"}]
+                }
+            }),
+        )
+        .expect("append ask_question result");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-atomic-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                limit: Some(1),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-1")
+    })
+    .await;
+    let first = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-1"))
+        .expect("atomic first page");
+    assert_eq!(
+        payload_message_ids(first),
+        vec![assistant_id.clone(), tool_id]
+    );
+    let messages = first["payload"]["messages"].as_array().expect("messages");
+    assert_eq!(messages[0]["message"]["tool_calls"][0]["id"], "ask-call-1");
+    assert_eq!(messages[1]["message"]["tool_call_id"], "ask-call-1");
+    assert_eq!(messages[1]["message"]["tool_display"]["kind"], "file");
+    assert_eq!(
+        messages[1]["message"]["tool_display"]["diff"][0]["text"],
+        "new"
+    );
+    let next_cursor = first["payload"]["nextCursor"]
+        .as_str()
+        .expect("cursor before atomic companion")
+        .to_string();
+    assert_eq!(decode_cursor(&next_cursor)["boundaryId"], assistant_id);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-atomic-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                cursor: Some(next_cursor),
+                limit: Some(1),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-2")
+    })
+    .await;
+    let second = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-atomic-2"))
+        .expect("atomic second page");
+    assert_eq!(payload_message_ids(second), vec![seed_id]);
+    assert_eq!(second["payload"]["hasMore"], false);
 }
 
 #[tokio::test]
@@ -1893,6 +3984,7 @@ async fn serve_get_messages_returns_boundary_entries_without_truncation() {
                 estimated_tokens_saved: None,
                 error: None,
                 attempts: None,
+                superseded: false,
             },
         ),
     )
@@ -2219,6 +4311,547 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_retry_and_resume_with_queued_signal_keep_empty_reply_protection() {
+    for resume in [false, true] {
+        let _key = install_test_api_key();
+        let hidden = || {
+            vec![
+                Ok(StreamEvent::Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 33,
+                    total_tokens: Some(133),
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: Some(27),
+                    text_tokens: Some(6),
+                }),
+                Ok(StreamEvent::FinishReason {
+                    reason: "stop".into(),
+                }),
+            ]
+        };
+        let (state, buffer, _temp, slot, requests) =
+            build_initialized_state_with_recorded_streams((0..4).map(|_| hidden()).collect()).await;
+        let session = &slot.ctx.session_runtime.session;
+        let id = session
+            .append_message(serde_json::json!({"role":"user","content":"real pending work"}))
+            .unwrap();
+        if resume {
+            session.append_message(serde_json::json!({"role":"assistant","tool_calls":[{"id":"read-pending","type":"function","function":{"name":"read","arguments":"{}"}}]})).unwrap();
+            session.append_message(serde_json::json!({"role":"tool","tool_call_id":"read-pending","content":"completed tool result"})).unwrap();
+        }
+        rehydrate_slot_context_state(&slot).unwrap();
+        let mut signal = crate::core::llm::ChatMessage::user("queued background notification");
+        signal.kind = crate::core::llm::MessageKind::Signal;
+        slot.ctx.session_runtime.follow_up_queue.lock().push(signal);
+        let command = if resume {
+            ServeCommand::Resume {
+                id: Some("resume-signal".into()),
+                session_id: Some(slot.session_id.clone()),
+            }
+        } else {
+            ServeCommand::Retry {
+                id: Some("retry-signal".into()),
+                session_id: Some(slot.session_id.clone()),
+                message_id: id,
+            }
+        };
+        handle_command(state, command).await.unwrap();
+        let frames = tokio::time::timeout(
+            Duration::from_secs(15),
+            wait_for_line(&buffer, |v| v["type"] == "agent_idle"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            frames.iter().any(|v| v["type"] == "agent_end"
+                && v["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains(&crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "agentLoop.hiddenExhausted",
+                        &[("count", "3")]
+                    )))),
+            "{frames:?}"
+        );
+        let captured = requests.0.lock();
+        assert_eq!(captured.len(), 4);
+        assert!(captured[0]
+            .messages
+            .iter()
+            .any(|m| m.text_content() == Some("real pending work")));
+        assert!(captured[0]
+            .messages
+            .iter()
+            .any(|m| m.kind == crate::core::llm::MessageKind::Signal));
+        if resume {
+            assert!(captured[0]
+                .messages
+                .iter()
+                .any(|m| m.role == crate::core::llm::ChatMessageRole::Tool));
+        }
+        drop(captured);
+        let transcript =
+            std::fs::read_to_string(session.transcript_path(&slot.session_id)).unwrap();
+        assert!(transcript.contains("hidden_output"));
+        assert!(transcript.contains("auto_retry_start"));
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_retry_copies_failed_prompt_forward_without_duplicating_model_input() {
+    let _api_key = install_test_api_key();
+    let recovered_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "recovered".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            vec![Err(crate::llm_http_status_error(
+                "mock",
+                503,
+                "temporary upstream outage",
+            ))],
+            recovered_stream,
+        ])
+        .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("resume-failed-prompt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "retry this exact prompt".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("temporary upstream outage"))
+    })
+    .await;
+
+    let failed_user_id = session_message_entries(&slot)
+        .into_iter()
+        .find(|entry| {
+            entry
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+                && entry
+                    .message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("retry this exact prompt")
+        })
+        .and_then(|entry| entry.id)
+        .expect("failed user row has a durable transcript id");
+    let transcript_before_retry = std::fs::read_to_string(
+        slot.ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id),
+    )
+    .expect("read auto-retry transcript");
+    assert!(
+        transcript_before_retry
+            .matches("\"event\":\"auto_retry_start\"")
+            .count()
+            >= 1,
+        "the exhausted automatic-retry path must retain its custom diagnostics"
+    );
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Retry {
+            id: Some("resume-failed-prompt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            message_id: failed_user_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").is_none_or(serde_json::Value::is_null)
+    })
+    .await;
+
+    let recorded = requests.0.lock().clone();
+    assert_eq!(
+        recorded.len(),
+        5,
+        "four automatic attempts and one copy-forward retry request"
+    );
+    let resumed_prompt_occurrences = recorded[4]
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .filter(|text| *text == "retry this exact prompt")
+        .count();
+    assert_eq!(
+        resumed_prompt_occurrences, 1,
+        "Retry must activate exactly one copied user message in the provider request"
+    );
+    let rows = session_message_entries(&slot);
+    assert_eq!(
+        rows.iter()
+            .filter(|entry| {
+                entry
+                    .message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("retry this exact prompt")
+            })
+            .count(),
+        2,
+        "the archived failed row and its new live copy are both auditable"
+    );
+    let archived = rows
+        .iter()
+        .find(|entry| entry.id.as_deref() == Some(failed_user_id.as_str()))
+        .expect("original failed row remains in transcript");
+    assert_eq!(archived.message["superseded"], true);
+    assert_eq!(archived.message["turn_failed"], true);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_rejects_without_a_complete_tool_result_tail() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({"role": "user", "content": "retry me"}),
+        )
+        .expect("seed incomplete non-tool tail");
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).expect("read transcript before rejected Resume");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-no-tool-tail".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("resume-no-tool-tail")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("resume-no-tool-tail")
+        })
+        .expect("structured Resume rejection");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(response["error"].as_str(), Some("nothing_to_resume"));
+    assert!(
+        requests.0.lock().is_empty(),
+        "failed validation must not start an LLM request"
+    );
+    assert_eq!(
+        std::fs::read(transcript).expect("read transcript after rejected Resume"),
+        before,
+        "failed validation must not mutate the transcript"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_rejects_when_a_failed_user_hides_an_old_tool_tail() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "user",
+                "content": "the older tool turn",
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "old-read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
+                }],
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "old-read",
+                "content": "# old result",
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "user",
+                "content": "the failed retry target",
+                "superseded": true,
+                "turn_failed": true,
+            }),
+        )
+        .unwrap();
+    session
+        .append_error_entry(crate::core::session::transcript::ErrorEntry {
+            id: Some("error-old-tool-tail".to_string()),
+            parent_id: None,
+            timestamp: "2026-08-01T00:00:00.000Z".to_string(),
+            phase: None,
+            provider: None,
+            model: None,
+            api_family: None,
+            status_code: Some(503),
+            request_id: None,
+            failure_kind: None,
+            failure_domain: None,
+            summary: "failed retry target".to_string(),
+            detail: "failed retry target".to_string(),
+        })
+        .unwrap();
+    let transcript = session.transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-old-tool-tail".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("resume-old-tool-tail")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("resume-old-tool-tail")
+                && line.get("error").and_then(serde_json::Value::as_str)
+                    == Some("nothing_to_resume")
+        }),
+        "an old tool tail must not authorize Resume for the superseded newer user"
+    );
+    assert!(requests.0.lock().is_empty());
+    assert_eq!(std::fs::read(transcript).unwrap(), before);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_retry_rejects_a_stale_anchor_without_mutating_the_transcript() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    let session = &slot.ctx.session_runtime.session;
+    let stale_id = session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({"role": "user", "content": "old failed request"}),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({"role": "user", "content": "newer live request"}),
+        )
+        .unwrap();
+    let transcript = session.transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).unwrap();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Retry {
+            id: Some("retry-stale-anchor".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            message_id: stale_id,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("retry-stale-anchor")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("retry-stale-anchor")
+                && line.get("error").and_then(serde_json::Value::as_str)
+                    == Some("retry_target_stale")
+        }),
+        "the service must report a stale Retry anchor rather than falling back to Resume"
+    );
+    assert!(requests.0.lock().is_empty());
+    assert_eq!(std::fs::read(transcript).unwrap(), before);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_after_truncated_tool_turn_continues_from_tool_tail() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
+        vec![ok_text_stream("resumed from placeholder")],
+    )
+    .await;
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "user",
+                "content": "finish the truncated tool turn",
+            }),
+        )
+        .unwrap();
+    session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "truncated-read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
+                }],
+            }),
+        )
+        .unwrap();
+    session
+        .append_error_entry(crate::core::session::transcript::ErrorEntry {
+            id: Some("error-truncated-read".to_string()),
+            parent_id: None,
+            timestamp: "2026-08-01T00:00:00.000Z".to_string(),
+            phase: None,
+            provider: None,
+            model: None,
+            api_family: None,
+            status_code: None,
+            request_id: None,
+            failure_kind: None,
+            failure_domain: None,
+            summary: "达到 max_tokens，回答可能未完成".to_string(),
+            detail: "the prior tool turn stopped at max_tokens".to_string(),
+        })
+        .unwrap();
+    let system_text = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("session turn state")
+        .prompt_snapshot
+        .system_text()
+        .to_string();
+    let healed_context = init_context_state(
+        &slot.ctx.session_runtime.session,
+        &slot.ctx.config.context,
+        &system_text,
+    )
+    .expect("failure recovery hydration must persist a placeholder after the error row");
+    if let Some(turn_state) = slot.turn_state.lock().as_mut() {
+        turn_state.context_state = healed_context;
+    }
+    let healed_entries = session.get_entries(16).unwrap();
+    assert!(
+        matches!(
+            healed_entries.last(),
+            Some(crate::core::session::transcript::TranscriptEntry::Message(entry))
+                if entry.message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                    && entry.message.get("tool_call_id").and_then(serde_json::Value::as_str)
+                        == Some("truncated-read")
+                    && entry.message.get("content").and_then(serde_json::Value::as_str)
+                        == Some(crate::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+        ),
+        "hydration must append the healed result after the durable error annotation"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-post-error-placeholder".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").is_none_or(serde_json::Value::is_null)
+    })
+    .await;
+
+    let recorded = requests.0.lock().clone();
+    assert_eq!(recorded.len(), 1);
+    let tail = recorded[0]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.kind != crate::core::llm::MessageKind::EphemeralTail)
+        .expect("Resume provider persisted request tail");
+    assert_eq!(tail.role, crate::core::llm::ChatMessageRole::Tool);
+    assert_eq!(
+        tail.text_content(),
+        Some(crate::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT),
+        "the post-error healed placeholder is the legal continuation tail"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_prompt_failed_turn_retry_does_not_replay_superseded_user_tail() {
     let _api_key = install_test_api_key();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2418,6 +5051,7 @@ async fn serve_prompt_failed_turn_retry_keeps_previous_response_id_hint() {
     let mut cfg = serve_test_config(temp.path(), &server.base_url);
     cfg.llm.default_model = "gpt-5.4".to_string();
     cfg.context.compaction_model = "gpt-5.4".to_string();
+    cfg.llm.title_model = None;
     cfg.llm.reasoning_continuity.enabled = true;
     cfg.llm.openai_responses.use_previous_response_id = true;
     std::fs::write(
@@ -2491,12 +5125,16 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         guard
             .as_ref()
             .expect("session turn state")
-            .system_text
-            .clone()
+            .prompt_snapshot
+            .system_text()
+            .to_string()
     };
-    let seeded_state =
-        init_context_state(&slot.ctx.session_runtime.session, &slot.ctx.config.context, &system_text)
-            .expect("rehydrate seeded context");
+    let seeded_state = init_context_state(
+        &slot.ctx.session_runtime.session,
+        &slot.ctx.config.context,
+        &system_text,
+    )
+    .expect("rehydrate seeded context");
     if let Some(turn_state) = slot.turn_state.lock().as_mut() {
         turn_state.context_state = seeded_state;
     }
@@ -2551,9 +5189,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         lines
     };
     assert!(
-        lines.iter().filter(|line| {
-            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-        }).count() >= 2,
+        lines
+            .iter()
+            .filter(|line| {
+                line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            })
+            .count()
+            >= 2,
         "expected failed turn + retry success terminal events: {lines:?}"
     );
 
@@ -2644,7 +5286,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
                     kind: ServeAttachmentKind::Image,
                     filename: None,
                     mime_type: None,
-                    data_base64: None,
+                    blob_sha: None,
+                    provider_sha: None,
                     file_id: Some("file-vision".to_string()),
                 }],
                 ..ServeMessageParams::default()
@@ -2680,7 +5323,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
                     kind: ServeAttachmentKind::File,
                     filename: Some("notes.pdf".to_string()),
                     mime_type: Some("application/pdf".to_string()),
-                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    blob_sha: Some(ingest_test_bytes(&slot, &test_pdf_bytes())),
+                    provider_sha: None,
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -2809,18 +5453,16 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         "deepseek follow-up should contain file omission placeholder in historical user message: {third_messages:?}"
     );
     assert!(
-        third_messages
-            .iter()
-            .all(|message| match &message.content {
-                Some(ChatMessageContent::Parts(parts)) => parts.iter().all(|part| {
-                    !matches!(
-                        part,
-                        ChatMessageContentPart::InputImage { .. }
-                            | ChatMessageContentPart::InputFile { .. }
-                    )
-                }),
-                _ => true,
+        third_messages.iter().all(|message| match &message.content {
+            Some(ChatMessageContent::Parts(parts)) => parts.iter().all(|part| {
+                !matches!(
+                    part,
+                    ChatMessageContentPart::InputImage { .. }
+                        | ChatMessageContentPart::InputFile { .. }
+                )
             }),
+            _ => true,
+        }),
         "deepseek follow-up should not carry raw multimodal parts after downgrade: {third_messages:?}"
     );
 }
@@ -2893,6 +5535,194 @@ async fn serve_set_model_rejects_invalid_id_without_mutating_session_override() 
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_set_model_rejects_a_model_removed_after_the_catalog_was_cached() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let model_id = "stale-catalog-model";
+    crate::core::llm::upsert_user_model(
+        &state.cfg,
+        ModelEntryInput {
+            id: model_id.to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            api: "openai-responses".to_string(),
+            provider: "relay".to_string(),
+            api_key_env: None,
+            base_url: Some("https://gateway.example.test/v1".to_string()),
+            capabilities: Capabilities {
+                tools: true,
+                ..Capabilities::default()
+            },
+            context_window: Some(200_000),
+            context_window_options: None,
+            max_output_tokens: None,
+            description: None,
+            supported_speeds: None,
+            supported_reasoning_levels: None,
+            thinking_format: Some("openai".to_string()),
+        },
+    )
+    .expect("write a user model");
+    state
+        .shared_model_catalog
+        .reload(&state.cfg)
+        .expect("cache the new model before external removal");
+    slot.ctx
+        .global_services
+        .model_catalog
+        .reload(&state.cfg)
+        .expect("cache the new model in the active session before external removal");
+    crate::core::llm::remove_user_model(&state.cfg, model_id).expect("remove model from disk");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("set-removed-model".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: model_id.to_string(),
+        },
+    )
+    .await
+    .expect("handle stale selection");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("set-removed-model")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("set-removed-model")
+        })
+        .expect("removed model response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert!(response["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(model_id)));
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .current_session_entry()
+            .expect("read current session")
+            .expect("current session")
+            .model_override,
+        None,
+        "a stale cached catalog must not put a deleted model back into sessions.json"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-after-external-removal".to_string()),
+        },
+    )
+    .await
+    .expect("refresh list from disk");
+    let listed = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-after-external-removal")
+    })
+    .await;
+    let list_response = listed
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("list-after-external-removal")
+        })
+        .expect("list response");
+    assert_eq!(list_response["success"].as_bool(), Some(true));
+    assert!(
+        !list_response["payload"]["models"]
+            .as_array()
+            .expect("models list")
+            .iter()
+            .any(|model| model["id"].as_str() == Some(model_id)),
+        "list_models must read the disk catalog instead of returning the old cache"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn speed_serve_persists_lists_rejects_and_keeps_failed_save_unchanged() {
+    use crate::core::llm::Speed;
+    let _api_key = install_test_api_key();
+    let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    for (id, model, speed, success) in [
+        ("speed-fast", "gpt-5.6", Speed::Fast, true),
+        ("speed-unsupported", "gpt-5.4", Speed::Fast, false),
+        ("speed-ultra", "gpt-5.6", Speed::Ultrafast, false),
+        ("speed-missing", "missing-model", Speed::Standard, false),
+        ("speed-standard", "gpt-5.4", Speed::Standard, true),
+    ] {
+        handle_command(
+            state.clone(),
+            ServeCommand::SetSpeed {
+                id: Some(id.into()),
+                session_id: Some(slot.session_id.clone()),
+                model: model.into(),
+                speed,
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |v| v["id"] == id).await;
+        let response = lines.iter().find(|v| v["id"] == id).unwrap();
+        assert_eq!(response["success"], success, "{response:?}");
+        if success {
+            assert_eq!(response["payload"]["speed"], serde_json::json!(speed));
+            assert!(response["payload"].get("tier").is_none());
+        }
+    }
+    let path = crate::infra::config::resolve_model_thinking_path(&state.cfg).unwrap();
+    let reloaded = crate::ModelPrefsStore::load(&path, crate::ThinkingLevel::High).unwrap();
+    assert_eq!(reloaded.speed_for("gpt-5.6"), Speed::Fast);
+    let disk = std::fs::read(&path).unwrap();
+    let backup = temp.path().join("prefs-backup.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    handle_command(
+        state.clone(),
+        ServeCommand::SetSpeed {
+            id: Some("speed-save-failed".into()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.6".into(),
+            speed: Speed::Standard,
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |v| v["id"] == "speed-save-failed").await;
+    assert_eq!(
+        lines
+            .iter()
+            .find(|v| v["id"] == "speed-save-failed")
+            .unwrap()["success"],
+        false
+    );
+    assert_eq!(state.shared_model_prefs.speed_for("gpt-5.6"), Speed::Fast);
+    assert_eq!(slot.ctx.resolve_speed("gpt-5.6"), Some(Speed::Fast));
+    assert_eq!(std::fs::read(&backup).unwrap(), disk);
+    handle_command(
+        state.clone(),
+        ServeCommand::ListModels {
+            id: Some("speed-list".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |v| v["id"] == "speed-list").await;
+    let response = lines.iter().find(|v| v["id"] == "speed-list").unwrap();
+    let model = response["payload"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "gpt-5.6")
+        .unwrap();
+    assert_eq!(model["selectedSpeed"], "fast");
+    assert_eq!(model["supportedSpeeds"], serde_json::json!(["fast"]));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_set_thinking_level_roundtrips_in_get_state() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
@@ -2927,9 +5757,70 @@ async fn serve_set_thinking_level_roundtrips_in_get_state() {
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-effort-1"))
         .expect("get_state response");
     let payload = response["payload"].clone();
-    assert_eq!(response["success"].as_bool(), Some(true));
+    assert_eq!(response["success"].as_bool(), Some(true), "{response:?}");
     assert_eq!(payload["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(payload["thinkingLevel"].as_str(), Some("xhigh"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn upsert_model_response_includes_non_fatal_warnings() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("upsert-warning".to_string()),
+            model: ModelEntryInput {
+                id: "relay-openai".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api: "openai-responses".to_string(),
+                provider: "relay".to_string(),
+                api_key_env: Some("SERVE_TEST_GATEWAY_API_KEY".to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                capabilities: Capabilities {
+                    tools: true,
+                    reasoning: true,
+                    ..Capabilities::default()
+                },
+                context_window: Some(200_000),
+                context_window_options: None,
+                max_output_tokens: None,
+                description: None,
+                supported_speeds: None,
+                supported_reasoning_levels: None,
+                thinking_format: Some("anthropic".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-warning")
+    })
+    .await;
+    let upsert = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-warning"))
+        .expect("upsert_model warning response");
+    assert_eq!(upsert["success"].as_bool(), Some(true));
+    assert_eq!(
+        upsert["payload"]["model"]["id"].as_str(),
+        Some("relay-openai")
+    );
+    let warnings = upsert["payload"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|msg| msg.contains("openai-responses") && msg.contains("anthropic")),
+        "unexpected warnings payload: {:?}",
+        warnings
+    );
 }
 
 #[tokio::test]
@@ -2955,6 +5846,11 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                     ..Capabilities::default()
                 },
                 context_window: Some(200_000),
+                context_window_options: None,
+                max_output_tokens: Some(128_000),
+                description: None,
+                supported_speeds: None,
+                supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
         },
@@ -3169,7 +6065,7 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
             id: Some("effort-deepseek".to_string()),
             session_id: Some(slot.session_id.clone()),
             model: "deepseek-v4-pro".to_string(),
-            level: "xhigh".to_string(),
+            level: "max".to_string(),
         },
         ServeCommand::SetModel {
             id: Some("switch-deepseek".to_string()),
@@ -3210,9 +6106,82 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
         deepseek["payload"]["model"].as_str(),
         Some("deepseek-v4-pro")
     );
-    assert_eq!(deepseek["payload"]["thinkingLevel"].as_str(), Some("xhigh"));
+    assert_eq!(deepseek["payload"]["thinkingLevel"].as_str(), Some("max"));
     assert_eq!(gpt["payload"]["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(gpt["payload"]["thinkingLevel"].as_str(), Some("low"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_model_reestimates_an_already_displayed_waterline() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    *slot.last_context_ratio.lock() = Some(0.5);
+    let current_entry = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_entry()
+        .unwrap();
+    let current_model = slot.ctx.effective_model(current_entry.as_ref());
+    let target_model = if current_model == "deepseek-v4-pro" {
+        "gpt-5.4"
+    } else {
+        "deepseek-v4-pro"
+    };
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("switch-waterline-model".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: target_model.to_string(),
+        },
+    )
+    .await
+    .expect("switch model");
+
+    let expected_ratio = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("idle slot")
+        .context_state
+        .usage_ratio();
+    let displayed_ratio = (*slot.last_context_ratio.lock())
+        .expect("model switch must refresh a provider-primed waterline");
+    assert!(
+        (displayed_ratio - expected_ratio).abs() < f64::EPSILON,
+        "model switch must apply the new input budget before publishing its estimate: displayed={displayed_ratio}, expected={expected_ratio}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-waterline-model-switch".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .expect("get state");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str)
+            == Some("state-after-waterline-model-switch")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("state-after-waterline-model-switch")
+        })
+        .expect("get_state response");
+    assert!(
+        response["payload"]["contextUtilizationRatio"]
+            .as_f64()
+            .is_some_and(|ratio| (ratio - expected_ratio).abs() < f64::EPSILON),
+        "get_state must replay the model-budget estimate: {response:?}"
+    );
 }
 
 #[tokio::test]
@@ -3318,7 +6287,7 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
         .agent_registry
         .spawn_subagent_internal(
             &slot.session_id,
-            crate::core::agent_loop::SubagentType::Reviewer,
+            crate::core::agent_loop::SubagentType::PlanReviewer,
             |ctx| async move {
                 crate::core::agent_registry::SubagentOutcome {
                     child_session_id: ctx.child_session_id,
@@ -3374,7 +6343,7 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
         .agent_registry
         .spawn_subagent_internal(
             &slot.session_id,
-            crate::core::agent_loop::SubagentType::Reviewer,
+            crate::core::agent_loop::SubagentType::PlanReviewer,
             |ctx| async move {
                 crate::core::agent_registry::SubagentOutcome {
                     child_session_id: ctx.child_session_id,
@@ -3394,7 +6363,7 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_to_chat() {
+async fn serve_set_plan_mode_exit_returns_plan_mode_to_chat_without_changing_plan_file() {
     use crate::core::plan_runtime::file_store::{
         read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
         PLAN_FILE_SCHEMA_VERSION,
@@ -3406,14 +6375,14 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
     slot.ctx
         .session_runtime
         .plan_runtime
-        .enter_planning()
-        .expect("enter planning");
-    let plan_path = temp.path().join("exit-executing.plan.md");
+        .enter_plan()
+        .expect("enter plan");
+    let plan_path = temp.path().join("exit-pending.plan.md");
     let plan = PlanFile {
         frontmatter: PlanFileFrontmatter {
             plan_id: "plan-exit".into(),
-            goal: "leave executing safely".into(),
-            state: PlanFileState::Planning,
+            goal: "leave plan mode safely".into(),
+            state: PlanFileState::Pending,
             session_key: None,
             session_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -3422,7 +6391,16 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
                 id: "todo-1".into(),
                 content: "ship it".into(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             }],
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## Plan\n- pending".into(),
@@ -3436,15 +6414,7 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
     slot.ctx
         .session_runtime
         .plan_runtime
-        .set_active_planning_plan("plan-exit".into(), plan_path.clone());
-    slot.ctx
-        .session_runtime
-        .plan_runtime
-        .build_plan(
-            plan_path.to_str().expect("utf8 plan path"),
-            Some(slot.session_id.clone()),
-        )
-        .expect("build plan into executing");
+        .bind_plan_file_for_test(plan_path.clone());
 
     handle_command(
         Arc::clone(&state),
@@ -3471,23 +6441,111 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
         Some(true)
     );
     assert_eq!(
-        response["payload"]["planState"].as_str(),
+        response["payload"]["agentMode"].as_str(),
         Some("chat"),
-        "executing+idle 退出后应回到 chat"
+        "退出后会话应回到 chat"
     );
 
-    let disk_plan = read_plan(&plan_path).expect("read demoted plan");
+    let disk_plan = read_plan(&plan_path).expect("read plan");
     assert_eq!(
         disk_plan.frontmatter.state,
         PlanFileState::Pending,
-        "退出 chat 前必须先把盘上的 executing 降级成 pending"
+        "退出会话模式不得改写计划文件生命周期"
     );
-    assert!(
-        matches!(
-            slot.ctx.session_runtime.plan_runtime.mode(),
-            crate::core::plan_runtime::PlanState::Chat
-        ),
+    assert_eq!(
+        slot.ctx.session_runtime.plan_runtime.mode(),
+        crate::core::session::AgentMode::Chat,
         "runtime 也应回到 Chat"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_build_persists_kickoff_message_before_responding() {
+    use crate::core::plan_runtime::file_store::{
+        write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+        PLAN_FILE_SCHEMA_VERSION,
+    };
+
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let plan_path = temp.path().join("build-persist.plan.md");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: "build-persist".into(),
+            goal: "persist the build kickoff".into(),
+            state: PlanFileState::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            schema_version: PLAN_FILE_SCHEMA_VERSION,
+            todos: vec![TodoItem {
+                id: "todo-1".into(),
+                content: "run the build".into(),
+                status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
+            }],
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
+            unknown: serde_yaml::Mapping::new(),
+        },
+        body: "## Plan\n- build".into(),
+    };
+    write_plan(
+        &plan_path,
+        &plan,
+        slot.ctx.session_runtime.plan_runtime.lock_timeout_ms(),
+    )
+    .expect("write external plan");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetPlanMode {
+            id: Some("build-persist".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            action: SetPlanModeAction::Build,
+            plan_id: Some(plan_path.to_string_lossy().to_string()),
+        },
+    )
+    .await
+    .expect("build command");
+
+    let persisted = session_message_entries(&slot)
+        .into_iter()
+        .find(|entry| {
+            entry.message["kind"].as_str() == Some("plan_build")
+                && entry.message["role"].as_str() == Some("user")
+        })
+        .expect("kickoff message must be persisted before the response is observable");
+    assert!(
+        persisted
+            .message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|content| content.contains("start building")),
+        "persisted message = {:?}",
+        persisted.message
+    );
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("build-persist")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("build-persist")
+                && line.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        }),
+        "build response missing: {lines:?}"
     );
 }
 
@@ -3508,6 +6566,8 @@ async fn serve_get_state_contains_plan_and_session_todos() {
             id: "st-1".to_string(),
             content: "wire session todos".to_string(),
             status: TodoStatus::InProgress,
+            evidence: Vec::new(),
+            kind: Default::default(),
         }]);
 
     tracing::info!(target: "test", phase = "act", test = "serve_get_state_contains_plan_and_session_todos");
@@ -3534,16 +6594,16 @@ async fn serve_get_state_contains_plan_and_session_todos() {
     tracing::info!(target: "test", phase = "assert", test = "serve_get_state_contains_plan_and_session_todos");
     assert_eq!(response["success"].as_bool(), Some(true));
     assert!(
-        payload.get("planPath").is_some(),
-        "get_state payload must include planPath"
+        payload.get("activePlan").is_some(),
+        "get_state payload must include activePlan"
     );
     assert!(
         payload.get("contextUtilizationRatio").is_some(),
         "get_state payload must include contextUtilizationRatio"
     );
     assert!(
-        payload["planPath"].is_null(),
-        "no active plan => planPath null"
+        payload["activePlan"].is_null(),
+        "no active plan => activePlan null"
     );
     assert!(
         payload["contextUtilizationRatio"].is_null(),
@@ -3569,7 +6629,7 @@ async fn serve_get_state_contains_plan_and_session_todos() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
+async fn serve_get_state_ignores_persisted_context_ratio() {
     use crate::core::plan_runtime::file_store::{
         write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
         PLAN_FILE_SCHEMA_VERSION,
@@ -3580,13 +6640,13 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     let session_mgr = &slot.ctx.session_runtime.session;
     session_mgr
         .update_session(session_mgr.current_session_key(), |entry| {
-            entry.context_utilization_ratio = Some(0.42);
+            entry.context_utilization_ratio = Some(0.9);
         })
         .unwrap();
     slot.ctx
         .session_runtime
         .plan_runtime
-        .enter_planning()
+        .enter_plan()
         .expect("enter planning");
     let plan_path = temp.path().join("active.plan.md");
     let plan = PlanFile {
@@ -3602,7 +6662,16 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
                 id: "todo-1".into(),
                 content: "restore".into(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: Default::default(),
             }],
+            code_review_pass: false,
+            code_review_rounds: 0,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
+            code_review_residual_findings: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## Plan\n- restore".into(),
@@ -3616,7 +6685,7 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     slot.ctx
         .session_runtime
         .plan_runtime
-        .set_active_planning_plan("plan-1".into(), plan_path.clone());
+        .refresh_active_plan_after_write(plan_path.clone(), &plan);
 
     handle_command(
         Arc::clone(&state),
@@ -3641,11 +6710,16 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     let payload = response["payload"].clone();
 
     assert_eq!(
-        payload["planPath"].as_str(),
+        payload["activePlan"]["path"].as_str(),
         Some(plan_path.to_string_lossy().as_ref())
     );
-    assert_eq!(payload["contextUtilizationRatio"].as_f64(), Some(0.42));
-    assert_eq!(payload["planState"].as_str(), Some("planning"));
+    assert!(
+        payload["contextUtilizationRatio"].is_null(),
+        "a fresh slot must not replay a stale persisted context ratio"
+    );
+    assert_eq!(payload["agentMode"].as_str(), Some("plan"));
+    assert_eq!(payload["activePlan"]["id"].as_str(), Some("plan-1"));
+    assert_eq!(payload["activePlan"]["state"].as_str(), Some("planning"));
     let plan_todos = payload["planTodos"]
         .as_array()
         .expect("get_state payload must include planTodos array");
@@ -3703,6 +6777,260 @@ async fn serve_set_thinking_level_invalid_value_returns_error_without_breaking_l
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_set_context_window_persists_and_lists_selected_tier() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    let description = "测试 Context 档位";
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("tiered-upsert".to_string()),
+            model: ModelEntryInput {
+                id: "tiered-model".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api: "openai-responses".to_string(),
+                provider: "openai".to_string(),
+                api_key_env: Some(TEST_API_KEY_ENV.to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                capabilities: Capabilities::default(),
+                context_window: Some(400_000),
+                context_window_options: Some(vec![1_000_000, 400_000]),
+                max_output_tokens: None,
+                description: Some(description.to_string()),
+                supported_speeds: None,
+                supported_reasoning_levels: None,
+                thinking_format: Some("openai".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("tiered-upsert")
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetContextWindow {
+            id: Some("set-context-tier".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "tiered-model".to_string(),
+            context_window: 1_000_000,
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-context-tier".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-context-tier")
+    })
+    .await;
+    let set_response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("set-context-tier"))
+        .expect("set context response");
+    assert_eq!(set_response["success"].as_bool(), Some(true));
+    assert_eq!(
+        set_response["payload"]["contextWindow"].as_u64(),
+        Some(1_000_000)
+    );
+
+    let listed = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-context-tier")
+        })
+        .expect("list models response");
+    let model = listed["payload"]["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["id"] == "tiered-model"))
+        .expect("tiered model in list");
+    assert_eq!(
+        model["contextWindowOptions"],
+        serde_json::json!([400000, 1000000])
+    );
+    assert_eq!(model["selectedContextWindow"].as_u64(), Some(1_000_000));
+    assert_eq!(model["description"].as_str(), Some(description));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetContextWindow {
+            id: Some("bad-context-tier".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "tiered-model".to_string(),
+            context_window: 123_456,
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("bad-context-tier")
+    })
+    .await;
+    let error = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("bad-context-tier"))
+        .expect("invalid context response");
+    assert_eq!(error["success"].as_bool(), Some(false));
+    assert!(error["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("invalid_context_window"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_thinking_level_for_relay_persists_under_catalog_id_and_lists_selection() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let relay_id = "relay/gpt-sol";
+    let wire_model_name = "gpt-sol";
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("relay-effort-upsert".to_string()),
+            model: ModelEntryInput {
+                id: relay_id.to_string(),
+                model_name: Some(wire_model_name.to_string()),
+                api: "openai-responses".to_string(),
+                provider: "relay".to_string(),
+                api_key_env: Some(TEST_API_KEY_ENV.to_string()),
+                base_url: Some("https://relay.example.test/v1".to_string()),
+                capabilities: Capabilities::default(),
+                context_window: Some(400_000),
+                context_window_options: None,
+                max_output_tokens: None,
+                description: None,
+                supported_speeds: None,
+                supported_reasoning_levels: Some(vec!["high".to_string(), "xhigh".to_string()]),
+                thinking_format: Some("openai".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("relay-effort-upsert")
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-relay-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: relay_id.to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-relay-effort".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-relay-effort")
+    })
+    .await;
+    let set_response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("set-relay-effort"))
+        .expect("set relay effort response");
+    assert_eq!(set_response["success"].as_bool(), Some(true));
+
+    let listed = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-relay-effort")
+        })
+        .expect("list relay models response");
+    let relay = listed["payload"]["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["id"] == relay_id))
+        .expect("relay model in list");
+    assert_eq!(relay["modelName"].as_str(), Some(wire_model_name));
+    assert_eq!(relay["selectedReasoningLevel"].as_str(), Some("xhigh"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_context_window_applies_resolved_limits_to_current_session() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.llm.default_model = "tiered-model".to_string();
+    cfg.context.compaction_model = "tiered-model".to_string();
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "tiered-model"
+model_name = "tiered-model"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "{env}"
+base_url = "http://127.0.0.1:1"
+context_window = 400000
+context_window_options = [400000, 1000000]
+max_output_tokens = 64000
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+        ),
+    )
+    .expect("write tiered model");
+
+    let (state, _buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    assert_eq!(
+        slot.turn_state
+            .lock()
+            .as_ref()
+            .expect("session context")
+            .context_state
+            .context_budget_tokens,
+        336_000,
+        "the baseline model tier should initialize the session budget"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetContextWindow {
+            id: Some("apply-context-tier".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: " tiered-model ".to_string(),
+            context_window: 1_000_000,
+        },
+    )
+    .await
+    .expect("set context tier");
+
+    let turn_state = slot.turn_state.lock();
+    let session_context = turn_state.as_ref().expect("session context");
+    assert_eq!(session_context.context_state.context_budget_tokens, 936_000);
+    assert_eq!(session_context.context_budget_chars, 3_744_000);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_set_thinking_level_persists_across_restart() {
     let _api_key = install_test_api_key();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3753,17 +7081,17 @@ async fn serve_set_thinking_level_persists_across_restart() {
 }
 
 #[test]
-fn build_shared_model_thinking_uses_global_store_path() {
+fn build_shared_model_prefs_uses_global_store_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
     cfg.llm.thinking.level = "medium".to_string();
     ensure_work_dir_structure(&cfg).expect("work dir");
 
-    let store = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let store = build_shared_model_prefs(&cfg).expect("shared model preferences");
     let global_path = crate::resolve_model_thinking_path(&cfg).expect("global model thinking path");
 
     assert_eq!(
-        store.get("gpt-5.4"),
+        store.reasoning_for("gpt-5.4"),
         crate::core::llm::ThinkingLevel::Medium
     );
     assert!(
@@ -3833,6 +7161,467 @@ async fn serve_prompt_passes_per_model_thinking_level_to_main_loop_request() {
         captured[0].thinking_level,
         Some(crate::core::llm::ThinkingLevel::Xhigh)
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_upsert_model_reloads_thinking_format_and_sends_xhigh_without_restart() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![
+        ScriptedHttpResponse::sse(&[
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"before\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_before\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ]),
+        ScriptedHttpResponse::sse(&[
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m2\",\"content_index\":0,\"delta\":\"after\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_after\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ]),
+    ])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "gpt-5.4".to_string();
+    cfg.context.compaction_model = "gpt-5.4".to_string();
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.4"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "anthropic"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write responses override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("format-prompt-before".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "before".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let _after_first = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("upsert-format-openai".to_string()),
+            model: ModelEntryInput {
+                id: "gpt-5.4".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api: "openai-responses".to_string(),
+                provider: "openai".to_string(),
+                api_key_env: Some(TEST_API_KEY_ENV.to_string()),
+                base_url: Some(server.base_url.clone()),
+                capabilities: Capabilities {
+                    vision: true,
+                    files: true,
+                    tools: true,
+                    reasoning: true,
+                    web_search: false,
+                },
+                context_window: Some(400_000),
+                context_window_options: None,
+                max_output_tokens: None,
+                description: None,
+                supported_speeds: None,
+                supported_reasoning_levels: Some(vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                    "xhigh".to_string(),
+                ]),
+                thinking_format: Some("openai".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-xhigh-after-upsert".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("format-prompt-after".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "after".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _after_second = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    let requests = server.requests();
+    let before_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"text\":\"before\"")
+                && !request.contains("\"text\":\"after\",\"type\":\"input_text\"")
+        })
+        .expect("expected a streamed request for the first prompt");
+    assert!(
+        !before_request.contains("\"effort\":\""),
+        "anthropic relay format on responses wire should omit reasoning effort: {}",
+        before_request
+    );
+    let after_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"text\":\"after\",\"type\":\"input_text\"")
+                && request.contains("\"effort\":\"xhigh\"")
+        })
+        .expect("expected a streamed request for the second prompt with xhigh effort");
+    assert!(
+        after_request.contains("\"effort\":\"xhigh\""),
+        "upserted openai format should hot-reload and send xhigh without restart: {}",
+        after_request
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_glm_max_emits_reasoning_effort_max() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![ScriptedHttpResponse::sse(&[
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ])])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "glm-5.2".to_string();
+    cfg.context.compaction_model = "glm-5.2".to_string();
+    cfg.llm.title_model = None;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "glm-5.2"
+model_name = "glm-5.2"
+api = "openai"
+provider = "zhipu"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "zai"
+supported_reasoning_levels = ["high", "max"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write glm override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-glm-max".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "glm-5.2".to_string(),
+            level: "max".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-glm-max".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "glm".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _lines = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    let requests = server.requests();
+    let glm_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true") && request.contains("\"reasoning_effort\":\"max\"")
+        })
+        .expect("expected a streamed glm request with max effort");
+    assert!(
+        glm_request.contains("\"reasoning_effort\":\"max\""),
+        "glm request should send max verbatim: {}",
+        glm_request
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_uses_catalog_id_for_reasoning_lookup_when_model_name_differs() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![ScriptedHttpResponse::sse(&[
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"ok\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_relay\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+    ])])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "relay/gpt-sol".to_string();
+    cfg.context.compaction_model = "relay/gpt-sol".to_string();
+    cfg.llm.title_model = None;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "relay/gpt-sol"
+model_name = "gpt-sol"
+api = "openai-responses"
+provider = "relay"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write relay override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-relay-xhigh".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "relay/gpt-sol".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-relay".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-relay".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "relay".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let state_lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-relay")
+    })
+    .await;
+    let state_response = state_lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-relay"))
+        .expect("relay get_state response");
+    assert_eq!(
+        state_response["payload"]["model"].as_str(),
+        Some("relay/gpt-sol")
+    );
+    assert_eq!(
+        state_response["payload"]["thinkingLevel"].as_str(),
+        Some("xhigh")
+    );
+
+    let _turn_lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+
+    let requests = server.requests();
+    let relay_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"model\":\"gpt-sol\"")
+                && request.contains("\"effort\":\"xhigh\"")
+        })
+        .expect("expected a streamed relay request with xhigh effort");
+    assert!(
+        relay_request.contains("\"effort\":\"xhigh\""),
+        "relay request should send xhigh from the catalog id selection: {}",
+        relay_request
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_claude_adaptive_uses_output_config_effort() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![ScriptedHttpResponse::sse(&[
+        "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":12}}}\n\n",
+        "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+        "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":34}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ])])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "claude-opus-4-8".to_string();
+    cfg.context.compaction_model = "claude-opus-4-8".to_string();
+    cfg.llm.title_model = None;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "claude-opus-4-8"
+model_name = "claude-opus-4-8"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write claude override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-claude-xhigh".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "claude-opus-4-8".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-claude-adaptive".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "claude".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _lines = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    let requests = server.requests();
+    let claude_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"output_config\":{\"effort\":\"xhigh\"}")
+        })
+        .expect("expected a streamed claude request with adaptive effort");
+    assert!(
+        claude_request.contains("\"thinking\":{\"type\":\"adaptive\"}"),
+        "claude adaptive request should enable adaptive thinking: {}",
+        claude_request
+    );
+    assert!(
+        claude_request.contains("\"output_config\":{\"effort\":\"xhigh\"}"),
+        "claude adaptive request should encode effort in output_config: {}",
+        claude_request
+    );
+
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -3999,14 +7788,345 @@ async fn serve_restore_checkpoint_transcript_only_reports_payload_and_supersedes
         .collect::<Vec<_>>();
     assert!(superseded_ids.contains(&superseded_user_id));
     assert!(superseded_ids.contains(&superseded_assistant_id));
+    let turn_state = slot.turn_state.lock();
+    let runtime_messages = &turn_state
+        .as_ref()
+        .expect("idle slot keeps turn state")
+        .context_state
+        .messages;
+    assert!(
+        runtime_messages.iter().all(|message| {
+            message.text_content() != Some("after checkpoint")
+                && message.text_content() != Some("after reply")
+        }),
+        "restore must also replace the in-memory context, not only supersede transcript rows"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_restore_rearms_a_question_unpaired_by_the_restore_boundary() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, initial_slot) = build_initialized_state_with_streams(vec![]).await;
+    let session_id = initial_slot.session_id.clone();
+    append_history_message(&initial_slot, "user", "restore this pending question");
+    let anchor = initial_slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": "需要选择",
+                "tool_calls": [{
+                    "id": "restore-ask-1",
+                    "type": "function",
+                    "function": {
+                        "name": "ask_question",
+                        "arguments": "{\"questions\":[{\"id\":\"q1\",\"prompt\":\"Continue?\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\",\"recommended\":true},{\"id\":\"no\",\"label\":\"No\",\"recommended\":false}]}]}"
+                    }
+                }]
+            }),
+        )
+        .expect("append checkpoint anchor with ask_question");
+    initial_slot
+        .ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_id,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "restore-ask-1",
+                "content": "{\"outcome\":\"host_disconnected\",\"cancelled\":true,\"answers\":[]}"
+            }),
+        )
+        .expect("append result that restore will supersede");
+    drop(initial_slot);
+
+    let checkpoint_id = CheckpointId::new("ck_restore_pending_question");
+    let slot = install_checkpoint_store(
+        &state,
+        &session_id,
+        Arc::new(FixedCheckpointStore {
+            checkpoints: vec![CheckpointMeta {
+                id: checkpoint_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: "turn-restore-pending-question".to_string(),
+                kind: CheckpointKind::TurnEnd,
+                git_commit: None,
+                message_anchor: Some(anchor),
+                created_at: "2026-07-31T12:00:00Z".to_string(),
+                notes: None,
+            }],
+            restore_report: CheckpointRestoreReport::default(),
+        }),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RestoreCheckpoint {
+            id: Some("restore-pending-question".to_string()),
+            session_id: Some(session_id.clone()),
+            checkpoint_id: checkpoint_id.to_string(),
+            revert_files: false,
+            dry_run: None,
+        },
+    )
+    .await
+    .expect("restore checkpoint");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+            && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+            && line
+                .get("payload")
+                .and_then(|payload| payload.get("toolCallId"))
+                == Some(&serde_json::Value::String("restore-ask-1".to_string()))
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+                && line.get("subtype").and_then(serde_json::Value::as_str) == Some("ask_question")
+                && line
+                    .get("payload")
+                    .and_then(|payload| payload.get("toolCallId"))
+                    == Some(&serde_json::Value::String("restore-ask-1".to_string()))
+        }),
+        "restore must rehydrate and rearm the question whose prior result it superseded: {lines:?}"
+    );
+    assert!(
+        session_message_entries(&slot).iter().any(|entry| {
+            entry.message["role"] == "tool"
+                && entry.message["tool_call_id"] == "restore-ask-1"
+                && entry.message["content"]
+                    == crate::core::session::manager::PENDING_TOOL_RESULT_TEXT
+        }),
+        "restore must leave the transcript protocol-complete with a [pending] result"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
+    use crate::core::plan_runtime::file_store;
+    let _api_key = install_test_api_key();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.workspace
+        .workspace_roots
+        .push(workspace.path().to_string_lossy().into_owned());
+    let plan_path = workspace.path().join("compacted.plan.md");
+    let plan = file_store::PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id": "compact-plan", "goal": "continue the plan after compaction",
+            "state": "pending", "created_at": chrono::Utc::now().to_rfc3339(),
+            "schema_version": file_store::PLAN_FILE_SCHEMA_VERSION,
+            "todos": [{"id": "t1", "content": "continue after compaction", "status": "pending"}]
+        }))
+        .unwrap(),
+        body: "## Plan\nContinue the same plan after compaction.\n".into(),
+    };
+    file_store::write_plan(&plan_path, &plan, 2_000).unwrap();
+    let provider: Arc<dyn LlmProvider> = Arc::new(CompactOnlyProvider::with_streams(vec![
+        vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("compact-plan-progress".into()),
+                name: Some("update_plan".into()),
+                arguments_delta: Some(
+                    serde_json::json!({"ops": [{
+                        "kind": "set_status", "id": "t1", "status": "completed",
+                        "evidence": ["test:post-compaction-native-update"]
+                    }]})
+                    .to_string(),
+                ),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".into(),
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "the compacted session can continue".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ],
+    ]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .build_plan(&plan_path.to_string_lossy(), Some(slot.session_id.clone()))
+        .unwrap();
+    let large_history = format!("historical detail {}", "x".repeat(32_000));
+    append_history_message(&slot, "user", &large_history);
+    append_history_message(&slot, "assistant", &large_history);
+    *slot.last_context_ratio.lock() = Some(0.42);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Compact {
+            id: Some("compact-session".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .expect("compact command");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("compact-session")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("compact-session"))
+        .expect("compact response");
+    assert_eq!(response["success"].as_bool(), Some(true));
+    let before_ratio = response["payload"]["beforeUsageRatio"]
+        .as_f64()
+        .expect("compact response must include beforeUsageRatio");
+    let after_ratio = response["payload"]["afterUsageRatio"]
+        .as_f64()
+        .expect("compact response must include afterUsageRatio");
+    assert!(
+        after_ratio < before_ratio,
+        "manual compact must return a strictly smaller context ratio: {response:?}"
+    );
+    assert!(
+        response["payload"]["coveredMessageCount"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 2,
+        "manual compact must cover transcript messages: {response:?}"
+    );
+    assert!(
+        slot.ctx
+            .session_runtime
+            .session
+            .get_entries(16)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry, crate::core::session::TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true))),
+        "compact must persist a durable boundary"
+    );
+    let uses_compacted_context = {
+        let turn_state = slot.turn_state.lock();
+        turn_state
+            .as_ref()
+            .expect("idle slot")
+            .context_state
+            .messages
+            .iter()
+            .any(|message| message.kind == crate::core::llm::MessageKind::CompactionSummary)
+    };
+    assert!(
+        uses_compacted_context,
+        "serve must use the compacted context immediately, without a restart"
+    );
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-compact".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .expect("get state after compact");
+    let state_lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-compact")
+    })
+    .await;
+    let state_response = state_lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-compact")
+        })
+        .expect("get_state response after compact");
+    let displayed_ratio = state_response["payload"]["contextUtilizationRatio"]
+        .as_f64()
+        .expect("compaction must refresh an already displayed waterline with its estimate");
+    let rehydrated_ratio = slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("idle slot")
+        .context_state
+        .usage_ratio();
+    assert!(
+        (displayed_ratio - rehydrated_ratio).abs() < f64::EPSILON,
+        "get_state must replay the rehydrated context estimate: displayed={displayed_ratio}, rehydrated={rehydrated_ratio}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("compact-follow-up".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "continue after compaction".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("the compacted session accepts a following prompt");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(slot.session_id.as_str())
+            && !slot.is_busy()
+    })
+    .await;
+    let end = lines
+        .iter()
+        .find(|line| line["type"] == "agent_end" && line["sessionId"] == slot.session_id)
+        .expect("the next prompt must finish after manual compaction");
+    assert!(
+        end["error"].is_null(),
+        "agent_end must not hide a failed turn: {end:?}"
+    );
+    assert!(
+        !slot.is_busy(),
+        "the follow-up must finish persistence before inspection"
+    );
+    assert!(
+        session_message_entries(&slot)
+            .iter()
+            .any(|entry| entry.message["role"] == "assistant"
+                && entry.message["content"] == "the compacted session can continue"),
+        "the successful follow-up body must actually reach the transcript"
+    );
+    let completed = file_store::read_plan(&plan_path).unwrap();
+    assert_eq!(
+        completed.frontmatter.state,
+        file_store::PlanFileState::Completed
+    );
+    assert_eq!(
+        completed.frontmatter.todos[0].status,
+        file_store::TodoStatus::Completed
+    );
+    assert_eq!(
+        completed.frontmatter.session_id.as_deref(),
+        Some(slot.session_id.as_str())
+    );
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_restore_checkpoint_reverts_files_and_reports_payload() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     let _api_key = install_test_api_key();
     let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -4190,7 +8310,11 @@ async fn serve_restore_checkpoint_rejects_foreign_session_checkpoint() {
 
     assert_eq!(response["success"].as_bool(), Some(false));
     assert_eq!(
-        response["error"].as_str(),
-        Some("checkpoint 不属于当前会话，不能跨会话 restore")
+        response["error"],
+        crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "slash.restore.wrongSession",
+            &[]
+        )
     );
 }

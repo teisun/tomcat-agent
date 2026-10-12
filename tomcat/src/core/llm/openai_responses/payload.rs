@@ -17,15 +17,13 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan_scoped, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport,
-    ReplayWindow,
+    plan, ProviderCompatProfile, ReplayAction, ReplayDowngradeReport,
 };
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
-    ChatResponseChoice, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatResponse, ChatResponseChoice, FileSource,
+    ImageSource, ReasoningContinuation, ReasoningFormat,
 };
-
-pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ResponsesTerminalMetadata {
@@ -53,20 +51,20 @@ impl ResponsesTerminalMetadata {
     fn max_output_tokens() -> Self {
         Self {
             finish_reason: Some("max_output_tokens".to_string()),
-            notice_message: Some(MAX_OUTPUT_TOKENS_NOTICE.to_string()),
+            notice_message: Some(crate::infra::i18n::tr("llm.maxOutputNotice", &[])),
             ..Self::default()
         }
     }
 
     fn error(message: impl Into<String>, code: Option<String>) -> Self {
         let message = message.into();
-        let reason_suffix = if message.is_empty() {
-            code.clone().unwrap_or_else(|| "unknown".to_string())
-        } else {
-            message.clone()
-        };
+        let finish_reason = code
+            .as_deref()
+            .filter(|code| !code.is_empty())
+            .map(|code| format!("error:{code}"))
+            .unwrap_or_else(|| "error".to_string());
         Self {
-            finish_reason: Some(format!("error:{reason_suffix}")),
+            finish_reason: Some(finish_reason),
             error_message: Some(message),
             error_code: code,
             notice_message: None,
@@ -105,6 +103,12 @@ fn incomplete_metadata(reason: &str, has_tool_calls: bool) -> ResponsesTerminalM
     ResponsesTerminalMetadata::error(reason.trim(), None)
 }
 
+/// 将 Responses 端点的终态统一成内部 finish reason。
+///
+/// 此处只忠实翻译上游明确报告的终态：`completed`/`done` 映射为 `stop`，
+/// `incomplete_details.reason` 决定不完整的终态。响应 usage 只描述消耗，不可
+/// 反向推断或改写上游结束原因；空回合是否需要重试由 agent loop 基于可见/隐藏
+/// 输出的事实信号判断。
 pub(super) fn infer_terminal_metadata(
     status_hint: Option<&str>,
     response: Option<&Value>,
@@ -155,6 +159,10 @@ pub(super) fn infer_terminal_metadata(
 ///
 /// 规则（与 plan §5 Phase B 表 + pi_agent_rust 同名实现一致）：
 /// - 序列首条 `role=System` 文本 → 顶层 `instructions`，**不**进 input；
+/// - `EphemeralTail` → 追加到顶层 `instructions`，**不**进 input。这样它不会在下轮被新
+///   assistant / tool history 插进 durable history 的中间；但它位于缓存前缀，内容变化仍会
+///   改变整个 `instructions` 前缀并使 provider cache miss。缓存效果必须由 usage 指标验证，
+///   不能由这个布局推断；
 /// - 后续 `role=System` → 退化到 `input` 中的 `message` 项（Responses 通常允许，但少数 Codex
 ///   端点会拒绝；本期不做特殊处理）；
 /// - `User` → `{ type: "message", role: "user", content: [input_text] }`；
@@ -162,42 +170,100 @@ pub(super) fn infer_terminal_metadata(
 /// - `Assistant` 带 `tool_calls` → 文本部分单独发一条 message item，每个 tool_call 翻成
 ///   `{ type: "function_call", call_id, name, arguments }`；
 /// - `Tool` → `{ type: "function_call_output", call_id: tool_call_id, output: text }`。
+// Flush only at a closed tool-batch boundary; never insert a carrier between results.
+fn flush_tool_media(input: &mut Vec<Value>, media: &mut Vec<Value>) {
+    if media.is_empty() {
+        return;
+    }
+    let mut content = vec![
+        json!({"type":"input_text","text":crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO}),
+    ];
+    content.append(media);
+    input.push(json!({"type":"message","role":"user","content":content}));
+}
+
 pub(super) fn build_responses_input(
     messages: &[ChatMessage],
     target: &ProviderCompatProfile,
     continuity_enabled: bool,
     explicit_replay: bool,
+    input_start: usize,
 ) -> (Option<String>, Vec<Value>) {
-    let mut instructions: Option<String> = None;
+    build_responses_input_with_media_mode(
+        messages,
+        target,
+        continuity_enabled,
+        explicit_replay,
+        input_start,
+        crate::core::llm::tool_result_media::tool_result_media_mode("openai-responses"),
+    )
+}
+
+pub(super) fn build_responses_input_with_media_mode(
+    messages: &[ChatMessage],
+    target: &ProviderCompatProfile,
+    continuity_enabled: bool,
+    explicit_replay: bool,
+    input_start: usize,
+    mode: crate::core::llm::tool_result_media::ToolResultMediaMode,
+) -> (Option<String>, Vec<Value>) {
+    use crate::core::llm::tool_result_media::{media_parts, ToolResultMediaMode};
+    let mut deferred_media = Vec::new();
+    let mut instructions = messages.first().and_then(|message| {
+        matches!(message.role, ChatMessageRole::System)
+            .then(|| extract_text(&message.content).unwrap_or_default())
+    });
+    let runtime_tail = ephemeral_tail_texts(messages)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !runtime_tail.is_empty() {
+        let mut merged = instructions.unwrap_or_default();
+        if !merged.is_empty() {
+            merged.push_str("\n\n");
+        }
+        merged.push_str(&runtime_tail);
+        instructions = Some(merged);
+    }
     let mut input: Vec<Value> = Vec::with_capacity(messages.len());
-    let mut first_seen = false;
-    let window = ReplayWindow::compute(messages);
     let mut report = ReplayDowngradeReport::default();
 
-    for (idx, original) in messages.iter().enumerate() {
-        let in_window = window.contains(idx);
+    for (index, original) in messages.iter().enumerate() {
+        // The runtime tail has already been promoted to top-level instructions. Keeping it
+        // out of input means newly appended assistant/tool history extends the prior request
+        // instead of being inserted before a disappearing user message.
+        if is_ephemeral_tail(original) {
+            continue;
+        }
+        // The leading system message is always sent as top-level instructions. When a request
+        // continues from `previous_response_id`, it still must be resent, but its historical
+        // message item must not be duplicated in `input`.
+        if index == 0 && matches!(original.role, ChatMessageRole::System) {
+            continue;
+        }
+        // `previous_response_id` restores all state through the selected assistant response.
+        // Only items after that assistant are new input for the next response.
+        if index < input_start {
+            continue;
+        }
+        if original.role != ChatMessageRole::Tool {
+            flush_tool_media(&mut input, &mut deferred_media);
+        }
         let action = if continuity_enabled {
-            plan_scoped(target, original, in_window)
+            plan(target, original)
         } else {
             ReplayAction::StripOpaque
         };
         if continuity_enabled {
-            if in_window {
-                report.record_in_window(target, original, &action);
-            } else {
-                report.record_stripped_old_history(original);
-            }
+            report.record_replay_decision(target, original, &action);
         }
         let explicit_keep = matches!(action, ReplayAction::KeepOpaque);
-        let msg = match action.clone() {
+        let msg = match action {
             ReplayAction::KeepOpaque | ReplayAction::StripOpaque => {
                 original.without_completion_metadata()
             }
-            ReplayAction::ConvertToText(text) => apply_text_downgrade(original, &text),
         };
-        // System / Assistant / Tool 角色出现非 text part 时 warn 一次并丢弃非文本部分
-        // （仅 User 角色透传多模态 part；见 §3.3 角色规则）。
-        if !matches!(msg.role, ChatMessageRole::User) {
+        // User and Tool both carry media; other roles retain the existing text-only rule.
+        if !matches!(msg.role, ChatMessageRole::User | ChatMessageRole::Tool) {
             if let Some(ChatMessageContent::Parts(parts)) = &msg.content {
                 warn_drop_non_text_parts(msg.role.clone(), parts);
             }
@@ -205,12 +271,6 @@ pub(super) fn build_responses_input(
         match msg.role {
             ChatMessageRole::System => {
                 let text = extract_text(&msg.content).unwrap_or_default();
-                if !first_seen && instructions.is_none() {
-                    instructions = Some(text);
-                    first_seen = true;
-                    continue;
-                }
-                first_seen = true;
                 input.push(json!({
                     "type": "message",
                     "role": "system",
@@ -218,7 +278,6 @@ pub(super) fn build_responses_input(
                 }));
             }
             ChatMessageRole::User => {
-                first_seen = true;
                 let parts = user_content_parts(&msg.content);
                 input.push(json!({
                     "type": "message",
@@ -227,7 +286,6 @@ pub(super) fn build_responses_input(
                 }));
             }
             ChatMessageRole::Assistant => {
-                first_seen = true;
                 if continuity_enabled && explicit_replay && explicit_keep {
                     if let Some(continuation) = original.reasoning_continuation.as_ref() {
                         input.extend(responses_reasoning_items(continuation));
@@ -278,9 +336,19 @@ pub(super) fn build_responses_input(
                 }
             }
             ChatMessageRole::Tool => {
-                first_seen = true;
                 let call_id = msg.tool_call_id.clone().unwrap_or_default();
-                let output = extract_text(&msg.content).unwrap_or_default();
+                let output =
+                    if mode == ToolResultMediaMode::Native && media_parts(&msg).next().is_some() {
+                        match &msg.content {
+                            Some(ChatMessageContent::Parts(parts)) => {
+                                Value::Array(parts.iter().map(part_to_responses_value).collect())
+                            }
+                            _ => unreachable!("media has parts"),
+                        }
+                    } else {
+                        deferred_media.extend(media_parts(&msg).map(part_to_responses_value));
+                        Value::String(crate::core::llm::tool_result_media::tool_result_text(&msg))
+                    };
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -290,6 +358,7 @@ pub(super) fn build_responses_input(
         }
     }
 
+    flush_tool_media(&mut input, &mut deferred_media);
     if continuity_enabled {
         report.emit(target);
     }
@@ -371,6 +440,7 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
                         Some(reference.to_prompt_text())
                     }
                     ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. } => None,
                 })
                 .collect::<Vec<_>>()
@@ -412,6 +482,9 @@ fn part_to_responses_value(p: &ChatMessageContentPart) -> Value {
             }
             v
         }
+        ChatMessageContentPart::InputImageRef { .. } => {
+            json!({"type": "input_text", "text": "[Image reference has not been materialized]"})
+        }
         ChatMessageContentPart::InputFile { source } => {
             let mut v = json!({"type": "input_file"});
             match source {
@@ -446,6 +519,7 @@ fn user_content_parts(content: &Option<ChatMessageContent>) -> Vec<Value> {
                         text.push_str(&reference.to_prompt_text());
                     }
                     ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. } => {
                         out.push(part_to_responses_value(part));
                     }
@@ -469,6 +543,7 @@ fn warn_drop_non_text_parts(role: ChatMessageRole, parts: &[ChatMessageContentPa
             matches!(
                 part,
                 ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputImageRef { .. }
                     | ChatMessageContentPart::InputFile { .. }
             )
         })
@@ -547,6 +622,26 @@ pub(super) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
                 .get("total_tokens")
                 .and_then(Value::as_u64)
                 .map(|v| v as u32),
+            cache_read_tokens: u
+                .get("input_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
+            cache_write_tokens: None,
+            reasoning_tokens: u
+                .get("output_tokens_details")
+                .and_then(|details| details.get("reasoning_tokens"))
+                .or_else(|| u.get("reasoning_output_tokens"))
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
+            text_tokens: {
+                let output = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0) as u32;
+                u.get("output_tokens_details")
+                    .and_then(|details| details.get("reasoning_tokens"))
+                    .or_else(|| u.get("reasoning_output_tokens"))
+                    .and_then(Value::as_u64)
+                    .map(|reasoning| output.saturating_sub(reasoning as u32))
+            },
         });
 
     let message = if tool_calls.is_empty() {

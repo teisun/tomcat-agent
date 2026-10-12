@@ -4,15 +4,201 @@ use async_trait::async_trait;
 
 use super::common::*;
 
+fn consent_to_review(rt: &PlanRuntime) {
+    use crate::core::plan_runtime::panels::{Answer, AskQuestionResult, MockAskQuestionPanel};
+    rt.attach_ask_question_panel(std::sync::Arc::new(MockAskQuestionPanel::new(vec![
+        AskQuestionResult::answered(vec![Answer {
+            question_id: "plan-review".into(),
+            option_ids: vec!["review".into()],
+            custom_text: None,
+            skipped: false,
+            picked_recommended: true,
+        }]),
+    ])));
+}
+
+#[tokio::test]
+async fn plan_review_decisions_require_explicit_consent_and_emit_exactly_one_result() {
+    use crate::core::plan_runtime::panels::{
+        Answer, AskQuestionOutcome, AskQuestionResult, MockAskQuestionPanel,
+    };
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let choice = |ids: &[&str], custom: Option<&str>, skipped: bool, recommended: bool| {
+        AskQuestionResult::answered(vec![Answer {
+            question_id: "plan-review".into(),
+            option_ids: ids.iter().map(|id| id.to_string()).collect(),
+            custom_text: custom.map(str::to_owned),
+            skipped,
+            picked_recommended: recommended,
+        }])
+    };
+    let cases = [
+        (choice(&["review"], None, false, false), true, ""),
+        (choice(&["skip"], None, false, true), false, "user_skipped"),
+        (choice(&[], None, true, false), false, "user_skipped"),
+        (
+            AskQuestionResult::terminal(AskQuestionOutcome::Skipped),
+            false,
+            "user_skipped",
+        ),
+        (
+            choice(&["review", "skip"], None, false, true),
+            false,
+            "user_skipped",
+        ),
+        (
+            choice(&["unknown"], None, false, true),
+            false,
+            "user_skipped",
+        ),
+        (
+            choice(&["review"], Some("yes"), false, true),
+            false,
+            "user_skipped",
+        ),
+        (choice(&["review"], None, true, true), false, "user_skipped"),
+        (
+            AskQuestionResult::terminal(AskQuestionOutcome::Interrupted),
+            false,
+            "parent_abort",
+        ),
+        (
+            AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected),
+            false,
+            "parent_abort",
+        ),
+    ];
+    for (index, (answer, review, stop)) in cases.into_iter().enumerate() {
+        let rt = PlanRuntime::new("decision");
+        let dispatcher = std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![ok_review()]));
+        rt.attach_plan_reviewer(dispatcher.clone());
+        rt.attach_ask_question_panel(std::sync::Arc::new(MockAskQuestionPanel::new(vec![answer])));
+        let captured = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+        rt.enter_plan().unwrap();
+        let mut args = good_args_with_todo();
+        args.goal = format!("decision case {index}");
+        let out = create_plan::execute_with_reviewer(&rt, args, false)
+            .await
+            .unwrap();
+        let id = out["plan_id"].as_str().unwrap();
+        assert!(plan_path_for_id(id).unwrap().exists());
+        assert_eq!(rt.reviewer_rounds(id), u32::from(review));
+        assert_eq!(
+            dispatcher.call_count.load(Ordering::Relaxed),
+            usize::from(review)
+        );
+        let events = captured.lock();
+        let results = events
+            .iter()
+            .filter(|event| event["event"] == "plan.review")
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 1, "case {index}");
+        assert_eq!(results[0]["reviewer_stop_reason"], stop, "case {index}");
+        if !review {
+            assert_eq!(out["review"]["aborted"], true);
+            assert_eq!(out["review"]["applied_changes"], false);
+            assert_eq!(out["review"]["reviewer_turns_used"], 0);
+        }
+    }
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn plan_review_wait_holds_no_file_lock_and_parent_stop_keeps_saved_plan() {
+    use crate::core::plan_runtime::panels::{
+        AskQuestionPanel, AskQuestionResult, AskQuestionTermination, Question,
+    };
+    struct WaitingPanel {
+        runtime: std::sync::Arc<PlanRuntime>,
+        ready: std::sync::Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl AskQuestionPanel for WaitingPanel {
+        async fn ask(
+            &self,
+            questions: Vec<Question>,
+            termination: AskQuestionTermination,
+        ) -> AskQuestionResult {
+            assert_eq!(questions.len(), 1);
+            assert!(!questions[0].allow_custom);
+            assert_eq!(
+                questions[0].prompt,
+                crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "plan.review.prompt",
+                    &[],
+                )
+            );
+            let active = self.runtime.active_plan().unwrap();
+            // An actual read/write under the same advisory lock succeeds while the user decides.
+            let plan = read_plan(&active.path).unwrap();
+            write_plan(&active.path, &plan, 150).unwrap();
+            self.ready.notify_one();
+            loop {
+                if let Some(result) = termination.result() {
+                    return result;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("waiting");
+    let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    rt.attach_ask_question_panel(std::sync::Arc::new(WaitingPanel {
+        runtime: rt.clone(),
+        ready: ready.clone(),
+    }));
+    let dispatcher = std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![ok_review()]));
+    rt.attach_plan_reviewer(dispatcher.clone());
+    rt.enter_plan().unwrap();
+    let termination = AskQuestionTermination::default();
+    let stop = termination.clone();
+    let cancel = async {
+        ready.notified().await;
+        assert_eq!(dispatcher.call_count.load(Ordering::Relaxed), 0);
+        stop.interrupt();
+    };
+    let (out, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(
+            create_plan::execute_for_tool(
+                &rt,
+                good_args_with_todo(),
+                true,
+                termination,
+                Some("create-call")
+            ),
+            cancel
+        )
+    })
+    .await
+    .expect("parent stop must end the wait");
+    let out = out.unwrap();
+    assert_eq!(out["review"]["reviewer_stop_reason"], "parent_abort");
+    assert!(plan_path_for_id(out["plan_id"].as_str().unwrap())
+        .unwrap()
+        .exists());
+    assert_eq!(dispatcher.call_count.load(Ordering::Relaxed), 0);
+    cleanup_home(&home);
+}
+
 #[tokio::test]
 async fn create_plan_internally_dispatches_reviewer_with_real_summary() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
     ])));
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -27,10 +213,11 @@ async fn create_plan_succeeds_even_when_reviewer_aborts() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
-        ReviewSummary::aborted_with("simulated parse error"),
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
+        PlanReviewSummary::aborted_with("simulated parse error"),
     ])));
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -53,7 +240,8 @@ async fn create_plan_without_reviewer_returns_placeholder() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -61,7 +249,11 @@ async fn create_plan_without_reviewer_returns_placeholder() {
     assert!(out["review"]["summary"]
         .as_str()
         .unwrap()
-        .contains("P4 接入"));
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "plan.review.unavailable",
+            &[]
+        )));
     cleanup_home(&home);
 }
 
@@ -73,14 +265,13 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
 
     struct LockAcquiringMock;
     #[async_trait]
-    impl ReviewerDispatcher for LockAcquiringMock {
+    impl PlanReviewerDispatcher for LockAcquiringMock {
         async fn dispatch(
             &self,
             plan_id: &str,
             _plan_text: &str,
-            _kind: ReviewKind,
             _allow_review_edit: bool,
-        ) -> ReviewSummary {
+        ) -> PlanReviewSummary {
             use crate::core::plan_runtime::file_store::{plan_path_for_id, with_advisory_lock};
             let path = plan_path_for_id(plan_id).unwrap();
             let lock_path = path.with_file_name(format!(
@@ -91,20 +282,21 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
                 Ok::<_, crate::core::plan_runtime::file_store::PlanError>(())
             });
             match r {
-                Ok(()) => ReviewSummary {
+                Ok(()) => PlanReviewSummary {
                     aborted: false,
                     summary: "lock acquired by reviewer (write_plan 已释放)".into(),
                     changes_summary: "none".into(),
                     applied_changes: false,
                     ..Default::default()
                 },
-                Err(e) => ReviewSummary::aborted_with(format!("LockBusy: {e}")),
+                Err(e) => PlanReviewSummary::aborted_with(format!("LockBusy: {e}")),
             }
         }
     }
 
-    rt.attach_reviewer(std::sync::Arc::new(LockAcquiringMock));
-    rt.enter_planning().unwrap();
+    rt.attach_plan_reviewer(std::sync::Arc::new(LockAcquiringMock));
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -132,7 +324,8 @@ fn create_plan_writes_transcript_plan_create_event() {
         }));
     }
 
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(&rt, good_args_with_todo()).expect("create_plan OK");
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
 
@@ -163,7 +356,7 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
         }));
     }
 
-    let summary = ReviewSummary {
+    let summary = PlanReviewSummary {
         aborted: false,
         summary: "ok".into(),
         changes_summary: "none".into(),
@@ -174,10 +367,11 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
         child_session_id: "child-1".into(),
         ..Default::default()
     };
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         summary,
     ])));
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let _ = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -212,11 +406,12 @@ async fn reviewer_writes_warning_event_on_second_round() {
             Ok(())
         }));
     }
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
         ok_review(),
     ])));
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -242,23 +437,23 @@ async fn reviewer_dispatch_invokes_mock_without_abort_param() {
         called: std::sync::Arc<AtomicBool>,
     }
     #[async_trait]
-    impl ReviewerDispatcher for CallTrackingMock {
+    impl PlanReviewerDispatcher for CallTrackingMock {
         async fn dispatch(
             &self,
             _plan_id: &str,
             _plan_text: &str,
-            _kind: ReviewKind,
             _allow_review_edit: bool,
-        ) -> ReviewSummary {
+        ) -> PlanReviewSummary {
             self.called.store(true, Ordering::Release);
             ok_review()
         }
     }
     let called = std::sync::Arc::new(AtomicBool::new(false));
-    rt.attach_reviewer(std::sync::Arc::new(CallTrackingMock {
+    rt.attach_plan_reviewer(std::sync::Arc::new(CallTrackingMock {
         called: std::sync::Arc::clone(&called),
     }));
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -272,11 +467,12 @@ async fn reviewer_round_count_warns_after_threshold() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
         ok_review(),
     ])));
-    rt.enter_planning().unwrap();
+    consent_to_review(&rt);
+    rt.enter_plan().unwrap();
 
     let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await

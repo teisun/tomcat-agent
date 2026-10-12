@@ -6,7 +6,7 @@
 //! - 生成"目的短句"后经 `tool.summary_updated` 事件按 `toolCallId` 热更新前端
 //! - 仅 live 生效，不回写 transcript（历史重载回落客户端确定性占位）
 
-use crate::core::summary::generate_command_summary;
+use crate::core::summary::generate_command_summary_with_output_limit;
 use crate::infra::events::wire;
 
 use super::types::AgentLoop;
@@ -18,25 +18,13 @@ fn is_command_tool(tool_name: &str) -> bool {
     matches!(tool_name, "bash" | "shell" | "execute_command")
 }
 
-/// 从 tool args 里拼出用于生成"目的"的命令串（`command` + 可选 `args` 数组）。
+/// 从 tool args 里取得用于生成“目的”的完整 shell 命令字符串。
 fn command_for_summary(args: &serde_json::Value) -> String {
-    let command = args
-        .get("command")
+    args.get("command")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
-        .trim();
-    let argv: Vec<&str> = args
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect())
-        .unwrap_or_default();
-    if argv.is_empty() {
-        command.to_string()
-    } else if command.is_empty() {
-        argv.join(" ")
-    } else {
-        format!("{command} {}", argv.join(" "))
-    }
+        .trim()
+        .to_string()
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -69,6 +57,7 @@ pub(super) fn maybe_spawn_tool_summary_update(
     }
 
     let llm = agent.title_provider();
+    let title_output_limit = agent.config.title_output_limit;
     let emitter = agent.emitter.clone();
     let tool_call_id = tool_call_id.to_string();
     let output_excerpt = truncate_chars(result_text.trim(), OUTPUT_EXCERPT_MAX_CHARS);
@@ -79,7 +68,14 @@ pub(super) fn maybe_spawn_tool_summary_update(
         } else {
             Some(output_excerpt.as_str())
         };
-        let title = generate_command_summary(&command, excerpt, llm.as_ref(), &model).await;
+        let title = generate_command_summary_with_output_limit(
+            &command,
+            excerpt,
+            llm.as_ref(),
+            &model,
+            title_output_limit,
+        )
+        .await;
         let title = title.trim().to_string();
         if title.is_empty() {
             return;

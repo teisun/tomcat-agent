@@ -16,6 +16,152 @@ use crate::{
     RetentionPolicy,
 };
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn cmd_restore_rehydrates_three_rounds_and_preserves_memory_on_dry_run_or_failure() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = super::test_support::Fixture::new();
+    let ctx = fixture.ctx();
+    std::fs::write(fixture.workspace.path().join("a.txt"), "stable").unwrap();
+    let sid = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .unwrap();
+    let mut anchor = String::new();
+    let mut checkpoint = None;
+    for round in 0..3 {
+        ctx.session_runtime
+            .session
+            .try_append_message_to_session(
+                &sid,
+                json!({"role":"user","content":format!("question {round}")}),
+            )
+            .unwrap();
+        let id = ctx
+            .session_runtime
+            .session
+            .try_append_message_to_session(
+                &sid,
+                json!({"role":"assistant","content":format!("answer {round}")}),
+            )
+            .unwrap();
+        if round == 0 {
+            anchor = id.clone();
+            checkpoint = Some(
+                ctx.scope_services
+                    .checkpoint_store
+                    .record(CheckpointRecordRequest {
+                        session_id: sid.clone(),
+                        turn_id: "first-round".into(),
+                        kind: CheckpointKind::TurnEnd,
+                        message_anchor: Some(id),
+                        notes: Some(json!({"changedPaths":["a.txt"]})),
+                    })
+                    .unwrap(),
+            );
+        }
+    }
+    let checkpoint = checkpoint.unwrap();
+    let mut state = crate::api::chat::reload_context_state(&ctx, "sys").unwrap();
+    assert_eq!(state.messages.len(), 6);
+    let before = state
+        .messages
+        .iter()
+        .map(|message| message.msg_id.clone())
+        .collect::<Vec<_>>();
+    let estimate = state.estimate_context_chars;
+    for (id, dry_run) in [
+        (checkpoint.to_string(), true),
+        ("missing-checkpoint".into(), false),
+    ] {
+        let outcome = run_restore(&ctx, id, vec![], dry_run, &mut state, "sys");
+        assert!(matches!(
+            outcome,
+            crate::api::chat::commands::ChatCommandOutcome::Handled
+        ));
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .map(|message| message.msg_id.clone())
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(state.estimate_context_chars, estimate);
+    }
+    let outcome = run_restore(
+        &ctx,
+        checkpoint.to_string(),
+        vec![],
+        false,
+        &mut state,
+        "sys",
+    );
+    assert!(matches!(
+        outcome,
+        crate::api::chat::commands::ChatCommandOutcome::Handled
+    ));
+    assert_eq!(state.messages.len(), 2);
+    assert_eq!(
+        state.messages.last().unwrap().msg_id.as_deref(),
+        Some(anchor.as_str())
+    );
+    assert!(state
+        .messages
+        .last()
+        .unwrap()
+        .text_content()
+        .expect("restored assistant text")
+        .contains("answer 0"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn cmd_restore_revived_pending_question_requests_zero_input_resume() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = super::test_support::Fixture::new();
+    let ctx = fixture.ctx();
+    std::fs::write(fixture.workspace.path().join("a.txt"), "stable").unwrap();
+    let session = &ctx.session_runtime.session;
+    let sid = session.current_session_id().unwrap().unwrap();
+    session
+        .try_append_message_to_session(&sid, json!({"role":"user","content":"Choose environment"}))
+        .unwrap();
+    let arguments = json!({"questions":[{"id":"env","prompt":"Where?","options":[{"id":"stage","label":"staging","recommended":true},{"id":"prod","label":"production","recommended":false}]}]}).to_string();
+    let anchor = session.try_append_message_to_session(&sid, json!({"role":"assistant","content":null,"tool_calls":[{"id":"pending-call","type":"function","function":{"name":"ask_question","arguments":arguments}}]})).unwrap();
+    let checkpoint = ctx
+        .scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: sid.clone(),
+            turn_id: "pending-question".into(),
+            kind: CheckpointKind::Interrupt,
+            message_anchor: Some(anchor),
+            notes: Some(json!({"changedPaths":["a.txt"]})),
+        })
+        .unwrap();
+    session.try_append_message_to_session(&sid, json!({"role":"tool","tool_call_id":"pending-call","content":"{\"outcome\":\"answered\",\"answers\":[]}"})).unwrap();
+    session
+        .try_append_message_to_session(&sid, json!({"role":"assistant","content":"done"}))
+        .unwrap();
+    let mut state = crate::api::chat::reload_context_state(&ctx, "sys").unwrap();
+    let outcome = run_restore(
+        &ctx,
+        checkpoint.to_string(),
+        vec![],
+        false,
+        &mut state,
+        "sys",
+    );
+    assert!(matches!(
+        outcome,
+        crate::api::chat::commands::ChatCommandOutcome::ResumePendingQuestion
+    ));
+    assert!(crate::api::chat::has_resumable_tail_ask_question(session).unwrap());
+}
+
 struct EnvGuard {
     key: &'static str,
     prev: Option<OsString>,
@@ -130,9 +276,10 @@ impl CheckpointStore for DiffSpyStore {
 #[test]
 #[serial(env_lock)]
 fn effective_restore_paths_defaults_to_current_session_changed_paths() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_TEST_KEY";
 
@@ -297,9 +444,10 @@ fn effective_restore_paths_warns_when_auto_narrowing_fails() {
 #[test]
 #[serial(env_lock)]
 fn other_session_restore_conflicts_detect_overlapping_paths() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_CONFLICT_TEST_KEY";
 
@@ -370,9 +518,10 @@ fn other_session_restore_conflicts_detect_overlapping_paths() {
 #[test]
 #[serial(env_lock)]
 fn other_session_restore_conflicts_include_other_scopes() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_SCOPE_CONFLICT_TEST_KEY";
 
@@ -455,9 +604,10 @@ fn other_session_restore_conflicts_include_other_scopes() {
 #[test]
 #[serial(env_lock)]
 fn restore_keeps_other_session_owned_paths_untouched() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_ISOLATION_TEST_KEY";
 
@@ -522,7 +672,15 @@ fn restore_keeps_other_session_owned_paths_untouched() {
         .session
         .switch_current_to_session_id(&session_a)
         .expect("switch back to session a");
-    let outcome = run_restore(&ctx, checkpoint_a.to_string(), Vec::new(), false);
+    let mut context_state = crate::api::chat::reload_context_state(&ctx, "sys").unwrap();
+    let outcome = run_restore(
+        &ctx,
+        checkpoint_a.to_string(),
+        Vec::new(),
+        false,
+        &mut context_state,
+        "sys",
+    );
     assert!(matches!(
         outcome,
         crate::api::chat::commands::parse::ChatCommandOutcome::Handled
@@ -542,10 +700,99 @@ fn restore_keeps_other_session_owned_paths_untouched() {
 
 #[test]
 #[serial(home_env_lock)]
-fn restore_core_without_reverting_files_truncates_transcript_only() {
-    if !git_available() {
-        return;
+fn restore_core_discards_keeps_only_when_reverting_files() {
+    use crate::core::checkpoint::{file_baselines, session_files};
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    for revert in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+        let _key = EnvGuard::set("TOMCAT_KEEP_CHECKPOINT_KEY", "stub");
+        let _cwd = CurrentDirGuard::set(workspace.path());
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+        cfg.llm.api_key_env = Some("TOMCAT_KEEP_CHECKPOINT_KEY".into());
+        let ctx = ChatContext::from_config(cfg).unwrap();
+        let session = &ctx.session_runtime.session;
+        let sid = session.current_session_id().unwrap().unwrap();
+        session
+            .append_message(json!({"role":"user","content":"before"}))
+            .unwrap();
+        let anchor = session
+            .append_message(json!({"role":"assistant","content":"checkpoint"}))
+            .unwrap();
+        let file = workspace.path().canonicalize().unwrap().join("a.txt");
+        std::fs::write(&file, "original").unwrap();
+        let checkpoint = ctx
+            .scope_services
+            .checkpoint_store
+            .record(CheckpointRecordRequest {
+                session_id: sid.clone(),
+                turn_id: "keep-checkpoint".into(),
+                kind: CheckpointKind::TurnEnd,
+                message_anchor: Some(anchor),
+                notes: Some(json!({"changedPaths":["a.txt"]})),
+            })
+            .unwrap();
+        let timestamp = ctx
+            .scope_services
+            .checkpoint_store
+            .show(&checkpoint)
+            .unwrap()
+            .unwrap()
+            .created_at;
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
+            .unwrap()
+            .timestamp_millis();
+        let owner = session
+            .append_message(json!({"role":"user","content":"change"}))
+            .unwrap();
+        let transcript = session.transcript_path(&sid);
+        let tracker =
+            file_baselines::TurnFileBaselines::new(&transcript, &owner, workspace.path().into())
+                .unwrap();
+        let pending = tracker.prepare(file.to_str().unwrap()).unwrap();
+        std::fs::write(&file, "accepted").unwrap();
+        pending.commit();
+        file_baselines::timestamp_after(Some(timestamp)).unwrap();
+        let kept = session_files::keep(&transcript, &sid, &owner).unwrap();
+        let root = file_baselines::session_dir(&transcript);
+        let keep_path = root.join(&kept.source_turn_id);
+        let next =
+            file_baselines::TurnFileBaselines::new(&transcript, &owner, workspace.path().into())
+                .unwrap();
+        let pending = next.prepare(file.to_str().unwrap()).unwrap();
+        std::fs::write(&file, "unaccepted").unwrap();
+        pending.commit();
+        restore_core(&ctx, checkpoint, revert, false).unwrap();
+        assert_eq!(keep_path.exists(), !revert);
+        assert!(
+            root.join(&owner).exists(),
+            "checkpoint rewrites retain per-message backups"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            if revert { "original" } else { "unaccepted" }
+        );
+        assert_eq!(
+            session_files::list(&transcript, &sid).unwrap().files.len(),
+            if revert { 0 } else { 1 }
+        );
     }
+}
+
+#[test]
+#[serial(home_env_lock)]
+fn restore_core_without_reverting_files_truncates_transcript_only() {
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_CORE_TEST_KEY";
 
@@ -674,9 +921,10 @@ fn restore_core_without_reverting_files_truncates_transcript_only() {
 #[test]
 #[serial(home_env_lock)]
 fn restore_core_without_reverting_files_skips_cross_session_conflict_warnings() {
-    if !git_available() {
-        return;
-    }
+    assert!(
+        git_available(),
+        "Git is required to exercise checkpoint Keep/restore"
+    );
 
     const API_ENV: &str = "TOMCAT_CMD_RESTORE_DONT_REVERT_WARNINGS_TEST_KEY";
 

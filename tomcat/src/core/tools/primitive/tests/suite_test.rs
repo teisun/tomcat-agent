@@ -67,6 +67,34 @@ impl Drop for CurrentDirGuard {
     }
 }
 
+struct HomeEnvGuard {
+    previous: Option<String>,
+}
+
+impl HomeEnvGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var("HOME").ok();
+        // SAFETY: env_lock 串行化了环境变量修改，测试结束后会恢复原值。
+        unsafe { std::env::set_var("HOME", path) };
+        Self { previous }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.as_deref() {
+            Some(previous) => {
+                // SAFETY: 与 set() 成对恢复；仍处于 env_lock 保护下。
+                unsafe { std::env::set_var("HOME", previous) };
+            }
+            None => {
+                // SAFETY: 与 set() 成对恢复；仍处于 env_lock 保护下。
+                unsafe { std::env::remove_var("HOME") };
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn read_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_read");
@@ -109,9 +137,18 @@ async fn read_file_missing_path_returns_not_found_error() {
         msg.contains("no such file")
             || msg.contains("not found")
             || msg.contains("os error 2")
-            || msg.contains("不存在"),
+            || msg.contains("does not exist"),
         "错误文案应包含路径不存在语义，实际: {}",
         err
+    );
+    assert!(
+        err.to_string().contains("project root is"),
+        "绝对路径不存在时应给出真实项目根纠偏，实际: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains(std::env::current_dir().unwrap().to_string_lossy().as_ref()),
+        "错误应回显实际 agent 工作目录，实际: {err}"
     );
     let _ = std::fs::remove_dir(&dir);
 }
@@ -134,8 +171,8 @@ async fn read_file_binary_returns_product_error() {
     let err = exec.read_file(&path_str, "p1").await.unwrap_err();
     match err {
         AppError::Primitive(msg) => {
-            assert!(msg.contains("文件存在且权限已通过检查"));
-            assert!(msg.contains("二进制或非 UTF-8 文本"));
+            assert!(msg.contains("The file exists and access was authorized"));
+            assert!(msg.contains("binary or non-UTF-8"));
         }
         other => panic!("expected product primitive error, got {:?}", other),
     }
@@ -199,6 +236,141 @@ async fn write_file_success() {
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "content");
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_dir(&dir);
+}
+
+struct WaitingWriteConfirmation(Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl crate::core::UserConfirmationProvider for WaitingWriteConfirmation {
+    async fn confirm(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, AppError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn native_write_confirmation_waits_cancel_without_touching_disk() {
+    for (tool, secret_wait) in [
+        ("write", false),
+        ("edit", false),
+        ("hashline_edit", false),
+        ("write", true),
+        ("edit", true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let path = dir.join("target.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let executor = Arc::new(DefaultPrimitiveExecutor::new(
+            PrimitiveConfig {
+                auto_confirm: false,
+                ..PrimitiveConfig::default()
+            },
+            Arc::new(WaitingWriteConfirmation(entered.clone())),
+            Arc::new(TracingAuditRecorder),
+            make_gate(if secret_wait {
+                &dir
+            } else {
+                Path::new("/nonexistent_pi_workspace")
+            }),
+        ));
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let owned_path = path.to_string_lossy().into_owned();
+        let new_text = if secret_wait {
+            "sk-ABCDEFGHIJKLMNOPQRSTUV"
+        } else {
+            "new"
+        };
+        let task = tokio::spawn(async move {
+            match tool {
+                "write" => executor
+                    .write_file_with_cancel(&owned_path, new_text, true, &child_cancel, "p1")
+                    .await
+                    .map(|r| r.written),
+                "edit" => executor
+                    .edit_file_with_cancel(
+                        &owned_path,
+                        vec![EditOperation {
+                            operation_type: EditOperationType::Replace,
+                            start_line: None,
+                            end_line: None,
+                            new_content: new_text.into(),
+                            old_content: Some("old".into()),
+                        }],
+                        &child_cancel,
+                        "p1",
+                    )
+                    .await
+                    .map(|r| r.applied),
+                _ => executor
+                    .hashline_edit_with_cancel(&owned_path, vec![], &child_cancel, "p1")
+                    .await
+                    .map(|r| r.applied),
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{tool} secret_wait={secret_wait} did not reach confirmation")
+            });
+        cancel.cancel();
+        let written = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !written,
+            "{tool} must not commit when confirmation is cancelled"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+        assert!(!path.with_extension("bak").exists());
+    }
+}
+
+#[tokio::test]
+async fn native_write_pre_cancel_never_registers_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("target.txt");
+    std::fs::write(&path, "old").unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let executor = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(WaitingWriteConfirmation(entered.clone())),
+        Arc::new(TracingAuditRecorder),
+        make_gate(Path::new("/nonexistent_pi_workspace")),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(
+        !executor
+            .write_file_with_cancel(path.to_str().unwrap(), "new", true, &cancel, "p1")
+            .await
+            .unwrap()
+            .written
+    );
+    assert!(
+        !executor
+            .edit_file_with_cancel(path.to_str().unwrap(), vec![], &cancel, "p1")
+            .await
+            .unwrap()
+            .applied
+    );
+    assert!(
+        !executor
+            .hashline_edit_with_cancel(path.to_str().unwrap(), vec![], &cancel, "p1")
+            .await
+            .unwrap()
+            .applied
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), entered.notified())
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "old");
 }
 
 #[tokio::test]
@@ -354,9 +526,9 @@ async fn hashline_edit_with_cancel_skips_disk_write() {
     let segment = crate::core::tools::primitive::HashlineSegment {
         op: crate::core::tools::primitive::HashlineOp::Replace,
         start_line: 2,
-        start_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        start_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         end_line: 2,
-        end_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        end_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         lines: "changed\n".to_string(),
     };
     let result = exec
@@ -385,9 +557,9 @@ async fn hashline_edit_success_returns_line_diff_stat() {
     let segment = crate::core::tools::primitive::HashlineSegment {
         op: crate::core::tools::primitive::HashlineOp::Replace,
         start_line: 2,
-        start_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        start_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         end_line: 2,
-        end_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        end_hash: crate::core::tools::primitive::compute_line_hash("beta"),
         lines: "changed\n".to_string(),
     };
     let result = exec
@@ -416,7 +588,7 @@ async fn execute_bash_success() {
         make_gate(&dir),
     );
     let res = exec
-        .execute_bash("echo ok", Some(&path_str), "p1", None, None)
+        .execute_bash("echo ok", Some(&path_str), "p1", None)
         .await
         .unwrap();
     assert_eq!(res.exit_code, 0);
@@ -427,6 +599,70 @@ async fn execute_bash_success() {
         res.stderr
     );
     let _ = std::fs::remove_dir(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn execute_bash_single_command_runs_node_script_and_shell_composition() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("echo-argument.mjs");
+    std::fs::write(&script, "console.log(process.argv[2]);").expect("write Node script");
+    let path_str = dir.path().to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(dir.path()),
+    );
+
+    let command = format!(
+        "node '{}' node-shell-ok && printf '|pipeline' | tr '|' ':'",
+        script.display()
+    );
+    let result = exec
+        .execute_bash(&command, Some(&path_str), "p1", None)
+        .await
+        .expect("the shell command should start");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "node-shell-ok\n:pipeline");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn execute_bash_preserves_real_streams_instead_of_parsing_log_labels() {
+    for shared in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut exec = DefaultPrimitiveExecutor::new(
+            temp_primitive_config(dir.path()),
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            make_gate(dir.path()),
+        );
+        if shared {
+            exec.bash_task_registry = Some(Arc::new(BashTaskRegistry::new(
+                dir.path().join("tool-results"),
+            )));
+        }
+        let result = exec
+            .execute_bash(
+                "printf 'STDERR: literal stdout\\n'; printf 'first error\\nsecond error\\n' >&2",
+                Some(dir.path().to_str().unwrap()),
+                "p1",
+                None,
+            )
+            .await
+            .expect("foreground command completes");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout, "STDERR: literal stdout\n",
+            "shared={shared}: stdout text must not be interpreted as a stream label"
+        );
+        assert_eq!(
+            result.stderr, "first error\nsecond error\n",
+            "shared={shared}: every stderr byte must retain its original stream"
+        );
+    }
 }
 
 #[tokio::test]
@@ -446,7 +682,7 @@ async fn execute_bash_marks_child_as_nested_agent() {
     let command = r#"echo %TOMCAT_AGENT_ACTIVE%"#;
 
     let res = exec
-        .execute_bash(command, Some(&path_str), "p1", None, None)
+        .execute_bash(command, Some(&path_str), "p1", None)
         .await
         .expect("bash command should succeed");
 
@@ -468,12 +704,93 @@ async fn execute_bash_empty_string_cwd_treated_as_none() {
     );
 
     let res = exec
-        .execute_bash("pwd", Some(""), "p1", None, None)
+        .execute_bash("pwd", Some(""), "p1", None)
         .await
         .expect("空 cwd 应视同未传");
 
     assert_eq!(res.exit_code, 0);
     assert_eq!(res.stdout.trim(), dir.display().to_string());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_empty_string_cwd_treated_as_none() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let _cwd = CurrentDirGuard::set(&dir);
+    let registry = BashTaskRegistry::new(dir.join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked("pwd".to_string(), Some(PathBuf::from("")), false)
+        .await
+        .expect("空 cwd 应视同未传");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("task finish");
+    let output = registry
+        .tail_output_chunk(&ticket.task_id, 1024)
+        .await
+        .expect("tail output");
+    assert_eq!(output.content.trim(), dir.display().to_string());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_tilde_cwd_executes_without_guard() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = HomeEnvGuard::set(home.path());
+    let target = home.path().join("tilde-registry");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let registry = BashTaskRegistry::new(home.path().join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked(
+            "pwd".to_string(),
+            Some(PathBuf::from("~/tilde-registry")),
+            false,
+        )
+        .await
+        .expect("注册表入口应展开 ~/...");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("task finish");
+    let output = registry
+        .tail_output_chunk(&ticket.task_id, 1024)
+        .await
+        .expect("tail output");
+    assert_eq!(output.content.trim(), target.display().to_string());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_unchecked_still_normalizes_tilde_cwd() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = HomeEnvGuard::set(home.path());
+    let target = home.path().join("tilde-unchecked");
+    std::fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    let registry = BashTaskRegistry::new(home.path().join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked_unchecked(
+            "pwd".to_string(),
+            ResolvedCwd::from_raw(Some("~/tilde-unchecked")).expect("resolved cwd"),
+            false,
+        )
+        .await
+        .expect("unchecked 入口也应展开 ~/...");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("task finish");
+    let output = registry
+        .tail_output_chunk(&ticket.task_id, 1024)
+        .await
+        .expect("tail output");
+    assert_eq!(output.content.trim(), target.display().to_string());
 }
 
 #[tokio::test]
@@ -490,13 +807,16 @@ async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
     );
 
     let err = exec
-        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .execute_bash("echo nope", Some(&path_str), "p1", None)
         .await
         .expect_err("不存在 cwd 应前置报错");
     let msg = err.to_string();
     assert!(msg.contains("bash.cwd does not exist:"));
     assert!(msg.contains(&path_str));
     assert!(msg.contains(&format!("input: {:?}", path_str)));
+    assert!(msg.contains("project root is"));
+    assert!(msg.contains("use \".\""));
+    assert!(msg.contains(std::env::current_dir().unwrap().to_string_lossy().as_ref()));
 }
 
 #[tokio::test]
@@ -514,7 +834,7 @@ async fn execute_bash_non_directory_cwd_returns_clear_error() {
     );
 
     let err = exec
-        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .execute_bash("echo nope", Some(&path_str), "p1", None)
         .await
         .expect_err("文件路径不应被接受为 cwd");
     let msg = err.to_string();
@@ -536,7 +856,7 @@ async fn execute_bash_dollar_var_like_cwd_returns_hint_when_path_missing() {
 
     let raw_cwd = "$HOME/this-does-not-exist";
     let err = exec
-        .execute_bash("echo nope", Some(raw_cwd), "p1", None, None)
+        .execute_bash("echo nope", Some(raw_cwd), "p1", None)
         .await
         .expect_err("字面 $HOME 且目录缺失时应返回提示");
     let msg = err.to_string();
@@ -561,7 +881,7 @@ async fn execute_bash_dollar_var_like_cwd_executes_when_real_dir() {
     );
 
     let res = exec
-        .execute_bash("pwd", Some("$HOME"), "p1", None, None)
+        .execute_bash("pwd", Some("$HOME"), "p1", None)
         .await
         .expect("客观存在的 $HOME 字面目录不应被误伤");
 
@@ -585,7 +905,7 @@ async fn execute_bash_pre_validation_failure_writes_audit() {
     );
 
     let err = exec
-        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .execute_bash("echo nope", Some(&path_str), "p1", None)
         .await
         .expect_err("不存在 cwd 应写失败审计");
     assert!(err.to_string().contains("bash.cwd does not exist:"));
@@ -608,7 +928,7 @@ async fn execute_bash_pre_validation_failure_writes_audit() {
 }
 
 #[tokio::test]
-async fn execute_bash_spawn_error_includes_cwd_and_input() {
+async fn execute_bash_missing_command_is_a_shell_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dir = dir.path().canonicalize().unwrap();
     let path_str = dir.display().to_string();
@@ -618,22 +938,45 @@ async fn execute_bash_spawn_error_includes_cwd_and_input() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    let argv = vec!["--version".to_string()];
 
-    let err = exec
+    let result = exec
         .execute_bash(
             "definitely_missing_binary_for_bash_test",
             Some(&path_str),
             "p1",
-            Some(&argv),
             None,
         )
         .await
-        .expect_err("缺失 binary 应走 spawn 失败路径");
-    let msg = err.to_string();
-    assert!(msg.contains("bash spawn failed"));
-    assert!(msg.contains(&format!("cwd={}", path_str)));
-    assert!(msg.contains(&format!("input={:?}", path_str)));
+        .expect("the shell itself should start");
+    assert_ne!(result.exit_code, 0);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn bash_registry_tracks_missing_shell_command_failure() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = HomeEnvGuard::set(home.path());
+    let target = home.path().join("spawn-error-target");
+    std::fs::create_dir_all(&target).unwrap();
+    let registry = BashTaskRegistry::new(home.path().join("tool-results"));
+
+    let ticket = registry
+        .spawn_tracked(
+            "definitely_missing_binary_for_registry_bash_test".to_string(),
+            Some(PathBuf::from("~/spawn-error-target")),
+            false,
+        )
+        .await
+        .expect("the shell itself should start");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("shell task should finish");
+    let output = registry
+        .read_output(&ticket.task_id, None)
+        .await
+        .expect("read output");
+    assert_ne!(output.exit_code, Some(0));
 }
 
 #[test]
@@ -645,56 +988,6 @@ fn tokio_spawn_with_dollar_home_returns_enoent_when_literal_path_missing() {
         .spawn()
         .expect_err("tokio spawn 应返回 ENOENT");
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-}
-
-#[tokio::test]
-async fn execute_bash_empty_argv_uses_shell_mode() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_empty_argv");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(AllowAllConfirmation),
-        Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    );
-    let empty_args: Vec<String> = vec![];
-    let res = exec
-        .execute_bash(
-            "echo empty-argv-ok",
-            Some(&path_str),
-            "p1",
-            Some(&empty_args),
-            None,
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.exit_code, 0);
-    assert!(res.stdout.trim().contains("empty-argv-ok"));
-    let _ = std::fs::remove_dir(&dir);
-}
-
-#[tokio::test]
-async fn execute_bash_shell_launcher_command_merges_with_argv() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_shell_launcher");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(AllowAllConfirmation),
-        Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    );
-    let argv = vec!["printf shell-launch-ok".to_string()];
-    let res = exec
-        .execute_bash("sh -c", Some(&path_str), "p1", Some(&argv), None)
-        .await
-        .unwrap();
-    assert_eq!(res.exit_code, 0);
-    assert_eq!(res.stdout.trim(), "shell-launch-ok");
-    let _ = std::fs::remove_dir(&dir);
 }
 
 #[tokio::test]
@@ -714,7 +1007,6 @@ async fn execute_bash_tokens_no_longer_trigger_path_gate() {
             "printf '%s\\n' http://127.0.0.1:4173/ node:fs/promises @playwright/test",
             Some(&path_str),
             "p1",
-            None,
             None,
         )
         .await
@@ -789,160 +1081,211 @@ async fn search_files_url_like_returns_non_permission_error() {
     );
 }
 
-/// T2-P0-016 PR-E.2 / bash.md §10 T1：墙钟超时 → kill 子进程 + 标记 timed_out。
-///
-/// 用 `with_bash_timeout_ms(50)` 把超时压到 50 ms，命令 `sleep 5` 触发 Elapsed 分支；
-/// 期望 `timed_out=true`、`exit_code=-1`、stderr 含 "timed out" 提示。
 #[tokio::test]
-async fn bash_wallclock_timeout_kills_process() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_timeout");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
+async fn build_bash_task_registry_applies_wait_policy_and_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let bash_cfg = crate::infra::config::ToolsBashConfig {
+        foreground_wait_ms: 9_000,
+        ..Default::default()
+    };
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: dir.path().to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![r"\becho\b".to_string()],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let registry = build_bash_task_registry(
+        &bash_cfg,
+        dir.path().join("tool-results"),
+        gate,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    )
-    .with_bash_timeout_ms(50);
+        crate::core::permission::BashAstChecker::default(),
+    );
+    assert_eq!(registry.foreground_wait_ms(), 9_000);
 
-    let started = std::time::Instant::now();
-    let res = exec
-        .execute_bash("sleep 5", Some(&path_str), "p1", None, None)
+    let err = registry
+        .spawn(
+            "echo should-be-blocked".to_string(),
+            Some(dir.path().to_path_buf()),
+        )
         .await
-        .expect("bash impl 应返回 Ok（即便超时）");
-    let elapsed = started.elapsed();
-
-    assert!(res.timed_out, "墙钟超时应置 timed_out=true");
-    assert_eq!(res.exit_code, -1, "超时退出码约定 -1");
+        .expect_err("guard should deny forbidden bash");
+    assert!(matches!(err, AppError::Permission(_)));
     assert!(
-        res.stderr.contains("timed out"),
-        "stderr 应携带 timed out 提示，实际: {:?}",
-        res.stderr
+        registry.list().is_empty(),
+        "deny should leave no tracked task"
     );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "墙钟超时 50ms + kill 后整体应远小于 sleep 时长，实际 elapsed={:?}",
-        elapsed
-    );
-    let _ = std::fs::remove_dir(&dir);
 }
 
-/// 前台 shell 先退出、后台 `cmd &` 仍攥着 stdout/stderr 时，同步 bash 不应永久卡死。
-/// 小 timeout 场景下，主 shell 退出后的善后 grace 还应被剩余预算 clamp，不能把 80ms 调用
-/// 反向拖成多秒；同时尽量保留前台已输出的内容。
+/// Dropping a foreground caller must not leave the tracked child writing after cancellation.
+#[cfg(unix)]
 #[tokio::test]
-async fn bash_backgrounded_pipe_holder_does_not_hang() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_bg_pipe_holder");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
-    let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(AllowAllConfirmation),
-        audit,
-        make_gate(&dir),
-    )
-    .with_bash_timeout_ms(80);
-
-    let started = std::time::Instant::now();
-    let res = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        exec.execute_bash("sleep 30 & echo done", Some(&path_str), "p1", None, None),
-    )
-    .await
-    .expect("后台残留路径不应把测试挂死")
-    .expect("bash 应返回 Ok");
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "应在测试级 timeout 前返回，实际 elapsed={:?}",
-        elapsed
-    );
-    assert!(
-        !res.timed_out,
-        "这里不是前台 wait 超时，而是 drain 检测到后台残留"
-    );
-    assert_eq!(res.exit_code, 0, "主 shell 已正常退出，应保留 exit_code=0");
-    assert!(
-        res.stdout.contains("done"),
-        "前台输出应被尽量保留，实际 stdout={:?}",
-        res.stdout
-    );
-    assert!(
-        res.stderr.contains("run_in_background=true"),
-        "stderr 应提示长任务改走后台机制，实际 stderr={:?}",
-        res.stderr
-    );
-
-    let entries = audit_entries.lock().unwrap();
-    let bash_entry = entries
-        .iter()
-        .rev()
-        .find(|entry| entry.operation == AuditPrimitiveOp::Bash)
-        .expect("应写 bash 审计");
-    let detail = bash_entry.detail.as_deref().unwrap_or("");
-    assert!(
-        detail.contains("lingering_children=true"),
-        "audit detail 应标记 lingering_children=true，实际 detail={}",
-        detail
-    );
-
-    let _ = std::fs::remove_dir(&dir);
+async fn bash_foreground_drop_stops_child_with_and_without_shared_registry() {
+    for shared in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("logs")));
+        let mut exec = DefaultPrimitiveExecutor::new(
+            temp_primitive_config(dir.path()),
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            make_gate(dir.path()),
+        )
+        .with_bash_persist_dir(dir.path().join("logs"));
+        if shared {
+            exec = exec.with_bash_task_registry(registry.clone());
+        }
+        let mut call = Box::pin(exec.execute_bash(
+            "printf ready > ready; sleep 1; printf escaped > escaped",
+            Some(&cwd),
+            "p1",
+            None,
+        ));
+        tokio::select! {
+            result = &mut call => panic!("foreground returned before cancellation: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !dir.path().join("ready").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }) => result.expect("child must start before dropping its caller"),
+        }
+        drop(call);
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(
+            !dir.path().join("escaped").exists(),
+            "cancelled foreground child kept writing (shared={shared})"
+        );
+        if shared {
+            let tasks = registry.list();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(
+                tasks[0].status,
+                crate::core::tools::primitive::BashTaskStatus::Stopped
+            );
+        }
+    }
 }
 
-/// 大 timeout 回归：默认/120s 级别预算下，主 shell 退出后的 lingering 检测也不应把同步
-/// bash 拖到完整 timeout_ms；应在 post-exit grace 内快速判残留并返回 warning。
+/// Without a shared registry, foreground wait expiry must stop the process tree locally rather
+/// than returning an unreachable background handle.
 #[tokio::test]
-async fn bash_backgrounded_pipe_holder_returns_fast_under_large_timeout() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_bg_pipe_holder_large_timeout");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
+async fn bash_foreground_wait_expiry_stops_without_shared_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_str = dir.path().to_string_lossy().to_string();
+    let marker = dir.path().join("should-not-exist.txt");
     let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
+        temp_primitive_config(dir.path()),
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
+        make_gate(dir.path()),
     )
-    .with_bash_timeout_ms(120_000);
+    .with_bash_foreground_wait_ms(8_000);
+    let res = exec
+        .execute_bash(
+            &format!(
+                "printf before-stop; sleep 9; printf after-stop > {}",
+                marker.display()
+            ),
+            Some(&path_str),
+            "p1",
+            Some(8_000),
+        )
+        .await
+        .expect("foreground wait expiry must return a bounded stopped result");
+    assert_eq!(
+        res.state,
+        crate::core::tools::primitive::BashExecutionState::Stopped
+    );
+    assert!(res.foreground_wait_expired);
+    assert!(res.task_id.is_none());
+    assert!(res.log_path.is_some());
+    assert!(
+        res.stdout.contains("before-stop"),
+        "stdout should keep drained prefix"
+    );
+    assert!(
+        !marker.exists(),
+        "stopped process must not reach post-sleep write"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(
+        !marker.exists(),
+        "post-return marker appearing would mean the timed-out process kept running"
+    );
+}
 
-    let started = std::time::Instant::now();
-    let res = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        exec.execute_bash("sleep 30 & echo done", Some(&path_str), "p1", None, None),
+/// A shared registry means the caller can follow up later, so expiry still promotes to
+/// background and returns a task handle.
+#[tokio::test]
+async fn bash_foreground_wait_expiry_promotes_with_shared_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_str = dir.path().to_string_lossy().to_string();
+    let persist_dir = dir.path().join("tool-results");
+    let registry = build_bash_task_registry(
+        &crate::infra::config::ToolsBashConfig {
+            foreground_wait_ms: 8_000,
+            ..Default::default()
+        },
+        persist_dir.clone(),
+        make_gate(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        crate::core::permission::BashAstChecker::default(),
+    );
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(dir.path()),
     )
-    .await
-    .expect("大 timeout 下也不应把测试挂死")
-    .expect("bash 应返回 Ok");
-    let elapsed = started.elapsed();
+    .with_bash_foreground_wait_ms(8_000)
+    .with_bash_persist_dir(persist_dir)
+    .with_bash_task_registry(registry.clone());
 
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "大 timeout 场景也应在数秒内返回，而不是吃满 120s，实际 elapsed={:?}",
-        elapsed
+    let res = exec
+        .execute_bash(
+            "sleep 9; echo promoted-done",
+            Some(&path_str),
+            "p1",
+            Some(8_000),
+        )
+        .await
+        .expect("shared registry path should promote to background");
+    assert_eq!(
+        res.state,
+        crate::core::tools::primitive::BashExecutionState::RunningInBackground
     );
+    assert!(res.foreground_wait_expired);
+    let task_id = res
+        .task_id
+        .clone()
+        .expect("background result must carry task_id");
     assert!(
-        !res.timed_out,
-        "这里不是前台 wait 超时，而是 post-exit grace 检测到后台残留"
-    );
-    assert_eq!(res.exit_code, 0, "主 shell 已正常退出，应保留 exit_code=0");
-    assert!(
-        res.stdout.contains("done"),
-        "前台输出应被尽量保留，实际 stdout={:?}",
-        res.stdout
-    );
-    assert!(
-        res.stderr.contains("run_in_background=true"),
-        "stderr 应提示长任务改走后台机制，实际 stderr={:?}",
-        res.stderr
+        res.log_path.is_some(),
+        "background result must carry log_path"
     );
 
-    let _ = std::fs::remove_dir(&dir);
+    registry
+        .wait_for_finish(&task_id)
+        .await
+        .expect("task finish");
+    let chunk = registry
+        .read_output(&task_id, Some(0))
+        .await
+        .expect("read output");
+    assert!(chunk.finished);
+    assert!(
+        chunk.content.contains("promoted-done"),
+        "final output should be durable"
+    );
 }
 
 /// T2-P0-016 PR-E.3 / bash.md §10 T1：超长 stdout 走 EndTruncatingAccumulator 头尾保留。
@@ -967,7 +1310,6 @@ async fn bash_output_truncation_keeps_head_tail() {
             r#"printf 'A%.0s' $(seq 1 2000)"#,
             Some(&path_str),
             "p1",
-            None,
             None,
         )
         .await
@@ -1016,7 +1358,6 @@ async fn bash_persists_full_output_when_truncated() {
             Some(&path_str),
             "p1",
             None,
-            None,
         )
         .await
         .expect("bash 应返回 Ok");
@@ -1064,7 +1405,7 @@ async fn bash_ast_allowlist_denies_compound_command_short_circuit() {
 
     let cmd = format!("git --version && rm -rf {}", probe.display());
     let err = exec
-        .execute_bash(&cmd, Some(&path_str), "p1", None, None)
+        .execute_bash(&cmd, Some(&path_str), "p1", None)
         .await
         .expect_err("AST deny 应当返回 Err，不进入 gate / spawn");
     let msg = err.to_string();
@@ -1099,7 +1440,7 @@ async fn bash_ast_default_empty_lists_keeps_legacy_behavior() {
     .with_bash_ast(BashAstChecker::new(true, vec![], vec![]));
 
     let res = exec
-        .execute_bash("echo ast-skeleton-ok", Some(&path_str), "p1", None, None)
+        .execute_bash("echo ast-skeleton-ok", Some(&path_str), "p1", None)
         .await
         .expect("空 list 时 AST 不应改变行为");
     assert_eq!(res.exit_code, 0);
@@ -1126,7 +1467,7 @@ async fn bash_ast_heredoc_returns_unsupported_error() {
     .with_bash_ast(BashAstChecker::new(true, vec![], vec![]));
 
     let err = exec
-        .execute_bash("cat <<EOF\nhi\nEOF\n", Some(&path_str), "p1", None, None)
+        .execute_bash("cat <<EOF\nhi\nEOF\n", Some(&path_str), "p1", None)
         .await
         .expect_err("heredoc 应当 AstUnsupported 早退");
     assert!(err.to_string().contains("AstUnsupported"));
@@ -1152,7 +1493,6 @@ async fn execute_bash_forbidden() {
             "tomcat config set llm.api_key xxx",
             Some(&path_str),
             "p1",
-            None,
             None,
         )
         .await;
@@ -1211,7 +1551,10 @@ async fn read_file_on_directory_returns_err() {
     );
     let r = exec.read_file(&path_str, "p1").await;
     assert!(r.is_err());
-    assert!(r.unwrap_err().to_string().contains("目录"));
+    assert!(r
+        .unwrap_err()
+        .to_string()
+        .contains("The path is a directory"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1403,6 +1746,21 @@ fn edit_seg(old: &str, new: &str, replace_all: bool) -> EditOperation {
     }
 }
 
+fn insert_edit_seg(old: &str, new: &str, before: bool) -> EditOperation {
+    let marker = if before {
+        crate::core::tools::primitive::EDIT_INSERT_BEFORE_MARKER
+    } else {
+        crate::core::tools::primitive::EDIT_INSERT_AFTER_MARKER
+    };
+    EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: None,
+        end_line: None,
+        old_content: Some(format!("{marker}{old}")),
+        new_content: new.to_string(),
+    }
+}
+
 fn temp_edit_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1412,6 +1770,7 @@ fn temp_edit_dir(name: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn edit_replace_all_replaces_every_match() {
+    let replacement = "DONE 文档";
     let dir = temp_edit_dir("tomcat_edit_replace_all");
     let f = dir.join("a.txt");
     // 多命中 + 多字节 + 尾换行：原文必须保留行尾 `\n`。
@@ -1423,7 +1782,7 @@ async fn edit_replace_all_replaces_every_match() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    let edits = vec![edit_seg("TODO 文档", "DONE 文档", true)];
+    let edits = vec![edit_seg("TODO 文档", replacement, true)];
     let res = exec
         .edit_file(&f.to_string_lossy(), edits, "p1")
         .await
@@ -1431,10 +1790,57 @@ async fn edit_replace_all_replaces_every_match() {
     assert!(res.applied);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
-        "DONE 文档\nbody\nDONE 文档\n",
+        format!("{replacement}\nbody\n{replacement}\n"),
         "replace_all 必须命中每一处且保留尾换行"
     );
     assert!(!dir.join("a.bak").exists(), "成功路径不应残留 .bak");
+}
+
+#[tokio::test]
+async fn edit_insert_modes_preserve_the_anchor_and_reject_ambiguous_anchors() {
+    let dir = temp_edit_dir("tomcat_edit_insert_modes");
+    let file = dir.join("anchor.md");
+    std::fs::write(&file, "before\n## Anchor\nafter\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    exec.edit_file(
+        &file.to_string_lossy(),
+        vec![insert_edit_seg("## Anchor", "inserted before\n", true)],
+        "p1",
+    )
+    .await
+    .unwrap();
+    exec.edit_file(
+        &file.to_string_lossy(),
+        vec![insert_edit_seg("## Anchor", "\ninserted after", false)],
+        "p1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "before\ninserted before\n## Anchor\ninserted after\nafter\n"
+    );
+
+    let ambiguous = dir.join("ambiguous.md");
+    std::fs::write(&ambiguous, "## Anchor\none\n## Anchor\ntwo\n").unwrap();
+    let error = exec
+        .edit_file(
+            &ambiguous.to_string_lossy(),
+            vec![insert_edit_seg("## Anchor", "new section\n", true)],
+            "p1",
+        )
+        .await
+        .expect_err("insert anchors must retain replace mode's uniqueness guard");
+    assert!(
+        error.to_string().contains("Ambiguous"),
+        "unexpected insert ambiguity error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -1487,7 +1893,7 @@ async fn edit_overlap_rejected() {
     assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
     assert!(msg.contains("edits[0]"), "错误文案应指出左侧段号：{}", msg);
     assert!(msg.contains("edits[1]"), "错误文案应指出右侧段号：{}", msg);
-    assert!(msg.contains("第 1 行"), "错误文案应给出行号：{}", msg);
+    assert!(msg.contains("line 1"), "错误文案应给出行号：{}", msg);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         original,
@@ -1540,7 +1946,11 @@ async fn edit_overlap_nested_reports_subset_hint() {
     assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
     assert!(msg.contains("edits[0]"), "错误文案应指出外层段号：{}", msg);
     assert!(msg.contains("edits[1]"), "错误文案应指出内层段号：{}", msg);
-    assert!(msg.contains("嵌套包含"), "错误文案应指出嵌套特例：{}", msg);
+    assert!(
+        msg.contains("Nested spans:"),
+        "错误文案应指出嵌套特例：{}",
+        msg
+    );
 }
 
 #[tokio::test]
@@ -1572,7 +1982,7 @@ async fn edit_validation_failure_restores_or_noop() {
         msg
     );
     assert!(
-        msg.contains("连续原文"),
+        msg.contains("one continuous excerpt"),
         "NotFound 应提示连续片段约束：{}",
         msg
     );
@@ -1591,6 +2001,11 @@ async fn edit_validation_failure_restores_or_noop() {
     assert!(
         msg2.contains("Ambiguous"),
         "错误文案应含 Ambiguous：{}",
+        msg2
+    );
+    assert!(
+        msg2.contains("matching lines: 1, 2"),
+        "Ambiguous 应列出全部匹配行号：{}",
         msg2
     );
     assert_eq!(std::fs::read_to_string(&f2).unwrap(), original2);
@@ -1630,12 +2045,12 @@ async fn edit_notfound_with_cat_n_prefix_explains_remediation() {
         msg
     );
     assert!(
-        msg.contains("cat -n 行号前缀"),
+        msg.contains("cat -n line prefixes"),
         "错误文案应指出 cat -n 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );
@@ -1666,9 +2081,9 @@ async fn edit_notfound_with_hashline_prefix_explains_remediation() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    let h1 = crate::core::tools::primitive::compute_line_hash("alpha", 1);
-    let h2 = crate::core::tools::primitive::compute_line_hash("beta", 2);
-    let h3 = crate::core::tools::primitive::compute_line_hash("gamma", 3);
+    let h1 = crate::core::tools::primitive::compute_line_hash("alpha");
+    let h2 = crate::core::tools::primitive::compute_line_hash("beta");
+    let h3 = crate::core::tools::primitive::compute_line_hash("gamma");
     let prefixed_old = format!(
         "{:>6}#{}:alpha\n{:>6}#{}:beta\n{:>6}#{}:gamma\n",
         1, h1, 2, h2, 3, h3
@@ -1688,12 +2103,12 @@ async fn edit_notfound_with_hashline_prefix_explains_remediation() {
         msg
     );
     assert!(
-        msg.contains("hashline 前缀"),
+        msg.contains("hashline prefixes"),
         "错误文案应指出 hashline 来源：{}",
         msg
     );
     assert!(
-        msg.contains("第 1 行"),
+        msg.contains("line 1"),
         "错误文案应给出命中行号 hint：{}",
         msg
     );

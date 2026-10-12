@@ -32,9 +32,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let cap = params.get("cap").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
         let entries = session.get_entries_for_session(&session_id, cap)?;
         let list: Vec<serde_json::Value> = entries
@@ -66,9 +66,9 @@ impl HostApiDispatcher {
             return Ok(HostResponse::ok(serde_json::Value::Null));
         }
         let wire = agent_send_message_wire(params)?;
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         session.try_append_message_to_session(&session_id, wire)?;
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
@@ -99,9 +99,9 @@ impl HostApiDispatcher {
             .and_then(|o| o.get("role"))
             .and_then(|v| v.as_str())
             .unwrap_or("user");
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         session.try_append_message_to_session(
             &session_id,
             serde_json::json!({ "role": role, "content": content }),
@@ -320,9 +320,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let from_id = params.get("fromId").and_then(|v| v.as_str());
         let leaf_id = match from_id {
             Some(id) => id.to_string(),
@@ -346,9 +346,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let entry = session.get_leaf_entry_for_session(&session_id)?;
         let data = match entry {
             Some(e) => serde_json::to_value(e).map_err(AppError::Serialize)?,
@@ -364,9 +364,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let id = session
             .get_leaf_entry_for_session(&session_id)?
             .as_ref()
@@ -384,9 +384,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let id = params
             .get("id")
             .and_then(|v| v.as_str())
@@ -406,9 +406,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let header = session.read_session_header_for_session(&session_id)?;
         let data = match header {
             Some(h) => serde_json::to_value(h).map_err(AppError::Serialize)?,
@@ -425,9 +425,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let cap = params.get("cap").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
         let entries = session.get_entries_for_session(&session_id, cap)?;
         let list: Vec<serde_json::Value> = entries
@@ -449,9 +449,9 @@ impl HostApiDispatcher {
         let Some(session) = self.session_for_instance(instance_id) else {
             return Ok(HostResponse::err("SessionManager not configured"));
         };
-        let session_id = self
-            .session_id_for_instance(instance_id)
-            .ok_or_else(|| AppError::Config(format!("实例未绑定 session: {instance_id}")))?;
+        let session_id = self.session_id_for_instance(instance_id).ok_or_else(|| {
+            AppError::Config(format!("Instance is not bound to a session: {instance_id}"))
+        })?;
         let message = params
             .get("message")
             .cloned()

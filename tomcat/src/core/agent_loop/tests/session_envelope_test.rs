@@ -10,7 +10,7 @@ use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 #[tokio::test]
 async fn run_tool_loop_keeps_session_id_consistent_between_payload_and_context() {
@@ -66,12 +66,17 @@ async fn run_tool_loop_keeps_session_id_consistent_between_payload_and_context()
         );
     }
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: session_id.to_string(),
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
     let result = loop_
         .run(vec![ChatMessage::user("write demo file")])
         .await

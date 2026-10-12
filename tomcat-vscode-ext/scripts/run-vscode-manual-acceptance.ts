@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { runTests } from "@vscode/test-electron";
+import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 import { resolveVsCodeCli, resolveVsCodeExecutable, seedChatUserSettings } from "./e2eHostFixture";
 import { packageVsix } from "./package-vsix";
@@ -60,6 +61,7 @@ async function main(): Promise<void> {
     await fs.mkdir(userDataDir, { recursive: true });
     await fs.mkdir(workspaceDir, { recursive: true });
     await fs.mkdir(screenshotsDir, { recursive: true });
+    await fs.chmod(fakeServePath, 0o755);
     await fs.writeFile(
       path.join(workspaceDir, "README.md"),
       "# Manual acceptance workspace\n",
@@ -72,7 +74,11 @@ async function main(): Promise<void> {
       cwd: extensionRoot,
       stdio: "inherit",
     });
-    packageVsix({ extensionRoot, outPath: vsixPath });
+    packageVsix({
+      extensionRoot,
+      outPath: vsixPath,
+      skipBuild: process.env.TOMCAT_ACCEPT_SKIP_BUILD === "1",
+    });
     execFileSync(
       resolveVsCodeCli(),
       [
@@ -90,29 +96,42 @@ async function main(): Promise<void> {
     );
 
     await fs.access(harnessTestsPath);
-    await runTests({
-      extensionDevelopmentPath: harnessRoot,
-      extensionTestsEnv: {
-        ...process.env,
-        TOMCAT_ACCEPT_REPORT_PATH: reportPath,
-        TOMCAT_ACCEPT_SCREENSHOTS_DIR: screenshotsDir,
-        TOMCAT_FAKE_SERVE_STATE_DIR: fakeServeStateDir,
-        TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
-        TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
-      },
-      extensionTestsPath: harnessTestsPath,
-      launchArgs: [
-        workspaceDir,
-        `--extensions-dir=${extensionsDir}`,
-        `--user-data-dir=${userDataDir}`,
-      ],
-      reuseMachineInstall: true,
-      vscodeExecutablePath: resolveVsCodeExecutable(),
-    });
+    {
+      await runVsCodeGuiTests(runTests, {
+        extensionDevelopmentPath: harnessRoot,
+        extensionTestsEnv: {
+          ...process.env,
+          TOMCAT_ACCEPT_REPORT_PATH: reportPath,
+          TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsRoot,
+          TOMCAT_ACCEPT_SCREENSHOTS_DIR: screenshotsDir,
+          TOMCAT_FAKE_SERVE_STATE_DIR: fakeServeStateDir,
+          TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
+          TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+        },
+        extensionTestsPath: harnessTestsPath,
+        launchArgs: [
+          workspaceDir,
+          `--extensions-dir=${extensionsDir}`,
+          `--user-data-dir=${userDataDir}`,
+        ],
+        reuseMachineInstall: true,
+        vscodeExecutablePath: resolveVsCodeExecutable(),
+      });
+    }
 
-    const reportText = await fs.readFile(reportPath, "utf8");
     console.log(`Manual acceptance artifacts: ${artifactsRoot}`);
-    console.log(reportText);
+    try {
+      console.log(await fs.readFile(reportPath, "utf8"));
+    } catch (error) {
+      if (
+        process.env.TOMCAT_E2E_GREP &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        console.log("No aggregate report was produced for the selected manual acceptance test.");
+        return;
+      }
+      throw error;
+    }
   } finally {
     await fs.rm(installRoot, { force: true, recursive: true });
   }

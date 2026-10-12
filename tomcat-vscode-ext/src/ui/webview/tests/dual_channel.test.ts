@@ -3,6 +3,31 @@ import { describe, expect, it } from "vitest";
 import { WebviewStateStore } from "../state";
 
 describe("webview dual-channel state store", () => {
+  it("applies one agent-mode broadcast consistently in two webview stores", () => {
+    const first = new WebviewStateStore();
+    const second = new WebviewStateStore();
+    const snapshot = {
+      activePlan: null,
+      agentMode: "chat" as const,
+      busy: false,
+      model: "gpt-5.4",
+      sessionId: "shared-session",
+    };
+    first.applySessionState(snapshot);
+    second.applySessionState(snapshot);
+
+    const event = {
+      agentMode: "plan" as const,
+      sessionId: "shared-session",
+      type: "session.agent_mode.changed" as const,
+    };
+    first.applyEvent(event);
+    second.applyEvent(event);
+
+    expect(first.snapshot().sessionViews["shared-session"]?.agentMode).toBe("plan");
+    expect(second.snapshot().sessionViews["shared-session"]?.agentMode).toBe("plan");
+  });
+
   it("maps state snapshots, history, and live events into timeline state", () => {
     const store = new WebviewStateStore();
 
@@ -23,10 +48,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -70,11 +95,9 @@ describe("webview dual-channel state store", () => {
     });
     store.setPendingAttachments("s1", [
       {
-        attachment: {
-          dataBase64: "YWJj",
-          kind: "file",
-          mimeType: "text/plain",
-        },
+        blobSha: "a".repeat(64),
+        bytes: 3,
+        filename: "README.md",
         id: "att-1",
         kind: "file",
         label: "README.md",
@@ -103,16 +126,53 @@ describe("webview dual-channel state store", () => {
       sessionId: "s1",
       type: "message_update",
     });
+    const cacheObs = {
+      cacheReadTokensTotal: 0,
+      consecutiveMissMax: 0,
+      promptTokensTotal: 0,
+      tailChangeMissTokens: 0,
+      tailChangedCount: 0,
+    };
     store.applyEvent({
+      ...cacheObs,
+      compactionCount: 0,
+      compactionTokensFreed: 0,
+      contextUtilizationRatio: 0.1,
+      inputTokensUsed: 128,
+      preheatInProgress: false,
+      preheatResultPending: false,
+      providerUsageMeasured: false,
+      totalToolResultBytesPersisted: 0,
+      type: "context_metrics_update",
+    });
+    expect(store.snapshot().sessionViews.s1.contextRatio).toBeNull();
+
+    store.applyEvent({
+      ...cacheObs,
       compactionCount: 0,
       compactionTokensFreed: 0,
       contextUtilizationRatio: 0.5,
       inputTokensUsed: 128,
       preheatInProgress: false,
       preheatResultPending: false,
+      providerUsageMeasured: true,
       totalToolResultBytesPersisted: 0,
       type: "context_metrics_update",
     });
+    expect(store.snapshot().sessionViews.s1.contextRatio).toBe(0.5);
+    store.applyEvent({
+      ...cacheObs,
+      compactionCount: 1,
+      compactionTokensFreed: 256,
+      contextUtilizationRatio: 0.4,
+      inputTokensUsed: 100,
+      preheatInProgress: false,
+      preheatResultPending: false,
+      providerUsageMeasured: false,
+      totalToolResultBytesPersisted: 1024,
+      type: "context_metrics_update",
+    });
+    expect(store.snapshot().sessionViews.s1.contextRatio).toBe(0.4);
     store.applyEvent({
       args: { path: "src/app.ts" },
       sessionId: "s1",
@@ -194,12 +254,6 @@ describe("webview dual-channel state store", () => {
           type: "tool",
         }),
         expect.objectContaining({
-          path: "/workspace/login.plan.md",
-          planId: "plan-1",
-          state: "planning",
-          type: "plan",
-        }),
-        expect.objectContaining({
           request: expect.objectContaining({ requestId: "ask-1" }),
           type: "approval",
         }),
@@ -209,12 +263,13 @@ describe("webview dual-channel state store", () => {
     expect(historicAssistantIndex).toBeGreaterThan(historicThinkingIndex);
     expect(liveThinkingIndex).toBeGreaterThanOrEqual(0);
     expect(liveAssistantIndex).toBeGreaterThan(liveThinkingIndex);
-    expect(snapshot.sessionViews.s1.planFile).toMatchObject({
+    expect(snapshot.sessionViews.s1.timeline.some((item) => item.type === "plan")).toBe(false);
+    expect(snapshot.sessionViews.s1.activePlan).toMatchObject({
       path: "/workspace/login.plan.md",
       planId: "plan-1",
       state: "planning",
     });
-    expect(snapshot.sessionViews.s1.contextRatio).toBe(0.5);
+    expect(snapshot.sessionViews.s1.contextRatio).toBe(0.4);
     expect(snapshot.sessionViews.s1.pendingAttachments[0]).toMatchObject({
       id: "att-1",
       label: "README.md",
@@ -444,10 +499,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: true,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -511,10 +566,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -595,10 +650,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -711,10 +766,10 @@ describe("webview dual-channel state store", () => {
     );
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: true,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -806,6 +861,7 @@ describe("webview dual-channel state store", () => {
         assistantMessageId: "live-assistant-1",
         id: "tool-1",
         isError: false,
+        startedAt: expect.any(Number),
         status: "running",
         toolCallId: "tool-1",
         toolName: "edit",
@@ -899,10 +955,10 @@ describe("webview dual-channel state store", () => {
 
     store.applySessionState(
       {
+        activePlan: null,
+        agentMode: "chat",
         busy: false,
         model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
         sessionId: "s1",
       },
     );
@@ -915,11 +971,9 @@ describe("webview dual-channel state store", () => {
     });
     store.setPendingAttachments("s1", [
       {
-        attachment: {
-          dataBase64: "YWJj",
-          kind: "file",
-          mimeType: "text/plain",
-        },
+        blobSha: "a".repeat(64),
+        bytes: 3,
+        filename: "README.md",
         id: "att-1",
         kind: "file",
         label: "README.md",
@@ -930,10 +984,14 @@ describe("webview dual-channel state store", () => {
     store.removePendingAttachment("s1", "att-1");
     store.applySessionState(
       {
+        activePlan: {
+          id: "plan-1",
+          path: "/workspace/plan-a.plan.md",
+          state: "executing",
+        },
+        agentMode: "chat",
         busy: true,
         model: "claude-4.6-sonnet",
-        planId: "plan-1",
-        planState: "executing",
         sessionId: "s1",
       },
     );
@@ -941,13 +999,11 @@ describe("webview dual-channel state store", () => {
     expect(store.snapshot().sessionViews.s1).toMatchObject({
       busy: true,
       model: "claude-4.6-sonnet",
-      planFile: {
+      activePlan: {
         path: "/workspace/plan-a.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planId: "plan-1",
-      planState: "executing",
     });
     expect(store.snapshot().sessionViews.s1.pendingAttachments).toHaveLength(0);
   });

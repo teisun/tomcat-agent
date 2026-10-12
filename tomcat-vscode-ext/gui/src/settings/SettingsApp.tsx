@@ -21,13 +21,32 @@ import {
   findMatchingProviderPreset,
   type ProviderPreset,
 } from "./providerPresets";
-import { deriveRelayFields, RELAY_ID_SEPARATOR } from "./relayDerive";
+import { findReusableModelByName } from "./modelBuiltinMatch";
+import {
+  deriveRelayFields,
+  findConfiguredRelayByBaseUrl,
+  RELAY_ID_SEPARATOR,
+} from "./relayDerive";
 import { KeySlotCombobox, type KeySlotOption } from "./KeySlotCombobox";
 import { isValidKeySlotName } from "./keySlot";
+import { ConnectorsSettingsView } from "./ConnectorsSettingsView";
+import { SettingsShell } from "./SettingsShell";
+import { GeneralSettingsView } from "./GeneralSettingsView";
+import type { SettingsRoute } from "../../../src/shared/settingsProtocol";
 
-type FormState = SettingsModelInput;
+import { isSpeed, type Speed } from "../../../src/shared/modelSpeed";
+import { parseCommaList } from "./commaList";
+import { useT } from "../i18n/LocaleProvider";
+import { type Translator, type MessageKey } from "../../../src/shared/i18n";
+
+type FormState = Omit<SettingsModelInput, "supportedReasoningLevels" | "supportedSpeeds"> & {
+  reasoningLevelsText: string | null;
+  speedsText: string | null;
+};
 type FormMode = "create" | "edit";
 type DialogKind = "official" | "relay";
+const DEFAULT_CONTEXT_WINDOW = 400_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 type SettingsDomAction = {
   kind: "clickTestId" | "setInputValue";
   testId?: string;
@@ -43,26 +62,26 @@ const RELAY_DEFAULT_CAPABILITIES: SettingsModelCapabilities = {
 };
 
 const API_OPTIONS = [
-  { label: "OpenAI (Chat Completions)", value: "openai" },
-  { label: "OpenAI (Responses)", value: "openai-responses" },
-  { label: "Anthropic (Messages)", value: "anthropic-messages" },
+  { labelKey: "term.api.openai", value: "openai" },
+  { labelKey: "term.api.responses", value: "openai-responses" },
+  { labelKey: "term.api.anthropic", value: "anthropic-messages" },
 ] as const;
 
 const THINKING_FORMAT_OPTIONS = [
-  { label: "Auto (follow the selected API)", value: "" },
-  { label: "OpenAI effort", value: "openai" },
-  { label: "DeepSeek thinking", value: "deepseek" },
-  { label: "ZAI / GLM reasoning", value: "zai" },
-  { label: "Doubao / Kimi / MiMo thinking", value: "doubao" },
-  { label: "Anthropic thinking budget", value: "anthropic" },
+  { labelKey: "term.thinking.openai", value: "openai" },
+  { labelKey: "term.thinking.deepseek", value: "deepseek" },
+  { labelKey: "term.thinking.zai", value: "zai" },
+  { labelKey: "term.thinking.doubao", value: "doubao" },
+  { labelKey: "term.thinking.anthropic", value: "anthropic" },
+  { labelKey: "term.thinking.adaptive", value: "anthropic-adaptive" },
 ] as const;
 
 const CAPABILITY_OPTIONS = [
-  ["vision", "Vision"],
-  ["files", "Files"],
-  ["tools", "Tools"],
-  ["reasoning", "Reasoning"],
-  ["webSearch", "Web Search"],
+  ["vision", "models.capability.vision"],
+  ["files", "models.capability.files"],
+  ["tools", "models.capability.tools"],
+  ["reasoning", "models.capability.reasoning"],
+  ["webSearch", "models.capability.webSearch"],
 ] as const;
 
 function cloneCapabilities(
@@ -73,6 +92,8 @@ function cloneCapabilities(
 
 function createEmptyForm(): FormState {
   return {
+    reasoningLevelsText: null,
+    speedsText: null,
     api: "",
     apiKeyEnv: "",
     baseUrl: "",
@@ -83,6 +104,28 @@ function createEmptyForm(): FormState {
     provider: "",
     thinkingFormat: "",
   };
+}
+
+function defaultThinkingFormatForApi(api: string): string {
+  switch (fieldText(api)) {
+    case "openai":
+    case "openai-responses":
+      return "openai";
+    case "anthropic":
+    case "anthropic-messages":
+      return "anthropic";
+    case "deepseek":
+      return "deepseek";
+    case "zai":
+      return "zai";
+    case "qwen":
+      return "qwen";
+    case "doubao":
+    case "moonshot":
+      return "doubao";
+    default:
+      return "openai";
+  }
 }
 
 function fieldText(value: string | null | undefined): string {
@@ -97,16 +140,24 @@ function maskDraftApiKey(value: string): string {
   return `${chars.slice(0, 8).join("")}${"•".repeat(chars.length - 12)}${chars.slice(-4).join("")}`;
 }
 
-function normalizeOptionalText(value: string | null | undefined): string | null {
+function normalizeOptionalText(
+  value: string | null | undefined,
+): string | null {
   const trimmed = fieldText(value);
   return trimmed ? trimmed : null;
+}
+
+function finiteNumberOrNull(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function hasScheme(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }
 
-function normalizeBaseUrlInput(value: string | null | undefined): string | null {
+function normalizeBaseUrlInput(
+  value: string | null | undefined,
+): string | null {
   const trimmed = fieldText(value);
   if (!trimmed) {
     return null;
@@ -133,13 +184,23 @@ function normalizeModel(model: FormState): SettingsModelInput {
     apiKeyEnv: normalizeOptionalText(model.apiKeyEnv),
     baseUrl: normalizeBaseUrlInput(model.baseUrl),
     capabilities: cloneCapabilities(model.capabilities),
-    contextWindow:
-      typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow)
-        ? model.contextWindow
-        : null,
+    contextWindow: finiteNumberOrNull(model.contextWindow),
+    contextWindowOptions: Array.isArray(model.contextWindowOptions)
+      ? [...model.contextWindowOptions]
+      : null,
+    description: normalizeOptionalText(model.description),
     id: fieldText(model.id),
+    maxOutputTokens: finiteNumberOrNull(model.maxOutputTokens),
     modelName: normalizeOptionalText(model.modelName),
     provider: fieldText(model.provider),
+    supportedReasoningLevels: model.reasoningLevelsText === null
+      ? null
+      : parseCommaList(model.reasoningLevelsText),
+    supportedSpeeds: model.speedsText === null
+      ? null
+      : parseCommaList(model.speedsText).filter(
+          (speed): speed is Speed => isSpeed(speed) && speed !== "standard",
+        ),
     thinkingFormat: normalizeOptionalText(model.thinkingFormat),
   };
 }
@@ -152,9 +213,7 @@ function frameIsState(message: unknown): message is SettingsHostFrame {
   );
 }
 
-function frameIsTestEvent(
-  message: unknown,
-): message is {
+function frameIsTestEvent(message: unknown): message is {
   channel: "event";
   content: {
     action?: SettingsDomAction;
@@ -166,7 +225,8 @@ function frameIsTestEvent(
     typeof message === "object" &&
     message !== null &&
     (message as { channel?: unknown }).channel === "event" &&
-    typeof (message as { content?: { type?: unknown } }).content?.type === "string"
+    typeof (message as { content?: { type?: unknown } }).content?.type ===
+      "string"
   );
 }
 
@@ -178,7 +238,12 @@ function readTestIdRect(
     return undefined;
   }
   const rect = el.getBoundingClientRect();
-  return { height: rect.height, left: rect.left, top: rect.top, width: rect.width };
+  return {
+    height: rect.height,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+  };
 }
 
 function buildSettingsDomSnapshot(): {
@@ -203,7 +268,9 @@ function runSettingsDomAction(action: SettingsDomAction | undefined): void {
   if (!action || !action.testId) {
     return;
   }
-  const target = document.querySelector<HTMLElement>(`[data-testid="${action.testId}"]`);
+  const target = document.querySelector<HTMLElement>(
+    `[data-testid="${action.testId}"]`,
+  );
   if (!(target instanceof HTMLElement)) {
     return;
   }
@@ -211,8 +278,21 @@ function runSettingsDomAction(action: SettingsDomAction | undefined): void {
     target.click();
     return;
   }
-  if (action.kind === "setInputValue" && target instanceof HTMLInputElement) {
-    target.value = action.value ?? "";
+  if (
+    action.kind === "setInputValue"
+    && (target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement)
+  ) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(target),
+      "value",
+    );
+    if (descriptor?.set) {
+      descriptor.set.call(target, action.value ?? "");
+    } else {
+      target.value = action.value ?? "";
+    }
     target.dispatchEvent(new Event("input", { bubbles: true }));
     target.dispatchEvent(new Event("change", { bubbles: true }));
   }
@@ -225,23 +305,43 @@ function modelToForm(model: SettingsModelView): FormState {
     baseUrl: model.baseUrl ?? "",
     capabilities: cloneCapabilities(model.capabilities),
     contextWindow: model.contextWindow ?? null,
+    contextWindowOptions: model.contextWindowOptions ?? null,
+    description: model.description ?? null,
     id: model.id,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     modelName: model.modelName ?? "",
     provider: model.provider,
+    reasoningLevelsText: model.supportedReasoningLevels?.join(", ") ?? null,
+    speedsText: model.supportedSpeeds?.join(", ") ?? null,
     thinkingFormat: model.thinkingFormat ?? "",
   };
 }
 
-function formatApiLabel(api: string): string {
-  return API_OPTIONS.find((entry) => entry.value === api)?.label ?? api;
+function formatApiLabel(api: string, t: Translator): string {
+  const entry = API_OPTIONS.find(entry => entry.value === api);
+  return entry ? t(entry.labelKey) : api;
 }
 
-function formatThinkingLabel(thinkingFormat: string | null | undefined): string {
-  return (
-    THINKING_FORMAT_OPTIONS.find((entry) => entry.value === (thinkingFormat ?? ""))?.label ??
-    thinkingFormat ??
-    ""
-  );
+function formatThinkingLabel(thinkingFormat: string | null | undefined, t: Translator): string {
+  const entry = THINKING_FORMAT_OPTIONS.find(entry => entry.value === thinkingFormat);
+  return entry ? t(entry.labelKey) : thinkingFormat ?? "";
+}
+
+function formatVersionLabel(version: string | null | undefined): string {
+  const trimmed = fieldText(version);
+  return trimmed ? `v${trimmed}` : "vunknown";
+}
+
+function buildServeVersionWarning(state: SettingsStateSnapshot, t: Translator): string | null {
+  const expected = fieldText(state.expectedCliVersion);
+  const server = fieldText(state.serverVersion);
+  if (!server) {
+    return t("models.versionMissing");
+  }
+  if (expected && server !== expected) {
+    return t("models.versionMismatch", { expected, server });
+  }
+  return null;
 }
 
 function modelKeyEnvName(model: SettingsModelView): string {
@@ -257,66 +357,39 @@ function fallbackModelName(model: SettingsModelView): string {
   return fromRelay?.trim() || model.id;
 }
 
-function buildModelDetails(model: SettingsModelView): Array<{ label: string; value: string }> {
-  const detailRows = [
-    {
-      label: "Source",
-      value: model.source === "user" ? "User" : "Built-in",
-    },
-    {
-      label: "API",
-      value: formatApiLabel(model.api),
-    },
-    {
-      label: "Provider",
-      value: model.provider,
-    },
-    {
-      label: "API Key Env",
-      value: modelKeyEnvName(model),
-    },
-    {
-      label: "Base URL",
-      value: model.baseUrl ?? "",
-    },
-    {
-      label: "Thinking",
-      value: formatThinkingLabel(model.thinkingFormat),
-    },
-    {
-      label: "Context Window",
-      value:
-        typeof model.contextWindow === "number"
-          ? String(model.contextWindow)
-          : "",
-    },
-    {
-      label: "Model Name",
-      value: model.modelName ?? "",
-    },
-  ];
-  return detailRows.filter((entry) => entry.value.trim().length > 0);
+function buildModelDetails(model: SettingsModelView, t: Translator): Array<{ id: string; label: string; value: string }> {
+  return [
+    { id: "source", label: t("models.source"), value: t(model.source === "user" ? "models.user" : "models.builtin") },
+    { id: "api", label: t("term.api"), value: formatApiLabel(model.api, t) },
+    { id: "provider", label: t("models.provider"), value: model.provider },
+    { id: "key", label: t("models.apiKeyEnv"), value: modelKeyEnvName(model) },
+    { id: "url", label: t("term.baseUrl"), value: model.baseUrl ?? "" },
+    { id: "thinking", label: t("thinking.title"), value: formatThinkingLabel(model.thinkingFormat, t) },
+    { id: "context", label: t("models.contextWindow"), value: typeof model.contextWindow === "number" ? String(model.contextWindow) : "" },
+    { id: "name", label: t("models.modelName"), value: model.modelName ?? "" },
+  ].filter(entry => entry.value.trim().length > 0);
 }
 
-function buildConfiguredKeyLabel(entry: SettingsProviderKeyView): string {
-  return entry.keyPresent ? `${entry.envName} (configured)` : entry.envName;
+function buildConfiguredKeyLabel(entry: SettingsProviderKeyView, t: Translator): string {
+  return entry.keyPresent ? t("models.keyConfigured", { name: entry.envName }) : entry.envName;
 }
 
 function buildKeySlotOptions(
   suggestedEnvName: string,
   providerKeys: SettingsProviderKeyView[],
+  t: Translator,
 ): KeySlotOption[] {
   const options: KeySlotOption[] = [];
   const seen = new Set<string>();
   if (suggestedEnvName) {
-    const existing = providerKeys.find((entry) => entry.envName === suggestedEnvName);
+    const existing = providerKeys.find(
+      (entry) => entry.envName === suggestedEnvName,
+    );
     options.push({
       envName: suggestedEnvName,
       group: "suggested",
       keyPresent: existing?.keyPresent ?? false,
-      label: existing?.keyPresent
-        ? `${suggestedEnvName} (configured)`
-        : `${suggestedEnvName} (suggested)`,
+      label: t(existing?.keyPresent ? "models.keyConfigured" : "models.keySuggested", { name: suggestedEnvName }),
     });
     seen.add(suggestedEnvName);
   }
@@ -328,7 +401,7 @@ function buildKeySlotOptions(
       envName: entry.envName,
       group: "saved",
       keyPresent: entry.keyPresent,
-      label: buildConfiguredKeyLabel(entry),
+      label: buildConfiguredKeyLabel(entry, t),
     });
     seen.add(entry.envName);
   }
@@ -419,9 +492,15 @@ function buildEditForm(
   return form;
 }
 
+type SettingsIntentPayload = SettingsIntent extends infer Intent
+  ? Intent extends SettingsIntent
+    ? Omit<Intent, "messageId">
+    : never
+  : never;
+
 function send(
   vscodeApi: VsCodeApiLike<SettingsIntent>,
-  message: Omit<SettingsIntent, "messageId">,
+  message: SettingsIntentPayload,
 ): void {
   vscodeApi.postMessage({
     ...message,
@@ -431,9 +510,12 @@ function send(
 
 export function SettingsApp({
   vscodeApi,
+  initialRoute = "models",
 }: {
   vscodeApi: VsCodeApiLike<SettingsIntent>;
+  initialRoute?: SettingsRoute;
 }) {
+  const t = useT();
   const [state, setState] = useState<SettingsStateSnapshot>({
     capabilities: {
       listModels: false,
@@ -445,25 +527,32 @@ export function SettingsApp({
     models: [],
     providerKeys: [],
     ready: false,
-    route: "models",
-  });
+    route: initialRoute,  });
   const [dialogKind, setDialogKind] = useState<DialogKind>("official");
   const [form, setForm] = useState<FormState>(() => createEmptyForm());
   const [draftApiKey, setDraftApiKey] = useState("");
   const [isApiKeyFocused, setIsApiKeyFocused] = useState(false);
-  const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>({});
+  const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>(
+    {},
+  );
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [formMode, setFormMode] = useState<FormMode>("create");
+  // `true` means the user has taken ownership of the suggestion, including by clearing it.
+  const [idManuallyEdited, setIdManuallyEdited] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<{ key: MessageKey; args?: Record<string, string | number> } | null>(null);
   const [isKeySlotRefreshing, setIsKeySlotRefreshing] = useState(false);
-  const [keySlotRefreshFeedback, setKeySlotRefreshFeedback] = useState<string | null>(null);
+  const [keySlotRefreshFeedback, setKeySlotRefreshFeedback] = useState<
+    MessageKey | null
+  >(null);
   const [replacementConfirmation, setReplacementConfirmation] = useState<{
     envName: string;
     modelIds: string[];
   } | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const keySlotRefreshPendingRef = useRef(false);
 
   useEffect(() => {
@@ -488,21 +577,22 @@ export function SettingsApp({
       if (keySlotRefreshPendingRef.current) {
         keySlotRefreshPendingRef.current = false;
         setIsKeySlotRefreshing(false);
-        setKeySlotRefreshFeedback(event.data.content.error ? null : "Key slots refreshed.");
+        setKeySlotRefreshFeedback(
+          event.data.content.error ? null : "models.keysRefreshed",
+        );
       }
       setState(event.data.content);
     };
     window.addEventListener("message", handleMessage);
     send(vscodeApi, {
       data: {
-        route: "models",
-      },
+        route: initialRoute,      },
       type: "settings.ready",
     });
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [vscodeApi]);
+  }, [vscodeApi, initialRoute]);
 
   useEffect(() => {
     if (!keySlotRefreshFeedback) {
@@ -515,6 +605,19 @@ export function SettingsApp({
       window.clearTimeout(timer);
     };
   }, [keySlotRefreshFeedback]);
+
+  useEffect(() => {
+    const receipt = state.modelRemovalReceipt;
+    if (!receipt || receipt.modelId !== deletingModelId) {
+      return;
+    }
+    setDeletingModelId(null);
+    if (receipt.success) {
+      setIsFormOpen(false);
+      setFormMode("create");
+      setDeleteConfirmation(null);
+    }
+  }, [deletingModelId, state.modelRemovalReceipt]);
 
   const providerPresets = useMemo(
     () => buildProviderPresets(state.models),
@@ -530,7 +633,12 @@ export function SettingsApp({
   );
 
   useEffect(() => {
-    if (!isFormOpen || dialogKind !== "official" || selectedProvider || providerPresets.length === 0) {
+    if (
+      !isFormOpen ||
+      dialogKind !== "official" ||
+      selectedProvider ||
+      providerPresets.length === 0
+    ) {
       return;
     }
     const firstPreset = providerPresets[0];
@@ -572,59 +680,155 @@ export function SettingsApp({
 
   const selectedPreset =
     dialogKind === "official"
-      ? providerPresetByProvider.get(selectedProvider) ?? providerPresets[0] ?? null
+      ? (providerPresetByProvider.get(selectedProvider) ??
+        providerPresets[0] ??
+        null)
       : null;
+
+  const effectiveModelName = fieldText(form.modelName);
+  const reusableModelByName = useMemo(
+    () => findReusableModelByName(state.models, effectiveModelName),
+    [effectiveModelName, state.models],
+  );
+  // A relay id belongs to the gateway, while modelName identifies the upstream model.
+  // Reuse is a creation-time snapshot: a user's explicit models.toml entry
+  // wins over the embedded catalog, but neither changes an existing relay.
+  const automaticReusableModel =
+    formMode === "create" && dialogKind === "relay" ? reusableModelByName : null;
+  const endpointReuse =
+    formMode === "create" && dialogKind === "relay"
+      ? findConfiguredRelayByBaseUrl(state.models, form.baseUrl ?? "")
+      : null;
+  const relayAutofillSource = automaticReusableModel
+    ? `${automaticReusableModel.source}:${automaticReusableModel.id}`
+    : null;
+  const lastRelayAutofillSource = useRef<string | null>(null);
+
+  // A reuse match is a creation-time snapshot, not a permanent overlay.  Put
+  // its editable values into the draft once so every ordinary form control can
+  // subsequently override them.  Context and output limits remain calculated
+  // catalog values because those controls are intentionally read-only here.
+  useEffect(() => {
+    if (!isFormOpen || !relayAutofillSource || !automaticReusableModel) {
+      if (!isFormOpen) {
+        lastRelayAutofillSource.current = null;
+      }
+      return;
+    }
+    if (lastRelayAutofillSource.current === relayAutofillSource) {
+      return;
+    }
+    lastRelayAutofillSource.current = relayAutofillSource;
+    setForm((current) => ({
+      ...current,
+      api: automaticReusableModel.api,
+      capabilities: cloneCapabilities(automaticReusableModel.capabilities),
+      description: automaticReusableModel.description ?? null,
+      reasoningLevelsText: automaticReusableModel.supportedReasoningLevels?.join(", ") ?? null,
+      speedsText: automaticReusableModel.supportedSpeeds?.join(", ") ?? null,
+      thinkingFormat: automaticReusableModel.thinkingFormat ?? "",
+    }));
+  }, [
+    automaticReusableModel,
+    isFormOpen,
+    relayAutofillSource,
+  ]);
+  const effectiveApi =
+    dialogKind === "official"
+      ? fieldText(form.api) || selectedPreset?.api || ""
+      : fieldText(form.api) || automaticReusableModel?.api || "openai";
+  const effectiveCapabilities = cloneCapabilities(
+    form.capabilities,
+  );
+  // The current Anthropic Messages adapter has no files attachment transport.
+  // Keep inherited relay capabilities valid for the backend's mutable-model check.
+  if (effectiveApi === "anthropic-messages") {
+    effectiveCapabilities.files = false;
+  }
   const relayDerived = useMemo(
     () =>
       deriveRelayFields(
         form.baseUrl ?? "",
         form.modelName ?? "",
-        fieldText(form.api) || "openai",
+        effectiveApi,
         RELAY_ID_SEPARATOR,
       ),
-    [form.api, form.baseUrl, form.modelName],
+    [effectiveApi, form.baseUrl, form.modelName],
   );
-
-  const effectiveModelName = fieldText(form.modelName);
-  const effectiveApi =
-    dialogKind === "official"
-      ? fieldText(form.api) || selectedPreset?.api || ""
-      : fieldText(form.api) || "openai";
   const effectiveProvider =
     dialogKind === "official"
       ? fieldText(form.provider) || selectedPreset?.provider || ""
-      : fieldText(form.provider) || relayDerived.provider;
+      : fieldText(form.provider) || endpointReuse?.provider || relayDerived.provider;
   const effectiveBaseUrl =
     dialogKind === "official"
-      ? normalizeBaseUrlInput(form.baseUrl) ?? selectedPreset?.baseUrl ?? null
+      ? (normalizeBaseUrlInput(form.baseUrl) ?? selectedPreset?.baseUrl ?? null)
       : normalizeBaseUrlInput(form.baseUrl);
   const suggestedApiKeyEnv =
     dialogKind === "official"
-      ? selectedPreset?.apiKeyEnv ?? ""
-      : relayDerived.apiKeyEnv;
+      ? (selectedPreset?.apiKeyEnv ?? "")
+      : endpointReuse?.apiKeyEnv ?? relayDerived.apiKeyEnv;
   const effectiveApiKeyEnv = fieldText(form.apiKeyEnv) || suggestedApiKeyEnv;
-  const derivedId = dialogKind === "official" ? effectiveModelName : relayDerived.id;
-  const effectiveId = selectedModel ? selectedModel.id : fieldText(form.id) || derivedId;
+  const derivedId =
+    dialogKind === "official" ? effectiveModelName : relayDerived.id;
+  const effectiveId =
+    formMode === "edit"
+      ? (selectedModelId ?? fieldText(form.id))
+      : idManuallyEdited
+        ? fieldText(form.id)
+        : derivedId;
+  const normalizedContextWindow = finiteNumberOrNull(form.contextWindow);
+  const automaticContextWindow = finiteNumberOrNull(
+    automaticReusableModel?.contextWindow,
+  );
+  const effectiveContextWindow =
+    formMode === "create"
+      ? (automaticContextWindow ?? normalizedContextWindow ?? DEFAULT_CONTEXT_WINDOW)
+      : (normalizedContextWindow ?? automaticContextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const normalizedMaxOutputTokens = finiteNumberOrNull(form.maxOutputTokens);
+  const automaticMaxOutputTokens = finiteNumberOrNull(
+    automaticReusableModel?.maxOutputTokens,
+  );
+  const effectiveMaxOutputTokens =
+    normalizedMaxOutputTokens ?? automaticMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const effectiveContextWindowOptions =
+    formMode === "create"
+      ? (automaticReusableModel?.contextWindowOptions ??
+        form.contextWindowOptions ??
+        null)
+      : (form.contextWindowOptions ??
+        automaticReusableModel?.contextWindowOptions ??
+        null);
   const effectiveThinkingFormat =
     fieldText(form.thinkingFormat) ||
-    (dialogKind === "official" ? selectedPreset?.thinkingFormat ?? "" : "");
+    (dialogKind === "official"
+      ? (selectedPreset?.thinkingFormat ??
+        defaultThinkingFormatForApi(effectiveApi))
+      : (automaticReusableModel?.thinkingFormat ??
+        defaultThinkingFormatForApi(effectiveApi)));
   const effectiveModel: SettingsModelInput = normalizeModel({
     ...form,
     api: effectiveApi,
     apiKeyEnv: effectiveApiKeyEnv,
     baseUrl: effectiveBaseUrl ?? "",
+    capabilities: effectiveCapabilities,
+    contextWindow: effectiveContextWindow,
+    contextWindowOptions: effectiveContextWindowOptions,
     id: effectiveId,
+    maxOutputTokens: effectiveMaxOutputTokens,
     modelName: effectiveModelName,
     provider: effectiveProvider,
+    description: form.description,
+    reasoningLevelsText: form.reasoningLevelsText,
+    speedsText: form.speedsText,
     thinkingFormat: effectiveThinkingFormat,
   });
 
   const keySlotOptions = useMemo(
-    () => buildKeySlotOptions(suggestedApiKeyEnv, state.providerKeys),
-    [state.providerKeys, suggestedApiKeyEnv],
+    () => buildKeySlotOptions(suggestedApiKeyEnv, state.providerKeys, t),
+    [state.providerKeys, suggestedApiKeyEnv, t],
   );
   const selectedKeyStatus = effectiveApiKeyEnv
-    ? providerKeysByEnv.get(effectiveApiKeyEnv) ?? null
+    ? (providerKeysByEnv.get(effectiveApiKeyEnv) ?? null)
     : null;
   const effectiveKeyPresent = Boolean(selectedKeyStatus?.keyPresent);
   const builtinCollision = useMemo(
@@ -634,13 +838,10 @@ export function SettingsApp({
       ) ?? null,
     [effectiveId, state.models],
   );
-  const normalizedContextWindow =
-    typeof form.contextWindow === "number" && Number.isFinite(form.contextWindow)
-      ? form.contextWindow
-      : null;
   const officialPresetUnavailable =
     dialogKind === "official" && selectedPreset === null;
-  const showSharedFormFields = dialogKind === "relay" || selectedPreset !== null;
+  const showSharedFormFields =
+    dialogKind === "relay" || selectedPreset !== null;
 
   function resetForm() {
     const nextDialogKind = defaultDialogKindForPresets(providerPresets);
@@ -650,6 +851,7 @@ export function SettingsApp({
     setIsKeySlotRefreshing(false);
     setKeySlotRefreshFeedback(null);
     setSelectedModelId(null);
+    setIdManuallyEdited(false);
     setSelectedProvider(providerPresets[0]?.provider ?? "");
     setShowAdvanced(false);
     setValidationError(null);
@@ -664,6 +866,9 @@ export function SettingsApp({
   }
 
   function closeForm() {
+    if (deletingModelId) {
+      return;
+    }
     setIsFormOpen(false);
     setFormMode("create");
     resetForm();
@@ -679,9 +884,10 @@ export function SettingsApp({
     const inferred = inferDialogKind(model, providerPresets);
     const preset =
       inferred.dialogKind === "official"
-        ? providerPresetByProvider.get(inferred.selectedProvider) ?? null
+        ? (providerPresetByProvider.get(inferred.selectedProvider) ?? null)
         : null;
     setSelectedModelId(model.id);
+    setIdManuallyEdited(false);
     setDraftApiKey("");
     setIsApiKeyFocused(false);
     setValidationError(null);
@@ -701,8 +907,12 @@ export function SettingsApp({
     setShowAdvanced(false);
     setValidationError(null);
     if (nextKind === "official") {
-      const nextProvider = selectedProvider || providerPresets[0]?.provider || "";
-      const preset = providerPresetByProvider.get(nextProvider) ?? providerPresets[0] ?? null;
+      const nextProvider =
+        selectedProvider || providerPresets[0]?.provider || "";
+      const preset =
+        providerPresetByProvider.get(nextProvider) ??
+        providerPresets[0] ??
+        null;
       setSelectedProvider(nextProvider);
       setForm((current) => ({
         ...createEmptyForm(),
@@ -710,7 +920,7 @@ export function SettingsApp({
           preset?.capabilities ?? RELAY_DEFAULT_CAPABILITIES,
         ),
         contextWindow: current.contextWindow ?? null,
-        id: selectedModel ? selectedModel.id : "",
+        id: formMode === "edit" ? (selectedModelId ?? current.id) : current.id,
         modelName: current.modelName ?? "",
       }));
       return;
@@ -718,11 +928,13 @@ export function SettingsApp({
 
     setForm((current) => ({
       ...createEmptyForm(),
-      api: fieldText(current.api) || "openai",
+      // Leave API unset for a fresh relay so a matching upstream model can
+      // supply its transport (for example Anthropic Messages for Claude).
+      api: fieldText(current.api),
       baseUrl: current.baseUrl ?? "",
       capabilities: cloneCapabilities(RELAY_DEFAULT_CAPABILITIES),
       contextWindow: current.contextWindow ?? null,
-      id: selectedModel ? selectedModel.id : "",
+      id: formMode === "edit" ? (selectedModelId ?? current.id) : current.id,
       modelName: current.modelName ?? "",
     }));
   }
@@ -774,13 +986,30 @@ export function SettingsApp({
   }
 
   function handleApiChange(nextApi: string) {
-    setForm((current) => ({
-      ...current,
-      api:
-        dialogKind === "official" && selectedPreset && nextApi === selectedPreset.api
-          ? ""
-          : nextApi,
-    }));
+    setForm((current) => {
+      const currentApi =
+        dialogKind === "official"
+          ? fieldText(current.api) || selectedPreset?.api || ""
+          : fieldText(current.api) || "openai";
+      const currentDefaultThinkingFormat =
+        defaultThinkingFormatForApi(currentApi);
+      const currentThinkingFormat = fieldText(current.thinkingFormat);
+      const nextThinkingFormat =
+        !currentThinkingFormat ||
+        currentThinkingFormat === currentDefaultThinkingFormat
+          ? defaultThinkingFormatForApi(nextApi)
+          : current.thinkingFormat;
+      return {
+        ...current,
+        api:
+          dialogKind === "official" &&
+          selectedPreset &&
+          nextApi === selectedPreset.api
+            ? ""
+            : nextApi,
+        thinkingFormat: nextThinkingFormat,
+      };
+    });
   }
 
   function handleKeySlotChange(nextEnvName: string) {
@@ -831,56 +1060,59 @@ export function SettingsApp({
   }
 
   function handleSave() {
+    if (parseCommaList(form.speedsText ?? "").some((speed) => !isSpeed(speed))) {
+      setValidationError({ key: "models.validate.speeds" });
+      return;
+    }
     if (dialogKind === "official" && !selectedPreset) {
-      setValidationError("Choose an official provider preset first.");
+      setValidationError({ key: "models.validate.preset" });
       return;
     }
     if (!effectiveModelName) {
-      setValidationError("Model name is required. Example: gpt-5.6");
+      setValidationError({ key: "models.validate.name" });
       return;
     }
     if (dialogKind === "relay" && !fieldText(form.baseUrl)) {
-      setValidationError("Base URL is required for relay or custom endpoints.");
+      setValidationError({ key: "models.validate.baseRequired" });
       return;
     }
     if (dialogKind === "relay" && !isValidBaseUrl(form.baseUrl)) {
-      setValidationError(
-        "Base URL could not be parsed. Use a value like https://host/v1.",
-      );
+      setValidationError({ key: "models.validate.baseInvalid" });
       return;
     }
     if (!effectiveModel.id || !effectiveModel.provider || !effectiveModel.api) {
-      setValidationError("Model ID, provider, and API are all required.");
+      setValidationError({ key: "models.validate.identity" });
       return;
     }
     if (!effectiveApiKeyEnv) {
-      setValidationError("Choose or derive an API key slot before saving.");
+      setValidationError({ key: "models.validate.slotRequired" });
       return;
     }
     if (!isValidKeySlotName(effectiveApiKeyEnv)) {
-      setValidationError(
-        "Key slot must match ^[A-Z_][A-Z0-9_]*$ (uppercase letters, numbers, and underscores).",
-      );
+      setValidationError({ key: "models.validate.slotInvalid" });
       return;
     }
     if (!effectiveKeyPresent && !draftApiKey.trim()) {
-      setValidationError(
-        `Add an API key or switch to a configured slot such as ${effectiveApiKeyEnv}.`,
-      );
+      setValidationError({ key: "models.validate.keyRequired", args: { name: effectiveApiKeyEnv } });
       return;
     }
     if (draftApiKey.trim() && !state.capabilities.setProviderKey) {
-      setValidationError("当前后端不支持保存 API Key，请先升级 `tomcat serve`。");
+      setValidationError({ key: "models.validate.keyUnsupported" });
       return;
     }
     setValidationError(null);
     const affectedModelIds = state.models
       .filter(
         (model) =>
-          model.apiKeyEnv === effectiveApiKeyEnv && model.id !== selectedModel?.id,
+          model.apiKeyEnv === effectiveApiKeyEnv &&
+          model.id !== selectedModel?.id,
       )
       .map((model) => model.id);
-    if (effectiveKeyPresent && draftApiKey.trim() && affectedModelIds.length > 0) {
+    if (
+      effectiveKeyPresent &&
+      draftApiKey.trim() &&
+      affectedModelIds.length > 0
+    ) {
       setReplacementConfirmation({
         envName: effectiveApiKeyEnv,
         modelIds: affectedModelIds,
@@ -891,16 +1123,22 @@ export function SettingsApp({
   }
 
   function handleDelete() {
-    if (!selectedModel || selectedModel.source !== "user") {
+    if (!selectedModel || selectedModel.source !== "user" || deletingModelId) {
       return;
     }
+    setDeleteConfirmation(selectedModel.id);
+  }
+
+  function confirmDelete() {
+    if (!deleteConfirmation || deletingModelId) {
+      return;
+    }
+    setDeletingModelId(deleteConfirmation);
+    setDeleteConfirmation(null);
     send(vscodeApi, {
-      data: {
-        modelId: selectedModel.id,
-      },
+      data: { modelId: deleteConfirmation },
       type: "removeModel",
     });
-    closeForm();
   }
 
   function handleInlineSave(model: SettingsModelView) {
@@ -922,55 +1160,47 @@ export function SettingsApp({
   }
 
   const formTitle =
-    formMode === "edit" && selectedModel ? `Edit ${selectedModel.id}` : "Add Model";
+    formMode === "edit" && selectedModelId
+      ? t("models.editTitle", { name: selectedModelId })
+      : t("models.addTitle");
   const formDescription =
     formMode === "edit"
-      ? "Update this model, reuse a saved key slot, or rotate the key without echoing it back into the UI."
-      : "Add an official model that Tomcat does not ship yet, or connect a relay or custom endpoint.";
+      ? t("models.editDescription")
+      : t("models.addDescription");
 
-  const saveDisabledReason =
-    !state.capabilities.upsertModel
-      ? "The connected `tomcat serve` does not expose model writes yet."
-      : officialPresetUnavailable
-        ? "No official provider presets are available right now. Switch to Relay / custom endpoint."
-        : !effectiveModelName
-          ? "Enter a model name to continue."
-          : !effectiveApiKeyEnv
-            ? "Choose or derive an API key slot before saving."
-            : !isValidKeySlotName(effectiveApiKeyEnv)
-              ? "Key slot must match ^[A-Z_][A-Z0-9_]*$."
-              : dialogKind === "relay" && !fieldText(form.baseUrl)
-              ? "Enter a base URL to continue."
+  const saveDisabledReason = !state.capabilities.upsertModel
+    ? t("models.disable.write")
+    : officialPresetUnavailable
+      ? t("models.disable.preset")
+      : !effectiveModelName
+        ? t("models.disable.name")
+        : !effectiveApiKeyEnv
+          ? t("models.validate.slotRequired")
+          : !isValidKeySlotName(effectiveApiKeyEnv)
+            ? t("models.disable.slotInvalid")
+            : dialogKind === "relay" && !fieldText(form.baseUrl)
+              ? t("models.disable.baseRequired")
               : !effectiveKeyPresent && !draftApiKey.trim()
-                ? `Add an API key or choose a configured slot such as ${effectiveApiKeyEnv}.`
+                ? t("models.disable.keyRequired", { name: effectiveApiKeyEnv })
                 : null;
   const saveDisabled = saveDisabledReason !== null;
+  const serveVersionWarning = buildServeVersionWarning(state, t);
+
+  if (state.route === "general") {
+    return <GeneralSettingsView state={state} vscodeApi={vscodeApi} />;
+  }
+
+  if (state.route === "connectors") {
+    return <ConnectorsSettingsView state={state} vscodeApi={vscodeApi} />;
+  }
 
   return (
-    <div className="tc-settings-shell">
-      <aside className="tc-settings-shell__nav">
-        <div className="tc-settings-shell__brand">Tomcat Settings</div>
-        <button
-          className="tc-settings-nav__item tc-settings-nav__item--active"
-          type="button"
-        >
-          Models
-        </button>
-        <button className="tc-settings-nav__item" disabled type="button">
-          Sessions
-        </button>
-        <button className="tc-settings-nav__item" disabled type="button">
-          Tools
-        </button>
-      </aside>
+    <SettingsShell state={state} vscodeApi={vscodeApi}>
       <main className="tc-settings-shell__content">
         <header className="tc-settings-shell__header">
           <div>
-            <h1>Models</h1>
-            <p>
-              Built-in and custom models, with provider keys stored without
-              echoing them back into the UI.
-            </p>
+            <h1>{t("models.title")}</h1>
+            <p>{t("models.description")}</p>
           </div>
           <button
             className="tc-button tc-button--secondary"
@@ -979,35 +1209,47 @@ export function SettingsApp({
             onClick={openCreateForm}
             type="button"
           >
-            + Add Model
+            {t("models.add")}
           </button>
         </header>
 
-        {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
+        {serveVersionWarning ? (
+          <div className="tc-banner tc-banner--warning">
+            {serveVersionWarning}
+          </div>
+        ) : null}
+        {state.error ? (
+          <div className="tc-banner tc-banner--warning">{state.error}</div>
+        ) : null}
+        {state.warnings?.map((warning) => (
+          <div key={warning} className="tc-banner tc-banner--warning">
+            {warning}
+          </div>
+        ))}
         {state.status ? <div className="tc-banner">{state.status}</div> : null}
 
         {!state.capabilities.listModels ? (
           <section className="tc-empty-state">
-            <h2>Model management unavailable</h2>
-            <p>
-              The connected `tomcat serve` does not expose model management yet.
-            </p>
+            <h2>{t("models.unavailable")}</h2>
+            <p>{t("models.unavailableHint")}</p>
           </section>
         ) : (
           <div className="tc-settings-groups">
             <section className="tc-settings-group">
-              <h2 className="tc-settings-group__title">Ready</h2>
+              <h2 className="tc-settings-group__title">{t("models.ready")}</h2>
               {readyModels.length === 0 ? (
-                <div className="tc-session-dropdown__empty">No ready models yet.</div>
+                <div className="tc-session-dropdown__empty">
+                  {t("models.noneReady")}
+                </div>
               ) : (
                 readyModels.map((model) => {
-                  const details = buildModelDetails(model);
+                  const details = buildModelDetails(model, t);
                   return (
                     <article className="tc-settings-model" key={model.id}>
                       <div className="tc-settings-model__header">
                         <div className="tc-settings-model__identity">
                           <span
-                            aria-label="Ready"
+                            aria-label={t("models.ready")}
                             className="tc-settings-model__status-dot tc-settings-model__status-dot--ready"
                             role="img"
                           />
@@ -1016,7 +1258,7 @@ export function SettingsApp({
                         <div className="tc-settings-model__actions">
                           <div className="tc-settings-model__tooltip-anchor">
                             <button
-                              aria-label={`Show details for ${model.id}`}
+                              aria-label={t("models.details", { name: model.id })}
                               className="tc-settings-model__info"
                               type="button"
                             >
@@ -1033,7 +1275,7 @@ export function SettingsApp({
                                 {details.map((entry) => (
                                   <div
                                     className="tc-settings-model__tooltip-row"
-                                    key={`${model.id}-${entry.label}`}
+                                    key={`${model.id}-${entry.id}`}
                                   >
                                     <dt>{entry.label}</dt>
                                     <dd>{entry.value}</dd>
@@ -1044,10 +1286,11 @@ export function SettingsApp({
                           </div>
                           <button
                             className="tc-button tc-button--secondary"
+                            data-testid={`settings-edit-${model.id}`}
                             onClick={() => openEditForm(model)}
                             type="button"
                           >
-                            Edit
+                            {t("models.edit")}
                           </button>
                         </div>
                       </div>
@@ -1058,20 +1301,20 @@ export function SettingsApp({
             </section>
 
             <section className="tc-settings-group">
-              <h2 className="tc-settings-group__title">Needs API Key</h2>
+              <h2 className="tc-settings-group__title">{t("models.needsKey")}</h2>
               {needsKeyModels.length === 0 ? (
                 <div className="tc-session-dropdown__empty">
-                  All visible models are ready.
+                  {t("models.noMissingKey")}
                 </div>
               ) : (
                 needsKeyModels.map((model) => {
-                  const details = buildModelDetails(model);
+                  const details = buildModelDetails(model, t);
                   return (
                     <article className="tc-settings-model" key={model.id}>
                       <div className="tc-settings-model__header">
                         <div className="tc-settings-model__identity">
                           <span
-                            aria-label="Needs API key"
+                            aria-label={t("models.needsKey")}
                             className="tc-settings-model__status-dot tc-settings-model__status-dot--missing"
                             role="img"
                           />
@@ -1080,7 +1323,7 @@ export function SettingsApp({
                         <div className="tc-settings-model__actions">
                           <div className="tc-settings-model__tooltip-anchor">
                             <button
-                              aria-label={`Show details for ${model.id}`}
+                              aria-label={t("models.details", { name: model.id })}
                               className="tc-settings-model__info"
                               type="button"
                             >
@@ -1097,7 +1340,7 @@ export function SettingsApp({
                                 {details.map((entry) => (
                                   <div
                                     className="tc-settings-model__tooltip-row"
-                                    key={`${model.id}-${entry.label}`}
+                                    key={`${model.id}-${entry.id}`}
                                   >
                                     <dt>{entry.label}</dt>
                                     <dd>{entry.value}</dd>
@@ -1108,10 +1351,11 @@ export function SettingsApp({
                           </div>
                           <button
                             className="tc-button tc-button--secondary"
+                            data-testid={`settings-edit-${model.id}`}
                             onClick={() => openEditForm(model)}
                             type="button"
                           >
-                            Edit
+                            {t("models.edit")}
                           </button>
                         </div>
                       </div>
@@ -1125,7 +1369,7 @@ export function SettingsApp({
                               [model.id]: event.target.value,
                             }))
                           }
-                          placeholder={`Save ${modelKeyEnvName(model)}`}
+                          placeholder={t("models.saveKey", { name: modelKeyEnvName(model) })}
                           type="password"
                           value={inlineApiKeys[model.id] ?? ""}
                         />
@@ -1135,7 +1379,7 @@ export function SettingsApp({
                           onClick={() => handleInlineSave(model)}
                           type="button"
                         >
-                          Save
+                          {t("common.save")}
                         </button>
                       </div>
                     </article>
@@ -1147,7 +1391,10 @@ export function SettingsApp({
         )}
 
         {isFormOpen ? (
-          <div className="tc-settings-modal" onClick={closeForm}>
+          <div
+            className="tc-settings-modal"
+            onClick={deletingModelId ? undefined : closeForm}
+          >
             <section
               aria-labelledby="settings-model-form-title"
               aria-modal="true"
@@ -1162,9 +1409,10 @@ export function SettingsApp({
                   <p>{formDescription}</p>
                 </div>
                 <button
-                  aria-label="Close model form"
+                  aria-label={t("models.closeForm")}
                   className="tc-icon-button tc-settings-modal__close"
                   data-testid="settings-close-model-form"
+                  disabled={Boolean(deletingModelId)}
                   onClick={closeForm}
                   type="button"
                 >
@@ -1173,17 +1421,25 @@ export function SettingsApp({
               </div>
 
               {validationError ? (
-                <div className="tc-banner tc-banner--warning">{validationError}</div>
+                <div className="tc-banner tc-banner--warning">
+                  {t(validationError.key, validationError.args)}
+                </div>
+              ) : null}
+
+              {deletingModelId ? (
+                <div className="tc-banner" role="status">
+                  {t("models.deleting", { name: deletingModelId })}
+                </div>
               ) : null}
               {builtinCollision ? (
                 <div className="tc-banner tc-banner--warning">
-                  Saving this model will override the built-in model `{builtinCollision.id}`.
+                  {t("models.builtinCollision", { name: builtinCollision.id })}
                 </div>
               ) : null}
 
               <div className="tc-settings-form">
                 <div
-                  aria-label="Add model mode"
+                  aria-label={t("models.mode")}
                   className="tc-settings-tabs"
                   role="tablist"
                 >
@@ -1193,12 +1449,14 @@ export function SettingsApp({
                     className={`tc-settings-tabs__tab${dialogKind === "official" ? " tc-settings-tabs__tab--active" : ""}`}
                     id={tabIdForDialogKind("official")}
                     onClick={() => handleDialogKindChange("official")}
-                    onKeyDown={(event) => handleDialogTabKeyDown("official", event)}
+                    onKeyDown={(event) =>
+                      handleDialogTabKeyDown("official", event)
+                    }
                     role="tab"
                     tabIndex={dialogKind === "official" ? 0 : -1}
                     type="button"
                   >
-                    Official new model
+                    {t("models.official")}
                   </button>
                   <button
                     aria-controls={panelIdForDialogKind("relay")}
@@ -1207,12 +1465,14 @@ export function SettingsApp({
                     data-testid="settings-mode-relay"
                     id={tabIdForDialogKind("relay")}
                     onClick={() => handleDialogKindChange("relay")}
-                    onKeyDown={(event) => handleDialogTabKeyDown("relay", event)}
+                    onKeyDown={(event) =>
+                      handleDialogTabKeyDown("relay", event)
+                    }
                     role="tab"
                     tabIndex={dialogKind === "relay" ? 0 : -1}
                     type="button"
                   >
-                    Relay / custom endpoint
+                    {t("models.relay")}
                   </button>
                 </div>
 
@@ -1227,25 +1487,29 @@ export function SettingsApp({
                       <>
                         <div className="tc-settings-form__row">
                           <label className="tc-field">
-                            <span>Provider</span>
+                            <span>{t("models.provider")}</span>
                             <select
-                              aria-label="Provider"
-                              onChange={(event) => handlePresetChange(event.target.value)}
+                              aria-label={t("models.provider")}
+                              onChange={(event) =>
+                                handlePresetChange(event.target.value)
+                              }
                               value={selectedPreset?.provider ?? ""}
                             >
                               {providerPresets.map((preset) => (
-                                <option key={preset.provider} value={preset.provider}>
+                                <option
+                                  key={preset.provider}
+                                  value={preset.provider}
+                                >
                                   {preset.label}
                                 </option>
                               ))}
                             </select>
                             <small className="tc-field__hint">
-                              Choose the official vendor. Tomcat fills in the API,
-                              URL, key slot, thinking format, and capabilities.
+                              {t("models.officialHint")}
                             </small>
                           </label>
                           <label className="tc-field">
-                            <span>Model name</span>
+                            <span>{t("models.name")}</span>
                             <input
                               className="tc-input"
                               onChange={(event) =>
@@ -1254,54 +1518,39 @@ export function SettingsApp({
                                   modelName: event.target.value,
                                 }))
                               }
-                              placeholder="For example: gpt-5.6"
+                              placeholder={t("models.example", { name: "gpt-5.6" })}
                               value={form.modelName ?? ""}
                             />
                             <small className="tc-field__hint">
-                              The exact model name the provider expects.
+                              {t("models.exactName")}
                             </small>
                           </label>
                         </div>
 
-                        <label className="tc-field">
-                          <span>Model ID (alias)</span>
-                          <input
-                            className="tc-input tc-input--readonly"
-                            disabled
-                            readOnly
-                            value={effectiveId}
-                          />
-                          <small className="tc-field__hint">
-                            This is how the model appears inside Tomcat. You can
-                            override the alias in Advanced.
-                          </small>
-                        </label>
-
                         <div className="tc-settings-preset-summary">
                           <span className="tc-settings-preset-summary__line">
-                            {formatApiLabel(selectedPreset.api)}
+                            {formatApiLabel(selectedPreset.api, t)}
                           </span>
                           <span className="tc-settings-preset-summary__line">
                             {selectedPreset.baseUrl}
                           </span>
                           <span className="tc-settings-preset-summary__line">
                             {selectedPreset.apiKeyEnv}
-                            {selectedPreset.keyPresent ? " already configured" : " not configured yet"}
+                            {selectedPreset.keyPresent
+                              ? t("models.alreadyConfigured")
+                              : t("models.notConfigured")}
                           </span>
                         </div>
                       </>
                     ) : (
                       <div className="tc-settings-mode-empty" role="status">
-                        <p>
-                          No official provider presets are available from the
-                          connected `tomcat serve`.
-                        </p>
+                        <p>{t("models.noPresets")}</p>
                         <button
                           className="tc-button tc-button--secondary"
                           onClick={() => handleDialogKindChange("relay")}
                           type="button"
                         >
-                          Use Relay / custom endpoint
+                          {t("models.useRelay")}
                         </button>
                       </div>
                     )}
@@ -1314,7 +1563,7 @@ export function SettingsApp({
                     role="tabpanel"
                   >
                     <label className="tc-field">
-                      <span>Base URL</span>
+                      <span>{t("term.baseUrl")}</span>
                       <input
                         className="tc-input"
                         onChange={(event) =>
@@ -1327,32 +1576,32 @@ export function SettingsApp({
                         value={form.baseUrl ?? ""}
                       />
                       <small className="tc-field__hint">
-                        The relay or custom endpoint. A missing scheme will be
-                        saved as `https://...`.
+                        {t("models.relayHint")}
                       </small>
                     </label>
 
                     <div className="tc-settings-form__row">
                       <label className="tc-field">
-                        <span>API</span>
+                        <span>{t("term.api")}</span>
                         <select
-                          aria-label="API"
-                          onChange={(event) => handleApiChange(event.target.value)}
+                          aria-label={t("term.api")}
+                          onChange={(event) =>
+                            handleApiChange(event.target.value)
+                          }
                           value={fieldText(form.api) || "openai"}
                         >
                           {API_OPTIONS.map((entry) => (
                             <option key={entry.value} value={entry.value}>
-                              {entry.label}
+                              {t(entry.labelKey)}
                             </option>
                           ))}
                         </select>
                         <small className="tc-field__hint">
-                          This decides how Tomcat talks to the endpoint and how
-                          Auto thinking is encoded.
+                          {t("models.apiHint")}
                         </small>
                       </label>
                       <label className="tc-field">
-                        <span>Model name</span>
+                        <span>{t("models.name")}</span>
                         <input
                           className="tc-input"
                           onChange={(event) =>
@@ -1361,18 +1610,18 @@ export function SettingsApp({
                               modelName: event.target.value,
                             }))
                           }
-                          placeholder="For example: gpt-5.4"
+                          placeholder={t("models.example", { name: "gpt-5.4" })}
                           value={form.modelName ?? ""}
                         />
                         <small className="tc-field__hint">
-                          The exact model name your relay forwards upstream.
+                          {t("models.relayNameHint")}
                         </small>
                       </label>
                     </div>
 
                     <div className="tc-settings-preview">
                       <div className="tc-settings-preview__title">
-                        Will save as
+                        {t("models.willSaveAs")}
                       </div>
                       <div className="tc-settings-preview__row">
                         <span>provider</span>
@@ -1387,30 +1636,79 @@ export function SettingsApp({
                         <strong>{effectiveId || "—"}</strong>
                       </div>
                     </div>
+                    {automaticReusableModel ? (
+                      <div
+                        className="tc-settings-derived-model"
+                        data-testid="settings-builtin-capability-source"
+                      >
+                        <strong>
+                          {t(automaticReusableModel.source === "user" ? "models.reusingConfigured" : "models.reusingBuiltin", { name: automaticReusableModel.id })}
+                        </strong>
+                        <span>
+                          {t("models.reusingHint")}
+                        </span>
+                      </div>
+                    ) : null}
                   </div>
                 )}
 
+                <label className="tc-field">
+                  <span>{t("models.alias")}</span>
+                  <input
+                    aria-label={t("models.alias")}
+                    className={`tc-input${formMode === "edit" ? " tc-input--readonly" : ""}`}
+                    onChange={(event) => {
+                      if (formMode === "edit") {
+                        return;
+                      }
+                      setIdManuallyEdited(true);
+                      setForm((current) => ({
+                        ...current,
+                        id: event.target.value,
+                      }));
+                    }}
+                    placeholder={derivedId || t("models.aliasDefault")}
+                    readOnly={formMode === "edit"}
+                    value={effectiveId}
+                  />
+                  <small className="tc-field__hint">
+                    {formMode === "edit"
+                      ? t("models.aliasFixed")
+                      : t("models.aliasHint")}
+                  </small>
+                </label>
+
                 {showSharedFormFields ? (
                   <>
-                    <div className="tc-settings-form__row" data-testid="settings-key-fields-row">
+                    <div
+                      className="tc-settings-form__row"
+                      data-testid="settings-key-fields-row"
+                    >
                       <KeySlotCombobox
-                        feedback={keySlotRefreshFeedback}
-                        hint="Search a configured key slot or type a new environment variable name."
+                        feedback={keySlotRefreshFeedback ? t(keySlotRefreshFeedback) : null}
+                        hint={t("models.keySearchHint")}
                         onChange={handleKeySlotChange}
                         onRefresh={handleKeySlotRefresh}
                         options={keySlotOptions}
                         placeholder={suggestedApiKeyEnv || "EXAMPLE_API_KEY"}
-                        refreshDisabled={!state.capabilities.listProviderKeys || isKeySlotRefreshing}
-                        refreshLabel="Refresh key slots"
+                        refreshDisabled={
+                          !state.capabilities.listProviderKeys ||
+                          isKeySlotRefreshing
+                        }
+                        refreshLabel={t("models.keyRefresh")}
                         refreshing={isKeySlotRefreshing}
                         value={effectiveApiKeyEnv}
                       />
                       <label className="tc-field">
                         <div className="tc-field__label-row">
-                          <span>{effectiveKeyPresent ? "New API key (optional)" : "API key"}</span>
+                          <span>
+                            {effectiveKeyPresent
+                              ? t("models.keyNew")
+                              : t("term.field.apiKey")}
+                          </span>
                         </div>
                         <input
-                          aria-label="API key"
+                          aria-label={t("term.field.apiKey")}
                           autoComplete="off"
                           className="tc-input tc-settings-api-key-input"
                           data-testid="settings-api-key-input"
@@ -1422,11 +1720,15 @@ export function SettingsApp({
                           onFocus={() => setIsApiKeyFocused(true)}
                           placeholder={
                             effectiveKeyPresent
-                              ? `Leave blank to reuse ${effectiveApiKeyEnv}`
-                              : `Save ${effectiveApiKeyEnv || "the selected key slot"}`
+                              ? t("models.leaveBlank", { name: effectiveApiKeyEnv })
+                              : t("models.saveKey", { name: effectiveApiKeyEnv || t("models.selectedSlot") })
                           }
                           readOnly={!isApiKeyFocused && draftApiKey.length > 0}
-                          type={isApiKeyFocused || !draftApiKey ? "password" : "text"}
+                          type={
+                            isApiKeyFocused || !draftApiKey
+                              ? "password"
+                              : "text"
+                          }
                           value={
                             isApiKeyFocused || !draftApiKey
                               ? draftApiKey
@@ -1435,8 +1737,8 @@ export function SettingsApp({
                         />
                         <small className="tc-field__hint">
                           {effectiveKeyPresent
-                            ? `Already configured: ${effectiveApiKeyEnv}.`
-                            : "Required unless you choose a configured slot."}
+                            ? t("models.alreadyKey", { name: effectiveApiKeyEnv })
+                            : t("models.keyHint")}
                         </small>
                       </label>
                     </div>
@@ -1444,10 +1746,11 @@ export function SettingsApp({
                     <button
                       aria-expanded={showAdvanced}
                       className="tc-settings-advanced__toggle"
+                      data-testid="settings-model-advanced"
                       onClick={() => setShowAdvanced((current) => !current)}
                       type="button"
                     >
-                      <span>Advanced</span>
+                      <span>{t("models.advanced")}</span>
                       <span className="tc-settings-advanced__caret">
                         {showAdvanced ? "▾" : "▸"}
                       </span>
@@ -1458,21 +1761,27 @@ export function SettingsApp({
                         {dialogKind === "official" ? (
                           <div className="tc-settings-form__row">
                             <label className="tc-field">
-                              <span>API override</span>
+                              <span>{t("models.apiOverride")}</span>
                               <select
-                                aria-label="API override"
-                                onChange={(event) => handleApiChange(event.target.value)}
-                                value={fieldText(form.api) || selectedPreset?.api || ""}
+                                aria-label={t("models.apiOverride")}
+                                onChange={(event) =>
+                                  handleApiChange(event.target.value)
+                                }
+                                value={
+                                  fieldText(form.api) ||
+                                  selectedPreset?.api ||
+                                  ""
+                                }
                               >
                                 {API_OPTIONS.map((entry) => (
                                   <option key={entry.value} value={entry.value}>
-                                    {entry.label}
+                                    {t(entry.labelKey)}
                                   </option>
                                 ))}
                               </select>
                             </label>
                             <label className="tc-field">
-                              <span>Base URL override</span>
+                              <span>{t("models.urlOverride")}</span>
                               <input
                                 className="tc-input"
                                 onChange={(event) =>
@@ -1481,7 +1790,10 @@ export function SettingsApp({
                                     baseUrl: event.target.value,
                                   }))
                                 }
-                                placeholder={selectedPreset?.baseUrl || "https://api.example.com/v1"}
+                                placeholder={
+                                  selectedPreset?.baseUrl ||
+                                  "https://api.example.com/v1"
+                                }
                                 value={form.baseUrl ?? ""}
                               />
                             </label>
@@ -1490,25 +1802,7 @@ export function SettingsApp({
 
                         <div className="tc-settings-form__row">
                           <label className="tc-field">
-                            <span>Model ID (alias)</span>
-                            <input
-                              className="tc-input"
-                              disabled={selectedModel !== null}
-                              onChange={(event) =>
-                                setForm((current) => ({
-                                  ...current,
-                                  id: event.target.value,
-                                }))
-                              }
-                              placeholder={derivedId || "Defaults to the model name"}
-                              value={selectedModel ? selectedModel.id : form.id}
-                            />
-                            <small className="tc-field__hint">
-                              Leave this empty to use the suggested alias.
-                            </small>
-                          </label>
-                          <label className="tc-field">
-                            <span>Provider override</span>
+                            <span>{t("models.providerOverride")}</span>
                             <input
                               className="tc-input"
                               onChange={(event) =>
@@ -1517,49 +1811,51 @@ export function SettingsApp({
                                   provider: event.target.value,
                                 }))
                               }
-                              placeholder={effectiveProvider || "Derived from the current mode"}
+                              placeholder={
+                                effectiveProvider ||
+                                t("models.derived")
+                              }
                               value={form.provider}
                             />
                             <small className="tc-field__hint">
-                              Usually you should keep the derived provider label.
+                              {t("models.providerHint")}
                             </small>
                           </label>
                         </div>
 
                         <div className="tc-settings-form__row">
-                          <label className="tc-field">
-                            <span>Context window</span>
-                            <input
-                              className="tc-input"
-                              inputMode="numeric"
-                              onChange={(event) =>
-                                setForm((current) => ({
-                                  ...current,
-                                  contextWindow: event.target.value
-                                    ? Number(event.target.value)
-                                    : null,
-                                }))
-                              }
-                              placeholder="400000"
-                              value={normalizedContextWindow ?? ""}
-                            />
-                            <small className="tc-field__hint">
-                              Leave this empty to use Tomcat’s default context window.
+                          <div className="tc-settings-auto-field">
+                            <span>{t("models.contextWindow")}</span>
+                            <strong data-testid="settings-context-window-auto">
+                              {effectiveContextWindow}
+                            </strong>
+                            <small>
+                              {t("models.contextHint")}
                             </small>
-                          </label>
+                          </div>
+                          <div className="tc-settings-auto-field">
+                            <span>{t("models.maxOutput")}</span>
+                            <strong data-testid="settings-max-output-tokens-auto">
+                              {effectiveMaxOutputTokens}
+                            </strong>
+                            <small className="tc-field__hint">
+                              {t("models.maxOutputHint")}
+                            </small>
+                          </div>
                         </div>
 
                         <label className="tc-field">
-                          <span>Thinking format</span>
+                          <span>{t("models.thinkingFormat")}</span>
                           <select
-                            aria-label="Thinking format"
+                            aria-label={t("models.thinkingFormat")}
                             onChange={(event) =>
                               setForm((current) => ({
                                 ...current,
                                 thinkingFormat:
                                   dialogKind === "official" &&
                                   selectedPreset &&
-                                  event.target.value === selectedPreset.thinkingFormat
+                                  event.target.value ===
+                                    selectedPreset.thinkingFormat
                                     ? ""
                                     : event.target.value,
                               }))
@@ -1567,33 +1863,93 @@ export function SettingsApp({
                             value={
                               fieldText(form.thinkingFormat) ||
                               (dialogKind === "official"
-                                ? selectedPreset?.thinkingFormat ?? ""
-                                : "")
+                                ? (selectedPreset?.thinkingFormat ??
+                                  defaultThinkingFormatForApi(effectiveApi))
+                                : defaultThinkingFormatForApi(effectiveApi))
                             }
                           >
                             {THINKING_FORMAT_OPTIONS.map((entry) => (
-                              <option key={entry.value || "auto"} value={entry.value}>
-                                {entry.label}
+                              <option
+                                key={entry.value || "auto"}
+                                value={entry.value}
+                              >
+                                {t(entry.labelKey)}
                               </option>
                             ))}
                           </select>
                           <small className="tc-field__hint">
-                            In relay mode, Auto follows the selected API and never
-                            guesses from the model name.
+                            {t("models.thinkingHint")}
+                          </small>
+                        </label>
+
+                        <div className="tc-settings-form__row">
+                          <label className="tc-field">
+                            <span>{t("models.descriptionField")}</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  description: event.target.value,
+                                }))
+                              }
+                              placeholder={t("models.descriptionOptional")}
+                              value={form.description ?? ""}
+                            />
+                          </label>
+                          <label className="tc-field">
+                            <span>{t("models.effortLevels")}</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  reasoningLevelsText: event.target.value,
+                                }))
+                              }
+                              placeholder="low, medium, high, xhigh, max"
+                              data-testid="settings-supported-effort-levels"
+                              aria-label={t("models.effortLevels")}
+                              value={form.reasoningLevelsText ?? ""}
+                            />
+                            <small className="tc-field__hint">
+                              {t("models.effortHint")}
+                            </small>
+                          </label>
+                        </div>
+
+                        <label className="tc-field">
+                          <span>{t("models.speeds")}</span>
+                          <input
+                            className="tc-input"
+                            data-testid="settings-supported-speeds"
+                            aria-label={t("models.speeds")}
+                            onChange={(event) => setForm((current) => ({ ...current, speedsText: event.target.value }))}
+                            placeholder={t("models.speedsExample")}
+                            value={form.speedsText ?? ""}
+                          />
+                          <small className="tc-field__hint">
+                            {t("models.speedsHint")}
                           </small>
                         </label>
 
                         <div className="tc-settings-capabilities">
                           {CAPABILITY_OPTIONS.map(([key, label]) => (
-                            <label className="tc-settings-capabilities__item" key={key}>
+                            <label
+                              className="tc-settings-capabilities__item"
+                              key={key}
+                            >
                               <input
                                 checked={form.capabilities[key]}
                                 onChange={(event) =>
-                                  handleCapabilityChange(key, event.target.checked)
+                                  handleCapabilityChange(
+                                    key,
+                                    event.target.checked,
+                                  )
                                 }
                                 type="checkbox"
                               />
-                              <span>{label}</span>
+                              <span>{t(label)}</span>
                             </label>
                           ))}
                         </div>
@@ -1605,28 +1961,30 @@ export function SettingsApp({
                 <div className="tc-button-row tc-settings-form__actions">
                   <button
                     className="tc-button tc-button--ghost"
+                    disabled={Boolean(deletingModelId)}
                     onClick={closeForm}
                     type="button"
                   >
-                    Cancel
+                    {t("common.cancel")}
                   </button>
                   {selectedModel?.source === "user" ? (
                     <button
                       className="tc-button tc-button--ghost"
-                      disabled={!state.capabilities.removeModel}
+                      disabled={!state.capabilities.removeModel || Boolean(deletingModelId)}
                       onClick={handleDelete}
                       type="button"
                     >
-                      Delete
+                      {t("models.delete")}
                     </button>
                   ) : null}
                   <button
                     className="tc-button tc-button--primary"
-                    disabled={saveDisabled}
+                    disabled={saveDisabled || Boolean(deletingModelId)}
+                    data-testid="settings-save-model"
                     onClick={handleSave}
                     type="button"
                   >
-                    Save Model
+                    {t("models.saveModel")}
                   </button>
                 </div>
                 {saveDisabledReason ? (
@@ -1634,6 +1992,40 @@ export function SettingsApp({
                     {saveDisabledReason}
                   </div>
                 ) : null}
+              </div>
+            </section>
+          </div>
+        ) : null}
+        {deleteConfirmation ? (
+          <div className="tc-settings-modal" role="presentation">
+            <section
+              aria-labelledby="delete-model-title"
+              aria-modal="true"
+              className="tc-card tc-settings-modal__card"
+              data-testid="settings-delete-model-confirmation"
+              role="alertdialog"
+            >
+              <div className="tc-settings-modal__header">
+                <div>
+                  <h3 id="delete-model-title">{t("models.deleteQuestion", { name: deleteConfirmation })}</h3>
+                  <p>{t("models.deleteHint")}</p>
+                </div>
+              </div>
+              <div className="tc-button-row tc-settings-form__actions">
+                <button
+                  className="tc-button tc-button--ghost"
+                  onClick={() => setDeleteConfirmation(null)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="tc-button tc-button--danger"
+                  onClick={confirmDelete}
+                  type="button"
+                >
+                  {t("models.deleteAction")}
+                </button>
               </div>
             </section>
           </div>
@@ -1648,14 +2040,12 @@ export function SettingsApp({
             >
               <div className="tc-settings-modal__header">
                 <div>
-                  <h3 id="replace-shared-key-title">Replace shared API key?</h3>
-                  <p>
-                    You are about to replace <strong>{replacementConfirmation.envName}</strong>.
-                  </p>
+                  <h3 id="replace-shared-key-title">{t("models.replaceQuestion")}</h3>
+                  <p>{t("models.replaceHint", { name: replacementConfirmation.envName })}</p>
                 </div>
               </div>
               <div className="tc-settings-form">
-                <p>The following models will use the new key immediately:</p>
+                <p>{t("models.replaceAffected")}</p>
                 <ul>
                   {replacementConfirmation.modelIds.map((modelId) => (
                     <li key={modelId}>{modelId}</li>
@@ -1667,7 +2057,7 @@ export function SettingsApp({
                     onClick={() => setReplacementConfirmation(null)}
                     type="button"
                   >
-                    Cancel
+                    {t("common.cancel")}
                   </button>
                   <button
                     className="tc-button tc-button--primary"
@@ -1677,7 +2067,7 @@ export function SettingsApp({
                     }}
                     type="button"
                   >
-                    Replace shared key
+                    {t("models.replaceAction")}
                   </button>
                 </div>
               </div>
@@ -1685,6 +2075,6 @@ export function SettingsApp({
           </div>
         ) : null}
       </main>
-    </div>
+    </SettingsShell>
   );
 }

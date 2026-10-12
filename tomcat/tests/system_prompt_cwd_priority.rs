@@ -1,7 +1,8 @@
 //! E2E-PROMPT-025-offline：system prompt 中 agent_workspace_dir 是“当前目录”的唯一来源。
 
 use tomcat::core::llm::system_prompt::{
-    build_system_prompt_with_state, WorkspaceContext, WorkspaceRootDescriptor, WorkspaceState,
+    SystemPromptBuilder, WorkspaceContext, WorkspaceRootDescriptor, WorkspaceState,
+    WorkspaceStateSection,
 };
 
 #[test]
@@ -42,7 +43,9 @@ fn system_prompt_names_three_directories_and_keeps_state_as_permission_list() {
         path_rules: vec![],
     };
 
-    let prompt = build_system_prompt_with_state(context, state);
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(WorkspaceStateSection::new(state)));
+    let prompt = builder.build(&context);
 
     assert!(prompt.contains("Agent workspace directory (agent_workspace_dir):"));
     assert!(prompt.contains("current directory"));

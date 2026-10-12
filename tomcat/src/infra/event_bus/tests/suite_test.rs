@@ -339,6 +339,7 @@ async fn scoped_event_emitter_can_be_cloned_into_spawn() {
     tokio::spawn(async move {
         task_emitter
             .emit(AgentEvent::ToolExecutionEnd {
+                media: Vec::new(),
                 tool_call_id: "c1".into(),
                 tool_name: "bash".into(),
                 result: ToolOutput(serde_json::json!({"stdout": "ok"})),

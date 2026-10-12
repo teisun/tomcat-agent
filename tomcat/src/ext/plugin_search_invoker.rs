@@ -1,3 +1,5 @@
+use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -49,7 +51,7 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
             Err(err) => Err(classify_plugin_invocation_error(
                 backend,
                 provider.plugin_id.as_str(),
-                &err.to_string(),
+                &err,
             )),
         }
     }
@@ -57,9 +59,9 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
 
 fn unsupported_backend_error(backend: &str) -> BackendFailure {
     let detail = if backend == "auto" {
-        "未找到可用的 web_search 插件后端".to_string()
+        tr("plugin.searchUnavailable", &[])
     } else {
-        format!("未找到名为 `{backend}` 的 web_search 插件后端")
+        tr("plugin.searchMissing", &[("name", backend)])
     };
     BackendFailure::Incompatible { detail }
 }
@@ -67,81 +69,39 @@ fn unsupported_backend_error(backend: &str) -> BackendFailure {
 fn classify_plugin_invocation_error(
     backend: &str,
     plugin_id: &str,
-    err_text: &str,
+    error: &AppError,
 ) -> BackendFailure {
-    if err_text.contains("pi.fetch request timed out") {
+    let err_text = error.to_string();
+    let code = match error {
+        AppError::Plugin(raw) | AppError::QuickJS(raw) => {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+        }
+        _ => None,
+    };
+    if code.as_deref() == Some("timeout") {
         return BackendFailure::Timeout;
     }
-    let detail =
-        format!("web_search plugin backend `{backend}` via `{plugin_id}` failed: {err_text}");
-    if looks_like_plugin_runtime_error(err_text) {
+    let detail = tr(
+        "plugin.searchFailed",
+        &[
+            ("backend", backend),
+            ("plugin", plugin_id),
+            ("detail", &err_text),
+        ],
+    );
+    if code.is_none() && matches!(error, AppError::QuickJS(_)) {
         return BackendFailure::PluginRuntime { detail };
     }
     BackendFailure::Transport { detail }
 }
 
-fn looks_like_plugin_runtime_error(err_text: &str) -> bool {
-    [
-        "QuickJsHost",
-        "RustHost",
-        "JS执行错误",
-        "VM execution error",
-        "VM actor channel closed",
-        "plugin runtime",
-        "plugin execution interrupted",
-        "execution exceeded ",
-        "async hostcall",
-        "LlmProvider not configured",
-        "LlmResolver not configured",
-        "create runtime for scope activation failed",
-    ]
-    .iter()
-    .any(|needle| err_text.contains(needle))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::classify_plugin_invocation_error;
-    use crate::core::tools::web_search::backend::BackendFailure;
-
-    #[test]
-    fn classify_plugin_invocation_error_keeps_fetch_timeouts_retryable() {
-        let failure = classify_plugin_invocation_error(
-            "tavily",
-            "tomcat.web-search-backends",
-            "JS执行错误: Error: pi.fetch request timed out",
-        );
-        assert!(matches!(failure, BackendFailure::Timeout));
-    }
-
-    #[test]
-    fn classify_plugin_invocation_error_marks_vm_failures_non_retryable() {
-        let failure = classify_plugin_invocation_error(
-            "mimo",
-            "tomcat.web-search-backends",
-            "JS执行错误: Error converting from js 'RustHost' into type 'QuickJsHost': 插件错误: async hostcall requires a Tokio runtime handle",
-        );
-        match failure {
-            BackendFailure::PluginRuntime { detail } => {
-                assert!(detail.contains("async hostcall requires a Tokio runtime handle"));
-                assert!(detail.contains("tomcat.web-search-backends"));
-            }
-            other => panic!("expected PluginRuntime, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_plugin_invocation_error_falls_back_to_transport_for_other_errors() {
-        let failure = classify_plugin_invocation_error(
-            "mimo",
-            "tomcat.web-search-backends",
-            "unexpected backend failure",
-        );
-        match failure {
-            BackendFailure::Transport { detail } => {
-                assert!(detail.contains("unexpected backend failure"));
-            }
-            other => panic!("expected Transport, got {other:?}"),
-        }
-    }
-}
+#[path = "tests/plugin_search_invoker_test.rs"]
+mod tests;

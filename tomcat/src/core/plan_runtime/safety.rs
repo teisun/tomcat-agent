@@ -3,7 +3,7 @@
 //! 写路径策略（plan-runtime.md §4.1 R6 / §5.6）：
 //! - **PLAN**：`write/edit/hashline_edit/delete` **仅允许** `~/.tomcat/plans/*.plan.md`；
 //!   离开此目录的任何写一律拒。
-//! - **EXEC**：`~/.tomcat/plans/*` **全拒**（含 plan 文件正文与 frontmatter）；推进任务仅走 `update_plan`。
+//! - **执行中的计划**：`~/.tomcat/plans/*` **全拒**（含 plan 文件正文与 frontmatter）；推进任务仅走 `update_plan`。
 //! - **CHAT / Pending / Completed**：plan 文件经 plan 工具间接写；外部路径按常规权限。
 //! - **Reviewer subagent**：`edit` 仅允许作用于 `~/.tomcat/plans/*.plan.md`，且 raw edit
 //!   不能改 frontmatter（在 tool_exec 的 edit 分支内做 diff 检查）。
@@ -11,8 +11,8 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::state::PlanState;
 use super::PlanRuntimeError;
+use crate::core::session::AgentMode;
 
 /// 校验 `plan_id` 仅含 `a-z 0-9 _ -` 字符，且不为空。
 ///
@@ -60,19 +60,15 @@ pub fn assert_plan_id_safe_for_disk(plan_id: &str) -> Result<(), PlanRuntimeErro
 /// 写工具路径策略拒绝原因（[`enforce_write_path_policy`] 返回 Err 时携带）。
 #[derive(Debug, thiserror::Error)]
 pub enum WritePathDenied {
-    #[error(
-        "PLAN 模式下 write/edit/delete 仅允许写入 ~/.tomcat/plans/*.plan.md；目标 {target:?} 不在白名单内"
-    )]
-    PlanStateOnlyPlanFiles { target: PathBuf },
-    #[error(
-        "EXEC 模式下 ~/.tomcat/plans/* 全部禁写（含正文与 frontmatter）；推进任务请使用 update_plan 工具。目标 {target:?}"
-    )]
-    ExecModePlanFilesReadOnly { target: PathBuf },
-    #[error("reviewer 子 Agent 只能写 ~/.tomcat/plans/*.plan.md（frontmatter raw edit 仍由 edit 守卫具体检查）")]
+    #[error("In PLAN mode, write/edit/delete may only target ~/.tomcat/plans/*.plan.md; target {target:?} is not allowed")]
+    PlanModeOnlyPlanFiles { target: PathBuf },
+    #[error("While a plan is executing, ~/.tomcat/plans/* is read-only (body and frontmatter); use update_plan to advance tasks. Target {target:?}")]
+    ExecutingPlanFilesReadOnly { target: PathBuf },
+    #[error("A reviewer sub-Agent may only write ~/.tomcat/plans/*.plan.md (the edit guard also checks raw frontmatter edits)")]
     ReviewerOnlyPlanFiles,
-    #[error("code reviewer 是严格只读子 Agent；禁止调用任何 write/edit/delete 类工具")]
+    #[error("The code reviewer is a strictly read-only sub-Agent; write/edit/delete tools are forbidden")]
     CodeReviewerReadOnly,
-    #[error("无法解析 ~/.tomcat/plans/ 目录：{0}")]
+    #[error("Could not resolve ~/.tomcat/plans/ directory: {0}")]
     PlansDirUnavailable(String),
 }
 
@@ -81,9 +77,9 @@ pub enum WritePathDenied {
 pub enum SubagentKind {
     /// 主 Agent / 用户 chat / dispatch_agent leaf
     Other,
-    /// reviewer subagent（`SubagentType::Reviewer`）
-    Reviewer,
-    /// code reviewer subagent（`ReviewKind::Code`）
+    /// plan reviewer subagent（`SubagentType::PlanReviewer`）
+    PlanReviewer,
+    /// code reviewer subagent（`SubagentType::CodeReviewer`）
     CodeReviewer,
 }
 
@@ -94,7 +90,8 @@ pub enum SubagentKind {
 /// 这里只做**路径维度**的拒绝；reviewer 的 frontmatter raw-edit 守卫由 edit 分支再做
 /// diff 检查（因为它需要新旧两份内容，无法在路径层判断）。
 pub fn enforce_write_path_policy(
-    mode: &PlanState,
+    mode: AgentMode,
+    executing: bool,
     subagent: SubagentKind,
     target_path: &Path,
 ) -> Result<(), WritePathDenied> {
@@ -129,17 +126,17 @@ pub fn enforce_write_path_policy(
         return Err(WritePathDenied::CodeReviewerReadOnly);
     }
 
-    // Reviewer：只能写 plan 文件（且段位再由 edit guard 检查）。
-    if subagent == SubagentKind::Reviewer && !is_plan_file {
+    // Plan reviewer：只能写 plan 文件（且段位再由 edit guard 检查）。
+    if subagent == SubagentKind::PlanReviewer && !is_plan_file {
         return Err(WritePathDenied::ReviewerOnlyPlanFiles);
     }
 
     match mode {
-        PlanState::Planning if !is_plan_file => Err(WritePathDenied::PlanStateOnlyPlanFiles {
+        AgentMode::Plan if !is_plan_file => Err(WritePathDenied::PlanModeOnlyPlanFiles {
             target: canon_target,
         }),
-        PlanState::Executing { .. } if in_plans_dir => {
-            Err(WritePathDenied::ExecModePlanFilesReadOnly {
+        AgentMode::Chat if executing && in_plans_dir => {
+            Err(WritePathDenied::ExecutingPlanFilesReadOnly {
                 target: canon_target,
             })
         }
@@ -161,7 +158,7 @@ pub fn reviewer_body_diff_guard(old: &str, new: &str) -> Result<(), ReviewDiffDe
 /// reviewer 段守卫拒绝原因。
 #[derive(Debug, thiserror::Error)]
 pub enum ReviewDiffDenied {
-    #[error("reviewer 不能 raw 修改 plan 文件 frontmatter；请用 update_plan 修改结构化字段")]
+    #[error("A reviewer cannot raw-edit plan frontmatter; use update_plan for structured fields")]
     FrontmatterTouched,
 }
 

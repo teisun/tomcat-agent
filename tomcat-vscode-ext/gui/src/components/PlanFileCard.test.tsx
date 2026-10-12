@@ -35,6 +35,8 @@ describe("PlanFileCard", () => {
     expect(screen.getByTestId("plan-card-title").textContent).toBe("Demo Plan UI");
     expect(screen.getByTestId("plan-card-overview").textContent).toContain("transcript UI polish");
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("4 todos");
+    expect(screen.getByTestId("build-plan").classList.contains("tc-plan-build-button")).toBe(true);
+    expect(screen.getByTestId("build-plan").classList.contains("tc-button--primary")).toBe(false);
 
     fireEvent.click(screen.getByTestId("plan-card-file-link"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
@@ -205,14 +207,12 @@ describe("PlanFileCard", () => {
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("1 todo");
   });
 
-  it("renders the build-model dropdown between View Plan and Build when onSetBuildModel is provided", () => {
+  it("renders the build-model dropdown between View Plan and Build when configured", () => {
     const onSetBuildModel = vi.fn();
     const onBuild = vi.fn();
 
     render(
       <PlanFileCard
-        availableModels={["gpt-5.6", "claude-opus"]}
-        buildModel="gpt-5.6"
         canBuild
         item={{
           id: "plan-model",
@@ -221,16 +221,27 @@ describe("PlanFileCard", () => {
           state: "planning",
           type: "plan",
         }}
+        modelPicker={{
+          availableModels: ["gpt-5.6", "claude-opus"],
+          buildModel: "gpt-5.6",
+          onSelectContextWindow: vi.fn(),
+          onSelectThinkingLevel: vi.fn(),
+          onSelectSpeed: vi.fn(),
+          onSetBuildModel,
+        }}
         onBuild={onBuild}
         onOpenPlanFile={() => undefined}
-        onSetBuildModel={onSetBuildModel}
         planTodos={[]}
       />,
     );
 
-    const select = screen.getByTestId("plan-card-build-model") as HTMLSelectElement;
-    expect(select.value).toBe("gpt-5.6");
-    fireEvent.change(select, { target: { value: "claude-opus" } });
+    const picker = screen.getByTestId("plan-card-build-model") as HTMLButtonElement;
+    expect(picker.textContent).toContain("gpt-5.6");
+    expect(picker.classList.contains("tc-model-picker-trigger")).toBe(true);
+    fireEvent.click(picker);
+    expect(document.querySelector(".tc-model-picker-dropdown--above")).toBeTruthy();
+    expect(picker.querySelector(".codicon-chevron-up")).toBeTruthy();
+    fireEvent.click(screen.getAllByTestId("model-option")[1]);
     expect(onSetBuildModel).toHaveBeenCalledWith("claude-opus");
 
     fireEvent.click(screen.getByTestId("build-plan"));
@@ -242,7 +253,78 @@ describe("PlanFileCard", () => {
     expect(screen.getByLabelText("Model")).toBeTruthy();
   });
 
-  it("omits the build-model dropdown when onSetBuildModel is not provided", () => {
+  it("routes Speed from a plan card to its own model ID", () => {
+    const onSelectSpeed = vi.fn();
+    const onSetBuildModel = vi.fn();
+    render(<PlanFileCard
+      canBuild
+      item={{ id: "speed-plan", path: "/tmp/speed.plan.md", planId: "speed", state: "planning", type: "plan" }}
+      modelPicker={{ availableModels: ["relay/model"], buildModel: "relay/model", availableModelDetails: { "relay/model": { id: "relay/model", supportedSpeeds: ["fast"], selectedSpeed: "standard" } }, onSelectContextWindow: vi.fn(), onSelectThinkingLevel: vi.fn(), onSelectSpeed, onSetBuildModel }}
+      onBuild={vi.fn()} onOpenPlanFile={vi.fn()}
+    />);
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="relay/model"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-relay/model"));
+    fireEvent.click(screen.getByRole("button", { name: "Fast" }));
+    expect(onSelectSpeed).toHaveBeenCalledWith("relay/model", "fast");
+    expect(onSetBuildModel).not.toHaveBeenCalled();
+  });
+
+  it("overlays the active session's context and effort in its model picker", () => {
+    render(
+      <PlanFileCard
+        canBuild
+        item={{
+          id: "plan-session-overlay",
+          path: "/tmp/session-overlay.plan.md",
+          planId: "pso",
+          state: "planning",
+          type: "plan",
+        }}
+        modelPicker={{
+          availableModelDetails: {
+            "gpt-5.6": {
+              contextWindowOptions: [400_000, 1_000_000],
+              id: "gpt-5.6",
+              selectedContextWindow: 400_000,
+              selectedReasoningLevel: "low",
+              supportedReasoningLevels: ["low", "high"],
+            },
+          },
+          availableModels: ["gpt-5.6"],
+          buildModel: "gpt-5.6",
+          onSelectContextWindow: vi.fn(),
+          onSelectThinkingLevel: vi.fn(),
+          onSelectSpeed: vi.fn(),
+          onSetBuildModel: vi.fn(),
+          sessionContextWindow: 1_000_000,
+          sessionModel: "gpt-5.6",
+          sessionThinkingLevel: "high",
+        }}
+        onBuild={() => undefined}
+        onOpenPlanFile={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("plan-card-build-model"));
+    fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.6"]')!);
+    fireEvent.click(screen.getByTestId("model-edit-gpt-5.6"));
+
+    expect(
+      screen
+        .getAllByTestId("context-window-option")
+        .find((option) => option.textContent === "1M")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((option) => option.textContent === "High")
+        ?.querySelector('[aria-label="Selected"]'),
+    ).toBeTruthy();
+  });
+
+  it("omits the build-model dropdown when picker callbacks are unavailable", () => {
     render(
       <PlanFileCard
         canBuild
@@ -261,9 +343,7 @@ describe("PlanFileCard", () => {
     expect(screen.queryByTestId("plan-card-build-model")).toBeNull();
   });
 
-  it("shows a breathing pending affordance while the plan file is still being created", () => {
-    const onOpenPlanFile = vi.fn();
-
+  it("restores the legacy pending footer while a plan card is still creating", () => {
     render(
       <PlanFileCard
         canBuild
@@ -276,16 +356,16 @@ describe("PlanFileCard", () => {
           type: "plan",
         }}
         onBuild={() => undefined}
-        onOpenPlanFile={onOpenPlanFile}
+        onOpenPlanFile={() => undefined}
         planTodos={[]}
       />,
     );
 
+    expect((screen.getByTestId("view-plan-pending") as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      screen.getByTestId("view-plan-pending").querySelectorAll(".tc-loading-dots__dot"),
+    ).toHaveLength(3);
     expect(screen.queryByTestId("view-plan")).toBeNull();
-    const pending = screen.getByTestId("view-plan-pending") as HTMLButtonElement;
-    expect(pending.disabled).toBe(true);
-    expect(pending.getAttribute("aria-busy")).toBe("true");
-    expect(pending.textContent).toContain("...");
-    expect(onOpenPlanFile).not.toHaveBeenCalled();
+    expect(screen.getByTestId("build-plan")).toBeTruthy();
   });
 });

@@ -1,9 +1,8 @@
 //! `core::llm::replay_policy` 焦小测。
 
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, classify_replay_downgrade, model_family, plan, plan_scoped,
-    warn_worthy_downgrade, ProviderCompatProfile, ReplayAction, ReplayDowngradeKind,
-    ReplayDowngradeReport, ReplayWindow,
+    classify_replay_downgrade, model_family, plan, plan_scoped, warn_worthy_downgrade,
+    ProviderCompatProfile, ReplayAction, ReplayDowngradeKind, ReplayWindow,
 };
 use crate::core::llm::types::{
     ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation, ReasoningFormat,
@@ -96,7 +95,7 @@ fn replay_policy_openai_responses_routed_profile_match_keeps_opaque() {
 }
 
 #[test]
-fn replay_policy_openai_responses_routed_profile_mismatch_downgrades() {
+fn replay_policy_openai_responses_routed_profile_mismatch_strips_opaque_reasoning() {
     let source = ProviderCompatProfile::openai_responses_routed(
         "gpt-5",
         "relay-a",
@@ -131,10 +130,7 @@ fn replay_policy_openai_responses_routed_profile_mismatch_downgrades() {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
-    assert_eq!(
-        plan(&target, &msg),
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    assert_eq!(plan(&target, &msg), ReplayAction::StripOpaque);
 }
 
 #[test]
@@ -201,7 +197,7 @@ fn replay_policy_deepseek_v4_non_tool_turn_keeps_reasoning_content() {
 }
 
 #[test]
-fn cross_provider_downgrade_prefers_fallback_text() {
+fn cross_provider_replay_strips_opaque_reasoning_without_rewriting_visible_text() {
     let msg = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
@@ -219,10 +215,7 @@ fn cross_provider_downgrade_prefers_fallback_text() {
         }),
     );
     let target = ProviderCompatProfile::openai_responses("gpt-5");
-    assert_eq!(
-        plan(&target, &msg),
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    assert_eq!(plan(&target, &msg), ReplayAction::StripOpaque);
 }
 
 #[test]
@@ -234,17 +227,6 @@ fn classify_replay_downgrade_reports_cross_profile_incompatibility() {
         classify_replay_downgrade(&target, &msg, &action),
         Some(ReplayDowngradeKind::CrossProfile)
     );
-}
-
-#[test]
-fn apply_text_downgrade_appends_safe_continuity_text() {
-    let msg = ChatMessage::assistant("visible answer");
-    let downgraded = apply_text_downgrade(&msg, "safe summary");
-    assert_eq!(
-        downgraded.text_content(),
-        Some("visible answer\n\n[reasoning continuity]\nsafe summary")
-    );
-    assert!(downgraded.reasoning_continuation.is_none());
 }
 
 #[test]
@@ -327,21 +309,15 @@ fn chat_completions_profile_is_data_driven_for_mimo() {
 #[test]
 fn mimo_and_deepseek_do_not_cross_replay() {
     // 数据驱动后两族共用一条代码逻辑，但 same_profile 比对保证不会 KeepOpaque 互串 blob；
-    // 跨 profile 且有 fallback_text 时优雅降级为 ConvertToText（不再 StripOpaque）。
+    // 跨 profile 一律 StripOpaque，绝不把内部推理拼进 assistant 可见正文。
     let mimo_msg = mimo_reasoning_message();
     let deepseek_target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
-    // mimo continuity 落到 deepseek target：非同 profile，不吃 opaque blob，转文本续传。
-    assert_eq!(
-        plan(&deepseek_target, &mimo_msg),
-        ReplayAction::ConvertToText("mimo summary".to_string())
-    );
+    // mimo continuity 落到 deepseek target：非同 profile，不吃 opaque blob。
+    assert_eq!(plan(&deepseek_target, &mimo_msg), ReplayAction::StripOpaque);
 
     let deepseek_msg = deepseek_v4_compatible_message();
     let mimo_target = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
-    assert_eq!(
-        plan(&mimo_target, &deepseek_msg),
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    assert_eq!(plan(&mimo_target, &deepseek_msg), ReplayAction::StripOpaque);
 }
 
 #[test]
@@ -367,12 +343,9 @@ fn classify_replay_downgrade_reports_same_profile_shape_mismatch() {
     );
     let target = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
     let action = plan(&target, &msg);
-    // 同 profile 但 format 不匹配：落不到 KeepOpaque，有 fallback_text → 转文本（仍按
+    // 同 profile 但 format 不匹配：落不到 KeepOpaque，直接 strip（仍按
     // SameProfileIncompatible 归类，始终告警）。
-    assert_eq!(
-        action,
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    assert_eq!(action, ReplayAction::StripOpaque);
     assert_eq!(
         classify_replay_downgrade(&target, &msg, &action),
         Some(ReplayDowngradeKind::SameProfileIncompatible)
@@ -396,6 +369,30 @@ fn deepseek_v4_compatible_message() -> ChatMessage {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     )
+}
+
+#[test]
+fn tool_owned_media_preserves_replay_window_without_reinterpreting_legacy_carriers() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let mut tool = ChatMessage::tool("image", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_file_id("image").unwrap(),
+    ]));
+    let messages = vec![
+        ChatMessage::user("inspect"),
+        deepseek_v4_compatible_message(),
+        tool,
+    ];
+    assert!(ReplayWindow::compute(&messages).contains(1));
+    assert!(!messages[2].starts_logical_turn());
+    let mut legacy = messages;
+    legacy.push(ChatMessage::tool_media(vec![
+        ChatMessageContentPart::image_file_id("legacy").unwrap(),
+    ]));
+    assert!(
+        !ReplayWindow::compute(&legacy).contains(1),
+        "historical carrier semantics remain compatible"
+    );
 }
 
 #[test]
@@ -425,6 +422,25 @@ fn replay_window_strips_older_history_but_keeps_latest_assistant() {
 }
 
 #[test]
+fn replay_window_excludes_previous_turn_assistant_when_current_turn_has_no_reply_yet() {
+    let messages = vec![
+        ChatMessage::user("q1"),
+        deepseek_v4_compatible_message(), // idx 1: previous turn's last assistant
+        ChatMessage::user("q2"),          // idx 2: current turn start
+    ];
+    let window = ReplayWindow::compute(&messages);
+
+    assert!(
+        !window.contains(1),
+        "a previous turn's last assistant must not be replayed just because it is latest"
+    );
+    assert!(
+        !window.contains(2),
+        "the current user input itself has no opaque reasoning payload to replay"
+    );
+}
+
+#[test]
 fn replay_window_ignores_steering_as_turn_start() {
     let mut steering = ChatMessage::user("steer mid-turn");
     steering.kind = MessageKind::Steering;
@@ -440,19 +456,66 @@ fn replay_window_ignores_steering_as_turn_start() {
 }
 
 #[test]
-fn warn_worthy_skips_graceful_text_but_flags_total_loss() {
+fn replay_window_ignores_ephemeral_tail_as_turn_start() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("q1"),
+        deepseek_v4_compatible_message(),
+        tail,
+    ];
+
+    let window = ReplayWindow::compute(&messages);
+
+    assert!(
+        window.contains(1),
+        "the tail must not empty the replay window for the active assistant turn"
+    );
+}
+
+#[test]
+fn replay_window_uses_signal_but_not_nudge_as_a_turn_start() {
+    let mut nudge = ChatMessage::user("continue the plan");
+    nudge.kind = MessageKind::Nudge;
+    let nudge_window = ReplayWindow::compute(&[
+        ChatMessage::user("q1"),
+        deepseek_v4_compatible_message(),
+        nudge,
+        deepseek_v4_compatible_message(),
+    ]);
+    assert!(
+        nudge_window.contains(1),
+        "completion guard nudge preserves the old steering semantics"
+    );
+    assert!(nudge_window.contains(3));
+
+    let mut signal = ChatMessage::user("background task finished");
+    signal.kind = MessageKind::Signal;
+    let signal_window = ReplayWindow::compute(&[
+        ChatMessage::user("q1"),
+        deepseek_v4_compatible_message(),
+        signal,
+        deepseek_v4_compatible_message(),
+    ]);
+
+    assert!(
+        !signal_window.contains(1),
+        "a background completion is normal user input and starts the new replay window"
+    );
+    assert!(signal_window.contains(3));
+}
+
+#[test]
+fn cross_profile_strip_is_silent_but_same_profile_incompatibility_is_not() {
     let target = ProviderCompatProfile::openai_responses("gpt-5");
 
-    // 跨 profile + 有 fallback_text → ConvertToText：设计内优雅降级，不告警。
+    // 跨 profile 一律 StripOpaque；这是预期行为，不告警。
     let with_text = deepseek_v4_compatible_message();
     let action = plan_scoped(&target, &with_text, true);
-    assert_eq!(
-        action,
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    assert_eq!(action, ReplayAction::StripOpaque);
     assert_eq!(warn_worthy_downgrade(&target, &with_text, &action), None);
 
-    // 跨 profile + 无任何文本可救 → StripOpaque：continuity 彻底丢失，告警。
+    // fallback_text 是否存在都不改变跨 profile strip 的行为。
     let no_text = ChatMessage::assistant("answer").with_reasoning_state(
         None,
         Some(ReasoningContinuation {
@@ -471,25 +534,19 @@ fn warn_worthy_skips_graceful_text_but_flags_total_loss() {
     );
     let action = plan_scoped(&target, &no_text, true);
     assert_eq!(action, ReplayAction::StripOpaque);
-    assert_eq!(
-        warn_worthy_downgrade(&target, &no_text, &action),
-        Some(ReplayDowngradeKind::CrossProfile)
-    );
+    assert_eq!(warn_worthy_downgrade(&target, &no_text, &action), None);
 }
 
 #[test]
-fn deepseek_to_mimo_window_converts_to_text_without_warn() {
+fn deepseek_to_mimo_window_strips_opaque_without_warn() {
     // 回归：终端里观察到的现象——deepseek-v4-pro 续传切到 mimo-v2.5-pro。
     // 两者同为 chat_completions/reasoning_content profile，但 provider 不同（跨 profile）。
-    // 期望：窗口内有 fallback_text → 优雅转文本续传，且不触发 cross_profile_lost 误报 warn。
+    // 期望：窗口内 reasoning 直接 strip，且不触发跨 profile 误报 warn。
     let deepseek_source = deepseek_v4_compatible_message();
     let mimo_target = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
 
     let action = plan_scoped(&mimo_target, &deepseek_source, true);
-    assert_eq!(
-        action,
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    assert_eq!(action, ReplayAction::StripOpaque);
 
     // 仍被归类为跨 profile 降级（确实没有 KeepOpaque 互吃 blob），但不 warn-worthy。
     assert_eq!(
@@ -500,11 +557,6 @@ fn deepseek_to_mimo_window_converts_to_text_without_warn() {
         warn_worthy_downgrade(&mimo_target, &deepseek_source, &action),
         None
     );
-
-    // 走一遍请求级聚合器：窗口内这条按 graceful_text 计入，emit 时无 sample → 完全静默。
-    let mut report = ReplayDowngradeReport::default();
-    report.record_in_window(&mimo_target, &deepseek_source, &action);
-    report.emit(&mimo_target);
 }
 
 #[test]
@@ -529,11 +581,8 @@ fn warn_worthy_flags_same_profile_incompatible_but_not_keep() {
     );
     let target = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
     let action = plan_scoped(&target, &mismatched, true);
-    // 同 profile 不匹配且有 fallback_text → 转文本，但 SameProfileIncompatible 始终告警。
-    assert_eq!(
-        action,
-        ReplayAction::ConvertToText("safe summary".to_string())
-    );
+    // 同 profile 不匹配时也不准改写 assistant 正文，直接 strip。
+    assert_eq!(action, ReplayAction::StripOpaque);
     assert_eq!(
         warn_worthy_downgrade(&target, &mismatched, &action),
         Some(ReplayDowngradeKind::SameProfileIncompatible)

@@ -1,6 +1,8 @@
 # 工作目录与数据布局
 
 本文为 [Architecture](../openspec/specs/Architecture.md) 中「8. 工作目录与数据布局」的详细设计，总览见主文档。参考 [openclaw 多 agent 目录约定]
+> **项目资源根当前规则（2026-09）**：项目层由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`。本文后续出现的项目 `.tomcat` 路径属于旧布局示意，不可作为写入目标。
+
 
 ## 1. 默认工作根目录（work_dir）
 
@@ -45,7 +47,7 @@
 |------|-----------------|---------------|-------------|----------------|------|
 | `global` | `{work_dir}/plugins/` | `{work_dir}/skills/` | `{work_dir}/packages/registry.json` | `{work_dir}/plugins/registry.json` | 所有 scope 的兜底层 |
 | `agent` | `{work_dir}/agents/<agentId>/plugins/` | `{work_dir}/agents/<agentId>/skills/` | `{work_dir}/agents/<agentId>/packages/registry.json` | `{work_dir}/agents/<agentId>/plugins/registry.json` | 当前 agent 私有层 |
-| `scope` | `<scope_root>/.tomcat/plugins/` | `<scope_root>/.tomcat/skills/` | `<scope_root>/.tomcat/packages/registry.json` | `<scope_root>/.tomcat/plugins/registry.json` | 当前 project 私有层；`scope_root` 必须先 canonicalize |
+| `scope` | `<scope_root>/.agents/plugins/` | `<scope_root>/.agents/skills/` | `<scope_root>/.agents/packages/registry.json` | `<scope_root>/.agents/plugins/registry.json` | 当前 project 私有层；`scope_root` 必须先 canonicalize |
 
 补充约束：
 

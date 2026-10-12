@@ -1,4 +1,16 @@
-export type SettingsRoute = "models";
+import type {
+  ConnectorConfigPaths,
+  ConnectorConnectionIdentity,
+  ConnectorInput,
+  ConnectorProject,
+  ConnectorToolFilter,
+  ConnectorToolView,
+  ConnectorView,
+} from "./connectorsProtocol";
+
+import { isSpeed, type Speed } from "./modelSpeed";
+import { isLanguagePreference, type LanguagePreference } from "./i18n";
+export type SettingsRoute = "general" | "models" | "connectors";
 
 export interface SettingsModelCapabilities {
   files: boolean;
@@ -16,11 +28,16 @@ export interface SettingsModelView {
   baseUrl?: string | null;
   capabilities: SettingsModelCapabilities;
   contextWindow?: number | null;
+  contextWindowOptions?: number[] | null;
+  description?: string | null;
   id: string;
   keyPresent: boolean;
+  maxOutputTokens?: number | null;
   modelName?: string | null;
   provider: string;
   source: SettingsModelSource;
+  supportedReasoningLevels?: string[] | null;
+  supportedSpeeds?: Speed[] | null;
   thinkingFormat?: string | null;
 }
 
@@ -30,9 +47,14 @@ export interface SettingsModelInput {
   baseUrl?: string | null;
   capabilities: SettingsModelCapabilities;
   contextWindow?: number | null;
+  contextWindowOptions?: number[] | null;
+  description?: string | null;
   id: string;
+  maxOutputTokens?: number | null;
   modelName?: string | null;
   provider: string;
+  supportedReasoningLevels?: string[] | null;
+  supportedSpeeds?: Speed[] | null;
   thinkingFormat?: string | null;
 }
 
@@ -48,22 +70,94 @@ export interface SettingsProviderKeyInput {
   value: string;
 }
 
+export interface SettingsModelRemovalReceipt {
+  modelId: string;
+  success: boolean;
+  warnings: string[];
+}
+
 export interface SettingsCapabilities {
+  setUiLanguage?: boolean;
   listModels: boolean;
   listProviderKeys: boolean;
   removeModel: boolean;
   setProviderKey: boolean;
   upsertModel: boolean;
+  connectorCapabilities?: SettingsConnectorCapabilities;
 }
 
+export interface SettingsConnectorCapabilities {
+  list: boolean;
+  listTools: boolean;
+  add: boolean;
+  remove: boolean;
+  reload: boolean;
+  trustProject: boolean;
+  filter: boolean;
+  toggle: boolean;
+  login: boolean;
+}
+
+export interface SettingsConnectorReceipt {
+  requestId: string;
+  configSaved: boolean;
+  connectionStarted: boolean;
+  error?: string | null;
+  name?: string | null;
+}
+
+/** One latest click per source, not a second copy of backend connection state. */
+export interface SettingsConnectorReloadReceipt {
+  requestId: string;
+  configKey: string;
+  phase: "pending" | "accepted" | "succeeded" | "failed" | "unknown";
+  generation?: string;
+  message?: string;
+  reason?: "superseded" | "removed" | "rejected" | "connection-lost" | "timeout" | "incompatible";
+}
+/** One durable setting result per source tool; it is not a second tool catalog. */
+export interface SettingsConnectorToolToggleReceipt {
+  requestId: string;
+  configKey: string;
+  rawName: string;
+  enabled: boolean;
+  configSaved?: boolean;
+  runtimeApplied?: boolean;
+  error?: string | null;
+}
+
+
 export interface SettingsStateSnapshot {
+  locale?: import("./i18n").Locale;
+  uiPreferences?: import("./i18n").UiPreferences | null;
+  languageStatus?: "saving" | "saved" | "failed";
+  hostLocale?: import("./i18n").Locale;
   capabilities: SettingsCapabilities;
   error?: string | null;
+  expectedCliVersion?: string | null;
+  extensionVersion?: string | null;
   models: SettingsModelView[];
+  modelRemovalReceipt?: SettingsModelRemovalReceipt | null;
   providerKeys: SettingsProviderKeyView[];
+  connectors?: ConnectorView[];
+  connectorConfigPaths?: ConnectorConfigPaths;
+  connectorProject?: ConnectorProject | null;
+  connectorTrustPending?: boolean;
+  connectorCapabilities?: SettingsConnectorCapabilities;
+  connectorTools?: ConnectorToolView[];
+  connectorReceipt?: SettingsConnectorReceipt | null;
+  connectorLogin?: { configKey: string; requestId: string; phase: "authorizing" | "settled" } | null;
+  connectorReloads?: Record<string, SettingsConnectorReloadReceipt>;
+  connectorToolToggles?: Record<string, SettingsConnectorToolToggleReceipt>;
+  connectorToolsIdentity?: ConnectorConnectionIdentity | null;
+
+
+  selectedConnector?: string | null;
   ready: boolean;
   route: SettingsRoute;
+  serverVersion?: string | null;
   status?: string | null;
+  warnings?: string[] | null;
 }
 
 export type SettingsHostFrame = {
@@ -73,6 +167,7 @@ export type SettingsHostFrame = {
 };
 
 export type SettingsIntent =
+  | { messageId: string; type: "setUiLanguage"; data: { language: LanguagePreference } }
   | {
       messageId: string;
       type: "settings.ready";
@@ -110,6 +205,40 @@ export type SettingsIntent =
         envName: string;
         value: string;
       };
+    }
+  | {
+      messageId: string;
+      type: "listConnectors" | "reloadConnectors";
+    }
+  | {
+      messageId: string;
+      type: "listConnectorTools" | "reloadConnector" | "removeConnector" | "loginConnector" | "logoutConnector" | "cancelLoginConnector";
+      data: { name: string; configKey: string };
+    }
+  | {
+      messageId: string;
+      type: "trustProject";
+      data: { projectRoot: string };
+    }
+  | {
+      messageId: string;
+      type: "addConnector";
+      data: { connector: ConnectorInput; trustProject?: true };
+    }
+  | {
+      messageId: string;
+      type: "setConnectorToolFilter";
+      data: { name: string; configKey: string; filter: ConnectorToolFilter };
+    }
+  | {
+      messageId: string;
+      type: "setConnectorToolEnabled";
+      data: { name: string; configKey: string; rawName: string; enabled: boolean };
+    }
+  | {
+      messageId: string;
+      type: "openConnectorConfig";
+      data: { configKey?: string; scope?: "global" | "workspace" };
     };
 
 export interface VsCodeApiLike<TMessage = unknown> {
@@ -132,7 +261,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isSettingsRoute(value: unknown): value is SettingsRoute {
-  return value === "models";
+  return value === "general" || value === "models" || value === "connectors";
 }
 
 function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapabilities {
@@ -146,6 +275,10 @@ function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapa
   );
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
 function isSettingsModelInput(value: unknown): value is SettingsModelInput {
   return (
     isRecord(value) &&
@@ -156,9 +289,22 @@ function isSettingsModelInput(value: unknown): value is SettingsModelInput {
     (value.contextWindow === undefined ||
       value.contextWindow === null ||
       typeof value.contextWindow === "number") &&
+    (value.contextWindowOptions === undefined ||
+      value.contextWindowOptions === null ||
+      (Array.isArray(value.contextWindowOptions) &&
+        value.contextWindowOptions.every((entry) => typeof entry === "number"))) &&
+    (value.description === undefined || value.description === null || typeof value.description === "string") &&
     typeof value.id === "string" &&
+    (value.maxOutputTokens === undefined ||
+      value.maxOutputTokens === null ||
+      typeof value.maxOutputTokens === "number") &&
     (value.modelName === undefined || value.modelName === null || typeof value.modelName === "string") &&
     typeof value.provider === "string" &&
+    (value.supportedReasoningLevels === undefined ||
+      value.supportedReasoningLevels === null ||
+      isStringArray(value.supportedReasoningLevels)) &&
+    (value.supportedSpeeds === undefined || value.supportedSpeeds === null ||
+      (Array.isArray(value.supportedSpeeds) && value.supportedSpeeds.every(isSpeed))) &&
     (value.thinkingFormat === undefined ||
       value.thinkingFormat === null ||
       typeof value.thinkingFormat === "string")
@@ -174,6 +320,8 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
     return false;
   }
   switch (value.type) {
+    case "setUiLanguage":
+      return isRecord(value.data) && isLanguagePreference(value.data.language);
     case "settings.ready":
       return (
         value.data === undefined ||
@@ -197,6 +345,34 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
         typeof value.data.envName === "string" &&
         typeof value.data.value === "string"
       );
+    case "listConnectors":
+    case "reloadConnectors":
+      return true;
+    case "listConnectorTools":
+    case "reloadConnector":
+    case "removeConnector":
+    case "loginConnector":
+    case "logoutConnector":
+    case "cancelLoginConnector":
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string";
+    case "trustProject":
+      return isRecord(value.data) && typeof value.data.projectRoot === "string" && value.data.projectRoot.length > 0;
+    case "addConnector":
+      return isRecord(value.data) && isRecord(value.data.connector) && typeof value.data.connector.name === "string"
+        && (value.data.trustProject === undefined || value.data.trustProject === true);
+    case "setConnectorToolFilter":
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string" && isRecord(value.data.filter);    case "setConnectorToolEnabled":
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string"
+        && typeof value.data.rawName === "string" && typeof value.data.enabled === "boolean";
+
+    case "openConnectorConfig":
+      return (
+        isRecord(value.data) &&
+        (typeof value.data.configKey === "string" ||
+          value.data.scope === "global" ||
+          value.data.scope === "workspace")
+      );
+
     default:
       return false;
   }

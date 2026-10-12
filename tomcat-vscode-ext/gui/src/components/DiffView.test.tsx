@@ -46,6 +46,26 @@ describe("DiffView", () => {
     expect(screen.getByTestId("diff-view").textContent).toContain("line 8");
   });
 
+  it("uses structured skippedLines for explicit gap rows", () => {
+    render(
+      <DiffView
+        diff={buildDiff([
+          {
+            newLine: null,
+            oldLine: null,
+            skippedLines: 42,
+            tag: "gap",
+            text: "obsolete display text",
+          },
+        ])}
+      />,
+    );
+
+    const marker = screen.getByTestId("diff-fold-marker").textContent ?? "";
+    expect(marker).toContain("42 unmodified lines");
+    expect(marker).not.toContain("obsolete display text");
+  });
+
   it("anchors preview mode around the first change instead of the file tail", () => {
     render(
       <DiffView
@@ -88,6 +108,30 @@ describe("DiffView", () => {
   it("shows a fallback message when inline diff is unavailable", () => {
     render(<DiffView diff={undefined} />);
 
-    expect(screen.getByTestId("diff-view-empty").textContent).toContain("File too large");
+    expect(screen.getByTestId("diff-view-empty").textContent).toContain(
+      "No Diff was saved for this change",
+    );
+  });
+
+  it("explains that truncated content cannot provide the historical comparison", () => {
+    render(
+      <DiffView
+        diff={buildDiff([
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "kept prefix" },
+        ])}
+        truncated
+      />,
+    );
+
+    expect(screen.getByTestId("diff-view-truncated").textContent).toContain(
+      "Diff is too large and was truncated; this comparison is unavailable",
+    );
+  });
+
+  it("distinguishes a truncated missing payload from an unsaved diff", () => {
+    render(<DiffView truncated />);
+    expect(screen.getByTestId("diff-view-empty").textContent).toContain(
+      "Diff is too large and was truncated; this comparison is unavailable",
+    );
   });
 });

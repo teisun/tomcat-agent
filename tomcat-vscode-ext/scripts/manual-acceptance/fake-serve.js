@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -32,16 +33,42 @@ const ERROR_TEXT = [
 
 const STATE_DIR = process.env.TOMCAT_FAKE_SERVE_STATE_DIR || os.tmpdir();
 const STATE_PATH = path.join(STATE_DIR, "manual-acceptance-fake-serve-state.json");
+const PROMPT_SCRIPT_PATH = path.join(STATE_DIR, "manual-acceptance-next-prompt-script.txt");
+
+/**
+ * Content-addressed attachment store, mirroring the real backend's layout.
+ *
+ * The acceptance harness runs against a real VS Code webview, so these files have to
+ * genuinely exist on disk: images reach the webview through `asWebviewUri`, which
+ * fetches the file rather than receiving bytes over the message channel. A fake that
+ * only echoed hashes back would render nothing but broken images.
+ */
+const ATTACHMENT_ROOT = path.join(STATE_DIR, "attachments");
+const BLOBS_DIR = path.join(ATTACHMENT_ROOT, "blobs");
+const THUMBS_DIR = path.join(ATTACHMENT_ROOT, "thumbs");
 
 const timers = new Set();
 const sessions = new Map();
 const pendingApprovals = new Map();
+// The real attachment store retains hashes per session while a draft survives
+// a serve restart. This fixture does not garbage-collect blobs, but it still
+// tracks the lease contract so an invalid reference fails just as it would in
+// production instead of silently making a broken thumbnail look valid.
+const attachmentLeases = new Map();
 
 let activeSessionId = null;
 let askQuestionCounter = 1;
 let assistantMessageCounter = 1;
 let historyCounter = 1;
 let sessionCounter = 1;
+let nextPromptScript = null;
+// Presentation-only connector state; this fake is not an MCP recovery engine.
+let connectorGeneration = 1;
+let connectorToolEnabled = true;
+
+function normalizePromptScript(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
 function defaultThinkingLevels() {
   return {
@@ -83,7 +110,7 @@ function normalizeSession(session) {
     busy: false,
     cwd: typeof session?.cwd === "string" ? session.cwd : process.cwd(),
     history,
-    mode: typeof session?.mode === "string" ? session.mode : "code",
+    mode: session?.mode === "user" ? "user" : "project",
     model:
       typeof session?.model === "string" && MODEL_OPTIONS.includes(session.model)
         ? session.model
@@ -114,6 +141,7 @@ function persistState() {
           activeSessionId,
           askQuestionCounter,
           historyCounter,
+          nextPromptScript,
           sessionCounter,
           sessions: Object.fromEntries(sessions.entries()),
         },
@@ -141,6 +169,7 @@ function loadState() {
       typeof parsed.askQuestionCounter === "number" ? parsed.askQuestionCounter : askQuestionCounter;
     historyCounter =
       typeof parsed.historyCounter === "number" ? parsed.historyCounter : historyCounter;
+    nextPromptScript = normalizePromptScript(parsed.nextPromptScript);
     sessionCounter =
       typeof parsed.sessionCounter === "number" ? parsed.sessionCounter : sessionCounter;
     sessions.clear();
@@ -152,6 +181,40 @@ function loadState() {
     }
   } catch (error) {
     console.error(`[fake-serve] failed to load state: ${String((error && error.message) || error)}`);
+  }
+}
+
+function consumeNextPromptScript() {
+  try {
+    if (fs.existsSync(PROMPT_SCRIPT_PATH)) {
+      const scripted = normalizePromptScript(fs.readFileSync(PROMPT_SCRIPT_PATH, "utf8"));
+      fs.rmSync(PROMPT_SCRIPT_PATH, { force: true });
+      if (scripted) {
+        nextPromptScript = null;
+        return scripted;
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[fake-serve] failed to consume prompt script sidecar: ${String((error && error.message) || error)}`,
+    );
+  }
+  try {
+    if (!fs.existsSync(STATE_PATH)) {
+      return nextPromptScript;
+    }
+    const parsed = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    const scripted = normalizePromptScript(parsed.nextPromptScript);
+    if (!scripted) {
+      return nextPromptScript;
+    }
+    parsed.nextPromptScript = null;
+    fs.writeFileSync(STATE_PATH, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+    nextPromptScript = null;
+    return scripted;
+  } catch (error) {
+    console.error(`[fake-serve] failed to consume prompt script: ${String((error && error.message) || error)}`);
+    return nextPromptScript;
   }
 }
 
@@ -334,6 +397,7 @@ function emitContextMetrics(sessionId, ratio) {
     inputTokensUsed: 384,
     preheatInProgress: false,
     preheatResultPending: false,
+    providerUsageMeasured: true,
     sessionId,
     totalToolResultBytesPersisted: 0,
     type: "context_metrics_update",
@@ -446,6 +510,213 @@ function startTurn(sessionId) {
   });
 }
 
+function emitRetryNotice(sessionId, errorMessage) {
+  send({
+    attempt: 2,
+    delayMs: 120,
+    errorMessage,
+    maxAttempts: 4,
+    sessionId,
+    type: "auto_retry_start",
+  });
+}
+
+function emitDegradeNotice(sessionId) {
+  send({
+    finishReason: "unsupported_multimodal_degraded",
+    message: "本轮附件未被当前端点接受，已按纯文本发送",
+    sessionId,
+    type: "llm_notice",
+  });
+}
+
+function emitTerminalLlmError(sessionId, reason, errorMessage, errorCode = null) {
+  send({
+    errorCode,
+    errorMessage,
+    reason,
+    sessionId,
+    type: "llm_error",
+  });
+}
+
+function scheduleScriptedRetrySuccess(sessionId, session, promptText, options = {}) {
+  const answerText = `Scripted retry success for prompt: ${promptText || "empty prompt"}.`;
+  const retryMessage =
+    "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.";
+  schedule(120, () => emitRetryNotice(sessionId, retryMessage));
+  if (options.degradeNotice) {
+    schedule(280, () => emitDegradeNotice(sessionId));
+  }
+  schedule(1500, () => emitMessageDelta(sessionId, "content_delta", answerText));
+  schedule(1900, () => {
+    recordHistoryEntry(session, {
+      content: answerText,
+      role: "assistant",
+    });
+    emitContextMetrics(sessionId, 0.52);
+    finishTurn(sessionId, null);
+  });
+}
+
+function scheduleScriptedTerminalLlmError(sessionId) {
+  schedule(200, () => {
+    emitTerminalLlmError(
+      sessionId,
+      "Gateway rejected the attachment payload",
+      "Gateway rejected the attachment payload",
+      null,
+    );
+    finishTurn(sessionId, null);
+  });
+}
+
+function schedulePlanCloseOutReviewGreenFinalize(sessionId, session) {
+  const planId = "plan-close-out-review-green";
+  const planPath = path.join(session.cwd, `${planId}.plan.md`);
+  const todos = [
+    {
+      content: "Implement the single-file acceptance change",
+      id: "close-out-edit",
+      status: "completed",
+    },
+    {
+      content: "Review and verify the completed change",
+      id: "close-out-verify",
+      status: "completed",
+    },
+  ];
+  const updateToolCallId = "close-out-update-plan";
+  const buildToolCallId = "close-out-green-build";
+
+  schedule(80, () => {
+    session.planId = planId;
+    session.planPath = planPath;
+    session.planState = "executing";
+    persistState();
+    send({
+      path: planPath,
+      planId,
+      sessionId,
+      state: "executing",
+      type: "plan.build",
+    });
+  });
+  schedule(140, () => {
+    send({
+      args: {
+        ops: todos.map((todo) => ({
+          kind: "set_status",
+          status: todo.status,
+          todo_id: todo.id,
+        })),
+        path: planPath,
+        plan_id: planId,
+      },
+      sessionId,
+      toolCallId: updateToolCallId,
+      toolName: "update_plan",
+      type: "tool_execution_start",
+    });
+  });
+  schedule(220, () => {
+    send({
+      planId,
+      reviewAttemptId: `${planId}:1`,
+      round: 1,
+      sessionId,
+      toolCallId: updateToolCallId,
+      type: "plan.code_review.started",
+    });
+  });
+  schedule(320, () => {
+    send({
+      findings: [],
+      planId,
+      reviewAttemptId: `${planId}:1`,
+      round: 1,
+      rounds: 1,
+      sessionId,
+      summary: "Code review found no blocking findings.",
+      toolCallId: updateToolCallId,
+      type: "plan.code_review",
+      verdict: "pass",
+    });
+  });
+  schedule(420, () => {
+    send({
+      args: {
+        command: "npm run test",
+      },
+      sessionId,
+      toolCallId: buildToolCallId,
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+  });
+  schedule(500, () => {
+    send({
+      isError: false,
+      result: "Test suite passed.",
+      sessionId,
+      toolCallId: buildToolCallId,
+      toolName: "bash",
+      type: "tool_execution_end",
+    });
+  });
+  schedule(580, () => {
+    send({
+      sessionId,
+      summaryTitle: "Green build passed",
+      toolCallId: buildToolCallId,
+      type: "tool.summary_updated",
+    });
+  });
+  schedule(620, () => {
+    send({
+      isError: false,
+      result: JSON.stringify({
+        applied: todos.length,
+        items: todos,
+        path: planPath,
+        plan_id: planId,
+        plan_state_after: "completed",
+        plan_state_before: "executing",
+      }),
+      sessionId,
+      toolCallId: updateToolCallId,
+      toolName: "update_plan",
+      type: "tool_execution_end",
+    });
+  });
+  schedule(680, () => {
+    send({
+      planId,
+      sessionId,
+      todos,
+      type: "plan.todos",
+    });
+  });
+  schedule(740, () => {
+    session.planState = "completed";
+    persistState();
+    send({
+      path: planPath,
+      planId,
+      sessionId,
+      state: "completed",
+      type: "plan.complete",
+    });
+  });
+  schedule(820, () => {
+    recordHistoryEntry(session, {
+      content: "Close-out fixture completed review and green-build presentation.",
+      role: "assistant",
+    });
+    finishTurn(sessionId, null);
+  });
+}
+
 function buildLiveAssistantPayload(promptText) {
   const thinkingText = [
     "Live thinking: compare the hydrated transcript with the incoming stream so thinking always stays above the assistant reply.",
@@ -475,6 +746,216 @@ function buildLiveAssistantPayload(promptText) {
   };
 }
 
+/** Write bytes under their own sha256 and return the hash. */
+function putBlob(bytes) {
+  const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+  const target = path.join(BLOBS_DIR, sha);
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(BLOBS_DIR, { recursive: true });
+    fs.writeFileSync(target, bytes);
+  }
+  return sha;
+}
+
+/** Thumbnails are addressed by the hash of the image they came from, never their own. */
+function putThumbnail(sourceSha, bytes) {
+  fs.mkdirSync(THUMBS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(THUMBS_DIR, sourceSha), bytes);
+}
+
+function handleIngestAttachment(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const attachment = frame?.attachment ?? frame?.params?.attachment ?? {};
+  const dataBase64 = attachment.dataBase64;
+  if (typeof dataBase64 !== "string" || typeof attachment.mimeType !== "string") {
+    send({
+      error: "ingest_attachment requires dataBase64 and mimeType",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const bytes = Buffer.from(dataBase64, "base64");
+  const blobSha = putBlob(bytes);
+
+  let hasThumb = false;
+  if (typeof attachment.thumbBase64 === "string" && attachment.thumbBase64.length > 0) {
+    putThumbnail(blobSha, Buffer.from(attachment.thumbBase64, "base64"));
+    hasThumb = true;
+  }
+
+  let providerSha = null;
+  if (typeof attachment.providerBase64 === "string" && attachment.providerBase64.length > 0) {
+    providerSha = putBlob(Buffer.from(attachment.providerBase64, "base64"));
+  }
+
+  send({
+    id: frame.id,
+    payload: {
+      blobSha,
+      bytes: bytes.length,
+      filename:
+        typeof attachment.filename === "string" && attachment.filename.length > 0
+          ? attachment.filename
+          : "pasted-image.png",
+      hasThumb,
+      mimeType: attachment.mimeType,
+      providerSha,
+    },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+function handleCacheAttachmentThumbnail(frame) {
+  const sessionId = frame.sessionId || activeSessionId || createSession();
+  const input = frame?.thumbnail ?? frame?.params?.thumbnail ?? frame ?? {};
+  const sourceSha = input.blobSha ?? input.sourceSha;
+  const thumbBase64 = input.thumbBase64;
+  const ok =
+    typeof sourceSha === "string" &&
+    /^[0-9a-f]{64}$/.test(sourceSha) &&
+    typeof thumbBase64 === "string" &&
+    thumbBase64.length > 0;
+  if (ok) {
+    putThumbnail(sourceSha, Buffer.from(thumbBase64, "base64"));
+  }
+  send({
+    id: frame.id,
+    payload: { cached: ok },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+function handleRetainAttachmentLeases(frame) {
+  const sessionId = frame.sessionId;
+  if (typeof sessionId !== "string" || !sessions.has(sessionId)) {
+    send({
+      error: "unknown_session",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const attachments = Array.isArray(frame?.params?.attachments)
+    ? frame.params.attachments
+    : [];
+  if (attachments.length > 512) {
+    send({
+      error: "too_many_attachment_leases",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const retainedShas = [...new Set(attachments.flatMap((attachment) => [
+    attachment?.blobSha,
+    attachment?.providerSha,
+  ]).filter((sha) => typeof sha === "string"))].sort();
+  if (retainedShas.length > 512) {
+    send({
+      error: "too_many_attachment_leases",
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const missing = retainedShas.find((sha) => !fs.existsSync(path.join(BLOBS_DIR, sha)));
+  if (missing) {
+    send({
+      error: `missing_attachment_blob: ${missing}`,
+      id: frame.id,
+      sessionId,
+      success: false,
+      type: "response",
+    });
+    return;
+  }
+
+  const sessionLeases = attachmentLeases.get(sessionId) ?? new Set();
+  retainedShas.forEach((sha) => sessionLeases.add(sha));
+  attachmentLeases.set(sessionId, sessionLeases);
+  send({
+    id: frame.id,
+    payload: { retainedShas },
+    sessionId,
+    success: true,
+    type: "response",
+  });
+}
+
+/**
+ * Turn the reference-only attachments on a prompt into transcript attachment parts.
+ *
+ * The wire carries hashes, so the transcript records hashes too — the bytes are
+ * already on disk from `ingest_attachment` and are never copied again.
+ */
+function buildPromptHistoryContent(frame, promptText) {
+  const attachments = Array.isArray(frame?.params?.attachments)
+    ? frame.params.attachments
+    : [];
+  const parts = attachments.flatMap((attachment, index) => {
+    if (
+      (attachment?.kind !== "image" && attachment?.kind !== "file")
+      || typeof attachment.blobSha !== "string"
+    ) {
+      return [];
+    }
+    const blobPath = path.join(BLOBS_DIR, attachment.blobSha);
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(blobPath).size;
+    } catch {
+      // A hash with no bytes behind it is exactly the "unavailable attachment"
+      // degradation path, so record it and let the UI show that state.
+    }
+    const mimeType =
+      typeof attachment.mimeType === "string"
+        ? attachment.mimeType
+        : attachment.kind === "file"
+          ? "application/pdf"
+          : "image/png";
+    return [{
+      blobSha: attachment.blobSha,
+      bytes,
+      filename:
+        typeof attachment.filename === "string"
+          ? attachment.filename
+          : attachment.kind === "file"
+            ? `attached-file-${index + 1}.pdf`
+            : `attached-image-${index + 1}.png`,
+      ...(attachment.kind === "image"
+        ? { hasThumb: fs.existsSync(path.join(THUMBS_DIR, attachment.blobSha)) }
+        : {}),
+      ...(typeof attachment.sourcePath === "string" ? { path: attachment.sourcePath } : {}),
+      mime_type: mimeType,
+      type: attachment.kind === "file" ? "input_file" : "input_image",
+    }];
+  });
+  if (parts.length === 0) {
+    return promptText;
+  }
+  return [
+    ...(promptText ? [{ text: promptText, type: "input_text" }] : []),
+    ...parts,
+  ];
+}
+
 function handlePrompt(frame) {
   const sessionId = frame.sessionId || activeSessionId || createSession();
   const session = touchSession(ensureSession(sessionId));
@@ -492,6 +973,10 @@ function handlePrompt(frame) {
   }
 
   const promptText = String(frame.text || "");
+  // The harness injects one-shot prompt scripts by editing the persisted state file.
+  // Consume that marker before startTurn()/recordHistoryEntry() call persistState(),
+  // or we would overwrite the file with the in-memory null and lose the script.
+  const promptScript = consumeNextPromptScript();
   const liveAssistant = buildLiveAssistantPayload(promptText);
 
   send({
@@ -504,9 +989,26 @@ function handlePrompt(frame) {
   startTurn(sessionId);
 
   recordHistoryEntry(session, {
-    content: promptText,
+    content: buildPromptHistoryContent(frame, promptText),
     role: "user",
   });
+
+  if (promptScript === "llm_error_once_then_success") {
+    scheduleScriptedRetrySuccess(sessionId, session, promptText);
+    return;
+  }
+  if (promptScript === "llm_error_degrade_then_success") {
+    scheduleScriptedRetrySuccess(sessionId, session, promptText, { degradeNotice: true });
+    return;
+  }
+  if (promptScript === "terminal_llm_error") {
+    scheduleScriptedTerminalLlmError(sessionId);
+    return;
+  }
+  if (promptScript === "plan_close_out_review_green_finalize") {
+    schedulePlanCloseOutReviewGreenFinalize(sessionId, session);
+    return;
+  }
 
   if (ASK_QUESTION_REVERIFY_PATTERN.test(promptText)) {
     schedule(160, () => emitAskQuestion(sessionId));
@@ -652,6 +1154,9 @@ function handleCommand(frame) {
         const sessionId = activeSessionId || createSession();
         send({
           payload: {
+            // Handed over at handshake time, like the real backend: the host needs it
+            // before the first render or granting it later reloads the webview.
+            attachmentRoot: ATTACHMENT_ROOT,
             capabilities: [
               "ask_question",
               "prompt",
@@ -660,13 +1165,28 @@ function handleCommand(frame) {
               "switch_session",
               "list_sessions",
               "get_state",
+              "list_checkpoints",
               "close_session",
               "interrupt",
               "list_models",
               "set_model",
               "set_thinking_level",
+              "ingest_attachment",
+              "retain_attachment_leases",
+              "cache_attachment_thumbnail",
+              "list_connectors",
+              "list_connector_tools",
+              "add_connector",
+              "remove_connector",
+              "set_connector_tool_enabled",
+              "test_connector",
+              "login_connector",
+              "cancel_login_connector",
+              "logout_connector",
+              "reload_connector",
+              "set_connector_tool_filter",
             ],
-            protocolVersion: 1,
+            protocolVersion: 2,
             sessionId,
           },
           requestId: frame.requestId,
@@ -677,6 +1197,115 @@ function handleCommand(frame) {
       return;
     case "control_response":
       handleApprovalResponse(frame, false);
+      return;
+    case "list_connectors": {
+      send({
+        id: frame.id,
+        payload: {
+          project: null,
+          configPaths: {
+            global: { display: "~/.tomcat/mcp.json", raw: "~/.tomcat/mcp.json" },
+            workspace: { display: ".agents/mcp.json", raw: ".agents/mcp.json" },
+          },
+          connectors: [
+            {
+              auth: "none",
+              command: "node",
+              configKey: "mcp:manual-global",
+              generation: String(connectorGeneration),
+              attempt: 1,
+              recovery: null,
+              configPath: "~/.tomcat/mcp.json",
+              configPathRaw: "~/.tomcat/mcp.json",
+              name: "manual-global",
+              oauthConfigured: false,
+              resourceCount: 0,
+              source: "global",
+              state: "connected",
+              toolCount: 1,
+              transport: "stdio",
+              url: null,
+            },
+          ],
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    }
+    case "list_connector_tools":
+      send({
+        id: frame.id,
+        payload: {
+          configKey: frame.configKey,
+          generation: String(connectorGeneration),
+          attempt: 1,
+          tools: [{
+            description: "Manual acceptance connector probe",
+            enabled: connectorToolEnabled,
+            label: "connector_probe",
+            modelName: "mcp__manual_global__connector_probe",
+            rawName: "connector_probe",
+          }],
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "reload_connector":
+      connectorGeneration += 1;
+      send({
+        id: frame.id,
+        payload: {
+          configKey: frame.configKey,
+          accepted: true,
+          generation: String(connectorGeneration),
+          recoveryTimeoutMs: 60_000,
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "set_connector_tool_enabled":
+      connectorToolEnabled = frame.enabled;
+      send({
+        id: frame.id,
+        payload: {
+          configKey: frame.configKey,
+          rawName: frame.rawName,
+          enabled: connectorToolEnabled,
+          configSaved: true,
+          runtimeApplied: true,
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "add_connector":
+      send({
+        id: frame.id,
+        payload: {
+          configKey: `mcp:manual-${frame.name}`,
+          connectionStarted: true,
+          configSaved: true,
+          name: frame.name,
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "remove_connector":
+    case "test_connector":
+    case "login_connector":
+    case "cancel_login_connector":
+    case "logout_connector":
+    case "set_connector_tool_filter":
+      send({
+        id: frame.id,
+        payload: { configKey: frame.configKey, updated: true },
+        success: true,
+        type: "response",
+      });
       return;
     case "control_cancel":
       handleApprovalResponse(frame, true);
@@ -724,22 +1353,55 @@ function handleCommand(frame) {
         type: "response",
       });
       return;
+    case "ingest_attachment":
+      handleIngestAttachment(frame);
+      return;
+    case "cache_attachment_thumbnail":
+      handleCacheAttachmentThumbnail(frame);
+      return;
+    case "retain_attachment_leases":
+      handleRetainAttachmentLeases(frame);
+      return;
     case "get_state": {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = ensureSession(sessionId);
+      const activePlan =
+        typeof session.planId === "string" &&
+        typeof session.planPath === "string" &&
+        (session.planState === "planning" ||
+          session.planState === "executing" ||
+          session.planState === "completed" ||
+          session.planState === "pending")
+          ? {
+            id: session.planId,
+            path: session.planPath,
+            state: session.planState,
+          }
+          : null;
       send({
         id: frame.id,
         payload: {
+          activePlan,
+          agentMode: activePlan?.state === "planning" ? "plan" : "chat",
           busy: session.busy,
           cwd: session.cwd,
-          mode: session.mode,
+          workspaceMode: session.mode,
           model: session.model,
-          planId: session.planId,
-          planState: session.planState,
           sessionId,
           sessionKey: session.sessionKey,
           thinkingLevel: currentThinkingLevel(session),
         },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      return;
+    }
+    case "list_checkpoints": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      send({
+        id: frame.id,
+        payload: { checkpoints: [], sessionId },
         sessionId,
         success: true,
         type: "response",
@@ -771,6 +1433,7 @@ function handleCommand(frame) {
     case "close_session":
       if (frame.sessionId) {
         sessions.delete(frame.sessionId);
+        attachmentLeases.delete(frame.sessionId);
         if (activeSessionId === frame.sessionId) {
           activeSessionId = [...sessions.keys()][0] ?? null;
         }

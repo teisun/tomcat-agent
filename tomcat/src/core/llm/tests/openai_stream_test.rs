@@ -15,7 +15,10 @@ use crate::core::llm::types::{
     ReplayRequirement, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
-use crate::infra::error::{llm_http_status, llm_stage, llm_summary, AppError, LlmErrorStage};
+use crate::infra::error::{
+    classify_llm_failure, llm_http_status, llm_stage, llm_summary, AppError, LlmErrorStage,
+    LlmFailureKind,
+};
 use crate::infra::LlmConfig;
 use bytes::Bytes;
 use std::time::Duration;
@@ -25,7 +28,7 @@ const STREAM_TEST_KEY_ENV: &str = "__OPENAI_STREAM_TEST_KEY__";
 #[test]
 fn test_openai_chunk_with_usage_emits_usage_event() {
     let chunk: OpenAiStreamChunk = serde_json::from_str(
-        r#"{"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":42,"total_tokens":192}}"#,
+        r#"{"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":42,"total_tokens":192,"prompt_tokens_details":{"cached_tokens":120}}}"#,
     )
     .expect("should parse chunk with usage");
     let events = openai_chunk_to_stream_events(chunk);
@@ -34,10 +37,15 @@ fn test_openai_chunk_with_usage_emits_usage_event() {
         StreamEvent::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             total_tokens,
+            ..
         } => {
             assert_eq!(*prompt_tokens, 150);
             assert_eq!(*completion_tokens, 42);
+            assert_eq!(*cache_read_tokens, Some(120));
+            assert_eq!(*cache_write_tokens, None);
             assert_eq!(*total_tokens, Some(192));
         }
         other => panic!("expected StreamEvent::Usage, got {:?}", other),
@@ -179,6 +187,134 @@ async fn sse_stream_drain_skips_empty_first_block_and_keeps_following_events() {
     assert!(saw_finish, "stream should still emit finish reason");
 }
 
+#[tokio::test]
+async fn sse_stream_eof_without_terminal_is_interrupted() {
+    use tokio_stream::StreamExt;
+
+    for tail in ["", "data: {\"choices\":[{\"delta\":{\"content\":\"a"] {
+        let source = tokio_stream::iter(vec![
+            Ok(Bytes::from(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            )),
+            Ok(Bytes::from(tail)),
+        ]);
+        let mut stream = SseEventStream::new(
+            source,
+            ProviderCompatProfile::chat_completions("gpt-4"),
+            true,
+        );
+        assert!(
+            matches!(stream.next().await.expect("delta").expect("valid delta"),
+                StreamEvent::ContentDelta { delta } if delta == "partial"
+            )
+        );
+        let error = stream
+            .next()
+            .await
+            .expect("interruption")
+            .expect_err("no terminal signal");
+        assert_eq!(
+            classify_llm_failure(&error).kind,
+            LlmFailureKind::StreamInterrupted
+        );
+        assert_eq!(llm_stage(&error), Some(LlmErrorStage::BodyRead));
+        assert!(!llm_summary(&error).expect("summary").contains("raw="));
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn sse_stream_eof_after_terminal_ends_cleanly() {
+    use tokio_stream::StreamExt;
+
+    for (terminal, has_finish) in [
+        (
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            true,
+        ),
+        ("data: [DONE]\n\n", false),
+    ] {
+        let body =
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\n{terminal}");
+        let source = tokio_stream::iter(vec![Ok(Bytes::from(body))]);
+        let mut stream = SseEventStream::new(
+            source,
+            ProviderCompatProfile::chat_completions("gpt-4"),
+            true,
+        );
+        assert!(
+            matches!(stream.next().await.expect("delta").expect("valid delta"),
+                StreamEvent::ContentDelta { delta } if delta == "ok"
+            )
+        );
+        if has_finish {
+            assert!(
+                matches!(stream.next().await.expect("finish").expect("valid finish"),
+                    StreamEvent::FinishReason { reason } if reason == "stop"
+                )
+            );
+        }
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn sse_stream_eof_residual_invalid_first_frame_is_retryable_transport() {
+    use tokio_stream::StreamExt;
+
+    // 没有 `\n\n` 分隔符，旧实现会在 EOF 直接 flush 后正常结束，导致 agent 静默停下。
+    let source = tokio_stream::iter(vec![Ok(Bytes::from("data: {not-json"))]);
+    let mut stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("gpt-4"),
+        true,
+    );
+
+    let error = stream
+        .next()
+        .await
+        .expect("residual malformed frame must be surfaced")
+        .expect_err("malformed first frame cannot become a normal EOF");
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted,
+        "before any valid event, a malformed gateway frame is transport-retryable"
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_parse_after_first_event_remains_protocol_error() {
+    use tokio_stream::StreamExt;
+
+    let source = tokio_stream::iter(vec![
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        )),
+        Ok(Bytes::from("data: {not-json\n\n")),
+    ]);
+    let mut stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("gpt-4"),
+        true,
+    );
+    assert!(matches!(
+        stream
+            .next()
+            .await
+            .expect("first event")
+            .expect("valid chunk"),
+        StreamEvent::ContentDelta { .. }
+    ));
+    let error = stream
+        .next()
+        .await
+        .expect("later malformed frame must surface")
+        .expect_err("later protocol corruption must fail");
+    assert_eq!(llm_stage(&error), Some(LlmErrorStage::Parse));
+}
+
 /// 回归：chat-completions 类 provider 的 reasoning 单流必须发成 `ThinkingSource::Summary`。
 ///
 /// 这些模型（deepseek/mimo/doubao 等）没有 OpenAI Responses 的独立 summary/raw 双流，
@@ -216,8 +352,10 @@ fn test_openai_request_body_does_not_serialize_reasoning_when_none() {
         stream: false,
         tools: None,
         stream_options: None,
+        service_tier: None,
         reasoning_effort: None,
         thinking: None,
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert!(
@@ -230,6 +368,31 @@ fn test_openai_request_body_does_not_serialize_reasoning_when_none() {
         "None thinking 不应进 wire JSON: {}",
         j
     );
+    assert!(
+        j.get("max_completion_tokens").is_none(),
+        "None max_tokens 应彻底省略而非序列化为 null: {}",
+        j
+    );
+    assert!(j.get("prompt_cache_key").is_none());
+}
+
+#[test]
+fn test_openai_request_body_serializes_scoped_prompt_cache_key() {
+    let body = OpenAiRequestBody {
+        model: "gpt-5.4".into(),
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        stream: true,
+        tools: None,
+        stream_options: None,
+        service_tier: None,
+        reasoning_effort: None,
+        thinking: None,
+        prompt_cache_key: Some("session-1:subagent:verifier".to_string()),
+    };
+    let wire = serde_json::to_value(&body).expect("serialize request body");
+    assert_eq!(wire["prompt_cache_key"], "session-1:subagent:verifier");
 }
 
 #[test]
@@ -242,8 +405,10 @@ fn test_openai_request_body_serializes_reasoning_effort() {
         stream: true,
         tools: None,
         stream_options: None,
+        service_tier: None,
         reasoning_effort: Some("high".into()),
         thinking: None,
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert_eq!(
@@ -263,8 +428,10 @@ fn test_openai_request_body_serializes_thinking_object() {
         stream: true,
         tools: None,
         stream_options: None,
+        service_tier: None,
         reasoning_effort: None,
         thinking: Some(serde_json::json!({"type":"enabled"})),
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert_eq!(j["thinking"]["type"], "enabled");
@@ -281,8 +448,10 @@ fn test_openai_request_body_serializes_deepseek_thinking_fields_together() {
         stream: true,
         tools: None,
         stream_options: None,
+        service_tier: None,
         reasoning_effort: Some("high".into()),
         thinking: Some(serde_json::json!({"type":"enabled"})),
+        prompt_cache_key: None,
     };
     let j = serde_json::to_value(&body).unwrap();
     assert_eq!(
@@ -407,6 +576,69 @@ fn test_openai_chunk_deepseek_tool_turn_without_reasoning_does_not_emit_snapshot
 }
 
 #[test]
+fn tool_owned_media_split_keeps_deepseek_reasoning_before_wire_user() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let assistant=ChatMessage::assistant_with_tool_calls(None,vec![serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}})])
+        .with_reasoning_state(None,Some(ReasoningContinuation {
+            source_provider:"deepseek".into(),source_api:"chat_completions".into(),source_model:"deepseek-v4-pro".into(),
+            format:ReasoningFormat::DeepseekReasoningContent,opaque_payload:serde_json::json!({"reasoning_content":"inspect pixels"}),fallback_text:None,provider_refs:None,
+        }),Some(ContinuityMetadata {had_tool_call:true,replay_requirement:ReplayRequirement::SameProfileRequired}));
+    let mut tool = ChatMessage::tool("one", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+    ]));
+    let wire = transport_messages(
+        &[ChatMessage::user("look"), assistant, tool],
+        "deepseek-v4-pro",
+        true,
+        None,
+    );
+    assert_eq!(wire[1]["reasoning_content"], "inspect pixels");
+    assert_eq!(wire[2]["role"], "tool");
+    assert_eq!(wire[3]["role"], "user");
+    assert_eq!(wire[3]["content"][1]["type"], "image_url");
+}
+
+#[test]
+fn tool_owned_media_kimi_preserves_same_profile_thinking_across_real_and_wire_users() {
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
+    let mut assistant = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![
+            serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}}),
+        ],
+    );
+    assistant.reasoning_continuation = Some(ReasoningContinuation {
+        source_provider: "moonshot".into(),
+        source_api: "chat_completions".into(),
+        source_model: "kimi-k3".into(),
+        format: ReasoningFormat::DeepseekReasoningContent,
+        opaque_payload: serde_json::json!({"reasoning_content":"inspect pixels"}),
+        fallback_text: None,
+        provider_refs: None,
+    });
+    let mut tool = ChatMessage::tool("one", "");
+    tool.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+    ]));
+    let messages = vec![
+        ChatMessage::user("look"),
+        assistant,
+        tool,
+        ChatMessage::user("continue"),
+    ];
+    let wire = transport_messages(&messages, "kimi-k3", true, None);
+    assert_eq!(wire[1]["reasoning_content"], "inspect pixels");
+    assert_eq!(wire[3]["content"][1]["type"], "image_url");
+    assert_eq!(wire[4]["content"], "continue");
+    let other = transport_messages(&messages, "deepseek-v4-pro", true, None);
+    assert!(
+        other[1].get("reasoning_content").is_none(),
+        "never replay Kimi thinking into another model profile"
+    );
+}
+
+#[test]
 fn deepseek_tool_turn_replays_reasoning_content() {
     let message = ChatMessage::assistant_with_tool_calls(
         None,
@@ -432,7 +664,7 @@ fn deepseek_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileRequired,
         }),
     );
-    let wire = transport_messages(&[message], "deepseek-v4-flash", true);
+    let wire = transport_messages(&[message], "deepseek-v4-flash", true, None);
     assert_eq!(wire[0]["reasoning_content"], "internal plan");
 }
 
@@ -454,7 +686,7 @@ fn test_transport_messages_deepseek_non_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
-    let wire = transport_messages(&[message], "deepseek-v4-pro", true);
+    let wire = transport_messages(&[message], "deepseek-v4-pro", true, None);
     assert_eq!(wire[0]["reasoning_content"], "internal plan");
 }
 
@@ -468,7 +700,7 @@ fn test_transport_messages_deepseek_tool_turn_without_reasoning_state_keeps_plai
             "function":{"name":"read","arguments":"{}"}
         })],
     );
-    let wire = transport_messages(&[message], "deepseek-v4-pro", true);
+    let wire = transport_messages(&[message], "deepseek-v4-pro", true, None);
     assert_eq!(wire[0]["content"], "calling tool");
     assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
     assert!(wire[0].get("reasoning_content").is_none());
@@ -527,6 +759,7 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
         ],
         "deepseek-v4-flash",
         true,
+        None,
     );
 
     // 历史 tool turn（wire[1]）在「answer directly」这条真实 user 之前，落在可 replay 窗口外，
@@ -591,8 +824,10 @@ fn mimo_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileRequired,
         }),
     );
-    let wire = transport_messages(&[message], "mimo-v2.5-pro", true);
+    let wire = transport_messages(&[message], "mimo-v2.5-pro", true, None);
     assert_eq!(wire[0]["reasoning_content"], "mimo plan");
+    assert_eq!(wire[0]["content"], serde_json::Value::Null);
+    assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "read");
 }
 
 #[tokio::test]
@@ -673,7 +908,15 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
         Err(err) => {
             let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
             assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
-            assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains(&crate::infra::i18n::tr_in(
+                    crate::infra::i18n::Locale::En,
+                    "llm.idleTimeout",
+                    &[("seconds", "3")]
+                )),
+                "unexpected msg: {}",
+                msg
+            );
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
                 "unexpected msg: {}",
@@ -685,29 +928,39 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn keepalive_bytes_do_not_trigger_idle_timeout() {
+async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
     use tokio_stream::wrappers::IntervalStream;
     use tokio_stream::StreamExt;
 
     let interval = tokio::time::interval(Duration::from_millis(200));
-    let source = IntervalStream::new(interval)
-        .take(3)
-        .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
-    let mut stream = apply_stream_idle_timeout(source, 1);
-    let collect_task = tokio::spawn(async move {
-        let mut out = Vec::new();
-        while let Some(item) = stream.next().await {
-            out.push(item);
-        }
-        out
-    });
+    let source = IntervalStream::new(interval).map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
+    let event_stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("gpt-5"),
+        true,
+    );
+    let mut stream = apply_stream_idle_timeout(event_stream, 1);
+    let next_task = tokio::spawn(async move { stream.next().await });
 
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
 
-    let out = collect_task.await.expect("join ok");
-    assert_eq!(out.len(), 3);
-    assert!(out.into_iter().all(|item| item.is_ok()));
+    let item = next_task
+        .await
+        .expect("join ok")
+        .expect("should produce timeout error");
+    match item {
+        Err(err) => {
+            let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
+            assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
+            assert!(
+                msg.contains("stream_timeout_sec=1s"),
+                "unexpected msg: {}",
+                msg
+            );
+        }
+        other => panic!("expected timeout AppError, got {:?}", other),
+    }
 }
 
 fn stream_test_provider(
@@ -724,6 +977,16 @@ fn stream_test_provider(
         base_url: Some(base_url),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: Some("openai".to_string()),
     };
     let mut runtime = LlmConfig::default().runtime();
@@ -750,9 +1013,13 @@ fn stream_test_request() -> ChatRequest {
         model: "gpt-4.1".to_string(),
         temperature: Some(0.0),
         max_tokens: Some(16),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(true),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     }
 }
@@ -778,7 +1045,7 @@ async fn stream_post_once_gateway_503_sets_connect_stage() {
     let provider = stream_test_provider(server.base_url.clone(), None, 0);
     let body = OpenAiRequestBody {
         model: "gpt-4.1".to_string(),
-        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true),
+        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true, None),
         temperature: Some(0.0),
         max_tokens: Some(16),
         stream: true,
@@ -786,8 +1053,10 @@ async fn stream_post_once_gateway_503_sets_connect_stage() {
         stream_options: Some(StreamOptionsBody {
             include_usage: true,
         }),
+        service_tier: None,
         reasoning_effort: None,
         thinking: None,
+        prompt_cache_key: Some("session:main".to_string()),
     };
     let err = provider
         .stream_post_once(&server.base_url, &body)
@@ -815,7 +1084,7 @@ async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
         .expect("build read-timeout reqwest client");
     let body = OpenAiRequestBody {
         model: "gpt-4.1".to_string(),
-        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true),
+        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true, None),
         temperature: Some(0.0),
         max_tokens: Some(16),
         stream: true,
@@ -823,8 +1092,10 @@ async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
         stream_options: Some(StreamOptionsBody {
             include_usage: true,
         }),
+        service_tier: None,
         reasoning_effort: None,
         thinking: None,
+        prompt_cache_key: None,
     };
     let err = provider
         .stream_post_once(&server.base_url, &body)
@@ -834,7 +1105,21 @@ async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
     assert!(OpenAiProvider::is_retriable(&err));
     let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
     assert!(
-        msg.contains("等待响应头"),
+        msg.contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "llm.headersTimeout",
+            &[
+                (
+                    "action",
+                    &crate::infra::i18n::tr_in(
+                        crate::infra::i18n::Locale::En,
+                        "llm.action.streamRequest",
+                        &[]
+                    )
+                ),
+                ("seconds", "1"),
+            ]
+        )),
         "错误文案应说明卡在响应头阶段，实际: {}",
         msg
     );
@@ -967,7 +1252,11 @@ async fn chat_stream_after_first_delta_body_read_error_is_not_retried() {
     assert!(
         llm_summary(&err)
             .unwrap_or_else(|| err.to_string())
-            .contains("流读取"),
+            .contains(&crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "llm.action.readStream",
+                &[]
+            )),
         "错误摘要应保留流读取失败语义，实际: {}",
         err
     );

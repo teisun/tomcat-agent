@@ -33,6 +33,7 @@ sidecar 只保存恢复定位所需的轻量 metadata，不保存完整消息正
 - `total_entries`
 - `last_entry_id`
 - `latest_boundary`
+- `pending_boundary_markers`
 - `recent_turn_starts`
 - `latest_day_first_entry`
 - `latest_plan_event`
@@ -88,7 +89,9 @@ ordinal:
 - 给 sidecar 做 O(1) 增量更新
 - 维护 `total_entries`
 - 追加 / 滚动 `recent_turn_starts`
-- 更新 `latest_boundary` / `latest_plan_event`
+- 收到 `branch_summary` marker 时存入 `pending_boundary_markers`；收到关联的
+  `branch_summary_text` 后才将 marker 提升为 `latest_boundary`
+- 更新 `latest_plan_event`
 
 ### 4.2 Rewrite
 
@@ -97,10 +100,14 @@ ordinal:
 - `insert_entry_after_message_id`
 - `mark_message_entries_after_anchor_superseded`
 - `rewrite_message_text_entries_by_id`
-- `set_branch_summary_entry_is_boundary_true`
-- `remove_branch_summary_entry_by_id`
 
 这些操作现在在 **同一趟 rewrite 后立刻 inline rebuild sidecar**：rewrite 期间已经拿到了新的内存行集合，随后直接复用这些行调用内联重建 helper 写回 sidecar，**不会在 `write_file_atomic(...)` 之后再把 transcript 重新打开全量读一遍**。这样既避免“下次启动才发现索引失效”，也把 rewrite 后的额外读盘压到 0。
+
+> Compaction 已迁移到方案 E：触发预热时 append `branch_summary` marker，应用时
+> append `branch_summary_text` 正文，hydrate 两遍 fold 拼回。原来的
+> `set_branch_summary_entry_is_boundary_true` /
+> `remove_branch_summary_entry_by_id` / `write_boundary_transcript` 翻转、删行写法已移除；
+> 详见 [方案 E 整改计划](/Users/yankeben/.cursor/plans/transcript_regressions_remediation_df3378d3.plan.md)。
 
 ### 4.3 Rebuild
 

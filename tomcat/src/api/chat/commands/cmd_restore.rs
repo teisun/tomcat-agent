@@ -9,6 +9,7 @@ use crate::core::{
     CheckpointId, CheckpointKind, CheckpointRecordRequest, ListOptions, RestoreOptions,
     TranscriptEntry,
 };
+use crate::infra::i18n::tr;
 use crate::infra::HostcallAuditEntry;
 
 use super::cmd_ckpt::checkpoint_kind_label;
@@ -44,6 +45,8 @@ pub(crate) fn run(
     checkpoint_id: String,
     paths: Vec<PathBuf>,
     dry_run: bool,
+    context_state: &mut crate::core::ContextState,
+    system_text: &str,
 ) -> ChatCommandOutcome {
     let checkpoint_id = CheckpointId::new(checkpoint_id);
     let report = match restore_core_with_paths(ctx, checkpoint_id.clone(), &paths, true, dry_run) {
@@ -56,7 +59,7 @@ pub(crate) fn run(
 
     for warning in &report.warnings {
         warn!(checkpoint_id = %checkpoint_id, "{warning}");
-        println!("警告：{warning}");
+        println!("{}", tr("slash.restore.warning", &[("detail", warning)]));
     }
 
     if report.dry_run {
@@ -64,24 +67,62 @@ pub(crate) fn run(
         if let Some(summary) = report.summary {
             print!("{}", summary);
         } else {
-            println!("当前工作区与目标 checkpoint 无差异。");
+            println!("{}", tr("slash.restore.noDiff", &[]));
         }
         return ChatCommandOutcome::Handled;
     }
 
+    match crate::api::chat::reload_context_state(ctx, system_text) {
+        Ok(reloaded) => *context_state = reloaded,
+        Err(error) => {
+            println!(
+                "{}",
+                tr(
+                    "slash.restore.reloadFailed",
+                    &[
+                        ("id", &checkpoint_id.to_string()),
+                        ("detail", &error.to_string())
+                    ]
+                )
+            );
+            return ChatCommandOutcome::Handled;
+        }
+    }
+
     if report.restored_paths.is_empty() {
-        println!("已恢复 checkpoint {}。", checkpoint_id);
+        println!(
+            "{}",
+            tr("slash.restore.done", &[("id", &checkpoint_id.to_string())])
+        );
     } else {
         println!(
-            "已恢复 checkpoint {}：{}",
-            checkpoint_id,
-            report.restored_paths.join(", ")
+            "{}",
+            tr(
+                "slash.restore.paths",
+                &[
+                    ("id", &checkpoint_id.to_string()),
+                    ("paths", &report.restored_paths.join(", "))
+                ]
+            )
         );
     }
     if let Some(plan_id) = report.reloaded_plan_id {
-        println!("plan_runtime 已对齐磁盘：EXEC plan_id={plan_id}");
+        println!("{}", tr("slash.restore.plan", &[("id", &plan_id)]));
     }
-    ChatCommandOutcome::Handled
+    match crate::api::chat::has_resumable_tail_ask_question(&ctx.session_runtime.session) {
+        Ok(true) => ChatCommandOutcome::ResumePendingQuestion,
+        Ok(false) => ChatCommandOutcome::Handled,
+        Err(error) => {
+            println!(
+                "{}",
+                tr(
+                    "slash.restore.questionFailed",
+                    &[("detail", &error.to_string())]
+                )
+            );
+            ChatCommandOutcome::Handled
+        }
+    }
 }
 
 pub(crate) fn restore_core(
@@ -104,11 +145,17 @@ fn restore_core_with_paths(
         Ok(Some(meta)) => meta,
         Ok(None) => {
             record_restore_audit(ctx, false, format!("checkpoint missing: {checkpoint_id}"));
-            return Err(format!("未找到 checkpoint: {checkpoint_id}"));
+            return Err(tr(
+                "slash.ckpt.notFound",
+                &[("id", &checkpoint_id.to_string())],
+            ));
         }
         Err(err) => {
             record_restore_audit(ctx, false, format!("show failed: {err}"));
-            return Err(format!("读取 checkpoint 失败：{err}"));
+            return Err(tr(
+                "slash.restore.readFailed",
+                &[("detail", &err.to_string())],
+            ));
         }
     };
 
@@ -116,11 +163,14 @@ fn restore_core_with_paths(
         Ok(Some(session_id)) => session_id,
         Ok(None) => {
             record_restore_audit(ctx, false, "restore missing current session".to_string());
-            return Err("当前无活动会话，无法执行 restore".to_string());
+            return Err(tr("slash.restore.noSession", &[]));
         }
         Err(err) => {
             record_restore_audit(ctx, false, format!("current_session_id failed: {err}"));
-            return Err(format!("读取当前会话失败：{err}"));
+            return Err(tr(
+                "slash.restore.sessionFailed",
+                &[("detail", &err.to_string())],
+            ));
         }
     };
     if meta.session_id != current_session_id {
@@ -132,7 +182,7 @@ fn restore_core_with_paths(
                 meta.session_id
             ),
         );
-        return Err("checkpoint 不属于当前会话，不能跨会话 restore".to_string());
+        return Err(tr("slash.restore.wrongSession", &[]));
     }
 
     let note_paths = checkpoint_note_paths(meta.notes.as_ref());
@@ -157,7 +207,10 @@ fn restore_core_with_paths(
     if revert_files && !dry_run && matches!(meta.kind, CheckpointKind::TurnEnd) {
         if let Err(err) = record_pre_rollback(ctx, &checkpoint_id) {
             record_restore_audit(ctx, false, format!("pre-rollback failed: {err}"));
-            return Err(format!("pre-rollback 失败，已中止 restore：{err}"));
+            return Err(tr(
+                "slash.restore.preFailed",
+                &[("detail", &err.to_string())],
+            ));
         }
     }
 
@@ -177,7 +230,7 @@ fn restore_core_with_paths(
             Ok(report) => report,
             Err(err) => {
                 record_restore_audit(ctx, false, format!("restore failed: {err}"));
-                return Err(format!("restore 失败：{err}"));
+                return Err(tr("slash.restore.failed", &[("detail", &err.to_string())]));
             }
         };
         summary = report.summary.clone();
@@ -194,7 +247,21 @@ fn restore_core_with_paths(
                     false,
                     format!("restore applied but transcript finalize failed: {err}"),
                 );
-                return Err(format!("restore 已改盘，但 transcript 回滚失败：{err}"));
+                return Err(tr(
+                    "slash.restore.transcriptPartial",
+                    &[("detail", &err.to_string())],
+                ));
+            }
+        }
+        if !dry_run {
+            if let (Ok(Some(transcript)), Ok(timestamp)) = (
+                ctx.session_runtime.session.current_transcript_path(),
+                chrono::DateTime::parse_from_rfc3339(&meta.created_at),
+            ) {
+                crate::core::checkpoint::file_baselines::discard_keeps_after(
+                    &transcript,
+                    timestamp.timestamp_millis(),
+                );
             }
         }
         changed_paths_for_report(&report, &restore_plan.paths)
@@ -210,7 +277,10 @@ fn restore_core_with_paths(
         {
             if let Err(err) = finalize_restore_transcript(ctx, &meta, &[]) {
                 record_restore_audit(ctx, false, format!("transcript-only restore failed: {err}"));
-                return Err(format!("restore 对话截断失败：{err}"));
+                return Err(tr(
+                    "slash.restore.truncateFailed",
+                    &[("detail", &err.to_string())],
+                ));
             }
         }
         note_paths
@@ -224,14 +294,17 @@ fn restore_core_with_paths(
         match ctx
             .session_runtime
             .plan_runtime
-            .reload_active_plan_from_disk()
+            .sync_active_plan_from_disk()
         {
             Ok(Some(plan_id)) => {
                 reloaded_plan_id = Some(plan_id);
             }
             Ok(None) => {}
             Err(err) => {
-                warnings.push(format!("plan_runtime 重新对齐失败（仅警告）：{err}"));
+                warnings.push(tr(
+                    "slash.restore.planWarning",
+                    &[("detail", &err.to_string())],
+                ));
             }
         }
     }
@@ -278,7 +351,7 @@ fn record_pre_rollback(ctx: &ChatContext, checkpoint_id: &CheckpointId) -> Resul
         .session
         .current_session_id()
         .map_err(|err| err.to_string())?
-        .ok_or_else(|| "无当前会话".to_string())?;
+        .ok_or_else(|| tr("terminal.noSession", &[]))?;
     ctx.scope_services
         .checkpoint_store
         .record(CheckpointRecordRequest {
@@ -304,7 +377,7 @@ fn finalize_restore_transcript(
     let anchor = meta
         .message_anchor
         .as_deref()
-        .ok_or_else(|| "checkpoint 缺少 message_anchor，无法安全标记 superseded".to_string())?;
+        .ok_or_else(|| tr("slash.restore.anchorMissing", &[]))?;
     ctx.session_runtime
         .session
         .mark_messages_after_anchor_superseded(anchor)
@@ -423,7 +496,7 @@ fn collect_restore_warnings(
         conflicts = %detail,
         "restore may overlap other session changes"
     );
-    vec![format!("本次 restore 可能影响其他会话改动：{detail}")]
+    vec![tr("slash.restore.conflict", &[("detail", &detail)])]
 }
 
 pub(crate) fn effective_restore_paths(
@@ -452,14 +525,13 @@ pub(crate) fn effective_restore_paths(
         },
         Ok(_) => RestorePathPlan {
             paths: Vec::new(),
-            warning: Some(
-                "无法自动收窄 restore 路径，将继续执行整树 restore。".to_string(),
-            ),
+            warning: Some(tr("slash.restore.wholeTree", &[])),
         },
         Err(err) => RestorePathPlan {
             paths: Vec::new(),
-            warning: Some(format!(
-                "无法自动收窄 restore 路径（读取 checkpoint diff 失败：{err}），将继续执行整树 restore。"
+            warning: Some(tr(
+                "slash.restore.wholeTreeError",
+                &[("detail", &err.to_string())],
             )),
         },
     }

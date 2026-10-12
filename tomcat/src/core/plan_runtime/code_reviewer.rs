@@ -1,0 +1,519 @@
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
+
+use super::{
+    review::{downgrade_invalid_code_review_p1_findings, Finding, ParsedReview},
+    DisputedFinding,
+};
+
+pub const CODE_REVIEWER_ALLOWED_TOOLS: &[&str] = &[
+    "read",
+    "search_files",
+    "list_dir",
+    "bash",
+    "task_output",
+    "task_list",
+    "task_stop",
+];
+
+pub fn code_reviewer_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
+    let mut tools = CODE_REVIEWER_ALLOWED_TOOLS.to_vec();
+    if expose_skills {
+        tools.push("load_skill");
+    }
+    tools
+}
+
+pub fn code_review_system_prompt_text() -> &'static str {
+    load_prompt(PromptKey::ReviewerCode)
+}
+
+/// Render the factual finding list without assigning it to a particular consumer.
+pub(crate) fn render_open_findings_list(open_findings: &[Finding]) -> String {
+    open_findings
+        .iter()
+        .map(|finding| {
+            let evidence = match finding.basis.as_deref() {
+                Some("plan_mismatch") => finding
+                    .plan_ref
+                    .as_deref()
+                    .map(|reference| format!(" [basis=plan_mismatch; plan_ref={reference}]"))
+                    .unwrap_or_else(|| " [basis=plan_mismatch]".to_string()),
+                Some("user_defect") => " [basis=user_defect]".to_string(),
+                Some(other) => format!(" [basis={other}]"),
+                None => String::new(),
+            };
+            format!(
+                "- {} [{}] {}: {}{}",
+                finding.reference, finding.severity, finding.area, finding.note, evidence
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 上一轮未清 finding 渲染成 prompt 片段，要求 reviewer 逐条核销。
+pub(crate) fn render_open_findings_section(open_findings: &[Finding]) -> String {
+    let list = render_open_findings_list(open_findings);
+    if list.is_empty() {
+        return String::new();
+    }
+    let lines = list
+        .lines()
+        .map(|line| format!("         {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "         Open findings from the previous review round (verify each one first):\n\
+         {lines}\n\
+         - Verify each item against the current code. Report it again ONLY if it is still unfixed.\n\
+         - Do not re-report an issue you confirmed fixed.\n"
+    )
+}
+
+fn render_adjudicated_section(disputed_findings: &[DisputedFinding]) -> String {
+    if disputed_findings.is_empty() {
+        return String::new();
+    }
+    let lines = disputed_findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "         - [{}] {}: {} — accepted trade-off: {}",
+                finding.severity, finding.area, finding.note, finding.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "         Known accepted trade-offs (do NOT re-flag these, including with different wording):\n\
+         {lines}\n"
+    )
+}
+
+/// 构建 code-review 首轮请求的输入集合，避免 prompt 组装继续堆叠位置参数。
+pub(crate) struct CodeReviewPromptInput<'a> {
+    pub plan_id: &'a str,
+    pub plan_text: &'a str,
+    pub plan_path: &'a Path,
+    pub workspace_root: Option<&'a Path>,
+    pub changed_files: &'a [String],
+    pub review_files: &'a [String],
+    pub round: u32,
+    pub is_incremental: bool,
+    pub open_findings: &'a [Finding],
+    pub disputed_findings: &'a [DisputedFinding],
+}
+
+pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> String {
+    let CodeReviewPromptInput {
+        plan_id,
+        plan_text,
+        plan_path,
+        workspace_root,
+        changed_files,
+        review_files,
+        round,
+        is_incremental,
+        open_findings,
+        disputed_findings,
+    } = input;
+    let plan_path = crate::infra::platform::format_home_path(plan_path);
+    let workspace_hint = workspace_root
+        .map(|path| {
+            format!(
+                "         - Project/workspace root (start repo inspection here first): `{}`\n\
+                 - Path discipline: use the relative changed-file paths below. For bash, leave cwd empty or use `.`; do not guess an absolute root.\n\
+                 - Access note: reads and bash still follow runtime authorization / permission rules.\n",
+                crate::infra::platform::format_home_path(path)
+            )
+        })
+        .unwrap_or_default();
+    let review_scope_section = if is_incremental {
+        let review_files = render_changed_files(review_files);
+        format!(
+            "         Follow-up review (round {round}).\n\
+             A timestamp cannot provide a reliable per-file delta, so review the current complete changed-file set (including untracked new files):\n\
+             {review_files}\
+             Recheck prior findings below first. Do not re-report a prior issue that is fixed; report any new P0/P1 problem you find in the current diff.\n"
+        )
+    } else {
+        format!(
+            "         Runtime changed files list (`git diff --name-only HEAD` ∪ `git ls-files --others --exclude-standard` = tracked changes + untracked new files — the COMPLETE set to review):\n\
+             {}",
+            render_changed_files(changed_files)
+        )
+    };
+    render_prompt(
+        PromptKey::ReviewerCodeBrief,
+        &[
+            ("plan_id", plan_id),
+            ("plan_path", &plan_path),
+            ("workspace_hint", &workspace_hint),
+            ("review_scope_section", &review_scope_section),
+            (
+                "open_findings_section",
+                &render_open_findings_section(open_findings),
+            ),
+            (
+                "adjudicated_findings_section",
+                &render_adjudicated_section(disputed_findings),
+            ),
+            ("plan_text", plan_text),
+        ],
+    )
+}
+
+fn render_changed_files(files: &[String]) -> String {
+    if files.is_empty() {
+        return "         - (none)\n".to_string();
+    }
+    let joined = files
+        .iter()
+        .take(80)
+        .map(|path| format!("         - `{path}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let suffix = if files.len() > 80 {
+        format!("\n         - ... {} more file(s) omitted", files.len() - 80)
+    } else {
+        String::new()
+    };
+    format!("{joined}{suffix}\n")
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeReviewSummary {
+    pub aborted: bool,
+    #[serde(default)]
+    pub verdict: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub changes_summary: String,
+    pub applied_changes: bool,
+    #[serde(default)]
+    pub findings: Vec<Finding>,
+    #[serde(default)]
+    pub reviewer_turns_used: u32,
+    #[serde(default)]
+    pub reviewer_turns_limit: u32,
+    #[serde(default)]
+    pub reviewer_stop_reason: String,
+    #[serde(default)]
+    pub child_session_id: String,
+}
+
+impl CodeReviewSummary {
+    pub fn placeholder_pending() -> Self {
+        Self {
+            aborted: true,
+            verdict: Some("aborted".into()),
+            summary:
+                "Independent code review is unavailable; this result is an aborted placeholder."
+                    .to_string(),
+            changes_summary: "none".into(),
+            applied_changes: false,
+            findings: Vec::new(),
+            reviewer_turns_used: 0,
+            reviewer_turns_limit: 0,
+            reviewer_stop_reason: "not_dispatched".into(),
+            child_session_id: String::new(),
+        }
+    }
+
+    pub fn aborted_with(reason: impl Into<String>) -> Self {
+        Self {
+            aborted: true,
+            verdict: Some("aborted".into()),
+            summary: reason.into(),
+            changes_summary: "none".into(),
+            applied_changes: false,
+            findings: Vec::new(),
+            reviewer_turns_used: 0,
+            reviewer_turns_limit: 0,
+            reviewer_stop_reason: "aborted".into(),
+            child_session_id: String::new(),
+        }
+    }
+
+    pub fn from_parsed(parsed: ParsedReview, plan_text: &str) -> Self {
+        let mut findings = parsed.findings;
+        downgrade_invalid_code_review_p1_findings(&mut findings, plan_text);
+        Self {
+            aborted: false,
+            verdict: parsed.verdict,
+            summary: parsed.summary,
+            changes_summary: parsed.changes_summary,
+            applied_changes: parsed.applied_changes,
+            findings,
+            reviewer_turns_used: 0,
+            reviewer_turns_limit: 0,
+            reviewer_stop_reason: "completed".into(),
+            child_session_id: String::new(),
+        }
+    }
+
+    pub fn normalize_for_result(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        if self.aborted {
+            if self.verdict.as_deref() != Some("aborted") {
+                self.verdict = Some("aborted".into());
+                warnings.push("code review aborted; verdict normalized to aborted".to_string());
+            }
+            self.applied_changes = false;
+            return warnings;
+        }
+
+        match self.verdict.clone() {
+            Some(verdict)
+                if matches!(verdict.as_str(), "pass" | "fail" | "partial" | "aborted") => {}
+            Some(other) => {
+                self.verdict = Some("aborted".into());
+                warnings.push(format!(
+                    "Invalid code review verdict `{other}`; normalized to aborted"
+                ));
+            }
+            None => {
+                self.verdict = Some("partial".into());
+                warnings.push("code review returned no verdict; normalized to partial".to_string());
+            }
+        }
+
+        if self.applied_changes {
+            self.applied_changes = false;
+            warnings.push(
+                "code reviewer may not edit files directly; applied_changes reset to false"
+                    .to_string(),
+            );
+        }
+        if self.changes_summary.trim().is_empty() {
+            self.changes_summary = "none".into();
+            warnings
+                .push("code review returned no changes_summary; normalized to none".to_string());
+        }
+
+        warnings
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let non_blocking_findings = self
+            .findings
+            .iter()
+            .filter(|finding| !finding.blocks())
+            .count();
+        serde_json::json!({
+            "aborted": self.aborted,
+            "verdict": self.verdict,
+            "summary": self.summary,
+            "changes_summary": self.changes_summary,
+            "applied_changes": self.applied_changes,
+            "findings": self.findings,
+            "non_blocking_findings": non_blocking_findings,
+            "p2_guidance": (non_blocking_findings > 0).then_some(
+                "P2 findings are non-blocking suggestions; do not create a todo or delay close-out unless the user asks to address them."
+            ),
+            "reviewer_turns_used": self.reviewer_turns_used,
+            "reviewer_turns_limit": self.reviewer_turns_limit,
+            "reviewer_stop_reason": self.reviewer_stop_reason,
+            "child_session_id": self.child_session_id,
+        })
+    }
+}
+
+/// 当前工作树相对 HEAD 的完整变更文件集：已跟踪的差异与未跟踪新文件的并集。
+pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let mut changed_files = BTreeSet::new();
+    for line in run_git_paths(
+        workspace_root,
+        // `git -C <workspace-subdir>` normally prints paths relative to the
+        // repository root. `--relative` keeps them relative to workspace_root,
+        // which is the base used below for content reads and reviewer navigation.
+        &[
+            "diff",
+            "--relative",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "HEAD",
+        ],
+    )
+    .await
+    {
+        if !line.is_empty() {
+            changed_files.insert(line);
+        }
+    }
+    for line in run_git_paths(
+        workspace_root,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    )
+    .await
+    {
+        if !line.is_empty() {
+            changed_files.insert(line);
+        }
+    }
+
+    changed_files.into_iter().collect()
+}
+
+/// Fingerprint the current code-only Git delta for completion-guard progress.
+///
+/// Tracked files contribute Git's binary diff against HEAD, while untracked
+/// code files contribute their current path and bytes. This distinguishes an
+/// edit to an already-dirty file from a no-op rewrite without treating
+/// non-code files as implementation progress.
+pub async fn code_diff_content_fingerprint(workspace_root: &std::path::Path) -> Option<String> {
+    let changed_code_files = collect_git_changed_files(workspace_root)
+        .await
+        .into_iter()
+        .filter(|path| is_code_path(path))
+        .collect::<Vec<_>>();
+    let mut untracked_code_files = run_git_paths(
+        workspace_root,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    )
+    .await
+    .into_iter()
+    .filter(|path| is_code_path(path))
+    .collect::<Vec<_>>();
+    untracked_code_files.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"tomcat-code-diff-fingerprint-v1\0");
+    if !changed_code_files.is_empty() {
+        let mut args = vec![
+            "diff".to_string(),
+            "--relative".to_string(),
+            "--no-ext-diff".to_string(),
+            "--binary".to_string(),
+            "HEAD".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(changed_code_files.iter().cloned());
+        let tracked_diff = run_git_capture_owned(workspace_root, &args).await?;
+        update_fingerprint_component(&mut hasher, b"tracked-diff", &tracked_diff);
+    }
+    for path in untracked_code_files {
+        let contents = tokio::fs::read(workspace_root.join(&path)).await.ok()?;
+        update_fingerprint_component(&mut hasher, b"untracked-path", path.as_bytes());
+        update_fingerprint_component(&mut hasher, b"untracked-contents", &contents);
+    }
+
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn update_fingerprint_component(hasher: &mut Sha256, label: &[u8], contents: &[u8]) {
+    hasher.update((label.len() as u64).to_be_bytes());
+    hasher.update(label);
+    hasher.update((contents.len() as u64).to_be_bytes());
+    hasher.update(contents);
+}
+
+/// 当前 Git diff 中的代码文件。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeDiffContext {
+    pub changed_code_files: Vec<String>,
+}
+
+pub async fn collect_code_diff_context(workspace_root: &std::path::Path) -> CodeDiffContext {
+    let changed_files = collect_git_changed_files(workspace_root).await;
+    let changed_code_files: Vec<String> = changed_files
+        .into_iter()
+        .filter(|path| is_code_path(path))
+        .collect();
+    CodeDiffContext { changed_code_files }
+}
+
+fn is_code_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "rs" | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "mjs"
+                    | "cjs"
+                    | "py"
+                    | "go"
+                    | "java"
+                    | "kt"
+                    | "kts"
+                    | "c"
+                    | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "h"
+                    | "hpp"
+                    | "cs"
+                    | "rb"
+                    | "php"
+                    | "swift"
+                    | "scala"
+                    | "sh"
+                    | "sql"
+                    | "vue"
+                    | "svelte"
+                    | "css"
+                    | "scss"
+                    | "less"
+                    | "html"
+            )
+        })
+}
+
+async fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn run_git_capture_owned(
+    workspace_root: &std::path::Path,
+    args: &[String],
+) -> Option<Vec<u8>> {
+    let output = tokio::process::Command::new("git")
+        .arg("--literal-pathspecs")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+async fn run_git_paths(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
+    run_git_capture(workspace_root, args)
+        .await
+        .map(|text| {
+            text.split('\0')
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[path = "tests/code_diff_test.rs"]
+mod tests;

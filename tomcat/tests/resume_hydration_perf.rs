@@ -14,16 +14,10 @@ fn cmd() -> Command {
     c
 }
 
-fn apply_deepseek_env(command: &mut Command) {
-    let model = common::deepseek_test_model();
+fn apply_idatatlas_env(command: &mut Command) {
+    let model = common::idatatlas_test_model();
     command
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
@@ -50,13 +44,14 @@ fn setup_fixture() -> Fixture {
 
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
-    common::apply_deepseek_app_config(&mut cfg);
+    cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
+    common::apply_idatatlas_app_config(&mut cfg);
+    cfg.llm.title_model = Some("test-title-disabled".to_string());
     std::fs::write(
         &config_path,
-        toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
+        toml::to_string_pretty(&cfg).expect("serialize idatatlas test config"),
     )
-    .expect("persist deepseek test config");
-    cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
+    .expect("persist idatatlas test config");
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
@@ -136,7 +131,7 @@ fn run_resume_trace(fx: &Fixture, extra_env: &[(&str, &str)]) -> String {
         .env("SHELL", "/bin/zsh")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("");
-    apply_deepseek_env(&mut command);
+    apply_idatatlas_env(&mut command);
     for (key, value) in extra_env {
         command.env(key, value);
     }

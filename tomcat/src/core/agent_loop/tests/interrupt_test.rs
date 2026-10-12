@@ -11,20 +11,311 @@
 //! - `token_rebuild_per_turn_allows_next_run`：预 cancel 的 token 在 run() 入口
 //!   立即返回 Interrupted；新 token 的 AgentLoop 应能正常收束（架构 §6.2）。
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
+use crate::core::compaction::preheat::Preheat;
+use crate::core::llm::retry_delay::sleep_provider_retry_delay;
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::session::find_dangling_tail_tool_call_ids;
+use crate::core::session::manager::{ContextState, MessageAppendSink};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
+
+struct CommitBarrierPrimitive {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::tools::primitive::PrimitiveExecutor for CommitBarrierPrimitive {
+    async fn read_file(&self, path: &str, p: &str) -> Result<String, AppError> {
+        MockPrimitiveExecutor.read_file(path, p).await
+    }
+    async fn list_dir(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+        Ok(vec![])
+    }
+    async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+        _: bool,
+        _: &str,
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        std::fs::write(path, content)?;
+        Ok(crate::core::tools::primitive::WriteFileResult {
+            path: path.into(),
+            written: true,
+            bytes_written: content.len() as u64,
+            diff_hint: None,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        })
+    }
+    async fn edit_file(
+        &self,
+        _: &str,
+        _: Vec<crate::core::tools::primitive::EditOperation>,
+        _: &str,
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        unreachable!()
+    }
+    async fn execute_bash(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+        _: Option<u64>,
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        unreachable!()
+    }
+    async fn require_user_confirmation(
+        &self,
+        _: crate::core::tools::primitive::PrimitiveOperation,
+        _: &str,
+        _: &str,
+    ) -> Result<bool, AppError> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn native_write_interrupt_waits_for_commit_and_registers_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("new.txt");
+    let transcript = temp.path().join("session.jsonl");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("write-1".into()),
+            name: Some("write".into()),
+            arguments_delta: Some(
+                serde_json::json!({"path":path,"content":"committed"}).to_string(),
+            ),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(CommitBarrierPrimitive {
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig::default(),
+        cancel.clone(),
+    );
+    agent.file_baselines = crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+        &transcript,
+        "u1",
+        temp.path().to_path_buf(),
+    );
+    let mut user = ChatMessage::user("write a file");
+    user.msg_id = Some("u1".into());
+    let task = tokio::spawn(async move { agent.run(vec![user]).await });
+    entered.notified().await;
+    cancel.cancel();
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "a committing writer must be joined, not dropped"
+    );
+    assert!(!path.exists());
+    release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "committed");
+    let manifest = crate::core::checkpoint::file_baselines::session_dir(&transcript)
+        .join("u1/baselines.jsonl");
+    assert_eq!(
+        std::fs::read_to_string(manifest).unwrap().lines().count(),
+        1
+    );
+}
+
+struct InterruptWriteConfirmation(Arc<tokio::sync::Notify>);
+#[async_trait::async_trait]
+impl crate::core::UserConfirmationProvider for InterruptWriteConfirmation {
+    async fn confirm(
+        &self,
+        _: crate::core::tools::primitive::PrimitiveOperation,
+        _: &str,
+        _: &str,
+    ) -> Result<bool, AppError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn native_write_interrupt_cancels_confirmation_without_registering_baseline() {
+    use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("new.txt");
+    let transcript = temp.path().join("session.jsonl");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: PathBuf::from("/nonexistent_pi_workspace"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let primitive = crate::core::DefaultPrimitiveExecutor::new(
+        crate::infra::PrimitiveConfig::default(),
+        Arc::new(InterruptWriteConfirmation(entered.clone())),
+        Arc::new(crate::infra::TracingAuditRecorder),
+        gate,
+    );
+    let cancel = CancellationToken::new();
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("write-1".into()),
+            name: Some("write".into()),
+            arguments_delta: Some(serde_json::json!({"path":path,"content":"new"}).to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(primitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig::default(),
+        cancel.clone(),
+    );
+    agent.file_baselines = crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+        &transcript,
+        "u1",
+        temp.path().to_path_buf(),
+    );
+    let mut user = ChatMessage::user("write a file");
+    user.msg_id = Some("u1".into());
+    let task = tokio::spawn(async move { agent.run(vec![user]).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted());
+    assert!(!path.exists());
+    let manifest = crate::core::checkpoint::file_baselines::session_dir(&transcript)
+        .join("u1/baselines.jsonl");
+    assert!(!manifest.exists());
+}
+
+#[tokio::test]
+async fn native_update_plan_interrupt_cancels_permission_without_touching_plan() {
+    use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+    use crate::core::plan_runtime::PlanRuntime;
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("permission.plan.md");
+    let original = "---\nplan_id: permission\ngoal: fixture\nstate: planning\ncreated_at: 2026-01-01T00:00:00Z\nschema_version: 1\ntodos: []\n---\n## Plan\nkeep this body\n";
+    std::fs::write(&path, original).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: temp.path().join("definition"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let primitive = crate::core::DefaultPrimitiveExecutor::new(
+        crate::infra::PrimitiveConfig::default(),
+        Arc::new(InterruptWriteConfirmation(entered.clone())),
+        Arc::new(crate::infra::TracingAuditRecorder),
+        gate,
+    );
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("plan-1".into()),
+            name: Some("update_plan".into()),
+            arguments_delta: Some(
+                serde_json::json!({
+                    "path": path,
+                    "ops": [{"kind": "upsert", "id": "new", "content": "must not be added"}]
+                })
+                .to_string(),
+            ),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(primitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            plan_runtime: Some(PlanRuntime::new("permission-session")),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+    let task =
+        tokio::spawn(async move { agent.run(vec![ChatMessage::user("update the plan")]).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted(), "{outcome:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::read_dir(temp.path()).unwrap().count(),
+        1,
+        "no lock file before permission"
+    );
+}
 
 fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
     let recent = messages
@@ -33,6 +324,33 @@ fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
         .collect::<Result<Vec<_>, _>>()
         .expect("chat messages should serialize");
     find_dangling_tail_tool_call_ids(&recent)
+}
+
+#[derive(Default)]
+struct RecordingMessageSink {
+    next_id: AtomicUsize,
+    messages: Mutex<Vec<serde_json::Value>>,
+}
+
+impl MessageAppendSink for RecordingMessageSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(format!("persisted-{id}"))
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        Ok(forced_id.to_string())
+    }
 }
 
 /// Abort：工具执行前/中设置 abort_signal，run 返回 Err，agent_end 含 interrupted。
@@ -73,12 +391,17 @@ async fn run_aborts_returns_interrupted() {
         }),
     );
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s1".to_string(),
         ..Default::default()
     };
     let abort_signal = CancellationToken::new();
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort_signal.clone());
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        abort_signal.clone(),
+    );
     let messages = vec![ChatMessage::user("read files")];
     let abort_for_thread = abort_signal.clone();
     std::thread::spawn(move || {
@@ -131,13 +454,17 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
     );
 
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-tools".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
-
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(130)).await;
@@ -214,12 +541,17 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
     let primitive = Arc::new(SleepyMockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-active-tool".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -253,6 +585,99 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
 }
 
 #[tokio::test]
+async fn interrupt_appends_interrupted_tool_results_into_single_list_with_ids() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let sink = Arc::new(RecordingMessageSink::default());
+    let sink_for_config: Arc<dyn MessageAppendSink> = sink.clone();
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream_tools])), "gpt-4"),
+        Arc::new(SleepyMockPrimitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            message_append_sink: Some(sink_for_config),
+            session_id: "s-int-single-list-ids".to_string(),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+    agent.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 0,
+        context_budget_chars: 10_000,
+        context_budget_tokens: 2_500,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        cancel_bg.cancel();
+    });
+    let mut user = ChatMessage::user("read one file");
+    user.msg_id = Some("seeded-user".to_string());
+
+    let outcome = agent.run(vec![user]).await;
+
+    assert!(
+        outcome.is_interrupted(),
+        "tool cancellation must interrupt the turn"
+    );
+    let parked = agent
+        .take_context_state()
+        .expect("interrupted turn must park its only message list");
+    assert_eq!(
+        parked.messages.len(),
+        3,
+        "user + tool-call assistant + synthetic result"
+    );
+    assert_eq!(
+        parked
+            .messages
+            .last()
+            .and_then(|message| message.tool_call_id.as_deref()),
+        Some("c1")
+    );
+    assert_eq!(
+        parked.messages.last().and_then(ChatMessage::text_content),
+        Some("[interrupted]")
+    );
+    assert!(
+        parked
+            .messages
+            .iter()
+            .all(|message| message.msg_id.is_some()),
+        "every durable message in the parked single list must carry its persisted id"
+    );
+    assert_eq!(
+        sink.messages.lock().unwrap().len(),
+        2,
+        "only the assistant tool call and synthetic tool result are newly persisted"
+    );
+    assert_eq!(
+        dangling_tool_call_ids(&parked.messages),
+        None,
+        "the persisted interrupted tool result must close the parked tool-call tail"
+    );
+}
+
+#[tokio::test]
 async fn run_interrupt_during_parallel_tools_heals_all_remaining() {
     let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ToolCallDelta {
@@ -281,12 +706,17 @@ async fn run_interrupt_during_parallel_tools_heals_all_remaining() {
     let primitive = Arc::new(SleepyMockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-three-tools".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -380,12 +810,35 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
     });
 
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-int-stream".to_string(),
         ..Default::default()
     };
     let cancel = CancellationToken::new();
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 4_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    // Simulate a stale prior response usage: this stream is cancelled before
+    // it emits Usage, so the partial assistant must enter the post-usage delta.
+    state.update_api_usage(1_000, 0);
+    agent.set_context_state(Some(state));
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -415,6 +868,138 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
             .any(|m| format!("{:?}", m.role).contains("Assistant")),
         "partial_messages 应含 assistant 消息（承载 partial_text）"
     );
+    let state = agent.context_state.as_ref().expect("context state");
+    assert_eq!(
+        state.post_usage_appended_chars,
+        result.final_text.len(),
+        "an aborted stream without Usage must retain its partial assistant in the post-usage delta"
+    );
+    assert_eq!(
+        state.estimated_token_count(),
+        1_000 + result.final_text.len() / 4,
+        "the next timing-2 check must include the persisted partial response"
+    );
+}
+
+#[tokio::test]
+async fn run_interrupt_during_blocking_collapse_returns_promptly() {
+    assert_interrupt_during_collapse(false).await;
+}
+
+#[tokio::test]
+async fn run_interrupt_during_overflow_collapse_returns_promptly() {
+    assert_interrupt_during_collapse(true).await;
+}
+
+async fn assert_interrupt_during_collapse(reactive: bool) {
+    struct BlockingCompactionLlm {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for BlockingCompactionLlm {
+        fn provider_name(&self) -> &str {
+            "blocking-compaction"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            std::future::pending::<Result<ChatResponse, AppError>>().await
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<
+            Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            Err(AppError::Llm(
+                "main stream must not start during collapse".to_string(),
+            ))
+        }
+
+        fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let compaction_provider: Arc<dyn LlmProvider> = Arc::new(BlockingCompactionLlm {
+        entered: Mutex::new(Some(entered_tx)),
+    });
+    let streams = if reactive {
+        vec![vec![Err(crate::infra::error::llm_http_status_error(
+            "openai",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))]]
+    } else {
+        vec![]
+    };
+    let (main_provider, requests) = super::mocks::RecordingStreamLlmProvider::new(streams);
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(main_provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "s-int-blocking-collapse".to_string(),
+            context_config: crate::infra::config::ContextConfig {
+                compaction_model: "compaction".to_string(),
+                ..Default::default()
+            },
+            compaction_provider: Some(compaction_provider),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+
+    let mut user = ChatMessage::user("u".repeat(4_000));
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = ChatMessage::assistant("a".repeat(4_000));
+    assistant.msg_id = Some("a1".to_string());
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 8_000,
+        context_budget_chars: if reactive { 100_000 } else { 200 },
+        context_budget_tokens: if reactive { 25_000 } else { 50 },
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let cancel_after_collapse_started = cancel.clone();
+    tokio::spawn(async move {
+        entered_rx
+            .await
+            .expect("collapse provider should receive exactly one summary request");
+        cancel_after_collapse_started.cancel();
+    });
+
+    let input = if reactive {
+        vec![user]
+    } else {
+        vec![user, assistant]
+    };
+    let result = tokio::time::timeout(Duration::from_secs(1), agent.run(input)).await;
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        usize::from(reactive),
+        "reactive collapse must follow a real main-model overflow, not the proactive guard"
+    );
+    let outcome = result.expect("cancel boundary must not wait for a non-cancellable collapse");
+    assert!(
+        outcome.is_interrupted(),
+        "blocking collapse should finish as Interrupted, got {outcome:?}"
+    );
 }
 
 /// Token 每回合重建：预取消的 token 应在 run() 入口立即返回 Interrupted；
@@ -434,7 +1019,6 @@ async fn token_rebuild_per_turn_allows_next_run() {
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config_a = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-rebuild".to_string(),
         ..Default::default()
     };
@@ -442,7 +1026,7 @@ async fn token_rebuild_per_turn_allows_next_run() {
     let token_a = CancellationToken::new();
     token_a.cancel();
     let mut loop_a = AgentLoop::new(
-        llm.clone(),
+        test_binding(llm.clone(), "gpt-4"),
         primitive.clone(),
         event_bus.clone(),
         config_a,
@@ -455,7 +1039,6 @@ async fn token_rebuild_per_turn_allows_next_run() {
     );
 
     let config_b = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-rebuild".to_string(),
         ..Default::default()
     };
@@ -464,9 +1047,79 @@ async fn token_rebuild_per_turn_allows_next_run() {
         !token_b.is_cancelled(),
         "新 token 必须未被 cancel（否则证明 token 被跨回合复用）"
     );
-    let mut loop_b = AgentLoop::new(llm, primitive, event_bus, config_b, token_b);
+    let mut loop_b = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config_b,
+        token_b,
+    );
     let out_b = loop_b.run(vec![ChatMessage::user("second")]).await;
     assert!(out_b.is_ok(), "新回合应正常 Completed");
     let r = out_b.unwrap();
     assert_eq!(r.final_text, "second-ok");
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_interrupt_during_provider_retry_backoff_returns_interrupted() {
+    struct BackoffProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for BackoffProvider {
+        fn provider_name(&self) -> &str {
+            "backoff-provider"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            Err(AppError::Llm("unused".into()))
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<
+            Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            sleep_provider_retry_delay(Duration::from_secs(30)).await?;
+            Err(AppError::Llm(
+                "should have been cancelled during retry backoff".into(),
+            ))
+        }
+
+        fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(BackoffProvider);
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let cancel = CancellationToken::new();
+    let config = AgentLoopConfig {
+        session_id: "provider-backoff-cancel".to_string(),
+        ..Default::default()
+    };
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        cancel.clone(),
+    );
+
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        cancel_bg.cancel();
+    });
+
+    let outcome = loop_
+        .run(vec![ChatMessage::user("interrupt provider retry backoff")])
+        .await;
+    assert!(
+        outcome.is_interrupted(),
+        "expected Interrupted outcome, got {:?}",
+        outcome
+    );
 }

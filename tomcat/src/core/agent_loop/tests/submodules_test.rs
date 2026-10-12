@@ -18,32 +18,64 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::agent_loop::error_classifier::handle_overflow_retry;
+use crate::core::agent_loop::error_classifier::{
+    handle_overflow_retry, handle_unsupported_multimodal_retry,
+};
 use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
-use crate::core::llm::{ChatMessage, ModelCatalog};
+use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageContentPart, ModelCatalog};
+use crate::core::session::manager::ContextState;
 use crate::core::skill::{Skill, SkillSet, SkillSource};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::web_fetch::{types::WebFetchOutput, WebFetchFormat, WebFetchRuntime};
 use crate::core::tools::web_search::types::{Hit, Stats, WebSearchArgs, WebSearchOutput};
 use crate::core::tools::web_search::WebSearchRuntime;
-use crate::infra::error::{llm_http_status_error, AppError};
-use crate::infra::DefaultEventBus;
+use crate::infra::error::{llm_http_status_error, llm_stream_terminal_error, AppError};
+use crate::infra::{wire, DefaultEventBus, EventBus};
 use crate::AppConfig;
 use parking_lot::{Mutex, RwLock};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 fn make_agent() -> AgentLoop {
+    make_agent_with_bus().0
+}
+
+fn make_agent_with_bus() -> (AgentLoop, Arc<DefaultEventBus>) {
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-submod".to_string(),
         ..Default::default()
     };
-    AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new())
+    (
+        AgentLoop::new(
+            test_binding(llm, "gpt-4"),
+            primitive,
+            event_bus.clone(),
+            config,
+            CancellationToken::new(),
+        ),
+        event_bus,
+    )
+}
+
+fn make_context_state_with_transcript(path: std::path::PathBuf) -> ContextState {
+    ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 0,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: path,
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }
 }
 
 struct SkillFilePrimitive;
@@ -86,8 +118,7 @@ impl PrimitiveExecutor for SkillFilePrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }
@@ -147,8 +178,7 @@ impl PrimitiveExecutor for RecordingSkillPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }
@@ -170,7 +200,7 @@ async fn handle_overflow_retry_skipped_when_not_overflow() {
     let mut agent = make_agent();
     let mut messages = vec![ChatMessage::user("hi")];
     let err = llm_http_status_error("mock", 429, "rate limit");
-    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
+    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err).await;
     assert!(
         !stats.applied,
         "non-overflow error must not trigger L3 trim, stats={:?}",
@@ -191,13 +221,135 @@ async fn handle_overflow_retry_skipped_when_no_context_state() {
         400,
         r#"{"error":{"code":"context_length_exceeded"}}"#,
     );
-    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
+    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err).await;
     assert!(
         !stats.applied,
         "overflow without context_state must skip trim, stats={:?}",
         stats
     );
     assert_eq!(messages.len(), 1, "messages must be left untouched");
+}
+
+#[tokio::test]
+async fn handle_unsupported_multimodal_retry_degrades_input_file_and_keeps_transcript_unchanged() {
+    let (mut agent, bus) = make_agent_with_bus();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("session.jsonl");
+    std::fs::write(&transcript_path, "sentinel transcript bytes").expect("seed transcript");
+    let before = std::fs::read(&transcript_path).expect("read before");
+    agent.set_context_state(Some(make_context_state_with_transcript(
+        transcript_path.clone(),
+    )));
+
+    let observed: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let mut messages = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("prefix"),
+        ChatMessageContentPart::file_base64_data(
+            "brief.pdf",
+            "application/pdf",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"%PDF-1.4\n%%EOF\n",
+            ),
+        )
+        .expect("build inline file part"),
+        ChatMessageContentPart::text("suffix"),
+    ])];
+    let err = llm_stream_terminal_error(
+        "fcodex",
+        "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
+        Some("invalid_request_error".into()),
+    );
+
+    let stats = handle_unsupported_multimodal_retry(&mut agent, &mut messages, 2, &err);
+    assert!(stats.applied);
+    assert!(stats.degraded_files);
+    assert!(!stats.degraded_vision);
+
+    let Some(ChatMessageContent::Parts(parts)) = &messages[0].content else {
+        panic!("degraded message should still be parts");
+    };
+    let texts: Vec<String> = parts
+        .iter()
+        .filter_map(|part| match part {
+            ChatMessageContentPart::InputText { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "prefix".to_string(),
+            "[File omitted: the current model does not support file input]".to_string(),
+            "suffix".to_string()
+        ]
+    );
+
+    let notice = observed.lock().unwrap();
+    assert_eq!(notice.len(), 1);
+    assert_eq!(
+        notice[0]["message"],
+        crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "agentLoop.attachmentsDegraded",
+            &[]
+        )
+    );
+
+    let after = std::fs::read(&transcript_path).expect("read after");
+    assert_eq!(
+        before, after,
+        "降级只改 in-memory messages，不应回写 transcript"
+    );
+}
+
+#[tokio::test]
+async fn handle_unsupported_multimodal_retry_skips_when_not_matched() {
+    let (mut agent, bus) = make_agent_with_bus();
+    let observed: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let mut messages = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("prefix"),
+        ChatMessageContentPart::file_base64_data(
+            "brief.pdf",
+            "application/pdf",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"%PDF-1.4\n%%EOF\n",
+            ),
+        )
+        .expect("build inline file part"),
+    ])];
+    let before = serde_json::to_string(&messages).expect("serialize before");
+    let err = llm_http_status_error("openai", 429, "rate limit");
+
+    let stats = handle_unsupported_multimodal_retry(&mut agent, &mut messages, 1, &err);
+    assert!(!stats.applied);
+    assert_eq!(
+        before,
+        serde_json::to_string(&messages).expect("serialize after"),
+        "未命中时消息不应被改写"
+    );
+    assert!(observed.lock().unwrap().is_empty(), "未命中时不应发 notice");
 }
 
 /// unknown 工具名：execute_tool 返回 `is_error == true`，content 含 unknown 提示。
@@ -295,7 +447,6 @@ async fn tool_exec_load_skill_resolves_by_name() {
         None,
         Some(&skill_set),
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -352,8 +503,7 @@ async fn tool_exec_load_skill_rejected_for_reviewer() {
         None,
         None,
         Some(&skill_set),
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        SubagentType::PlanReviewer,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -364,7 +514,7 @@ async fn tool_exec_load_skill_rejected_for_reviewer() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("reviewer 子 Agent 禁止调用工具 `load_skill`"));
+        .contains("reviewer sub-Agent may not call `load_skill`"));
 }
 
 #[tokio::test]
@@ -406,8 +556,7 @@ async fn tool_exec_load_skill_allowed_for_reviewer_when_exposed() {
         None,
         None,
         Some(&skill_set),
-        SubagentType::Reviewer,
-        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        SubagentType::PlanReviewer,
         true,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
@@ -458,7 +607,6 @@ async fn tool_exec_load_skill_rejected_for_verifier() {
         None,
         Some(&skill_set),
         SubagentType::Verifier,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -469,7 +617,7 @@ async fn tool_exec_load_skill_rejected_for_verifier() {
     assert!(outcome.is_error);
     assert!(outcome
         .model_text
-        .contains("verifier 子 Agent 禁止调用工具 `load_skill`"));
+        .contains("verifier sub-Agent may not call `load_skill`"));
 }
 
 #[tokio::test]
@@ -512,7 +660,6 @@ async fn tool_exec_load_skill_allowed_for_verifier_when_exposed() {
         None,
         Some(&skill_set),
         SubagentType::Verifier,
-        None,
         true,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
@@ -563,7 +710,6 @@ async fn tool_exec_load_skill_unknown_name_errors() {
         None,
         Some(&skill_set),
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -572,7 +718,9 @@ async fn tool_exec_load_skill_unknown_name_errors() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("未知 skill `missing-skill`"));
+    assert!(outcome
+        .model_text
+        .contains("Unknown Skill `missing-skill`. Available Skills: commit"));
     assert!(outcome.model_text.contains("commit"));
 }
 
@@ -616,7 +764,6 @@ async fn tool_exec_load_skill_file_escape_denied() {
         None,
         Some(&skill_set),
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -625,7 +772,9 @@ async fn tool_exec_load_skill_file_escape_denied() {
     .await;
 
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("越出技能目录"));
+    assert!(outcome
+        .model_text
+        .contains("load_skill: `file` escapes the Skill directory"));
 }
 
 #[tokio::test]
@@ -670,7 +819,6 @@ async fn load_skill_body_load_passes_gate() {
         None,
         Some(&skill_set),
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
@@ -732,7 +880,7 @@ async fn tool_exec_web_search_requires_runtime_injection() {
         "web_search without runtime should report is_error=true"
     );
     assert!(
-        msg.contains("web_search runtime 未注入"),
+        msg.contains("web_search runtime was not supplied"),
         "missing-runtime error should be explicit, got: {}",
         msg
     );
@@ -753,7 +901,7 @@ async fn tool_exec_web_fetch_requires_runtime_injection() {
         "web_fetch without runtime should report is_error=true"
     );
     assert!(
-        msg.contains("web_fetch runtime 未注入"),
+        msg.contains("web_fetch runtime was not supplied"),
         "missing-runtime error should be explicit, got: {}",
         msg
     );
@@ -976,20 +1124,24 @@ async fn tool_exec_task_list_without_registry_returns_friendly_error() {
 }
 
 #[tokio::test]
-async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent() {
+async fn tool_exec_verifier_bash_uses_tracked_registry_when_available() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
 
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
-    let tc = ToolCallInfo {
-        id: "bgv1".to_string(),
+    let foreground_tc = ToolCallInfo {
+        id: "fgv1".to_string(),
         name: "bash".to_string(),
-        arguments: r#"{"command":"sleep 1","run_in_background":true}"#.to_string(),
+        arguments: r#"{"command":"printf verifier-front-ok"}"#.to_string(),
     };
-    let outcome = execute_tool_full(
+    let foreground = execute_tool_full(
         &primitive,
         &None,
-        &None,
+        &registry_opt,
         None,
         None,
         None,
@@ -997,31 +1149,177 @@ async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent()
         None,
         None,
         SubagentType::Verifier,
+        &tokio_util::sync::CancellationToken::new(),
+        &foreground_tc,
         None,
+        None,
+    )
+    .await;
+    assert!(
+        !foreground.is_error,
+        "verifier 前台 bash 应可用: {}",
+        foreground.model_text
+    );
+    assert!(
+        foreground.model_text.contains("verifier-front-ok"),
+        "前台执行应返回实际输出: {}",
+        foreground.model_text
+    );
+
+    let tc = ToolCallInfo {
+        id: "bgv1".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"i=0; while [ $i -lt 8 ]; do echo verifier-bg-$i; i=$((i+1)); sleep 0.05; done","run_in_background":true}"#.to_string(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
         &tokio_util::sync::CancellationToken::new(),
         &tc,
         None,
         None,
     )
     .await;
-    assert!(outcome.is_error);
     assert!(
-        outcome
-            .model_text
-            .contains("currently unsupported in this subagent"),
-        "verifier 子 Agent 文案应说明当前子 Agent 不支持 background bash：{}",
+        !outcome.is_error,
+        "verifier 后台 bash 应进入 tracked 路径: {}",
         outcome.model_text
     );
+    let ticket: serde_json::Value =
+        serde_json::from_str(&outcome.model_text).expect("ticket 应为合法 JSON");
+    let task_id = ticket["taskId"]
+        .as_str()
+        .expect("ticket 应含 taskId")
+        .to_string();
     assert!(
-        outcome.model_text.contains("foreground `bash`"),
-        "verifier 子 Agent 文案应提示改用前台 bash：{}",
+        !task_id.is_empty(),
+        "tracked verifier bash 应返回 taskId: {}",
         outcome.model_text
     );
+
+    let out_tc = ToolCallInfo {
+        id: "to-v1".to_string(),
+        name: "task_output".to_string(),
+        arguments: format!(r#"{{"task_id":"{}","block":true,"wait_ms":5000}}"#, task_id),
+    };
+    let output = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    let out_msg = output.model_text;
     assert!(
-        !outcome.model_text.contains("BashTaskRegistry"),
-        "verifier 子 Agent 文案不应泄漏内部 registry 术语：{}",
-        outcome.model_text
+        !output.is_error,
+        "verifier task_output 必须可用: {}",
+        out_msg
     );
+    let chunk: serde_json::Value = serde_json::from_str(&out_msg).expect("chunk json");
+    assert!(
+        chunk["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("verifier-bg-"),
+        "task_output 应拿到后台输出: {}",
+        out_msg
+    );
+}
+
+#[tokio::test]
+async fn inspector_task_controls_use_only_their_own_registry() {
+    use crate::core::agent_loop::{tool_exec::execute_tool_full, types::SubagentType};
+    use crate::core::tools::primitive::BashTaskRegistry;
+    let dir = tempfile::tempdir().unwrap();
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    for role in [
+        SubagentType::CodeReviewer,
+        SubagentType::Explorer,
+        SubagentType::Verifier,
+    ] {
+        let parent = BashTaskRegistry::new(dir.path().join("parent"));
+        let foreign = parent.spawn("sleep 30".into(), None).await.unwrap();
+        let child = Arc::new(BashTaskRegistry::new(dir.path().join("child")));
+        let own = child.spawn("sleep 30".into(), None).await.unwrap();
+        let registry = Some(child.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut results = Vec::new();
+        for (name, arguments) in [
+            ("task_list", serde_json::json!({})),
+            (
+                "task_output",
+                serde_json::json!({"task_id":own.task_id,"block":false}),
+            ),
+            ("task_stop", serde_json::json!({"task_id":foreign.task_id})),
+            ("task_stop", serde_json::json!({"task_id":own.task_id})),
+        ] {
+            results.push(
+                execute_tool_full(
+                    &primitive,
+                    &None,
+                    &registry,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    role,
+                    &cancel,
+                    &ToolCallInfo {
+                        id: name.into(),
+                        name: name.into(),
+                        arguments: arguments.to_string(),
+                    },
+                    None,
+                    None,
+                )
+                .await,
+            );
+        }
+        let foreign_still_running = matches!(
+            parent.get_info(&foreign.task_id).unwrap().status,
+            crate::core::tools::primitive::BashTaskStatus::Running
+        );
+        // Cleanup precedes assertions, including the expected pre-fix denial path.
+        child.stop(&own.task_id).await.unwrap();
+        parent.stop(&foreign.task_id).await.unwrap();
+        for index in [0, 1, 3] {
+            assert!(
+                !results[index].is_error,
+                "{role:?}: {}",
+                results[index].model_text
+            );
+        }
+        assert!(results[0].model_text.contains(&own.task_id));
+        assert!(!results[0].model_text.contains(&foreign.task_id));
+        assert!(
+            results[2].is_error,
+            "another registry's task must not be addressable"
+        );
+        assert!(
+            foreign_still_running,
+            "{role:?} stopped another registry's process"
+        );
+    }
 }
 
 /// 起后台 → 拉输出 → stop → list：bash.md §2.4.4 验收的端到端路径，
@@ -1045,6 +1343,9 @@ async fn tool_exec_bash_background_full_lifecycle() {
         execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
     assert!(!start_err, "起后台必须成功：{}", start_msg);
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).expect("ticket 应为合法 JSON");
+    assert!(ticket["logPath"].as_str().is_some());
+    assert!(ticket["startedAtUnixMs"].as_u64().is_some());
+    assert_eq!(ticket["state"], "running_in_background");
     let task_id = ticket["taskId"]
         .as_str()
         .expect("ticket 含 taskId")
@@ -1084,8 +1385,13 @@ async fn tool_exec_bash_background_full_lifecycle() {
     assert!(!stop_err, "task_stop 必须成功：{}", stop_msg);
     assert!(stop_msg.contains(&task_id));
 
-    // 给 wait 任务 reap 留点时间。
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.wait_for_finish(&task_id),
+    )
+    .await
+    .expect("stop 后必须在限定时间内完成 drain")
+    .expect("task finish");
 
     // list：返回 1 条且 status.state == "stopped"。
     let list_tc = ToolCallInfo {
@@ -1133,89 +1439,13 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
     assert!(!start_err);
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
     let task_id = ticket["taskId"].as_str().unwrap().to_string();
-
-    // wait slice 循环：起点可能命中 wakeReason="new_output"（echo 立即被 pump
-    // 写出），需要按契约用 next_offset 继续等，直到 wakeReason="finished"。
-    let mut since: u64 = 0;
-    let mut got_finished = false;
-    for _ in 0..6 {
-        let out_tc = ToolCallInfo {
-            id: "to-blk-1".into(),
-            name: "task_output".into(),
-            arguments: format!(
-                r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":1500}}"#,
-                task_id, since
-            ),
-        };
-        let outcome = execute_tool_full(
-            &primitive,
-            &None,
-            &registry_opt,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            SubagentType::User,
-            None,
-            &tokio_util::sync::CancellationToken::new(),
-            &out_tc,
-            None,
-            None,
-        )
-        .await;
-        assert!(
-            !outcome.is_error,
-            "block=true 必须成功：{}",
-            outcome.model_text
-        );
-        let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-        let wr = chunk["wakeReason"].as_str().unwrap_or("");
-        let finished = chunk["finished"].as_bool().unwrap_or(false);
-        if wr == "finished" || finished {
-            assert_eq!(
-                chunk["wakeReason"],
-                serde_json::Value::String("finished".into())
-            );
-            assert!(finished);
-            got_finished = true;
-            break;
-        }
-        since = chunk["nextOffset"].as_u64().unwrap_or(since);
-    }
-    assert!(got_finished, "应当在多次 wait slice 后命中 finished");
-}
-
-/// timeout 是非终态：`wakeReason="timeout" && finished=false`。若自 `since` 之后
-/// 仍无新输出，则允许 `next_offset == since`；若此前已有输出，则返回最近 tail 快照
-/// 供模型判断是否继续等待。
-#[tokio::test]
-async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
-    use crate::core::agent_loop::tool_exec::execute_tool_full;
-    use crate::core::agent_loop::types::SubagentType;
-    use crate::core::tools::primitive::BashTaskRegistry;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
-    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
-    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
-
-    // 起一个长任务（5s 都不会结束 / 不会 print 任何东西）。
-    let start_tc = ToolCallInfo {
-        id: "bg-tmo".into(),
-        name: "bash".into(),
-        arguments: r#"{"command":"sleep 5","run_in_background":true}"#.into(),
-    };
-    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
-    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
-    let task_id = ticket["taskId"].as_str().unwrap().to_string();
-
+    // `block=true` 现在会一直睡到任务结束或 timeout；这个任务很短，因此一次就应命中
+    // `wakeReason="finished"`。
     let out_tc = ToolCallInfo {
-        id: "to-tmo".into(),
+        id: "to-blk-1".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":300}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":1500}}"#,
             task_id
         ),
     };
@@ -1230,7 +1460,68 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
         None,
         None,
         SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
         None,
+        None,
+    )
+    .await;
+    assert!(
+        !outcome.is_error,
+        "block=true 必须成功：{}",
+        outcome.model_text
+    );
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("finished".into())
+    );
+    assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
+}
+
+/// timeout 是非终态：`wakeReason="wait_window_elapsed" && finished=false`。若自 `since` 之后
+/// 仍无新输出，则允许 `next_offset == since`；若此前已有输出，则返回最近 tail 快照
+/// 供模型判断是否继续等待。
+#[tokio::test]
+async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    // 起一个长任务（>5s 都不会结束 / 不会 print 任何东西）。
+    let start_tc = ToolCallInfo {
+        id: "bg-tmo".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 8","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let out_tc = ToolCallInfo {
+        id: "to-tmo".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":5000}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
         &tokio_util::sync::CancellationToken::new(),
         &out_tc,
         None,
@@ -1241,7 +1532,7 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
     assert_eq!(
         chunk["wakeReason"],
-        serde_json::Value::String("timeout".into())
+        serde_json::Value::String("wait_window_elapsed".into())
     );
     assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
     assert_eq!(chunk["nextOffset"].as_u64(), Some(0));
@@ -1266,7 +1557,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         id: "bg-tail".into(),
         name: "bash".into(),
         arguments:
-            r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 5","run_in_background":true}"#.into(),
+            r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 8","run_in_background":true}"#.into(),
     };
     let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
@@ -1283,12 +1574,15 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         initial.content
     );
 
+    // block=true 会睡满 timeout（任务 `sleep 8` 不会先结束）。这里用 since=0 让本次等待
+    // 窗口覆盖已产出的 token，因此 timeout 时应回一段有界尾巴（含 token）、finished=false，
+    // 而不是像 since=EOF 那样返回空 content。
     let out_tc = ToolCallInfo {
         id: "to-tail".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":250}}"#,
-            task_id, initial.next_offset
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":5000}}"#,
+            task_id
         ),
     };
     let outcome = execute_tool_full(
@@ -1302,7 +1596,6 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         None,
         None,
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &out_tc,
         None,
@@ -1313,7 +1606,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
     assert_eq!(
         chunk["wakeReason"],
-        serde_json::Value::String("timeout".into())
+        serde_json::Value::String("wait_window_elapsed".into())
     );
     assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
     let content = chunk["content"].as_str().unwrap_or_default();
@@ -1326,7 +1619,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
     let _ = registry.stop(&task_id).await;
 }
 
-/// `timeout_ms=0` 等价 `block=false`：返回不带 wakeReason 字段。
+/// `wait_ms=0` 等价 `block=false`：返回不带 wakeReason 字段。
 #[tokio::test]
 async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
@@ -1351,7 +1644,7 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
         id: "to-z".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":0}}"#,
+            r#"{{"task_id":"{}","since":0,"block":false,"wait_ms":0}}"#,
             task_id
         ),
     };
@@ -1366,7 +1659,6 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
         None,
         None,
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &out_tc,
         None,
@@ -1383,22 +1675,31 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
     let _ = registry.stop(&task_id).await;
 }
 
-/// `timeout_ms` 上限 cap：传 999_999 不会真的等 ~17 分钟，会被 cap 到 30_000。
-/// 这里我们用一个不会有任何输出/不会结束的长任务，传 timeout_ms=999_999，
-/// 然后 cancel_token 在 ~150ms 后 cancel；如果 cap 没生效，sleep_until 会等满
-/// 17 分钟而被 cancel；如果 cap 生效，我们仅断言不到 5s 内已经返回（cancel 命中）即可——
-/// 真正验证 cap 的方式是"返回里没有等满 17 分钟"，但 unit test 想要快速兜底，
-/// 用 cancel 路径足以覆盖：上限 cap 与 cancel 路径都是同一个 select 分支。
+/// `wait_ms` 上限 cap：传超大值时，task_output 发出的实时 update 应显示 600_000 ms。
+/// 这里仍用 cancel 路径快速收尾，但真正断言的是第一帧 `partialResult.waitMs`。
 #[tokio::test]
-async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
+async fn task_output_wait_ms_cap_does_not_block_indefinitely() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
     use crate::core::tools::primitive::BashTaskRegistry;
+    use crate::infra::event_bus::{EventBus, EventContext, ScopedEventEmitter};
+    use crate::infra::wire;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+    let captured_cb = Arc::clone(&captured);
+    let listener_id = bus.on(
+        wire::WIRE_TOOL_EXECUTION_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "sid-cap");
 
     let start_tc = ToolCallInfo {
         id: "bg-cap".into(),
@@ -1420,7 +1721,7 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         id: "to-cap".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":999999999}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":999999999}}"#,
             task_id
         ),
     };
@@ -1436,21 +1737,109 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         None,
         None,
         SubagentType::User,
-        None,
         &cancel,
         &out_tc,
-        None,
+        Some(&emitter),
         None,
     )
     .await;
     let elapsed = started.elapsed();
+    let wait_ms = captured
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|payload| payload.get("partialResult"))
+        .and_then(|partial| partial.get("waitMs"))
+        .and_then(serde_json::Value::as_u64);
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "cancel 应当在 ~150ms 后命中，{:?}",
         elapsed
     );
+    assert_eq!(wait_ms, Some(600_000), "超大 wait_ms 应被 cap 到 10 分钟");
     assert!(outcome.is_error, "cancel 路径返回 is_error=true");
 
+    bus.off(listener_id);
+    let _ = registry.stop(&task_id).await;
+}
+
+/// `wait_ms` 下限 floor：传 1 ms 时，task_output 发出的实时 update 应抬到 5_000 ms。
+#[tokio::test]
+async fn task_output_wait_ms_floor_promotes_short_wait_slice() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+    use crate::infra::event_bus::{EventBus, EventContext, ScopedEventEmitter};
+    use crate::infra::wire;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+    let captured_cb = Arc::clone(&captured);
+    let listener_id = bus.on(
+        wire::WIRE_TOOL_EXECUTION_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "sid-floor");
+
+    let start_tc = ToolCallInfo {
+        id: "bg-floor".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 60","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_signal = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel_signal.cancel();
+    });
+
+    let out_tc = ToolCallInfo {
+        id: "to-floor".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":1}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &cancel,
+        &out_tc,
+        Some(&emitter),
+        None,
+    )
+    .await;
+    let wait_ms = captured
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|payload| payload.get("partialResult"))
+        .and_then(|partial| partial.get("waitMs"))
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(wait_ms, Some(5_000), "短 wait slice 应被抬到 5 秒");
+    assert!(outcome.is_error, "cancel 路径返回 is_error=true");
+
+    bus.off(listener_id);
     let _ = registry.stop(&task_id).await;
 }
 
@@ -1488,7 +1877,7 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
             id: "to-cr".into(),
             name: "task_output".into(),
             arguments: format!(
-                r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":3000}}"#,
+                r#"{{"task_id":"{}","since":{},"block":true,"wait_ms":3000}}"#,
                 task_id, since
             ),
         };
@@ -1503,7 +1892,6 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
             None,
             None,
             SubagentType::User,
-            None,
             &tokio_util::sync::CancellationToken::new(),
             &out_tc,
             None,
@@ -1563,7 +1951,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
         id: "to-rel".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":250}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":250}}"#,
             task_id
         ),
     };
@@ -1578,7 +1966,6 @@ async fn task_output_block_true_releases_claim_on_timeout() {
         None,
         None,
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &out_tc,
         None,
@@ -1588,7 +1975,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
     assert_eq!(
         chunk["wakeReason"],
-        serde_json::Value::String("timeout".into())
+        serde_json::Value::String("wait_window_elapsed".into())
     );
     // routes 不应留 entry：让 lifecycle 后续兜底。
     assert!(routes.lock().get(&task_id).is_none());
@@ -1633,11 +2020,11 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         id: "to-snk".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":100}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":100}}"#,
             task_id
         ),
     };
-    // 即便 timeout_ms 只有 100ms，dispatcher 应在 entry 立即返回（不进 wait）。
+    // 即便 wait_ms 只有 100ms，dispatcher 应在 entry 立即返回（不进 wait）。
     let started = std::time::Instant::now();
     let outcome = execute_tool_full(
         &primitive,
@@ -1650,7 +2037,6 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         None,
         None,
         SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         &out_tc,
         None,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -7,14 +8,17 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::core::session::manager::{PlanEventKind, PlanEventRef};
+use crate::core::llm::MessageKind;
+use crate::core::session::manager::{
+    AgentMode, PlanEventKind, PlanEventRef, PlanModeTransition, ResumeControlState,
+};
 use crate::core::session::transcript::{
     read_entries_tail_with_stats, TranscriptEntry, TranscriptReadStats,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-const RESUME_INDEX_SCHEMA_VERSION: u32 = 1;
+pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 5;
 const RECENT_TURN_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -53,6 +57,8 @@ pub(crate) enum ResumeEntryKind {
     ThinkingLevelChange,
     ThinkingTrace,
     BranchSummary,
+    BranchSummaryText,
+    ToolResultsCompacted,
     Label,
     SessionInfo,
     Custom,
@@ -104,6 +110,18 @@ impl ResumeAnchor {
                 ordinal,
                 timestamp: e.timestamp.clone(),
                 entry_kind: ResumeEntryKind::BranchSummary,
+            },
+            TranscriptEntry::BranchSummaryText(e) => Self {
+                entry_id: e.id.clone(),
+                ordinal,
+                timestamp: e.timestamp.clone(),
+                entry_kind: ResumeEntryKind::BranchSummaryText,
+            },
+            TranscriptEntry::ToolResultsCompacted(e) => Self {
+                entry_id: e.id.clone(),
+                ordinal,
+                timestamp: e.timestamp.clone(),
+                entry_kind: ResumeEntryKind::ToolResultsCompacted,
             },
             TranscriptEntry::Label(e) => Self {
                 entry_id: e.id.clone(),
@@ -208,9 +226,23 @@ pub(crate) struct ResumeIndex {
     pub total_entries: usize,
     pub last_entry_id: Option<String>,
     pub latest_boundary: Option<ResumeAnchor>,
+    /// `branch_summary` markers waiting for a later `branch_summary_text` payload.
+    ///
+    /// This is persisted because incremental sidecar updates see the marker and its payload in
+    /// separate appends. A bare marker must not become a hydrate boundary: doing so would skip
+    /// the original messages before the LLM result exists.
+    #[serde(default)]
+    pub pending_boundary_markers: HashMap<String, ResumeAnchor>,
     pub recent_turn_starts: Vec<ResumeAnchor>,
     pub latest_day_first_entry: Option<ResumeDayAnchor>,
     pub latest_plan_event: Option<StoredPlanEventRef>,
+    /// schema v2：会话当前所处的模式。旧 sidecar 没有这项，恢复时走推断兜底。
+    #[serde(default)]
+    pub agent_mode: Option<AgentMode>,
+    #[serde(default)]
+    pub active_plan_path: Option<String>,
+    #[serde(default)]
+    pub active_plan_id: Option<String>,
 }
 
 impl ResumeIndex {
@@ -218,6 +250,17 @@ impl ResumeIndex {
         self.latest_plan_event
             .as_ref()
             .and_then(StoredPlanEventRef::to_plan_event_ref)
+    }
+
+    pub(crate) fn resume_control_state(&self) -> ResumeControlState {
+        ResumeControlState {
+            mode: self.agent_mode,
+            plan_path: self
+                .active_plan_path
+                .as_deref()
+                .and_then(|raw| crate::infra::platform::normalize_path(raw).ok()),
+            plan_id: self.active_plan_id.clone(),
+        }
     }
 }
 
@@ -244,6 +287,8 @@ fn parse_entry_id(entry: &TranscriptEntry) -> Option<String> {
         TranscriptEntry::ThinkingLevelChange(e) => e.id.clone(),
         TranscriptEntry::ThinkingTrace(e) => e.id.clone(),
         TranscriptEntry::BranchSummary(e) => e.id.clone(),
+        TranscriptEntry::BranchSummaryText(e) => e.id.clone(),
+        TranscriptEntry::ToolResultsCompacted(e) => e.id.clone(),
         TranscriptEntry::Label(e) => e.id.clone(),
         TranscriptEntry::SessionInfo(e) => e.id.clone(),
         TranscriptEntry::Custom(e) => e.id.clone(),
@@ -258,6 +303,8 @@ fn parse_entry_timestamp(entry: &TranscriptEntry) -> &str {
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
+        TranscriptEntry::BranchSummaryText(e) => &e.timestamp,
+        TranscriptEntry::ToolResultsCompacted(e) => &e.timestamp,
         TranscriptEntry::Label(e) => &e.timestamp,
         TranscriptEntry::SessionInfo(e) => &e.timestamp,
         TranscriptEntry::Custom(e) => &e.timestamp,
@@ -274,18 +321,30 @@ fn is_user_turn_start(entry: &TranscriptEntry) -> bool {
     match entry {
         TranscriptEntry::Message(me) => {
             me.message.get("role").and_then(|v| v.as_str()) == Some("user")
+                && me
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                && MessageKind::from_persisted(
+                    me.message.get("kind").and_then(serde_json::Value::as_str),
+                )
+                .is_replay_input()
         }
         _ => false,
     }
 }
 
-fn is_boundary(entry: &TranscriptEntry) -> bool {
-    matches!(entry, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true))
-}
-
 fn maybe_plan_event(entry: &TranscriptEntry) -> Option<PlanEventRef> {
     match entry {
         TranscriptEntry::Custom(custom) => PlanEventRef::from_custom_event(&custom.extra),
+        _ => None,
+    }
+}
+
+fn maybe_plan_mode_transition(entry: &TranscriptEntry) -> Option<PlanModeTransition> {
+    match entry {
+        TranscriptEntry::Custom(custom) => PlanModeTransition::from_custom_event(&custom.extra),
         _ => None,
     }
 }
@@ -319,6 +378,8 @@ fn read_sidecar_raw(transcript_path: &Path) -> Result<Option<ResumeIndex>, AppEr
 
 fn write_sidecar(transcript_path: &Path, index: &ResumeIndex) -> Result<(), AppError> {
     let path = resume_index_path(transcript_path);
+    let _guard = crate::infra::config::lock::acquire_config_lock(&path)?;
+    fs::metadata(transcript_path).map_err(AppError::Io)?;
     let body = serde_json::to_vec_pretty(index)?;
     write_file_atomic(&path, &body)
 }
@@ -328,8 +389,26 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
     index.total_entries = ordinal + 1;
     index.last_entry_id = parse_entry_id(entry);
 
-    if is_boundary(entry) {
-        index.latest_boundary = Some(anchor.clone());
+    match entry {
+        TranscriptEntry::BranchSummary(summary)
+            if !summary.superseded && summary.is_boundary == Some(true) =>
+        {
+            match (&summary.id, &summary.summary) {
+                (_, Some(_)) => index.latest_boundary = Some(anchor.clone()),
+                (Some(id), None) => {
+                    index
+                        .pending_boundary_markers
+                        .insert(id.clone(), anchor.clone());
+                }
+                (None, None) => {}
+            }
+        }
+        TranscriptEntry::BranchSummaryText(body) if !body.superseded => {
+            if let Some(marker) = index.pending_boundary_markers.remove(&body.for_id) {
+                index.latest_boundary = Some(marker);
+            }
+        }
+        _ => {}
     }
     if is_user_turn_start(entry) {
         index.recent_turn_starts.push(anchor.clone());
@@ -362,6 +441,17 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
         index.latest_plan_event =
             Some(StoredPlanEventRef::from_plan_event_ref(plan_event, &anchor));
     }
+    if let Some(transition) = maybe_plan_mode_transition(entry) {
+        if let Some(mode) = transition.mode {
+            index.agent_mode = Some(mode);
+        }
+        if let Some(plan_id) = transition.plan_id {
+            index.active_plan_id = Some(plan_id);
+        }
+        if let Some(path) = transition.path {
+            index.active_plan_path = Some(path.to_string_lossy().to_string());
+        }
+    }
 }
 
 fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
@@ -373,9 +463,13 @@ fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
         total_entries: 0,
         last_entry_id: None,
         latest_boundary: None,
+        pending_boundary_markers: HashMap::new(),
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
+        agent_mode: None,
+        active_plan_path: None,
+        active_plan_id: None,
     })
 }
 
@@ -533,7 +627,45 @@ pub(crate) fn update_resume_index_after_append(
     write_sidecar(transcript_path, &index)
 }
 
+/// A supersede/revive rewrite changes message metadata but never adds, removes, reorders, or
+/// changes any field consumed by `ResumeIndex`. Keep the sidecar valid by refreshing only its
+/// file identity instead of parsing every JSONL entry again.
+///
+/// A missing, corrupt, or old-schema sidecar is deliberately discarded. The next hydrate lazily
+/// rebuilds it from the authoritative transcript; guessing an index would be worse than a cold
+/// rebuild.
+pub(crate) fn refresh_resume_index_after_nonstructural_rewrite(
+    transcript_path: &Path,
+) -> Result<(), AppError> {
+    let Some(mut index) = read_sidecar_raw(transcript_path)? else {
+        #[cfg(test)]
+        LAST_INLINE_REBUILD_STATS.with(|slot| {
+            *slot.borrow_mut() = Some(ResumeIndexIoStats::default());
+        });
+        return Ok(());
+    };
+    if index.schema_version != RESUME_INDEX_SCHEMA_VERSION {
+        remove_resume_index(transcript_path)?;
+        #[cfg(test)]
+        LAST_INLINE_REBUILD_STATS.with(|slot| {
+            *slot.borrow_mut() = Some(ResumeIndexIoStats::default());
+        });
+        return Ok(());
+    }
+
+    index.transcript_size = fs::metadata(transcript_path).map_err(AppError::Io)?.len();
+    index.transcript_mtime_ms = transcript_mtime_ms(transcript_path)?;
+    write_sidecar(transcript_path, &index)?;
+    #[cfg(test)]
+    LAST_INLINE_REBUILD_STATS.with(|slot| {
+        *slot.borrow_mut() = Some(ResumeIndexIoStats::default());
+    });
+    Ok(())
+}
+
 pub(crate) fn remove_resume_index(transcript_path: &Path) -> Result<(), AppError> {
+    let _guard =
+        crate::infra::config::lock::acquire_config_lock(&resume_index_path(transcript_path))?;
     match fs::remove_file(resume_index_path(transcript_path)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

@@ -1,6 +1,8 @@
 # 插件发现、作用域与加载
 
 本文为 [Architecture](../../openspec/specs/Architecture.md) 中「4. 插件系统（统一入口）」的专题页，补充 [`../plugin-system-overview.md`](../plugin-system-overview.md) 的磁盘发现、scope 视图、激活时机与 layered registry 规则。
+> **项目资源根当前规则（2026-09）**：scope 的项目数据由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`；任何项目 `.tomcat` 路径仅表示旧布局，不能用于扫描或安装。
+
 
 ## 这份文档回答什么
 
@@ -54,7 +56,7 @@ sequenceDiagram
 
 | 可见层 | 目录根 | 用途 | 说人话 |
 |------|--------|------|--------|
-| `scope` | `<scope_root>/.tomcat/plugins/` | 当前项目私有插件，优先级最高 | 这个项目自己带的插件，应该最能覆盖本地需要。 |
+| `scope` | `<scope_root>/.agents/plugins/` | 当前项目私有插件，优先级最高 | 这个项目自己带的插件，应该最能覆盖本地需要。 |
 | `agent` | `~/.tomcat/agents/<agentId>/plugins/` | 当前 agent 私有插件 | 只服务这个 agent，不影响别的 agent。 |
 | `global` | `~/.tomcat/plugins/` | 全局兜底插件 | 装一份，大家都能看见，但优先级最低。 |
 

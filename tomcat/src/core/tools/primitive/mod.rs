@@ -4,26 +4,30 @@
 
 pub mod bash_task;
 mod diff;
-mod executor;
+pub(crate) mod executor;
+mod registry_builder;
 #[cfg(test)]
 mod tests;
 mod types;
 
 pub use bash_task::{
-    BackgroundTaskLifecycleEvent, BashTaskId, BashTaskInfo, BashTaskOutputChunk, BashTaskRegistry,
-    BashTaskStatus, BashTaskTicket, WakeReason,
+    BackgroundTaskLifecycleEvent, BashOutputStream, BashRuntimePreview, BashTaskId, BashTaskInfo,
+    BashTaskOutputChunk, BashTaskOutputEvent, BashTaskRegistry, BashTaskStatus, BashTaskTicket,
+    ResolvedCwd,
 };
+pub(crate) use diff::{line_diff_stat, MAX_DIFF_INPUT_BYTES, MAX_DIFF_INPUT_LINES};
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
 #[cfg(test)]
 pub(crate) use executor::simulate_failed_commit_with_backup_for_test;
 pub use executor::DefaultPrimitiveExecutor;
+pub(crate) use registry_builder::build_bash_task_registry;
 pub use types::{
-    BashResult, DiffTag, DirEntry, EditFileResult, EditOperation, EditOperationType, FileDiffLine,
-    HashlineOp, HashlineSegment, PrimitiveExecutor, PrimitiveOperation, ReadBinaryResult,
-    ReadResult, ReadTextResult, SearchFileCount, SearchFileMatch, SearchFilesArgs,
-    SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery, SearchFilesResultMode,
-    SearchFilesStats, SearchFilesTarget, WriteFileResult,
+    BashExecutionState, BashNextAction, BashResult, DiffTag, DirEntry, EditFileResult,
+    EditOperation, EditOperationType, FileDiffLine, HashlineOp, HashlineSegment, PrimitiveExecutor,
+    PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount,
+    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
+    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
 };
 
 /// T2-P0-017 PR-D：`replace_all` 信号 sentinel。
@@ -39,3 +43,8 @@ pub use types::{
 /// extension / 多个 mock / 集成测试一起改名。`replace_all` 信号通过此 marker
 /// 在调用对内传递，外部 trait 完全感知不到。
 pub(crate) const EDIT_REPLACE_ALL_MARKER: &str = "\u{0000}__PI_EDIT_REPLACE_ALL__\u{0000}";
+/// Internal transport markers for string-edit insert modes. Like
+/// `EDIT_REPLACE_ALL_MARKER`, NUL makes collisions with valid UTF-8 text
+/// impossible while keeping the primitive trait signature stable.
+pub(crate) const EDIT_INSERT_BEFORE_MARKER: &str = "\u{0000}__PI_EDIT_INSERT_BEFORE__\u{0000}";
+pub(crate) const EDIT_INSERT_AFTER_MARKER: &str = "\u{0000}__PI_EDIT_INSERT_AFTER__\u{0000}";

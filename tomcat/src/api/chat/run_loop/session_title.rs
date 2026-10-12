@@ -2,18 +2,18 @@
 
 use std::sync::Arc;
 
-use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider};
+use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, PromptCacheKeyFamily};
 use crate::core::session::manager::{is_rule_derived_title, SessionManager};
-use crate::core::summary::generate_session_title;
+use crate::core::summary::generate_session_title_with_cache_key_and_output_limit;
 use crate::infra::events::wire;
 use crate::infra::ScopedEventEmitter;
 
 pub(crate) fn maybe_emit_rule_session_title(
     session: &SessionManager,
-    appended_messages: &[(ChatMessage, bool)],
+    appended_messages: &[ChatMessage],
     emitter: &Arc<ScopedEventEmitter>,
 ) {
-    for (message, _) in appended_messages {
+    for message in appended_messages {
         if message.role != ChatMessageRole::User {
             continue;
         }
@@ -41,13 +41,14 @@ pub(crate) fn maybe_emit_rule_session_title(
 
 pub(crate) fn maybe_spawn_semantic_session_title(
     session: &SessionManager,
-    appended_messages: &[(ChatMessage, bool)],
+    appended_messages: &[ChatMessage],
     title_provider: Arc<dyn LlmProvider>,
     title_model: String,
+    title_output_limit: Option<u32>,
     emitter: Arc<ScopedEventEmitter>,
-    _session_id: String,
+    session_id: String,
 ) {
-    for (message, _) in appended_messages {
+    for message in appended_messages {
         if message.role != ChatMessageRole::User {
             continue;
         }
@@ -68,9 +69,16 @@ pub(crate) fn maybe_spawn_semantic_session_title(
         }
         let user_text = text;
         let session = session.clone();
+        let cache_key = PromptCacheKeyFamily::Title.key_for(&session_id);
         tokio::spawn(async move {
-            let Ok(generated) =
-                generate_session_title(&user_text, title_provider.as_ref(), &title_model).await
+            let Ok(generated) = generate_session_title_with_cache_key_and_output_limit(
+                &user_text,
+                title_provider.as_ref(),
+                &title_model,
+                cache_key.as_deref(),
+                title_output_limit,
+            )
+            .await
             else {
                 return;
             };

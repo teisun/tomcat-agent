@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::super::{AgentLoop, AgentLoopConfig};
-use super::mocks::{MockPrimitiveExecutor, RecordingChatLlmProvider};
+use super::mocks::{test_binding, MockPrimitiveExecutor, RecordingChatLlmProvider};
 use crate::core::llm::LlmProvider;
 use crate::infra::event_bus::DefaultEventBus;
 
@@ -20,7 +20,7 @@ fn returns_configured_compaction_provider_when_present() {
         Arc::new(Mutex::new(vec![])),
     ));
     let agent = AgentLoop::new(
-        Arc::clone(&main_provider),
+        test_binding(Arc::clone(&main_provider), "main-x"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -43,7 +43,7 @@ fn falls_back_to_main_provider_when_absent() {
         Arc::new(Mutex::new(vec![])),
     ));
     let agent = AgentLoop::new(
-        Arc::clone(&main_provider),
+        test_binding(Arc::clone(&main_provider), "main-x"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig::default(),

@@ -16,22 +16,29 @@ use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
 };
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
-use crate::core::llm::openai_files::OpenAiFilesRuntime;
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmResolver, SharedModelCatalog};
 use crate::core::plan_runtime::review::resolve_internal_tools;
 use crate::core::plan_runtime::{PlanRuntime, VerifierDispatcher};
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
-use crate::core::CheckpointStore;
-use crate::infra::config::ContextConfig;
+use crate::core::{CheckpointStore, ModelPrefsStore};
+use crate::infra::config::{ContextConfig, LlmFilesConfig};
 use crate::infra::event_bus::EventBus;
 
 pub const VERIFIER_MAX_TURNS: u32 = 64;
 
 /// verifier 子 Agent allowed tools 硬白名单。
-pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] =
-    &["read", "search_files", "list_dir", "bash", "web_fetch"];
+pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] = &[
+    "read",
+    "search_files",
+    "list_dir",
+    "bash",
+    "task_output",
+    "task_list",
+    "task_stop",
+    "web_fetch",
+];
 
 pub(crate) fn verifier_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
     let mut tools = VERIFIER_ALLOWED_TOOLS.to_vec();
@@ -78,7 +85,8 @@ impl VerifySummary {
         Self {
             checks: Vec::new(),
             verdict: "aborted".into(),
-            summary: "verifier 子 Agent 未注入，返回占位摘要".into(),
+            summary: "Verifier sub-Agent was not supplied; returning a placeholder summary"
+                .to_string(),
             verifier_turns_used: 0,
             verifier_turns_limit: VERIFIER_MAX_TURNS,
             verifier_stop_reason: "not_dispatched".into(),
@@ -171,7 +179,7 @@ pub fn normalize_for_gate(summary: &mut VerifySummary) -> Vec<String> {
         if check.result == "pass" && check.command.trim().is_empty() {
             check.result = "skip".into();
             warnings.push(format!(
-                "check `{}` 声称 pass 但 command 为空，已降级为 skip",
+                "check `{}` claimed pass without a command; downgraded to skip",
                 check.name
             ));
         }
@@ -185,7 +193,10 @@ pub fn normalize_for_gate(summary: &mut VerifySummary) -> Vec<String> {
         && !saw_key_non_skip
     {
         summary.verdict = "partial".into();
-        warnings.push("关键 build/test/lint 检查均未实际跑通，verdict 已降级为 partial".into());
+        warnings.push(
+            "No key build/test/lint checks ran successfully; verdict downgraded to partial"
+                .to_string(),
+        );
     }
     warnings
 }
@@ -226,21 +237,58 @@ pub struct ProdVerifierDispatcher {
 pub struct ProdVerifierDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
-    pub llm: Arc<dyn LlmProvider>,
-    pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    pub llm_resolver: Arc<dyn LlmResolver>,
+    pub model_catalog: SharedModelCatalog,
+    pub model_prefs: Arc<ModelPrefsStore>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub event_bus: Arc<dyn EventBus>,
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
-    pub read_file_state: Arc<ReadFileState>,
-    pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    /// 与根会话相同的 read-stamp 刷新策略；状态本身在每个子 Agent 内独立。
+    pub refresh_mutation_stamp: bool,
+    pub llm_files_config: LlmFilesConfig,
+    pub sessions_dir: std::path::PathBuf,
     pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
     pub skills_config: crate::infra::config::SkillsConfig,
+    pub bash_config: crate::infra::config::ToolsBashConfig,
+    pub gate: Arc<dyn crate::core::permission::PermissionGate>,
+    pub confirmation: Arc<dyn crate::core::tools::contract::confirmation::UserConfirmationProvider>,
+    pub audit: Arc<dyn crate::infra::AuditRecorder>,
+    pub bash_ast: crate::core::permission::BashAstChecker,
     pub plan_runtime: Weak<PlanRuntime>,
-    pub model: String,
+    /// `[verifier].model_override`；语义同 [`super::prod_reviewer::ProdReviewerDeps`]。
+    pub model_override: Option<String>,
+    pub fallback_model: String,
+}
+
+impl ProdVerifierDeps {
+    fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
+        let session_model = match super::prod_reviewer::read_parent_session_model(
+            &self.sessions_dir,
+            &self.parent_session_id,
+        ) {
+            Some(model) => model,
+            None => plan_runtime.session_model(),
+        };
+        super::prod_reviewer::resolve_dispatch_model(
+            self.model_override.as_deref(),
+            session_model.as_deref(),
+            &self.fallback_model,
+        )
+    }
+
+    fn resolve_thinking_level(&self, model_id: &str) -> crate::core::llm::ThinkingLevel {
+        self.model_catalog
+            .resolve_reasoning_level(self.model_prefs.as_ref(), model_id)
+    }
+
+    fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {
+        self.model_catalog
+            .resolve_speed(self.model_prefs.as_ref(), model_id)
+    }
 }
 
 impl ProdVerifierDispatcher {
@@ -261,13 +309,13 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
     async fn dispatch(&self, plan_id: &str, plan_text: &str) -> VerifySummary {
         let Some(deps) = self.deps.as_ref() else {
             return VerifySummary::aborted_with(format!(
-                "[{}] 生产 verifier 子 Agent 未注入依赖（stub 模式）",
+                "[{}] Production verifier sub-Agent dependencies were not supplied (stub mode)",
                 self.origin
             ));
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
             return VerifySummary::aborted_with(format!(
-                "[{}] PlanRuntime 已被 drop，verifier 取消派发",
+                "[{}] PlanRuntime was dropped; verifier dispatch cancelled",
                 self.origin
             ));
         };
@@ -281,23 +329,50 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             build_verify_prompt(plan_id, plan_text, &plan_path, workspace_root);
         let turns_limit = VERIFIER_MAX_TURNS;
 
-        let llm = Arc::clone(&deps.llm);
-        let compaction_provider = deps.compaction_provider.clone();
         let primitive = Arc::clone(&deps.primitive);
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let context_config = deps.context_config.clone();
-        let context_budget_chars =
-            crate::infra::config::compute_context_budget_chars(&context_config);
-        let read_file_state = Arc::clone(&deps.read_file_state);
-        let openai_files_runtime = deps.openai_files_runtime.clone();
+        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
         let web_fetch_runtime = Arc::clone(&deps.web_fetch_runtime);
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
+        let bash_config = deps.bash_config.clone();
+        let gate = Arc::clone(&deps.gate);
+        let confirmation = Arc::clone(&deps.confirmation);
+        let audit = Arc::clone(&deps.audit);
+        let bash_ast = deps.bash_ast.clone();
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
+        let model_id = deps.resolve_model(&plan_runtime);
+        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
+        let speed = deps.resolve_speed(&model_id);
+        let parent_session_id = deps.parent_session_id.clone();
+        let parent_session_id_for_closure = parent_session_id.clone();
+        let origin = self.origin;
+        let runtime = match super::prod_reviewer::resolve_subagent_runtime(
+            deps.llm_resolver.as_ref(),
+            &deps.context_config,
+            &deps.llm_files_config,
+            &deps.sessions_dir,
+            &parent_session_id,
+            &model_id,
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let mut s = VerifySummary::aborted_with(format!(
+                    "[{}] Could not resolve verifier model `{model_id}`: {err}",
+                    self.origin
+                ));
+                s.verifier_turns_limit = turns_limit;
+                s.verifier_stop_reason = "model_unresolved".into();
+                return s;
+            }
+        };
+        let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+            runtime.main_call.limits.input_budget_tokens,
+        );
         let skill_prompt = if expose_skills {
             crate::core::llm::system_prompt::render_available_skills_prompt(
                 &skill_set,
@@ -307,11 +382,14 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         } else {
             None
         };
-        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let model = deps.model.clone();
-        let parent_session_id = deps.parent_session_id.clone();
-        let parent_session_id_for_closure = parent_session_id.clone();
-        let origin = self.origin;
+        let compaction_provider = runtime.compaction_provider.clone();
+        let compaction_output_limit = runtime
+            .compaction_output_limit
+            .or_else(|| runtime.main_call.output_limit_for_request(None).0);
+        let context_config = runtime.context_config.clone();
+        let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let binding = runtime.main_call;
+        let transcript_model = binding.catalog_id().to_string();
         let mut system_text = format!(
             "{}\n(max_turns budget: {} reasoning turns)\n",
             verifier_system_prompt_text(),
@@ -330,31 +408,51 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                 &parent_session_id,
                 SubagentType::Verifier,
                 move |spawn_ctx| async move {
+                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
+                        refresh_mutation_stamp,
+                    ));
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();
+                    let bash_task_registry =
+                        crate::core::tools::primitive::build_bash_task_registry(
+                            &bash_config,
+                            std::path::PathBuf::from(&transcript_root)
+                                .join("tool-results")
+                                .join(format!("subagent-{}", spawn_ctx.subagent_type.as_str()))
+                                .join(&child_session_id),
+                            gate.clone(),
+                            confirmation.clone(),
+                            audit.clone(),
+                            bash_ast.clone(),
+                        );
                     let transcript_sink =
                         crate::core::session::subagent_transcript::open_subagent_transcript(
                             &transcript_root,
                             &child_session_id,
                             SubagentType::Verifier,
-                            &model,
+                            &transcript_model,
                             &parent_session_id_for_closure,
                         );
+                    let initial_message_sink = transcript_sink.clone();
 
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        system_prompt: Some(system_text.clone()),
+                        unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
-                        model,
-                        thinking_level: None,
+                        thinking_level,
+                        speed,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        compaction_output_limit,
                         title_provider: None,
                         title_model: String::new(),
+                        title_output_limit: None,
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,
@@ -363,22 +461,27 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Verifier,
-                        review_kind: None,
-                        plan_runtime: Some(plan_runtime_for_loop),
+                        plan_runtime: None,
                         skill_set: if expose_skills {
                             Some(Arc::clone(&shared_skill_set))
                         } else {
                             None
                         },
+                        ephemeral_tail_provider: None,
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
-                            .with_web_fetch_runtime(web_fetch_runtime);
-                    let initial_messages = vec![
+                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
+                            .with_web_fetch_runtime(web_fetch_runtime)
+                            .with_bash_task_registry(bash_task_registry);
+                    let initial_messages = [
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
-                    let run_outcome = agent_loop.run(initial_messages).await;
+                    crate::core::session::subagent_transcript::persist_initial_messages(
+                        initial_message_sink.as_ref(),
+                        &initial_messages,
+                    );
+                    let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
 
                     let (summary, label) = build_summary_from_outcome(
                         origin,
@@ -412,13 +515,13 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             Ok(_) => match rx.await {
                 Ok(summary) => summary,
                 Err(_) => VerifySummary::aborted_with(format!(
-                    "[{}] verifier 子 Agent 退出但 summary channel 提前关闭",
+                    "[{}] verifier sub-Agent exited but its summary channel closed early",
                     self.origin
                 )),
             },
             Err(e) => {
                 let mut s = VerifySummary::aborted_with(format!(
-                    "[{}] verifier spawn 失败：{e}",
+                    "[{}] Could not spawn verifier: {e}",
                     self.origin
                 ));
                 s.verifier_turns_limit = turns_limit;
@@ -458,13 +561,9 @@ pub(crate) fn build_summary_from_outcome(
                 }
                 None => {
                     let mut s = if exhausted_budget {
-                        VerifySummary::aborted_with(format!(
-                            "[{origin}] verifier 在 {turns_limit} 轮预算内未正常收口（child={child_session_id}）"
-                        ))
+                        VerifySummary::aborted_with(format!("[{origin}] Verifier did not finish normally within the {turns_limit}-turn budget (child={child_session_id})"))
                     } else {
-                        VerifySummary::aborted_with(format!(
-                            "[{origin}] verifier 输出不符合 <verify> 契约（child={child_session_id}）"
-                        ))
+                        VerifySummary::aborted_with(format!("[{origin}] Verifier output does not match the <verify> contract (child={child_session_id})"))
                     };
                     s.verifier_turns_used = turns_used;
                     s.verifier_turns_limit = turns_limit;
@@ -481,7 +580,7 @@ pub(crate) fn build_summary_from_outcome(
         AgentRunOutcome::Interrupted(result) => {
             let turns_used = count_assistant_turns(&result.new_messages);
             let mut s = VerifySummary::aborted_with(format!(
-                "[{origin}] verifier 被父 abort / cancel（child={child_session_id}）"
+                "[{origin}] verifier aborted/cancelled by parent (child={child_session_id})"
             ));
             s.verifier_turns_used = turns_used;
             s.verifier_turns_limit = turns_limit;
@@ -491,9 +590,9 @@ pub(crate) fn build_summary_from_outcome(
         }
         AgentRunOutcome::Failed(e) => {
             let mut s =
-                VerifySummary::aborted_with(format!("[{origin}] verifier 子 Agent 失败：{e}"));
+                VerifySummary::aborted_with(format!("[{origin}] verifier sub-Agent failed: {e}"));
             s.verifier_turns_limit = turns_limit;
-            s.verifier_stop_reason = "spawn_error".into();
+            s.verifier_stop_reason = "llm_error".into();
             s.child_session_id = child_session_id.to_string();
             (s, SubagentOutcomeLabel::Failed)
         }
@@ -548,9 +647,7 @@ fn ended_with_terminal_assistant_message(messages: &[ChatMessage]) -> bool {
 }
 
 fn append_budget_exhausted_note(summary: &mut String, turns_limit: u32) {
-    let note = format!(
-        "[runtime override] verifier exhausted the {turns_limit}-turn budget before normal completion."
-    );
+    let note = format!("[runtime override] verifier exhausted the {turns_limit}-turn budget before normal completion.");
     if summary.is_empty() {
         *summary = note;
     } else if !summary.contains(&note) {

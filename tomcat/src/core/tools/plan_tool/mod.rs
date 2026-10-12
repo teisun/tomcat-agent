@@ -29,17 +29,21 @@ pub use update_plan::UpdatePlanArgs;
 /// 所有 plan 工具的统一错误。可序列化到 ToolResult.content。
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("当前模式 {mode} 下 {tool} 不可见")]
-    InvisibleInMode { tool: &'static str, mode: String },
-    #[error("参数错误: {0}")]
+    #[error("{message}", message = crate::infra::i18n::tr("planTool.rejected", &[("mode", .mode), ("tool", .tool), ("guidance", .guidance)]))]
+    RejectedInMode {
+        tool: &'static str,
+        mode: String,
+        guidance: String,
+    },
+    #[error("Invalid arguments: {0}")]
     BadArgs(String),
-    #[error("plan 文件错误: {0}")]
+    #[error("Plan file error: {0}")]
     PlanFile(#[from] crate::core::plan_runtime::file_store::PlanError),
-    #[error("ops 错误: {0}")]
+    #[error("Operation error: {0}")]
     Op(#[from] crate::core::plan_runtime::ops::OpError),
-    #[error("跨 session 编辑被拒：{0}")]
+    #[error("Cross-session edit denied: {0}")]
     CrossSessionDenied(String),
-    #[error("内部错误: {0}")]
+    #[error("Internal error: {0}")]
     Internal(String),
 }
 
@@ -49,7 +53,7 @@ impl ToolError {
         serde_json::json!({
             "error": self.to_string(),
             "kind": match self {
-                ToolError::InvisibleInMode { .. } => "invisible_in_mode",
+                ToolError::RejectedInMode { .. } => "rejected_in_mode",
                 ToolError::BadArgs(_) => "bad_args",
                 ToolError::PlanFile(_) => "plan_file",
                 ToolError::Op(_) => "op",

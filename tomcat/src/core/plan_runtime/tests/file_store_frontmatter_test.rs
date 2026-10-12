@@ -4,6 +4,49 @@ use super::super::file_store::{
 use super::sample_frontmatter;
 
 #[test]
+fn code_review_state_round_trips_and_defaults_for_legacy_files() {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.code_review_rounds = 2;
+    frontmatter.code_review_open_findings = vec![crate::core::plan_runtime::Finding::new(
+        "P1".into(),
+        "runtime".into(),
+        "missing regression coverage".into(),
+    )
+    .with_reference("F01")];
+    frontmatter.code_review_disputed_findings = vec![crate::core::plan_runtime::DisputedFinding {
+        reference: "F02".into(),
+        severity: "P1".into(),
+        area: "compatibility".into(),
+        note: "legacy protocol stays enabled".into(),
+        resolution: "wontfix".into(),
+        reason: "explicit product trade-off".into(),
+    }];
+    let plan = PlanFile {
+        frontmatter: frontmatter.clone(),
+        body: String::new(),
+    };
+
+    let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize")).expect("parse");
+    assert_eq!(parsed.frontmatter.code_review_rounds, 2);
+    assert_eq!(
+        parsed.frontmatter.code_review_open_findings,
+        frontmatter.code_review_open_findings
+    );
+    assert_eq!(
+        parsed.frontmatter.code_review_disputed_findings,
+        frontmatter.code_review_disputed_findings
+    );
+
+    let legacy = parse_plan_file(
+        "---\nplan_id: legacy\ngoal: g\nstate: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n",
+    )
+    .expect("legacy plan remains readable");
+    assert_eq!(legacy.frontmatter.code_review_rounds, 0);
+    assert!(legacy.frontmatter.code_review_open_findings.is_empty());
+    assert!(legacy.frontmatter.code_review_disputed_findings.is_empty());
+}
+
+#[test]
 fn plan_file_round_trip_frontmatter() {
     let plan = PlanFile {
         frontmatter: sample_frontmatter(),
@@ -93,20 +136,62 @@ fn plan_file_schema_version_v1_locked() {
 }
 
 #[test]
-fn plan_file_rejects_multiple_in_progress_on_write() {
+fn ordinary_reads_preserve_all_gate_in_progress_states() {
+    let plan_text = "---\nplan_id: plan\ngoal: g\nstate: executing\ncreated_at: t\nschema_version: 1\ntodos:\n  - id: gate-review\n    content: \"[gate] review\"\n    status: in_progress\n    kind: gate_code_review\n  - id: gate-acceptance\n    content: \"[gate] Acceptance\"\n    status: in_progress\n    kind: gate_acceptance\n---\n";
+
+    let parsed = parse_plan_file(plan_text).expect("plan remains readable");
+
+    assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::InProgress);
+    assert_eq!(parsed.frontmatter.todos[1].status, TodoStatus::InProgress);
+    assert!(parsed
+        .frontmatter
+        .todos
+        .iter()
+        .all(|todo| todo.kind == crate::core::plan_runtime::file_store::TodoKind::Unknown));
+}
+
+#[test]
+fn acceptance_in_progress_survives_serialize_and_parse_round_trip() {
     let mut frontmatter = sample_frontmatter();
     frontmatter.todos.push(TodoItem {
-        id: "t3".into(),
-        content: "另一个 in_progress".into(),
+        id: "acceptance".into(),
+        content: "验收".into(),
         status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: crate::core::plan_runtime::file_store::TodoKind::Acceptance,
     });
     let plan = PlanFile {
         frontmatter,
         body: String::new(),
     };
-    let err = serialize_plan_file(&plan).expect_err("应拒多个 in_progress");
+
+    let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize acceptance"))
+        .expect("parse acceptance");
+    assert_eq!(
+        parsed.frontmatter.todos.last().map(|todo| todo.status),
+        Some(TodoStatus::InProgress)
+    );
+}
+
+#[test]
+fn plan_file_rejects_more_than_three_in_progress_on_write() {
+    let mut frontmatter = sample_frontmatter();
+    for id in ["t3", "t4", "t5"] {
+        frontmatter.todos.push(TodoItem {
+            id: id.into(),
+            content: format!("另一个 in_progress: {id}"),
+            status: TodoStatus::InProgress,
+            evidence: Vec::new(),
+            kind: Default::default(),
+        });
+    }
+    let plan = PlanFile {
+        frontmatter,
+        body: String::new(),
+    };
+    let err = serialize_plan_file(&plan).expect_err("应拒超过三个 in_progress");
     assert!(
-        matches!(err, PlanError::MultipleInProgress { count: 2 }),
+        matches!(err, PlanError::MultipleInProgress { count: 4 }),
         "got {err:?}"
     );
 }
@@ -118,6 +203,8 @@ fn plan_file_rejects_duplicate_todo_ids_on_write() {
         id: "t1".into(),
         content: "dup".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
+        kind: Default::default(),
     });
     let plan = PlanFile {
         frontmatter,

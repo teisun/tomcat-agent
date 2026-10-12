@@ -1,13 +1,18 @@
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::agent_loop::tool_dispatcher::run_tool_calls;
-use crate::core::agent_loop::tool_exec::{execute_tool, NORMALIZED_TOOL_CALL_ARGUMENTS};
+use crate::core::agent_loop::tool_dispatcher::{run_tool_calls, run_tool_calls_with_usage};
+use crate::core::agent_loop::tool_exec::{
+    execute_tool, persisted_tool_call_arguments, NORMALIZED_TOOL_CALL_ARGUMENTS,
+};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
-use crate::core::llm::ChatMessage;
+use crate::core::compaction::preheat::Preheat;
+use crate::core::llm::{ChatMessage, TokenUsage};
+use crate::core::session::manager::ContextState;
 use crate::core::tools::contract::registry::{DefaultToolRegistry, Tool, ToolRegistry};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::ext::{
@@ -16,18 +21,23 @@ use crate::ext::{
 use crate::infra::error::AppError;
 use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, TracingAuditRecorder};
 
-use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
+use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 
 fn make_agent() -> AgentLoop {
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-tool-call-args".to_string(),
         ..Default::default()
     };
-    AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new())
+    AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus,
+        config,
+        CancellationToken::new(),
+    )
 }
 
 struct MockPluginToolRegistry;
@@ -135,8 +145,7 @@ impl PrimitiveExecutor for CountingPrimitiveExecutor {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::BashResult, AppError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(AppError::Tool(
@@ -308,6 +317,168 @@ async fn run_tool_calls_keeps_valid_arguments_unchanged() {
 }
 
 #[tokio::test]
+async fn tool_dispatch_counts_assistant_only_in_fallback_estimate() {
+    let mut agent = make_agent();
+    let mut messages = Vec::<ChatMessage>::new();
+    let tool_calls = vec![ToolCallInfo {
+        id: "call_1".into(),
+        name: "read".into(),
+        arguments: r#"{"path":"/abc"}"#.into(),
+    }];
+    let persisted_args = persisted_tool_call_arguments(&tool_calls[0]);
+    let assistant_content = "abc";
+    let assistant_chars = assistant_content.len()
+        + tool_calls[0].name.len()
+        + persisted_args.len()
+        + tool_calls[0].id.len()
+        + 40;
+    assert_eq!(
+        assistant_chars % 4,
+        0,
+        "fixture keeps usage-backed and fallback estimates comparable"
+    );
+
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 4_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.update_api_usage(1_000, (assistant_chars / 4) as u32);
+    agent.set_context_state(Some(state));
+
+    run_tool_calls_with_usage(
+        &mut agent,
+        &mut messages,
+        &tool_calls,
+        assistant_content,
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: (assistant_chars / 4) as u32,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("tool dispatch should succeed");
+
+    let tool_result_chars = messages[1]
+        .text_content()
+        .expect("tool result should contain text")
+        .len();
+    assert_eq!(tool_result_chars, 12, "MockPrimitiveExecutor read fixture");
+    let state = agent.context_state.as_mut().expect("context state");
+    assert_eq!(
+        state.post_usage_appended_chars, tool_result_chars,
+        "provider usage already accounts for assistant text and tool-call arguments"
+    );
+    assert_eq!(
+        state.estimate_context_chars,
+        4_000 + assistant_chars + tool_result_chars,
+        "fallback estimate must retain the complete assistant and tool payload"
+    );
+    let usage_backed_estimate = state.estimated_token_count();
+    assert_eq!(usage_backed_estimate, 1_020);
+
+    state.invalidate_api_usage();
+    assert_eq!(
+        state.estimated_token_count(),
+        usage_backed_estimate,
+        "invalidating usage must preserve the fallback estimate"
+    );
+}
+
+#[tokio::test]
+async fn tool_dispatch_does_not_double_count_large_tool_call_arguments() {
+    let mut agent = make_agent();
+    let mut messages = Vec::<ChatMessage>::new();
+    let tool_calls = vec![ToolCallInfo {
+        id: "call_large".into(),
+        name: "read".into(),
+        arguments: format!(r#"{{"path":"/{}"}}"#, "x".repeat(40_000)),
+    }];
+    let persisted_args = persisted_tool_call_arguments(&tool_calls[0]);
+    let assistant_content = "calling read";
+    let assistant_chars = assistant_content.len()
+        + tool_calls[0].name.len()
+        + persisted_args.len()
+        + tool_calls[0].id.len()
+        + 40;
+
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 4_000,
+        context_budget_chars: 500_000,
+        context_budget_tokens: 125_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.update_api_usage(1_000, (assistant_chars / 4) as u32);
+    agent.set_context_state(Some(state));
+
+    run_tool_calls_with_usage(
+        &mut agent,
+        &mut messages,
+        &tool_calls,
+        assistant_content,
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(TokenUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: (assistant_chars / 4) as u32,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("large tool call should succeed");
+
+    let tool_result_chars = messages[1]
+        .text_content()
+        .expect("tool result should contain text")
+        .len();
+    assert!(
+        tool_result_chars >= 40_000,
+        "fixture must retain a large tool result"
+    );
+    let state = agent.context_state.as_ref().expect("context state");
+    let provider_total = 1_000 + assistant_chars / 4;
+    assert_eq!(
+        state.post_usage_appended_chars, tool_result_chars,
+        "only the tool result is new after provider usage"
+    );
+    assert_eq!(
+        state.estimated_token_count() - provider_total,
+        tool_result_chars / 4,
+        "large tool-call arguments must not add a second ~10K-token delta"
+    );
+}
+
+#[tokio::test]
 async fn run_tool_calls_normalizes_empty_arguments_to_empty_object() {
     let mut agent = make_agent();
     let mut messages = Vec::<ChatMessage>::new();
@@ -465,12 +636,11 @@ pi.registerTool({
     });
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-tool-call-args".to_string(),
         ..Default::default()
     };
     let mut agent = AgentLoop::new(
-        llm,
+        test_binding(llm, "gpt-4"),
         primitive,
         event_bus.clone(),
         config,
@@ -589,12 +759,17 @@ pi.registerTool({
     let llm = Arc::new(MockLlmProvider::new(vec![]));
     let cancel = CancellationToken::new();
     let config = AgentLoopConfig {
-        model: "gpt-4".to_string(),
         session_id: "s-tool-call-args".to_string(),
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(llm, primitive, event_bus.clone(), config, cancel.clone())
-        .with_tool_registry(harness.registry.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        primitive,
+        event_bus.clone(),
+        config,
+        cancel.clone(),
+    )
+    .with_tool_registry(harness.registry.clone());
 
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -3,12 +3,13 @@
 //! 列表与路由由此提供；原子写通过「写临时文件 → 重命名」保证。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 
 /// MVP 默认 sessionKey：单 Agent 单入口。
@@ -52,6 +53,9 @@ pub struct SessionEntry {
     pub session_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 用户显式选择并由宿主验证的项目根；与运行 cwd 分开持久化。
+    pub project_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,30 +83,32 @@ pub struct SessionEntry {
     pub title: Option<String>,
 }
 
-/// 从路径加载 SessionStore；文件不存在或为空时返回空 store。
+/// 从路径加载 SessionStore。缺失文件只返回内存中的空 store；现存空白或损坏文件
+/// 直接报错，读取绝不重写用户的 sessions.json。
 pub fn load_store(path: &Path) -> Result<SessionStore, AppError> {
     let content = match read_file_utf8(path) {
-        Ok(s) => s,
-        Err(AppError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
-            return reset_store(path);
+        Ok(content) => content,
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SessionStore::new());
         }
-        Err(err) => return Err(err),
+        Err(error) => return Err(error),
     };
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return reset_store(path);
+        return Err(AppError::Config(tr(
+            "session.storeEmpty",
+            &[("path", &path.display().to_string())],
+        )));
     }
-    let mut store: SessionStore = match serde_json::from_str(trimmed) {
-        Ok(store) => store,
-        Err(err) => {
-            warn!(
-                path = %path.display(),
-                error = %err,
-                "session store parse failed; rebuilding empty store"
-            );
-            return reset_store(path);
-        }
-    };
+    let mut store: SessionStore = serde_json::from_str(trimmed).map_err(|error| {
+        AppError::Config(tr(
+            "session.storeParse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
+        ))
+    })?;
     repair_missing_session_keys(&mut store);
     prune_stale_current_pointers(&mut store);
     Ok(store)
@@ -112,6 +118,116 @@ pub fn load_store(path: &Path) -> Result<SessionStore, AppError> {
 pub fn save_store(path: &Path, store: &SessionStore) -> Result<(), AppError> {
     let content = serde_json::to_string_pretty(store)?;
     write_file_atomic(path, content.as_bytes())
+}
+
+/// 预检用于模型删除：现存 store 必须是可安全定位 `sessions.*.modelOverride` 的 JSON。
+/// 缺失 store 表示还没有会话，不创建文件。
+pub(crate) fn precheck_model_override_store(path: &Path) -> Result<(), AppError> {
+    with_store_write_lock(path, || read_store_document(path).map(|_| ()))
+}
+
+/// 只删除等于目标模型的 session override，保留 current、标题、用量以及未知 JSON 字段。
+///
+/// 这条路径不能反序列化后再用 `SessionStore` 整体序列化，因为未来版本写入的未知字段
+/// 会在那种读改写中被静默丢掉。
+pub(crate) fn clear_model_overrides_in_store(
+    path: &Path,
+    model_id: &str,
+) -> Result<usize, AppError> {
+    with_store_write_lock(path, || {
+        let Some(mut document) = read_store_document(path)? else {
+            return Ok(0);
+        };
+        let sessions = document
+            .as_object_mut()
+            .and_then(|root| root.get_mut("sessions"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("read_store_document validates sessions object");
+        let mut cleared = 0;
+        for (session_id, entry) in sessions.iter_mut() {
+            let entry = entry
+                .as_object_mut()
+                .expect("read_store_document validates session entry");
+            let matches = match entry.get("modelOverride") {
+                Some(value) => {
+                    value.as_str().ok_or_else(|| {
+                        AppError::Config(tr(
+                            "session.overrideString",
+                            &[("path", &path.display().to_string()), ("id", session_id)],
+                        ))
+                    })? == model_id
+                }
+                None => false,
+            };
+            if matches {
+                entry.remove("modelOverride");
+                cleared += 1;
+            }
+        }
+        if cleared > 0 {
+            let content = serde_json::to_string_pretty(&document)?;
+            write_file_atomic(path, content.as_bytes())?;
+        }
+        Ok(cleared)
+    })
+}
+
+fn read_store_document(path: &Path) -> Result<Option<serde_json::Value>, AppError> {
+    let content = match read_file_utf8(path) {
+        Ok(content) => content,
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    if content.trim().is_empty() {
+        return Err(AppError::Config(tr(
+            "session.storeEmpty",
+            &[("path", &path.display().to_string())],
+        )));
+    }
+    let document: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        AppError::Config(tr(
+            "session.storeParse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &error.to_string()),
+            ],
+        ))
+    })?;
+    let root = document.as_object().ok_or_else(|| {
+        AppError::Config(tr(
+            "session.storeRoot",
+            &[("path", &path.display().to_string())],
+        ))
+    })?;
+    let sessions = root
+        .get("sessions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            AppError::Config(tr(
+                "session.storeSessions",
+                &[("path", &path.display().to_string())],
+            ))
+        })?;
+    if root
+        .get("current")
+        .is_some_and(|current| !current.is_object())
+    {
+        return Err(AppError::Config(tr(
+            "session.storeCurrent",
+            &[("path", &path.display().to_string())],
+        )));
+    }
+    for (session_id, entry) in sessions {
+        if !entry.is_object() {
+            return Err(AppError::Config(tr(
+                "session.storeEntry",
+                &[("path", &path.display().to_string()), ("id", session_id)],
+            )));
+        }
+    }
+    Ok(Some(document))
 }
 
 fn repair_missing_session_keys(store: &mut SessionStore) {
@@ -135,8 +251,45 @@ fn prune_stale_current_pointers(store: &mut SessionStore) {
         .retain(|_, session_id| store.sessions.contains_key(session_id));
 }
 
-fn reset_store(path: &Path) -> Result<SessionStore, AppError> {
-    let store = SessionStore::new();
-    save_store(path, &store)?;
-    Ok(store)
+fn store_mutation_locks() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalized_store_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+/// Serialize the complete RMW in this process and across cooperating CLI/Serve processes.
+/// The lock lives beside sessions.json because atomic rename replaces the store inode.
+pub(crate) fn with_store_write_lock<T>(
+    path: &Path,
+    work: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let key = normalized_store_path(path);
+    let lock = {
+        let mut locks = store_mutation_locks().lock().map_err(|error| {
+            AppError::Config(tr(
+                "session.storeRegistry",
+                &[("detail", &error.to_string())],
+            ))
+        })?;
+        Arc::clone(
+            locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    };
+    let _guard = lock.lock().map_err(|error| {
+        AppError::Config(tr("session.storeLock", &[("detail", &error.to_string())]))
+    })?;
+    crate::infra::config::with_config_lock(&key, work)
 }

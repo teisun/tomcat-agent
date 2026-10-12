@@ -1,3 +1,4 @@
+use crate::core::llm::PromptCacheKeyFamily;
 use crate::core::{ChatMessage, ChatRequest, Tool};
 use crate::infra::error::AppError;
 
@@ -78,6 +79,8 @@ pub(super) fn transcript_entry_id(entry: &crate::core::session::TranscriptEntry)
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
+        TranscriptEntry::BranchSummaryText(e) => e.id.as_deref(),
+        TranscriptEntry::ToolResultsCompacted(e) => e.id.as_deref(),
         TranscriptEntry::Label(e) => e.id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
         TranscriptEntry::Custom(e) => e.id.as_deref(),
@@ -106,9 +109,17 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
             .or_else(|| params.get("max_tokens"))
             .and_then(|v| v.as_u64())
             .map(|u| u as u32),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: params
+            .get("session_id")
+            .or_else(|| params.get("sessionId"))
+            .and_then(|value| value.as_str())
+            .and_then(|session_id| PromptCacheKeyFamily::Extension.key_for(session_id)),
         tools: params
             .get("tools")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),

@@ -18,10 +18,11 @@
 //!   stop 走的是 `pid → libc::killpg(SIGKILL)`，不依赖 Child 句柄，杀完
 //!   wait 任务自然 `wait()` 返回 → 状态翻成 `Finished{ exit_code }`。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -81,39 +82,99 @@ fn grant_trigger_str(s: GrantTrigger) -> String {
     .to_string()
 }
 
-fn normalize_launcher_argv(
-    command: String,
-    argv: Option<Vec<String>>,
-) -> (String, Option<Vec<String>>) {
-    let Some(mut argv) = argv else {
-        return (command, None);
+fn op_summary(op: PrimitiveOperation) -> String {
+    let key = match op {
+        PrimitiveOperation::Read => "permission.op.read",
+        PrimitiveOperation::Write => "permission.op.write",
+        PrimitiveOperation::Edit => "permission.op.edit",
+        PrimitiveOperation::Bash => "permission.op.bash",
     };
-    let trimmed = command.trim();
-    let mut parts = trimmed.split_whitespace();
-    let Some(program) = parts.next() else {
-        return (command, Some(argv));
-    };
-    if !matches!(
-        program,
-        "sh" | "bash" | "zsh" | "cmd" | "powershell" | "pwsh"
-    ) {
-        return (command, Some(argv));
-    }
-    let launcher_args: Vec<String> = parts.map(str::to_string).collect();
-    if launcher_args.is_empty() {
-        return (command, Some(argv));
-    }
-    let mut merged = launcher_args;
-    merged.append(&mut argv);
-    (program.to_string(), Some(merged))
+    crate::infra::i18n::tr(key, &[])
 }
 
-fn op_summary(op: PrimitiveOperation) -> &'static str {
-    match op {
-        PrimitiveOperation::Read => "读取",
-        PrimitiveOperation::Write => "写入",
-        PrimitiveOperation::Edit => "编辑",
-        PrimitiveOperation::Bash => "执行命令",
+/// Validate an explicit bash cwd: it must exist and be a directory. Emitting this before the
+/// process is spawned turns an otherwise cryptic `ENOENT` from `Command::spawn` into an
+/// actionable message (and hints about un-expanded `$VAR`).
+fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
+    if !path.try_exists().map_err(AppError::Io)? {
+        let mut msg = format!(
+            "bash.cwd does not exist: {} (input: {raw_cwd:?})",
+            path.display()
+        );
+        if let Ok(project_root) = std::env::current_dir() {
+            msg.push_str(&format!(
+                "; project root is {} — use \".\" or a relative path under it",
+                project_root.display()
+            ));
+        }
+        if raw_cwd.contains('$') {
+            msg.push_str(
+                "; environment variables are not expanded here; use ~/... or an absolute path instead",
+            );
+        }
+        return Err(AppError::Primitive(msg));
+    }
+    if !path.is_dir() {
+        return Err(AppError::Primitive(format!(
+            "bash.cwd is not a directory: {} (input: {raw_cwd:?})",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCwd {
+    path: PathBuf,
+    raw_input: Option<String>,
+}
+
+impl ResolvedCwd {
+    pub fn inherited() -> Self {
+        Self {
+            path: PathBuf::from("."),
+            raw_input: None,
+        }
+    }
+
+    pub fn from_raw(cwd: Option<&str>) -> Result<Self, AppError> {
+        Self::from_owned(cwd.map(str::to_string))
+    }
+
+    pub fn from_path_buf(cwd: Option<PathBuf>) -> Result<Self, AppError> {
+        Self::from_owned(cwd.map(|path| path.to_string_lossy().into_owned()))
+    }
+
+    fn from_owned(cwd: Option<String>) -> Result<Self, AppError> {
+        let raw_input = cwd.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        let Some(raw_input) = raw_input else {
+            return Ok(Self::inherited());
+        };
+        let path = normalize_path(&raw_input)?;
+        validate_bash_cwd(&path, &raw_input)?;
+        Ok(Self {
+            path,
+            raw_input: Some(raw_input),
+        })
+    }
+
+    pub fn resolved_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn raw_input(&self) -> Option<&str> {
+        self.raw_input.as_deref()
+    }
+
+    pub fn display_input(&self) -> &str {
+        self.raw_input.as_deref().unwrap_or("<inherited>")
+    }
+
+    fn command_cwd(&self) -> Option<&Path> {
+        self.raw_input.as_ref().map(|_| self.path.as_path())
     }
 }
 
@@ -227,23 +288,30 @@ impl BackgroundBashGuard {
                     reason,
                     suggested_root,
                 } => {
-                    let preview = format!(
-                        "[{:?}] {}\n路径: {}\n原因: {}",
-                        op,
-                        op_summary(op),
-                        normalized.display(),
-                        reason
+                    let preview = crate::infra::i18n::tr(
+                        "permission.pathPreview",
+                        &[
+                            ("op", &format!("{op:?}")),
+                            ("summary", &op_summary(op)),
+                            ("path", &normalized.display().to_string()),
+                            ("reason", &reason),
+                        ],
                     );
                     match self
                         .confirmation
-                        .confirm_decision(op, &preview, &self.plugin_id, suggested_root.clone())
+                        .confirm_decision(
+                            op,
+                            &preview,
+                            &self.plugin_id,
+                            Some(normalized.clone()),
+                            suggested_root.clone(),
+                        )
                         .await?
                     {
                         ConfirmDecision::Deny => {
-                            return Err(AppError::Permission(format!(
-                                "用户拒绝授权: {}。下次工具再次访问该路径时会重新弹出 [s]/[w]/[c] 授权选项；也可以执行 `tomcat workspace add {}` 一次性永久授权。",
-                                normalized.display(),
-                                normalized.display()
+                            return Err(AppError::Permission(crate::infra::i18n::tr(
+                                "permission.pathDenied",
+                                &[("path", &normalized.display().to_string())],
                             )));
                         }
                         ConfirmDecision::AllowOnce => {
@@ -267,13 +335,19 @@ impl BackgroundBashGuard {
             PermissionDecision::Allow { grant, scope } => Ok((scope, grant)),
             PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
             PermissionDecision::NeedConfirm { reason, .. } => {
-                let preview = format!(
-                    "[Bash] 危险命令命中确认列表\n命令: {}\n原因: {}",
-                    command, reason
+                let preview = crate::infra::i18n::tr(
+                    "permission.bashPreview",
+                    &[("command", command), ("reason", &reason)],
                 );
                 match self
                     .confirmation
-                    .confirm_decision(PrimitiveOperation::Bash, &preview, &self.plugin_id, None)
+                    .confirm_decision(
+                        PrimitiveOperation::Bash,
+                        &preview,
+                        &self.plugin_id,
+                        None,
+                        None,
+                    )
                     .await?
                 {
                     ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
@@ -282,9 +356,10 @@ impl BackgroundBashGuard {
                             GrantTrace::new(GrantType::BashPolicy, GrantTrigger::UserConfirm),
                         ))
                     }
-                    ConfirmDecision::Deny => {
-                        Err(AppError::Permission("用户拒绝 bash 确认".to_string()))
-                    }
+                    ConfirmDecision::Deny => Err(AppError::Permission(crate::infra::i18n::tr(
+                        "permission.bashDenied",
+                        &[],
+                    ))),
                 }
             }
         }
@@ -293,12 +368,13 @@ impl BackgroundBashGuard {
     async fn bash_preflight_and_gate(
         &self,
         audit_cmd: &str,
-        cwd: Option<&Path>,
+        cwd: &ResolvedCwd,
     ) -> Result<(PermissionScope, GrantTrace), AppError> {
-        let cwd_path = if let Some(cwd) = cwd {
-            self.gate_check_path(PrimitiveOperation::Read, cwd.to_string_lossy().as_ref())
-                .await?
-                .0
+        let cwd_path = if let Some(raw_cwd) = cwd.raw_input() {
+            let _ = self
+                .gate_check_path(PrimitiveOperation::Read, raw_cwd)
+                .await?;
+            cwd.resolved_path().to_path_buf()
         } else {
             PathBuf::from(".")
         };
@@ -332,6 +408,7 @@ pub type BashTaskId = String;
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum BashTaskStatus {
     Running,
+    DrainingOutput,
     Stopped,
     Finished { exit_code: i32 },
 }
@@ -370,29 +447,38 @@ pub struct BashTaskOutputChunk {
     pub exit_code: Option<i32>,
 }
 
+type CapturedStreams = std::io::Result<(tokio::fs::File, tokio::fs::File)>;
+pub(super) type ForegroundOutput = tokio::sync::oneshot::Receiver<CapturedStreams>;
+type StreamCapture = (
+    tokio::fs::File,
+    Arc<tokio::sync::oneshot::Sender<CapturedStreams>>,
+);
+
 struct BashTask {
     info: RwLock<BashTaskInfo>,
-    /// 子进程 PID（spawn 后立即记录）；stop 路径 `libc::killpg(pid, SIGKILL)`
-    /// 杀整组，**不**依赖 `Child` 句柄（句柄已 move 进 wait 任务独占 await）。
+    /// 子进程 PID（spawn 后立即记录）；stop 路径在 Unix 用 `killpg`，在 Windows 用
+    /// `taskkill /T /F` 杀整组；句柄已 move 进 wait 任务独占 await。
     pid: Option<u32>,
     /// P1：每 task 一份 `Notify`。pump 任务每 flush 一次后 `notify_waiters()`；
     /// wait 任务把 status 翻成 `Finished` / `Stopped` 时也 `notify_waiters()`。
-    /// 配合 [`BashTaskRegistry::wait_for_change`] 实现"按文件长度 vs since"判定，
+    /// 配合 [`BashTaskRegistry::wait_for_finish`] 实现"按文件长度 vs since"判定，
     /// 不依赖事件计数，避免 lost wakeup 与 read 与 wait 之间的字节丢失竞态。
     notify: Arc<Notify>,
     /// P1：lifecycle event 已经发出过的去重 guard（pump close + wait task return
     /// 都可能命中"翻终态"，但只允许 broadcast 一次）。
     lifecycle_emitted: parking_lot::Mutex<bool>,
+    delivery: parking_lot::Mutex<TaskDelivery>,
+    preview: parking_lot::Mutex<RuntimePreview>,
+    stop_requested: AtomicBool,
+    preview_flush_required: bool,
+    preview_flushed: AtomicBool,
+    preview_flush_notify: Arc<Notify>,
 }
 
-/// P1：`task_output(block=true)` 的"为什么醒了"。dispatcher 用它决定写出
-/// `wake_reason` 字段、是否在 `completion_routes` 上 Delivered。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WakeReason {
-    /// 文件 size 已超过 since（有新字节可读），但任务可能仍 Running。
-    NewOutput,
-    /// 任务已 Finished / Stopped；调用方可同步取 `exit_code`。
-    Finished,
+enum TaskDelivery {
+    Foreground,
+    Background,
 }
 
 /// P1：registry 级 broadcast 事件。lifecycle subscriber（host/chat_loop 侧）
@@ -407,6 +493,85 @@ pub struct BackgroundTaskLifecycleEvent {
     pub command: String,
 }
 
+const RUNTIME_PREVIEW_MAX_BYTES: usize = 64 * 1024;
+const RUNTIME_PREVIEW_MAX_LINES: usize = 1_000;
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BashOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// A best-effort live-preview event. Full output is already flushed to `log_path`
+/// before this event is broadcast, so lagging consumers may safely skip deltas.
+#[derive(Debug, Clone)]
+pub struct BashTaskOutputEvent {
+    pub task_id: BashTaskId,
+    pub stream: BashOutputStream,
+    pub output: String,
+    pub start_offset: u64,
+    pub next_offset: u64,
+    pub sequence: u64,
+    pub truncated: bool,
+    pub log_path: String,
+    pub completed: bool,
+}
+
+#[derive(Debug, Default)]
+struct RuntimePreview {
+    bytes: VecDeque<u8>,
+    start_offset: u64,
+    next_offset: u64,
+    sequence: u64,
+    truncated: bool,
+}
+
+impl RuntimePreview {
+    fn append(&mut self, bytes: &[u8]) -> (u64, u64, u64, bool) {
+        let start = self.next_offset;
+        self.next_offset = self.next_offset.saturating_add(bytes.len() as u64);
+        self.sequence = self.sequence.saturating_add(1);
+        self.bytes.extend(bytes.iter().copied());
+        self.trim();
+        (start, self.next_offset, self.sequence, self.truncated)
+    }
+
+    fn trim(&mut self) {
+        while self.bytes.len() > RUNTIME_PREVIEW_MAX_BYTES
+            || self.line_count() > RUNTIME_PREVIEW_MAX_LINES
+        {
+            if self.bytes.pop_front().is_some() {
+                self.start_offset = self.start_offset.saturating_add(1);
+                self.truncated = true;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn line_count(&self) -> usize {
+        if self.bytes.is_empty() {
+            return 0;
+        }
+        self.bytes.iter().filter(|byte| **byte == b'\n').count()
+            + usize::from(self.bytes.back() != Some(&b'\n'))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.iter().copied().collect::<Vec<_>>()).into_owned()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashRuntimePreview {
+    pub output: String,
+    pub start_offset: u64,
+    pub next_offset: u64,
+    pub sequence: u64,
+    pub truncated: bool,
+}
+
 /// `bash` 后台任务三件套的注册表。生产路径：`api/chat` 装配时 `Arc::new` 一份，
 /// 通过 `AgentLoop::with_bash_task_registry` 注入；测试路径可注入 `tempfile::tempdir()`。
 pub struct BashTaskRegistry {
@@ -418,17 +583,34 @@ pub struct BashTaskRegistry {
     /// 终态翻转一次性 send。channel 容量按"启动后短期未消费的最大堆积量"
     /// 估算 256 足够大；满时旧事件丢失但不会阻塞翻转路径。
     lifecycle_tx: broadcast::Sender<BackgroundTaskLifecycleEvent>,
+    output_tx: broadcast::Sender<BashTaskOutputEvent>,
+    foreground_wait_ms: u64,
 }
 
 impl BashTaskRegistry {
     pub fn new(persist_dir: PathBuf) -> Self {
         let (lifecycle_tx, _) = broadcast::channel(256);
+        let (output_tx, _) = broadcast::channel(256);
         Self {
             tasks: RwLock::new(HashMap::new()),
             persist_dir,
             background_guard: None,
             lifecycle_tx,
+            output_tx,
+            foreground_wait_ms: crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS,
         }
+    }
+
+    pub fn with_foreground_wait_ms(mut self, ms: u64) -> Self {
+        self.foreground_wait_ms = ms.clamp(
+            crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
+            crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
+        );
+        self
+    }
+
+    pub fn foreground_wait_ms(&self) -> u64 {
+        self.foreground_wait_ms
     }
 
     pub fn with_background_guard(mut self, guard: BackgroundBashGuard) -> Self {
@@ -447,18 +629,95 @@ impl BashTaskRegistry {
         self.lifecycle_tx.subscribe()
     }
 
+    /// Subscribe before spawning a task, then filter by `task_id`. The channel is
+    /// intentionally bounded: preview deltas may be dropped, while the log never is.
+    pub fn subscribe_output(&self) -> broadcast::Receiver<BashTaskOutputEvent> {
+        self.output_tx.subscribe()
+    }
+
     /// 起一个后台 bash：spawn + 起 stdout/stderr pump + 起 wait 任务回写状态。
     /// 立即返回 ticket，**不**等子进程结束。
     pub async fn spawn(
         &self,
         command: String,
-        argv: Option<Vec<String>>,
         cwd: Option<PathBuf>,
     ) -> Result<BashTaskTicket, AppError> {
-        // 空 argv 与未提供 args 同义，避免 `command="echo hi", args=[]` 被误当成 argv 模式。
-        let argv = argv.filter(|args| !args.is_empty());
-        // 兼容真 LLM 把 `sh -c` / `bash -lc` 写进 command、把脚本正文放进 args 的形态。
-        let (command, argv) = normalize_launcher_argv(command, argv);
+        self.spawn_tracked(command, cwd, true).await
+    }
+
+    pub async fn spawn_tracked_unchecked(
+        &self,
+        command: String,
+        cwd: ResolvedCwd,
+        deliver_completion_on_finish: bool,
+    ) -> Result<BashTaskTicket, AppError> {
+        self.spawn_tracked_inner(
+            command,
+            cwd,
+            deliver_completion_on_finish,
+            false,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// The primitive adapter owns the capture receiver. Dropping it on cancellation or
+    /// background handoff closes the anonymous files; tasks never own a second output store.
+    pub(super) async fn spawn_foreground_unchecked(
+        &self,
+        command: String,
+        cwd: ResolvedCwd,
+    ) -> Result<(BashTaskTicket, ForegroundOutput), AppError> {
+        let (sender, output) = tokio::sync::oneshot::channel();
+        let ticket = self
+            .spawn_tracked_inner(command, cwd, false, false, false, Some(sender))
+            .await?;
+        Ok((ticket, output))
+    }
+
+    /// The single spawn primitive used by foreground and explicit background Bash.
+    /// Registration and log creation complete before the process is started.
+    pub async fn spawn_tracked(
+        &self,
+        command: String,
+        cwd: Option<PathBuf>,
+        deliver_completion_on_finish: bool,
+    ) -> Result<BashTaskTicket, AppError> {
+        let cwd = ResolvedCwd::from_path_buf(cwd)?;
+        self.spawn_tracked_inner(
+            command,
+            cwd,
+            deliver_completion_on_finish,
+            true,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Spawn a tracked task whose terminal state is held until the AgentLoop output bridge
+    /// acknowledges that its final preview has been synchronously enqueued in the EventBus.
+    pub async fn spawn_tracked_with_preview_barrier(
+        &self,
+        command: String,
+        cwd: Option<PathBuf>,
+        deliver_completion_on_finish: bool,
+    ) -> Result<BashTaskTicket, AppError> {
+        let cwd = ResolvedCwd::from_path_buf(cwd)?;
+        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, true, None)
+            .await
+    }
+
+    async fn spawn_tracked_inner(
+        &self,
+        command: String,
+        cwd: ResolvedCwd,
+        deliver_completion_on_finish: bool,
+        apply_guard: bool,
+        preview_flush_required: bool,
+        captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
+    ) -> Result<BashTaskTicket, AppError> {
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -466,52 +725,57 @@ impl BashTaskRegistry {
             .as_millis();
         let task_id = format!("{}-{}", now, simple_rand6());
         let log_path = self.persist_dir.join(format!("bash-{}.log", &task_id));
-        let audit_cmd = match argv.as_deref() {
-            None => command.clone(),
-            Some(args) => {
-                let mut text = command.clone();
-                for arg in args {
-                    text.push(' ');
-                    text.push_str(arg);
+        let audit_cmd = command.clone();
+        let bash_scope_grant = if apply_guard {
+            if let Some(guard) = self.background_guard.as_ref() {
+                match guard.bash_preflight_and_gate(&audit_cmd, &cwd).await {
+                    Ok(scope_grant) => Some(scope_grant),
+                    Err(err) => {
+                        guard.record_failure(&audit_cmd, &err);
+                        return Err(err);
+                    }
                 }
-                text
-            }
-        };
-        let bash_scope_grant = if let Some(guard) = self.background_guard.as_ref() {
-            match guard
-                .bash_preflight_and_gate(&audit_cmd, cwd.as_deref())
-                .await
-            {
-                Ok(scope_grant) => Some(scope_grant),
-                Err(err) => {
-                    guard.record_failure(&audit_cmd, &err);
-                    return Err(err);
-                }
+            } else {
+                None
             }
         } else {
             None
         };
 
-        let mut cmd = match argv.as_deref() {
-            None => {
-                #[cfg(unix)]
-                let (shell, arg) = ("sh", "-c");
-                #[cfg(windows)]
-                let (shell, arg) = ("cmd", "/C");
-                let mut c = Command::new(shell);
-                c.arg(arg).arg(&command);
-                c
-            }
-            Some(args) => {
-                let mut c = Command::new(&command);
-                c.args(args);
-                c
-            }
+        let log_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+            .map_err(AppError::Io)?;
+        let log_writer = Arc::new(AsyncMutex::new(log_file));
+        let captured = captured.map(Arc::new);
+        let (stdout_capture, stderr_capture) = if let Some(sender) = &captured {
+            (
+                Some((
+                    tokio::fs::File::from_std(tempfile::tempfile().map_err(AppError::Io)?),
+                    sender.clone(),
+                )),
+                Some((
+                    tokio::fs::File::from_std(tempfile::tempfile().map_err(AppError::Io)?),
+                    sender.clone(),
+                )),
+            )
+        } else {
+            (None, None)
         };
-        if let Some(c) = cwd.as_ref() {
+
+        #[cfg(unix)]
+        let (shell, arg) = ("sh", "-c");
+        #[cfg(windows)]
+        let (shell, arg) = ("cmd", "/C");
+        let mut cmd = Command::new(shell);
+        cmd.arg(arg).arg(&command);
+        if let Some(c) = cwd.command_cwd() {
             cmd.current_dir(c);
         }
-        cmd.kill_on_drop(true)
+        cmd.env("TOMCAT_AGENT_ACTIVE", "1")
+            .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
@@ -520,7 +784,11 @@ impl BashTaskRegistry {
         cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|e| {
-            let err = AppError::Primitive(e.to_string());
+            let err = AppError::Primitive(format!(
+                "bash spawn failed (cwd={}, input={:?}): {e}",
+                cwd.resolved_path().display(),
+                cwd.display_input()
+            ));
             if let (Some(guard), Some((scope, grant))) =
                 (self.background_guard.as_ref(), bash_scope_grant)
             {
@@ -531,14 +799,6 @@ impl BashTaskRegistry {
         let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-
-        let log_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .await
-            .map_err(AppError::Io)?;
-        let log_writer = Arc::new(AsyncMutex::new(log_file));
 
         let task = Arc::new(BashTask {
             info: RwLock::new(BashTaskInfo {
@@ -551,6 +811,16 @@ impl BashTaskRegistry {
             pid,
             notify: Arc::new(Notify::new()),
             lifecycle_emitted: parking_lot::Mutex::new(false),
+            delivery: parking_lot::Mutex::new(if deliver_completion_on_finish {
+                TaskDelivery::Background
+            } else {
+                TaskDelivery::Foreground
+            }),
+            preview: parking_lot::Mutex::new(RuntimePreview::default()),
+            stop_requested: AtomicBool::new(false),
+            preview_flush_required,
+            preview_flushed: AtomicBool::new(!preview_flush_required),
+            preview_flush_notify: Arc::new(Notify::new()),
         });
         self.tasks.write().insert(task_id.clone(), task.clone());
         if let (Some(guard), Some((scope, grant))) =
@@ -572,9 +842,23 @@ impl BashTaskRegistry {
         // 两条 pump 任务：stdout / stderr 边读边追加日志。
         // stderr 行前缀 "STDERR: " 让 task_output 拉到的内容仍可肉眼区分两路。
         // P1：每条 pump flush 后 `notify_waiters()`，唤醒所有挂在
-        // `wait_for_change` 上的等待者；按"文件长度 vs since"判定，避免 lost wakeup。
-        spawn_pump(stdout, log_writer.clone(), "", task.notify.clone());
-        spawn_pump(stderr, log_writer.clone(), "STDERR: ", task.notify.clone());
+        // `wait_for_finish` 上的等待者；按"文件长度 vs since"判定，避免 lost wakeup。
+        let stdout_pump = spawn_pump(
+            stdout,
+            log_writer.clone(),
+            stdout_capture,
+            BashOutputStream::Stdout,
+            task.clone(),
+            self.output_tx.clone(),
+        );
+        let stderr_pump = spawn_pump(
+            stderr,
+            log_writer.clone(),
+            stderr_capture,
+            BashOutputStream::Stderr,
+            task.clone(),
+            self.output_tx.clone(),
+        );
 
         // wait 任务：独占 Child handle 等结束 → 翻 status。
         // 注意：stop 已把 status 置为 Stopped 时，**不**回退覆盖成 Finished。
@@ -583,6 +867,7 @@ impl BashTaskRegistry {
         let task_id_for_wait = task_id.clone();
         let log_path_for_wait = log_path.display().to_string();
         let command_for_wait = command.clone();
+        let output_tx_for_wait = self.output_tx.clone();
         tokio::spawn(async move {
             let exit_code = match child.wait().await {
                 Ok(status) => {
@@ -600,26 +885,75 @@ impl BashTaskRegistry {
                 }
                 Err(_) => -1,
             };
-            let final_status = {
+            {
                 let mut info = task_for_wait.info.write();
                 if !matches!(info.status, BashTaskStatus::Stopped) {
-                    info.status = BashTaskStatus::Finished { exit_code };
+                    info.status = BashTaskStatus::DrainingOutput;
                 }
+            }
+            task_for_wait.notify.notify_waiters();
+            let (stdout, stderr) = tokio::join!(stdout_pump, stderr_pump);
+            if let Some(captured) = captured {
+                if let Ok(sender) = Arc::try_unwrap(captured) {
+                    let streams = match (stdout, stderr) {
+                        (Ok(Ok(Some(stdout))), Ok(Ok(Some(stderr)))) => Ok((stdout, stderr)),
+                        (Ok(Err(error)), _) | (_, Ok(Err(error))) => Err(error),
+                        (Err(error), _) | (_, Err(error)) => Err(std::io::Error::other(error)),
+                        _ => Err(std::io::Error::other(
+                            "foreground output capture was closed",
+                        )),
+                    };
+                    let _ = sender.send(streams);
+                }
+            }
+            let completion_preview = {
+                let preview = task_for_wait.preview.lock();
+                BashTaskOutputEvent {
+                    task_id: task_id_for_wait.clone(),
+                    stream: BashOutputStream::Stdout,
+                    output: String::new(),
+                    start_offset: preview.next_offset,
+                    next_offset: preview.next_offset,
+                    sequence: preview.sequence,
+                    truncated: preview.truncated,
+                    log_path: log_path_for_wait.clone(),
+                    completed: true,
+                }
+            };
+            let _ = output_tx_for_wait.send(completion_preview);
+            if task_for_wait.preview_flush_required {
+                loop {
+                    let notified = task_for_wait.preview_flush_notify.notified();
+                    tokio::pin!(notified);
+                    if task_for_wait.preview_flushed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    notified.await;
+                }
+            }
+            let final_status = {
+                let mut info = task_for_wait.info.write();
+                info.status = if task_for_wait.stop_requested.load(Ordering::Acquire) {
+                    BashTaskStatus::Stopped
+                } else {
+                    BashTaskStatus::Finished { exit_code }
+                };
                 info.status.clone()
             };
+            // Completion is announced only after output drain and only after foreground promotion.
+            let should_emit = *task_for_wait.delivery.lock() == TaskDelivery::Background;
             // P1：先 emit lifecycle（受 lifecycle_emitted guard 保护），再
-            // notify_waiters；这样阻塞在 wait_for_change 的 dispatcher 醒来后能
+            // notify_waiters；这样阻塞在 wait_for_finish 的 dispatcher 醒来后能
             // 立刻看到终态，host lifecycle subscriber 也能拿到 broadcast。
-            let already_emitted = {
+            let already_emitted = if should_emit {
                 let mut g = task_for_wait.lifecycle_emitted.lock();
-                if *g {
-                    true
-                } else {
-                    *g = true;
-                    false
-                }
+                let previous = *g;
+                *g = true;
+                previous
+            } else {
+                false
             };
-            if !already_emitted {
+            if should_emit && !already_emitted {
                 let _ = lifecycle_tx.send(BackgroundTaskLifecycleEvent {
                     task_id: task_id_for_wait,
                     final_status,
@@ -637,6 +971,32 @@ impl BashTaskRegistry {
         })
     }
 
+    /// Atomically promote a foreground observer to background delivery. Returns false when
+    /// the task already reached a drained terminal state, so the caller must return foreground.
+    pub fn promote_to_background(&self, task_id: &str) -> Result<bool, AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        let mut delivery = task.delivery.lock();
+        let terminal = matches!(
+            task.info.read().status,
+            BashTaskStatus::Finished { .. } | BashTaskStatus::Stopped
+        );
+        if terminal {
+            return Ok(false);
+        }
+        *delivery = TaskDelivery::Background;
+        Ok(true)
+    }
+
+    /// Remove a foreground-completed task after its final output has been collected.
+    pub fn remove_foreground(&self, task_id: &str) {
+        self.tasks.write().remove(task_id);
+    }
+
     /// 拉日志增量：`since=None` 从头读；返回 `[start_offset, next_offset)` 的字节窗口
     /// （UTF-8 lossy 解码）。`finished=true` 时 `exit_code` 一定有值。
     pub async fn read_output(
@@ -649,7 +1009,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let info_snap = task.info.read().clone();
         let log_path = Path::new(&info_snap.log_path);
         let mut file = tokio::fs::OpenOptions::new()
@@ -667,7 +1027,7 @@ impl BashTaskRegistry {
         let (finished, exit_code) = match info_snap.status {
             BashTaskStatus::Finished { exit_code } => (true, Some(exit_code)),
             BashTaskStatus::Stopped => (true, Some(-1)),
-            BashTaskStatus::Running => (false, None),
+            BashTaskStatus::Running | BashTaskStatus::DrainingOutput => (false, None),
         };
         Ok(BashTaskOutputChunk {
             task_id: task_id.to_string(),
@@ -679,112 +1039,194 @@ impl BashTaskRegistry {
         })
     }
 
-    /// 主动停止：标记 status = Stopped → killpg(SIGKILL) 整组（Unix）；
-    /// wait 任务后续 `child.wait()` 返回**不**回退覆盖（见 spawn 内 `if !matches!(...)`）。
-    ///
-    /// P1：stop 路径同样会 emit lifecycle 一次（由 `lifecycle_emitted` guard 兜底；
-    /// stop 抢先 emit 后 wait 任务 return 时再尝试将被忽略），并 notify_waiters
-    /// 唤醒所有挂在 `wait_for_change` 上的等待者，让它们立即返回 `Finished`。
-    pub async fn stop(&self, task_id: &str) -> Result<(), AppError> {
+    /// 取自 `since` 之后新增输出的有界尾巴。若自 `since` 起没有新字节，则
+    /// `content` 为空；若新增内容超过 `max_bytes`，只保留尾部并把
+    /// `start_offset` 前移到实际返回片段的起点。
+    pub async fn read_output_tail(
+        &self,
+        task_id: &str,
+        since: Option<u64>,
+        max_bytes: u64,
+    ) -> Result<BashTaskOutputChunk, AppError> {
         let task = self
             .tasks
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
-        let final_status_for_emit;
-        let log_path_for_emit;
-        let command_for_emit;
-        {
-            let mut info = task.info.write();
-            if matches!(info.status, BashTaskStatus::Running) {
-                info.status = BashTaskStatus::Stopped;
-            }
-            final_status_for_emit = info.status.clone();
-            log_path_for_emit = info.log_path.clone();
-            command_for_emit = info.command.clone();
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        let info_snap = task.info.read().clone();
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&info_snap.log_path)
+            .await
+            .map_err(AppError::Io)?;
+        let since = since.unwrap_or(0);
+        let len_before = file.metadata().await.map_err(AppError::Io)?.len();
+        let start = if len_before > since {
+            std::cmp::max(since, len_before.saturating_sub(max_bytes))
+        } else {
+            since
+        };
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(AppError::Io)?;
+        let mut buf = Vec::with_capacity(max_bytes as usize);
+        let mut limited = file.take(max_bytes);
+        limited.read_to_end(&mut buf).await.map_err(AppError::Io)?;
+        let next_offset = tokio::fs::metadata(&info_snap.log_path)
+            .await
+            .map_err(AppError::Io)?
+            .len()
+            .max(start + buf.len() as u64);
+        let (finished, exit_code) = match info_snap.status {
+            BashTaskStatus::Finished { exit_code } => (true, Some(exit_code)),
+            BashTaskStatus::Stopped => (true, Some(-1)),
+            BashTaskStatus::Running | BashTaskStatus::DrainingOutput => (false, None),
+        };
+        Ok(BashTaskOutputChunk {
+            task_id: task_id.to_string(),
+            content: String::from_utf8_lossy(&buf).into_owned(),
+            start_offset: start,
+            next_offset,
+            finished,
+            exit_code,
+        })
+    }
+
+    pub fn runtime_preview(&self, task_id: &str) -> Result<BashRuntimePreview, AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        let preview = task.preview.lock();
+        Ok(BashRuntimePreview {
+            output: preview.text(),
+            start_offset: preview.start_offset,
+            next_offset: preview.next_offset,
+            sequence: preview.sequence,
+            truncated: preview.truncated,
+        })
+    }
+
+    /// Request process-group termination. The child waiter remains the sole owner of the
+    /// terminal transition: it drains both output pumps and waits for the preview barrier before
+    /// publishing `Stopped` and waking finish waiters.
+    pub async fn stop(&self, task_id: &str) -> Result<(), AppError> {
+        self.request_stop(task_id)
+    }
+
+    /// Synchronous cancellation entry for foreground Drop; the existing waiter still
+    /// owns reaping, output drain and the terminal transition.
+    pub(super) fn request_stop(&self, task_id: &str) -> Result<(), AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        // The waiter cannot publish a terminal state before the platform result is known.
+        // A failed stop must not turn a later natural exit into a successful Stopped receipt.
+        let info = task.info.write();
+        if matches!(
+            info.status,
+            BashTaskStatus::Finished { .. } | BashTaskStatus::Stopped
+        ) {
+            return Ok(());
         }
+        // Termination is a host operation, not an executable resolved from the workspace.
+        #[cfg(windows)]
+        let taskkill = std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("System32").join("taskkill.exe"))
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| {
+                AppError::Primitive(
+                    "cannot stop bash process tree without an absolute Windows SystemRoot".into(),
+                )
+            })?;
+        #[cfg(windows)]
+        let previous_stop = task.stop_requested.load(Ordering::Acquire);
+        task.stop_requested.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(pid) = task.pid {
-            // SAFETY: POSIX 信号 API；pid 来自仍存活（或已 reaped）的子进程，
-            // ESRCH 在已退场景下出现也无副作用。
+            // SAFETY: POSIX signal API; ESRCH is harmless if the child already exited.
             unsafe {
                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
             }
         }
-        // Windows 下不依赖 killpg；已设置 `kill_on_drop(true)`，且 wait 任务会
-        // 在 Child drop 时由 tokio 兜底——此处不再重复 kill 以免 race。
-
-        // P1：emit lifecycle（被 lifecycle_emitted guard 收敛，wait 任务后续
-        // 命中相同 task 的翻转尝试会被忽略）+ 唤醒所有挂在 wait_for_change 的等待者。
-        let already_emitted = {
-            let mut g = task.lifecycle_emitted.lock();
-            if *g {
-                true
-            } else {
-                *g = true;
-                false
+        #[cfg(windows)]
+        if let Some(pid) = task.pid {
+            let pid = pid.to_string();
+            match std::process::Command::new(taskkill)
+                .args(["/PID", pid.as_str(), "/T", "/F"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    task.stop_requested.store(previous_stop, Ordering::Release);
+                    return Err(AppError::Primitive(format!(
+                        "taskkill failed for bash process tree {task_id}: exit {:?}",
+                        status.code()
+                    )));
+                }
+                Err(error) => {
+                    task.stop_requested.store(previous_stop, Ordering::Release);
+                    return Err(AppError::Io(error));
+                }
             }
-        };
-        if !already_emitted {
-            let _ = self.lifecycle_tx.send(BackgroundTaskLifecycleEvent {
-                task_id: task_id.to_string(),
-                final_status: final_status_for_emit,
-                log_path: log_path_for_emit,
-                command: command_for_emit,
-            });
         }
-        task.notify.notify_waiters();
         Ok(())
     }
 
-    /// P1：阻塞等待"文件长度超过 since"或"task 终态翻转"。
-    ///
-    /// 实现按"先 `notified()` 拿 future → 再读当前文件总长度 / status 判定"
-    /// 的标准 race-free 顺序，避免 pump flush 与等待者注册之间的 lost wakeup。
-    /// 调用方负责自己处理"超时"（在外层 `tokio::select!` 套 `sleep_until`），
-    /// 这里只承诺"要么有新输出要么终态"两条返回路径之一。
-    ///
-    /// `since` 为 `None` 等价 `Some(0)`，即"从头判定"。
-    ///
-    /// `task_id` 不存在时返回 `AppError::Primitive`，与 `read_output` / `stop`
-    /// 一致。
-    pub async fn wait_for_change(
-        &self,
-        task_id: &str,
-        since: Option<u64>,
-    ) -> Result<WakeReason, AppError> {
+    /// Release the per-task final-preview barrier after the bridge has synchronously called
+    /// `ScopedEventEmitter::emit`. This guarantees EventBus enqueue order, not UI rendering.
+    pub fn acknowledge_preview_flushed(&self, task_id: &str) -> Result<(), AppError> {
         let task = self
             .tasks
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
-        let since = since.unwrap_or(0);
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        task.preview_flushed.store(true, Ordering::Release);
+        task.preview_flush_notify.notify_waiters();
+        Ok(())
+    }
+
+    /// P1：阻塞等待任务终态翻转。
+    ///
+    /// 实现按"先 `notified()` 拿 future → 再读当前 status 判定"的标准
+    /// race-free 顺序，避免 wait 任务 / stop 路径的 `notify_waiters()` 与等待者
+    /// 注册之间出现 lost wakeup。调用方负责自己处理"超时"（在外层
+    /// `tokio::select!` 套 `sleep_until`），这里只承诺"终态到了就返回"。
+    ///
+    /// `task_id` 不存在时返回 `AppError::Primitive`，与 `read_output` / `stop`
+    /// 一致。
+    pub async fn wait_for_finish(&self, task_id: &str) -> Result<(), AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         loop {
             // 关键顺序：先注册 notified()（等待者句柄），再做条件判定。
-            // 反过来会与 pump 的 `notify_waiters()` 之间存在标准 lost-wakeup 窗口。
+            // 反过来会与 wait/stop 的 `notify_waiters()` 之间存在标准
+            // lost-wakeup 窗口。
             let notified = task.notify.notified();
             tokio::pin!(notified);
 
-            // 1) 终态优先于"是否已有新输出"。dispatcher 拿到 Finished 时，会用
-            //    后续 read_output 拉最终 chunk，所以这里直接返回 Finished 即可。
             let status_snap = task.info.read().status.clone();
-            if !matches!(status_snap, BashTaskStatus::Running) {
-                return Ok(WakeReason::Finished);
+            if !matches!(
+                status_snap,
+                BashTaskStatus::Running | BashTaskStatus::DrainingOutput
+            ) {
+                return Ok(());
             }
 
-            // 2) 然后看"文件总长度是否已经超过 since"。注意：用文件元数据 size 比，
-            //    而不是事件计数；这样 read_output(since=X) 之后立刻 wait_for_change(since=Y=X+n)
-            //    即便没有新 notify 触发，size 直接判定也不会丢字节。
-            let log_path = task.info.read().log_path.clone();
-            if let Ok(meta) = tokio::fs::metadata(Path::new(&log_path)).await {
-                if meta.len() > since {
-                    return Ok(WakeReason::NewOutput);
-                }
-            }
-
-            // 3) 都不满足 → 让 await 句柄睡，等下一次 pump flush / 终态翻转。
             notified.await;
         }
     }
@@ -833,7 +1275,7 @@ impl BashTaskRegistry {
             .read()
             .get(task_id)
             .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
         let info_snap = task.info.read().clone();
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)
@@ -850,7 +1292,7 @@ impl BashTaskRegistry {
         let (finished, exit_code) = match info_snap.status {
             BashTaskStatus::Finished { exit_code } => (true, Some(exit_code)),
             BashTaskStatus::Stopped => (true, Some(-1)),
-            BashTaskStatus::Running => (false, None),
+            BashTaskStatus::Running | BashTaskStatus::DrainingOutput => (false, None),
         };
         Ok(BashTaskOutputChunk {
             task_id: task_id.to_string(),
@@ -887,40 +1329,86 @@ impl BashTaskRegistry {
 fn spawn_pump<R>(
     reader: Option<R>,
     writer: Arc<AsyncMutex<tokio::fs::File>>,
-    prefix: &'static str,
-    notify: Arc<Notify>,
-) where
+    mut capture: Option<StreamCapture>,
+    stream: BashOutputStream,
+    task: Arc<BashTask>,
+    output_tx: broadcast::Sender<BashTaskOutputEvent>,
+) -> tokio::task::JoinHandle<std::io::Result<Option<tokio::fs::File>>>
+where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
-    let Some(reader) = reader else {
-        return;
+    let prefix = match stream {
+        BashOutputStream::Stdout => "",
+        BashOutputStream::Stderr => "STDERR: ",
     };
     tokio::spawn(async move {
+        let mut capture_error = None;
         let mut buf = vec![0u8; 4096];
-        let mut buffered = BufReader::new(reader);
-        loop {
-            match buffered.read(&mut buf).await {
+        let mut buffered = reader.map(BufReader::new);
+        while let Some(reader) = &mut buffered {
+            match reader.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Serialize log writes so the preview event order matches the durable log order.
+                    if capture
+                        .as_ref()
+                        .is_some_and(|(_, sender)| sender.is_closed())
+                    {
+                        capture = None;
+                    }
+                    if let Some((file, _)) = &mut capture {
+                        let written = async {
+                            file.write_all(&buf[..n]).await?;
+                            file.flush().await
+                        }
+                        .await;
+                        if let Err(error) = written {
+                            capture_error = Some(error);
+                            capture = None;
+                        }
+                    }
                     let mut f = writer.lock().await;
-                    // 日志写入失败不应中断 pump：磁盘空间 / 句柄被外部强删等
-                    // 都属于「best-effort 旁路落盘」语义，与同步 bash 路径里
-                    // accumulate_with_persist 落盘失败仅 warn 同口径——若 fail
-                    // 整把 bash 任务，会让 task_output 拿不到任何尾部内容、调试更难。
                     if !prefix.is_empty() {
                         let _ = f.write_all(prefix.as_bytes()).await;
                     }
                     let _ = f.write_all(&buf[..n]).await;
                     let _ = f.flush().await;
+                    let event = {
+                        let mut preview = task.preview.lock();
+                        let mut durable = Vec::with_capacity(prefix.len() + n);
+                        durable.extend_from_slice(prefix.as_bytes());
+                        durable.extend_from_slice(&buf[..n]);
+                        let (start_offset, next_offset, sequence, truncated) =
+                            preview.append(&durable);
+                        let info = task.info.read();
+                        BashTaskOutputEvent {
+                            task_id: info.task_id.clone(),
+                            stream,
+                            output: String::from_utf8_lossy(&durable).into_owned(),
+                            start_offset,
+                            next_offset,
+                            sequence,
+                            truncated,
+                            log_path: info.log_path.clone(),
+                            completed: false,
+                        }
+                    };
                     drop(f);
-                    // P1：每次 flush 后唤醒所有挂在 `wait_for_change` 上的等待者；
-                    // 配合"先 notified() 再读 size"的 race-free 顺序，保证不丢字节、不丢唤醒。
-                    notify.notify_waiters();
+                    let _ = output_tx.send(event);
+                    task.notify.notify_waiters();
                 }
-                Err(_) => break,
+                Err(error) => {
+                    capture_error = Some(error);
+                    break;
+                }
             }
         }
-    });
+        if let Some(error) = capture_error {
+            Err(error)
+        } else {
+            Ok(capture.map(|(file, _)| file))
+        }
+    })
 }
 
 fn simple_rand6() -> String {
@@ -937,3 +1425,7 @@ fn simple_rand6() -> String {
     }
     s
 }
+
+#[cfg(test)]
+#[path = "tests/bash_task_capture_test.rs"]
+mod tests;

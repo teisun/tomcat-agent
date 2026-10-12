@@ -1,8 +1,8 @@
-// pi_bridge.js — pi-mono compatible bridge layer for tomcat
-// Constructs globalThis.pi object that routes API calls through __pi_host_call.
+// Tomcat's built-in plugin bridge.
+// Constructs globalThis.tomcat; `pi` remains a compatibility alias for existing plugins.
 // Loaded by run_script_file_impl before user plugin scripts.
 // Authoring note: plugin source should not import this file directly; use
-// assets/types/tomcat-plugin.d.ts for IDE hints and let the host inject `pi`.
+// assets/types/tomcat-plugin.d.ts for IDE hints and let the host inject `tomcat`.
 // See: architecture/plugin-system/js-bridge-layer.md, architecture/plugin-system/host-call-protocol.md,
 //      architecture/plugin-system/js-api-alignment.md, architecture/plugin-system/async-hostcall-event-loop.md
 (function () {
@@ -114,8 +114,8 @@
   var __pi_commands = {}; // commandName -> { description, handler }
   var __pi_nextId = 1;
 
-  // -- Build globalThis.pi ---------------------------------------------------
-  globalThis.pi = {
+  // -- Build the public Tomcat plugin bridge ----------------------------------
+  globalThis.tomcat = {
 
     // =========================================================================
     // Event Subscription (pi-mono ExtensionAPI.on / off / emit / once)
@@ -171,17 +171,39 @@
     },
 
     // =========================================================================
-    // 4 Primitives — async, aligned with pi-mono Promise-returning signatures
+    // 4 Primitives — async hostcalls; exec accepts a complete shell command
     // =========================================================================
     exec: function (command, args, options) {
+      // Preserve the existing third-argument options position, not the retired argv mode.
+      if (args !== undefined && (!Array.isArray(args) || args.length !== 0)) {
+        return Promise.reject(new Error('exec requires a complete shell command; args must be omitted or empty'));
+      }
       return hostCallAsync('fs', 'executeBash', {
         command: command,
-        args: args,
-        cwd: options && options.cwd
+        cwd: options && options.cwd,
+        foreground_wait_ms: options && options.foregroundWaitMs
       }).then(function (r) {
         if (!r.ok) throw new Error(r.error || 'exec failed');
         return r.data; // { stdout, stderr, exitCode }
       });
+    },
+
+    taskOutput: function (taskId, options) {
+      return hostCallAsync('fs', 'taskOutput', {
+        taskId: taskId,
+        since: options && options.since,
+        block: options && options.block,
+        waitMs: options && options.waitMs
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'taskOutput failed');
+        return r.data;
+      });
+    },
+
+    taskStop: function (taskId) {
+      var r = hostCall('fs', 'taskStop', { taskId: taskId });
+      if (!r.ok) return Promise.reject(new Error(r.error || 'taskStop failed'));
+      return Promise.resolve(r.data);
     },
 
     // File ops use Promise.resolve-wrapping of sync call (files are fast; no
@@ -407,6 +429,8 @@
       return hostCall('llm', 'setThinkingLevel', { level: level });
     }
   };
+  // Keep existing plugins runnable while new source uses the Tomcat API name.
+  globalThis.pi = globalThis.tomcat;
 
   // -- Shared ctx constructor (used by dispatch_event and invoke_command) ------
   function __pi_build_ctx(snapshot) {
@@ -583,6 +607,7 @@
   // -- Expose internals needed by the async main loop injected in instance_wasmedge.rs --
   globalThis.__pi_build_ctx = __pi_build_ctx;
   globalThis.__pi_hostCall = hostCall;
+  globalThis.__pi_hostCallAsync = hostCallAsync;
   globalThis.__pi_functions = __pi_functions;
   globalThis.__pi_commands = __pi_commands;
 
@@ -704,7 +729,12 @@
       }
       return { ok: true, data: result };
     } catch (e) {
-      return { ok: false, error: String(e) };
+      // Keep an existing host error code across the string-only commandFailed
+      // boundary. Localized message text must not decide retry behavior.
+      var error = e && typeof e.code === 'string'
+        ? JSON.stringify({ code: e.code, message: String(e.message || e) })
+        : String(e);
+      return { ok: false, error: error };
     }
   };
 

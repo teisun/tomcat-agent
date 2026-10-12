@@ -73,6 +73,7 @@
 | **`write_file` 运行时别名** | 不重定向；transcript 仅 `warn`（同 `read` / `edit`） | 老录音里叫 `write_file` 只打个日志，不当真执行。 |
 | **UTF-16 / 多编码自动转** | 本期 `content` 按 **UTF-8 字符串** 入参；与 `read` 文本路径一致 | 本期只玩 UTF-8 字符串，别指望工具自动猜编码。 |
 | **复刻 cc-fork 全量 structuredPatch + gitDiff** | 仅采纳「结构化回执」思路，控制体积与依赖 | 抄作业抄精华，不把人家整条产品线搬进仓库。 |
+| **按第 N 次出现精确替换** | `edit` 命中多处相同文本时不增加 `occurrence` / `nth_match` 参数；保留 `replace_all`，否则报 `Ambiguous` 并列出全部匹配行号，让模型补足上下文后再改 | 不让模型靠「第 2 个」这种脆弱坐标猜位置；要么全改，要么先看清每一处再精确改。 |
 
 ---
 

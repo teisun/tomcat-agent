@@ -457,11 +457,11 @@ async fn read_oversize_image_rejected_at_metadata_stage() {
 // ─── PR-RM T3 hashline ────────────────────────────────────────────────────
 
 #[test]
-fn hashline_format_matches_pi_agent_rust_layout() {
+fn hashline_format_has_stable_content_hashes() {
     use super::super::executor::{compute_line_hash, format_with_hashlines};
 
-    // 1) compute_line_hash 单行：纯字母行 → seed=0；纯标点行 → seed=line_no。
-    let h_alpha = compute_line_hash("fn foo() {}", 12);
+    // 1) 每行 hash 只由去空白后的内容决定。
+    let h_alpha = compute_line_hash("fn foo() {}");
     assert_eq!(h_alpha.len(), 2, "tag must be 2 chars, got {:?}", h_alpha);
     assert!(
         h_alpha
@@ -471,18 +471,29 @@ fn hashline_format_matches_pi_agent_rust_layout() {
         h_alpha
     );
     // 2) 缩进不影响 hash（去空白后才算）。
-    let h_indent = compute_line_hash("    fn foo() {}", 12);
+    let h_indent = compute_line_hash("    fn foo() {}");
     assert_eq!(
         h_alpha, h_indent,
         "hash should ignore whitespace, indented variant differs: {:?} vs {:?}",
         h_alpha, h_indent
     );
-    // 3) 纯标点行用行号做 seed → 不同行号产生不同 hash。
-    let h_punct_a = compute_line_hash("---", 1);
-    let h_punct_b = compute_line_hash("---", 2);
-    assert_ne!(
+    // 3) 无论字符类别与所在行号，内容相同就有相同 hash。
+    let h_punct_a = compute_line_hash("---");
+    let h_punct_b = compute_line_hash("---");
+    assert_eq!(
         h_punct_a, h_punct_b,
-        "punct-only rows must hash differently per line_no"
+        "punctuation-only rows must have a content-stable hash"
+    );
+    let cjk_heading = "#### 验收标准\n";
+    assert_eq!(
+        hash_tag(&format_with_hashlines(368, cjk_heading)),
+        hash_tag(&format_with_hashlines(371, cjk_heading)),
+        "CJK content must retain its hash when its line number changes"
+    );
+    assert_eq!(
+        hash_tag(&format_with_hashlines(1, "\n")),
+        hash_tag(&format_with_hashlines(2, "\n")),
+        "empty rows are located by their line number, so their fingerprint is content-stable too"
     );
 
     // 4) format_with_hashlines 渲染：{:>6}#{2-char}:{原行}（含 \n）。
@@ -503,6 +514,14 @@ fn hashline_format_matches_pi_agent_rust_layout() {
         "line 2 should end with `:beta`, got {:?}",
         l2
     );
+}
+
+fn hash_tag(rendered_line: &str) -> &str {
+    rendered_line
+        .split_once('#')
+        .and_then(|(_, tagged)| tagged.split_once(':'))
+        .map(|(tag, _)| tag)
+        .expect("hashline output must contain a tag")
 }
 
 #[tokio::test]

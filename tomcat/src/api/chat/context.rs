@@ -6,6 +6,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::core::connector::{CompositeToolExecutor, ConnectorRegistry};
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::ext::plugin::{PluginCatalog, PluginSource};
@@ -26,16 +27,70 @@ use crate::infra::{
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
     resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
-    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
-    ModelThinkingStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
-    ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
+    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry,
+    ModelPrefsStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode, ThinkingLevel,
+    Tool, ToolExecutor, ToolRegistry,
 };
 
-use crate::core::llm::LlmScene;
+use crate::core::llm::{LlmScene, ResolvedCall};
 use crate::core::plan_runtime;
 
 use super::session_runtime::{GlobalServices, ScopeContainer, ScopeServices, SessionRuntime};
 use super::{panels, permission};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BashProductionPolicy {
+    foreground_wait_ms: u64,
+    max_output_chars: usize,
+    persist_dir: std::path::PathBuf,
+}
+
+fn resolve_bash_production_policy(
+    config: &AppConfig,
+    agent_trail_dir: &std::path::Path,
+) -> BashProductionPolicy {
+    BashProductionPolicy {
+        foreground_wait_ms: config.tools.bash.foreground_wait_ms,
+        max_output_chars: config.tools.bash.max_output_chars,
+        persist_dir: agent_trail_dir.join("tool-results"),
+    }
+}
+
+/// Translates a durable plan transcript entry into the camelCase live-event
+/// contract before it crosses the serve boundary.
+fn normalize_plan_transcript_event_for_live_delivery(
+    mut payload: serde_json::Value,
+    session_id: &str,
+) -> Option<(String, serde_json::Value)> {
+    let event_name = payload
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| name.starts_with("plan.") || name.starts_with("session."))
+        .map(str::to_owned)?;
+    let obj = payload.as_object_mut()?;
+    obj.remove("event");
+    if let Some(plan_id) = obj.remove("plan_id") {
+        obj.insert("planId".to_string(), plan_id);
+    }
+    if let Some(skip_reason) = obj.remove("skip_reason") {
+        obj.insert("skipReason".to_string(), skip_reason);
+    }
+    if let Some(idle_nudges) = obj.remove("idle_nudges") {
+        obj.insert("idleNudges".to_string(), idle_nudges);
+    }
+    if let Some(remaining_work) = obj.remove("remaining_work") {
+        obj.insert("remainingWork".to_string(), remaining_work);
+    }
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String(event_name.clone()),
+    );
+    obj.insert(
+        "sessionId".to_string(),
+        serde_json::Value::String(session_id.to_owned()),
+    );
+    Some((event_name, payload))
+}
 
 pub struct ChatContext {
     pub global_services: GlobalServices,
@@ -49,17 +104,197 @@ pub struct ChatContext {
 #[derive(Default)]
 pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
+    pub confirmation: Option<Arc<dyn UserConfirmationProvider>>,
     pub fetch_http_client: Option<reqwest::Client>,
     pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
-    pub shared_model_thinking: Option<Arc<ModelThinkingStore>>,
+    pub shared_model_prefs: Option<Arc<ModelPrefsStore>>,
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
     pub session_cwd_override: Option<std::path::PathBuf>,
 }
 
+impl ChatContext {
+    pub(crate) fn instruction_catalog(
+        &self,
+    ) -> Vec<crate::core::project_instructions::InstructionCard> {
+        use crate::core::project_instructions::{InstructionCard, InstructionKind};
+        let mut cards: Vec<_> = self
+            .project_commands()
+            .files
+            .into_iter()
+            .map(|f| f.card)
+            .collect();
+        if self.config.skills.enabled {
+            let snapshot = self.skill_set_snapshot();
+            for skill in snapshot.by_name.values() {
+                if matches!(
+                    self.global_services
+                        .gate
+                        .check(PrimitiveOperation::Read, &skill.file_path.to_string_lossy()),
+                    Ok(crate::core::permission::PermissionDecision::Deny { .. }) | Err(_)
+                ) {
+                    continue;
+                }
+                cards.push(InstructionCard {
+                    id: format!("skill:{}", skill.name),
+                    kind: InstructionKind::Skill,
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                    source: skill.source.as_str().into(),
+                    path: skill.file_path.to_string_lossy().into_owned(),
+                });
+            }
+        }
+        cards
+    }
+
+    pub(crate) fn resolve_instruction(
+        &self,
+        id: &str,
+        kind: crate::core::project_instructions::InstructionKind,
+    ) -> Result<crate::core::llm::ContextReference, String> {
+        use crate::core::llm::{ContextRefKind, ContextReference};
+        use crate::core::project_instructions::{read_body, InstructionKind};
+        let (path, label, body) = match kind {
+            InstructionKind::Command => {
+                let commands = self.project_commands();
+                let file = commands
+                    .files
+                    .iter()
+                    .find(|f| f.card.id == id)
+                    .ok_or_else(|| tr("runtime.commandMissing", &[("id", id)]))?;
+                let root = self
+                    .scope_services
+                    .resource_root
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                (
+                    file.card.path.clone(),
+                    format!("/{}", file.card.name),
+                    read_body(&root, &file.file_path, self.global_services.gate.as_ref())?,
+                )
+            }
+            InstructionKind::Skill => {
+                if !self.config.skills.enabled {
+                    return Err(tr("runtime.skillsDisabled", &[]));
+                }
+                let name = id
+                    .strip_prefix("skill:")
+                    .ok_or_else(|| tr("runtime.skillIdInvalid", &[]))?;
+                let snapshot = self.skill_set_snapshot();
+                let skill = snapshot
+                    .resolve_any(name)
+                    .ok_or_else(|| tr("runtime.skillMissing", &[("name", name)]))?;
+                let base = skill.base_dir.canonicalize().map_err(|e| e.to_string())?;
+                let file = base.join("SKILL.md");
+                (
+                    skill.file_path.to_string_lossy().into_owned(),
+                    format!("/{name}"),
+                    read_body(&base, &file, self.global_services.gate.as_ref())?
+                        .trim()
+                        .to_string(),
+                )
+            }
+        };
+        Ok(ContextReference {
+            ref_kind: match kind {
+                InstructionKind::Command => ContextRefKind::Command,
+                InstructionKind::Skill => ContextRefKind::Skill,
+            },
+            path,
+            label,
+            line_start: None,
+            line_end: None,
+            text: Some(body),
+            resource_id: Some(id.into()),
+        })
+    }
+
+    pub(crate) fn project_commands(&self) -> crate::core::project_instructions::Discovery {
+        crate::core::project_instructions::discover(
+            &self.scope_services.resource_root,
+            &self.config.workspace.project_resource_dir,
+            false,
+            self.global_services.gate.as_ref(),
+        )
+    }
+
+    pub(crate) fn project_rules(&self, budget: usize) -> (String, Vec<String>, usize) {
+        let root = self
+            .scope_services
+            .resource_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.scope_services.resource_root.clone());
+        let rules = crate::core::project_instructions::discover(
+            &root,
+            &self.config.workspace.project_resource_dir,
+            true,
+            self.global_services.gate.as_ref(),
+        );
+        crate::core::project_instructions::render_rules(
+            &rules,
+            &root,
+            self.global_services.gate.as_ref(),
+            budget,
+        )
+    }
+
+    pub(crate) fn instruction_summary(&self) -> String {
+        let commands = self.project_commands();
+        let entry = self
+            .session_runtime
+            .session
+            .get_session(self.session_runtime.session.current_session_key())
+            .ok()
+            .flatten();
+        let budget = self
+            .resolve_call(LlmScene::Main, entry.as_ref())
+            .map(|call| {
+                crate::infra::config::compute_context_budget_chars_from_tokens(
+                    call.limits.input_budget_tokens,
+                )
+            })
+            .unwrap_or(320_000);
+        let (_, errors, loaded) = self.project_rules(budget);
+        let summarize = |key: &str, count: usize, diagnostics: &[String]| {
+            let mut text = tr(
+                key,
+                &[
+                    ("count", &count.to_string()),
+                    ("skipped", &diagnostics.len().to_string()),
+                ],
+            );
+            for error in diagnostics.iter().take(20) {
+                text.push_str(&format!("\n      {error}"));
+            }
+            if diagnostics.len() > 20 {
+                text.push_str(&tr(
+                    "runtime.moreDiagnostics",
+                    &[("count", &(diagnostics.len() - 20).to_string())],
+                ));
+            }
+            text
+        };
+        format!(
+            "{}\n{}",
+            summarize(
+                "runtime.commandsSummary",
+                commands.files.len(),
+                &commands.diagnostics
+            ),
+            summarize("runtime.rulesSummary", loaded, &errors)
+        )
+    }
+}
+
 impl ChatContextOverrides {
     pub fn with_ask_question_panel(mut self, panel: Arc<dyn panels::AskQuestionPanel>) -> Self {
         self.ask_question_panel = Some(panel);
+        self
+    }
+
+    pub fn with_confirmation(mut self, confirmation: Arc<dyn UserConfirmationProvider>) -> Self {
+        self.confirmation = Some(confirmation);
         self
     }
 
@@ -76,8 +311,8 @@ impl ChatContextOverrides {
         self
     }
 
-    pub fn with_shared_model_thinking(mut self, store: Arc<ModelThinkingStore>) -> Self {
-        self.shared_model_thinking = Some(store);
+    pub fn with_shared_model_prefs(mut self, store: Arc<ModelPrefsStore>) -> Self {
+        self.shared_model_prefs = Some(store);
         self
     }
 
@@ -124,39 +359,23 @@ fn resolve_agent_workspace_dir(
     std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.to_path_buf())
 }
 
-fn resolve_child_agent_compaction_runtime(
-    llm_resolver: &dyn crate::core::llm::LlmResolver,
-    base_context_config: &crate::infra::config::ContextConfig,
-    entry: Option<&SessionEntry>,
-) -> (
-    crate::infra::config::ContextConfig,
-    Option<Arc<dyn LlmProvider>>,
-) {
-    let mut context_config = base_context_config.clone();
-    let session_override = entry
-        .and_then(|e| e.model_override.as_deref())
-        .filter(|model| !model.trim().is_empty());
-    match llm_resolver.resolve(LlmScene::Compaction, session_override) {
-        Ok(call) => {
-            context_config.compaction_model = call.model;
-            (context_config, Some(call.provider_impl))
-        }
-        Err(err) => {
-            warn!(
-                error = %err,
-                "failed to resolve child-agent compaction runtime; falling back to main provider"
-            );
-            (context_config, None)
-        }
-    }
-}
-
-fn build_model_thinking_store(config: &AppConfig) -> Result<Arc<ModelThinkingStore>, AppError> {
+fn build_model_prefs_store(config: &AppConfig) -> Result<Arc<ModelPrefsStore>, AppError> {
     let default_level = ThinkingLevel::parse_or_medium(&config.llm.thinking.level).0;
-    Ok(Arc::new(ModelThinkingStore::load(
+    Ok(Arc::new(ModelPrefsStore::load(
         resolve_model_thinking_path(config)?,
         default_level,
     )?))
+}
+
+fn connector_registry_for(
+    config: &AppConfig,
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Option<Arc<ConnectorRegistry>>, AppError> {
+    config
+        .connector
+        .enabled
+        .then(|| ConnectorRegistry::create_and_start(config, workspace_root))
+        .transpose()
 }
 
 fn checkpoint_store_cache() -> &'static RwLock<
@@ -202,32 +421,65 @@ fn checkpoint_store_for(
     store
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ScopeRuntimeCacheKey {
+    resource_root: std::path::PathBuf,
+    // Equal discovery directories do not imply equal connector scopes: a
+    // default Serve session has no explicit Workspace MCP configuration.
+    project_root: Option<std::path::PathBuf>,
+}
+
 fn scope_runtime_cache(
-) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+) -> &'static RwLock<std::collections::HashMap<ScopeRuntimeCacheKey, Weak<ScopeContainer>>> {
     static CACHE: OnceLock<
-        RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
+        RwLock<std::collections::HashMap<ScopeRuntimeCacheKey, Weak<ScopeContainer>>>,
     > = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+/// End only VMs already owned by this process; cleanup must never construct a new chat session.
+pub(crate) fn end_cached_plugin_session(session_id: &str) -> Result<(), AppError> {
+    let managers: Vec<_> = scope_runtime_cache()
+        .read()
+        .values()
+        .filter_map(Weak::upgrade)
+        .filter_map(|scope| scope.plugin_manager.clone())
+        .collect();
+    if managers.is_empty() {
+        return Ok(());
+    }
+    let session_id = session_id.to_owned();
+    block_on_plugin_future(async move {
+        for manager in managers {
+            manager.end_session(&session_id).await?;
+        }
+        Ok(())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn scope_runtime_for(
     config: &AppConfig,
-    agent_workspace_dir: std::path::PathBuf,
+    resource_root: std::path::PathBuf,
+    session_project_root: Option<std::path::PathBuf>,
     audit: Arc<dyn AuditRecorder>,
-    llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
+    bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     session: Arc<SessionManager>,
     overrides: &ChatContextOverrides,
 ) -> Result<Arc<ScopeContainer>, AppError> {
     let disable_cache = overrides.fetch_http_client.is_some();
-    let key = std::fs::canonicalize(&agent_workspace_dir).unwrap_or(agent_workspace_dir);
+    let key = std::fs::canonicalize(&resource_root).unwrap_or(resource_root);
+    let cache_key = ScopeRuntimeCacheKey {
+        resource_root: key.clone(),
+        project_root: session_project_root.clone(),
+    };
     let current_tokio_handle = tokio::runtime::Handle::try_current().ok();
     if !disable_cache {
         if let Some(existing) = scope_runtime_cache()
             .read()
-            .get(&key)
+            .get(&cache_key)
             .and_then(Weak::upgrade)
         {
             if current_tokio_handle.is_none() || existing.dispatcher.has_tokio_handle() {
@@ -238,7 +490,7 @@ fn scope_runtime_for(
 
     let mut cache_guard = (!disable_cache).then(|| scope_runtime_cache().write());
     if let Some(cache) = cache_guard.as_ref() {
-        if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+        if let Some(existing) = cache.get(&cache_key).and_then(Weak::upgrade) {
             if current_tokio_handle.is_none() || existing.dispatcher.has_tokio_handle() {
                 return Ok(existing);
             }
@@ -250,25 +502,43 @@ fn scope_runtime_for(
         audit,
         event_bus: event_bus.clone(),
         fetch_http_client: overrides.fetch_http_client.clone(),
-        llm,
         llm_resolver,
         primitive,
+        bash_task_registry,
         session,
     };
+    let (connector_registry, connector_load_error) =
+        match connector_registry_for(config, session_project_root.as_deref()) {
+            Ok(registry) => (registry, None),
+            Err(error) => {
+                tracing::warn!(error = %error, "MCP connectors unavailable; chat continues");
+                (None, Some(error.to_string()))
+            }
+        };
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
-        build_plugin_runtime(config, &key, deps)?;
+        build_plugin_runtime(
+            config,
+            &key,
+            deps,
+            connector_registry
+                .as_ref()
+                .map(|registry| registry.mcp_executor()),
+        )?;
     let shared = Arc::new(ScopeContainer {
+        inventory_sync: tokio::sync::Mutex::new(()),
         event_bus,
         tool_registry,
         function_registry,
         plugin_manager,
         plugin_function_invoker,
+        connector_registry,
+        connector_load_error,
         dispatcher,
         skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
         skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
     });
     if let Some(cache) = cache_guard.as_mut() {
-        cache.insert(key, Arc::downgrade(&shared));
+        cache.insert(cache_key, Arc::downgrade(&shared));
     }
     Ok(shared)
 }
@@ -281,7 +551,7 @@ where
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         return std::thread::spawn(move || handle.block_on(future))
             .join()
-            .map_err(|_| AppError::Plugin("scope activation worker panicked".to_string()))?;
+            .map_err(|_| AppError::Plugin(crate::infra::i18n::tr("runtime.scopeWorker", &[])))?;
     }
 
     let runtime = tokio::runtime::Runtime::new().map_err(|error| {
@@ -340,8 +610,11 @@ impl ChatContext {
         std::fs::create_dir_all(&agent_definition_dir).map_err(AppError::Io)?;
         let agent_trail_dir = resolve_agent_trail_dir(&config)?;
         std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
-        let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
-        session.pin_session(&current_session_entry.session_id);
+        // CLI startup owns its cwd; persist it as the explicit project root rather
+        // than later treating the backend process cwd as an implicit fallback.
+        let current_session_entry = session
+            .ensure_current_session_with_project_root(session_cwd.clone(), session_cwd.clone())?;
+        session.pin_session(&current_session_entry.session_id)?;
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
         let agent_workspace_dir =
@@ -350,6 +623,10 @@ impl ChatContext {
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
         let model_catalog = crate::core::llm::SharedModelCatalog::load(&config)?;
+        let model_prefs = match overrides.shared_model_prefs.clone() {
+            Some(store) => store,
+            None => build_model_prefs_store(&config)?,
+        };
         let web_search_runtime = Arc::new(crate::core::tools::web_search::WebSearchRuntime::new(
             &config,
             model_catalog.clone(),
@@ -358,26 +635,24 @@ impl ChatContext {
             &config,
             agent_trail_dir.join("tool-results"),
         )?);
-        let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> = Arc::new(
-            crate::core::llm::DefaultLlmResolver::new(config.clone(), model_catalog.clone()),
-        );
-        let llm: Arc<dyn LlmProvider> = llm_resolver
-            .resolve(crate::core::llm::LlmScene::Main, None)?
-            .provider_impl;
-        let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
-            llm.as_ref(),
-            &config.llm.files,
-            session.sessions_dir(),
-            &current_session_entry.session_id,
-        )
-        .map(Arc::new);
+        let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> =
+            Arc::new(crate::core::llm::DefaultLlmResolver::new(
+                config.clone(),
+                model_catalog.clone(),
+                Arc::clone(&model_prefs),
+            ));
+        let _ = llm_resolver.resolve(crate::core::llm::LlmScene::Main, None)?;
 
-        let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
-            Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
+        let audit_store = AuditStore::open_if_enabled(&config)?.map(Arc::new);
+        let audit: Arc<dyn AuditRecorder> = match audit_store.as_ref() {
+            Some(store) => Arc::new(FileAuditRecorder::new(Arc::clone(store))),
             None => Arc::new(TracingAuditRecorder),
         };
         let workspace_roots = resolve_workspace_roots_paths(&config)?;
-        let cli_confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
+        let base_confirmation: Arc<dyn UserConfirmationProvider> = overrides
+            .confirmation
+            .clone()
+            .unwrap_or_else(|| Arc::new(CliConfirmation));
 
         let session_grants = crate::core::permission::SessionGrants::new();
         let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
@@ -405,7 +680,7 @@ impl ChatContext {
 
         let confirmation: Arc<dyn UserConfirmationProvider> =
             Arc::new(permission::cwd_lazy::CwdLazyPrompt::new(
-                cli_confirmation,
+                base_confirmation,
                 agent_workspace_dir.clone(),
                 gate.clone(),
                 session_grants.clone(),
@@ -414,6 +689,15 @@ impl ChatContext {
 
         let _ = workspace_roots;
         let bash_ast = crate::core::permission::BashAstChecker::new(false, vec![], vec![]);
+        let bash_policy = resolve_bash_production_policy(&config, &agent_trail_dir);
+        let bash_task_registry = crate::core::tools::primitive::build_bash_task_registry(
+            &config.tools.bash,
+            bash_policy.persist_dir.clone(),
+            gate.clone(),
+            confirmation.clone(),
+            audit.clone(),
+            bash_ast.clone(),
+        );
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
             DefaultPrimitiveExecutor::new(
                 config.primitive.clone(),
@@ -422,6 +706,10 @@ impl ChatContext {
                 gate.clone(),
             )
             .with_bash_ast(bash_ast.clone())
+            .with_bash_foreground_wait_ms(bash_policy.foreground_wait_ms)
+            .with_bash_max_output_chars(bash_policy.max_output_chars)
+            .with_bash_persist_dir(bash_policy.persist_dir.clone())
+            .with_bash_task_registry(bash_task_registry.clone())
             .with_write_normalize_crlf(config.tools.write.normalize_crlf),
         );
 
@@ -439,18 +727,31 @@ impl ChatContext {
                 Err(_) => None,
             };
 
+        let session_project_root = current_session_entry
+            .project_root
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_dir())
+            .and_then(|path| std::fs::canonicalize(path).ok());
+        let resource_root = session_project_root
+            .clone()
+            // Older session records have no explicit root. Keep their established discovery
+            // behavior, but do not use this fallback as an install target.
+            .unwrap_or_else(|| agent_workspace_dir.clone());
         let checkpoint_switcher =
             checkpoint_store_for(agent_trail_dir.clone(), agent_workspace_dir.clone());
         let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
+        crate::core::skill::materialize_builtin_skills(&config)?;
 
         let session_arc = Arc::new(session.clone());
         let shared_scope_runtime = scope_runtime_for(
             &config,
-            agent_workspace_dir.clone(),
+            resource_root.clone(),
+            session_project_root.clone(),
             audit.clone(),
-            llm.clone(),
             llm_resolver.clone(),
             primitive.clone(),
+            bash_task_registry.clone(),
             session_arc.clone(),
             &overrides,
         )?;
@@ -470,65 +771,13 @@ impl ChatContext {
             ));
         }
         if !overrides.skip_session_plugin_activation {
-            if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
-                for plugin_id in plugin_manager_ref.list_loaded() {
-                    let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
-                        continue;
-                    };
-                    if info.manifest.tools.is_empty() && info.loaded_at == 0 {
-                        if let Err(err) = plugin_manager_ref.load_plugin(&info.plugin_root) {
-                            warn!(
-                                plugin = %plugin_id,
-                                path = %info.plugin_root.display(),
-                                error = %err,
-                                "scope activation failed to pre-register legacy dynamic plugin"
-                            );
-                        }
-                        if info.manifest.activation == crate::ext::PluginActivation::Lazy {
-                            continue;
-                        }
-                    }
-                    if info.manifest.activation != crate::ext::PluginActivation::Session {
-                        continue;
-                    }
-                    if plugin_manager_ref
-                        .has_session_vm(&current_session_entry.session_id, &plugin_id)
-                    {
-                        continue;
-                    }
-
-                    let pm = Arc::clone(plugin_manager_ref);
-                    let session_id = current_session_entry.session_id.clone();
-                    let plugin_id_for_start = plugin_id.clone();
-                    if let Err(err) = block_on_plugin_future(async move {
-                        pm.start_session_vm(&session_id, &plugin_id_for_start)
-                            .await
-                            .map(|_| ())
-                    }) {
-                        warn!(
-                            plugin = %plugin_id,
-                            session = %current_session_entry.session_id,
-                            error = %err,
-                            "scope activation failed to prestart session plugin"
-                        );
-                        continue;
-                    }
-                    if let Err(err) = plugin_manager_ref.dispatch_session_event(
-                        &current_session_entry.session_id,
-                        &plugin_id,
-                        crate::infra::wire::vm::WIRE_SESSION_START,
-                        serde_json::json!({}),
-                        serde_json::json!({
-                            "sessionId": current_session_entry.session_id.clone(),
-                        }),
-                    ) {
-                        warn!(
-                            plugin = %plugin_id,
-                            session = %current_session_entry.session_id,
-                            error = %err,
-                            "scope activation failed to deliver session_start"
-                        );
-                    }
+            if let Some(manager) = plugin_manager.clone() {
+                let session_id = current_session_entry.session_id.clone();
+                let (_, warnings) = block_on_plugin_future(async move {
+                    Ok(activate_session_plugins(manager, &session_id).await)
+                })?;
+                for warning in warnings {
+                    warn!("{warning}");
                 }
             }
         }
@@ -536,24 +785,10 @@ impl ChatContext {
         let last_interrupt_at = Arc::new(Mutex::new(None));
         let hard_exit_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let bash_task_registry = Arc::new(
-            crate::core::tools::primitive::BashTaskRegistry::new(
-                agent_trail_dir.join("tool-results"),
-            )
-            .with_background_guard(
-                crate::core::tools::primitive::bash_task::BackgroundBashGuard::new(
-                    "__agent__",
-                    gate.clone(),
-                    confirmation.clone(),
-                    audit.clone(),
-                    bash_ast,
-                ),
-            ),
-        );
         let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
             Arc::new(Mutex::new(Vec::new()));
-        let steering_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let steering_queue =
+            Arc::new(Mutex::new(crate::core::agent_loop::SteeringInbox::default()));
         let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let delivered_completion: Arc<
@@ -575,25 +810,46 @@ impl ChatContext {
         let ask_question_panel: Arc<dyn panels::AskQuestionPanel> = overrides
             .ask_question_panel
             .unwrap_or_else(|| Arc::new(panels::CliAskQuestionPanel));
-        plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
+        plan_runtime.attach_workspace_root(agent_workspace_dir.clone());
+        plan_runtime.attach_bash_task_registry(bash_task_registry.clone());
         plan_runtime.set_expose_skills_to_reviewer(config.skills.expose_to_reviewer);
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));
         plan_runtime.attach_ask_question_panel(ask_question_panel);
 
+        let mut package_install_context =
+            crate::core::tools::package_install::PackageInstallContext::new(
+                config.clone(),
+                agent_workspace_dir.clone(),
+                session_project_root.clone(),
+                confirmation.clone(),
+            )
+            .with_gate(gate.clone())
+            .with_plan_runtime(&plan_runtime);
+        if let Some(store) = audit_store.clone() {
+            package_install_context = package_install_context.with_audit_store(store);
+        }
+        let package_install_backend: Option<crate::core::agent_loop::SharedPackageInstallBackend> =
+            Some(Arc::new(
+                crate::core::tools::package_install::ChatPackageInstallBackend {
+                    ctx: package_install_context,
+                },
+            ));
+
         let agent_registry = overrides.shared_agent_registry.unwrap_or_else(|| {
             crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone())
         });
-        let model_thinking = match overrides.shared_model_thinking.clone() {
-            Some(store) => store,
-            None => build_model_thinking_store(&config)?,
-        };
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
-            .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Config(tr(
+                    "runtime.rootRegisterFailed",
+                    &[("detail", &e.to_string())],
+                ))
+            })?;
         let skill_set = shared_scope_runtime.skill_set.clone();
         let skill_discovery_handle = shared_scope_runtime.skill_discovery_handle.clone();
 
@@ -601,94 +857,155 @@ impl ChatContext {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(config.reviewer.max_turns);
-        let reviewer_model = config
-            .reviewer
-            .model_override
-            .clone()
-            .unwrap_or_else(|| config.llm.default_model.clone());
-        let (child_agent_context_config, child_agent_compaction_provider) =
-            resolve_child_agent_compaction_runtime(
-                llm_resolver.as_ref(),
-                &config.context,
-                Some(&current_session_entry),
-            );
-        let read_file_state =
-            Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
-        let prod_reviewer = plan_runtime::prod_reviewer::ProdReviewerDispatcher::new(
+        // 只捕获 override；为空时由 dispatcher 在每次派发时取当前会话模型。
+        let reviewer_model_override = config.reviewer.model_override.clone();
+        let read_file_state = Arc::new(
+            crate::core::tools::pipeline::read_state::ReadFileState::with_mutation_stamp_refresh(
+                config.tools.read.refresh_mutation_stamp,
+            ),
+        );
+        let prod_plan_reviewer = plan_runtime::prod_reviewer::ProdPlanReviewerDispatcher::new(
             "chat_context",
             plan_runtime::prod_reviewer::ProdReviewerDeps {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
-                llm: llm.clone(),
-                compaction_provider: child_agent_compaction_provider.clone(),
+                llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: child_agent_context_config.clone(),
-                read_file_state: read_file_state.clone(),
-                openai_files_runtime: openai_files_runtime.clone(),
+                context_config: config.context.clone(),
+                refresh_mutation_stamp: config.tools.read.refresh_mutation_stamp,
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                model: reviewer_model,
+                model_override: reviewer_model_override.clone(),
+                fallback_model: config.llm.default_model.clone(),
                 max_turns: reviewer_max_turns,
             },
         );
-        plan_runtime.attach_reviewer(Arc::new(prod_reviewer));
+        let prod_code_reviewer = plan_runtime::prod_reviewer::ProdCodeReviewerDispatcher::new(
+            "chat_context",
+            plan_runtime::prod_reviewer::ProdReviewerDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: config.context.clone(),
+                refresh_mutation_stamp: config.tools.read.refresh_mutation_stamp,
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                skill_set: skill_set.clone(),
+                skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                model_override: reviewer_model_override,
+                fallback_model: config.llm.default_model.clone(),
+                max_turns: reviewer_max_turns,
+            },
+        );
+        let prod_explorer = plan_runtime::prod_reviewer::ProdExplorerDispatcher::new(
+            "chat_context",
+            plan_runtime::prod_reviewer::ProdReviewerDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: config.context.clone(),
+                refresh_mutation_stamp: config.tools.read.refresh_mutation_stamp,
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                skill_set: skill_set.clone(),
+                skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                // explorer 没有独立模型配置，始终跟随会话模型。
+                model_override: None,
+                fallback_model: config.llm.default_model.clone(),
+                max_turns: reviewer_max_turns,
+            },
+        );
+        plan_runtime.attach_plan_reviewer(Arc::new(prod_plan_reviewer));
+        plan_runtime.attach_code_reviewer(Arc::new(prod_code_reviewer));
+        plan_runtime.attach_explorer(Arc::new(prod_explorer));
         let prod_verifier = plan_runtime::verify::ProdVerifierDispatcher::new(
             "chat_context",
             plan_runtime::verify::ProdVerifierDeps {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
-                llm: llm.clone(),
-                compaction_provider: child_agent_compaction_provider.clone(),
+                llm_resolver: llm_resolver.clone(),
+                model_catalog: model_catalog.clone(),
+                model_prefs: model_prefs.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: child_agent_context_config.clone(),
-                read_file_state: read_file_state.clone(),
-                openai_files_runtime: openai_files_runtime.clone(),
+                context_config: config.context.clone(),
+                refresh_mutation_stamp: config.tools.read.refresh_mutation_stamp,
+                llm_files_config: config.llm.files.clone(),
+                sessions_dir: session.sessions_dir().to_path_buf(),
                 web_fetch_runtime: web_fetch_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                model: config.llm.default_model.clone(),
+                // verifier 没有独立的 model_override 配置，直接跟随会话模型。
+                model_override: None,
+                fallback_model: config.llm.default_model.clone(),
             },
         );
         plan_runtime.attach_verifier(Arc::new(prod_verifier));
 
         {
             let appender_session = session.clone();
+            plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
+                appender_session.append_custom_entry(extra)
+            }));
+
             let plan_event_bus = event_bus.clone();
             let plan_event_session_id = current_session_entry.session_id.clone();
-            plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
-                let bus_payload = extra.clone();
-                appender_session.append_custom_entry(extra)?;
-                if let Some(event_name) = bus_payload
-                    .get("event")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|name| name.starts_with("plan.") || name.starts_with("session."))
+            plan_runtime.attach_transcript_event_notifier(Arc::new(move |payload| {
+                if let Some((event_name, payload)) =
+                    normalize_plan_transcript_event_for_live_delivery(
+                        payload,
+                        &plan_event_session_id,
+                    )
                 {
-                    let event_name = event_name.to_string();
-                    let mut payload = bus_payload;
-                    if let Some(obj) = payload.as_object_mut() {
-                        obj.remove("event");
-                        if let Some(plan_id) = obj.remove("plan_id") {
-                            obj.insert("planId".to_string(), plan_id);
-                        }
-                        obj.insert(
-                            "type".to_string(),
-                            serde_json::Value::String(event_name.clone()),
-                        );
-                        obj.insert(
-                            "sessionId".to_string(),
-                            serde_json::Value::String(plan_event_session_id.clone()),
-                        );
-                    }
                     if let Err(error) = plan_event_bus.emit_sync(
                         &event_name,
                         crate::infra::EventContext::new(event_name.clone(), payload)
@@ -701,7 +1018,6 @@ impl ChatContext {
                         );
                     }
                 }
-                Ok(())
             }));
         }
 
@@ -713,10 +1029,9 @@ impl ChatContext {
             initial_thinking_display.as_u8(),
         ));
         let global_services = GlobalServices {
-            llm: llm.clone(),
             model_catalog: model_catalog.clone(),
             llm_resolver: llm_resolver.clone(),
-            model_thinking,
+            model_prefs,
             primitive: primitive.clone(),
             tool_registry: tool_registry.clone(),
             function_registry: function_registry.clone(),
@@ -724,16 +1039,20 @@ impl ChatContext {
             audit: audit.clone(),
             gate: gate.clone(),
             config_backend: config_backend.clone(),
+            package_install_backend: package_install_backend.clone(),
             web_fetch_runtime: web_fetch_runtime.clone(),
             web_search_runtime: web_search_runtime.clone(),
             plugin_manager,
             plugin_function_invoker,
+            connector_registry: shared_scope_runtime.connector_registry.clone(),
         };
         let scope_services = ScopeServices {
             scope_container: shared_scope_runtime.clone(),
             checkpoint_switcher: checkpoint_switcher.clone(),
             checkpoint_store: checkpoint_store.clone(),
             agent_workspace_dir: agent_workspace_dir.clone(),
+            resource_root: resource_root.clone(),
+            session_project_root: session_project_root.clone(),
             agent_definition_dir: agent_definition_dir.clone(),
             agent_trail_dir: agent_trail_dir.clone(),
             cfg_path: cfg_path_snapshot.clone(),
@@ -746,6 +1065,9 @@ impl ChatContext {
             cancel_token: cancel_token.clone(),
             last_interrupt_at: last_interrupt_at.clone(),
             hard_exit_requested: hard_exit_requested.clone(),
+            seen_resource_inventory_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::api::chat::session_runtime::current_resource_inventory_epoch(),
+            )),
             session_grants: session_grants.clone(),
             bash_task_registry: bash_task_registry.clone(),
             follow_up_queue: follow_up_queue.clone(),
@@ -753,9 +1075,10 @@ impl ChatContext {
             completion_routes: completion_routes.clone(),
             delivered_completion: delivered_completion.clone(),
             completion_subscriber_handle: completion_subscriber_handle.clone(),
+            checkpoint_record_tasks: Arc::new(Mutex::new(Vec::new())),
             read_file_state: read_file_state.clone(),
+            openai_files_runtime: Arc::new(Mutex::new(None)),
             thinking_display: thinking_display.clone(),
-            openai_files_runtime: openai_files_runtime.clone(),
             todos_runtime: todos_runtime.clone(),
             plan_runtime: plan_runtime.clone(),
             suppress_cli_output: overrides.suppress_cli_output,
@@ -772,11 +1095,21 @@ impl ChatContext {
     }
 
     pub(crate) fn effective_model(&self, entry: Option<&SessionEntry>) -> String {
-        entry
-            .and_then(|e| e.model_override.as_deref())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&self.config.llm.default_model)
-            .to_string()
+        self.resolve_call(LlmScene::Main, entry)
+            .map(|call| call.catalog_id)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {
+        self.global_services
+            .model_catalog
+            .resolve_reasoning_level(self.global_services.model_prefs.as_ref(), model_id)
+    }
+
+    pub(crate) fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {
+        self.global_services
+            .model_catalog
+            .resolve_speed(self.global_services.model_prefs.as_ref(), model_id)
     }
 
     pub(crate) fn resolve_call(
@@ -794,7 +1127,7 @@ impl ChatContext {
 
     pub(crate) fn openai_files_runtime_for(
         &self,
-        provider: &dyn LlmProvider,
+        call: &ResolvedCall,
     ) -> Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>> {
         let session_id = self
             .session_runtime
@@ -802,13 +1135,28 @@ impl ChatContext {
             .current_session_id()
             .ok()
             .flatten()?;
-        crate::core::llm::openai_files::build_runtime_for_provider(
-            provider,
+        let runtime_key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            call.provider,
+            call.api,
+            call.base_url.as_deref().unwrap_or_default(),
+            call.key_source,
+        );
+        let mut cached = self.session_runtime.openai_files_runtime.lock();
+        if let Some((cached_key, runtime)) = cached.as_ref() {
+            if cached_key == &runtime_key {
+                return Some(runtime.clone());
+            }
+        }
+        let runtime = crate::core::llm::openai_files::build_runtime_for_provider(
+            call.provider_impl.as_ref(),
             &self.config.llm.files,
             self.session_runtime.session.sessions_dir(),
             &session_id,
         )
-        .map(Arc::new)
+        .map(Arc::new)?;
+        *cached = Some((runtime_key, runtime.clone()));
+        Some(runtime)
     }
 
     pub(crate) fn shutdown_completion_subscriber(&self) {
@@ -834,7 +1182,7 @@ impl ChatContext {
         if handle.is_none() {
             *handle = Some(crate::core::skill::spawn_discovery_task(
                 self.config.clone(),
-                self.scope_services.agent_workspace_dir.clone(),
+                self.scope_services.resource_root.clone(),
             ));
         }
     }
@@ -877,110 +1225,15 @@ impl ChatContext {
             handle.abort();
         }
         let skill_set = if self.config.skills.enabled {
-            crate::core::skill::discover(&self.config, &self.scope_services.agent_workspace_dir)
+            crate::core::skill::discover(&self.config, &self.scope_services.resource_root)
         } else {
             crate::core::skill::SkillSet::default()
         };
+        if skill_set.discovery_failed() {
+            return self.skill_set_snapshot();
+        }
         *self.scope_services.skill_set.write() = skill_set.clone();
         skill_set
-    }
-
-    pub(crate) async fn refresh_plugin_catalog_inventory(&self) -> Result<Vec<String>, AppError> {
-        let Some(plugin_manager) = self.global_services.plugin_manager.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let current_session_id = self
-            .session_runtime
-            .session
-            .current_session_id()
-            .ok()
-            .flatten();
-
-        let catalog =
-            PluginCatalog::discover(&self.config, &self.scope_services.agent_workspace_dir)?;
-        let discovered_ids = catalog
-            .iter()
-            .map(|(plugin_id, _)| plugin_id.clone())
-            .collect::<std::collections::HashSet<_>>();
-
-        for existing_id in plugin_manager.list_loaded() {
-            let Some(info) = plugin_manager.get_plugin(&existing_id) else {
-                continue;
-            };
-            let has_session_vm = current_session_id
-                .as_deref()
-                .map(|session_id| plugin_manager.has_session_vm(session_id, &existing_id))
-                .unwrap_or(false);
-            if info.loaded_at != 0 || has_session_vm {
-                continue;
-            }
-            if discovered_ids.contains(&existing_id) {
-                continue;
-            }
-            self.global_services
-                .tool_registry
-                .unregister_plugin_tools(&existing_id);
-            let _ = plugin_manager.unload_plugin(&existing_id);
-        }
-
-        for (plugin_id, entry) in catalog.iter() {
-            let loaded = plugin_manager
-                .get_plugin(plugin_id)
-                .map(|info| info.loaded_at > 0)
-                .unwrap_or(false);
-            let has_session_vm = current_session_id
-                .as_deref()
-                .map(|session_id| plugin_manager.has_session_vm(session_id, plugin_id))
-                .unwrap_or(false);
-            if loaded || has_session_vm {
-                continue;
-            }
-
-            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
-            self.global_services
-                .tool_registry
-                .unregister_plugin_tools(plugin_id);
-            for manifest_tool in &entry.manifest.tools {
-                self.global_services
-                    .tool_registry
-                    .register_tool(
-                        Tool {
-                            name: manifest_tool.name.clone(),
-                            label: manifest_tool.name.clone(),
-                            description: manifest_tool.description.clone(),
-                            parameters: manifest_tool.parameters.clone(),
-                            plugin_id: plugin_id.clone(),
-                            is_enabled: true,
-                            created_at: 0,
-                        },
-                        plugin_id,
-                    )
-                    .await?;
-            }
-        }
-
-        let function_catalog = refresh_host_function_registry(
-            &self.config,
-            &self.scope_services.agent_workspace_dir,
-            &self.global_services.function_registry,
-        )?;
-        let mut warnings = catalog.warnings.clone();
-        warnings.extend(function_catalog.warnings.clone());
-        warnings.extend(catalog.diagnostics.iter().map(|diagnostic| {
-            format!(
-                "plugin catalog ignored {}: {}",
-                diagnostic.path.display(),
-                diagnostic.reason
-            )
-        }));
-        warnings.extend(function_catalog.diagnostics.iter().map(|diagnostic| {
-            format!(
-                "host function catalog ignored {}: {}",
-                diagnostic.path.display(),
-                diagnostic.reason
-            )
-        }));
-        Ok(warnings)
     }
 }
 
@@ -989,6 +1242,8 @@ impl Drop for ChatContext {
         self.shutdown_completion_subscriber();
     }
 }
+
+use crate::infra::i18n::tr;
 
 pub struct CliConfirmation;
 
@@ -1000,27 +1255,38 @@ impl UserConfirmationProvider for CliConfirmation {
         preview: &str,
         plugin_id: &str,
     ) -> Result<bool, AppError> {
-        println!("\n--- 操作确认 ---");
+        println!("{}", tr("terminal.confirm.title", &[]));
         let source_label = if plugin_id == "__agent__" {
             "host".to_string()
         } else {
             plugin_id.to_string()
         };
-        println!("类型: {:?}  来源: {}", operation, source_label);
+        println!(
+            "{}",
+            tr(
+                "terminal.confirm.source",
+                &[
+                    ("operation", &format!("{operation:?}")),
+                    ("source", &source_label)
+                ]
+            )
+        );
         if !preview.is_empty() {
             let lines: Vec<&str> = preview.lines().collect();
             let display = if lines.len() > 20 {
-                format!(
-                    "{}\n  ... ({} 行已省略)",
-                    lines[..20].join("\n"),
-                    lines.len() - 20
+                tr(
+                    "terminal.confirm.omitted",
+                    &[
+                        ("text", &lines[..20].join("\n")),
+                        ("count", &(lines.len() - 20).to_string()),
+                    ],
                 )
             } else {
                 preview.to_string()
             };
-            println!("预览:\n{}", display);
+            println!("{}", tr("terminal.confirm.preview", &[("text", &display)]));
         }
-        print!("是否执行？[y/N] ");
+        print!("{}", tr("terminal.confirm.ask", &[]));
         io::stdout().flush().map_err(AppError::Io)?;
         let mut line = String::new();
         io::stdin().read_line(&mut line).map_err(AppError::Io)?;
@@ -1033,24 +1299,28 @@ impl UserConfirmationProvider for CliConfirmation {
         operation: PrimitiveOperation,
         preview: &str,
         plugin_id: &str,
+        target: Option<std::path::PathBuf>,
         suggested_root: Option<std::path::PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
-        if operation == PrimitiveOperation::Bash {
-            return match self.confirm(operation, preview, plugin_id).await? {
-                true => Ok(ConfirmDecision::AllowOnce),
-                false => Ok(ConfirmDecision::Deny),
-            };
-        }
-
-        let target = extract_path_from_preview(preview).unwrap_or_else(|| {
-            suggested_root
-                .clone()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-        });
+        let target = match target {
+            Some(target) if operation != PrimitiveOperation::Bash => target,
+            _ => {
+                return match self.confirm(operation, preview, plugin_id).await? {
+                    true => Ok(ConfirmDecision::AllowOnce),
+                    false => Ok(ConfirmDecision::Deny),
+                };
+            }
+        };
         match permission::prompt::read_path_prompt(
             &target,
             suggested_root,
-            Some(&format!("类型: {:?}  来源: {}", operation, plugin_id)),
+            Some(&tr(
+                "terminal.confirm.source",
+                &[
+                    ("operation", &format!("{operation:?}")),
+                    ("source", plugin_id),
+                ],
+            )),
         )
         .map_err(AppError::Io)?
         {
@@ -1068,13 +1338,6 @@ impl UserConfirmationProvider for CliConfirmation {
     }
 }
 
-fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
-    preview
-        .lines()
-        .find_map(|line| line.strip_prefix("路径: "))
-        .map(std::path::PathBuf::from)
-}
-
 type PluginRuntimeParts = (
     Arc<dyn ToolRegistry>,
     Arc<FunctionRegistry>,
@@ -1087,9 +1350,9 @@ struct PluginRuntimeDeps {
     audit: Arc<dyn AuditRecorder>,
     event_bus: Arc<dyn EventBus>,
     fetch_http_client: Option<reqwest::Client>,
-    llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
+    bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     session: Arc<SessionManager>,
 }
 
@@ -1105,10 +1368,18 @@ fn host_function_source_rank(source: PluginSource) -> u8 {
     }
 }
 
-fn materialize_host_functions_from_catalog(
+pub(super) fn materialize_host_functions_from_catalog(
     registry: &FunctionRegistry,
     catalog: &PluginCatalog,
 ) -> Vec<String> {
+    let (functions, warnings) = collect_host_functions_from_catalog(catalog);
+    registry.replace_all(functions);
+    warnings
+}
+
+pub(super) fn collect_host_functions_from_catalog(
+    catalog: &PluginCatalog,
+) -> (Vec<RegisteredFunction>, Vec<String>) {
     #[derive(Debug)]
     struct HostFunctionCandidate {
         order: usize,
@@ -1173,39 +1444,113 @@ fn materialize_host_functions_from_catalog(
         winners.insert(candidate.point.clone(), (candidate.source, registered));
     }
 
-    registry.replace_all(winners.into_values().map(|(_, function)| function));
-    warnings
+    (
+        winners
+            .into_values()
+            .map(|(_, function)| function)
+            .collect(),
+        warnings,
+    )
 }
 
-fn refresh_host_function_registry(
-    config: &AppConfig,
-    agent_workspace_dir: &std::path::Path,
-    registry: &FunctionRegistry,
-) -> Result<PluginCatalog, AppError> {
-    let mut catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
-    catalog
-        .warnings
-        .extend(materialize_host_functions_from_catalog(registry, &catalog));
-    Ok(catalog)
+pub(super) fn register_catalog_entry(
+    manager: &PluginManager,
+    entry: &crate::ext::plugin::CatalogEntry,
+) -> Result<Vec<Tool>, AppError> {
+    manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
+    manager.set_catalog_fingerprint(&entry.manifest.id, entry.fingerprint);
+    Ok(entry
+        .manifest
+        .tools
+        .iter()
+        .map(|tool| Tool {
+            name: tool.name.clone(),
+            label: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+            plugin_id: entry.manifest.id.clone(),
+            is_enabled: true,
+            created_at: 0,
+        })
+        .collect())
+}
+
+pub(super) async fn activate_session_plugins(
+    manager: Arc<PluginManager>,
+    session_id: &str,
+) -> (bool, Vec<String>) {
+    let mut worked = false;
+    let mut warnings = Vec::new();
+    for id in manager.list_loaded() {
+        let Some(info) = manager.get_plugin(&id) else {
+            continue;
+        };
+        // Keep legacy dynamic discovery identical to new-session startup. A
+        // Lazy plugin with no manifest tools can still run this short script.
+        if info.manifest.tools.is_empty() && info.loaded_at == 0 {
+            worked = true;
+            let pm = manager.clone();
+            let root = info.plugin_root.clone();
+            match tokio::task::spawn_blocking(move || pm.load_plugin(&root)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warnings.push(format!("scope activation failed for {id}: {error}"))
+                }
+                Err(error) => {
+                    warnings.push(format!("scope activation worker failed for {id}: {error}"))
+                }
+            }
+            if info.manifest.activation == crate::ext::PluginActivation::Lazy {
+                continue;
+            }
+        }
+        if info.manifest.activation != crate::ext::PluginActivation::Session
+            || manager.has_session_vm(session_id, &id)
+        {
+            continue;
+        }
+        worked = true;
+        if let Err(error) = manager.start_session_vm(session_id, &id).await {
+            warnings.push(format!("scope activation failed to start {id}: {error}"));
+            continue;
+        }
+        if let Err(error) = manager.dispatch_session_event(
+            session_id,
+            &id,
+            crate::infra::wire::vm::WIRE_SESSION_START,
+            serde_json::json!({}),
+            serde_json::json!({"sessionId": session_id}),
+        ) {
+            warnings.push(format!(
+                "scope activation failed to deliver session_start to {id}: {error}"
+            ));
+        }
+    }
+    (worked, warnings)
 }
 
 fn build_plugin_runtime(
     config: &AppConfig,
     agent_workspace_dir: &std::path::Path,
     deps: PluginRuntimeDeps,
+    mcp_executor: Option<Arc<dyn ToolExecutor>>,
 ) -> Result<PluginRuntimeParts, AppError> {
     let PluginRuntimeDeps {
         audit,
         event_bus,
         fetch_http_client,
-        llm,
         llm_resolver,
         primitive,
+        bash_task_registry,
         session,
     } = deps;
     if plugin_runtime_disabled_via_env() {
         warn!("PI_PLUGIN_DISABLE enabled; skipping plugin runtime initialization");
-        let executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let plugin_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let executor: Arc<dyn ToolExecutor> = match mcp_executor {
+            Some(mcp_executor) => CompositeToolExecutor::new(plugin_executor, mcp_executor),
+            None => plugin_executor,
+        };
         let tool_registry: Arc<dyn ToolRegistry> =
             Arc::new(DefaultToolRegistry::new(executor, audit.clone()));
         let function_registry = Arc::new(FunctionRegistry::new());
@@ -1213,9 +1558,9 @@ fn build_plugin_runtime(
             HostApiDispatcher::new(event_bus.clone())
                 .with_tools(tool_registry.clone())
                 .with_session(session)
-                .with_llm(llm)
                 .with_llm_resolver(llm_resolver)
                 .with_primitive(primitive)
+                .with_bash_task_registry(bash_task_registry.clone())
                 .with_audit(audit),
         );
         return Ok((tool_registry, function_registry, None, None, dispatcher));
@@ -1244,7 +1589,11 @@ fn build_plugin_runtime(
     inner.set_event_channel_capacity(config.plugin.event_channel_capacity);
     inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
 
-    let executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
+    let plugin_executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
+    let executor: Arc<dyn ToolExecutor> = match mcp_executor {
+        Some(mcp_executor) => CompositeToolExecutor::new(plugin_executor.clone(), mcp_executor),
+        None => plugin_executor.clone(),
+    };
     let function_registry = Arc::new(FunctionRegistry::new());
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
     let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
@@ -1263,7 +1612,7 @@ fn build_plugin_runtime(
         build_outbound_client(
             options,
             OutboundClientErrorKind::Tool,
-            "创建 plugin net.fetch HTTP 客户端失败",
+            &tr("runtime.fetchClientFailed", &[]),
         )?
     };
     let explicit_fetch_proxy = config
@@ -1281,16 +1630,16 @@ fn build_plugin_runtime(
             )
             .with_tools(tool_registry.clone())
             .with_session(session.clone())
-            .with_llm(llm)
             .with_llm_resolver(llm_resolver)
             .with_primitive(primitive)
+            .with_bash_task_registry(bash_task_registry)
             .with_plugin_manager(Arc::downgrade(&plugin_manager))
             .with_fetch_http_client(fetch_client)
             .with_fetch_max_body_bytes(config.tools.web_fetch.max_http_content_bytes)
             .with_audit(audit),
     );
     let function_invoker = PluginFunctionInvoker::new(Arc::downgrade(&plugin_manager));
-    executor.attach_dispatcher(Arc::downgrade(&dispatcher));
+    plugin_executor.attach_dispatcher(Arc::downgrade(&dispatcher));
     function_invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
     plugin_manager.set_tool_registry(tool_registry.clone());
     plugin_manager.set_function_registry(function_registry.clone());
@@ -1298,35 +1647,15 @@ fn build_plugin_runtime(
 
     let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
     for (plugin_id, entry) in catalog.iter() {
-        if let Err(err) =
-            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())
-        {
-            warn!(
-                plugin = %plugin_id,
-                path = %entry.plugin_root.display(),
-                error = %err,
-                "catalog register plugin failed; continuing without this plugin"
-            );
-            continue;
-        }
-        for manifest_tool in &entry.manifest.tools {
-            let tool = Tool {
-                name: manifest_tool.name.clone(),
-                label: manifest_tool.name.clone(),
-                description: manifest_tool.description.clone(),
-                parameters: manifest_tool.parameters.clone(),
-                plugin_id: plugin_id.clone(),
-                is_enabled: true,
-                created_at: 0,
-            };
-            if let Err(err) = default_tool_registry.register_tool_local(tool, plugin_id) {
-                warn!(
-                    plugin = %plugin_id,
-                    tool = %manifest_tool.name,
-                    error = %err,
-                    "catalog materialize static tool failed; continuing without this tool"
-                );
+        match register_catalog_entry(&plugin_manager, entry) {
+            Ok(tools) => {
+                for tool in tools {
+                    if let Err(error) = default_tool_registry.register_tool_local(tool, plugin_id) {
+                        warn!(plugin = %plugin_id, %error, "catalog materialize static tool failed");
+                    }
+                }
             }
+            Err(error) => warn!(plugin = %plugin_id, %error, "catalog register plugin failed"),
         }
     }
     for diagnostic in &catalog.diagnostics {
@@ -1336,14 +1665,8 @@ fn build_plugin_runtime(
             "plugin catalog scan ignored invalid entry"
         );
     }
-    let host_function_catalog =
-        refresh_host_function_registry(config, agent_workspace_dir, &function_registry)?;
-    for diagnostic in &host_function_catalog.diagnostics {
-        warn!(
-            path = %diagnostic.path.display(),
-            reason = %diagnostic.reason,
-            "host function catalog scan ignored invalid entry"
-        );
+    for warning in materialize_host_functions_from_catalog(&function_registry, &catalog) {
+        warn!("{warning}");
     }
 
     let plugins_dir = resolve_plugins_dir(config)?;
@@ -1397,9 +1720,9 @@ impl ToolExecutor for NoopToolExecutor {
         _caller_plugin_id: &str,
         _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
-        Err(AppError::Tool(format!(
-            "对话模式下不支持插件工具执行: {}",
-            tool.name
+        Err(AppError::Tool(tr(
+            "runtime.pluginExecutionUnavailable",
+            &[("name", &tool.name)],
         )))
     }
 }
@@ -1457,97 +1780,5 @@ fn migrate_legacy_layer0_tool_results(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use serial_test::serial;
-
-    use super::resolve_child_agent_compaction_runtime;
-    use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
-    use crate::AppConfig;
-
-    #[test]
-    #[serial(env_lock)]
-    fn child_agent_compaction_runtime_preserves_resolved_model_provider_pair() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("models.toml");
-        let mut cfg = AppConfig::default();
-        cfg.context.compaction_model = "deepseek-v4-pro".to_string();
-        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> =
-            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
-
-        unsafe {
-            std::env::set_var("DEEPSEEK_API_KEY", "stub");
-        }
-
-        let (context_config, provider) =
-            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
-        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
-        assert!(
-            provider.is_some(),
-            "应把解析成功的 compaction provider 注入给子 Agent"
-        );
-
-        unsafe {
-            std::env::remove_var("DEEPSEEK_API_KEY");
-        }
-    }
-
-    #[test]
-    #[serial(env_lock)]
-    fn child_agent_compaction_runtime_preserves_fallback_pair() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("models.toml");
-        let mut cfg = AppConfig::default();
-        cfg.llm.default_model = "deepseek-v4-pro".to_string();
-        cfg.context.compaction_model = "gpt-5.4".to_string();
-        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> =
-            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
-
-        unsafe {
-            std::env::set_var("DEEPSEEK_API_KEY", "stub");
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-
-        let (context_config, provider) =
-            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
-        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
-        assert!(
-            provider.is_some(),
-            "fallback 成功时也应把 fallback 后的 provider 一起注入"
-        );
-
-        unsafe {
-            std::env::remove_var("DEEPSEEK_API_KEY");
-        }
-    }
-
-    #[test]
-    #[serial(env_lock)]
-    fn child_agent_compaction_runtime_keeps_compat_fallback_boundary_when_unresolved() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("models.toml");
-        let mut cfg = AppConfig::default();
-        cfg.llm.default_model = "deepseek-v4-pro".to_string();
-        cfg.context.compaction_model = "gpt-5.4".to_string();
-        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> =
-            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
-
-        unsafe {
-            std::env::remove_var("DEEPSEEK_API_KEY");
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-
-        let (context_config, provider) =
-            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
-
-        assert!(provider.is_none(), "无法解析 pair 时应保留兼容回退边界");
-        assert_eq!(
-            context_config.compaction_model, "gpt-5.4",
-            "未解析成功时不应偷偷改写 compaction_model"
-        );
-    }
-}
+#[path = "tests/context_test.rs"]
+mod tests;

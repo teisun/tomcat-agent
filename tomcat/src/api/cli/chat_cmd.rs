@@ -46,8 +46,12 @@ pub fn build_runtime_and_context_with_overrides(
     mode: SessionMode,
     overrides: crate::api::chat::ChatContextOverrides,
 ) -> Result<(tokio::runtime::Runtime, crate::api::chat::ChatContext), AppError> {
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| AppError::Config(format!("创建 tokio 运行时失败: {}", e)))?;
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        AppError::Config(crate::infra::i18n::tr(
+            "cli.runtimeFailed",
+            &[("detail", &e.to_string())],
+        ))
+    })?;
 
     let ctx = {
         let _enter = rt.enter();
@@ -120,6 +124,7 @@ pub(super) fn run_chat_mode(
         }
         std::process::exit(130);
     }
+    ctx.session_runtime.session.release_session_usage();
     result
 }
 

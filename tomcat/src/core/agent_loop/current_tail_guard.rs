@@ -4,28 +4,35 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::{info, warn};
 
-use crate::core::compaction::apply::check_after_reply;
-use crate::core::compaction::preheat::generate_summary;
+use crate::core::compaction::apply::BoundaryEnv;
+use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
     TOOL_RESULT_PLACEHOLDER,
 };
-use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, MessageKind};
-use crate::core::plan_runtime::file_store::{read_plan, TodoItem, TodoStatus};
+use crate::core::llm::{
+    ChatMessage, ChatMessageRole, LlmProvider, MessageKind, PromptCacheKeyFamily,
+};
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
-    build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
-    generate_entry_id, CompactionResult, ContextState, PlanEventRef,
+    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, generate_entry_id,
+    CompactionResult, ContextState,
 };
 use crate::core::session::transcript::{
-    insert_entry_after_message_id, rewrite_message_text_entries_by_id, BranchSummaryEntry,
-    MessageTextRewrite, TranscriptEntry,
+    append_entry, entry_id, insert_entry_after_message_id, read_entries_tail,
+    rewrite_message_text_entries_by_id, BranchSummaryEntry, MessageTextRewrite, TranscriptEntry,
 };
+use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
+
 use crate::infra::error::AppError;
 
 use super::types::AgentLoop;
 
 const COMPACTABLE_TOOLS: &[&str] = &["read", "search_files", "bash", "task_output"];
+/// Build-mode folds the prefix captured at the 50% waterline, retaining the later half as the
+/// agent's working set. This is deliberately not a user configuration knob: its value is a
+/// policy trade-off, and cache/compaction observations decide whether it should become 0.25.
+const MIDTURN_FOLD_KEEP_RATIO: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GuardRoute {
@@ -140,6 +147,7 @@ async fn maybe_reduce_before_next_llm_inner(
         );
     }
     if matches!(decision.route, GuardRoute::Fits) {
+        start_midturn_preheat_if_needed(agent, messages)?;
         log_aggregate_precheck_decision(&decision);
         return Ok(Some(decision));
     }
@@ -168,7 +176,9 @@ async fn maybe_reduce_before_next_llm_inner(
     log_aggregate_precheck_decision(&decision);
 
     if mutated {
-        agent.emit_context_metrics();
+        // The reduction changed the request payload, so publish the new
+        // best-effort estimate. It is not a fresh provider Usage sample.
+        agent.emit_context_metrics(false);
     }
     Ok(Some(decision))
 }
@@ -232,15 +242,17 @@ pub(super) fn build_precheck_decision(
             .current_tail_compactable_min_chars,
     )
     .len();
-    let max_reducible = estimate_history_reduction_tokens(ctx_state, &agent.config.context_config)
-        + estimate_tail_reduction_tokens(
-            messages,
-            agent.start_idx.min(messages.len()),
-            agent
-                .config
-                .context_config
-                .current_tail_compactable_min_chars,
-        );
+    let history_end = agent.start_idx.min(messages.len());
+    let max_reducible =
+        estimate_history_reduction_tokens(messages, history_end, &agent.config.context_config)
+            + estimate_tail_reduction_tokens(
+                messages,
+                history_end,
+                agent
+                    .config
+                    .context_config
+                    .current_tail_compactable_min_chars,
+            );
     let (route, route_reason) = if ctx_state.preheat.is_finished() {
         // D3：预热收益一旦就绪，就优先尝试整条 Reduce 链路
         // （apply 历史 -> 历史再压 -> tail reduction），而不是先用纯理论
@@ -270,34 +282,36 @@ fn reduce_before_next_llm(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<ReductionResult, AppError> {
     let mut result = ReductionResult::default();
-
-    let applied_history = {
-        let Some(ctx_state) = agent.context_state.as_mut() else {
-            return Ok(result);
-        };
-        check_after_reply(ctx_state, &agent.emitter)
-    };
-    if applied_history {
-        rebuild_messages_from_context(agent, messages);
+    if apply_ready_preheat(agent, messages, None)? {
         result.mutated = true;
         if !context_is_over_budget(agent) {
             return Ok(result);
         }
     }
-
     let history_reduced = {
         let Some(ctx_state) = agent.context_state.as_mut() else {
             return Ok(result);
         };
-        let reduced = compact_tool_results(ctx_state, &agent.config.context_config);
-        if reduced > 0 {
+        let history_end = agent.start_idx.min(messages.len());
+        let placeholder = compact_tool_results(
+            ctx_state,
+            messages,
+            &agent.config.context_config,
+            history_end,
+        );
+        if placeholder.chars_freed > 0 {
             ctx_state.invalidate_api_usage();
         }
-        reduced
+        for tool_call_id in &placeholder.tool_call_ids {
+            agent
+                .config
+                .read_file_state
+                .invalidate_tool_call(tool_call_id);
+        }
+        placeholder.chars_freed
     };
     if history_reduced > 0 {
         result.freed_chars += history_reduced;
-        rebuild_messages_from_context(agent, messages);
         result.mutated = true;
         if !context_is_over_budget(agent) {
             return Ok(result);
@@ -323,6 +337,104 @@ fn reduce_before_next_llm(
     Ok(result)
 }
 
+/// A build's tool loop has no normal turn boundary, so its preheat must start from the guard's
+/// Fits path rather than `turn_finalize`. The snapshot ends at the current tool round; later
+/// tool calls stay raw when this preheated prefix is applied.
+fn start_midturn_preheat_if_needed(
+    agent: &mut AgentLoop,
+    messages: &mut [ChatMessage],
+) -> Result<(), AppError> {
+    let Some(ctx_state) = agent.context_state.as_ref() else {
+        return Ok(());
+    };
+    let usage_ratio = ctx_state.usage_ratio();
+    if usage_ratio < MIDTURN_FOLD_KEEP_RATIO || !ctx_state.preheat.is_idle() {
+        return Ok(());
+    }
+
+    if messages.is_empty() {
+        return Ok(());
+    }
+    ensure_working_message_ids(agent, messages)?;
+    let snapshot = messages.to_vec();
+    let transcript_path = ctx_state.transcript_path.clone();
+    let compaction_provider = agent.compaction_provider();
+    let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
+    let control_snapshot = agent
+        .config
+        .plan_runtime
+        .as_ref()
+        .map(|runtime| runtime.control_snapshot(Some(agent.wire_model())));
+    let emitter = std::sync::Arc::new(agent.emitter.clone());
+    let covered_count = snapshot.len();
+
+    let started = agent.context_state.as_mut().is_some_and(|ctx_state| {
+        ctx_state.preheat.try_start(
+            usage_ratio,
+            &snapshot,
+            &transcript_path,
+            cache_key,
+            compaction_provider,
+            agent.config.compaction_output_limit,
+            &agent.config.context_config,
+            emitter,
+            control_snapshot,
+        )
+    });
+    if started {
+        agent.emit_event(crate::infra::events::AgentEvent::AutoCompactionStart {
+            covered_count,
+            ratio_before: usage_ratio,
+        });
+    }
+    Ok(())
+}
+
+/// Apply a ready preheat directly to the sole working list.
+pub(super) fn apply_ready_preheat(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    min_ratio: Option<f64>,
+) -> Result<bool, AppError> {
+    let Some(ctx_state) = agent.context_state.as_ref() else {
+        return Ok(false);
+    };
+    if min_ratio.is_some_and(|minimum| ctx_state.usage_ratio() < minimum) {
+        return Ok(false);
+    }
+
+    let Some(result) = (match agent.context_state.as_mut() {
+        Some(ctx_state) if ctx_state.preheat.is_finished() => match ctx_state.preheat.poll_result()
+        {
+            crate::core::compaction::preheat::PreheatOutcome::Completed(result) => Some(result),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+
+    let boundary_env = BoundaryEnv {
+        config: &agent.config.context_config,
+        work_dir: Path::new(&agent.config.agent_trail_dir),
+        session_id: &agent.config.session_id,
+        read_file_state: agent.config.read_file_state.as_ref(),
+    };
+    let Some(ctx_state) = agent.context_state.as_mut() else {
+        return Ok(false);
+    };
+    Ok(crate::core::compaction::apply::apply_and_emit_boundary(
+        ctx_state,
+        messages,
+        result,
+        ctx_state.usage_ratio(),
+        false,
+        &agent.emitter,
+        &boundary_env,
+        &mut agent.start_idx,
+    ))
+}
+
 fn reduce_current_tail_messages(
     agent: &mut AgentLoop,
     messages: &mut [ChatMessage],
@@ -333,9 +445,13 @@ fn reduce_current_tail_messages(
     let tail_start = agent.start_idx.min(messages.len());
     let config = &agent.config.context_config;
     let work_dir = Path::new(&agent.config.agent_trail_dir);
+    // Step 0 changes a tool result into a durable file reference, so it still needs a targeted
+    // rewrite. Placeholder waves only change what the current LLM request sees.
     let mut transcript_rewrites = Vec::new();
     let mut result = TailReductionResult::default();
     let mut step0_reduced = false;
+    // 正文被换成引用/占位符的那些工具调用：这一轮结束前必须让它们的 read stamp 失效。
+    let mut evicted_tool_call_ids: Vec<String> = Vec::new();
 
     let initial_candidates = collect_tail_candidates(
         messages,
@@ -365,6 +481,7 @@ fn reduce_current_tail_messages(
             ) {
                 result.freed_chars += freed;
                 step0_reduced = true;
+                evicted_tool_call_ids.push(tool_call_id.clone());
                 ctx_state.rewrite_local_tail_chars(content.len(), text.len());
                 ctx_state.session_obs.tool_result_chars_persisted += persisted.original_chars;
                 if let Some(message_id) = &candidate.message_id {
@@ -387,8 +504,8 @@ fn reduce_current_tail_messages(
             ctx_state,
             messages,
             candidates_after_step0,
-            &mut transcript_rewrites,
             &mut result.freed_chars,
+            &mut evicted_tool_call_ids,
         );
         result
             .after_each_wave
@@ -415,8 +532,8 @@ fn reduce_current_tail_messages(
             ctx_state,
             messages,
             candidates,
-            &mut transcript_rewrites,
             &mut result.freed_chars,
+            &mut evicted_tool_call_ids,
         );
         result
             .after_each_wave
@@ -424,6 +541,12 @@ fn reduce_current_tail_messages(
     }
 
     rewrite_transcript_best_effort(&ctx_state.transcript_path, transcript_rewrites);
+    for tool_call_id in &evicted_tool_call_ids {
+        agent
+            .config
+            .read_file_state
+            .invalidate_tool_call(tool_call_id);
+    }
     Ok(result)
 }
 
@@ -476,11 +599,13 @@ fn collect_tail_candidates(
 }
 
 fn estimate_history_reduction_tokens(
-    state: &ContextState,
+    messages: &[ChatMessage],
+    history_end: usize,
     config: &crate::infra::config::ContextConfig,
 ) -> usize {
-    let protected_start = find_protected_turn_start(&state.messages, config.keep_recent_turns);
-    let reducible_chars: usize = state.messages[..protected_start]
+    let history = &messages[..history_end.min(messages.len())];
+    let protected_start = find_protected_turn_start(history, config.keep_recent_turns);
+    let reducible_chars: usize = history[..protected_start]
         .iter()
         .filter(|msg| msg.role == ChatMessageRole::Tool)
         .filter_map(|msg| msg.text_content())
@@ -511,36 +636,13 @@ fn find_protected_turn_start(messages: &[ChatMessage], keep_recent_turns: usize)
     let turn_starts: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter(|(_, msg)| {
-            (msg.role == ChatMessageRole::User && msg.kind != MessageKind::Steering)
-                || msg.kind == MessageKind::CompactionSummary
-        })
+        .filter(|(_, msg)| msg.starts_logical_turn())
         .map(|(idx, _)| idx)
         .collect();
     if turn_starts.len() <= keep_recent_turns {
         return 0;
     }
     turn_starts[turn_starts.len() - keep_recent_turns]
-}
-
-fn rebuild_messages_from_context(agent: &mut AgentLoop, messages: &mut Vec<ChatMessage>) {
-    let Some(ctx_state) = agent.context_state.as_ref() else {
-        return;
-    };
-    let tail = messages[agent.start_idx.min(messages.len())..].to_vec();
-    let mut rebuilt = Vec::new();
-    if messages
-        .first()
-        .is_some_and(|msg| msg.role == ChatMessageRole::System)
-    {
-        rebuilt.push(messages[0].clone());
-    }
-    rebuilt.extend(build_context_from_state(ctx_state));
-    let new_tail_start = rebuilt.len();
-    rebuilt.extend(tail);
-    *messages = rebuilt;
-    agent.start_idx = new_tail_start;
-    agent.context_tail_start = new_tail_start;
 }
 
 fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>) {
@@ -558,50 +660,99 @@ fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>
             new_content,
         })
         .collect();
-    if let Err(err) = rewrite_message_text_entries_by_id(path, &merged) {
+    if let Err(err) = crate::infra::config::lock::with_config_lock(path, || {
+        rewrite_message_text_entries_by_id(path, &merged)
+    }) {
         warn!(error = %err, "mid-turn transcript rewrite failed");
     }
 }
 
-async fn collapse_to_branch_summary(
+pub(super) async fn collapse_to_branch_summary(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {
     let plan_runtime = agent.config.plan_runtime.clone();
-    let latest_plan_event = agent
+    let session_model = agent.wire_model().to_string();
+    ensure_working_message_ids(agent, messages)?;
+    let transcript_path = agent
         .context_state
         .as_ref()
-        .and_then(|state| state.latest_plan_event.clone());
-    let mut working: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|msg| msg.role != ChatMessageRole::System)
-        .cloned()
-        .collect();
-    ensure_working_message_ids(agent, &mut working)?;
+        .map(|state| state.transcript_path.clone())
+        .unwrap_or_default();
+
     let compaction_provider = agent.compaction_provider();
-    let artifacts = build_collapse_summary_artifacts_for_test(
-        &working,
-        compaction_provider.as_ref(),
-        &agent.config.context_config.compaction_model,
-        plan_runtime.as_deref(),
-        latest_plan_event.as_ref(),
-    )
-    .await?;
+    let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
+    let request = CollapseSummaryRequest {
+        plan_runtime: plan_runtime.as_deref(),
+        session_model: Some(session_model.as_str()),
+        cache_key: cache_key.as_deref(),
+        resolved_output_limit: agent.config.compaction_output_limit,
+        transcript_path: (!transcript_path.as_os_str().is_empty())
+            .then_some(transcript_path.as_path()),
+    };
+    let cancel = agent.cancel_token.clone();
+    let summary_request = async {
+        let artifacts = match build_collapse_summary_artifacts(
+            messages,
+            compaction_provider.as_ref(),
+            &agent.config.context_config.compaction_model,
+            request,
+        )
+        .await
+        {
+            Ok(artifacts) => artifacts,
+            Err(error) if agent.config.context_config.compaction_model != session_model => {
+                let reason = super::error_classifier::err_snippet(&error.to_string());
+                agent.emit_event(crate::infra::events::AgentEvent::LlmNotice {
+                    finish_reason: "compaction_model_fallback".to_string(),
+                    message: crate::infra::i18n::tr(
+                        "agentLoop.compactionFallback",
+                        &[
+                            ("model", &agent.config.context_config.compaction_model),
+                            ("fallback", agent.catalog_id()),
+                            ("reason", &reason),
+                        ],
+                    ),
+                });
+                build_collapse_summary_artifacts(
+                    messages,
+                    agent.llm.as_ref(),
+                    &session_model,
+                    CollapseSummaryRequest {
+                        resolved_output_limit: None,
+                        ..request
+                    },
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
+        Ok::<_, AppError>(artifacts)
+    };
+    // Both proactive and overflow compaction share this cancellation boundary.
+    // Once artifacts are ready, join disk/sidecar publication and the memory update.
+    let artifacts = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(AppError::Llm("compaction cancelled".to_string())),
+        result = summary_request => result?,
+    };
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(());
     };
-    if let Err(err) = maybe_write_collapse_entry(
+    match maybe_write_collapse_entry(
         &ctx_state.transcript_path,
         &artifacts.covered_end_id,
         &artifacts.transcript_entry,
     ) {
-        warn!(error = %err, "collapse branch_summary transcript write failed");
+        Ok(()) => {
+            let _ = ensure_user_message_sidecar_current(&ctx_state.transcript_path).await;
+        }
+        Err(err) => warn!(error = %err, "collapse branch_summary transcript write failed"),
     }
 
     let summary_msg = artifacts.summary_message;
     let new_chars = estimate_msg_chars(&summary_msg);
     let saved_chars = ctx_state.estimate_context_chars.saturating_sub(new_chars);
-    ctx_state.messages = vec![summary_msg.clone()];
     ctx_state.estimate_context_chars = new_chars;
     ctx_state.invalidate_api_usage();
     ctx_state.preheat.abort();
@@ -609,18 +760,19 @@ async fn collapse_to_branch_summary(
         ctx_state.session_obs.compaction_count.saturating_add(1);
     ctx_state.session_obs.compaction_tokens_freed += estimated_tokens_from_chars(saved_chars);
 
-    let mut rebuilt = Vec::new();
-    if messages
-        .first()
-        .is_some_and(|msg| msg.role == ChatMessageRole::System)
-    {
-        rebuilt.push(messages[0].clone());
-    }
-    rebuilt.push(summary_msg);
-    *messages = rebuilt;
-    agent.start_idx = messages.len().saturating_sub(1);
-    agent.context_tail_start = agent.start_idx;
+    *messages = vec![summary_msg];
+    agent.start_idx = 1;
     Ok(())
+}
+
+/// 生成 collapse 摘要所需的可选运行时资料，集中传递避免 helper 位置参数继续增长。
+#[derive(Clone, Copy)]
+struct CollapseSummaryRequest<'a> {
+    plan_runtime: Option<&'a PlanRuntime>,
+    session_model: Option<&'a str>,
+    cache_key: Option<&'a str>,
+    resolved_output_limit: Option<u32>,
+    transcript_path: Option<&'a Path>,
 }
 
 #[doc(hidden)]
@@ -629,23 +781,51 @@ pub async fn build_collapse_summary_artifacts_for_test(
     llm: &dyn LlmProvider,
     compaction_model: &str,
     plan_runtime: Option<&PlanRuntime>,
-    latest_plan_event: Option<&PlanEventRef>,
+    session_model: Option<&str>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
-    let working: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|msg| msg.role != ChatMessageRole::System)
-        .cloned()
-        .collect();
-    let (covered_start_id, covered_end_id) = collapse_bounds(&working)
-        .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
-    let summary = generate_summary(&working, None, llm, compaction_model).await?;
-    let summary_text = format!(
-        "## Structured Summary\n{}\n\n## Execution Keepalive\n{}",
-        summary.trim(),
-        build_keepalive_snapshot(plan_runtime, latest_plan_event)
-    );
+    build_collapse_summary_artifacts(
+        messages,
+        llm,
+        compaction_model,
+        CollapseSummaryRequest {
+            plan_runtime,
+            session_model,
+            cache_key: None,
+            resolved_output_limit: None,
+            transcript_path: None,
+        },
+    )
+    .await
+}
+
+async fn build_collapse_summary_artifacts(
+    messages: &[ChatMessage],
+    llm: &dyn LlmProvider,
+    compaction_model: &str,
+    request: CollapseSummaryRequest<'_>,
+) -> Result<CollapseSummaryArtifacts, AppError> {
+    let (covered_start_id, covered_end_id) = collapse_bounds(messages)
+        .ok_or_else(|| AppError::Config("collapse is missing a message anchor".to_string()))?;
+    // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
+    // recent-files 也在同一个入口生成，避免不同 compaction 路径漏掉其中一块。
+    let control = request
+        .plan_runtime
+        .map(|rt| rt.control_snapshot(request.session_model));
+    let summary_text = generate_summary_with_output_limit(
+        messages,
+        None,
+        llm,
+        compaction_model,
+        control.as_ref(),
+        SummaryRequestOptions {
+            cache_key: request.cache_key,
+            resolved_output_limit: request.resolved_output_limit,
+            transcript_path: request.transcript_path,
+        },
+    )
+    .await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
-    let covered_count = working
+    let covered_count = messages
         .iter()
         .filter(|msg| msg.kind != MessageKind::CompactionSummary)
         .count();
@@ -664,9 +844,10 @@ pub async fn build_collapse_summary_artifacts_for_test(
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     let summary_message = apply_collapse_summary(
-        &working,
+        messages,
         &summary_text,
         &covered_start_id,
         &covered_end_id,
@@ -690,7 +871,19 @@ fn maybe_write_collapse_entry(
     if path.as_os_str().is_empty() {
         return Ok(());
     }
-    insert_entry_after_message_id(path, anchor_id, entry)
+    let _guard = crate::infra::config::lock::acquire_config_lock(path)?;
+    // Collapse normally covers through the current durable tail, so its boundary can be appended
+    // in O(1), like /compact and Scheme E preheat. Retain anchor insertion only for an extreme
+    // interleaving where another transcript entry arrived while the summary LLM call was running.
+    let tail_is_anchor = read_entries_tail(path, 1)?
+        .last()
+        .and_then(entry_id)
+        .is_some_and(|id| id == anchor_id);
+    if tail_is_anchor {
+        append_entry(path, entry)
+    } else {
+        insert_entry_after_message_id(path, anchor_id, entry)
+    }
 }
 
 fn apply_collapse_summary(
@@ -701,8 +894,9 @@ fn apply_collapse_summary(
     entry_id: &str,
 ) -> Result<ChatMessage, AppError> {
     let total_chars: usize = working.iter().map(estimate_msg_chars).sum();
+    let mut messages = working.to_vec();
     let mut temp = ContextState {
-        messages: working.to_vec(),
+        messages: Vec::new(),
         estimate_context_chars: total_chars,
         context_budget_chars: total_chars,
         context_budget_tokens: 1,
@@ -710,22 +904,28 @@ fn apply_collapse_summary(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
     };
-    temp.apply_boundary(CompactionResult {
-        summary_text: summary_text.to_string(),
-        covered_start_id: covered_start_id.to_string(),
-        covered_end_id: covered_end_id.to_string(),
-        covered_count: working.len(),
-        transcript_compaction_entry_id: Some(entry_id.to_string()),
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        preheat_elapsed_ms: 0,
-    })?;
-    temp.messages
+    let mut turn_start = messages.len();
+    temp.apply_boundary(
+        &mut messages,
+        CompactionResult {
+            summary_text: summary_text.to_string(),
+            covered_start_id: covered_start_id.to_string(),
+            covered_end_id: covered_end_id.to_string(),
+            covered_count: working.len(),
+            transcript_compaction_entry_id: Some(entry_id.to_string()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 0,
+        },
+        &mut turn_start,
+    )?;
+    messages
         .into_iter()
         .next()
         .ok_or_else(|| AppError::internal("collapse summary missing"))
@@ -744,7 +944,7 @@ fn collapse_bounds(working: &[ChatMessage]) -> Option<(String, String)> {
     Some((start, end))
 }
 
-fn ensure_working_message_ids(
+pub(super) fn ensure_working_message_ids(
     agent: &AgentLoop,
     working: &mut [ChatMessage],
 ) -> Result<(), AppError> {
@@ -764,11 +964,16 @@ fn apply_placeholder_wave(
     ctx_state: &mut ContextState,
     messages: &mut [ChatMessage],
     candidates: Vec<TailCandidate>,
-    transcript_rewrites: &mut Vec<MessageTextRewrite>,
     freed_chars: &mut usize,
+    evicted_tool_call_ids: &mut Vec<String>,
 ) {
     let wave = std::cmp::max(1, candidates.len() / 2);
+    let chars_before = *freed_chars;
+    let mut rewritten_messages = Vec::new();
     for candidate in candidates.into_iter().take(wave) {
+        if let Some(id) = messages[candidate.msg_idx].tool_call_id.clone() {
+            evicted_tool_call_ids.push(id);
+        }
         let Some(text) = text_content_mut(&mut messages[candidate.msg_idx]) else {
             continue;
         };
@@ -776,12 +981,21 @@ fn apply_placeholder_wave(
         *text = TOOL_RESULT_PLACEHOLDER.to_string();
         *freed_chars += old_len.saturating_sub(text.len());
         ctx_state.rewrite_local_tail_chars(old_len, text.len());
-        if let Some(message_id) = candidate.message_id {
-            transcript_rewrites.push(MessageTextRewrite {
-                message_id,
-                new_content: text.clone(),
-            });
-        }
+        rewritten_messages.push(
+            candidate
+                .message_id
+                .unwrap_or_else(|| "<unpersisted>".to_string()),
+        );
+    }
+    let chars_freed = (*freed_chars).saturating_sub(chars_before);
+    if chars_freed > 0 {
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "tool_results_marked_compacted",
+            operation = "apply_placeholder_wave",
+            chars_freed,
+            rewritten_messages = ?rewritten_messages,
+        );
     }
 }
 
@@ -816,85 +1030,6 @@ fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
     );
 }
 
-fn build_keepalive_snapshot(
-    plan_runtime: Option<&PlanRuntime>,
-    latest_plan_event: Option<&PlanEventRef>,
-) -> String {
-    let Some(plan_runtime) = plan_runtime else {
-        return format!(
-            "- mode: chat\n- active_plan_path: (none)\n- active_plan_id: (none)\n- current_step: (none)\n- pending_work: (none)\n- latest_plan_event: {}",
-            format_plan_event(latest_plan_event)
-        );
-    };
-    let mode = plan_runtime.mode();
-    let active_plan_path = plan_runtime
-        .active_plan_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "(none)".to_string());
-    let active_plan_id = mode
-        .active_plan_id()
-        .map(str::to_string)
-        .or_else(|| plan_runtime.active_planning_plan_id())
-        .unwrap_or_else(|| "(none)".to_string());
-    let todos = match mode {
-        crate::core::plan_runtime::PlanState::Planning => plan_runtime.snapshot_session_todos(),
-        crate::core::plan_runtime::PlanState::Executing { .. }
-        | crate::core::plan_runtime::PlanState::Pending { .. } => plan_runtime
-            .active_plan_path()
-            .and_then(|path| read_plan(&path).ok())
-            .map(|plan| plan.frontmatter.todos)
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    format!(
-        "- mode: {}\n- active_plan_path: {}\n- active_plan_id: {}\n- current_step: {}\n- pending_work: {}\n- latest_plan_event: {}",
-        mode.as_str(),
-        active_plan_path,
-        active_plan_id,
-        pick_current_step(&todos),
-        format_pending_work(&todos),
-        format_plan_event(latest_plan_event)
-    )
-}
-
-fn pick_current_step(todos: &[TodoItem]) -> String {
-    todos
-        .iter()
-        .find(|todo| todo.status == TodoStatus::InProgress)
-        .or_else(|| todos.iter().find(|todo| todo.status == TodoStatus::Pending))
-        .map(|todo| todo.content.clone())
-        .unwrap_or_else(|| "(none)".to_string())
-}
-
-fn format_pending_work(todos: &[TodoItem]) -> String {
-    let items: Vec<String> = todos
-        .iter()
-        .filter(|todo| matches!(todo.status, TodoStatus::Pending | TodoStatus::InProgress))
-        .take(5)
-        .map(|todo| format!("{} [{}]", todo.content, todo.status.as_str()))
-        .collect();
-    if items.is_empty() {
-        "(none)".to_string()
-    } else {
-        items.join(" | ")
-    }
-}
-
-fn format_plan_event(event: Option<&crate::core::session::manager::PlanEventRef>) -> String {
-    let Some(event) = event else {
-        return "(none)".to_string();
-    };
-    let kind = match event.kind {
-        crate::core::session::manager::PlanEventKind::Create => "create",
-        crate::core::session::manager::PlanEventKind::Build => "build",
-        crate::core::session::manager::PlanEventKind::Update => "update",
-    };
-    format!("{kind}:{}:{}", event.plan_id, event.path.display())
-}
-
 fn text_content_mut(msg: &mut ChatMessage) -> Option<&mut String> {
-    match msg.content.as_mut() {
-        Some(crate::core::llm::ChatMessageContent::Text(text)) => Some(text),
-        _ => None,
-    }
+    msg.text_content_mut()
 }

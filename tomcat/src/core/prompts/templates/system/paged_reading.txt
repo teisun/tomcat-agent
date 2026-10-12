@@ -1,3 +1,8 @@
 - When you see "[Tool result persisted: <path>]", the original content has been saved to disk.
   You can read specific portions using read with offset and limit parameters.
-  Do NOT re-read the entire file; read only the relevant sections you need.
+  Do NOT re-read the whole persisted result; read only the sections you need.
+- Reading a fresh file is the opposite case: one read costs one round-trip no matter how
+  wide the window, so read wide enough to answer your question in one call (300-1200
+  lines is the useful range; beyond roughly 1400 lines the result is persisted to disk
+  and you only get a preview). Repeatedly reading 20-60 line windows of the same file is
+  a failure mode.

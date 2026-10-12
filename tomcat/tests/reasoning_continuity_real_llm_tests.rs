@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tomcat::core::llm::{ContinuityMetadata, ReasoningContinuation};
 use tomcat::{
-    build_context_from_state, init_context_state, AppConfig, AppError, ChatMessage, ChatRequest,
-    ContextConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
+    init_context_state, AppConfig, AppError, ChatMessage, ChatRequest, ContextConfig, LlmProvider,
+    SessionManager, StreamEvent, TranscriptEntry,
 };
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -178,7 +178,14 @@ fn merge_tool_call_delta(
 fn finalized_tool_calls(tool_calls: Vec<ToolCallAccum>) -> Vec<Value> {
     tool_calls
         .into_iter()
-        .filter(|tool_call| tool_call.name.is_some())
+        // Match the AgentLoop's acceptance rule: a blank name is not a
+        // executable/replayable tool call and must never become invalid wire.
+        .filter(|tool_call| {
+            tool_call
+                .name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+        })
         .map(|tool_call| {
             json!({
                 "id": tool_call.id.unwrap_or_else(|| "call_missing".to_string()),
@@ -258,6 +265,7 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
     let fixture = openai_responses_continuity_config();
     let config = &fixture.config;
     let call = common::resolve_main_call(config);
+    let expected_provider = call.provider.clone();
     let provider = call.provider_impl;
     let model = call.model;
     let prompt =
@@ -271,9 +279,13 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                 model: model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )
@@ -293,7 +305,10 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
             );
             continue;
         };
-        assert_eq!(reasoning_continuation.source_provider, "openai");
+        assert_eq!(
+            reasoning_continuation.source_provider, expected_provider,
+            "continuation 必须如实记录产生 opaque reasoning items 的已解析 provider"
+        );
         assert_eq!(reasoning_continuation.source_api, "responses");
         assert!(
             reasoning_continuation
@@ -323,9 +338,13 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                 model: model.clone(),
                 temperature: None,
                 max_tokens: Some(128),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )
@@ -359,9 +378,13 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -430,9 +453,13 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )
@@ -451,15 +478,13 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
 }
 
 #[tokio::test]
-async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn mimo_chat_roundtrip_replays_reasoning_content() -> Result<(), Box<dyn std::error::Error>> {
     require_api_key("MIMO_API_KEY");
 
     let fixture = mimo_continuity_config();
     let config = &fixture.config;
     let provider = common::resolve_main_provider(config);
-    let prompt =
-        "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
+    let prompt = "Explain why 3 * 7 equals 21 in one short sentence.";
 
     for attempt in 1..=DEEPSEEK_CAPTURE_ATTEMPTS {
         let first_turn = capture_stream_turn(
@@ -469,36 +494,30 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
-                tools: Some(weather_tool_definitions()),
+                speed: None,
+                cache_key: None,
+                tools: None,
             },
         )
         .await?;
 
         let Some(reasoning_continuation) = first_turn.reasoning_continuation.clone() else {
-            tracing::warn!(
-                attempt,
-                "MiMo tool turn 未返回 continuity snapshot，重试捕获"
-            );
+            tracing::warn!(attempt, "MiMo 未返回 continuity snapshot，重试捕获");
             continue;
         };
         let Some(continuity) = first_turn.continuity.clone() else {
-            tracing::warn!(
-                attempt,
-                "MiMo tool turn 未返回 continuity metadata，重试捕获"
-            );
+            tracing::warn!(attempt, "MiMo 未返回 continuity metadata，重试捕获");
             continue;
         };
-        if first_turn.tool_calls.is_empty() {
-            tracing::warn!(attempt, "MiMo 首轮未触发 tool call，重试捕获");
-            continue;
-        }
 
         assert!(
-            continuity.had_tool_call,
-            "MiMo tool turn continuity 应标记 had_tool_call=true"
+            !continuity.had_tool_call,
+            "MiMo reasoning-only turn without tools must not claim a tool call"
         );
         assert_eq!(reasoning_continuation.source_provider, "mimo");
         assert_eq!(reasoning_continuation.source_api, "chat_completions");
@@ -509,55 +528,42 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
             "MiMo continuity snapshot 应携带 reasoning_content"
         );
 
-        let tool_call_id = first_turn.tool_calls[0]["id"]
-            .as_str()
-            .expect("tool_call id missing")
-            .to_string();
-        let assistant = ChatMessage::assistant_with_tool_calls(
-            (!first_turn.assistant_text.trim().is_empty())
-                .then_some(first_turn.assistant_text.as_str()),
-            first_turn.tool_calls.clone(),
-        )
-        .with_reasoning_state(
-            first_turn.thinking_text.clone(),
-            Some(reasoning_continuation),
-            Some(continuity),
-        );
+        let assistant = ChatMessage::assistant(first_turn.assistant_text.clone())
+            .with_reasoning_state(
+                first_turn.thinking_text.clone(),
+                Some(reasoning_continuation),
+                Some(continuity),
+            );
         let second = run_chat(
             provider.clone(),
             ChatRequest {
                 messages: vec![
                     ChatMessage::user(prompt),
                     assistant,
-                    ChatMessage::tool(
-                        &tool_call_id,
-                        r#"{"city":"Hangzhou","day":"tomorrow","forecast":"sunny 25C"}"#,
-                    ),
-                    ChatMessage::user(
-                        "Do not call any more tools. Answer directly in one short sentence.",
-                    ),
+                    ChatMessage::user("Answer directly in one short sentence."),
                 ],
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )
         .await?;
         assert!(
             !second.choices.is_empty(),
-            "MiMo tool-turn continuity replay 第二轮应返回 choices"
+            "MiMo reasoning continuity replay 第二轮应返回 choices"
         );
         return Ok(());
     }
 
-    Err(
-        std::io::Error::other("MiMo 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot")
-            .into(),
-    )
+    Err(std::io::Error::other("MiMo 在两次尝试后仍未拿到 reasoning continuity snapshot").into())
 }
 
 #[tokio::test]
@@ -586,9 +592,13 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -669,13 +679,17 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
         let second = run_chat(
             provider.clone(),
             ChatRequest {
-                messages: build_context_from_state(&state),
+                messages: state.messages.clone(),
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(false),
                 model_override: entry.model_override.clone(),
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )
@@ -715,9 +729,13 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -775,9 +793,13 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(true),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )
@@ -832,9 +854,13 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
+                resolved_output_limit: None,
+                diagnostic_request_id: None,
                 stream: Some(false),
                 model_override: None,
                 thinking_level: None,
+                speed: None,
+                cache_key: None,
                 tools: None,
             },
         )

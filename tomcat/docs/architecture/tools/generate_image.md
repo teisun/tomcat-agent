@@ -312,7 +312,7 @@
 │  • generate_image_parameters(): prompt + action + image_path? + size? ...  │
 │  • 元数据: scope=Read, read_only=false, category=Exec, plan_only=false     │
 └───────────────────────────────┬────────────────────────────────────────────┘
-        │ visible_tools_for_mode_with_policy 过滤后给 LLM
+        │ stable ToolSurface 下发给 LLM；handler 再按会话状态执行 policy
         ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  src/core/agent_loop/tool_exec/  (目录模块)                                 │

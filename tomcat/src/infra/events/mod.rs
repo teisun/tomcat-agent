@@ -72,6 +72,10 @@ use crate::core::tools::primitive::FileDiffLine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
 pub mod wire {
     // --- AgentEvent（`#[serde(tag = "type", rename_all = "snake_case")]` 下的线格式名）---
@@ -138,18 +142,29 @@ pub mod wire {
     pub const WIRE_PLAN_CREATE: &str = "plan.create";
     /// `/plan build` 成功把 plan 绑定到当前 runtime 并把盘 state 切到 `executing`。
     pub const WIRE_PLAN_BUILD: &str = "plan.build";
-    /// `/plan` 进入 Planning 模式。
+    /// `/plan` 进入 Planning 模式。仅为兼容旧 transcript 保留读取，不再写入。
     pub const WIRE_PLAN_ENTER: &str = "plan.enter";
-    /// `/plan exit` 退回 Chat 模式。
+    /// `/plan exit` 退回 Chat 模式。仅为兼容旧 transcript 保留读取，不再写入。
     pub const WIRE_PLAN_EXIT: &str = "plan.exit";
+    /// 会话交互模式发生变化。payload 带 `agentMode: "chat" | "plan"`。
+    ///
+    /// 计划文件事件不得再借用这一职责；它们只描述计划文件的生命周期。
+    pub const WIRE_SESSION_AGENT_MODE_CHANGED: &str = "session.agent_mode.changed";
     /// `update_plan` 成功写盘（普通更新 / reopen / finalize 收口都复用此事件）。
     pub const WIRE_PLAN_UPDATE: &str = "plan.update";
     /// 已完成 / 中断后的 plan 被 reopen 到 `pending`。
     pub const WIRE_PLAN_PENDING: &str = "plan.pending";
+    /// Unattended execution ended before plan completion and control was returned to the user.
+    pub const WIRE_PLAN_STALLED: &str = "plan.stalled";
+    /// plan reviewer 子 Agent 派发成功，父侧记住 child 指针。
+    pub const WIRE_PLAN_REVIEW_STARTED: &str = "plan.review.started";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
-    /// verifier 前 code reviewer 子 Agent 返回。
+    /// verifier 前 code reviewer 子 Agent 派发成功，父侧记住 child 指针。
+    pub const WIRE_PLAN_CODE_REVIEW_STARTED: &str = "plan.code_review.started";
     pub const WIRE_PLAN_CODE_REVIEW: &str = "plan.code_review";
+    /// `dispatch_agent` 派发 explorer 子 Agent 成功，父侧记住 child 指针。
+    pub const WIRE_PLAN_EXPLORER_STARTED: &str = "plan.explorer.started";
     /// verifier 子 Agent 返回（含 `verdict=aborted` / `partial` / `fail` 分支）。
     pub const WIRE_PLAN_VERIFY: &str = "plan.verify";
     /// reviewer parse 失败 / 超 `max_review_rounds` 软上限时的告警。
@@ -165,6 +180,11 @@ pub mod wire {
     pub const WIRE_PLAN_PANEL: &str = "plan.panel";
     /// PlanRuntime `mode → completed` 派生时落痕。
     pub const WIRE_PLAN_COMPLETE: &str = "plan.complete";
+    /// 会话恢复时模式判定走了兜底推断（sidecar 无 agent_mode，或记录的计划文件已不可读），
+    /// 记录最终落到哪个模式以及依据，便于用户在 UI 上看见"为什么不是我离开时那个模式"。
+    pub const WIRE_PLAN_RESTORE: &str = "plan.restore";
+    /// code review 轮次预算用尽但仍有未清 finding，交还用户。
+    pub const WIRE_PLAN_CODE_REVIEW_EXHAUSTED: &str = "plan.code_review.exhausted";
     /// session 标题异步 LLM 覆盖后推送。
     pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
     /// `todos` 工具写入 session scratchpad 后推送。
@@ -173,6 +193,8 @@ pub mod wire {
     pub const WIRE_TURN_SUMMARY_UPDATED: &str = "turn.summary_updated";
     /// 单条工具（bash）标题异步 utility 覆盖后推送。
     pub const WIRE_TOOL_SUMMARY_UPDATED: &str = "tool.summary_updated";
+    /// 后台 bash 任务真正结束后推送，供前端把 bash 卡片从 loading 翻成完成。
+    pub const WIRE_BACKGROUND_TASK_FINISHED: &str = "background_task_finished";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";
@@ -231,6 +253,27 @@ pub enum ToolDisplay {
         removed: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<Vec<FileDiffLine>>,
+        /// Inline diff reached its rendering budget. Any retained prefix is safe to show,
+        /// but the host must identify it as incomplete.
+        #[serde(
+            default,
+            rename = "diffTruncated",
+            alias = "diff_truncated",
+            skip_serializing_if = "is_false"
+        )]
+        diff_truncated: bool,
+        /// Historical diff payload was compacted after its retention window elapsed.
+        #[serde(default, skip_serializing_if = "is_false")]
+        expired: bool,
+    },
+    /// 一次调用碰了多个文件（批量 `read` / `edit`）。折叠时看 summary，展开时逐文件；
+    /// 失败项必须留在列表里 —— 只报成功的那几个会让人以为整批都成了。
+    Files {
+        summary: String,
+        files: Vec<ToolDisplayFileEntry>,
+        /// Every file diff in this historical batch was compacted after retention elapsed.
+        #[serde(default, skip_serializing_if = "is_false")]
+        expired: bool,
     },
     Plan {
         plan: String,
@@ -238,6 +281,50 @@ pub enum ToolDisplay {
     Text {
         text: String,
     },
+}
+
+/// [`ToolDisplay::Files`] 里的单个文件条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ToolDisplayFileEntry {
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Vec<FileDiffLine>>,
+    /// Inline diff reached its rendering budget.
+    #[serde(
+        default,
+        rename = "diffTruncated",
+        alias = "diff_truncated",
+        skip_serializing_if = "is_false"
+    )]
+    pub diff_truncated: bool,
+    /// Historical diff payload was compacted after its retention window elapsed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expired: bool,
+    /// 批量 `read` 用：这一段的行号区间，例如 `L1-900 (900 lines)`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    /// 缺省表示「正常，无需强调」（批量 read 的普通条目）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ToolDisplayFileStatus>,
+    /// 失败原因或跳过原因。`status` 为 `Failed` / `Skipped` 时必有值。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// [`ToolDisplayFileEntry::status`]：这个文件在这次调用里的结局。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDisplayFileStatus {
+    /// 改动已落盘。
+    Applied,
+    /// 这个文件失败了，磁盘内容保持原样。
+    Failed,
+    /// 没轮到它（批量 read 的输出预算用尽）。
+    Skipped,
 }
 
 /// transcript `Custom` 行里 plan.* 事件共用的最小 payload。
@@ -309,6 +396,27 @@ impl<'a> ExtensionWireEnvelope<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentIdleOutcome {
+    Completed,
+    Interrupted,
+    Failed,
+}
+
+/// Reference-only tool media, shared by live events and history attachment views.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolMediaRef {
+    InputImageRef {
+        #[serde(rename = "blobSha")]
+        blob_sha: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        bytes: u64,
+    },
+}
+
 /// 宿主侧流式/UI 与生命周期事件，供前端或日志消费。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -327,7 +435,14 @@ pub enum AgentEvent {
     /// - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。
     ///
     /// 该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。
-    AgentIdle,
+    AgentIdle {
+        outcome: AgentIdleOutcome,
+    },
+    /// Input was archived and appended at a safe point, not necessarily answered yet.
+    SteeringConsumed {
+        #[serde(rename = "userMessageIds")]
+        user_message_ids: Vec<String>,
+    },
     TurnStart {
         #[serde(rename = "turnIndex")]
         turn_index: usize,
@@ -412,6 +527,8 @@ pub enum AgentEvent {
         result: ToolOutput,
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<ToolDisplay>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<ToolMediaRef>,
         #[serde(rename = "isError")]
         is_error: bool,
     },
@@ -480,12 +597,29 @@ pub enum AgentEvent {
         input_tokens_used: usize,
         #[serde(rename = "contextUtilizationRatio")]
         context_utilization_ratio: f64,
+        /// `true` only after the provider has returned usage for this loaded context.
+        /// `false` means the ratio is the pre-request chars/4 fallback estimate.
+        #[serde(rename = "providerUsageMeasured")]
+        provider_usage_measured: bool,
         #[serde(rename = "compactionCount")]
         compaction_count: u32,
         #[serde(rename = "compactionTokensFreed")]
         compaction_tokens_freed: usize,
         #[serde(rename = "totalToolResultBytesPersisted")]
         total_tool_result_bytes_persisted: usize,
+        #[serde(rename = "promptTokensTotal")]
+        prompt_tokens_total: u64,
+        #[serde(rename = "cacheReadTokensTotal")]
+        cache_read_tokens_total: u64,
+        /// `None` means the provider has not reported cache-read usage yet.
+        #[serde(rename = "cacheHitRatio", skip_serializing_if = "Option::is_none")]
+        cache_hit_ratio: Option<f64>,
+        #[serde(rename = "consecutiveMissMax")]
+        consecutive_miss_max: u32,
+        #[serde(rename = "tailChangedCount")]
+        tail_changed_count: u32,
+        #[serde(rename = "tailChangeMissTokens")]
+        tail_change_miss_tokens: u64,
         #[serde(rename = "preheatInProgress")]
         preheat_in_progress: bool,
         #[serde(rename = "preheatResultPending")]
@@ -527,7 +661,7 @@ pub enum AgentEvent {
         #[serde(rename = "estimatedTokensFreed")]
         estimated_tokens_freed: usize,
     },
-    /// L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。
+    /// L0 落盘 + 占位符在成功 boundary 应用后的释放估算 tokens（不计入 L1/L2）。
     Layer0ContextRelease {
         #[serde(rename = "persistTokensFreed")]
         persist_tokens_freed: usize,

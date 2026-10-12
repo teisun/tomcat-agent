@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { useLocale, useT } from "../i18n/LocaleProvider";
+import type { Locale, Translator } from "../../../src/shared/i18n";
 
-import type { WebviewMessageBlock, WebviewToolCard } from "../types";
+import type { WebviewMediaRoot, WebviewMessageBlock, WebviewToolCard } from "../types";
+import { GroupActivityTicker } from "./GroupActivityTicker";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { buildToolCollectionTitle, isSuppressedPlanToolRow, ToolRow } from "./ToolRow";
+import { buildToolCollectionTitle, ToolRow } from "./ToolRow";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 
 function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): boolean {
@@ -17,49 +20,58 @@ function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): bo
 function groupHeaderTitle(
   group: AssistantResponseGroup,
   isStreaming: boolean,
+  t: Translator,
+  locale: Locale,
 ): { shimmer: boolean; text: string } {
   const summaryTitle = group.thinking?.summaryTitle ?? null;
-  if (summaryTitle && group.tools.length > 0 && !isDirtySummaryTitle(summaryTitle, group.tools)) {
-    return { shimmer: false, text: summaryTitle };
+  if (summaryTitle && (group.tools.length === 0 || !isDirtySummaryTitle(summaryTitle, group.tools))) {
+    return { shimmer: isStreaming, text: summaryTitle };
   }
   if (group.tools.length > 0) {
-    return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools) };
+    return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools, t, locale) };
   }
-  return { shimmer: isStreaming, text: "Thinking" };
+  return { shimmer: isStreaming, text: t("thinking.title") };
 }
 
-function shouldHideGroupedToolRow(tool: WebviewToolCard): boolean {
-  return isSuppressedPlanToolRow(tool);
-}
+type ThinkingGroupProps = {
+  group: AssistantResponseGroup;
+  isLive?: boolean;
+  isStreaming?: boolean;
+  mediaRoots?: WebviewMediaRoot[];
+  onOpenFile(path: string, line?: number): void;
+  onOpenDiff?(toolCallId: string): void;
+  onOpenImagePreview?(attachmentId: string): void;
+  onZoomImage?(image: { alt: string; src: string }): void;
+};
 
-export function ThinkingGroup({
+function ThinkingGroupComponent({
   group,
+  isLive = false,
   isStreaming = false,
+  mediaRoots,
   onOpenFile,
   onOpenDiff,
-}: {
-  group: AssistantResponseGroup;
-  isStreaming?: boolean;
-  onOpenFile(path: string): void;
-  onOpenDiff?(toolCallId: string): void;
-}) {
+  onOpenImagePreview,
+  onZoomImage,
+}: ThinkingGroupProps) {
+  const t = useT();
+  const locale = useLocale();
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
-  const [collapsed, setCollapsed] = useState(!streaming);
+  const [collapsed, setCollapsed] = useState(true);
 
   useEffect(() => {
-    setCollapsed(!streaming);
-  }, [group.assistantMessageId, streaming]);
+    setCollapsed(true);
+  }, [group.assistantMessageId]);
 
-  const header = useMemo(() => groupHeaderTitle(group, isStreaming), [group, isStreaming]);
-  const statusIconClass = isStreaming
-    ? "tc-thinking-box__status codicon codicon-loading tc-codicon-spin"
-    : group.tools.length > 0
+  const header = useMemo(() => groupHeaderTitle(group, isStreaming, t, locale), [group, isStreaming, t, locale]);
+  const statusIconClass =
+    group.tools.length > 0
       ? "tc-thinking-box__status codicon codicon-search"
       : "tc-thinking-box__status codicon codicon-lightbulb";
 
   const preamble = group.preamble;
   const thinking = group.thinking;
-  const tools = group.tools.filter((tool) => !shouldHideGroupedToolRow(tool));
+  const tools = group.tools;
 
   return (
     <section
@@ -68,7 +80,12 @@ export function ThinkingGroup({
       data-testid="thinking-group"
     >
       {preamble ? (
-        <MessageBubble item={preamble as WebviewMessageBlock} />
+        <MessageBubble
+          item={preamble as WebviewMessageBlock}
+          mediaRoots={mediaRoots}
+          onOpenFile={onOpenFile}
+          onZoomImage={onZoomImage}
+        />
       ) : null}
       <div className="tc-thinking-list">
         <button
@@ -85,22 +102,27 @@ export function ThinkingGroup({
               data-testid="thinking-group-status"
             />
             <span
-              className={`tc-thinking__title${header.shimmer ? " tc-thinking__title--shimmer" : ""}`}
+              className={`tc-thinking__title tc-thinking-box__title${header.shimmer ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
               data-testid="thinking-group-title"
+              title={header.text}
             >
               {header.text}
             </span>
           </span>
           <span className="tc-thinking-box__caret">{collapsed ? "▸" : "▾"}</span>
         </button>
+        {collapsed && tools.length > 0 ? (
+          <GroupActivityTicker isLive={isLive} tools={tools} />
+        ) : null}
         {collapsed ? null : (
           <>
-            {thinking ? <ThinkingBlock item={thinking} variant="embedded" /> : null}
+            {thinking ? <ThinkingBlock item={thinking} onOpenFile={onOpenFile} variant="embedded" /> : null}
             {tools.map((tool: WebviewToolCard) => (
               <ToolRow
                 item={tool}
                 key={tool.id}
                 onOpenDiff={onOpenDiff}
+                onOpenImagePreview={onOpenImagePreview}
                 onOpenFile={onOpenFile}
                 variant="grouped"
               />
@@ -111,3 +133,26 @@ export function ThinkingGroup({
     </section>
   );
 }
+
+function sameTools(left: WebviewToolCard[], right: WebviewToolCard[]): boolean {
+  return left.length === right.length && left.every((tool, index) => tool === right[index]);
+}
+
+function areThinkingGroupPropsEqual(prev: ThinkingGroupProps, next: ThinkingGroupProps): boolean {
+  return (
+    prev.group.assistantMessageId === next.group.assistantMessageId &&
+    prev.group.preamble === next.group.preamble &&
+    prev.group.thinking === next.group.thinking &&
+    sameTools(prev.group.tools, next.group.tools) &&
+    prev.isLive === next.isLive &&
+    prev.isStreaming === next.isStreaming &&
+    prev.mediaRoots === next.mediaRoots &&
+    prev.onOpenDiff === next.onOpenDiff &&
+    prev.onOpenImagePreview === next.onOpenImagePreview &&
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onZoomImage === next.onZoomImage
+  );
+}
+
+export const ThinkingGroup = memo(ThinkingGroupComponent, areThinkingGroupPropsEqual);
+ThinkingGroup.displayName = "ThinkingGroup";

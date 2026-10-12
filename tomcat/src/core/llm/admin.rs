@@ -9,16 +9,26 @@ use std::time::{Duration, Instant};
 use crate::core::llm::auth::{
     env_name_for_provider, key_present_for_env, refresh_managed_credentials,
 };
+use crate::core::session::{
+    clear_model_overrides_in_store, precheck_model_override_store, ModelPrefsStore,
+};
 use crate::infra::config::{
-    get_work_dir, read_env_entries, write_default_model, write_env_entries,
+    clear_model_references, get_work_dir, read_env_entries, write_default_model, write_env_entries,
+    ThinkingConfig,
 };
 use crate::infra::platform::write_file_atomic;
 use crate::{AppConfig, AppError};
 
 use super::catalog::{
-    load_user_models_file, render_user_models_file, Capabilities, ModelCatalog, ModelEntry,
-    PartialCapabilities, UserModelEntry, UserModelsFile,
+    load_user_models_file, render_user_models_file, validate_context_window_options,
+    validate_supported_speeds, Capabilities, ModelCatalog, ModelEntry, PartialCapabilities,
+    UserModelEntry, UserModelsFile,
 };
+use super::thinking_policy::{
+    clamp_reasoning_level, default_thinking_format_for_api, normalize_supported_reasoning_levels,
+    resolve_request_fields, safe_supported_reasoning_levels_for, ThinkingFormat,
+};
+use super::Speed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +52,22 @@ pub struct ModelView {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub context_window_options: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
+    #[serde(default)]
+    pub supported_speeds: Vec<Speed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_speed: Option<Speed>,
     pub source: ModelSource,
     pub api_key_env: String,
     pub key_present: bool,
@@ -64,7 +90,23 @@ pub struct ModelEntryInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_options: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_reasoning_levels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_speeds: Option<Vec<Speed>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpsertModelResult {
+    pub model: ModelView,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -102,6 +144,18 @@ impl ModelView {
             capabilities: entry.capabilities.clone(),
             thinking_format: entry.thinking_format.clone(),
             context_window: entry.context_window,
+            context_window_options: entry.context_window_options.clone(),
+            selected_context_window: None,
+            selected_reasoning_level: None,
+            description: entry.description.clone().or_else(|| {
+                catalog
+                    .is_builtin_seed(&entry.id)
+                    .then(|| tr(&format!("model.description.{}", entry.id), &[]))
+            }),
+            max_output_tokens: entry.max_output_tokens,
+            supported_reasoning_levels: entry.supported_reasoning_levels.clone(),
+            supported_speeds: entry.supported_speeds.clone(),
+            selected_speed: entry.resolve_speed(Speed::Standard),
             source: if catalog.is_builtin_seed(&entry.id) {
                 ModelSource::Builtin
             } else {
@@ -113,20 +167,26 @@ impl ModelView {
     }
 }
 
+use crate::infra::i18n::tr;
+
 impl ModelEntryInput {
     pub fn into_model_entry(self) -> Result<ModelEntry, AppError> {
         let id = self.id.trim().to_string();
         if id.is_empty() {
-            return Err(AppError::Config("模型 id 不能为空。".to_string()));
+            return Err(AppError::Config(tr("model.idRequired", &[])));
         }
         let api = self.api.trim().to_string();
         if api.is_empty() {
-            return Err(AppError::Config(format!("模型 `{id}` 的 api 不能为空。")));
+            return Err(AppError::Config(tr(
+                "model.fieldRequired",
+                &[("id", &id), ("field", "api")],
+            )));
         }
         let provider = self.provider.trim().to_string();
         if provider.is_empty() {
-            return Err(AppError::Config(format!(
-                "模型 `{id}` 的 provider 不能为空。"
+            return Err(AppError::Config(tr(
+                "model.fieldRequired",
+                &[("id", &id), ("field", "provider")],
             )));
         }
         let model_name = normalize_optional(self.model_name);
@@ -135,7 +195,31 @@ impl ModelEntryInput {
             validate_api_key_env_name(env_name)?;
         }
         let base_url = normalize_optional(self.base_url);
-        let thinking_format = normalize_optional(self.thinking_format);
+        let thinking_format = normalize_optional(self.thinking_format)
+            .or_else(|| Some(default_thinking_format_for_api(api.as_str()).to_string()));
+        let context_window_options = validate_context_window_options(
+            &id,
+            self.context_window,
+            self.context_window_options.as_deref().unwrap_or_default(),
+            self.max_output_tokens,
+        )?;
+        let description = normalize_optional(self.description);
+        let supported_reasoning_levels = match self.supported_reasoning_levels {
+            Some(levels) => {
+                let normalized = normalize_supported_reasoning_levels(&levels);
+                if normalized.is_empty() && !levels.is_empty() {
+                    safe_supported_reasoning_levels_for(api.as_str(), thinking_format.as_deref())
+                } else {
+                    normalized
+                }
+            }
+            None => safe_supported_reasoning_levels_for(api.as_str(), thinking_format.as_deref()),
+        };
+        let supported_speeds = validate_supported_speeds(
+            &id,
+            &api,
+            self.supported_speeds.as_deref().unwrap_or_default(),
+        )?;
         Ok(ModelEntry {
             id,
             model_name,
@@ -145,7 +229,12 @@ impl ModelEntryInput {
             base_url,
             capabilities: self.capabilities,
             context_window: self.context_window,
+            context_window_options,
+            max_output_tokens: self.max_output_tokens,
+            description,
             thinking_format,
+            supported_reasoning_levels,
+            supported_speeds,
         })
     }
 }
@@ -155,6 +244,41 @@ pub fn list_model_views(catalog: &ModelCatalog) -> Vec<ModelView> {
         .entries_in_merge_order()
         .into_iter()
         .map(|entry| ModelView::from_entry(catalog, entry))
+        .collect()
+}
+
+pub fn list_model_views_with_prefs(
+    catalog: &ModelCatalog,
+    prefs: &ModelPrefsStore,
+) -> Vec<ModelView> {
+    catalog
+        .entries_in_merge_order()
+        .into_iter()
+        .map(|entry| {
+            let mut view = ModelView::from_entry(catalog, entry.clone());
+            let explicit_prefs = prefs.explicit_prefs_for(&entry.id);
+            view.selected_reasoning_level =
+                (!entry.supported_reasoning_levels.is_empty()).then(|| {
+                    let requested = explicit_prefs
+                        .as_ref()
+                        .map(|prefs| prefs.reasoning)
+                        .unwrap_or_else(|| prefs.default_reasoning());
+                    clamp_reasoning_level(requested, &entry.supported_reasoning_levels)
+                        .as_str()
+                        .to_string()
+                });
+            view.selected_speed = entry.resolve_speed(prefs.speed_for(&entry.id));
+            view.selected_context_window = explicit_prefs
+                .and_then(|prefs| prefs.context_window)
+                .filter(|value| entry.context_window_options.contains(value))
+                .or_else(|| {
+                    entry.context_window.filter(|value| {
+                        entry.context_window_options.is_empty()
+                            || entry.context_window_options.contains(value)
+                    })
+                });
+            view
+        })
         .collect()
 }
 
@@ -196,8 +320,12 @@ pub fn resolve_provider_key_env_name(catalog: &ModelCatalog, raw: &str) -> Strin
     env_name_for_provider(candidate)
 }
 
-pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<ModelView, AppError> {
+pub fn upsert_user_model(
+    cfg: &AppConfig,
+    input: ModelEntryInput,
+) -> Result<UpsertModelResult, AppError> {
     let entry = input.into_model_entry()?;
+    let warnings = collect_model_warnings(&entry);
     validate_mutable_model_entry(&entry)?;
     let path = ModelCatalog::default_user_path(cfg)?;
     with_file_lock(&models_lock_path(&path), || {
@@ -210,40 +338,136 @@ pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<Mode
             .lookup(&entry.id)
             .cloned()
             .map(|resolved| ModelView::from_entry(&reloaded, resolved))
-            .ok_or_else(|| AppError::Config(format!("模型 `{}` 写入后未能重新加载。", entry.id)))?;
-        Ok(view)
+            .ok_or_else(|| AppError::Config(tr("model.reloadFailed", &[("id", &entry.id)])))?;
+        Ok(UpsertModelResult {
+            model: view,
+            warnings: warnings.clone(),
+        })
+    })
+}
+
+/// 在 models.toml 锁内从磁盘加载当前目录，并在同一临界区完成依赖该目录的写入。
+///
+/// 删除和选择模型都通过此入口，以免一个请求已基于旧缓存验证模型、另一个请求
+/// 随后删除该模型后，前者又把已删除的 ID 写回会话或默认配置。
+pub fn with_current_model_catalog<T>(
+    cfg: &AppConfig,
+    work: impl FnOnce(&ModelCatalog) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let path = ModelCatalog::default_user_path(cfg)?;
+    with_file_lock(&models_lock_path(&path), || {
+        let catalog = ModelCatalog::load_from_path(cfg, path.clone())?;
+        work(&catalog)
     })
 }
 
 pub fn remove_user_model(cfg: &AppConfig, model_id: &str) -> Result<(), AppError> {
+    remove_user_model_with_config_path(cfg, None, model_id)
+}
+
+/// 删除用户模型，并在提供真实配置路径时一并忘掉所有持久化的同名选择。
+///
+/// CLI / serve 必须传配置路径；保留无路径 wrapper 仅供旧的内存隔离测试使用，不能用于
+/// 用户实际删除操作。
+pub fn remove_user_model_with_config_path(
+    cfg: &AppConfig,
+    config_path: Option<&Path>,
+    model_id: &str,
+) -> Result<(), AppError> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Config("模型 id 不能为空。".to_string()));
+        return Err(AppError::Config(tr("model.idRequired", &[])));
     }
     let path = ModelCatalog::default_user_path(cfg)?;
     with_file_lock(&models_lock_path(&path), || {
         let current = ModelCatalog::load_from_path(cfg, path.clone())?;
         if !current.is_user_model(trimmed) {
             if current.lookup(trimmed).is_some() {
-                return Err(AppError::Config(format!(
-                    "模型 `{trimmed}` 是内置模型，不能删除；如需自定义请覆盖或仅配置 API Key。"
+                return Err(AppError::Config(tr(
+                    "model.builtinDelete",
+                    &[("id", trimmed)],
                 )));
             }
-            return Err(AppError::Config(format!("模型 `{trimmed}` 不存在。")));
+            return Err(AppError::Config(tr("model.notFound", &[("id", trimmed)])));
         }
-        ensure_model_not_in_use(cfg, trimmed)?;
+
+        let keeps_builtin_entry = current.is_builtin_seed(trimmed);
+        let session_stores = session_store_paths(cfg)?;
+        if !keeps_builtin_entry {
+            for store_path in &session_stores {
+                precheck_model_override_store(store_path)?;
+            }
+        }
+
+        let mut cleared = Vec::new();
+        if !keeps_builtin_entry {
+            if let Some(config_path) = config_path {
+                let references = clear_model_references(config_path, trimmed)?;
+                cleared.extend(references.into_iter().map(str::to_string));
+            }
+            for store_path in &session_stores {
+                match clear_model_overrides_in_store(store_path, trimmed) {
+                    Ok(0) => {}
+                    Ok(count) => cleared.push(tr(
+                        "model.selectionsCleared",
+                        &[
+                            ("count", &count.to_string()),
+                            ("path", &store_path.display().to_string()),
+                        ],
+                    )),
+                    Err(error) => return Err(removal_partial_error(trimmed, &cleared, error)),
+                }
+            }
+        }
+
         let mut file = load_user_models_file(&path)?;
         let before = file.models.len();
         file.models.retain(|entry| entry.id.trim() != trimmed);
         if file.models.len() == before {
-            return Err(AppError::Config(format!(
-                "模型 `{trimmed}` 不在用户 models.toml 中。"
-            )));
+            return Err(AppError::Config(tr("model.notInFile", &[("id", trimmed)])));
         }
         let rendered = render_user_models_file(&file)?;
         validate_and_write_models(cfg, &path, rendered.as_bytes())?;
         Ok(())
     })
+}
+
+fn session_store_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
+    let agents_dir = get_work_dir(cfg)?.join("agents");
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(AppError::Io)?;
+        if !entry.file_type().map_err(AppError::Io)?.is_dir() {
+            continue;
+        }
+        let store_path = entry.path().join("sessions").join("sessions.json");
+        match std::fs::metadata(&store_path) {
+            Ok(_) => paths.push(store_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn removal_partial_error(model_id: &str, cleared: &[String], error: AppError) -> AppError {
+    if cleared.is_empty() {
+        return error;
+    }
+    AppError::Config(tr(
+        "model.removePartial",
+        &[
+            ("id", model_id),
+            ("cleared", &cleared.join("、")),
+            ("detail", &error.to_string()),
+        ],
+    ))
 }
 
 pub fn set_default_model(
@@ -253,11 +477,12 @@ pub fn set_default_model(
 ) -> Result<(), AppError> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Config("默认模型不能为空。".to_string()));
+        return Err(AppError::Config(tr("model.defaultRequired", &[])));
     }
-    let catalog = ModelCatalog::load(cfg)?;
-    catalog.lookup_explicit(trimmed)?;
-    write_default_model(config_path, trimmed)
+    with_current_model_catalog(cfg, |catalog| {
+        catalog.lookup_explicit(trimmed)?;
+        write_default_model(config_path, trimmed)
+    })
 }
 
 pub fn set_provider_key(
@@ -267,12 +492,16 @@ pub fn set_provider_key(
     let env_name = input.env_name.trim().to_string();
     let value = input.value.trim().to_string();
     if !is_valid_api_key_env_name(&env_name) {
-        return Err(AppError::Config(format!(
-            "envName `{env_name}` 必须匹配大写环境变量格式 `^[A-Z_][A-Z0-9_]*$`。"
+        return Err(AppError::Config(tr(
+            "model.envInvalid",
+            &[("field", "envName"), ("name", &env_name)],
         )));
     }
     if value.is_empty() {
-        return Err(AppError::Config(format!("`{env_name}` 不能为空。")));
+        return Err(AppError::Config(tr(
+            "model.keyRequired",
+            &[("name", &env_name)],
+        )));
     }
     let env_path = runtime_env_path(cfg)?;
     with_file_lock(&env_lock_path(&env_path), || {
@@ -296,17 +525,13 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
 fn validate_mutable_model_entry(entry: &ModelEntry) -> Result<(), AppError> {
     let registered = super::registered_provider_ids();
     if !registered.iter().any(|api| *api == entry.api) {
-        return Err(AppError::Config(format!(
-            "模型 `{}` 的 api=`{}` 未注册；可选值：{}。",
-            entry.id,
-            entry.api,
-            registered.join(", ")
-        )));
-    }
-    if entry.api == "anthropic-messages" && entry.capabilities.files {
-        return Err(AppError::Config(format!(
-            "模型 `{}` 的 api=`anthropic-messages` 当前不支持 files 附件能力，请关闭 files 或改用支持文件附件的 api。",
-            entry.id
+        return Err(AppError::Config(tr(
+            "model.apiUnregistered",
+            &[
+                ("id", &entry.id),
+                ("api", &entry.api),
+                ("available", &registered.join(", ")),
+            ],
         )));
     }
     Ok(())
@@ -317,49 +542,6 @@ fn inferred_api_key_env(entry: &ModelEntry) -> String {
         .api_key_env
         .clone()
         .unwrap_or_else(|| env_name_for_provider(&entry.provider))
-}
-
-fn ensure_model_not_in_use(cfg: &AppConfig, model_id: &str) -> Result<(), AppError> {
-    let mut refs = Vec::new();
-    if cfg.llm.default_model.trim() == model_id {
-        refs.push("llm.default_model".to_string());
-    }
-    if cfg.context.compaction_model.trim() == model_id {
-        refs.push("context.compaction_model".to_string());
-    }
-    if cfg.llm.vision_model.as_deref().map(str::trim) == Some(model_id) {
-        refs.push("llm.vision_model".to_string());
-    }
-    if cfg.llm.title_model.as_deref().map(str::trim) == Some(model_id) {
-        refs.push("llm.title_model".to_string());
-    }
-
-    let sessions_path = crate::resolve_sessions_dir(cfg)?.join("sessions.json");
-    let store = crate::load_store(&sessions_path)?;
-    for entry in store.sessions.values().filter(|entry| {
-        entry
-            .model_override
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|current| current == model_id)
-    }) {
-        let label = entry
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(|title| format!("session `{}` ({title})", entry.session_id))
-            .unwrap_or_else(|| format!("session `{}`", entry.session_id));
-        refs.push(label);
-    }
-
-    if refs.is_empty() {
-        return Ok(());
-    }
-    Err(AppError::Config(format!(
-        "模型 `{model_id}` 仍被以下位置引用：{}。请先切换这些位置的模型，再删除。",
-        refs.join("、")
-    )))
 }
 
 fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
@@ -378,12 +560,39 @@ fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
             web_search: Some(entry.capabilities.web_search),
         }),
         context_window: entry.context_window,
+        context_window_options: (!entry.context_window_options.is_empty())
+            .then(|| entry.context_window_options.clone()),
+        max_output_tokens: entry.max_output_tokens,
+        description: entry.description.clone(),
         thinking_format: entry.thinking_format.clone(),
+        supported_reasoning_levels: Some(entry.supported_reasoning_levels.clone()),
+        supported_speeds: Some(entry.supported_speeds.clone()),
+        extra: toml::Table::new(),
     }
 }
 
-fn upsert_user_model_entry(file: &mut UserModelsFile, next: UserModelEntry) {
+fn collect_model_warnings(entry: &ModelEntry) -> Vec<String> {
+    if !entry.capabilities.reasoning {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    if matches!(entry.api.as_str(), "openai" | "openai-responses") {
+        let fmt = ThinkingFormat::parse_or_auto(entry.thinking_format.as_deref())
+            .resolve_for_api(entry.api.as_str());
+        let probe = resolve_request_fields(&ThinkingConfig::default(), fmt);
+        if probe.reasoning_effort.is_none() {
+            warnings.push(tr(
+                "model.reasoningWarning",
+                &[("api", &entry.api), ("format", fmt.as_str())],
+            ));
+        }
+    }
+    warnings
+}
+
+fn upsert_user_model_entry(file: &mut UserModelsFile, mut next: UserModelEntry) {
     if let Some(existing) = file.models.iter_mut().find(|entry| entry.id == next.id) {
+        next.extra = std::mem::take(&mut existing.extra);
         *existing = next;
     } else {
         file.models.push(next);
@@ -454,24 +663,29 @@ fn with_file_lock<T>(
                 std::thread::sleep(LOCK_RETRY);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(AppError::Config(format!(
-                    "等待文件锁超时（{}ms）：{}",
-                    LOCK_TIMEOUT.as_millis(),
-                    lock_path.display()
+                return Err(AppError::Config(tr(
+                    "model.lockTimeout",
+                    &[
+                        ("milliseconds", &LOCK_TIMEOUT.as_millis().to_string()),
+                        ("path", &lock_path.display().to_string()),
+                    ],
                 )));
             }
             Err(error) => return Err(AppError::Io(error)),
         }
     }
     let result = work();
-    file.unlock().map_err(AppError::Io)?;
+    if let Err(error) = file.unlock() {
+        tracing::warn!(path = %lock_path.display(), error = %error, "model file lock release failed");
+    }
     result
 }
 
 fn validate_api_key_env_name(env_name: &str) -> Result<(), AppError> {
     if !is_valid_api_key_env_name(env_name) {
-        return Err(AppError::Config(format!(
-            "api_key_env `{env_name}` 必须匹配大写环境变量格式 `^[A-Z_][A-Z0-9_]*$`。"
+        return Err(AppError::Config(tr(
+            "model.envInvalid",
+            &[("field", "api_key_env"), ("name", env_name)],
         )));
     }
     Ok(())

@@ -9,8 +9,14 @@ mod apply_and_after_reply_test;
 mod context_layer0_v2_test;
 mod layer0_cleanup_test;
 mod legacy_transcript_compat_test;
+mod machine_block_sidecar_test;
 mod messages_to_text_test;
+
 mod mocks;
 mod preheat_and_truncation_test;
+mod preheat_sidecar_freshness_test;
+mod preheat_sidecar_test;
+
 mod prompt_snapshot_test;
 mod turn_boundaries_l3_test;
+mod update_machine_block_replay_test;

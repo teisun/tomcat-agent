@@ -28,7 +28,7 @@
    │  ① 准入：权限 + 体量门
    ▼
 PermissionGate(Read) + metadata size 门
-   ├─ 同窗未变 ──────────────► FILE_UNCHANGED stub（省 token，链路短路）
+   ├─ 已读范围覆盖 + 排版相同 + 未变 + 结果仍可见 ─► FILE_UNCHANGED stub（省 token，链路短路）
    │
    │  ② 类型与体量分叉
    ▼
@@ -125,7 +125,7 @@ ReadStamp / read_state（mtime + size，供 dedup 与写前对表）
 read(args)
    │
    ▼ tool_exec：校验 offset/limit，查 read_state
-   ├─ 同 key 且 mtime/size 未变 ─► FILE_UNCHANGED stub（不调 executor）
+   ├─ 范围覆盖 + 排版相同 + mtime/size 未变 + 结果仍可见 ─► FILE_UNCHANGED stub（不调 executor）
    └─ 失配 / 首读 ─► executor/read：gate + metadata size 门
                        ├─ 超 max_bytes 且无窗口 ─► 结构化 Tool 错误
                        └─ 路由内容类型
@@ -153,19 +153,20 @@ LLM          tool_exec              executor/read           read_state
 
 **说人话**：第一次读走全链路，读完把指纹写进表。
 
-**② 同窗口第二次 read（dedup）**
+**② 已读范围覆盖且同排版的第二次 read（dedup）**
 
 ```text
 LLM          tool_exec                       read_state
  │               │                               │
- │ read(同路径同窗口) │ lookup：mtime+size 未变      │
+ │ read(同路径/同排版) │ lookup：范围覆盖、mtime+size 未变 │
  │──────────────>│──────────────────────────────>│
  │               │<──────────────────────────────│ hit
  │               │ 组装 FileUnchanged（不调 executor）
  │<──────────────│ stub 文本
 ```
 
-**说人话**：同路径同窗且 mtime/size 没变，第二次不调 executor，直接 stub。
+**说人话**：上次读到的范围覆盖本次请求、排版也相同、文件未变且旧结果仍在上下文时，
+第二次才不调 executor、直接 stub。
 
 **③ Agent 整轮交互：LLM 调 read 与 128 KiB 护栏**
 
@@ -306,23 +307,27 @@ sequenceDiagram
                   │ put_stamp
                   ▼
            ┌─────────────┐
-  再次 read │  key 对齐   │──mtime/size 变──▶ 全量重读 + 更新 stamp
-           │  且磁盘未变 │
+  再次 read │ 文件/行范围 │──任一不符──▶ 全量重读 + 更新 stamp
+           │ 排版都对齐  │
            └──────┬──────┘
-                  │ 同窗口 + 未变
+                  │ 已读范围覆盖请求 + 排版相同 + 未变
                   ▼
            ┌─────────────┐
            │ FILE_UNCHANGED stub
            └─────────────┘
 ```
 
-**说人话**：没记录就记；有记录且没变就 stub；变了就重读更新表。
+**说人话**：不是「文件没变」就一定 stub。上次读的行必须覆盖这次要的行，而且
+排版（纯文本 / 普通行号 / hashline）也要一致；否则模型拿到的不是它这次索要的字节，
+必须重新读。
 
 | 字段 / 概念             | 作用                                         | 说人话 |
 | ------------------- | ------------------------------------------ | ------ |
 | `mtime_ms` + `size` | dedup 快路径：未变才允许短路                          | 先看大小和时间戳快不快。 |
 | `content_hash`      | 存储供诊断与后续 hashline_edit；**dedup 命中不强制重算比对** | 深度校验留给 edit，dedup 不强制重读。 |
 | `is_partial_view`   | 分窗读与整文件读不互相 dedup                          | 半窗和全文件别互相 dedup。 |
+| `render_mode`       | `Plain` / `LineNumbers` / `Hashline`；dedup 必须相同才短路 | 普通行号不能冒充 edit 要的 hashline 锚点。 |
+| `tool_call_id`      | 可见 tool 结果被落盘、替换或压缩驱逐时，失效对应 stamp | 上一次结果看不见了，就不能再说「你已经读过」。 |
 
 ## 目录
 
@@ -366,7 +371,7 @@ sequenceDiagram
 | **dedup（重复读短路）**        | 同一窗口、文件看起来没变，就不再塞全文                                        | [`read_state::ReadFileState`](../../../../src/core/tools/pipeline/read_state.rs) | 命中 → `ReadResult::FileUnchanged`（在 **tool_exec** 短路，不调 primitive）                                     | 没变就别再灌全文。 |
 | **staleness（陈旧）**       | 模型脑中的内容已不是磁盘最新                                             | 同上表中的 `ReadStamp`                                                       | **edit/write 入口**查表：指纹不一致 → 拒绝并要求先 `read`                                                             | 磁盘变了先逼你再 read。 |
 | **FILE_UNCHANGED stub** | 告诉模型「别读了，跟上一次一样」                                           | 常量 [`FILE_UNCHANGED_STUB`](../../../../src/core/tools/pipeline/read_state.rs)    | 非错误；模型应引用上一轮 read 结果                                                                                  | 短句告诉模型「跟上轮一样」。 |
-| **hashline**            | 行号 + 内容指纹前缀，供精细 edit 锚点                                    | executor 文本渲染分支                                                         | `hashline=true` 时覆盖 `line_numbers`；算法对齐 pi_agent_rust                                                 | 行尾带俩字指纹，给 edit 对齐。 |
+| **hashline**            | 行号 + 内容指纹前缀，供精细 edit 锚点                                    | executor 文本渲染分支                                                         | `hashline=true` 时覆盖 `line_numbers`；行号只定位、指纹只取内容                                               | 行号找位置，俩字指纹确认那行文字没变。 |
 | **「LLM 收到 tool 结果后」**   | 指 **`tool_exec` 已把 `ReadResult` 落成 chat 消息、即将进入下一轮模型推理之前** | —                                                                       | 与去重 / 注入时序讨论绑在此边界                                                                                     | tool 结果已进 transcript、下一轮推理还没开始。 |
 
 
@@ -399,7 +404,7 @@ sequenceDiagram
 | 来源 / 形态                | 分页与上限                  | 行号 / 锚点               | 重复读                   | 多模态                                 | 备注                      | 说人话 |
 | ---------------------- | ---------------------- | --------------------- | --------------------- | ----------------------------------- | ----------------------- | ------ |
 | **cc-fork 系**          | 大行数窗口 + 续读提示           | 常见 `cat -n`           | 软 stub 省 token        | 视产品而定                               | 工程上验证「窗口默认 ~2k 行」较稳     | 大行数窗口是业界共识。 |
-| **pi_agent_rust**      | 类似 Agent 读盘            | **hashline**（xxh 短指纹） | 可与 edit 对齐            | 依部署                                 | 本仓库 **hashline 算法对齐**   | 指纹行我们对齐生态。 |
+| **pi_agent_rust**      | 类似 Agent 读盘            | **hashline**（xxh 短指纹） | 可与 edit 对齐            | 依部署                                 | 本仓布局与双字符字典对齐；行号 seed 经本仓校验语义复核后不采纳 | 借显示格式，不把行号混进内容指纹。 |
 | **Claude / Cursor 内置** | 产品化分页策略                | 因产品而异                 | 通常由宿主去重               | 强多模态                                | 协议细节不公开处用「占位 + 侧信道」思路参照 | 产品侧做法作参照。 |
 | **本仓库 `read`**         | 默认 2000 行 + 25 MiB 裸读门 | `cat -n` 或 hashline   | `FILE_UNCHANGED` stub | OpenAI：**tool 占位 + 下一条 user Parts** | wasm 友好、单测锁行为           | 分页 + dedup + 图走 user。 |
 
@@ -413,7 +418,7 @@ sequenceDiagram
 | R2 体量与窗口 | 大文件、wasm 堆、token | 默认分页 + 裸读门，别整文件进上下文。 |
 | R3 裸读与内存 | 无窗口时的字节上限与绕过 | 没传窗才挡整文件；传了 offset/limit 就能「只窥一角」。 |
 | R4 行级锚点 | `cat -n` vs hashline vs IDE 习惯 | 行号要稳定可 diff；hashline 给 edit 短指纹。 |
-| R5 重复读与 dedup | 合法重试 vs 烧 token | 同窗未变走 stub，别每次全文重发。 |
+| R5 重复读与 dedup | 合法重试 vs 烧 token | 已读范围覆盖、排版相同且未变才走 stub，别每次全文重发。 |
 | R6 多模态与注入 | OpenAI tool 消息能否带图 | 图 / PDF 走占位 + **下一条 user** Parts。 |
 
 ---
@@ -432,7 +437,7 @@ sequenceDiagram
 | **二进制可诊断**         | 非 UTF-8 文本路径 → `AppError::Tool`，文案含 first-byte 十六进制与可执行建议（如 `bash file`），避免裸 `invalid utf-8`           | 乱码给 hex 和运维 hint，别裸崩。 |
 | **行级可定位**          | 默认 `cat -n`（6 格右对齐行号 + Tab）；`hashline=true` 时为 `行号#双字符哈希:正文`（与 `line_numbers` 互斥，**hashline 优先**）      | 行号跟终端；要 edit 就开 hashline。 |
 | **多模态走 OpenAI 约束** | 图 / PDF：`tool` 消息里占位句；真实 `InputImage` / `InputFile` 注入**下一条** `user` 的 `Parts`（`role=tool` 不接受图像 part） | 图不进 tool 正文，塞进下一条 user。 |
-| **会话去重**           | 同一 `(path, offset, limit)` 且磁盘 `mtime+size` 未变 → 第二次起返回 `FILE_UNCHANGED` 短 stub                        | 同窗没变就 stub，省 token。 |
+| **会话去重**           | 同一文件、请求行范围被上次实际读取范围覆盖、`render_mode` 相同、磁盘 `mtime+size` 未变且旧结果仍在上下文 → 返回 `FILE_UNCHANGED` 短 stub | 内容、行范围、排版都一样才 stub，别把普通行号当 hashline 锚点。 |
 | **陈旧检测底座**         | `read_state` 存上次成功 read 的指纹；`write` / `edit` 入口可比对，防止按旧上下文误改                                           | 指纹表给写改前对表用。 |
 
 
@@ -448,7 +453,7 @@ sequenceDiagram
 | G5 行级可定位      | `cat -n` 或 hashline 二选一渲染                              | 行号或指纹二选一渲染。 |
 | G6 多模态 inline | magic + 扩展名路由；图 4.5 MiB、PDF 25 MiB 在 **metadata 阶段**拒绝 | 超限在 metadata 就挡。 |
 | G7 OpenAI 路径  | 图 / PDF 占位 + 下一条 `user` 注入                             | API 约束：图跟 user Parts。 |
-| G8 会话去重       | 同窗口未变 → `FileUnchanged` stub                           | 重复读走 stub。 |
+| G8 会话去重       | 已读行范围覆盖请求 + 渲染形态相同 + 文件未变 → `FileUnchanged` stub；任一不符 → 真读 | 真正已有同一版内容才 stub。 |
 | G9 陈旧检测       | `read_state` 供写改前比对                                    | 写改前对指纹。 |
 
 
@@ -477,10 +482,10 @@ sequenceDiagram
 | R2 分页默认 | 大文件进上下文与 wasm 堆 | **采用** 默认 `limit=2000` 分页 + 截断续读尾注。 | cc-fork 系大行数窗口实践 | 默认 `limit=2000` + 截断续读尾注；可控 token | 整文件默认读入 → OOM / 费 token | 一屏加一点。 |
 | R3 裸读门 | 无窗读巨文件 | **采用** 无窗 `max_bytes` 门（默认 25 MiB）；有窗可绕过。 | `infra/config` + executor metadata | 无窗时 `max_bytes`（默认 25 MiB）拒绝；**有** `offset`/`limit` 之一可绕过 | 不设门或门过低 → 误伤或仍 OOM | 没窗才挡整锅；有窗只窥一角。 |
 | R4 行号默认 | IDE / diff / 人工扫读 | **采用** 默认 `cat -n`（6 格 + Tab）。 | 常见 `cat -n` 实践 | 默认 `cat -n` 6 格 + Tab | 无前缀 → 对行号不友好 | 跟终端习惯对齐。 |
-| R5 同窗重复读 | 合法重试 vs 烧 token | **采用** 同窗未变 → `FileUnchanged` stub。 | dedup stub 类产品实践 | 同窗磁盘未变 → `FileUnchanged` stub | 硬拒绝误伤「再确认」；每次全文 → 烧 token | 没变就别再灌全文。 |
+| R5 重复读 | 合法重试 vs 烧 token | **采用** 已读范围覆盖 + `render_mode` 相同 + 文件未变且结果仍可见 → `FileUnchanged` stub。 | dedup stub 类产品实践 | 只有模型已有同一版输入才短路；否则重新读 | 硬拒绝误伤「再确认」；每次全文 → 烧 token | 真有同一版内容才别再灌。 |
 | R5 dedup 指纹 | 短路前是否再读全文 | **采用** dedup 命中 `mtime_ms+size`；`content_hash` 仅诊断/纵深。 | `read_state.rs` 头注释与 PR-RF | `mtime_ms + size` 快路径；`content_hash` 存表供诊断与 edit 纵深 | hash 参与 dedup 命中 → 短路前被迫再读全文 | 省读优先，hash 做纵深。 |
 | R6 图片策略 | 依赖与 wasm 体积 | **采用** metadata 限长、路径级不缩放（wasm 可控）。 | OpenAI inline 限制 | metadata 限长、路径级不缩放；对齐上限 | 在工具内解码缩放 → 依赖与编译膨胀 | wasm 可控，贴 OpenAI。 |
-| R4 hashline | 行级强锚点 | **采用** xxh32 + 双字符表 hashline（对齐 pi 生态）。 | **pi_agent_rust** hashline | xxh32 + 双字符表；与 edit 纵深一致 | 无行级指纹 → 精细 edit 难闭环 | 短指纹好对齐生态。 |
+| R4 hashline | 行级强锚点 | **采用** xxh32 + 双字符表；行号定位、指纹仅取内容。 | **pi_agent_rust** hashline（格式基准）；本仓 `hashline_edit` 校验语义 | 行号已在锚点中单独传递；把它再混入指纹不会增强读后校验，却会让内容平移时指纹变化 | 无行级指纹 → 精细 edit 难闭环；行号 seed → 中文/符号行平移时产生无意义 churn | 行号管位置，指纹管内容，各管一件事。 |
 | R6 图 / PDF 进模型 | OpenAI tool 能否带 binary | **采用** tool 占位 + 下条 `user` Parts 注入（单测锁住）。 | OpenAI API 约束 + PR-RJ T3-c | tool 占位 + **下一条** `user` Parts 注入 | 在 tool 消息内嵌图 → API 拒收 / 浪费 | 图走侧信道，单测锁住。 |
 
 ### 4.2 实施点（已闭环）
@@ -553,26 +558,27 @@ sequenceDiagram
 #### 4.2.3 PR-RF（T2）：`cat -n`、会话表与 `FILE_UNCHANGED`
 
 - **行号**：`format_with_line_numbers` → `{:>6}\t{content}`，默认 `line_numbers=true`。
-- **`src/core/tools/pipeline/read_state.rs`**：`ReadStamp { mtime, size, content_hash, offset, limit, is_partial_view }` + `ReadFileState`（`RwLock<HashMap<PathBuf, ReadStamp>>`）+ 常量 `FILE_UNCHANGED_STUB`。
+- **`src/core/tools/pipeline/read_state.rs`**：`ReadStamp { mtime, size, content_hash, offset, limit, is_partial_view, render_mode, tool_call_id }` + `ReadFileState`（`RwLock<HashMap<PathBuf, ReadStamp>>`）+ 常量 `FILE_UNCHANGED_STUB`。`render_mode` 是纯文本 / 普通行号 / hashline 的归一化形态，既有行范围覆盖也必须形态相同才允许短路；tool 结果离开上下文时按 `tool_call_id` 失效。
 - **挂载**：`Arc<ReadFileState>` 挂在 `AgentLoopConfig` / `ChatContext`，跨轮复用；会话结束清理，避免表无限涨。
-- **dedup**：`tool_exec` 在调 primitive 前查表；命中且磁盘指纹未变 → 直接 `ReadResult::FileUnchanged`（**不调** executor）。
+- **dedup**：`tool_exec` 在调 primitive 前查表；只有上次结果仍在上下文、磁盘指纹未变、已读行范围覆盖本次请求且 `render_mode` 相同时，才直接 `ReadResult::FileUnchanged`（**不调** executor）。
 
 ```text
-        read 请求 (path, offset, limit)
+        read 请求 (path, offset, limit, render_mode)
                     │
                     ▼
             ReadFileState.lookup
                     │
          ┌──────────┴──────────┐
          ▼                     ▼
-    mtime/size 变          key 命中且未变
+    文件/范围/排版不符        文件、范围、排版都对齐
          │                     │
          ▼                     ▼
    executor/read          FileUnchanged stub
    + put_stamp             （不调 primitive）
 ```
 
-**说人话**：表里有同窗指纹且磁盘没变 → 直接 stub，不调真读盘。
+**说人话**：模型得真的已有「同一段、同一种排版」的内容才 stub；普通行号和
+hashline 是两份不同的模型输入，不能互相冒充。
 
 #### 4.2.4 PR-RJ-0 与 T3-a / b / c：多模态与 OpenAI 注入边界
 
@@ -594,7 +600,7 @@ sequenceDiagram
 #### 4.2.5 PR-RM：`hashline`（xxh32）
 
 - **依赖**：`xxhash-rust`（`xxh32`）。
-- **算法**：行内容经 whitespace-stripped 后做 xxh32，取 nibbles 映射为**双字符**指纹前缀；渲染 `{:>6}#XX:{content}`。
+- **算法**：行内容经 whitespace-stripped 后以固定 seed `0` 做 xxh32，取 nibbles 映射为**双字符**指纹前缀；渲染 `{:>6}#XX:{content}`。行号只用于定位，**不参与**内容指纹。
 - **优先级**：`hashline=true` 时 **覆盖** `line_numbers`（schema、system prompt、executor 分支一致）。
 
 ```text
@@ -602,7 +608,14 @@ sequenceDiagram
   hashline=true（优先）                 →  "    42#Ab:code"
 ```
 
-**说人话**：要 edit 锚点就开 hashline，行里多俩字符指纹。
+```text
+同一行文字从 L368 移到 L371：
+  旧锚点  368#Ab:#### 验收标准
+  新锚点  371#Ab:#### 验收标准
+                 ^^ 内容指纹不变；行号必须由新的 read 更新
+```
+
+**说人话**：要 edit 锚点就开 hashline。行号负责找位置，俩字符只确认文字没变；文字挪了行，必须重新读到新行号，但同一文字不会再换一套指纹。
 
 #### 4.2.6 PR-RS：文档
 
@@ -629,6 +642,11 @@ sequenceDiagram
 | `limit`        | integer 1..=10000 | 否     | 2000    | 最多返回多少行；截断则附续读尾注                      | 最多读几行；不够就尾注续读。 |
 | `line_numbers` | boolean           | 否     | `true`  | `cat -n` 风格前缀；与 `hashline` 互斥         | 默认带行号。 |
 | `hashline`     | boolean           | 否     | `false` | `行号#XX:内容`；开启时 **优先于** `line_numbers` | 开指纹行，覆盖普通行号。 |
+
+`line_numbers` / `hashline` 同时决定本次文本的 `render_mode`：`hashline=true` 为
+`Hashline`（无论 `line_numbers` 的值），否则 `line_numbers=true` 为 `LineNumbers`，
+两者都否为 `Plain`。它是 dedup 身份的一部分：相同行范围但形态不同必须重新读取，
+因为模型需要的渲染字节不同。
 
 
 ### 5.2 出参（Rust：`ReadResult`）
@@ -805,11 +823,12 @@ ReadResult
 | 分页 / 尾注        | `read_window_test::read_offset_limit_returns_window`、`read_offset_beyond_eof_returns_empty`、`read_limit_truncates_with_resume_hint`、`read_with_offset_bypasses_max_bytes_check`                                                                                                                                                                                                              | ✅ 2026-05-05 | 窗、截断、续读提示、有窗绕过裸读门都锁住。 |
 | 后读预算护栏        | `read_window_test::read_applies_post_output_budget_guard_with_resume_hint`、`read_first_returned_line_over_budget_returns_structured_error`                                                                                                                                                                                                                                                     | ✅ 2026-05-30 | 单窗过胖会在工具层切页；首行自己就过胖时给可恢复错误。 |
 | 大文件 / 二进制 hint | `read_window_test::read_no_offset_large_file_rejected_with_hint`、`read_binary_returns_structured_hint`                                                                                                                                                                                                                                                                                       | ✅ 2026-05-05 | 巨文件无窗拒、二进制给结构化 hint。 |
-| 行号 / hashline  | `read_window_test::read_default_renders_cat_n_line_numbers`、`read_offset_window_uses_absolute_line_numbers`、`read_with_hashline_renders_hash_prefixed_lines`                                                                                                                                                                                                                                 | ✅ 2026-05-05 | 默认 cat-n、绝对行号、hashline 前缀。 |
+| 行号 / hashline  | `read_window_test::read_default_renders_cat_n_line_numbers`、`read_offset_window_uses_absolute_line_numbers`、`read_with_hashline_renders_hash_prefixed_lines`、`hashline_format_has_stable_content_hashes`                                                                                                                                                                                       | ✅ | 默认 cat-n、绝对行号、hashline 前缀；同一中文、符号或空白行内容不随行号改指纹。 |
 | 路由 Image/Pdf   | `read_window_test::read_routes_png_to_image_variant`、`read_routes_pdf_to_pdf_variant`、`read_unknown_extension_falls_back_to_text`、`read_oversize_image_rejected_at_metadata_stage`                                                                                                                                                                                                           | ✅ 2026-05-05 | 图/PDF 路由与 metadata 拒超大图。 |
 | 集成（黑盒）         | `tests/read_tool_tests.rs`：`read_text_offset_limit_window_with_line_numbers`、`read_large_window_is_cut_at_post_read_budget_with_resume_hint`、`read_first_returned_line_over_budget_returns_recoverable_error`、`read_binary_returns_structured_hint`、`read_hashline_renders_two_char_hash_prefix`、`read_png_routes_to_image_and_can_build_input_image_part`、`read_pdf_routes_to_pdf_and_can_build_input_file_part`、`read_oversize_image_rejected_before_loading_bytes` | ✅ 2026-05-30 | 端到端看分页、预算护栏、结构化错误和多模态路由都能一起站住。 |
 | tool_exec 参数   | `submodules_test::tool_exec_read_returns_content`、`tool_exec_legacy_read_file_returns_unknown_tool_error`、`tool_exec_read_offset_zero_returns_bound_error`、`tool_exec_read_limit_over_max_returns_bound_error`                                                                                                                                                                               | ✅ 2026-05-05 | 调度层参数与老名未知工具语义。 |
-| dedup / 注入     | `tool_exec_dedup_test::tool_exec_read_second_call_returns_unchanged_stub`、`tool_exec_read_after_mtime_bump_refetches`、`tool_exec_read_partial_then_full_does_not_dedup`、`tool_exec_read_different_window_does_not_dedup`、`tool_exec_read_state_clear_resets_dedup`、`tool_exec_image_result_injects_into_next_user_message_parts`、`tool_exec_pdf_result_injects_into_next_user_message_parts` | ✅ 2026-05-05 | stub、mtime 刷新、窗不等价、清表、图/PDF 注入 user。 |
+| dedup / 注入     | `read_state_test::matches_request_misses_when_render_mode_differs`、`read_state_test::resolve_prefers_hashline_and_normalizes_ignored_line_numbers_flag`、`tool_exec_dedup_test::tool_exec_read_second_call_returns_unchanged_stub`、`tool_exec_read_line_numbers_then_hashline_refetches_for_edit_anchors`、`tool_exec_read_hashline_then_line_numbers_refetches_for_plain_context`、`tool_exec_read_after_mtime_bump_refetches`、`tool_exec_read_partial_then_full_does_not_dedup`、`tool_exec_read_different_window_does_not_dedup`、`tool_exec_read_state_clear_resets_dedup`、`tool_exec_image_result_injects_into_next_user_message_parts`、`tool_exec_pdf_result_injects_into_next_user_message_parts` | ✅（形态回归：2026-08-27） | 同形态范围覆盖才 stub；普通行号和 hashline 互切必须重读；mtime、窗口、清表与图/PDF 注入也仍受锁定。 |
+| 上下文驱逐后的 dedup | `apply_and_after_reply_test::boundary_eviction_forces_a_real_reread_instead_of_an_unchanged_stub` | ✅ 2026-08-27 | 可见结果被真实 Layer 0 驱逐后，对应 stamp 必须失效，下一次 read 得回正文、不能指向空结果。 |
 | helper 签名      | `src/core/llm/tests/types_test.rs` 中 `image_b64` / `file_b64`                                                                                                                                                                                                                                                                                                                                | ✅ 2026-05-05 | helper 限长与白名单不回归。 |
 | 配置解析           | `infra/config/tests/tools_cfg_test.rs`（`[tools.read] max_bytes` 覆盖）                                                                                                                                                                                                                                                                                                                          | ✅ 2026-05-05 | TOML 里改门能生效。 |
 
@@ -827,7 +846,9 @@ ReadResult
 | 大文件 OOM           | wasm / 主机内存 | metadata 门 + 分块扫行；禁止整文件读后再判大小                          | 先量再流式扫，别整文件进 String。 |
 | OpenAI tool 消息塞图片 | API 拒收 / 浪费 | 图 / PDF **仅**注入下一条 `user` Parts；单测锁注入行为                | 图别塞 tool 正文，走 user Parts。 |
 | `mtime` 欺骗式不变     | 陈旧漏判        | 存 `content_hash` + hashline 给 edit 侧纵深；[文首导读 D 状态机与会话表](#d-状态机与会话表) 写明边界         | dedup 快路径认 mtime；写改侧还有纵深。 |
-| 重复 read 烧 token   | 成本          | dedup stub；`ReadFileState` 按会话释放                       | 同窗没变就 stub，会话结束清表。 |
+| 把另一种排版误判成重复 read | 模型拿不到 hashline 锚点，退回 bash/touch 绕过 | `render_mode` 纳入 dedup 身份；普通行号 / hashline 互切端到端测试锁住 | 同一份源文件排版不同也是不同模型输入，得真读。 |
+| stub 指向已离开上下文的结果 | 模型按空引用推理，可能再次绕过 read | 工具结果被落盘、替换或压缩驱逐时按 `tool_call_id` 失效 stamp；真实 Layer 0 驱逐后 reread 测试锁住 | 旧结果看不见了，就不能说「你已读过」。 |
+| 重复 read 烧 token   | 成本          | `render_mode` 相同、已读范围覆盖且结果仍可见时才 dedup stub；`ReadFileState` 按会话释放 | 真正同一版内容才 stub，会话结束清表。 |
 
 
 ---

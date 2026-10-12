@@ -30,6 +30,26 @@ describe("TodoList", () => {
     expect(document.querySelector('svg[data-state="completed"] path.tc-plan-todo__icon-check')).not.toBeNull();
   });
 
+  it("announces all four statuses as text instead of relying on icon shape or color", () => {
+    render(
+      <TodoList
+        labelledBy="todos-heading"
+        todos={[
+          { content: "Queued work", id: "t1", status: "pending" },
+          { content: "Active work", id: "t2", status: "in_progress" },
+          { content: "Stopped work", id: "t3", status: "cancelled" },
+          { content: "Finished work", id: "t4", status: "completed" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Pending:").classList.contains("tc-visually-hidden")).toBe(true);
+    expect(screen.getByText("In progress:").classList.contains("tc-visually-hidden")).toBe(true);
+    expect(screen.getByText("Cancelled:").classList.contains("tc-visually-hidden")).toBe(true);
+    expect(screen.getByText("Completed:").classList.contains("tc-visually-hidden")).toBe(true);
+    expect(screen.getByRole("list").getAttribute("aria-labelledby")).toBe("todos-heading");
+  });
+
   it("sizes icons through the --tc-todo-icon-size CSS variable", () => {
     render(<TodoList todos={[{ content: "x", id: "t1", status: "pending" }]} />);
     const svg = document.querySelector("svg.tc-plan-todo__icon") as SVGElement;

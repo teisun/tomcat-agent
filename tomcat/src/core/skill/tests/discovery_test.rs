@@ -4,6 +4,24 @@ use crate::core::skill::{discover, skill_roots, SkillSource};
 use crate::AppConfig;
 
 #[test]
+fn discover_ignores_hidden_transaction_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let cfg = base_config(&temp.path().join("work"));
+    let root = project.join(".agents/skills");
+    for name in [".foo.staging.x", ".foo.backup.x"] {
+        write_skill(&root.join(name).join("SKILL.md"), "foo", "unpublished");
+    }
+    write_skill(&root.join("foo/SKILL.md"), "foo", "published");
+    let set = discover(&cfg, &project);
+    assert_eq!(set.by_name.len(), 1);
+    assert_eq!(set.by_name["foo"].description, "published");
+    assert!(set.warnings.is_empty());
+    std::fs::remove_dir_all(root.join("foo")).unwrap();
+    assert!(discover(&cfg, &project).by_name.is_empty());
+}
+
+#[test]
 fn skill_roots_follow_project_agent_managed_order() {
     let temp = temp_dir("roots_order");
     let project = temp.join("project");
@@ -17,7 +35,13 @@ fn skill_roots_follow_project_agent_managed_order() {
 
     let roots = skill_roots(&cfg, &project).unwrap();
     assert_eq!(roots[0].0, SkillSource::Project);
-    assert_eq!(roots[0].1, project.join(".tomcat").join("skills"));
+    assert_eq!(roots[0].1, project.join(".agents").join("skills"));
+    cfg.workspace.project_resource_dir = ".team-agents".to_string();
+    let custom_roots = skill_roots(&cfg, &project).unwrap();
+    assert_eq!(
+        custom_roots[0].1,
+        project.join(".team-agents").join("skills")
+    );
     assert_eq!(roots[1].0, SkillSource::Agent);
     assert!(roots[1]
         .1
@@ -37,7 +61,7 @@ fn discover_prefers_higher_priority_same_name() {
 
     write_skill(
         &project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("commit")
             .join("SKILL.md"),
@@ -104,7 +128,11 @@ fn discover_keeps_diagnostics_for_bad_skill_without_blocking_good_ones() {
     assert_eq!(set.diagnostics.len(), 1);
     assert!(set.diagnostics[0]
         .reason
-        .contains("skill 文件缺少 frontmatter 分隔符"));
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "skill.delimiter",
+            &[]
+        )));
 
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -118,7 +146,7 @@ fn discover_preserves_allowed_tools_metadata() {
 
     write_raw(
         &project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("commit")
             .join("SKILL.md"),
@@ -139,6 +167,85 @@ fn discover_preserves_allowed_tools_metadata() {
 }
 
 #[test]
+fn discover_accepts_a_valid_header_when_the_bounded_read_ends_mid_utf8_body_character() {
+    let temp = temp_dir("utf8_prefix");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+    let header = "---\nname: unicode\ndescription: safe bounded header\n---\n";
+    let body_bytes_before_unicode = 4 * 1024 - 1 - header.len();
+    let content = format!("{header}{}界", "x".repeat(body_bytes_before_unicode));
+    write_raw(
+        &work_dir.join("skills").join("unicode").join("SKILL.md"),
+        &content,
+    );
+
+    let set = discover(&cfg, &project);
+    assert!(
+        set.by_name.contains_key("unicode"),
+        "{:#?}",
+        set.diagnostics
+    );
+    assert!(set.diagnostics.is_empty(), "{:#?}", set.diagnostics);
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn discover_rejects_a_header_without_a_complete_closing_delimiter_in_the_read_window() {
+    let temp = temp_dir("truncated_delimiter");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+    write_raw(
+        &work_dir.join("skills").join("truncated").join("SKILL.md"),
+        &format!(
+            "---\nname: truncated\ndescription: {}\n--",
+            "x".repeat(4050)
+        ),
+    );
+
+    let set = discover(&cfg, &project);
+    assert!(!set.by_name.contains_key("truncated"));
+    assert!(set.diagnostics[0]
+        .reason
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "skill.frontmatterLimit",
+            &[("limit", "4096")]
+        )));
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn discover_rejects_invalid_utf8_inside_the_completed_header() {
+    let temp = temp_dir("invalid_header_utf8");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+    let path = work_dir.join("skills").join("invalid").join("SKILL.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        b"---\nname: invalid\ndescription: \xff\n---\n# body\n",
+    )
+    .unwrap();
+
+    let set = discover(&cfg, &project);
+    assert!(!set.by_name.contains_key("invalid"));
+    assert!(set.diagnostics[0]
+        .reason
+        .contains(&crate::infra::i18n::tr_in(
+            crate::infra::i18n::Locale::En,
+            "skill.utf8",
+            &[("detail", "")]
+        )));
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn discover_ignores_loose_markdown_files_in_project_root() {
     let temp = temp_dir("ignore_loose_markdown");
     let project = temp.join("project");
@@ -146,13 +253,13 @@ fn discover_ignores_loose_markdown_files_in_project_root() {
     let cfg = base_config(&work_dir);
 
     write_skill(
-        &project.join(".tomcat").join("skills").join("commit.md"),
+        &project.join(".agents").join("skills").join("commit.md"),
         "commit",
         "loose markdown should be ignored",
     );
     write_skill(
         &project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("lint")
             .join("SKILL.md"),
@@ -165,6 +272,43 @@ fn discover_ignores_loose_markdown_files_in_project_root() {
     assert!(set.by_name.contains_key("lint"));
 
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn discovery_failed_distinguishes_single_file_and_root_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let work = temp.path().join("work");
+    let cfg = base_config(&work);
+    let bad = project.join(".agents/skills/broken/SKILL.md");
+    write_raw(&bad, "placeholder");
+    std::fs::write(&bad, [0xff, 0xfe]).unwrap();
+    write_skill(&work.join("skills/good/SKILL.md"), "good", "still visible");
+
+    let single_file = discover(&cfg, &project);
+    assert!(single_file.by_name.contains_key("good"));
+    assert!(!single_file.by_name.contains_key("broken"));
+    assert!(!single_file.diagnostics.is_empty());
+    assert!(single_file
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("skills_scan_unreadable:")));
+    assert!(!single_file.discovery_failed());
+
+    // A file at the root path makes read_dir fail without chmod/UID assumptions.
+    let root = project.join(".agents/skills");
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, "not a directory").unwrap();
+    let failed_root = discover(&cfg, &project);
+    assert!(failed_root.discovery_failed());
+    assert!(failed_root.by_name.contains_key("good"));
+
+    let mut set = crate::core::skill::SkillSet::default();
+    assert!(!set.discovery_failed());
+    set.warnings.push("skill_shadowed:good by project".into());
+    assert!(!set.discovery_failed());
+    set.warnings.push("skills_discovery_roots_failed".into());
+    assert!(set.discovery_failed());
 }
 
 fn base_config(work_dir: &Path) -> AppConfig {

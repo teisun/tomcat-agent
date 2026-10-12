@@ -16,6 +16,41 @@ fn desc_of(name: &str) -> &'static str {
         .description
 }
 
+#[test]
+fn dispatch_agent_description_enforces_bounded_explorer_usage() {
+    let description = desc_of("dispatch_agent");
+
+    for forbidden in [
+        "a simple task",
+        "project rules or AGENTS/README files",
+        "a known file or symbol",
+        "confirmation of one implementation",
+        "one or two batches of direct-tool calls",
+        "self-review or final audit of your own Plan",
+        "work already covered by the Plan/Code Reviewer",
+    ] {
+        assert!(
+            description.contains(forbidden),
+            "dispatch_agent description should forbid: {forbidden}"
+        );
+    }
+
+    for required in [
+        "Direct `search_files` / `read` calls are the default",
+        "(1) the task crosses multiple unknown subsystems",
+        "(2) the questions can be investigated independently in parallel",
+        "(3) returning the necessary raw reads would materially bloat the parent context",
+        "every currently known independent question into one `tasks` array",
+        "After reports return, prefer direct tools to fill evidence gaps",
+        "Dispatch again only if the reports reveal a new blocker that direct tools cannot answer",
+    ] {
+        assert!(
+            description.contains(required),
+            "dispatch_agent description should require: {required}"
+        );
+    }
+}
+
 /// 成功率红线：精简 description 时，影响调用成功率的格式/枚举/互斥/唯一性/坑点
 /// 必须留在原地。删了这些模型就会调错工具。
 #[test]
@@ -26,7 +61,10 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
         hashline.contains("<line>#<2char>"),
         "hashline_edit 必须保留 `<line>#<2char>` 锚点格式"
     );
-    assert!(hashline.contains("HashMismatch"));
+    assert!(
+        hashline.contains("HashMismatch"),
+        "hashline_edit description lost its HashMismatch guidance: {hashline}"
+    );
 
     // edit：唯一性/精确匹配约束（Ambiguous）+ ORIGINAL 快照语义 + Stale。
     let edit = desc_of("edit");
@@ -35,9 +73,12 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
     assert!(edit.contains("ORIGINAL"));
     assert!(edit.contains("Stale"));
 
-    // search_files：系统二进制依赖 + Tier2 regex 限制。
+    // search_files：保留 target/usage 语义，不泄露底层实现细节。
     let search = desc_of("search_files");
-    assert!(search.contains("rg") && search.contains("fd"));
+    assert!(search.contains("target=content"));
+    assert!(search.contains("target=files"));
+    assert!(!search.contains("`rg`"));
+    assert!(!search.contains("`fd`"));
     assert!(search.contains("regex"));
 
     // update_plan：ops 三种 kind 枚举。
@@ -53,6 +94,84 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
 
     // bash：run_in_background 语义（后台任务全套用法在系统段）。
     assert!(desc_of("bash").contains("run_in_background"));
+    let task_output = desc_of("task_output");
+    assert!(task_output.contains("600000"));
+    assert!(task_output.contains("5000-600000ms"));
+}
+
+#[test]
+fn edit_schema_exposes_only_canonical_path_and_edits_shape() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "edit")
+        .expect("edit catalog entry");
+    let schema = (entry.parameters)();
+    let properties = &schema["properties"];
+    assert!(properties.get("path").is_some());
+    assert!(properties.get("edits").is_some());
+    assert!(properties.get("old_content").is_none());
+    assert!(properties.get("new_content").is_none());
+    assert!(properties.get("files").is_none());
+    assert_eq!(schema["required"], serde_json::json!(["path", "edits"]));
+}
+
+#[test]
+fn edit_guidelines_mention_batch_multi_file() {
+    let guidelines = render_tool_guidelines_with_policy(true);
+    assert!(guidelines.contains("multiple independent files"));
+    assert!(guidelines.contains("SAME tool round"));
+}
+
+#[test]
+fn plan_todo_schemas_expose_optional_final_acceptance_kind() {
+    let create_plan = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "create_plan")
+        .expect("create_plan catalog entry");
+    let create_schema = (create_plan.parameters)();
+    assert_eq!(
+        create_schema["properties"]["todos"]["items"]["properties"]["kind"]["enum"],
+        serde_json::json!(["work", "acceptance"])
+    );
+
+    let update_plan = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "update_plan")
+        .expect("update_plan catalog entry");
+    let schema = (update_plan.parameters)();
+    let upsert = &schema["properties"]["ops"]["items"]["oneOf"][0];
+    assert_eq!(
+        upsert["properties"]["todo_kind"]["enum"],
+        serde_json::json!(["work", "acceptance"])
+    );
+    assert!(schema["properties"].get("green_build_evidence").is_none());
+    assert!(schema["properties"].get("acceptance_commands").is_none());
+}
+
+#[test]
+fn todo_set_status_schema_accepts_evidence() {
+    let update_plan = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "update_plan")
+        .expect("update_plan catalog entry");
+    let update_plan_schema = (update_plan.parameters)();
+    let set_status = &update_plan_schema["properties"]["ops"]["items"]["oneOf"][1];
+    assert_eq!(set_status["properties"]["evidence"]["type"], "array");
+    assert_eq!(
+        set_status["properties"]["evidence"]["items"]["type"],
+        "string"
+    );
+
+    let todos = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "todos")
+        .expect("todos catalog entry");
+    let todos_schema = (todos.parameters)();
+    let todos_set_status = &todos_schema["properties"]["ops"]["items"]["oneOf"][1];
+    assert!(
+        todos_set_status["properties"].get("evidence").is_none(),
+        "plan completion evidence must not leak into the session-local todos contract"
+    );
 }
 
 /// 聚合去重：跨工具规则只说一遍，且包含被测试依赖的关键锚点。
@@ -63,6 +182,9 @@ fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {
     // 关键跨工具锚点（原 tool_instructions 内联，现从 guidelines 注入）。
     assert!(g.contains("Default file-edit workflow: read -> edit"));
     assert!(g.contains("read(hashline=true) -> hashline_edit"));
+    assert!(g.contains("prefer edit for prose and Markdown"));
+    assert!(g.contains("never mix anchors from separate reads"));
+    assert!(g.contains("line-count changes do not shift other batch anchors"));
     assert!(g.contains("never include display prefixes"));
     assert!(g.contains("prefer it over bash with grep/find/ls -R"));
     assert!(g.contains("Only claim you can access"));
@@ -81,6 +203,25 @@ fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {
     );
     // 每条 guideline 以 `- ` 起头。
     assert!(g.lines().all(|l| l.starts_with("- ")));
+}
+
+#[test]
+fn task_output_schema_matches_long_wait_slice_contract() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "task_output")
+        .expect("task_output catalog entry");
+    let schema = (entry.parameters)();
+    let timeout = &schema["properties"]["wait_ms"];
+    assert_eq!(timeout["minimum"].as_i64(), Some(0));
+    assert_eq!(timeout["maximum"].as_i64(), Some(600000));
+    assert!(
+        schema["properties"].get("timeout_ms").is_none(),
+        "legacy task_output timeout_ms must not be accepted"
+    );
+    let description = timeout["description"].as_str().unwrap_or("");
+    assert!(description.contains("5000-600000ms"));
+    assert!(description.contains("Ignored when block=false"));
 }
 
 #[test]
@@ -145,13 +286,27 @@ fn catalog_scope_and_category_contracts_hold() {
         }
     }
 
-    for name in ["config_get", "config_set"] {
+    for name in ["config_get", "config_set", "package_install"] {
         let entry = BUILTIN_TOOL_CATALOG
             .iter()
             .find(|entry| entry.name == name)
             .expect("config catalog entry");
         assert_eq!(entry.category, Some(ToolCategory::Config));
     }
+    let package_install = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "package_install")
+        .expect("package_install catalog entry");
+    assert_eq!(package_install.scope, PermissionScope::Write);
+    assert!(package_install.destructive);
+    let schema = (package_install.parameters)();
+    assert_eq!(schema["required"], serde_json::json!(["source"]));
+    assert_eq!(
+        schema["properties"]["scope"]["enum"],
+        serde_json::json!(["scope", "agent", "global"])
+    );
+    assert!(schema["properties"].get("force").is_none());
+    assert_eq!(schema["additionalProperties"], Value::Bool(false));
 }
 
 #[test]
@@ -186,8 +341,53 @@ fn search_files_catalog_contract_matches_plan() {
         "首版 schema 不应暴露 multiline"
     );
     assert!(
-        entry.description.contains("rg") && entry.description.contains("fd"),
-        "description 应说明系统二进制依赖"
+        !entry.description.contains("`rg`") && !entry.description.contains("`fd`"),
+        "description 不应泄露 search_files 的系统实现细节"
+    );
+}
+
+#[test]
+fn create_plan_requires_explicit_interaction_but_is_not_replay_safe() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "create_plan")
+        .unwrap();
+    assert!(entry.requires_user_interaction);
+    assert!(entry.description.contains("explicit consent"));
+    assert!(!super::super::catalog::is_replay_safe_tool("create_plan"));
+}
+
+#[test]
+fn replay_safety_is_independent_from_read_only() {
+    let ask_question = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "ask_question")
+        .expect("ask_question catalog entry");
+    let read = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "read")
+        .expect("read catalog entry");
+    let edit = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "edit")
+        .expect("edit catalog entry");
+
+    assert!(ask_question.requires_user_interaction);
+    assert!(
+        super::super::catalog::is_replay_safe_tool(ask_question.name),
+        "ask_question only re-shows a durable user interaction and is safe to continue"
+    );
+    assert!(
+        read.read_only && !super::super::catalog::is_replay_safe_tool(read.name),
+        "read-only does not prove an interrupted invocation did not already run"
+    );
+    assert!(
+        !super::super::catalog::is_replay_safe_tool(edit.name),
+        "mutation tools must never be silently replayed"
+    );
+    assert!(
+        !super::super::catalog::is_replay_safe_tool("third_party_tool"),
+        "unknown tools are fail-closed"
     );
 }
 
@@ -299,4 +499,23 @@ fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
             name
         );
     }
+}
+
+#[test]
+fn bash_schema_exposes_only_a_single_command_string() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "bash")
+        .unwrap();
+    let schema = (entry.parameters)();
+    assert!(schema["properties"].get("foreground_wait_ms").is_some());
+    assert!(schema["properties"].get("timeout_ms").is_none());
+    assert!(schema["properties"].get("args").is_none());
+    assert!(schema["properties"]["command"]["description"]
+        .as_str()
+        .is_some_and(|description| {
+            description.contains("Complete shell command line")
+                && description.contains("pipes")
+                && description.contains("sh -c")
+        }));
 }

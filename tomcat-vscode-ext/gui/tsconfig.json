@@ -17,5 +17,8 @@
     "jsx": "react-jsx",
     "types": ["vitest/globals"]
   },
-  "include": ["src"]
+  // The preview panel imports its protocol types straight from the host's shared
+  // directory, so both sides of that message contract are checked against one
+  // declaration rather than two copies that can drift apart.
+  "include": ["src", "../src/shared"]
 }

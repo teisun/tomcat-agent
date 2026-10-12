@@ -66,14 +66,19 @@ fn write_if_different(path: &std::path::Path, contents: &str) -> Result<bool, Ap
 fn merge_manifest_file(path: &std::path::Path, bundled_manifest: &str) -> Result<bool, AppError> {
     let existing_text = std::fs::read_to_string(path).map_err(AppError::Io)?;
     let mut existing: serde_json::Value = serde_json::from_str(&existing_text).map_err(|err| {
-        AppError::Plugin(format!(
-            "builtin plugin manifest parse error ({}): {}",
-            path.display(),
-            err
+        AppError::Plugin(crate::infra::i18n::tr(
+            "builtin.manifestParse",
+            &[
+                ("path", &path.display().to_string()),
+                ("detail", &err.to_string()),
+            ],
         ))
     })?;
     let bundled: serde_json::Value = serde_json::from_str(bundled_manifest).map_err(|err| {
-        AppError::Plugin(format!("embedded builtin manifest parse error: {}", err))
+        AppError::Plugin(crate::infra::i18n::tr(
+            "builtin.embeddedParse",
+            &[("detail", &err.to_string())],
+        ))
     })?;
     if !merge_manifest_fields(&mut existing, &bundled)? {
         return Ok(false);
@@ -87,12 +92,12 @@ fn merge_manifest_fields(
     existing: &mut serde_json::Value,
     bundled: &serde_json::Value,
 ) -> Result<bool, AppError> {
-    let existing_obj = existing.as_object_mut().ok_or_else(|| {
-        AppError::Plugin("builtin plugin manifest must be a JSON object".to_string())
-    })?;
-    let bundled_obj = bundled.as_object().ok_or_else(|| {
-        AppError::Plugin("embedded builtin plugin manifest must be a JSON object".to_string())
-    })?;
+    let existing_obj = existing
+        .as_object_mut()
+        .ok_or_else(|| AppError::Plugin(crate::infra::i18n::tr("builtin.manifestObject", &[])))?;
+    let bundled_obj = bundled
+        .as_object()
+        .ok_or_else(|| AppError::Plugin(crate::infra::i18n::tr("builtin.embeddedObject", &[])))?;
 
     let mut changed = false;
     for field in ["requiredPermissions", "requiredSecrets", "allowedHosts"] {
@@ -100,15 +105,17 @@ fn merge_manifest_fields(
             continue;
         };
         let bundled_array = bundled_value.as_array().ok_or_else(|| {
-            AppError::Plugin(format!(
-                "embedded builtin manifest `{field}` must be an array"
+            AppError::Plugin(crate::infra::i18n::tr(
+                "builtin.embeddedArray",
+                &[("field", field)],
             ))
         })?;
         match existing_obj.get_mut(field) {
             Some(existing_value) => {
                 let existing_array = existing_value.as_array_mut().ok_or_else(|| {
-                    AppError::Plugin(format!(
-                        "builtin plugin manifest `{field}` must be an array"
+                    AppError::Plugin(crate::infra::i18n::tr(
+                        "builtin.manifestArray",
+                        &[("field", field)],
                     ))
                 })?;
                 for item in bundled_array {

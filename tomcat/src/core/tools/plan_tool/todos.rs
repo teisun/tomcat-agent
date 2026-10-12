@@ -10,7 +10,6 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::TodoStatus,
-    state::PlanState,
     todo_runtime::{TodoFile, TodosRuntime},
     PlanRuntime,
 };
@@ -37,7 +36,7 @@ impl TodosArgs {
             for op in ops {
                 if op.get("op").is_some() && op.get("kind").is_none() {
                     return Err(ToolError::BadArgs(
-                        "todos ops: 字段 `op` 已下线，请改用 `kind`（kind: upsert | set_status | remove）"
+                        "todos ops: field `op` was removed; use `kind` (kind: upsert | set_status | remove)"
                             .into(),
                     ));
                 }
@@ -53,15 +52,13 @@ pub fn execute(
     todos_runtime: Option<&TodosRuntime>,
     args: TodosArgs,
 ) -> Result<serde_json::Value, ToolError> {
-    let mode = runtime.mode();
-    session_path(runtime, todos_runtime, args, mode)
+    session_path(runtime, todos_runtime, args)
 }
 
 fn session_path(
     runtime: &PlanRuntime,
     todos_runtime: Option<&TodosRuntime>,
     args: TodosArgs,
-    mode: PlanState,
 ) -> Result<serde_json::Value, ToolError> {
     let mut todos = if args.new_todos {
         Vec::new()
@@ -98,7 +95,7 @@ fn session_path(
         .map(|t| t.id.clone());
     let mut out = serde_json::json!({
         "scope": "session",
-        "mode": mode.as_str(),
+        "mode": runtime.mode().as_str(),
         "applied": args.ops.len(),
         "replace": args.replace,
         "new_todos": args.new_todos,

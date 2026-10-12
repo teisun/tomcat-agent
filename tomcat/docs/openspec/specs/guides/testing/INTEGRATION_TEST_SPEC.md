@@ -126,11 +126,12 @@ my_project/
 *   **分类执行约定（本仓库）**：Rust 门禁唯一入口仍是 `./scripts/run-integration-tests.sh`；`integration*` 统一走 `cargo-nextest`，`lib` / `doctest` 继续用 `cargo test`，避免把纯单测误切到“一用例一进程”模型。
 *   运行默认集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`
 *   仅运行默认 integration 组：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`
-*   仅运行 serial 兜底组（默认空）：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
+*   仅运行 serial 兜底组（当前六个进程密集目标）：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
 *   运行真 LLM 显式层：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-real-llm`
+*   40K 单列表长会话是付费手动专项，不计入 `integration-real-llm` 的执行数。显式运行（先构建当前 CLI）：`cargo build --bin tomcat && TOMCAT_REAL_LLM_E2E=1 RUST_LOG=tomcat=debug,info cargo test -j 1 --test single_list_real_llm_long_session_e2e real_terra_long_session_exercises_single_list_handoffs -- --ignored --exact --nocapture --test-threads=1`。模型由 `TOMCAT_E2E_GUARD_REAL_MODEL` 选择，默认 `idatatlas/gpt-5.6-terra`，复制该模型的现有 models.toml 条目；只向隔离的 Serve 子进程显式传入该条目所需凭据，并保留原有父环境过滤规则。缺前提或调用失败不得计通过。
 *   运行 Rust 快门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`
 *   运行 Rust 全门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`
-*   运行特定文件：默认目标可用 `RUST_LOG=tomcat=debug,info cargo nextest run --test audit_tests`；显式 real-llm 目标用 `RUST_LOG=tomcat=debug,info cargo nextest run --profile real-llm --test plan_real_llm_cli_e2e`。若要覆盖 doctest，额外执行 `cargo test --doc`。
+*   运行特定文件：默认目标可用 `RUST_LOG=tomcat=debug,info cargo nextest run --test audit_tests`；显式 real-llm 目标用 `RUST_LOG=tomcat=debug,info cargo nextest run --profile real-llm --test plan_real_llm_inprocess_tests`。若要覆盖 doctest，额外执行 `cargo test --doc`。
 *   仅运行库内单元测试：`RUST_LOG=tomcat=debug,info cargo test --lib`
 *   仅运行 doctest：`cargo test --doc`
 
@@ -139,15 +140,19 @@ my_project/
 
 **当前模型（默认追求最省时间）**：
 
-1. **默认 4 并发车道**：仓库通过 `.config/nextest.toml` 将 `profile.default.test-threads` 固定为 `4`，不再按 `num-cpus` 满开。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc`、`serve_*` 等。
-2. **serial 兜底组**：`test-groups.serial.max-threads = 1`，默认空。只有 3x 连跑证明确实互踩、OOM 或明显抖动时，才把个别 binary 临时回退到这里。
-3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 负责收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 以及 `cli_tests` 里 `*_real_llm_cli` 慢用例；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
+1. **默认 4 并发车道**：仓库通过 `.config/nextest.toml` 将 `profile.default.test-threads` 固定为 `4`，不再按 `num-cpus` 满开。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc` 等；下一项列出的六个目标除外。
+2. **serial 兜底组**：`test-groups.serial.max-threads = 1`；当前为 `project_trust_cli_tests`、`serve_multi_session`、`serve_ask_question_tests`、`serve_robustness_tests`、`serve_stdio_e2e`、`serve_rewind_and_resend`。`test-groups.sh` 记录了三轮门禁中并发启动会错过首帧 10 秒预算的回退依据；不得为了宣称并行而重新放开。新增回退仍需 3x 连跑证明确实互踩、OOM 或明显抖动。
+3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS`、`TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS` 及 `TOMCAT_INTEGRATION_REAL_LLM_CASES`；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
+4. **本地服务特性与手动项**：`TOMCAT_INTEGRATION_FEATURE_TESTS` 随默认门禁启用 `test-streamable-http-server`，覆盖本机 HTTP/OAuth 测试服务；`TOMCAT_INTEGRATION_MANUAL_TESTS` / `MANUAL_CASES` 明确列出需专用环境的用例，不把它们伪称离线或 real-llm 已通过。`integration_gate_config_tests` 对照 Cargo targets 检查分类遗漏。
 
 **隔离原则**：
 
 *   `nextest` 是“一用例一进程”，因此 `set_var` / `cwd` 这类进程内状态不再天然要求整组 `-j1 --test-threads=1`。
 *   真 LLM / CLI E2E 里凡会落盘到 `~/.tomcat` 的路径，都必须在测试入口先切到**临时 HOME**，让 `~/.tomcat/*` 落到私有 tempdir；默认门禁不再依赖真实家目录。
-*   默认过滤（`profile.default.default-filter`）会排除显式 real-llm binary 与 `cli_tests` 里的 `*_real_llm_cli` 慢用例；它们只能通过 `integration-real-llm` / `profile real-llm` 进入门禁。
+*   默认过滤排除上述真实模型/外网 binary 和 case，以及明确列出的手动项。离线集成可使用固定本地服务，但其通过不能代替真实供应商链路验证。
+*   `run-integration-tests.sh` 只使用当前 shell 已导出的凭据（`TOMCAT_TEST_EXPORTED_ENV_ONLY=1`），不让 Rust helper 偷偷从 dotenv 补到与预检不同的 key。默认 Responses target 是 `idatatlas/gpt-5.6-terra`，由 `TOMCAT_E2E_OPENAI_TARGET` 覆盖，对应凭据为 `IDATATLAS_OPENAI_API_KEY`；若显式改为内置 GPT target，则使用 `OPENAI_API_KEY`，`fcodex/*` 使用 `FCODEX_OPENAI_API_KEY`。`integration-real-llm` 还包含有意固定 IDATATLAS 的 CLI/LLM/plan 交付测试，因此 target 不同于 IDATATLAS 时必须同时提供 `IDATATLAS_OPENAI_API_KEY`；只跑 `integration-openai-responses-wire` 则只要求所选 target 的凭据。DeepSeek / MiMo 的协议专项测试保留为单独目标，不进入这条通用门禁。缺凭据退出 2 并说明“未运行”，不是成功跳过。
+*   入口只给 `NO_PROXY` / `no_proxy` 追加 `127.0.0.1,localhost,::1`，避免本地 HTTP fixture 经开发机代理转发；已有排除项和真实远程供应商代理保持不变。直接使用 `cargo` 聚焦本地 HTTP 用例时也须提供 loopback 排除项，不能把代理阻塞当业务回归或通过。
+*   `run-integration-tests.sh` 在启动隔离测试前清除父 shell 的 `TOMCAT_AGENT_ACTIVE` 标记，以便 disposable CLI 可修改自己的临时 HOME；这是测试入口的限定例外，不得禁用生产 CLI guard，也不得借此修改真实 HOME。fixture 仍必须自行隔离 HOME/配置/工作区；guard 开关行为由显式开/关测试覆盖。
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：

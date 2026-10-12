@@ -38,11 +38,28 @@ fn parse_command_line_rejects_explicit_null_session_id() {
 }
 
 #[test]
+fn speed_ndjson_parses_speeds_and_rejects_unknown_values_and_legacy_key() {
+    for speed in ["standard", "fast", "ultrafast"] {
+        let raw = format!(
+            r#"{{"type":"set_speed","id":"s1","sessionId":"sid","model":"relay","speed":"{speed}"}}"#
+        );
+        let command = parse_command_line(&raw).unwrap();
+        assert_eq!(command.wire_type(), "set_speed");
+        assert_eq!(command.command_id(), Some("s1"));
+        assert_eq!(command.session_id(), Some("sid"));
+    }
+    assert!(parse_command_line(r#"{"type":"set_speed","model":"relay","speed":"warp"}"#).is_err());
+    assert!(parse_command_line(r#"{"type":"set_speed","model":"relay","tier":"fast"}"#).is_err());
+}
+
+#[test]
 fn parse_command_line_accepts_all_known_command_types() {
     let commands = [
         r#"{"type":"prompt","id":"u1","text":"hello"}"#,
         r#"{"type":"steer","id":"u2","text":"focus"}"#,
         r#"{"type":"follow_up","id":"u3","text":"continue"}"#,
+        r#"{"type":"resume","id":"u3b","sessionId":"s1"}"#,
+        r#"{"type":"retry","id":"u3c","sessionId":"s1","messageId":"m1"}"#,
         r#"{"type":"get_state","id":"u4","sessionId":"s1"}"#,
         r#"{"type":"set_plan_mode","id":"u5","sessionId":"s1","action":"enter"}"#,
         r#"{"type":"set_model","id":"u6","sessionId":"s1","model":"gpt-5.4"}"#,

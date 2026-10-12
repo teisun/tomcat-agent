@@ -11,13 +11,24 @@ export class FakeChildProcess extends EventEmitter {
   public killed = false;
   public pid = 4242;
   public signalCode: NodeJS.Signals | null = null;
+  public autoClose = true;
+  public readonly signals: Array<NodeJS.Signals | undefined> = [];
 
   kill(signal?: NodeJS.Signals): boolean {
+    this.signals.push(signal);
     this.killed = true;
     this.signalCode = signal ?? null;
     this.exitCode = 0;
     this.emit("exit", this.exitCode, this.signalCode);
+    if (this.autoClose) this.close();
     return true;
+  }
+
+  close(): void {
+    this.stdin.end();
+    this.stdout.end();
+    this.stderr.end();
+    this.emit("close", this.exitCode, this.signalCode);
   }
 
   emitStdout(text: string): void {

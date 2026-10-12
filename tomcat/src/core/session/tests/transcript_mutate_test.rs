@@ -1,123 +1,11 @@
-//! # 原地改写 / 插入 / 删除条目
+//! # 原地改写 / 插入条目
 //!
-//! 覆盖三组写路径：
+//! 覆盖两组写路径：
 //!
-//! - `set_branch_summary_entry_is_boundary_true_*`：把 `BranchSummary` 行的
-//!   `is_boundary` 字段原地翻转，保留其它字段；非目标行保留前导空白
-//!   （`preserve_unmatched_line_whitespace`）。
 //! - `insert_entry_after_message_id_*`：在指定锚点 message 之后插入新条目，
 //!   并保持原有更晚消息的相对顺序。
-//! - `remove_branch_summary_entry_by_id_*`：按 id 删除 BranchSummary 行；
-//!   重复 id 全部删除；id 不存在时返回 `Err`。
 
 use super::super::transcript::*;
-
-#[test]
-fn set_branch_summary_entry_is_boundary_true_updates_line() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("inplace.jsonl");
-    write_header(
-        &path,
-        &SessionHeader {
-            r#type: "session".to_string(),
-            version: Some(3),
-            id: "sid".to_string(),
-            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
-            cwd: None,
-        },
-    )
-    .unwrap();
-    let c = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-        id: Some("cmp_inplace".to_string()),
-        parent_id: None,
-        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
-        summary: Some("s".to_string()),
-        covered_start_id: Some("a".to_string()),
-        covered_end_id: Some("b".to_string()),
-        covered_count: Some(2),
-        is_boundary: Some(false),
-        preheat_compaction_id: Some("cmp_inplace".to_string()),
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        error: None,
-        attempts: None,
-    });
-    append_entry(&path, &c).unwrap();
-    set_branch_summary_entry_is_boundary_true(&path, "cmp_inplace").unwrap();
-    let e = get_entry(&path, "cmp_inplace").unwrap().unwrap();
-    match e {
-        TranscriptEntry::BranchSummary(ce) => {
-            assert_eq!(ce.is_boundary, Some(true));
-            assert_eq!(ce.summary.as_deref(), Some("s"));
-        }
-        _ => panic!("expected branch_summary"),
-    }
-}
-
-#[test]
-fn set_branch_summary_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("preserve_ws.jsonl");
-    write_header(
-        &path,
-        &SessionHeader {
-            r#type: "session".to_string(),
-            version: Some(3),
-            id: "sid".to_string(),
-            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
-            cwd: None,
-        },
-    )
-    .unwrap();
-
-    let msg = TranscriptEntry::Message(MessageEntry {
-        id: Some("msg_ws".to_string()),
-        parent_id: None,
-        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
-        message: serde_json::json!({"role": "user", "content": "hi"}),
-    });
-    let indented = format!("   {}", serde_json::to_string(&msg).unwrap());
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(f, "{}", indented).unwrap();
-
-    let c = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-        id: Some("cmp_ws".to_string()),
-        parent_id: None,
-        timestamp: "2025-01-01T00:00:02.000Z".to_string(),
-        summary: Some("sum".to_string()),
-        covered_start_id: Some("a".to_string()),
-        covered_end_id: Some("b".to_string()),
-        covered_count: Some(2),
-        is_boundary: Some(false),
-        preheat_compaction_id: None,
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        error: None,
-        attempts: None,
-    });
-    append_entry(&path, &c).unwrap();
-
-    set_branch_summary_entry_is_boundary_true(&path, "cmp_ws").unwrap();
-
-    let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(
-        raw.lines()
-            .any(|l| l.starts_with("   ") && l.contains("\"type\":\"message\"")),
-        "leading spaces on non-target lines must be preserved:\n{raw}"
-    );
-
-    let e = get_entry(&path, "cmp_ws").unwrap().unwrap();
-    match e {
-        TranscriptEntry::BranchSummary(ce) => assert_eq!(ce.is_boundary, Some(true)),
-        _ => panic!("expected branch_summary"),
-    }
-}
 
 #[test]
 fn insert_entry_after_message_id_inserts_before_later_messages() {
@@ -131,6 +19,7 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -166,6 +55,7 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     insert_entry_after_message_id(&path, "mid_anchor", &c).unwrap();
 
@@ -174,110 +64,6 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
     assert!(matches!(&entries[0], TranscriptEntry::Message(_)));
     assert!(matches!(&entries[1], TranscriptEntry::BranchSummary(_)));
     assert!(matches!(&entries[2], TranscriptEntry::Message(_)));
-}
-
-#[test]
-fn remove_branch_summary_entry_by_id_removes_matching_line() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rm_branch.jsonl");
-    write_header(
-        &path,
-        &SessionHeader {
-            r#type: "session".to_string(),
-            version: Some(3),
-            id: "sid".to_string(),
-            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
-            cwd: None,
-        },
-    )
-    .unwrap();
-    let msg = TranscriptEntry::Message(MessageEntry {
-        id: Some("m1".to_string()),
-        parent_id: None,
-        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
-        message: serde_json::json!({"role": "user", "content": "hi"}),
-    });
-    append_entry(&path, &msg).unwrap();
-    let b = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-        id: Some("rm_target".to_string()),
-        parent_id: None,
-        timestamp: "2025-01-01T00:00:02.000Z".to_string(),
-        summary: Some("s".to_string()),
-        covered_start_id: Some("a".to_string()),
-        covered_end_id: Some("b".to_string()),
-        covered_count: Some(2),
-        is_boundary: Some(false),
-        preheat_compaction_id: None,
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        error: None,
-        attempts: None,
-    });
-    append_entry(&path, &b).unwrap();
-    remove_branch_summary_entry_by_id(&path, "rm_target").unwrap();
-    let raw = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(raw.lines().count(), 2, "header + message only");
-    assert!(get_entry(&path, "rm_target").unwrap().is_none());
-}
-
-#[test]
-fn remove_branch_summary_entry_by_id_removes_all_duplicate_ids() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rm_dup.jsonl");
-    write_header(
-        &path,
-        &SessionHeader {
-            r#type: "session".to_string(),
-            version: Some(3),
-            id: "sid".to_string(),
-            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
-            cwd: None,
-        },
-    )
-    .unwrap();
-    let mk = |ts: &str| {
-        TranscriptEntry::BranchSummary(BranchSummaryEntry {
-            id: Some("dup_id".to_string()),
-            parent_id: None,
-            timestamp: ts.to_string(),
-            summary: Some("x".to_string()),
-            covered_start_id: None,
-            covered_end_id: None,
-            covered_count: None,
-            is_boundary: Some(false),
-            preheat_compaction_id: None,
-            estimated_covered_tokens_before: None,
-            estimated_summary_tokens: None,
-            estimated_tokens_saved: None,
-            error: None,
-            attempts: None,
-        })
-    };
-    append_entry(&path, &mk("2025-01-01T00:00:01.000Z")).unwrap();
-    append_entry(&path, &mk("2025-01-01T00:00:02.000Z")).unwrap();
-    remove_branch_summary_entry_by_id(&path, "dup_id").unwrap();
-    let raw = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(raw.lines().count(), 1);
-}
-
-#[test]
-fn remove_branch_summary_entry_by_id_not_found_returns_err() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("rm_missing.jsonl");
-    write_header(
-        &path,
-        &SessionHeader {
-            r#type: "session".to_string(),
-            version: Some(3),
-            id: "sid".to_string(),
-            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
-            cwd: None,
-        },
-    )
-    .unwrap();
-    let r = remove_branch_summary_entry_by_id(&path, "nope");
-    assert!(r.is_err());
 }
 
 #[test]
@@ -292,6 +78,7 @@ fn mark_message_entries_after_anchor_superseded_marks_only_later_messages() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -351,6 +138,30 @@ fn mark_message_entries_after_anchor_superseded_marks_only_later_messages() {
 }
 
 #[test]
+fn rewind_and_resend_supersedes_compaction_by_marker_not_body_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rewind.jsonl");
+    let rows = [
+        serde_json::json!({"type":"session","id":"s","timestamp":"t"}),
+        serde_json::json!({"type":"branch_summary","id":"before","timestamp":"t","isBoundary":true}),
+        serde_json::json!({"type":"message","id":"target","timestamp":"t","message":{"role":"user","content":"old"}}),
+        serde_json::json!({"type":"branch_summary","id":"after","timestamp":"t","isBoundary":true}),
+        serde_json::json!({"type":"branch_summary_text","forId":"before","timestamp":"t","summary":"keep"}),
+        serde_json::json!({"type":"branch_summary_text","forId":"after","timestamp":"t","summary":"discard"}),
+    ];
+    std::fs::write(&path, format!("{}\n", rows[0])).unwrap();
+    for row in &rows[1..] {
+        append_line(&path, &row.to_string()).unwrap();
+    }
+    mark_message_entries_after_anchor_superseded(&path, "target").unwrap();
+    let entries = read_entries_tail(&path, 20).unwrap();
+    assert!(matches!(&entries[0], TranscriptEntry::BranchSummary(e) if !e.superseded));
+    assert!(matches!(&entries[2], TranscriptEntry::BranchSummary(e) if e.superseded));
+    assert!(matches!(&entries[3], TranscriptEntry::BranchSummaryText(e) if !e.superseded));
+    assert!(matches!(&entries[4], TranscriptEntry::BranchSummaryText(e) if e.superseded));
+}
+
+#[test]
 fn mark_message_entries_after_anchor_superseded_requires_anchor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("superseded_missing.jsonl");
@@ -362,11 +173,109 @@ fn mark_message_entries_after_anchor_superseded_requires_anchor() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
     let err = mark_message_entries_after_anchor_superseded(&path, "missing");
     assert!(err.is_err());
+}
+
+#[test]
+fn mark_tool_result_entries_by_tool_call_id_superseded_marks_only_matching_active_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tool_result_superseded.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+            project_root: None,
+        },
+    )
+    .unwrap();
+
+    for (id, message) in [
+        (
+            "assistant-1",
+            serde_json::json!({
+                "role":"assistant",
+                "tool_calls":[{
+                    "id":"ask-1",
+                    "type":"function",
+                    "function":{"name":"ask_question","arguments":"{}"}
+                }]
+            }),
+        ),
+        (
+            "tool-1",
+            serde_json::json!({
+                "role":"tool",
+                "tool_call_id":"ask-1",
+                "content":"[pending]"
+            }),
+        ),
+        (
+            "tool-2",
+            serde_json::json!({
+                "role":"tool",
+                "tool_call_id":"other",
+                "content":"ok"
+            }),
+        ),
+        (
+            "tool-3",
+            serde_json::json!({
+                "role":"tool",
+                "tool_call_id":"ask-1",
+                "content":"stale old result",
+                "superseded":true
+            }),
+        ),
+    ] {
+        append_entry(
+            &path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+                message,
+            }),
+        )
+        .unwrap();
+    }
+
+    let changed = mark_tool_result_entries_by_tool_call_id_superseded(&path, "ask-1").unwrap();
+    assert_eq!(changed, 1);
+
+    let entries = read_entries_tail(&path, 10).unwrap();
+    let tool_flags: Vec<(String, Option<bool>)> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(me)
+                if me.message.get("role").and_then(|value| value.as_str()) == Some("tool") =>
+            {
+                Some((
+                    me.message["tool_call_id"].as_str().unwrap().to_string(),
+                    me.message
+                        .get("superseded")
+                        .and_then(|value| value.as_bool()),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_flags,
+        vec![
+            ("ask-1".to_string(), Some(true)),
+            ("other".to_string(), None),
+            ("ask-1".to_string(), Some(true)),
+        ]
+    );
 }
 
 #[test]
@@ -381,6 +290,7 @@ fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -433,7 +343,67 @@ fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
 }
 
 #[test]
+fn mark_user_message_entry_superseded_by_id_is_precise_and_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("copy_forward_anchor.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+            project_root: None,
+        },
+    )
+    .unwrap();
+    for (id, role) in [
+        ("source", "user"),
+        ("assistant", "assistant"),
+        ("other", "user"),
+    ] {
+        append_entry(
+            &path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+                message: serde_json::json!({"role": role, "content": id}),
+            }),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        mark_user_message_entry_superseded_by_id(&path, "source").unwrap(),
+        1
+    );
+    let after_first_stamp = std::fs::read(&path).unwrap();
+    assert_eq!(
+        mark_user_message_entry_superseded_by_id(&path, "source").unwrap(),
+        0,
+        "repeating the stamp must not rewrite an already stamped source row"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), after_first_stamp);
+
+    let entries = read_entries_tail(&path, 8).unwrap();
+    let messages = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(messages[0].message["superseded"], true);
+    assert_eq!(messages[0].message["turn_failed"], true);
+    assert!(messages[1].message.get("superseded").is_none());
+    assert!(messages[2].message.get("superseded").is_none());
+}
+
+#[test]
 fn error_entry_roundtrips_as_type_error() {
+    let summary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-123";
     let entry = TranscriptEntry::Error(ErrorEntry {
         id: Some("err-1".to_string()),
         parent_id: None,
@@ -444,13 +414,21 @@ fn error_entry_roundtrips_as_type_error() {
         api_family: Some("openai-responses".to_string()),
         status_code: Some(403),
         request_id: Some("req-123".to_string()),
-        summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123".to_string(),
+        failure_kind: Some("billing".to_string()),
+        failure_domain: Some("account".to_string()),
+        summary: summary.to_string(),
         detail: "API 错误 403: <html>...</html>".to_string(),
     });
 
     let json = serde_json::to_value(&entry).unwrap();
-    assert_eq!(json.get("type").and_then(|value| value.as_str()), Some("error"));
-    assert_eq!(json.get("summary").and_then(|value| value.as_str()), Some("API 错误 403 · aigateway.sunmi.com · Request-Id req-123"));
+    assert_eq!(
+        json.get("type").and_then(|value| value.as_str()),
+        Some("error")
+    );
+    assert_eq!(
+        json.get("summary").and_then(|value| value.as_str()),
+        Some(summary)
+    );
 
     let roundtrip: TranscriptEntry = serde_json::from_value(json).unwrap();
     match roundtrip {
@@ -474,6 +452,7 @@ fn rewrite_message_text_entries_by_id_updates_target_messages_only() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

@@ -1,6 +1,14 @@
-# OpenAI Files 上传管理（`POST /v1/files`）
+# Files API 上传管理（跨厂商适配层）
 
-本文档是 **[T2-P0-015](../agents/TASK_BOARD_002/tasks/T2-P0-015.md) | llm-files-upload-manager** 的冻结版技术方案（OpenSpec **A 类**：`docs/architecture/` 根下跨模块方案），与任务卡 **双向锚定**：任务卡列子项与验收，本文列决策、协议与测试指针；**实现以仓库代码为准**；未定稿的占位以「计划」标明。承接 **[T2-P0-012](../agents/TASK_BOARD_002/tasks/T2-P0-012.md)** 已落地的 **inline base64（A 通道）** 与 **已知 `file_id`（B 通道）** wire，补齐 **multipart 上传 → `file_id` → Responses 引用** 的闭环与生命周期治理。
+本文档是 **[T2-P0-015](../agents/TASK_BOARD_002/tasks/T2-P0-015.md) | llm-files-upload-manager** 的冻结版技术方案（OpenSpec **A 类**：`docs/architecture/` 根下跨模块方案），与任务卡 **双向锚定**：任务卡列子项与验收，本文列决策、协议与测试指针；**实现以仓库代码为准**；未定稿的占位以「计划」标明。
+
+> 2026-07 更新：文件名仍沿用历史名称 `llm-files-upload-manager`，但**当前实现已不是“OpenAI 专属上传器”**。现在的边界是：
+>
+> - **`FilesApiAdapter`**：只管上传 / 删除 / 极小引用提示（OpenAI 原样、Moonshot `ms://`、Anthropic beta 头）
+> - **wire 家族函数**：只管把 `ChatMessageContentPart` 翻译成 Responses / Completions / Anthropic 的消息 JSON
+> - **`OpenAiFilesRuntime`**：继续负责缓存 / 去重 / 清理，但底下挂的是 `Arc<dyn FilesApiAdapter>`
+>
+> 因此本文中的一些 “OpenAI Files” 历史表述，应理解为“**兼容 OpenAI 形或同类 Files API 的上传运行时**”；当前已覆盖 **OpenAI / Moonshot / Anthropic** 三家。
 
 **节号与 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 对应**：本文 `## 1`–`## 13` 分别映射规范 **§1 术语** … **§13 历史决策**（与 [`tools/read.md`](tools/read.md) 文首脚注同构）。标杆写法：**§2 仅调研**；**§4** 含 **§4.1 七列决策表**（`决策` + `说人话`）+ **§4.2 五列实施表** + **§4.2.x** 技术要点。
 
@@ -45,14 +53,14 @@
 
 | 术语 | 语义（大白话） | 数据载体 | 行为约束 | 说人话 |
 |------|----------------|----------|----------|--------|
-| **A 通道（inline）** | 字节 base64 塞进请求 JSON，不经 OpenAI Files | [`ChatMessageContentPart::InputImage` / `InputFile`](../../src/core/llm/types.rs) 的 `image_b64` / `file_b64` 字段 | 受 `IMAGE_MAX_BYTES` / `FILE_MAX_BYTES` 约束；[`part_to_responses_value`](../../src/core/llm/openai_responses/payload.rs) 拼 `data:` URL | 小图小 PDF 直接塞包里发走。 |
-| **B 通道（file_id）** | 引用已在 OpenAI 账户里的文件 | 同上变体的 `file_id: Option<String>` | **非空 `file_id` 优先于 inline**（payload 翻译顺序）；不做本地字节大小校验 | 先上传拿 id，再只传 id，省带宽。 |
-| **`OpenAiFilesClient`** | 专打 `POST/GET/DELETE {base}/v1/files` 的薄客户端 | 计划：`src/core/llm/openai_files.rs`（或子目录）+ 共享 `reqwest::Client` / `LlmConfig` 派生的 base/key | 与 Responses 适配器 **解耦**：只负责 Files REST，不组 `ChatRequest` | 上传归上传，对话归对话。 |
+| **A 通道（inline）** | 字节 base64 直接塞进请求 JSON，不经 Files 上传 | [`ChatMessageContentPart::InputImage` / `InputFile`](../../src/core/llm/types.rs) 的 `image_b64` / `file_b64` 字段 | 受 `IMAGE_MAX_BYTES` / `FILE_MAX_BYTES` 约束；具体 JSON 由当前 wire 家族拼装 | 小图小 PDF 直接塞包里发走。 |
+| **B 通道（file_id）** | 先上传到厂商文件仓库，再在消息里只带 id / token | 同上变体的 `file_id: Option<String>` | **非空 `file_id` 优先于 inline**；最终 token/槽位由 wire + adapter 协作决定 | 先上传拿号，再只传号，省带宽。 |
+| **`FilesApiAdapter`** | 专打厂商 `POST/DELETE {base}/v1/files` 的存储适配层 | [`src/core/llm/files_api.rs`](../../src/core/llm/files_api.rs) + 共享 `reqwest::Client` / `LlmConfig` 派生的 base/key | **只管存储，不吐消息 JSON**；JSON 仍归 Responses / Completions / Anthropic wire | 上传归上传，对话归对话。 |
 | **`purpose`** | OpenAI 侧文件用途（影响可用场景） | 计划：`enum FilePurpose` 映射到 REST `purpose` 字符串（如 `vision`、`user_data`） | 以官方当前文档为准；图片与通用文件可能分 purpose | 告诉 OpenAI 这文件是给看图还是给当附件。 |
 | **Reuse cache（双索引）** | 同一字节内容不重复 `POST /v1/files`，且**同路径文件改动后不命中旧 file_id** | 计划：进程内 `DashMap` 等价；**两张表**——① `path → CacheEntry { mtime_ms, size, sha256, file_id, expires_at }`；② `sha256 → file_id`（跨路径去重） | **一致性检查顺序**：(a) 路径表查 `(mtime, size)` 一致 → 直接复用 `file_id`；(b) `(mtime, size)` 变 → 重算 `sha256`；(c) `sha256` 一致 → 仍复用并刷新 stamp；(d) `sha256` 不一致 → 视为**新文件**，上传得 `file_id'`，旧 `file_id` 入 DELETE 队列；(e) 命中 entry 已 `expires_at <= now` → 视为失效，重传。**借鉴** [`read_state.rs::ReadStamp`](../../src/core/tools/pipeline/read_state.rs) 的「mtime+size 快路径，hash 兜底」 | 同一份 PDF 连发五轮别上传五次；改了再传就别还用旧 id。 |
 | **`expires_after`**（服务端 TTL） | 上传时声明文件几秒后由 OpenAI 自动删除 | wire：`expires_after[anchor]=created_at` + `expires_after[seconds]=N` ([官方 Upload file](https://developers.openai.com/api/reference/resources/files/methods/create)) | 取值范围 **3600 ~ 2592000s**；**默认 86400s（24h）**，进程崩溃 / CI 异常退出也不会泄漏 | 让 OpenAI 自己到点收尸，不全靠我们 DELETE。 |
 | **`cleanup_on_exit`**（客户端 DELETE） | 会话 / 进程退出时是否**主动**删远端 file（**手刹**） | **实现内默认**（无 TOML）；**与 `expires_after` 是兜底关系**，不互相替代 | 编排层在会话收尾对本会话登记的 `file_id` **尽力 DELETE**（幂等 404）；策略常量（如是否 `older_than`）若需产品化再开新任务，**本任务不暴露配置项** | 不等 24 小时，主动删；崩溃也有 expire 兜底。 |
-| **「下一轮 Responses 请求发出前」** | 指 **`OpenAiResponsesProvider::chat` / `chat_stream` 已拿到含 `file_id` 的 `ChatMessage`、即将 `POST /v1/responses` 之前** | — | 与上传重试、cleanup 时序讨论绑在此边界 | 上传必须在打 Responses 之前结束（同轮或上一轮末缓存）。 |
+| **「下一轮聊天请求发出前」** | 指 provider 已拿到含 `file_id` 的 `ChatMessage`，即将 `POST /v1/responses` / `POST /v1/chat/completions` / `POST /v1/messages` 之前 | — | 与上传重试、cleanup 时序讨论绑在此边界 | 上传必须在真正发聊天请求前结束（同轮或上一轮末缓存）。 |
 
 ---
 
@@ -134,7 +142,7 @@ grep -rE 'api\.openai\.com/v1/files|/v1/files[^A-Za-z0-9_/]|openai\.files|client
 
 ## 3. 目标与设计原则
 
-**一句话**：在大附件与多轮复用场景用 **`file_id` 引用** 替代每轮 inline 重传，并用 **可配置生命周期 + 缓存** 控制 OpenAI 账户侧文件堆积与成本。
+**一句话**：在大附件与多轮复用场景用 **`file_id` / 引用 token** 替代每轮 inline 重传，并用 **可配置生命周期 + 缓存** 控制各厂商文件账户侧的堆积与成本。
 
 ### 3.1 观察指标表（与 §11 验收一一对应）
 
@@ -155,7 +163,7 @@ grep -rE 'api\.openai\.com/v1/files|/v1/files[^A-Za-z0-9_/]|openai\.files|client
 |--------|------|--------|
 | TUI 拖拽、附件 chip、具体控件像素 | **T2-P0-012** 余子项 | **UI 皮肤**归 012；**本文 §3.4** 只钉 **「先 Files 拿 `file_id`，再与文字一并组 `ChatRequest`」** 的编排契约，供 CLI / 未来 TUI 共用。 |
 | `read` 工具二进制分流 / UTF-8 误读修复 | **T2-P0-012** + [`read.md`](tools/read.md) | read 语义不归本文。 |
-| Anthropic / 非 OpenAI Files | 未来 Provider 任务 | 本文只钉 OpenAI REST。 |
+| 完整列举所有非 OpenAI 厂商高级特性 | 后续专门文档 | 本文当前只冻结 **OpenAI / Moonshot / Anthropic** 这三家已落地上传适配差异。 |
 | 服务端图片缩放 | [`read.md` §3.2](tools/read.md) 非目标 | 不引入 `image` crate 做缩放。 |
 
 ### 3.3 inline vs upload 决策树（产品阈值）

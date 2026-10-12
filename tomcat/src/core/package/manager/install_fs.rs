@@ -1,8 +1,15 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+use sha2::{Digest, Sha256};
 
 use uuid::Uuid;
 
+use crate::infra::i18n::tr;
 use crate::infra::AppError;
 
 use super::super::model::PreparedInstallResource;
@@ -29,20 +36,35 @@ pub(super) fn install_resource(
     let parent = resource
         .destination_dir
         .parent()
-        .ok_or_else(|| AppError::Config("目标目录无父目录".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("package.destinationNoParent", &[])))?;
     fs::create_dir_all(parent).map_err(AppError::Io)?;
+    reject_symlink_path(parent, &tr("package.destinationParent", &[]))?;
+    reject_symlink_path(&resource.destination_dir, &tr("package.destination", &[]))?;
+    if paths_overlap(&resource.source_dir, &resource.destination_dir) {
+        return Err(AppError::Config(tr(
+            "package.overlap",
+            &[
+                ("source", &resource.source_dir.display().to_string()),
+                (
+                    "destination",
+                    &resource.destination_dir.display().to_string(),
+                ),
+            ],
+        )));
+    }
 
     let stage_dir = hidden_sibling_path(parent, &resource.id, "staging");
-    copy_dir_recursive(&resource.source_dir, &stage_dir).inspect_err(|_| {
-        let _ = remove_path_if_exists(&stage_dir);
-    })?;
+    copy_dir_snapshot_checked(&resource.source_dir, &stage_dir, &resource.source_digest)
+        .inspect_err(|_| {
+            let _ = remove_path_if_exists(&stage_dir);
+        })?;
 
     let backup_dir = if resource.destination_dir.exists() {
         if !force {
             let _ = remove_path_if_exists(&stage_dir);
-            return Err(AppError::Config(format!(
-                "目标已存在且未开启 force: {}",
-                resource.destination_dir.display()
+            return Err(AppError::Config(tr(
+                "package.forceRequired",
+                &[("path", &resource.destination_dir.display().to_string())],
             )));
         }
         let backup = hidden_sibling_path(parent, &resource.id, "backup");
@@ -67,6 +89,18 @@ pub(super) fn install_resource(
     })
 }
 
+fn reject_symlink_path(path: &Path, label: &str) -> Result<(), AppError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::Permission(tr(
+                "package.pathSymlink",
+                &[("label", label), ("path", &path.display().to_string())],
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_force_remove_path(
     path: &Path,
 ) -> Result<Option<InstallFsMutation>, AppError> {
@@ -75,11 +109,11 @@ pub(super) fn prepare_force_remove_path(
     }
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::Config("待移除资源无父目录".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("package.removeNoParent", &[])))?;
     let stem = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| AppError::Config("待移除资源名称无效".to_string()))?;
+        .ok_or_else(|| AppError::Config(tr("package.removeBadName", &[])))?;
     let backup_path = hidden_sibling_path(parent, stem, "backup");
     fs::rename(path, &backup_path).map_err(AppError::Io)?;
     Ok(Some(InstallFsMutation::Removed {
@@ -123,26 +157,35 @@ pub(super) fn rollback_install(
                 stage_dir,
             } => {
                 if let Err(error) = remove_path_if_exists(destination_dir) {
-                    errors.push(format!(
-                        "remove {} failed: {error}",
-                        destination_dir.display()
+                    errors.push(tr(
+                        "package.rollbackRemove",
+                        &[
+                            ("path", &destination_dir.display().to_string()),
+                            ("detail", &error.to_string()),
+                        ],
                     ));
                 }
                 if let Some(backup_dir) = backup_dir {
                     if backup_dir.exists() {
                         if let Err(error) = fs::rename(backup_dir, destination_dir) {
-                            errors.push(format!(
-                                "restore {} failed: {error}",
-                                destination_dir.display()
+                            errors.push(tr(
+                                "package.rollbackRestore",
+                                &[
+                                    ("path", &destination_dir.display().to_string()),
+                                    ("detail", &error.to_string()),
+                                ],
                             ));
                         }
                     }
                 }
                 if stage_dir.exists() {
                     if let Err(error) = remove_path_if_exists(stage_dir) {
-                        errors.push(format!(
-                            "cleanup stage {} failed: {error}",
-                            stage_dir.display()
+                        errors.push(tr(
+                            "package.rollbackStage",
+                            &[
+                                ("path", &stage_dir.display().to_string()),
+                                ("detail", &error.to_string()),
+                            ],
                         ));
                     }
                 }
@@ -153,9 +196,12 @@ pub(super) fn rollback_install(
             } => {
                 if backup_path.exists() {
                     if let Err(error) = fs::rename(backup_path, original_path) {
-                        errors.push(format!(
-                            "restore removed {} failed: {error}",
-                            original_path.display()
+                        errors.push(tr(
+                            "package.rollbackRemoved",
+                            &[
+                                ("path", &original_path.display().to_string()),
+                                ("detail", &error.to_string()),
+                            ],
                         ));
                     }
                 }
@@ -164,10 +210,16 @@ pub(super) fn rollback_install(
     }
 
     if let Err(error) = package_snapshot.restore(&layer_paths.package_registry_path) {
-        errors.push(format!("restore package registry failed: {error}"));
+        errors.push(tr(
+            "package.rollbackRegistry",
+            &[("kind", "package"), ("detail", &error.to_string())],
+        ));
     }
     if let Err(error) = plugin_snapshot.restore(&layer_paths.plugin_registry_path) {
-        errors.push(format!("restore plugin registry failed: {error}"));
+        errors.push(tr(
+            "package.rollbackRegistry",
+            &[("kind", "plugin"), ("detail", &error.to_string())],
+        ));
     }
     errors
 }
@@ -189,37 +241,213 @@ fn hidden_sibling_path(parent: &Path, stem: &str, suffix: &str) -> PathBuf {
     parent.join(format!(".{stem}.{suffix}.{}", Uuid::new_v4()))
 }
 
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AppError> {
-    let metadata = fs::symlink_metadata(source).map_err(AppError::Io)?;
-    if metadata.file_type().is_symlink() {
-        return Err(AppError::Permission(format!(
-            "不支持复制符号链接目录: {}",
-            source.display()
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+/// Fingerprints the safe, regular-file-only source tree before confirmation. The
+/// digest frames each relative name and file content with its length and includes
+/// Unix file modes, so name/content boundaries and executable/private bits cannot
+/// be substituted between preparation and staging.
+pub(super) fn source_tree_digest(source: &Path) -> Result<String, AppError> {
+    let mut hasher = Sha256::new();
+    snapshot_tree(source, Path::new(""), None, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn copy_dir_snapshot_checked(
+    source: &Path,
+    target: &Path,
+    expected_digest: &str,
+) -> Result<(), AppError> {
+    let mut hasher = Sha256::new();
+    snapshot_tree(source, Path::new(""), Some(target), &mut hasher)?;
+    let actual_digest = format!("{:x}", hasher.finalize());
+    if actual_digest != expected_digest {
+        return Err(AppError::Permission(tr(
+            "package.sourceChanged",
+            &[("path", &source.display().to_string())],
         )));
     }
+    Ok(())
+}
+
+/// Walks an already named source directory into a private staging snapshot. It
+/// accepts only regular files and directories, rejects every symbolic link and
+/// special file, and on Unix opens files with `O_NOFOLLOW` before copying bytes.
+/// Platforms without that no-follow primitive fail closed instead of performing
+/// an installation with weaker guarantees.
+fn snapshot_tree(
+    source: &Path,
+    relative: &Path,
+    target: Option<&Path>,
+    hasher: &mut Sha256,
+) -> Result<(), AppError> {
+    let directory_handle = open_source_directory(source)?;
+    let metadata = directory_handle.metadata().map_err(AppError::Io)?;
     if !metadata.is_dir() {
-        return Err(AppError::Config(format!(
-            "待安装资源必须是目录: {}",
-            source.display()
+        return Err(AppError::Config(tr(
+            "package.sourceDirectory",
+            &[("path", &source.display().to_string())],
         )));
     }
-    fs::create_dir_all(target).map_err(AppError::Io)?;
-    for entry in fs::read_dir(source).map_err(AppError::Io)? {
-        let entry = entry.map_err(AppError::Io)?;
+    if let Some(target) = target {
+        fs::create_dir_all(target).map_err(AppError::Io)?;
+        reject_symlink_path(target, &tr("package.staging", &[]))?;
+    }
+
+    let mut entries = fs::read_dir(source)
+        .map_err(AppError::Io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::Io)?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            AppError::Config(tr(
+                "package.sourceUtf8",
+                &[("path", &entry.path().display().to_string())],
+            ))
+        })?;
         let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
+        let child_relative = relative.join(name);
+        let target_path = target.map(|target| target.join(name));
         let file_type = entry.file_type().map_err(AppError::Io)?;
         if file_type.is_symlink() {
-            return Err(AppError::Permission(format!(
-                "不支持复制符号链接文件: {}",
-                source_path.display()
+            return Err(AppError::Permission(tr(
+                "package.copySymlink",
+                &[("path", &source_path.display().to_string())],
             )));
         }
         if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
+            hasher.update(b"D\0");
+            let relative_name = child_relative.to_string_lossy();
+            hasher.update((relative_name.len() as u64).to_le_bytes());
+            hasher.update(relative_name.as_bytes());
+            snapshot_tree(
+                &source_path,
+                &child_relative,
+                target_path.as_deref(),
+                hasher,
+            )?;
         } else if file_type.is_file() {
-            fs::copy(&source_path, &target_path).map_err(AppError::Io)?;
+            hasher.update(b"F\0");
+            let relative_name = child_relative.to_string_lossy();
+            hasher.update((relative_name.len() as u64).to_le_bytes());
+            hasher.update(relative_name.as_bytes());
+            copy_regular_file(&source_path, target_path.as_deref(), hasher)?;
+        } else {
+            return Err(AppError::Permission(tr(
+                "package.specialFile",
+                &[("path", &source_path.display().to_string())],
+            )));
         }
+    }
+    ensure_source_directory_unchanged(source, &directory_handle)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_source_directory(path: &Path) -> Result<File, AppError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(AppError::Io)
+}
+
+#[cfg(not(unix))]
+fn open_source_directory(_path: &Path) -> Result<File, AppError> {
+    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
+}
+
+#[cfg(unix)]
+fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), AppError> {
+    let opened = handle.metadata().map_err(AppError::Io)?;
+    let current = fs::symlink_metadata(path).map_err(AppError::Io)?;
+    if current.file_type().is_symlink()
+        || !current.is_dir()
+        || opened.dev() != current.dev()
+        || opened.ino() != current.ino()
+    {
+        return Err(AppError::Permission(tr(
+            "package.directoryChanged",
+            &[("path", &path.display().to_string())],
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_source_directory_unchanged(_path: &Path, _handle: &File) -> Result<(), AppError> {
+    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
+}
+
+#[cfg(unix)]
+fn open_source_file(path: &Path) -> Result<File, AppError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(AppError::Io)
+}
+
+#[cfg(not(unix))]
+fn open_source_file(_path: &Path) -> Result<File, AppError> {
+    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
+}
+
+fn copy_regular_file(
+    source: &Path,
+    target: Option<&Path>,
+    hasher: &mut Sha256,
+) -> Result<(), AppError> {
+    let mut source_file = open_source_file(source)?;
+    let metadata = source_file.metadata().map_err(AppError::Io)?;
+    if !metadata.is_file() {
+        return Err(AppError::Permission(tr(
+            "package.notRegular",
+            &[("path", &source.display().to_string())],
+        )));
+    }
+    hasher.update(metadata.len().to_le_bytes());
+    #[cfg(unix)]
+    hasher.update(metadata.mode().to_le_bytes());
+    let mut target_file = target
+        .map(|path| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            // Staging bytes stay private until the complete file has its source mode.
+            #[cfg(unix)]
+            options.mode(0o600);
+            options.open(path).map_err(AppError::Io)
+        })
+        .transpose()?;
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source_file.read(&mut buffer).map_err(AppError::Io)?;
+        if read == 0 {
+            break;
+        }
+        copied += read as u64;
+        hasher.update(&buffer[..read]);
+        if let Some(target_file) = target_file.as_mut() {
+            target_file
+                .write_all(&buffer[..read])
+                .map_err(AppError::Io)?;
+        }
+    }
+    if copied != metadata.len() {
+        return Err(AppError::Permission(tr(
+            "package.sourceChanged",
+            &[("path", &source.display().to_string())],
+        )));
+    }
+    if let Some(target_file) = target_file {
+        target_file
+            .set_permissions(metadata.permissions())
+            .map_err(AppError::Io)?;
     }
     Ok(())
 }

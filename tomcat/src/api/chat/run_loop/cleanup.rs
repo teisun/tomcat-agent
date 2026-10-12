@@ -15,21 +15,14 @@ pub(super) fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
 pub(crate) async fn cleanup_openai_files_on_session_end(ctx: &ChatContext, reason: &str) {
     let runtime = ctx
         .session_runtime
-        .openai_files_runtime
-        .clone()
-        .or_else(|| {
-            ctx.session_runtime
-                .session
-                .get_session(ctx.session_runtime.session.current_session_key())
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())
+        .ok()
+        .flatten()
+        .and_then(|entry| {
+            ctx.resolve_call(LlmScene::Main, Some(&entry))
                 .ok()
-                .flatten()
-                .and_then(|entry| {
-                    ctx.resolve_call(LlmScene::Main, Some(&entry))
-                        .ok()
-                        .and_then(|resolved| {
-                            ctx.openai_files_runtime_for(resolved.provider_impl.as_ref())
-                        })
-                })
+                .and_then(|resolved| ctx.openai_files_runtime_for(&resolved))
         });
     let Some(runtime) = runtime.as_ref() else {
         return;

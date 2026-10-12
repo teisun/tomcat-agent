@@ -12,10 +12,15 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tomcat::infra::tr;
 use tomcat::{
     init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
     Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult,
@@ -26,12 +31,17 @@ use tracing::{info, info_span};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const CONTINUE_REQUEST: &str = "继续";
+const CONTINUE_ONCE_REQUEST: &str = "继续一次";
+const FAILED_REQUEST: &str = "第一轮会失败但应保留进度";
+
 #[allow(deprecated)]
 fn cmd() -> Command {
     let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
     // 避免宿主环境或并行测试残留的 TOMCAT__* 覆盖子进程自己的临时 work_dir/config。
     for key in [
         "TOMCAT__LLM__DEFAULT_MODEL",
+        "TOMCAT__LLM__TITLE_MODEL",
         "TOMCAT__CONTEXT__COMPACTION_MODEL",
         "TOMCAT__LLM__PROVIDER",
         "TOMCAT__LLM__API_BASE",
@@ -43,38 +53,41 @@ fn cmd() -> Command {
     ] {
         c.env_remove(key);
     }
+    c.env("TOMCAT__UI__LANGUAGE", "en");
     c
 }
 
 fn real_llm_api_key(test_name: &str) -> String {
-    common::require_deepseek_api_key(test_name)
+    common::require_idatatlas_api_key(test_name)
 }
 
-fn configure_deepseek_real_llm(command: &mut Command, api_key: &str) {
-    let model = common::deepseek_test_model();
+fn seed_idatatlas_real_llm_catalog(work_dir: &Path) {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    common::apply_idatatlas_app_config(&mut cfg);
+    assert!(
+        work_dir.join("models.toml").is_file(),
+        "idatatlas Terra entry must be written before the CLI resolves it"
+    );
+}
+
+fn configure_idatatlas_real_llm(command: &mut Command, api_key: &str, work_dir: &Path) {
+    seed_idatatlas_real_llm_catalog(work_dir);
+    let model = common::idatatlas_test_model();
     command
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, api_key)
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, api_key)
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__LLM__TITLE_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
 
-fn configure_deepseek_without_key(command: &mut Command) {
-    let model = common::deepseek_test_model();
+fn configure_idatatlas_without_key(command: &mut Command, work_dir: &Path) {
+    seed_idatatlas_real_llm_catalog(work_dir);
+    let model = common::idatatlas_test_model();
     command
-        .env_remove(common::DEEPSEEK_TEST_API_KEY_ENV)
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
+        .env_remove(common::IDATATLAS_TEST_API_KEY_ENV)
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__LLM__TITLE_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
 
@@ -82,36 +95,93 @@ fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-fn is_transient_deepseek_connect_failure(stderr: &str) -> bool {
-    [
-        "流式请求连接失败",
-        "请求连接失败",
-        "connection closed via error",
-        "error sending request for url (https://api.deepseek.com",
-        "retryable_llm_transport_stage",
-        "stage=Some(Connect)",
-    ]
-    .iter()
-    .any(|needle| stderr.contains(needle))
+fn assert_current_cli_reply(config_path: &Path, work_dir: &Path) -> String {
+    let mut cfg = tomcat::load_config_toml_file(config_path).expect("load isolated CLI config");
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    let session = SessionManager::new_scoped(
+        tomcat::resolve_sessions_dir(&cfg).unwrap(),
+        current_code_session_key(),
+    );
+    let messages = session
+        .get_entries(256)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            tomcat::core::session::TranscriptEntry::Message(entry) => Some(
+                serde_json::from_value::<ChatMessage>(entry.message).expect("durable chat message"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let user = messages
+        .iter()
+        .rposition(|message| message.role == tomcat::core::llm::ChatMessageRole::User)
+        .expect("the CLI must persist this turn's user input");
+    messages[user + 1..].iter().rev().find_map(|message| {
+        (message.role == tomcat::core::llm::ChatMessageRole::Assistant
+            && message.error_message.is_none() && message.error_code.is_none()
+            && message.finish_reason.as_deref() != Some("error")
+            && message.tool_calls.as_ref().is_none_or(Vec::is_empty))
+            .then(|| message.text_content()).flatten()
+            .filter(|text| !text.trim().is_empty()).map(str::to_owned)
+    }).expect("the current user input requires a successful assistant reply; a banner, old answer or error is not a reply")
 }
 
-fn maybe_skip_transient_deepseek_connect_failure(
-    test_name: &str,
-    stdout: &str,
-    stderr: &str,
-    contract: &str,
-) -> bool {
-    if !is_transient_deepseek_connect_failure(stderr) {
-        return false;
+#[test]
+fn cli_reply_evidence_rejects_old_missing_and_failed_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().display().to_string());
+    let config_path = dir.path().join("config.toml");
+    fs::write(&config_path, toml::to_string(&cfg).unwrap()).unwrap();
+    let key = current_code_session_key();
+    let session =
+        SessionManager::new_scoped(tomcat::resolve_sessions_dir(&cfg).unwrap(), key.clone());
+    session.create_session(&key, None).unwrap();
+    for message in [
+        ChatMessage::user("old input"),
+        ChatMessage::assistant("old valid answer"),
+        ChatMessage::user("current input"),
+    ] {
+        session
+            .append_message(serde_json::to_value(message).unwrap())
+            .unwrap();
     }
-    eprintln!(
-        "skipping {test_name}: transient DeepSeek connect failure prevented validating {contract}"
+    assert!(
+        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
     );
-    if !stdout.is_empty() {
-        eprintln!("stdout: {}", trunc(stdout, 400));
-    }
-    eprintln!("stderr: {}", trunc(stderr, 1200));
-    true
+    let intent = ChatMessage::assistant_with_tool_calls(
+        Some("I'll try a tool"),
+        vec![json!({
+            "id":"unfinished-call", "type":"function", "function":{"name":"read", "arguments":"{}"}
+        })],
+    );
+    session
+        .append_message(serde_json::to_value(intent).unwrap())
+        .unwrap();
+    assert!(
+        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
+    );
+    session
+        .append_message(
+            serde_json::to_value(ChatMessage::tool("unfinished-call", "tool finished")).unwrap(),
+        )
+        .unwrap();
+    let mut failed = ChatMessage::assistant("connection closed via error");
+    failed.error_message = Some("request failed".into());
+    session
+        .append_message(serde_json::to_value(failed).unwrap())
+        .unwrap();
+    assert!(
+        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
+    );
+    session
+        .append_message(serde_json::to_value(ChatMessage::assistant("fresh reply")).unwrap())
+        .unwrap();
+    assert_eq!(
+        assert_current_cli_reply(&config_path, dir.path()),
+        "fresh reply"
+    );
 }
 
 fn current_code_session_key() -> String {
@@ -137,19 +207,20 @@ fn create_session_via_cli(work_dir: &Path) -> String {
         "session new should succeed: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("已创建会话: ")
-                .and_then(|rest| rest.split_whitespace().next())
-        })
-        .expect("session new should print session id")
-        .to_string()
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    let manager = SessionManager::new_scoped(
+        tomcat::resolve_sessions_dir(&cfg).unwrap(),
+        current_code_session_key(),
+    );
+    manager
+        .current_session_id()
+        .expect("read created session identity")
+        .expect("session new must bind its new session")
 }
 
 fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     fs::create_dir_all(&skill_dir).expect("create skill dir");
     let mut content = format!("---\nname: {name}\ndescription: {description}\n");
     if user_only {
@@ -157,51 +228,6 @@ fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_onl
     }
     content.push_str("---\n# Skill Body\n1. Do the thing.\n");
     fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
-}
-
-fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
-    use std::time::{Duration, Instant};
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
-    let addr = listener.local_addr().expect("local addr");
-    listener
-        .set_nonblocking(true)
-        .expect("set mock llm server nonblocking");
-    let handle = std::thread::spawn(move || {
-        let mut served = 0usize;
-        let mut last_activity = Instant::now();
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    served += 1;
-                    last_activity = Instant::now();
-                    let mut buf = [0u8; 8192];
-                    let _ = stream.read(&mut buf);
-                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
-                    let first = format!(
-                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n"
-                    );
-                    let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-                    stream.write_all(headers.as_bytes()).expect("write headers");
-                    stream.write_all(first.as_bytes()).expect("write delta");
-                    stream.write_all(finish.as_bytes()).expect("write finish");
-                    stream.flush().expect("flush");
-                    if served >= 4 {
-                        break;
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if served > 0 && last_activity.elapsed() > Duration::from_secs(1) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(err) => panic!("accept: {err}"),
-            }
-        }
-    });
-    (format!("http://{addr}"), handle)
 }
 
 struct DeterministicMockLlm {
@@ -286,16 +312,14 @@ impl FixedResolver {
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
             web_search: false,
         };
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: api.to_string(),
-            provider: provider.to_string(),
-            base_url: Some(base_url.to_string()),
-            key_source: "DEEPSEEK_API_KEY".to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities,
-        }
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = api.to_string();
+        call.provider = provider.to_string();
+        call.base_url = Some(base_url.to_string());
+        call.key_source = "DEEPSEEK_API_KEY".to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = capabilities;
+        call
     }
 }
 
@@ -321,7 +345,6 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
@@ -352,6 +375,7 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 
@@ -367,6 +391,7 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 
@@ -375,8 +400,7 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{command}"),
@@ -466,6 +490,10 @@ impl tomcat::core::session::MessageAppendSink for CliInjectAppendInvariantSink {
         }
         self.inner.append_message_with_id(value, forced_id)
     }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.inner.append_custom_entry(extra)
+    }
 }
 
 fn cli_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
@@ -494,7 +522,11 @@ fn cli_text_stream_with_usage(
         Ok(StreamEvent::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             total_tokens: Some(prompt_tokens + completion_tokens),
+            reasoning_tokens: None,
+            text_tokens: None,
         }),
     ]
 }
@@ -712,7 +744,7 @@ fn write_project_function_plugin(
     script: &str,
 ) {
     write_function_plugin_dir(
-        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        &workspace.join(".agents").join("plugins").join(plugin_id),
         plugin_id,
         functions,
         script,
@@ -731,65 +763,6 @@ fn write_host_root_function_plugin(
         functions,
         script,
     );
-}
-
-fn assistant_tool_calls_from_transcript(transcript: &str) -> Vec<(String, Value)> {
-    let mut calls = Vec::new();
-    for line in transcript.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
-            continue;
-        };
-        for tool_call in tool_calls {
-            let Some(function) = tool_call.get("function") else {
-                continue;
-            };
-            let name = function
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let arguments = function
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("{}");
-            let parsed = serde_json::from_str::<Value>(arguments).unwrap_or_else(|err| {
-                panic!("tool arguments should be valid json: {arguments}; err: {err}");
-            });
-            calls.push((name, parsed));
-        }
-    }
-    calls
-}
-
-fn tool_results_from_transcript(transcript: &str) -> Vec<Value> {
-    let mut results = Vec::new();
-    for line in transcript.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        if message.get("role").and_then(Value::as_str) != Some("tool") {
-            continue;
-        }
-        let Some(content) = message.get("content").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Ok(parsed) = serde_json::from_str::<Value>(content) {
-            results.push(parsed);
-        }
-    }
-    results
 }
 
 fn seed_dangling_tool_round(session: &SessionManager, tool_call_id: &str) {
@@ -928,8 +901,11 @@ fn test_init_creates_config_file_in_temp_dir() {
     info!("Assert: exit 0, config file created, output mentions file path");
     assert
         .success()
-        .stdout(predicate::str::contains("[1/3] 环境初始化"))
-        .stdout(predicate::str::contains("配置文件已写入"));
+        .stdout(predicate::str::contains(tr("cli.init.stageSetup", &[])))
+        .stdout(predicate::str::contains(tr(
+            "cli.init.configWritten",
+            &[("path", "")],
+        )));
     assert!(config_path.exists(), "config file should be created");
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(
@@ -966,7 +942,7 @@ fn test_doctor_without_config_prompts_init() {
     info!("Assert: exit 0, prompts about missing config");
     assert
         .success()
-        .stdout(predicate::str::contains("未找到配置文件"));
+        .stdout(predicate::str::contains(tr("cli.doctor.noConfig", &[])));
 }
 
 /// [doctor 有配置] init 后 doctor 通过配置与环境检测
@@ -994,9 +970,11 @@ fn test_doctor_with_valid_config_checks_environment() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions config validity and wasm checks");
-    assert
-        .success()
-        .stdout(predicate::str::contains("配置合法").or(predicate::str::contains("✓")));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.doctor.valid", &[("path", "")])
+            .trim_end_matches(')')
+            .to_owned(),
+    ));
 }
 
 /// [E2E-CLI-004] 工作区 add / list / remove
@@ -1025,7 +1003,10 @@ fn test_workspace_add_list_remove_e2e() {
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     let list_assert = cmd()
         .args(["workspace", "list"])
@@ -1044,14 +1025,17 @@ fn test_workspace_add_list_remove_e2e() {
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已移除工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.removed",
+            &[("path", "")],
+        )));
 
     cmd()
         .args(["workspace", "list"])
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("无已授权工作区"));
+        .stdout(predicate::str::contains(tr("cli.workspace.empty", &[])));
 }
 
 /// [E2E-CLI-017] workspace add --cwd 将当前目录加入授权列表
@@ -1078,7 +1062,10 @@ fn test_workspace_add_cwd_e2e() {
         .env("HOME", home.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     let list_assert = cmd()
         .args(["workspace", "list"])
@@ -1408,9 +1395,10 @@ fn test_config_get_with_unknown_key_shows_hint() {
     let assert = c.assert();
 
     info!("Assert: exit 0, output mentions not found");
-    assert
-        .success()
-        .stdout(predicate::str::contains("未找到").or(predicate::str::contains("不存在")));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.config.notFound",
+        &[("name", "nonexistent.key")],
+    )));
 }
 
 // ────────────────────── config set (boundary) ──────────────────────
@@ -1426,7 +1414,7 @@ fn test_config_set_missing_args_shows_error() {
 
     info!("Arrange: config set with no args");
     let mut c = cmd();
-    c.args(["config", "set"]);
+    c.env("TOMCAT__UI__LANGUAGE", "en").args(["config", "set"]);
 
     info!("Act: execute config set without key/value");
     let assert = c.assert();
@@ -1484,7 +1472,7 @@ fn test_plugin_list_empty_exits_ok() {
     info!("Assert: exit 0, mentions no plugins");
     assert
         .success()
-        .stdout(predicate::str::contains("无已加载插件").or(predicate::str::contains("插件")));
+        .stdout(predicate::str::contains(tr("cli.plugin.empty", &[])));
 }
 
 /// [plugin load 不存在路径] 加载不存在的 wasm 文件给出提示
@@ -1504,7 +1492,10 @@ fn test_plugin_load_nonexistent_path_shows_error() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions path not found");
-    assert.success().stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.pathMissing",
+        &[("path", "/tmp/nonexistent_pi_plugin_xyz")],
+    )));
 }
 
 /// [plugin info 不存在] 查询不存在的插件 ID 提示"未找到"
@@ -1524,7 +1515,10 @@ fn test_plugin_info_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions not found");
-    assert.success().stdout(predicate::str::contains("未找到"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.notFound",
+        &[("id", "nonexistent-plugin-id")],
+    )));
 }
 
 /// [plugin unload 不存在] 卸载不存在的插件给出"卸载失败"
@@ -1544,9 +1538,10 @@ fn test_plugin_unload_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions failure");
-    assert
-        .success()
-        .stdout(predicate::str::contains("卸载失败"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.unloadMissing",
+        &[("id", "")],
+    )));
 }
 
 /// [plugin enable 不存在] 启用不存在的插件给出"启用失败"
@@ -1566,9 +1561,10 @@ fn test_plugin_enable_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions failure");
-    assert
-        .success()
-        .stdout(predicate::str::contains("启用失败"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.enableMissing",
+        &[("id", "")],
+    )));
 }
 
 /// [plugin disable 不存在] 禁用不存在的插件给出"禁用失败"
@@ -1588,9 +1584,10 @@ fn test_plugin_disable_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions failure");
-    assert
-        .success()
-        .stdout(predicate::str::contains("禁用失败"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.disableMissing",
+        &[("id", "")],
+    )));
 }
 
 /// [plugin --help] 帮助页列出所有 plugin 子命令
@@ -1719,9 +1716,11 @@ fn test_session_new_creates_session() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions created");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已创建会话"));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.session.created", &[("id", ""), ("key", "")])
+            .trim_end()
+            .to_owned(),
+    ));
 }
 
 /// [session --help] 帮助页列出所有 session 子命令
@@ -1764,10 +1763,9 @@ fn test_chat_without_config_exits_with_error() {
 
     let dir = tempfile::tempdir().unwrap();
 
-    info!("Arrange: 无 ~/.tomcat/ 配置且无 DEEPSEEK_API_KEY（HOME 指向空临时目录）");
+    info!("Arrange: 无 ~/.tomcat/ 配置（HOME 指向空临时目录）");
     let mut c = cmd();
     c.arg("chat").env("HOME", dir.path());
-    configure_deepseek_without_key(&mut c);
 
     info!("Act: execute chat");
     let assert = c.assert();
@@ -1784,7 +1782,7 @@ fn test_chat_without_config_exits_with_error() {
 #[serial(env_lock)]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span =
         info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
 
@@ -1792,7 +1790,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
 
-    info!("Arrange: init config in temp dir, set work_dir and DEEPSEEK_API_KEY");
+    info!("Arrange: init config in temp dir, set work_dir and IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -1803,12 +1801,14 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let api_key =
         real_llm_api_key("test_chat_with_valid_config_and_api_key_starts_and_produces_output");
 
+    let config_path = dir.path().join(".tomcat/tomcat.config.toml");
     let mut c = cmd();
     c.arg("chat")
+        .env("TOMCAT__CONFIG_PATH", &config_path)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("hi\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
 
     info!("Act: execute chat with stdin 'hi', timeout 60s");
     let assert = c.assert();
@@ -1817,10 +1817,12 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
 
     info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
     assert.success();
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
-        out_str.contains("对话模式")
-            || out_str.contains("模型:")
-            || out_str.contains("agent.main>"),
+        out_str.contains(&tr(
+            "terminal.welcome",
+            &[("model", &common::idatatlas_test_model())]
+        )) || out_str.contains("agent.main>"),
         "chat 应输出对话模式 banner 或模型信息或 agent.main> 提示，实际: {}",
         out_str.chars().take(500).collect::<String>()
     );
@@ -1858,7 +1860,7 @@ fn test_chat_with_session_dir_does_not_crash() {
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("\n")
         .timeout(std::time::Duration::from_secs(5));
-    configure_deepseek_without_key(&mut c);
+    configure_idatatlas_without_key(&mut c, &work_dir);
 
     info!("Act: run chat without API key, timeout 5s");
     let output = c.output().expect("chat 进程应在 5s 内结束");
@@ -1883,7 +1885,8 @@ fn test_unknown_subcommand_shows_error() {
 
     info!("Arrange: unknown subcommand");
     let mut c = cmd();
-    c.arg("nonexistent_command");
+    c.env("TOMCAT__UI__LANGUAGE", "en")
+        .arg("nonexistent_command");
 
     info!("Act: execute unknown command");
     let assert = c.assert();
@@ -1919,9 +1922,11 @@ fn test_init_then_doctor_roundtrip() {
     let assert = c.assert();
 
     info!("Assert: doctor passes config check");
-    assert
-        .success()
-        .stdout(predicate::str::contains("配置合法").or(predicate::str::contains("✓")));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.doctor.valid", &[("path", "")])
+            .trim_end_matches(')')
+            .to_owned(),
+    ));
 }
 
 // ────────────────────── 补充用例：session switch/delete/archive ──────────────────────
@@ -1950,7 +1955,10 @@ fn test_session_switch_nonexistent_shows_error() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions not exist");
-    assert.success().stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.not_found",
+        &[("id", "")],
+    )));
 }
 
 /// [session delete via CLI] 创建会话后通过 CLI 删除
@@ -1980,7 +1988,10 @@ fn test_session_delete_via_cli_removes_session() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions deleted");
-    assert.success().stdout(predicate::str::contains("已删除"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.deleted",
+        &[("id", &session_id)],
+    )));
 }
 
 /// [session archive] archive 子命令可正常执行
@@ -2010,9 +2021,10 @@ fn test_session_archive_exits_ok() {
     let assert = c.assert();
 
     info!("Assert: exit 0");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已归档").or(predicate::str::contains("会话不存在")));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.session.archived",
+        &[("id", &session_id)],
+    )));
 }
 
 // ────────────────────── 补充用例：config set 成功路径 ──────────────────────
@@ -2093,7 +2105,7 @@ fn test_audit_export_creates_file() {
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2115,7 +2127,10 @@ fn test_user_first_time_setup_init_and_doctor() {
         .stdout(predicate::str::contains("[1/3]"))
         .stdout(predicate::str::contains("[2/3]"))
         .stdout(predicate::str::contains("[3/3]"))
-        .stdout(predicate::str::contains("配置文件已写入"))
+        .stdout(predicate::str::contains(tr(
+            "cli.init.configWritten",
+            &[("path", "")],
+        )))
         .stdout(predicate::str::contains("tomcat code"))
         .stdout(predicate::str::contains("PATH"));
 
@@ -2131,8 +2146,12 @@ fn test_user_first_time_setup_init_and_doctor() {
     );
     doctor_assert
         .success()
-        .stdout(predicate::str::contains("配置合法"))
-        .stdout(predicate::str::contains("内嵌资源已就绪").or(predicate::str::contains("✓")));
+        .stdout(predicate::str::contains(
+            tr("cli.doctor.valid", &[("path", "")])
+                .trim_end_matches(')')
+                .to_owned(),
+        ))
+        .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])));
 }
 
 /// [E2E-CLI-002] 用户修改日志级别
@@ -2193,9 +2212,13 @@ fn test_user_doctor_detects_environment() {
         trunc(&out, 500)
     );
     assert.success().stdout(
-        predicate::str::contains("✓ rquickjs 运行时：可用")
-            .and(predicate::str::contains("配置"))
-            .and(predicate::str::contains("内嵌资源"))
+        predicate::str::contains(tr("cli.doctor.quickJsReady", &[]))
+            .and(predicate::str::contains(
+                tr("cli.doctor.valid", &[("path", "")])
+                    .trim_end_matches(')')
+                    .to_owned(),
+            ))
+            .and(predicate::str::contains(tr("cli.doctor.assetsReady", &[])))
             .and(predicate::str::contains(".env")),
     );
 }
@@ -2299,9 +2322,13 @@ fn test_doctor_reports_all_checks() {
     );
     assert
         .success()
-        .stdout(predicate::str::contains("配置合法"))
-        .stdout(predicate::str::contains("内嵌资源"))
-        .stdout(predicate::str::contains("✓ rquickjs 运行时：可用"));
+        .stdout(predicate::str::contains(
+            tr("cli.doctor.valid", &[("path", "")])
+                .trim_end_matches(')')
+                .to_owned(),
+        ))
+        .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])))
+        .stdout(predicate::str::contains(tr("cli.doctor.quickJsReady", &[])));
 }
 
 /// [E2E-CLI-010] init 幂等：第二次不覆盖配置并给出提示
@@ -2330,9 +2357,10 @@ fn test_init_idempotent() {
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: second init exit 0；actual: {}", trunc(&out, 300));
-    assert.success().stdout(
-        predicate::str::contains("已存在配置文件").or(predicate::str::contains("使用已有配置文件")),
-    );
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.init.configExisting",
+        &[("path", "")],
+    )));
 }
 
 /// [TASK-06] ensure_embedded_assets 准备 assets 目录
@@ -2421,18 +2449,18 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }
 
-// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 DEEPSEEK_API_KEY） ────────────────────
+// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 IDATATLAS_OPENAI_API_KEY） ────────────────────
 
 /// [E2E-CLI-011] 用户向助手提问并收到回答
 ///
 /// 用户意图：在 tomcat chat 中提问，收到 AI 回复
 /// 验证：exit 0；stdout 非空
-/// 要求：DEEPSEEK_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
+/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_a_question() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_a_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2440,7 +2468,7 @@ fn test_user_asks_pi_a_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2456,11 +2484,12 @@ fn test_user_asks_pi_a_question() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("你好，介绍一下你自己\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert.success();
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "AI 应输出非空回复，实际 stdout 为空"
@@ -2471,12 +2500,12 @@ fn test_user_asks_pi_a_question() {
 ///
 /// 用户意图：问 Rust 所有权系统
 /// 验证：exit 0；stdout 含"所有权"或"ownership"
-/// 要求：DEEPSEEK_API_KEY 环境变量已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_technical_question() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_technical_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2484,7 +2513,7 @@ fn test_user_asks_pi_technical_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2498,30 +2527,20 @@ fn test_user_asks_pi_technical_question() {
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
-        .write_stdin("用一句话解释什么是 Rust 的所有权系统\n")
+        .write_stdin("Explain Rust ownership in one English sentence using the term ownership.\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
-    let has_ownership = out.contains("所有权") || out.to_lowercase().contains("ownership");
+    let has_ownership = out.to_lowercase().contains("ownership");
     info!(
         "Assert: exit 0 + stdout 含所有权/ownership；actual: {}",
         trunc(&out, 300)
     );
-    if (!success || !has_ownership)
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_asks_pi_technical_question",
-            &out,
-            &stderr,
-            "Rust ownership explanation",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     assert!(
         has_ownership,
         "stdout 应含 '所有权' 或 'ownership'，实际: {}",
@@ -2537,7 +2556,7 @@ fn test_user_asks_pi_technical_question() {
 #[serial(env_lock)]
 fn test_user_asks_pi_to_run_bash_command() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_to_run_bash_command").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2545,7 +2564,7 @@ fn test_user_asks_pi_to_run_bash_command() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2562,7 +2581,7 @@ fn test_user_asks_pi_to_run_bash_command() {
         .env("RUST_LOG", "tomcat=info")
         .write_stdin("请执行 echo hello_from_pi\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2576,17 +2595,7 @@ fn test_user_asks_pi_to_run_bash_command() {
         "Assert: exit 0 + stdout 含 hello_from_pi；actual: {}",
         trunc(&out, 300)
     );
-    if (!success || !ran_echo)
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_asks_pi_to_run_bash_command",
-            &out,
-            &stderr,
-            "bash tool execution",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     assert!(
         ran_echo,
         "stdout 应含 'hello_from_pi'（工具 execute_bash 被调用），实际: {}",
@@ -2597,12 +2606,12 @@ fn test_user_asks_pi_to_run_bash_command() {
 /// [E2E-CLI-016B] 用户触发 read 失败时，终端应显示真实错误原因（非 failed 占位）
 ///
 /// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
-/// 要求：DEEPSEEK_API_KEY 环境变量已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_sees_read_failure_reason_in_tool_line").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2610,7 +2619,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2632,7 +2641,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(format!("{prompt}\n"))
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2642,23 +2651,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
         trunc(&stderr, 1200)
     );
     let stderr_lower = stderr.to_ascii_lowercase();
-    let contract_ok = stderr.contains("[tool] read")
-        && (stderr_lower.contains("no such file")
-            || stderr_lower.contains("not found")
-            || stderr_lower.contains("os error 2")
-            || stderr.contains("不存在"))
-        && !stderr.contains("✗ failed");
-    if (!success || !contract_ok)
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_sees_read_failure_reason_in_tool_line",
-            "",
-            &stderr,
-            "read failure rendering",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
     assert!(
         stderr.contains("[tool] read"),
         "stderr 应出现 [tool] read 行，实际: {}",
@@ -2667,8 +2660,8 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     assert!(
         stderr_lower.contains("no such file")
             || stderr_lower.contains("not found")
-            || stderr_lower.contains("os error 2")
-            || stderr.contains("不存在"),
+            || stderr_lower.contains("does not exist")
+            || stderr_lower.contains("os error 2"),
         "stderr 应包含路径不存在语义，实际: {}",
         trunc(&stderr, 800)
     );
@@ -2687,13 +2680,13 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
 // - `016D`：`task_output(block=true)` 单次 wait-slice。模型必须走阻塞等待路径，
 //   transcript 要出现真实 `task_output` / `task_stop`；非 TTY 抓取 stderr 不应再堆
 //   `waiting_for_output` 动画。
-// - `016E`：真实多次 timeout slice 重试。模型必须至少经历两次
-//   `wakeReason="timeout" && finished=false`，然后继续等到 `new_output` 再收尾。
+// - `016E`：真实多次 wait-window 重试。模型必须至少经历两次
+//   `wakeReason="wait_window_elapsed" && finished=false`，然后在后续 wait-window 结果里读到新 tail 再收尾。
 // - `016F`：midturn batch boundary auto-feed。模型先起后台 bash，再跑一个耗时 foreground
 //   bash；只有在 foreground batch 结束后的**下一次请求**里看到
 //   `<background-task-finished ...>` 才允许继续，否则必须输出失败哨兵词。
-// - `016G`：永不结束任务 + timeout tail snapshot。模型先吃掉首个 `new_output`，
-//   再在 EOF 处命中一次 timeout 快照，随后必须停止继续 poll。
+// - `016G`：永不结束任务 + wait-window tail snapshot。模型先在第一次 wait-window 里读到首个 tail，
+//   再在 EOF 处命中一次 wait-window 快照，随后必须停止继续 poll。
 //
 // 这组 helper 只做四件事：
 // 1. 起临时 HOME + `tomcat init`
@@ -2721,21 +2714,26 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("workspace-temp")
-        .join(scratch_leaf);
+    let scratch = dir.path().join(scratch_leaf);
     std::fs::create_dir_all(&scratch).unwrap();
     let scratch = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
+        .current_dir(&scratch)
+        .timeout(std::time::Duration::from_secs(20))
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = real_llm_api_key("setup_background_bash_p1_real_llm_fixture");
+    let mut cfg = tomcat::load_config_toml_file(&config_path).expect("private live fixture config");
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    common::apply_idatatlas_app_config(&mut cfg);
+    fs::write(&config_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
     info!("Arrange: tomcat workspace add {}", scratch_str);
     cmd()
@@ -2745,7 +2743,10 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     BackgroundBashP1RealLlmFixture {
         _home: dir,
@@ -2753,6 +2754,80 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
         config_path,
         scratch,
         api_key,
+    }
+}
+
+fn run_background_bash_autofeed_real_llm_chat(
+    fx: &BackgroundBashP1RealLlmFixture,
+    prompt: String,
+    timeout: std::time::Duration,
+) -> CliChatRunCapture {
+    let executable = std::env::var_os("CARGO_BIN_EXE_tomcat")
+        .expect("cargo must expose the tomcat integration-test binary");
+    let mut child = ProcessCommand::new(executable)
+        .arg("code")
+        .current_dir(&fx.scratch)
+        .env("HOME", fx._home.path())
+        .env("USERPROFILE", fx._home.path())
+        .env("TOMCAT__UI__LANGUAGE", "en")
+        .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
+        .env("RUST_LOG", "tomcat=info")
+        .env_remove("TOMCAT_AGENT_ACTIVE")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, &fx.api_key)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", common::idatatlas_test_model())
+        .env("TOMCAT__LLM__TITLE_MODEL", common::idatatlas_test_model())
+        .env(
+            "TOMCAT__CONTEXT__COMPACTION_MODEL",
+            common::idatatlas_test_model(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tomcat code");
+    let mut stdin = child.stdin.take().expect("tomcat stdin");
+    stdin
+        .write_all(format!("{prompt}\n").as_bytes())
+        .expect("write chat prompt");
+    stdin.flush().expect("flush chat prompt");
+
+    let mut stdout = child.stdout.take().expect("tomcat stdout");
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).expect("read tomcat stdout");
+        bytes
+    });
+    let mut stderr = child.stderr.take().expect("tomcat stderr");
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("read tomcat stderr");
+        bytes
+    });
+
+    // `assert_cmd::write_stdin` closes stdin immediately. Keep the interactive session alive
+    // long enough for the two-second child task to enqueue its synthetic follow-up, then send
+    // EOF so the normal CLI drain/exit path can render the final response.
+    thread::sleep(std::time::Duration::from_secs(8));
+    drop(stdin);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll tomcat code") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop timed-out tomcat code");
+            break child.wait().expect("reap timed-out tomcat code");
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stdout =
+        String::from_utf8_lossy(&stdout_reader.join().expect("join stdout reader")).to_string();
+    let stderr =
+        String::from_utf8_lossy(&stderr_reader.join().expect("join stderr reader")).to_string();
+    CliChatRunCapture {
+        success: status.success(),
+        stdout,
+        stderr,
     }
 }
 
@@ -2764,12 +2839,14 @@ fn run_background_bash_p1_real_llm_chat(
     let mut c = cmd();
     c.arg("code")
         .current_dir(&fx.scratch)
+        .env("HOME", fx._home.path())
+        .env("USERPROFILE", fx._home.path())
+        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
-        .env("TOMCAT__CONFIG_PATH", fx.config_path.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
-        .write_stdin(prompt)
+        .write_stdin(format!("{prompt}\n"))
         .timeout(timeout);
-    configure_deepseek_real_llm(&mut c, &fx.api_key);
+    configure_idatatlas_real_llm(&mut c, &fx.api_key, &fx.work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     CliChatRunCapture {
@@ -2804,7 +2881,7 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 /// 验证：
 /// - exit 0；
 /// - stderr 出现 `[bg] task ... queued for next turn`（证明 lifecycle subscriber →
-///   follow_up_queue → between-turns drain 路径真的跑了）；
+///   follow_up_queue 入队；消费可发生在同一轮或轮次之间，单凭此日志不能区分）；
 /// - 后台任务真实产出 `bg_done.txt`，独立工作真实产出 `marker.txt`；
 /// - stdout 最终包含约定完成词 `AUTOFEED_OK`。
 ///
@@ -2813,112 +2890,261 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 #[serial(env_lock)]
 fn test_user_background_bash_autofeed_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_autofeed_real_llm_cli").entered();
 
-    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016c_bg_autofeed");
-    let bg_done = fx.scratch.join("bg_done.txt");
-    let marker = fx.scratch.join("marker.txt");
-    let _ = fs::remove_file(&bg_done);
-    let _ = fs::remove_file(&marker);
+    // This is deliberately a real-provider black-box check. Each independent attempt still
+    // requires the complete tool sequence; bounded retries absorb an occasional model turn
+    // that describes the required bash call instead of issuing it.
+    let mut failures = Vec::new();
+    for attempt in 1..=3 {
+        let fx = setup_background_bash_p1_real_llm_fixture(&format!(
+            "e2e_cli016c_bg_autofeed_{attempt}",
+        ));
+        let bg_done = fx.scratch.join("bg_done.txt");
+        let marker = fx.scratch.join("marker.txt");
+        let _ = fs::remove_file(&bg_done);
+        let _ = fs::remove_file(&marker);
 
-    let prompt = format!(
-        concat!(
-            "以下内容就是完整步骤；不要要求我重复步骤，不要反问，不要 ask_question。 ",
-            "请严格按下面步骤执行，不要偏离，不要解释策略： ",
-            "1. 只启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
-            "2. 这个后台 bash 的 command 必须精确执行：sleep 2; printf BG_DONE > \"{bg_done}\"。 ",
-            "3. 启动后台任务后，立刻创建文件 \"{marker}\"，内容必须精确为 MARKER。 ",
-            "4. 从这一步开始，禁止调用 task_output、task_list、task_stop，也不要再启动新的 bash；你必须等待 runtime 自动注入的 <background-task-finished ...> 系统消息。 ",
-            "5. 只有在看到该系统消息之后，才允许读取并确认 \"{bg_done}\" 和 \"{marker}\" 都存在且内容正确。 ",
-            "6. 全部确认后，只回复一行 AUTOFEED_OK 并停止；不要输出别的结尾。"
-        ),
-        bg_done = bg_done.display(),
-        marker = marker.display(),
-    );
+        let prompt = format!(
+            concat!(
+                "以下内容就是完整步骤；不要要求我重复步骤，不要反问，不要 ask_question。 ",
+                "请严格按下面步骤执行，不要偏离，不要解释策略： ",
+                "1. 只启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+                "2. 这个后台 bash 的 command 必须精确执行：sleep 2; printf BG_DONE > \"{bg_done}\"。 ",
+                "3. 启动后台任务后，立刻创建文件 \"{marker}\"，内容必须精确为 MARKER。 ",
+                "4. 从这一步开始，禁止调用 task_output、task_list、task_stop，也不要再启动新的 bash；你必须等待 runtime 自动注入的 <background-task-finished ...> 系统消息。 ",
+                "5. 只有在看到该系统消息之后，才允许读取并确认 \"{bg_done}\" 和 \"{marker}\" 都存在且内容正确。 ",
+                "6. 全部确认后，只回复一行 AUTOFEED_OK 并停止；不要输出别的结尾。"
+            ),
+            bg_done = bg_done.display(),
+            marker = marker.display(),
+        );
 
-    info!("Act: tomcat chat 触发后台 bash auto-feed，timeout 120s");
-    let run =
-        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
-    let stdout = run.stdout;
-    let stderr = run.stderr;
-    info!("[tomcat chat stdout] {}", trunc(&stdout, 1500));
-    if !stderr.is_empty() {
-        info!("[tomcat chat stderr] {}", trunc(&stderr, 2000));
+        info!(
+            attempt,
+            "Act: tomcat chat 触发后台 bash auto-feed，timeout 120s"
+        );
+        let run = run_background_bash_autofeed_real_llm_chat(
+            &fx,
+            prompt,
+            std::time::Duration::from_secs(120),
+        );
+        let stdout = run.stdout;
+        let stderr = run.stderr;
+        let core_ok = run.success
+            && stderr.contains("[bg] task")
+            && stderr.contains("queued for next turn")
+            && bg_done.is_file()
+            && marker.is_file()
+            && fs::read_to_string(&bg_done).is_ok_and(|text| text == "BG_DONE")
+            && fs::read_to_string(&marker).is_ok_and(|text| text == "MARKER")
+            && stdout.contains("AUTOFEED_OK");
+        if core_ok {
+            return;
+        }
+        failures.push(format!(
+            "attempt {attempt}: success={} bg_done={:?} marker={:?} stdout={} stderr={}",
+            run.success,
+            fs::read_to_string(&bg_done).unwrap_or_default(),
+            fs::read_to_string(&marker).unwrap_or_default(),
+            trunc(&stdout, 600),
+            trunc(&stderr, 1200),
+        ));
     }
-    info!("Assert: exit 0 + stderr 含 [bg] task + 两文件落盘 + stdout 含 AUTOFEED_OK");
-    let core_ok = run.success
-        && stderr.contains("[bg] task")
-        && stderr.contains("queued for next turn")
-        && bg_done.exists()
-        && marker.exists()
-        && stdout.contains("AUTOFEED_OK");
-    if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_background_bash_autofeed_real_llm_cli",
-            &stdout,
-            &stderr,
-            "background bash auto-feed",
-        )
-    {
-        return;
+
+    panic!(
+        "background bash auto-feed must complete the strict tool sequence in one of three independent real-LLM attempts:\n{}",
+        failures.join("\n---\n"),
+    );
+}
+
+fn assert_background_wait_trace(transcript: &str, token: &str, minimum_tokenless: usize) {
+    // Walk chronological messages and pair each result with its actual call.
+    // Counting independent call/result bags cannot prove one task's wait order.
+    let mut pending: Option<(String, String)> = None;
+    let mut task_id: Option<String> = None;
+    let mut next_offset = 0;
+    let mut tokenless = 0;
+    let mut saw_token = false;
+    for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
+        let entry: Value = serde_json::from_str(line).expect("valid transcript JSONL");
+        let message = &entry["message"];
+        if message["role"] == "assistant" {
+            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                let name = call["function"]["name"].as_str().unwrap_or_default();
+                if !matches!(name, "bash" | "task_output" | "task_stop") {
+                    continue;
+                }
+                assert!(
+                    pending.is_none(),
+                    "wait for the preceding task receipt before another task operation"
+                );
+                let args: Value = serde_json::from_str(
+                    call["function"]["arguments"]
+                        .as_str()
+                        .expect("call arguments"),
+                )
+                .unwrap();
+                if name == "bash" {
+                    assert!(task_id.is_none(), "the scenario may start only one task");
+                    assert_eq!(args["run_in_background"], true);
+                } else {
+                    let task = task_id
+                        .as_deref()
+                        .expect("a successful Bash ticket must precede task control");
+                    assert_eq!(args["task_id"].as_str(), Some(task));
+                    if name == "task_output" {
+                        assert_eq!(args["block"], true);
+                        assert_eq!(args["wait_ms"], 5000);
+                        assert_eq!(
+                            args["since"].as_u64().unwrap_or(0),
+                            next_offset,
+                            "follow the previous nextOffset"
+                        );
+                    } else {
+                        assert!(saw_token, "task_stop must follow the token-bearing result");
+                    }
+                }
+                pending = Some((
+                    call["id"].as_str().expect("tool call id").into(),
+                    name.into(),
+                ));
+            }
+        } else if message["role"] == "tool" {
+            if message["tool_call_id"].as_str() != pending.as_ref().map(|(id, _)| id.as_str()) {
+                continue;
+            }
+            let (_, name) = pending.take().expect("matching outstanding call");
+            let content = message["content"].as_str().expect("tool result text");
+            if name == "task_stop" {
+                assert_eq!(
+                    content,
+                    format!("Stopped: {}", task_id.as_deref().unwrap()),
+                    "task_stop must succeed for this task"
+                );
+                return;
+            }
+            let result: Value =
+                serde_json::from_str(content).expect("successful Bash/task_output JSON");
+            if name == "bash" {
+                assert_eq!(result["state"], "running_in_background");
+                let task = result["taskId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .expect("ticket taskId");
+                assert!(result["logPath"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty()));
+                assert!(result["startedAtUnixMs"].as_u64().is_some());
+                task_id = Some(task.into());
+            } else {
+                assert_eq!(result["taskId"].as_str(), task_id.as_deref());
+                assert_eq!(result["wakeReason"], "wait_window_elapsed");
+                assert_eq!(result["finished"], false);
+                assert_eq!(result["startOffset"].as_u64(), Some(next_offset));
+                let next = result["nextOffset"].as_u64().expect("output nextOffset");
+                assert!(next >= next_offset);
+                next_offset = next;
+                if result["content"]
+                    .as_str()
+                    .expect("output content")
+                    .contains(token)
+                {
+                    assert!(tokenless >= minimum_tokenless, "need {minimum_tokenless} tokenless waits BEFORE the token, got {tokenless}");
+                    saw_token = true;
+                } else if !saw_token {
+                    tokenless += 1;
+                }
+            }
+        }
     }
-    assert!(
-        run.success,
-        "tomcat chat 应 exit 0；stderr: {}",
-        trunc(&stderr, 1200)
+    panic!("missing successful stop receipt after the token: task={task_id:?}, tokenless={tokenless}, saw_token={saw_token}");
+}
+
+#[test]
+fn background_wait_trace_rejects_wrong_order_task_and_stop() {
+    let wait_args = json!({"task_id":"job", "block":true, "wait_ms":5000, "since":0});
+    let empty = json!({"taskId":"job", "wakeReason":"wait_window_elapsed", "finished":false,
+        "content":"", "startOffset":0, "nextOffset":0});
+    let steps = vec![
+        json!({"name":"bash", "args":{"command":"sleep 30; echo TOKEN", "run_in_background":true},
+            "result":{"state":"running_in_background", "taskId":"job", "logPath":"/fixture/job.log", "startedAtUnixMs":1}}),
+        json!({"name":"task_output", "args":wait_args, "result":empty}),
+        json!({"name":"task_output", "args":wait_args, "result":empty}),
+        json!({"name":"task_output", "args":wait_args, "result":{"taskId":"job",
+            "wakeReason":"wait_window_elapsed", "finished":false, "content":"TOKEN", "startOffset":0, "nextOffset":5}}),
+        json!({"name":"task_stop", "args":{"task_id":"job"}, "result":"Stopped: job"}),
+    ];
+    let transcript = |steps: &[Value]| {
+        steps.iter().enumerate().flat_map(|(index, step)| {
+        let id = format!("call-{index}");
+        let content = step["result"].as_str().map(str::to_owned).unwrap_or_else(|| step["result"].to_string());
+        [json!({"type":"message", "message":{"role":"assistant", "tool_calls":[{
+            "id":id, "type":"function", "function":{"name":step["name"], "arguments":step["args"].to_string()}}]}}).to_string(),
+         json!({"type":"message", "message":{"role":"tool", "tool_call_id":id, "content":content}}).to_string()]
+    }).collect::<Vec<_>>().join("\n")
+    };
+    assert_background_wait_trace(&transcript(&steps), "TOKEN", 2);
+    assert_background_wait_trace(
+        &transcript(&[steps[0].clone(), steps[3].clone(), steps[4].clone()]),
+        "TOKEN",
+        0,
     );
-    assert!(
-        stderr.contains("[bg] task") && stderr.contains("queued for next turn"),
-        "stderr 应含后台完成 auto-feed 提示，实际: {}",
-        trunc(&stderr, 1200)
-    );
-    assert!(
-        bg_done.exists(),
-        "后台任务产物应存在: {}",
-        bg_done.display()
-    );
-    assert!(marker.exists(), "独立工作产物应存在: {}", marker.display());
-    let bg_done_text = fs::read_to_string(&bg_done).unwrap_or_default();
-    let marker_text = fs::read_to_string(&marker).unwrap_or_default();
-    assert_eq!(
-        bg_done_text, "BG_DONE",
-        "bg_done.txt 内容应精确为 BG_DONE，实际: {:?}",
-        bg_done_text
-    );
-    assert_eq!(
-        marker_text, "MARKER",
-        "marker.txt 内容应精确为 MARKER，实际: {:?}",
-        marker_text
-    );
-    assert!(
-        stdout.contains("AUTOFEED_OK"),
-        "stdout 应含 AUTOFEED_OK，实际: {}",
-        trunc(&stdout, 600)
-    );
+    for problem in [
+        "wrong-task",
+        "early-token",
+        "stop-failed",
+        "early-stop",
+        "wrong-call",
+    ] {
+        let mut altered = steps.clone();
+        match problem {
+            "wrong-task" => {
+                altered[2]["args"]["task_id"] = json!("other");
+                altered[2]["result"]["taskId"] = json!("other");
+            }
+            "early-token" => altered.swap(1, 3),
+            "stop-failed" => altered[4]["result"] = json!("task_stop: unknown task"),
+            "early-stop" => altered.swap(3, 4),
+            "wrong-call" => {}
+            _ => unreachable!(),
+        }
+        let mut text = transcript(&altered);
+        if problem == "wrong-call" {
+            text = text.replace(
+                "\"tool_call_id\":\"call-2\"",
+                "\"tool_call_id\":\"unrelated\"",
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| assert_background_wait_trace(&text, "TOKEN", 2)).is_err(),
+            "the real acceptance oracle must reject {problem}"
+        );
+    }
 }
 
 /// [E2E-CLI-016D] `task_output(block=true)` wait-slice 真 LLM 黑盒回归
 ///
 /// 用户意图：模型必须在 `bash(run_in_background=true)` 之后**立即**进入
-/// `task_output(block=true, timeout_ms=300)` 循环，直到拿到 `wakeReason="new_output"`；
+/// `task_output(block=true, wait_ms=5000)` 等待路径；首个 wait-window 里应拿到目标 token，
 /// 不允许依赖 auto-feed，不允许 `task_output(block=false)`。
 ///
 /// 验证：
 /// - exit 0；
 /// - 非 TTY 抓取 stderr **不**含 `waiting_for_output` 倒计时动画；
 /// - transcript 中至少有 1 次 `task_output` tool call，且参数包含
-///   `block=true` 与 `timeout_ms=300`；
+///   `block=true` 与 `wait_ms=5000`；
 /// - 后台任务真实产出 `blockwait_done.txt`；
 /// - stdout 最终包含约定完成词 `BLOCKWAIT_OK`。
 ///
 /// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、
-/// transcript 中的真实 tool_call，以及 `new_output` 唤醒后的收尾。
+/// transcript 中的真实 tool_call，以及 wait-window 结果携带 tail 后的收尾。
 #[test]
 #[serial(env_lock)]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_blocking_waitslice_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016d_blockwait");
@@ -2931,9 +3157,9 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
             "请严格执行，并只在最后回复一行 BLOCKWAIT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
             "2. 该后台 bash 的 command 必须精确执行：sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > \"{done_path}\"; sleep 30。 ",
-            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=300、since 从 0 开始并按 next_offset 续传。 ",
-            "4. 如果 task_output 返回 wakeReason=timeout 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, timeout_ms=300) 等下一次 wait slice。 ",
-            "5. 当 task_output 返回 wakeReason=new_output 且内容里出现 TOKEN_WAITSLICE 后，必须调用 task_stop 停掉这个后台任务，避免它继续睡眠。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、wait_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
+            "4. 如果 task_output 返回 wakeReason=wait_window_elapsed 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, wait_ms=5000) 等下一次 wait slice。 ",
+            "5. 当 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 TOKEN_WAITSLICE 后，必须调用 task_stop 停掉这个后台任务，避免它继续睡眠。 ",
             "6. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
             "7. 只有在看到 TOKEN_WAITSLICE 且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 BLOCKWAIT_DONE。 ",
             "8. 全部确认后，只回复一行 BLOCKWAIT_OK 并停止。"
@@ -2949,17 +3175,6 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
-    }
-    let core_ok = run.success && done_path.exists() && stdout.contains("BLOCKWAIT_OK");
-    if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_background_bash_blocking_waitslice_real_llm_cli",
-            &stdout,
-            &stderr,
-            "blocking wait-slice background bash",
-        )
-    {
-        return;
     }
     assert!(
         run.success,
@@ -2990,55 +3205,20 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 
     // transcript 级硬断言：必须能看到真实 `task_output(block=true)` + `task_stop`。
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
-    let tool_calls = assistant_tool_calls_from_transcript(&transcript);
-    let task_output_calls: Vec<_> = tool_calls
-        .iter()
-        .filter(|(name, _)| name == "task_output")
-        .collect();
-    assert!(
-        !task_output_calls.is_empty(),
-        "transcript 中 task_output 次数应至少为 1（证明真 LLM 走了 block=true 等待路径），实际 {}；transcript: {}",
-        task_output_calls.len(),
-        trunc(&transcript, 1500)
-    );
-    for (_, args) in &task_output_calls {
-        assert!(
-            args.get("block").and_then(Value::as_bool) == Some(true)
-                && args.get("timeout_ms").and_then(Value::as_u64) == Some(300),
-            "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
-        );
-    }
-    let tool_results = tool_results_from_transcript(&transcript);
-    assert!(
-        tool_results.iter().any(|result| {
-            result.get("wakeReason").and_then(Value::as_str) == Some("new_output")
-                && result
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(|content| content.contains("TOKEN_WAITSLICE"))
-                    .unwrap_or(false)
-        }),
-        "transcript 应能看到 wait-slice 唤醒后的 token；actual: {}",
-        trunc(&transcript, 1500)
-    );
-    assert!(
-        tool_calls.iter().any(|(name, _)| name == "task_stop"),
-        "transcript 应含 task_stop（收尾后台任务），actual: {}",
-        trunc(&transcript, 1500)
-    );
+    assert_background_wait_trace(&transcript, "TOKEN_WAITSLICE", 0);
 }
 
-/// [E2E-CLI-016E] 真 LLM 多次 timeout slice 重试
+/// [E2E-CLI-016E] 真 LLM 多次 wait-window 重试
 ///
 /// 用户意图：模型必须在同一个后台任务上经历**至少两次**
-/// `wakeReason="timeout" && finished=false`，继续重试 `task_output(block=true, timeout_ms=300)`，
-/// 最后再等到一次 `new_output` 并收尾。
+/// `wakeReason="wait_window_elapsed" && finished=false`，继续重试 `task_output(block=true, wait_ms=5000)`，
+/// 最后在第三次（或之后）wait-window 结果里读到新 tail 并收尾。
 ///
 /// 验证：
 /// - exit 0；
 /// - 非 TTY 抓取 stderr **不**含 `waiting_for_output`；
 /// - transcript 中 `task_output` tool call 至少 3 次；
-/// - transcript 中 `role=tool` 的结果里，`wakeReason="timeout"` 至少 2 次；
+/// - transcript 中 `role=tool` 的结果里，token 出现前的 `wakeReason="wait_window_elapsed"` 至少 2 次；
 /// - transcript 中最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；
 /// - 真实产物 `multi_timeout_done.txt` 存在且内容正确；
 /// - stdout 最终包含 `MULTI_TIMEOUT_OK`。
@@ -3046,7 +3226,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span =
         info_span!("test_user_background_bash_multiple_timeout_slices_real_llm_cli").entered();
 
@@ -3059,13 +3239,13 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
             "以下内容就是完整指令；不要要求我重复，不要反问，不要 ask_question。 ",
             "请严格执行，并只在最后回复一行 MULTI_TIMEOUT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
-            "2. 该后台 bash 的 command 必须精确执行：sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
-            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=300、since 从 0 开始并按 next_offset 续传。 ",
-            "4. `wakeReason=timeout` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 timeout，并且每次 timeout 之后都继续在同一个 task_id 上再次调用 task_output(block=true, timeout_ms=300)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
-            "5. 在至少两次 timeout 之后，继续沿用同一个 task_id 和最新 next_offset 等待，直到某次 task_output 返回 wakeReason=new_output 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
+            "2. 该后台 bash 的 command 必须精确执行：sleep 30; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、wait_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
+            "4. `wakeReason=wait_window_elapsed` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 wait-window，并且每次 wait-window 之后都继续在同一个 task_id 上再次调用 task_output(block=true, wait_ms=5000)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
+            "5. 在至少两次 wait-window 之后，继续沿用同一个 task_id 和最新 next_offset 等待，直到某次 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
             "6. 一旦看到 TOKEN_MULTI_TIMEOUT，必须调用 task_stop 停掉该后台任务，避免它继续睡眠。 ",
             "7. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
-            "8. 只有在已经看到至少两次 timeout、随后看到 TOKEN_MULTI_TIMEOUT、并且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 MULTI_TIMEOUT_DONE。 ",
+            "8. 只有在已经看到至少两次 wait-window、随后看到 TOKEN_MULTI_TIMEOUT、并且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 MULTI_TIMEOUT_DONE。 ",
             "9. 全部确认后，只回复一行 MULTI_TIMEOUT_OK 并停止。"
         ),
         done_path = done_path.display(),
@@ -3079,17 +3259,6 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     info!("[tomcat chat stdout] {}", trunc(&stdout, 2200));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2600));
-    }
-    let core_ok = run.success && done_path.exists() && stdout.contains("MULTI_TIMEOUT_OK");
-    if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_background_bash_multiple_timeout_slices_real_llm_cli",
-            &stdout,
-            &stderr,
-            "multiple timeout slices background bash",
-        )
-    {
-        return;
     }
     assert!(
         run.success,
@@ -3119,62 +3288,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     );
 
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
-    let tool_calls = assistant_tool_calls_from_transcript(&transcript);
-    let tool_results = tool_results_from_transcript(&transcript);
-
-    let mut task_output_calls = 0usize;
-    let mut timeout_results = 0usize;
-    let mut saw_new_output_token = false;
-    let mut saw_task_stop = false;
-    for (name, args) in &tool_calls {
-        if name == "task_output" {
-            task_output_calls += 1;
-            assert!(
-                args.get("block").and_then(Value::as_bool) == Some(true)
-                    && args.get("timeout_ms").and_then(Value::as_u64) == Some(300),
-                "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
-            );
-        } else if name == "task_stop" {
-            saw_task_stop = true;
-        }
-    }
-    for result in &tool_results {
-        if result.get("wakeReason").and_then(Value::as_str) == Some("timeout") {
-            timeout_results += 1;
-        }
-        if result.get("wakeReason").and_then(Value::as_str) == Some("new_output")
-            && result
-                .get("content")
-                .and_then(Value::as_str)
-                .map(|content| content.contains("TOKEN_MULTI_TIMEOUT"))
-                .unwrap_or(false)
-        {
-            saw_new_output_token = true;
-        }
-    }
-
-    assert!(
-        task_output_calls >= 3,
-        "transcript 中 task_output 次数应至少为 3（至少两次 timeout + 一次 new_output），实际 {}；transcript: {}",
-        task_output_calls,
-        trunc(&transcript, 1800)
-    );
-    assert!(
-        timeout_results >= 2,
-        "transcript 中 timeout slice 次数应至少为 2，实际 {}；transcript: {}",
-        timeout_results,
-        trunc(&transcript, 1800)
-    );
-    assert!(
-        saw_new_output_token,
-        "transcript 中应看到包含 TOKEN_MULTI_TIMEOUT 的 new_output 结果；actual: {}",
-        trunc(&transcript, 1800)
-    );
-    assert!(
-        saw_task_stop,
-        "transcript 应含 task_stop（收尾后台任务），actual: {}",
-        trunc(&transcript, 1800)
-    );
+    assert_background_wait_trace(&transcript, "TOKEN_MULTI_TIMEOUT", 2);
 }
 
 /// [E2E-CLI-016F] midturn batch boundary auto-feed 真 LLM 黑盒回归
@@ -3196,7 +3310,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_background_bash_midturn_followup_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_midturn_followup_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016f_midturn_followup");
@@ -3229,21 +3343,6 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
     info!("[tomcat chat stdout] {}", trunc(&stdout, 2000));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2400));
-    }
-    let core_ok = run.success
-        && stdout.contains("MIDTURN_FOLLOWUP_OK")
-        && !stdout.contains("MIDTURN_MISSED_FOLLOWUP")
-        && bg_done.exists()
-        && fg_done.exists();
-    if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_background_bash_midturn_followup_real_llm_cli",
-            &stdout,
-            &stderr,
-            "midturn follow-up background bash",
-        )
-    {
-        return;
     }
     assert!(
         run.success,
@@ -3337,8 +3436,8 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 /// [E2E-CLI-016G] 永不结束后台 bash + timeout 快照后停止轮询
 ///
 /// 用户意图：模型先启动一个会长时间挂起的后台 bash，先用一次 `task_output(block=true)`
-/// 吃掉首个 `new_output`，再用第二次 `task_output(block=true)` 在 EOF 处命中
-/// `wakeReason="timeout"`。拿到 timeout 返回的 tail 快照后，必须立即停止轮询，
+/// 在第一次 wait-window 里读到首个 tail，再用第二次 `task_output(block=true)` 在 EOF 处命中
+/// `wakeReason="wait_window_elapsed"`。拿到 wait-window 返回的 tail 快照后，必须立即停止轮询，
 /// 不允许继续 `task_output` busy loop。
 ///
 /// 验证：
@@ -3346,14 +3445,14 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 /// - stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；
 /// - 非 TTY 抓取 stderr 不含 `waiting_for_output`；
 /// - transcript 中 `task_output` 调用次数有上界（<= 3）且至少 2 次；
-/// - transcript 中存在 `wakeReason="timeout"` 且内容含 `HUNG_TIMEOUT_BOOT` 的工具结果；
+/// - transcript 中存在 `wakeReason="wait_window_elapsed"` 且内容含 `HUNG_TIMEOUT_BOOT` 的工具结果；
 /// - transcript 的 `role=user` 消息不含 `waiting_for_output`；
 /// - transcript 中不出现 `task_stop` / `task_list`。
 #[test]
 #[serial(env_lock)]
 fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli")
         .entered();
 
@@ -3363,32 +3462,21 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
         "请严格执行，并只在最后回复一行 HUNG_TIMEOUT_BOUNDED_OK： ",
         "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
         "2. 该后台 bash 的 command 必须精确执行：printf HUNG_TIMEOUT_BOOT; sleep 60。 ",
-        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、timeout_ms=300、since=0。 ",
-        "4. 当第一次 task_output 的返回内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, timeout_ms=300)。 ",
-        "5. 如果第二次 task_output 返回 wakeReason=timeout 且 finished=false，你必须阅读它返回的 content，并把它当作近期 tail 快照而不是失败。由于这里只有同一份 HUNG_TIMEOUT_BOOT、没有新的实质进展，你必须立刻停止继续轮询。 ",
+        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、wait_ms=5000、since=0。 ",
+        "4. 当第一次 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, wait_ms=5000)。 ",
+        "5. 如果第二次 task_output 返回 wakeReason=wait_window_elapsed 且 finished=false，你必须阅读它返回的 content，并把它当作近期 tail 快照而不是失败。由于这里只有同一份 HUNG_TIMEOUT_BOOT、没有新的实质进展，你必须立刻停止继续轮询。 ",
         "6. 从这一步开始，禁止再次调用 task_output，禁止调用 task_stop、task_list，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash。 ",
         "7. 满足上述条件后，只回复一行 HUNG_TIMEOUT_BOUNDED_OK 并停止。"
     )
     .to_string();
 
-    info!("Act: tomcat chat 触发 timeout tail snapshot bounded case，timeout 90s");
+    info!("Act: tomcat chat 触发 wait-window tail snapshot bounded case，timeout 90s");
     let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(90));
     let stdout = run.stdout;
     let stderr = run.stderr;
     info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
-    }
-    let core_ok = run.success && stdout.contains("HUNG_TIMEOUT_BOUNDED_OK");
-    if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli",
-            &stdout,
-            &stderr,
-            "bounded timeout snapshot background bash",
-        )
-    {
-        return;
     }
     assert!(
         run.success,
@@ -3408,7 +3496,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
     let mut task_output_calls = 0usize;
-    let mut saw_timeout_snapshot = false;
+    let mut saw_wait_window_snapshot = false;
     let mut saw_waiting_for_output_user = false;
     let mut saw_task_stop = false;
     let mut saw_task_list = false;
@@ -3442,11 +3530,11 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if content.contains("\"wakeReason\":\"timeout\"")
+            if content.contains("\"wakeReason\":\"wait_window_elapsed\"")
                 && content.contains("HUNG_TIMEOUT_BOOT")
                 && content.contains("\"finished\":false")
             {
-                saw_timeout_snapshot = true;
+                saw_wait_window_snapshot = true;
             }
         } else if role == "user" {
             let content = message
@@ -3466,8 +3554,8 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
         trunc(&transcript, 2200)
     );
     assert!(
-        saw_timeout_snapshot,
-        "transcript 中应看到带 HUNG_TIMEOUT_BOOT 的 timeout 快照；actual: {}",
+        saw_wait_window_snapshot,
+        "transcript 中应看到带 HUNG_TIMEOUT_BOOT 的 wait-window 快照；actual: {}",
         trunc(&transcript, 2200)
     );
     assert!(
@@ -3490,7 +3578,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -3505,7 +3593,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let scratch_canon = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -3522,7 +3610,10 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加工作区"));
+        .stdout(predicate::str::contains(tr(
+            "cli.workspace.added",
+            &[("path", "")],
+        )));
 
     let prompt = format!(
         "请在目录 {} 下创建文件 hello_e2e.txt，内容写 Hello E2E。不要写到其他路径。\n",
@@ -3535,7 +3626,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(prompt)
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -3547,44 +3638,14 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let success = output.status.success();
 
     let hello_path = scratch_canon.join("hello_e2e.txt");
-    let file_or_output_ok = if hello_path.exists() {
-        fs::read_to_string(&hello_path)
-            .map(|content| content.contains("Hello E2E"))
-            .unwrap_or(false)
-    } else {
-        out.contains("写入")
-            || out.contains("write")
-            || out.contains("创建")
-            || out.contains("创建了")
-    };
-    if (!success || !file_or_output_ok)
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_asks_pi_to_write_hello_world_bash",
-            &out,
-            &stderr,
-            "workspace file creation",
-        )
-    {
-        return;
-    }
-    assert.success();
-    if hello_path.exists() {
-        let content = fs::read_to_string(&hello_path).unwrap();
-        assert!(
-            content.contains("Hello E2E"),
-            "hello_e2e.txt 内容应含 'Hello E2E'，实际: {}",
-            trunc(&content, 200)
-        );
-    } else {
-        assert!(
-            out.contains("写入")
-                || out.contains("write")
-                || out.contains("创建")
-                || out.contains("创建了"),
-            "未找到 hello_e2e.txt 时 stdout 应含写入/创建类确认，实际: {}",
-            trunc(&out, 300)
-        );
-    }
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    let content = fs::read_to_string(&hello_path)
+        .expect("the requested file must exist; a model claim is not write evidence");
+    assert!(
+        content.contains("Hello E2E"),
+        "unexpected file contents: {}",
+        trunc(&content, 200)
+    );
 }
 
 // ──────────────────── Story 3: rquickjs 插件系统（E2E-CLI-021~026） ────────────────────
@@ -3893,12 +3954,10 @@ fn test_user_loads_nonexistent_plugin_path_shows_error() {
         "Assert: exit 0 + stdout 含 error 提示；actual: {}",
         trunc(&out, 300)
     );
-    assert.success().stdout(
-        predicate::str::contains("不存在")
-            .or(predicate::str::contains("error"))
-            .or(predicate::str::contains("Error"))
-            .or(predicate::str::contains("找不到")),
-    );
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.plugin.pathMissing",
+        &[("path", "/nonexistent/path/to/plugin")],
+    )));
 }
 
 // ──────────────────── Story 4: PackageManager 统一安装（E2E-CLI-027~030） ────────────────────
@@ -3942,10 +4001,14 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
         "Assert install: exit 0 + stdout 含 package 名；actual: {}",
         trunc(&install_out, 240)
     );
-    install_assert.success().stdout(
-        predicate::str::contains("已安装 package")
-            .and(predicate::str::contains("e2e-scope-package")),
-    );
+    install_assert.success().stdout(predicate::str::contains(tr(
+        "cli.package.installed",
+        &[
+            ("name", "e2e-scope-package"),
+            ("version", "0.2.0"),
+            ("visibility", "scope"),
+        ],
+    )));
 
     info!("Act: tomcat packages --scope-root <project>");
     let list_assert = cmd()
@@ -3967,9 +4030,9 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
             .and(predicate::str::contains("skill:e2e-scope-skill")),
     );
 
-    let scope_tomcat = scope_root.join(".tomcat");
+    let scope_agents = scope_root.join(".agents");
     assert!(
-        scope_tomcat
+        scope_agents
             .join("plugins")
             .join("e2e-scope-plugin")
             .join("plugin.json")
@@ -3977,7 +4040,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
         "scope plugin 应已落盘"
     );
     assert!(
-        scope_tomcat
+        scope_agents
             .join("skills")
             .join("e2e-scope-skill")
             .join("SKILL.md")
@@ -3986,7 +4049,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
     );
 
     let package_registry =
-        read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
+        read_package_registry(&scope_agents.join("packages").join("registry.json"));
     assert_eq!(
         package_registry.schema,
         tomcat::core::PACKAGE_REGISTRY_SCHEMA_V1
@@ -4015,7 +4078,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
         "skills/e2e-scope-skill"
     );
 
-    let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
+    let plugin_registry = read_plugin_registry(&scope_agents.join("plugins").join("registry.json"));
     assert!(
         plugin_registry
             .plugins
@@ -4064,9 +4127,14 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
         "Assert install: exit 0 + stdout 指向 agent；actual: {}",
         trunc(&install_out, 240)
     );
-    install_assert
-        .success()
-        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("agent")));
+    install_assert.success().stdout(predicate::str::contains(tr(
+        "cli.package.installed",
+        &[
+            ("name", "e2e-agent-plugin"),
+            ("version", "0.1.0"),
+            ("visibility", "agent"),
+        ],
+    )));
 
     info!("Act: tomcat packages --visibility agent");
     let list_assert = cmd()
@@ -4160,7 +4228,14 @@ fn test_user_installs_agent_package_survives_scope_switch() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("agent")));
+        .stdout(predicate::str::contains(tr(
+            "cli.package.installed",
+            &[
+                ("name", "e2e-agent-switch-plugin"),
+                ("version", "0.1.0"),
+                ("visibility", "agent"),
+            ],
+        )));
 
     info!("Act: 切到 project-b 后查看 agent 层 packages");
     let list_assert = cmd()
@@ -4240,9 +4315,14 @@ fn test_user_installs_bare_skill_to_global_layer() {
         "Assert install: exit 0 + stdout 指向 global；actual: {}",
         trunc(&install_out, 240)
     );
-    install_assert
-        .success()
-        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("global")));
+    install_assert.success().stdout(predicate::str::contains(tr(
+        "cli.package.installed",
+        &[
+            ("name", "e2e-global-skill"),
+            ("version", "0.0.0"),
+            ("visibility", "global"),
+        ],
+    )));
 
     info!("Act: tomcat packages --visibility global");
     let list_assert = cmd()
@@ -4351,14 +4431,16 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         "Assert uninstall: exit 0 + stdout 含 package 名；actual: {}",
         trunc(&uninstall_out, 260)
     );
-    uninstall_assert.success().stdout(
-        predicate::str::contains("已卸载 package")
-            .and(predicate::str::contains("e2e-uninstall-package")),
-    );
+    uninstall_assert
+        .success()
+        .stdout(predicate::str::contains(tr(
+            "cli.package.uninstalled",
+            &[("name", "e2e-uninstall-package"), ("visibility", "scope")],
+        )));
 
-    let scope_tomcat = scope_root.join(".tomcat");
+    let scope_agents = scope_root.join(".agents");
     assert!(
-        !scope_tomcat
+        !scope_agents
             .join("plugins")
             .join("e2e-uninstall-plugin")
             .join("plugin.json")
@@ -4366,7 +4448,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         "scope plugin 目录应被清理"
     );
     assert!(
-        !scope_tomcat
+        !scope_agents
             .join("skills")
             .join("e2e-uninstall-skill")
             .join("SKILL.md")
@@ -4375,13 +4457,13 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
     );
 
     let package_registry =
-        read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
+        read_package_registry(&scope_agents.join("packages").join("registry.json"));
     assert!(
         package_registry.packages.is_empty(),
         "scope package registry 卸载后应为空"
     );
 
-    let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
+    let plugin_registry = read_plugin_registry(&scope_agents.join("plugins").join("registry.json"));
     assert!(
         plugin_registry.plugins.is_empty(),
         "scope plugin registry 卸载后应为空"
@@ -4409,18 +4491,18 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         .stdout(predicate::str::contains("scope:").and(predicate::str::contains("(none)")));
 }
 
-// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 DEEPSEEK_API_KEY） ────────────────────
+// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 IDATATLAS_OPENAI_API_KEY） ────────────────────
 
 /// [E2E-CLI-041] 用户与 LLM 对话，获得流式渲染回复
 ///
 /// 用户意图：与 LLM 对话，获得非空 AI 回复
 /// 验证：exit 0；stdout 含 AI 回复
-/// 要求：DEEPSEEK_API_KEY 已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_chats_with_llm_gets_streaming_response() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chats_with_llm_gets_streaming_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -4428,7 +4510,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4444,7 +4526,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请用一句话回答：1+1 等于几？\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -4454,17 +4536,8 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         "Assert: exit 0 + stdout 含 AI 回复；actual: {}",
         trunc(&out, 300)
     );
-    if (!success || out.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_chats_with_llm_gets_streaming_response",
-            &out,
-            &stderr,
-            "streaming chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "LLM 应输出非空流式回复，实际 stdout 为空"
@@ -4475,12 +4548,12 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 ///
 /// 用户意图：发送极短提问，验证 LLM 回复非空
 /// 验证：exit 0；stdout 非空
-/// 要求：DEEPSEEK_API_KEY 已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_receives_nonempty_llm_response() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_receives_nonempty_llm_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -4488,7 +4561,7 @@ fn test_user_receives_nonempty_llm_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4504,24 +4577,15 @@ fn test_user_receives_nonempty_llm_response() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("说一个字\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
-    if (!success || out.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_receives_nonempty_llm_response",
-            &out,
-            &stderr,
-            "nonempty chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "LLM 应输出非空回复，实际 stdout 为空"
@@ -4557,9 +4621,11 @@ fn test_user_creates_new_session() {
         "Assert: exit 0 + stdout 含已创建会话；actual: {}",
         trunc(&out, 200)
     );
-    assert
-        .success()
-        .stdout(predicate::str::contains("已创建会话"));
+    assert.success().stdout(predicate::str::contains(
+        tr("cli.session.created", &[("id", ""), ("key", "")])
+            .trim_end()
+            .to_owned(),
+    ));
 }
 
 /// [E2E-CLI-052] 用户查看所有会话
@@ -4662,7 +4728,10 @@ fn test_user_switches_to_nonexistent_session_shows_error() {
         "Assert: exit 0 + stdout 含不存在；actual: {}",
         trunc(&out, 200)
     );
-    assert.success().stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.not_found",
+        &[("id", "")],
+    )));
 }
 
 /// [E2E-CLI-055] 用户删除刚创建的会话
@@ -4694,7 +4763,10 @@ fn test_user_deletes_session() {
         "Assert: exit 0 + stdout 含已删除；actual: {}",
         trunc(&out, 200)
     );
-    assert.success().stdout(predicate::str::contains("已删除"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "session.deleted",
+        &[("id", &session_id)],
+    )));
 }
 
 /// [E2E-CLI-056] 用户归档会话
@@ -4727,7 +4799,10 @@ fn test_user_archives_session() {
         "Assert: exit 0 + stdout 含已归档；actual: {}",
         trunc(&out, 200)
     );
-    assert.success().stdout(predicate::str::contains("已归档"));
+    assert.success().stdout(predicate::str::contains(tr(
+        "cli.session.archived",
+        &[("id", &session_id)],
+    )));
 }
 
 /// [E2E-CLI-057] 用户按关键词搜索会话
@@ -4794,7 +4869,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init，移除 DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init，移除 IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4809,7 +4884,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("hello\n")
         .timeout(std::time::Duration::from_secs(5));
-    configure_deepseek_without_key(&mut c);
+    configure_idatatlas_without_key(&mut c, &work_dir);
     let output = c.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -4818,14 +4893,9 @@ fn test_user_chat_without_api_key_fails_gracefully() {
         trunc(&stdout, 200)
     );
     let combined = format!("{stdout}{stderr}");
+    assert!(!output.status.success(), "missing credentials must fail");
     assert!(
-        combined.contains("error")
-            || combined.contains("Error")
-            || combined.contains("key")
-            || combined.contains("API")
-            || combined.to_lowercase().contains("invalid")
-            || combined.contains("配置")
-            || combined.contains("失败"),
+        combined.contains(common::IDATATLAS_TEST_API_KEY_ENV),
         "chat 无 API Key 时应含错误提示，实际 combined: {}",
         trunc(&combined, 300)
     );
@@ -4844,7 +4914,15 @@ fn test_user_chat_skill_list_reload_use() {
     let workspace = tempfile::tempdir().unwrap();
     let work_dir = home.path().join("work");
     fs::create_dir_all(&work_dir).unwrap();
-    let (base_url, server_handle) = spawn_quick_openai_stream_server("SKILL_CLI_OK");
+    let server = common::serve::spawn_scripted_openai_stream_server_with_auto_title(vec![
+        common::serve::response(vec![
+            common::serve::sse_delta("SKILL_CLI_OK"),
+            common::serve::sse_finish("stop"),
+            common::serve::sse_done(),
+        ]),
+    ]);
+    let base_url = &server.base_url;
+    fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
     info!("Arrange: init temp HOME + workspace skills");
     cmd()
@@ -4909,7 +4987,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         trunc(&combined, 400)
     );
     assert!(
-        combined.contains("已重载") || combined.contains("reload") || combined.contains("reloaded"),
+        combined.contains(&tr("slash.skill.reloaded", &[])),
         "chat output should mention reload, actual: {}",
         trunc(&combined, 400)
     );
@@ -4929,17 +5007,26 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .expect("current_transcript_path")
         .expect("transcript path should exist");
     let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
-    assert!(
-        transcript.contains("<skill name=\\\"secret\\\""),
-        "transcript should contain injected skill body, actual: {}",
-        trunc(&transcript, 800)
-    );
-    assert!(
-        transcript.contains("Current user intent:\\nsummarize current diff"),
-        "transcript should preserve /skill use intent, actual: {}",
-        trunc(&transcript, 800)
-    );
-    server_handle.join().expect("mock llm server should exit");
+    let user_message = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|entry| entry["type"] == "message" && entry["message"]["role"] == "user")
+        .expect("user message");
+    let parts = user_message["message"]["content"]
+        .as_array()
+        .expect("typed content parts");
+    assert!(parts.iter().any(|part| part["type"] == "input_reference"
+        && part["ref_kind"] == "skill"
+        && part["resource_id"] == "skill:secret"
+        && part["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("# Skill Body"))));
+    assert!(parts.iter().any(|part| part["type"] == "input_text"
+        && part["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("summarize current diff"))));
+    // RAII closes the local service even if an assertion above fails.
+    drop(server);
 }
 
 /// [E2E-CLI-068] 用户执行 tomcat skill list|reload
@@ -4992,7 +5079,7 @@ fn test_user_skill_cli_list_reload_e2e() {
     info!("Arrange: add a malformed skill and a new valid skill before reload");
     let broken_dir = workspace
         .path()
-        .join(".tomcat")
+        .join(".agents")
         .join("skills")
         .join("broken");
     fs::create_dir_all(&broken_dir).unwrap();
@@ -5014,7 +5101,10 @@ fn test_user_skill_cli_list_reload_e2e() {
     reload
         .success()
         .stdout(predicate::str::contains("lint"))
-        .stdout(predicate::str::contains("diagnostic").or(predicate::str::contains("诊断")));
+        .stdout(predicate::str::contains(tr(
+            "skill.inventory.diagnostics",
+            &[],
+        )));
 }
 
 /// [E2E-CLI-059] 用户查看操作审计记录列表
@@ -5126,7 +5216,10 @@ fn test_user_runs_unknown_command() {
     let _span = info_span!("test_user_runs_unknown_command").entered();
 
     info!("Act: tomcat nonexistent_cmd_e2e");
-    let assert = cmd().arg("nonexistent_cmd_e2e").assert();
+    let assert = cmd()
+        .env("TOMCAT__UI__LANGUAGE", "en")
+        .arg("nonexistent_cmd_e2e")
+        .assert();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr.clone()).to_string();
     info!(
         "Assert: exit 非 0 + stderr 含 error；actual: {}",
@@ -5165,8 +5258,12 @@ fn test_user_init_then_doctor_roundtrip() {
     );
     assert
         .success()
-        .stdout(predicate::str::contains("配置合法"))
-        .stdout(predicate::str::contains("内嵌资源已就绪").or(predicate::str::contains("✓")));
+        .stdout(predicate::str::contains(
+            tr("cli.doctor.valid", &[("path", "")])
+                .trim_end_matches(')')
+                .to_owned(),
+        ))
+        .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])));
 }
 
 // ──────────────────── Story 9 补充: chat --resume 与多轮上下文（E2E-CLI-082~083） ────────────────────
@@ -5175,12 +5272,12 @@ fn test_user_init_then_doctor_roundtrip() {
 ///
 /// 用户意图：用 --resume 恢复已有会话，历史消息从 JSONL 加载
 /// 验证：exit 0；进程正常退出（不崩溃）
-/// 要求：DEEPSEEK_API_KEY 已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_chat_resumes_last_session() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chat_resumes_last_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -5188,7 +5285,7 @@ fn test_user_chat_resumes_last_session() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -5205,22 +5302,10 @@ fn test_user_chat_resumes_last_session() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请回答：1+1=？\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut first_round, &api_key);
+    configure_idatatlas_real_llm(&mut first_round, &api_key, &work_dir);
     let first_assert = first_round.assert();
-    let first_output = first_assert.get_output();
-    let first_stdout = String::from_utf8_lossy(&first_output.stdout).to_string();
-    let first_stderr = String::from_utf8_lossy(&first_output.stderr).to_string();
-    if !first_output.status.success()
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_chat_resumes_last_session",
-            &first_stdout,
-            &first_stderr,
-            "initial chat round before --resume",
-        )
-    {
-        return;
-    }
     first_assert.success();
+    assert_current_cli_reply(&config_path, &work_dir);
 
     info!("Act: 第二轮 tomcat chat --resume，恢复会话");
     let mut c = cmd();
@@ -5230,24 +5315,15 @@ fn test_user_chat_resumes_last_session() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("好的，谢谢\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
-    if (!success || out.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_chat_resumes_last_session",
-            &out,
-            &stderr,
-            "resume chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out.trim().is_empty(),
         "--resume 后 AI 应有回复，实际 stdout 为空"
@@ -5380,7 +5456,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "继续",
+            CONTINUE_REQUEST,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -5402,16 +5478,16 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
     assert!(
         result.new_messages.iter().any(|msg| {
             msg.role == tomcat::core::llm::ChatMessageRole::User
-                && msg.text_content() == Some("继续")
+                && msg.text_content() == Some(CONTINUE_REQUEST)
         }),
         "原输入应作为本轮 user 消息进入续跑结果"
     );
     assert!(
         state.messages.iter().any(|m| {
             m.tool_call_id.as_deref() == Some("call_tail")
-                && m.text_content() == Some("[interrupted]")
+                && m.text_content() == Some(tomcat::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
         }),
-        "自愈后 state 应包含补齐的 `[interrupted]` tool 结果"
+        "可产生副作用的 bash 在重启后应标记为需核实的 tool 结果"
     );
 
     let transcript_path = ctx
@@ -5421,7 +5497,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         .expect("current_transcript_path")
         .expect("transcript path should exist");
     let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
-    let mut interrupted_idx = None;
+    let mut healed_idx = None;
     let mut continued_idx = None;
     for (idx, line) in transcript.lines().enumerate() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -5434,20 +5510,20 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         let content = message.get("content").and_then(|v| v.as_str());
         if role == Some("tool")
             && message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_tail")
-            && content == Some("[interrupted]")
+            && content == Some(tomcat::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
         {
-            interrupted_idx = Some(idx);
+            healed_idx = Some(idx);
         }
-        if role == Some("user") && content == Some("继续") {
+        if role == Some("user") && content == Some(CONTINUE_REQUEST) {
             continued_idx = Some(idx);
         }
     }
-    let interrupted_idx =
-        interrupted_idx.expect("transcript should contain healed interrupted tool result");
+    let healed_idx =
+        healed_idx.expect("transcript should contain the healed unknown-after-restart result");
     let continued_idx = continued_idx.expect("transcript should contain continued user input");
     assert!(
-        interrupted_idx < continued_idx,
-        "补齐的 `[interrupted]` 应先于用户输入落盘，actual transcript: {}",
+        healed_idx < continued_idx,
+        "补齐的 unknown-after-restart 结果应先于用户输入落盘，actual transcript: {}",
         trunc(&transcript, 800)
     );
 
@@ -5480,7 +5556,7 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "继续一次",
+            CONTINUE_ONCE_REQUEST,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -5509,7 +5585,12 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
         .expect("transcript path should exist");
     let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
     assert_eq!(
-        transcript.matches("\"content\":\"继续一次\"").count(),
+        transcript
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["message"]["role"] == "user"
+                && entry["message"]["content"] == CONTINUE_ONCE_REQUEST)
+            .count(),
         1,
         "原输入只应被消费一次，不应要求用户重输或重复 append；actual transcript: {}",
         trunc(&transcript, 800)
@@ -5575,9 +5656,10 @@ async fn test_cli_chat_path_retries_gateway_503_and_recovers_same_turn() {
 #[tokio::test]
 async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn() {
     common::setup_logging();
-    let _span =
-        info_span!("test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn")
-            .entered();
+    let _span = info_span!(
+        "test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn"
+    )
+    .entered();
 
     const ENV_KEY: &str = "TOMCAT_CLI_GATEWAY_503_EXHAUST_KEY";
     let (_work_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
@@ -5609,7 +5691,7 @@ async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_n
         std::time::Duration::from_secs(5),
         run_chat_turn(
             &ctx,
-            "第一轮会失败但应保留进度",
+            FAILED_REQUEST,
             system_text,
             &mut state,
             CancellationToken::new(),
@@ -5631,7 +5713,7 @@ async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_n
         !state
             .messages
             .iter()
-            .any(|msg| msg.text_content() == Some("第一轮会失败但应保留进度")),
+            .any(|msg| msg.text_content() == Some(FAILED_REQUEST)),
         "失败轮的用户输入不应继续留在 context_state，actual messages: {:?}",
         carried_messages
     );
@@ -5666,9 +5748,9 @@ async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_n
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
-/// Responses 终局元数据应随 assistant message 一起持久化到 transcript。
+/// 终局 LLM 错误应返回结构化失败，而不是把半截输出伪装成 assistant 消息。
 #[tokio::test]
-async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata() {
+async fn test_run_chat_turn_returns_terminal_error_metadata() {
     common::setup_logging();
     let _span =
         info_span!("test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata")
@@ -5676,6 +5758,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
 
     const ENV_KEY: &str = "TOMCAT_RESPONSES_FINISH_REASON_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    ctx.config.llm.agent_max_attempts = 1;
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![vec![
         Ok(StreamEvent::ContentDelta {
             delta: "partial".to_string(),
@@ -5683,7 +5766,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
         Ok(StreamEvent::LlmError {
             reason: "error:boom".to_string(),
             message: "boom".to_string(),
-            code: Some("server_error".to_string()),
+            code: Some("invalid_request".to_string()),
         }),
         Ok(StreamEvent::FinishReason {
             reason: "error:boom".to_string(),
@@ -5712,42 +5795,12 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
     .expect("run_chat_turn timeout 5s")
     .expect("run_chat_turn result");
 
-    let result = match outcome {
-        tomcat::AgentRunOutcome::Completed(result) => result,
-        other => panic!("应正常 Completed，实际: {other:?}"),
+    let error = match outcome {
+        tomcat::AgentRunOutcome::Failed(tomcat::AppError::LlmDetailed(error)) => error,
+        other => panic!("应返回结构化 LLM failure，实际: {other:?}"),
     };
-    let assistant = result
-        .new_messages
-        .iter()
-        .rev()
-        .find(|msg| msg.role == tomcat::core::llm::ChatMessageRole::Assistant)
-        .expect("should persist assistant message");
-    assert_eq!(assistant.finish_reason.as_deref(), Some("error:boom"));
-    assert_eq!(assistant.error_message.as_deref(), Some("boom"));
-    assert_eq!(assistant.error_code.as_deref(), Some("server_error"));
-
-    let transcript_path = ctx
-        .session_runtime
-        .session
-        .current_transcript_path()
-        .expect("current_transcript_path")
-        .expect("transcript path should exist");
-    let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
-    assert!(
-        transcript.contains("\"finish_reason\":\"error:boom\""),
-        "transcript 应保留 finish_reason，实际: {}",
-        trunc(&transcript, 800)
-    );
-    assert!(
-        transcript.contains("\"error_message\":\"boom\""),
-        "transcript 应保留 error_message，实际: {}",
-        trunc(&transcript, 800)
-    );
-    assert!(
-        transcript.contains("\"error_code\":\"server_error\""),
-        "transcript 应保留 error_code，实际: {}",
-        trunc(&transcript, 800)
-    );
+    assert_eq!(error.summary(), "boom");
+    assert_eq!(error.code(), Some("invalid_request"));
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
@@ -5989,7 +6042,10 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist web_search tool result");
     let tool_text = tool_msg.text_content().expect("tool result should be text");
     assert!(
-        tool_text.contains("所有后端均不可用"),
+        tool_text.contains(&tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )),
         "shadowed plugin slot declination 应保持 auto exhausted 文案，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6096,7 +6152,7 @@ async fn test_chat_path_surfaces_web_search_tool_error_without_vm_timeout() {
         .expect("should persist web_search tool error");
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
-        tool_text.contains("web_search backend `tavily` 请求超时"),
+        tool_text.contains(&tr("search.timeout", &[("backend", "tavily")])),
         "tool error 应暴露结构化超时文案，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6141,7 +6197,7 @@ async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
         &[("web_search.backend", "webSearchBackend")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
-  throw new Error("synthetic plugin runtime failure");
+  throw new Error("opaque execution failure");
 });
 "#,
     );
@@ -6177,9 +6233,11 @@ pi.registerFunction("webSearchBackend", function () {
             CancellationToken::new(),
         ),
     )
-    .await
-    .expect("run_chat_turn timeout 5s")
-    .expect("run_chat_turn result");
+    .await;
+    end_current_plugin_session(&ctx).await;
+    let outcome = outcome
+        .expect("run_chat_turn timeout 5s")
+        .expect("run_chat_turn result");
 
     let result = match outcome {
         tomcat::AgentRunOutcome::Completed(result) => result,
@@ -6196,21 +6254,26 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist web_search runtime tool error");
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
-        tool_text.contains("web_search backend `mimo` 运行时错误"),
+        tool_text.contains(&tr(
+            "search.runtime",
+            &[("backend", "mimo"), ("detail", "")]
+        )),
         "tool error 应标记为 runtime hard failure，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("synthetic plugin runtime failure"),
+        tool_text.contains("opaque execution failure"),
         "tool error 应保留原始异常文本，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
-        !tool_text.contains("所有后端均不可用"),
+        !tool_text.contains(&tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )) && !tool_text.contains(&tr("search.allUnavailable", &[("query", "reqwest rust")])),
         "runtime hard failure 不应被压扁为 all_backends_unavailable，实际: {}",
         trunc(tool_text, 400)
     );
-    end_current_plugin_session(&ctx).await;
 }
 
 #[tokio::test]
@@ -6304,7 +6367,10 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist degraded auto web_search error");
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
-        tool_text.contains("所有后端均不可用"),
+        tool_text.contains(&tr(
+            "search.allUnavailableDetails",
+            &[("query", "reqwest rust"), ("details", "")]
+        )),
         "auto 缺 key 应保持可降级 exhausted 文案，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6314,7 +6380,10 @@ pi.registerFunction("webSearchBackend", function () {
         trunc(tool_text, 400)
     );
     assert!(
-        !tool_text.contains("运行时错误"),
+        !tool_text.contains(&tr(
+            "search.runtime",
+            &[("backend", "auto"), ("detail", "")]
+        )),
         "纯缺 key 不应被误升级成 runtime hard failure，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6344,7 +6413,10 @@ async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
         std::time::Duration::ZERO,
     )
     .await;
-    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+    // The plugin's 200ms idle budget is the behavior under test. Keep the
+    // loopback client's transport timeout generous so a busy four-way gate does
+    // not turn an unrelated scheduler delay into a false search failure.
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(10));
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_IDLE_CHAT_KEY";
     let _env = EnvGuard::set_many(&[
@@ -6724,7 +6796,9 @@ web_search = true
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("openai_unavailable") && tool_text.contains("fallback=auto"),
+        (tool_text.contains("openai_unavailable")
+            || tool_text.contains("backend_unavailable:openai"))
+            && tool_text.contains("fallback=auto"),
         "tool result 应记录 hosted 失败后回落 auto，实际: {}",
         trunc(tool_text, 400)
     );
@@ -7058,13 +7132,13 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 
 /// [用户场景] 用户启动 `tomcat chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复
 ///
-/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 DEEPSEEK_API_KEY；无 key 时 panic，符合规范）
+/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 IDATATLAS_OPENAI_API_KEY；无 key 时 panic，符合规范）
 /// 意义：TASK-14 T1-P1-005 E2E 门禁——验证 AgentLoop::run() 已完整接入 tomcat chat 交互链路（E2E_TEST_SPEC §6）
 #[test]
 #[serial(env_lock)]
 fn test_user_chat_non_interactive_with_prompt_flag() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chat_non_interactive_with_prompt_flag").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -7072,7 +7146,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init 生成配置；加载 DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init 生成配置；加载 IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -7089,7 +7163,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("Reply with exactly: pong\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
 
     let assert = c.assert();
     let output = assert.get_output();
@@ -7102,17 +7176,8 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         "Assert: exit 0，stdout 含 AI 回复（非空）；actual stdout 前 300 chars: {}",
         out_str.chars().take(300).collect::<String>()
     );
-    if (!success || out_str.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
-            "test_user_chat_non_interactive_with_prompt_flag",
-            &out_str,
-            &stderr,
-            "non-interactive chat response",
-        )
-    {
-        return;
-    }
-    assert.success();
+    assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
+    assert_current_cli_reply(&config_path, &work_dir);
     assert!(
         !out_str.trim().is_empty(),
         "AgentLoop 应输出非空 AI 回复，实际 stdout 为空"

@@ -72,7 +72,13 @@ async fn non_tty_first_touch_sets_dismissed_and_forwards() {
 
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview,
+            "__agent__",
+            Some(cwd.join("foo.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(dec, ConfirmDecision::Deny);
@@ -98,7 +104,13 @@ async fn second_call_after_dismissed_skips_lazy_branch() {
     // 1) 非 TTY → dismissed=true
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let _ = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview,
+            "__agent__",
+            Some(cwd.join("foo.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert!(prompt.is_dismissed());
@@ -106,7 +118,13 @@ async fn second_call_after_dismissed_skips_lazy_branch() {
     // 2) 第二次进入 → dismissed 早返回 → AllowAll 直接放行
     let preview2 = build_preview(&cwd.join("bar.txt").to_string_lossy());
     let dec2 = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview2, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview2,
+            "__agent__",
+            Some(cwd.join("bar.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -248,7 +266,13 @@ async fn cwd_already_authorized_bypasses_decorator_entirely() {
 
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let dec = prompt
-        .confirm_decision(PrimitiveOperation::Read, &preview, "__agent__", None)
+        .confirm_decision(
+            PrimitiveOperation::Read,
+            &preview,
+            "__agent__",
+            Some(cwd.join("foo.txt")),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(dec, ConfirmDecision::AllowOnce);

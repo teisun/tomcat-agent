@@ -114,6 +114,153 @@ fn temp_home_guard_keeps_multiple_workdirs_isolated_under_same_temp_home() {
 }
 
 #[test]
+fn every_integration_binary_has_one_explicit_classification() {
+    let groups = read_test_groups();
+    let mut classified = BTreeSet::new();
+    for group in ["PARALLEL", "SERIAL", "FEATURE", "REAL_LLM", "MANUAL"] {
+        for binary in parse_shell_array(&groups, &format!("TOMCAT_INTEGRATION_{group}_TESTS")) {
+            assert!(
+                classified.insert(binary.clone()),
+                "duplicate classification: {binary}"
+            );
+        }
+    }
+    let actual: BTreeSet<String> = std::fs::read_dir(repo_root().join("tests"))
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        classified, actual,
+        "new test binaries must be classified, including manual/feature targets"
+    );
+    let config = read_nextest_config();
+    let offline = profile_default_filter(&config);
+    for binary in parse_shell_array(&groups, "TOMCAT_INTEGRATION_MANUAL_TESTS") {
+        assert!(
+            offline.contains(&format!("binary({binary})")),
+            "manual target in default: {binary}"
+        );
+        assert!(
+            !profile_real_llm_filter(&config).contains(&format!("binary({binary})")),
+            "manual target must not be presented as ordinary live coverage: {binary}"
+        );
+    }
+    for case in parse_shell_array(&groups, "TOMCAT_INTEGRATION_MANUAL_CASES") {
+        let (binary, name) = case.split_once("::").unwrap();
+        let source =
+            std::fs::read_to_string(repo_root().join(format!("tests/{binary}.rs"))).unwrap();
+        assert!(
+            source.contains(&format!("fn {name}(")),
+            "missing manual case: {case}"
+        );
+        assert!(
+            offline.contains(name),
+            "manual case absent from offline exclusion: {case}"
+        );
+    }
+    let runner =
+        std::fs::read_to_string(repo_root().join("scripts/run-integration-tests.sh")).unwrap();
+    assert!(runner.contains("${TOMCAT_INTEGRATION_FEATURE_TESTS[@]}"));
+    assert!(runner.contains("--features test-streamable-http-server"));
+}
+
+#[test]
+fn missing_live_credentials_is_not_a_successful_skip() {
+    for target in [
+        "",
+        "gpt-5.4",
+        "gpt-5.4_litellm-sunmi",
+        common::FCODEX_TEST_DEFAULT_MODEL,
+    ] {
+        let effective = if target.is_empty() {
+            common::OPENAI_TEST_DEFAULT_MODEL
+        } else {
+            target
+        };
+        let output = std::process::Command::new("bash")
+            .arg(repo_root().join("scripts/run-integration-tests.sh"))
+            .arg("integration-openai-responses-wire")
+            .env("TOMCAT_E2E_OPENAI_TARGET", target)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("LITELLM_SUNMI_API_KEY")
+            .env_remove("FCODEX_OPENAI_API_KEY")
+            .env_remove(common::openai_test_api_key_env_for_model(effective))
+            .output()
+            .expect("run preflight without credentials");
+        assert_eq!(output.status.code(), Some(2));
+        let log = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            log.contains(common::openai_test_api_key_env_for_model(effective)),
+            "{log}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+    for (target_key, delivery_key) in [(true, false), (false, true), (true, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = dir.path().join("cargo-calls");
+        let cargo = bin.join("cargo");
+        // Record dispatch only: preflight must never contact a real provider.
+        std::fs::write(
+            &cargo,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TOMCAT_GATE_CARGO_LOG\"\nprintf '%s\\n' \"NO_PROXY=$NO_PROXY\" \"no_proxy=$no_proxy\" \"HTTP_PROXY=$HTTP_PROXY\" >> \"$TOMCAT_GATE_CARGO_LOG\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg(repo_root().join("scripts/run-integration-tests.sh"))
+            .arg("integration-real-llm")
+            .env("HOME", dir.path())
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("TOMCAT_GATE_CARGO_LOG", &log)
+            .env("NO_PROXY", "existing.example")
+            .env("no_proxy", "other.example")
+            .env("HTTP_PROXY", "http://proxy.invalid:9000")
+            .env("TOMCAT_E2E_OPENAI_TARGET", "gpt-5.4")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("IDATATLAS_OPENAI_API_KEY");
+        if target_key {
+            cmd.env("OPENAI_API_KEY", "selected-target-stub");
+        }
+        if delivery_key {
+            cmd.env("IDATATLAS_OPENAI_API_KEY", "fixed-delivery-stub");
+        }
+        let output = cmd.output().expect("run isolated gate preflight");
+        if target_key && delivery_key {
+            assert!(output.status.success(), "{output:?}");
+            let dispatch = std::fs::read_to_string(log).unwrap();
+            assert!(dispatch.contains("nextest run --profile real-llm"));
+            assert!(dispatch.contains("NO_PROXY=existing.example,127.0.0.1,localhost,::1"));
+            assert!(dispatch.contains("no_proxy=other.example,127.0.0.1,localhost,::1"));
+            assert!(dispatch.contains("HTTP_PROXY=http://proxy.invalid:9000"));
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            let missing = if target_key {
+                "IDATATLAS_OPENAI_API_KEY"
+            } else {
+                "OPENAI_API_KEY"
+            };
+            assert!(String::from_utf8_lossy(&output.stderr).contains(missing));
+            assert!(
+                !log.exists(),
+                "missing credentials must prevent test dispatch"
+            );
+        }
+    }
+}
+
+#[test]
 fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
     let groups = read_test_groups();
     let parallel = parse_shell_array(&groups, "TOMCAT_INTEGRATION_PARALLEL_TESTS");
@@ -133,11 +280,7 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
         "hostcall_tests",
         "primitives_tools_tests",
         "tool_catalog_doc",
-        "serve_multi_session",
-        "serve_ask_question_tests",
         "serve_schema_fixture",
-        "serve_robustness_tests",
-        "serve_stdio_e2e",
     ];
     let parallel_set = parallel.iter().cloned().collect::<BTreeSet<_>>();
     for binary in promoted_from_old_serial {
@@ -146,17 +289,52 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
             "默认并行组应包含原串行 binary `{binary}`"
         );
     }
-    assert!(
-        serial.is_empty(),
-        "serial 兜底组默认应为空，实际：{serial:?}"
+    assert_eq!(
+        serial,
+        [
+            "project_trust_cli_tests",
+            "serve_multi_session",
+            "serve_ask_question_tests",
+            "serve_robustness_tests",
+            "serve_stdio_e2e",
+            "serve_rewind_and_resend",
+        ],
+        "process-heavy stdio binaries need one concurrent Serve child family",
     );
-    assert!(
-        !real_llm_cli.is_empty()
-            && real_llm_cli
+    let serial_override = config["profile"]["default"]["overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides
                 .iter()
-                .all(|test_name| test_name.ends_with("_real_llm_cli")),
-        "real-llm CLI 测试清单应显式维护且全部以 _real_llm_cli 结尾，实际：{real_llm_cli:?}"
+                .find(|override_config| override_config["test-group"].as_str() == Some("serial"))
+        })
+        .expect("default profile must assign serial binaries to the serial test group");
+    let serial_filter = serial_override["filter"]
+        .as_str()
+        .expect("serial override filter should be a string");
+    for binary in &serial {
+        assert!(
+            serial_filter.contains(&format!("binary({binary})")),
+            "serial binary missing from default profile override: {binary}",
+        );
+    }
+    assert!(
+        !real_llm_cli.is_empty(),
+        "live CLI inventory must not be empty"
     );
+    let cli_source = std::fs::read_to_string(repo_root().join("tests/cli_tests.rs")).unwrap();
+    for name in &real_llm_cli {
+        assert!(
+            cli_source.contains(&format!("fn {name}(")),
+            "unknown live CLI case: {name}"
+        );
+        if !name.ends_with("_real_llm_cli") {
+            assert!(
+                default_filter.contains(name) && real_llm_filter.contains(name),
+                "live CLI case absent from one filter: {name}"
+            );
+        }
+    }
 
     for binary in &real_llm {
         let needle = format!("binary({binary})");

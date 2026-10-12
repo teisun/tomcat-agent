@@ -12,6 +12,7 @@ pub(crate) mod error;
 pub(crate) mod event_bus;
 pub(crate) mod events;
 pub(crate) mod http_client;
+pub(crate) mod i18n;
 pub(crate) mod logging;
 pub(crate) mod net_guard;
 pub(crate) mod platform;
@@ -31,13 +32,13 @@ pub use config::{
     resolve_agent_definition_dir, resolve_agent_dir, resolve_agent_trail_dir, resolve_assets_dir,
     resolve_audit_dir, resolve_checkpoints_dir, resolve_dot_tomcat_temp_dir, resolve_log_dir,
     resolve_memory_dir, resolve_model_thinking_path, resolve_plans_dir, resolve_plugins_dir,
-    resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir, resolve_workspace_roots_paths,
-    validate_config, write_default_model, write_env_entries, AgentConfig, AppConfig,
-    CheckpointConfig, ContextConfig, LlmConfig, LogConfig, PreflightConfig, PrimitiveConfig,
-    ResumeHydrationMode, SecurityConfig, ServeConfig, ServeTransport, SessionConfig,
-    ToolCliVerbosity, ToolsBashConfig, ToolsConfig, ToolsReadConfig, ToolsWebFetchConfig,
-    ToolsWebSearchConfig, ToolsWriteConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
-    DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_BASH_TIMEOUT_MS,
+    resolve_project_resource_dir, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
+    resolve_workspace_roots_paths, validate_config, write_default_model, write_env_entries,
+    AgentConfig, AppConfig, CheckpointConfig, ConnectorConfig, ContextConfig, LlmConfig, LogConfig,
+    PreflightConfig, PrimitiveConfig, ResumeHydrationMode, SecurityConfig, ServeConfig,
+    ServeTransport, SessionConfig, ToolCliVerbosity, ToolsBashConfig, ToolsConfig, ToolsReadConfig,
+    ToolsWebFetchConfig, ToolsWebSearchConfig, ToolsWriteConfig, WorkspaceConfig,
+    DEFAULT_LLM_MODEL, DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS, DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
     DEFAULT_TOOLS_READ_MAX_BYTES, DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES,
     DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS, DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS,
     DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES, DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS,
@@ -46,11 +47,16 @@ pub use config::{
     DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY, DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS,
     DEFAULT_TOOLS_WEB_SEARCH_COUNT, DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL,
     DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS,
-    DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF, MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
+    DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF, MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
+    MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
 };
 pub use error::{llm_error, llm_http_status_error, AppError, LlmError, LlmErrorStage};
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId, ScopedEventEmitter};
 pub use events::wire;
 pub use events::{AgentEvent, ExtensionEvent};
+pub use i18n::tr;
 pub use logging::init_logging;
 pub use platform::{normalize_path, read_file_utf8, write_file_atomic};
+
+#[cfg(test)]
+mod tests;

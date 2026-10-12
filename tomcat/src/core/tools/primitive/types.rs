@@ -8,6 +8,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio_util::sync::CancellationToken;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirEntry {
@@ -21,6 +25,9 @@ pub enum DiffTag {
     Add,
     Del,
     Ctx,
+    /// 连续未改动区域的省略标记。`text` 说明省略了多少行；
+    /// 这不是文件内容，故没有行号。
+    Gap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -31,6 +38,12 @@ pub struct FileDiffLine {
     pub old_line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_line: Option<u32>,
+    /// Number of unchanged source lines omitted by a `gap` row.
+    ///
+    /// `text` remains a human-readable fallback for historical transcripts, but consumers
+    /// must use this structured field when it is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_lines: Option<u32>,
     pub text: String,
 }
 
@@ -56,6 +69,9 @@ pub struct WriteFileResult {
     /// transcript / IDE diff 展示复用的结构化逐行 diff。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<Vec<FileDiffLine>>,
+    /// diff 因渲染预算被截断；`diff` 仍是可安全显示的前缀。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub diff_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +88,30 @@ pub struct EditFileResult {
     /// transcript / IDE diff 展示复用的结构化逐行 diff。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<Vec<FileDiffLine>>,
+    /// diff 因渲染预算被截断；`diff` 仍是可安全显示的前缀。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub diff_truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BashExecutionState {
+    #[default]
+    Finished,
+    RunningInBackground,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashNextAction {
+    pub when: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,20 +121,22 @@ pub struct BashResult {
     pub stderr: String,
     #[serde(rename = "code")]
     pub exit_code: i32,
-    /// T2-P0-016 PR-E.3：墙钟超时被 kill 时为 `true`；正常退出 / 立即结束为 `false`。
-    /// 若主 shell 已退出、但 reader drain 阶段检测到 `cmd &` 残留后台子进程撑住管道，
-    /// 当前实现会在 `stderr` / 审计里追加 warning 并清理同进程组，但**不会**把这条字段
-    /// 置为 `true`（与真正的前台 wall-clock timeout 语义区分）。
-    /// 历史 mock / 第三方 PrimitiveExecutor 反序列化兼容：缺省 `false`。
     #[serde(default)]
-    pub timed_out: bool,
-    /// T2-P0-016 PR-E.3：原始 stdout / stderr 字符数超过 `[tools.bash].max_output_chars`
-    /// 上限被 [`crate::core::tools::primitive::executor::output_accum`] 头尾截断时为 `true`。
+    pub state: BashExecutionState,
+    #[serde(default)]
+    pub foreground_wait_expired: bool,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+    #[serde(default)]
+    pub recent_output: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<BashNextAction>,
     #[serde(default)]
     pub truncated: bool,
-    /// T2-P0-016 PR-E.3：当 `truncated=true` 且配置了 `bash_persist_dir` 时，指向
-    /// `~/.tomcat/agents/<id>/tool-results/<prefix>-<unix_ms>-<rand6>.txt`（合并后的完整原文）。
-    /// LLM 收到回执后可用 `read` 工具按需取回完整原文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted_output_path: Option<String>,
 }
@@ -136,19 +178,21 @@ pub struct SearchFilesArgs {
     pub glob: Option<String>,
     #[serde(default, rename = "type", deserialize_with = "empty_string_as_none")]
     pub file_type: Option<String>,
-    #[serde(default)]
+    // 工具 schema 给模型的是 snake_case，这个结构体序列化用 camelCase：多词字段必须两种
+    // 拼法都收，否则模型传的 `output_mode` 会被静默丢弃、悄悄退回默认值。
+    #[serde(default, alias = "output_mode")]
     pub output_mode: SearchFilesOutputMode,
     pub context: Option<usize>,
     /// `None` = schema field omitted (use target default);
     /// `Some(None)` = explicit JSON null (unlimited);
     /// `Some(Some(n))` = explicit limit.
-    #[serde(default)]
+    #[serde(default, alias = "head_limit")]
     pub head_limit: Option<Option<usize>>,
     #[serde(default)]
     pub offset: usize,
-    #[serde(default)]
+    #[serde(default, alias = "case_insensitive")]
     pub case_insensitive: bool,
-    #[serde(default)]
+    #[serde(default, alias = "include_hidden")]
     pub include_hidden: bool,
 }
 
@@ -257,29 +301,19 @@ impl HashlineSegment {
     /// 解析 `<line_no>#<2char>` 锚点；非法格式 → 结构化错误。
     pub fn parse_anchor(s: &str, ctx_idx: usize, field: &str) -> Result<(u64, String), AppError> {
         let (line_str, hash_str) = s.split_once('#').ok_or_else(|| {
-            AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 锚点格式应为 `<line>#<2char>`，实际 `{}`",
-                ctx_idx, field, s
-            ))
+            AppError::Primitive(format!("hashline_edit: edits[{ctx_idx}].{field} anchor must be `<line>#<2char>`; received `{s}`"))
         })?;
         let line_no: u64 = line_str.trim().parse().map_err(|_| {
-            AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 行号 `{}` 不是有效正整数",
-                ctx_idx, field, line_str
-            ))
+            AppError::Primitive(format!("hashline_edit: edits[{ctx_idx}].{field} line number `{line_str}` is not a valid positive integer"))
         })?;
         if line_no == 0 {
             return Err(AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 行号必须 ≥ 1",
-                ctx_idx, field
+                "hashline_edit: edits[{ctx_idx}].{field} line number must be >= 1"
             )));
         }
         let hash = hash_str.trim().to_string();
         if hash.chars().count() != 2 {
-            return Err(AppError::Primitive(format!(
-                "hashline_edit: edits[{}].{} 哈希应为 2 字符，实际 `{}`",
-                ctx_idx, field, hash
-            )));
+            return Err(AppError::Primitive(format!("hashline_edit: edits[{ctx_idx}].{field} hash must contain 2 characters; received `{hash}`")));
         }
         Ok((line_no, hash))
     }
@@ -356,7 +390,7 @@ impl ReadResult {
     /// 把 enum 摊平成一段适合 tool message 的字符串：
     ///
     /// - `Text` → `content`（已含行号 / 尾注）
-    /// - `Image` / `Pdf` → 占位句（真正 inline part 在 T3-c 注入下一条 user message）
+    /// - `Image` / `Pdf` → 占位句（真正的媒体 part 随对应 tool 消息返回）
     /// - `FileUnchanged` → 短句 stub（与 `read_state::FILE_UNCHANGED_STUB` 同源）
     ///
     /// 本方法是 T3-a 阶段的「兼容垫片」：T3-c 完成后 `tool_exec` 会按 variant
@@ -365,13 +399,13 @@ impl ReadResult {
         match self {
             ReadResult::Text(t) => t.content.clone(),
             ReadResult::Image(b) => format!(
-                "Image saved as next user input. See vision content for details (mime={}, path={}, bytes={}).",
+                "[Image attached]. See vision content for details (mime={}, path={}, bytes={}).",
                 b.mime,
                 b.path.display(),
                 b.original_size
             ),
             ReadResult::Pdf(b) => format!(
-                "PDF attached as next user input. See file content for details (filename={}, path={}, bytes={}).",
+                "[PDF attached]. See file content for details (filename={}, path={}, bytes={}).",
                 b.filename,
                 b.path.display(),
                 b.original_size
@@ -386,6 +420,19 @@ impl ReadResult {
 /// 4 原语执行引擎 Trait（与 design CODE_BLOCK_P1_006 一致）。
 #[async_trait]
 pub trait PrimitiveExecutor: Send + Sync + 'static {
+    /// Authorize a native read-modify-write without reading or replacing the file.
+    /// The caller must use the returned path and retain its own atomic transaction.
+    /// Executors without a permission implementation fail closed.
+    async fn authorize_write_path(
+        &self,
+        _path: &str,
+        _plugin_id: &str,
+    ) -> Result<std::path::PathBuf, AppError> {
+        Err(AppError::Permission(
+            "write-path authorization is not supported by this executor".into(),
+        ))
+    }
+
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError>;
 
     /// PR-RB（T1）read 工具入口：分页读 + metadata 阶段大小预检 + 二进制结构化提示。
@@ -500,26 +547,16 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         let _ = cancel;
         self.hashline_edit(path, segments, plugin_id).await
     }
-    /// 执行 bash/进程。
-    /// - `argv` 为 `None`：`command` 视为完整 shell 命令（经 `sh -c` / `cmd /C`）。
-    /// - `argv` 为 `Some`：`command` 为可执行文件名，`argv` 为其参数列表（不经 shell，与 pi-mono `exec(cmd, args)` 对齐）。
-    /// - `timeout_ms`（T2-P0-016 PR-E）：墙钟超时（毫秒）；`None` 时使用
-    ///   `[tools.bash].timeout_ms`（默认 120_000）。`tool_exec` 入口已按
-    ///   [`crate::infra::config::MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000 clamp，
-    ///   trait 实现侧再做一次防御性 clamp。`DefaultPrimitiveExecutor` 用
-    ///   `tokio::time::timeout(..., child.wait())` 包裹前台等待，并用同一 deadline 继续约束
-    ///   stdout/stderr reader drain；若主 shell 已退、但 `cmd &` 残留后台子进程继续持有
-    ///   管道写端，会清理同进程组并返回 warning，而不是永久阻塞在 `read_to_end` 上。
-    ///   这样既避免 `wait_with_output` 反模式（bash.md §2.4.3 / §6.2 / §9.2），也避免
-    ///   同步 bash 被“shell 语义后台”卡死。
-    ///   旧 mock / 第三方 PrimitiveExecutor 实现可忽略此参数（默认行为不变）。
+    /// 执行完整 shell 命令行（经 Unix `sh -c` / Windows `cmd /C`）。
+    /// - `foreground_wait_ms` controls only how long this call observes the tracked command.
+    ///   Expiry returns the same task as `RunningInBackground`; it never terminates the process.
+    ///   Explicit cancellation or `task_stop` are the only process-tree stop paths.
     async fn execute_bash(
         &self,
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
-        argv: Option<&[String]>,
-        timeout_ms: Option<u64>,
+        foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError>;
     async fn require_user_confirmation(
         &self,

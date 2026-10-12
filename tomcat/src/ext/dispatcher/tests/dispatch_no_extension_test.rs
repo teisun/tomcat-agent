@@ -2,8 +2,8 @@
 //!
 //! 这些用例覆盖：
 //!
-//! - 未注册 `primitive` / `llm` / `tools` / `session` 时，相应模块返回错误，
-//!   并保留 005/006/004 等错误码用于上层映射。
+//! - 未注册 `primitive` / `llm_resolver` / `tools` / `session` 时，相应模块返回错误，
+//!   并保留 005/006/007 等错误码用于上层映射。
 //! - `agent.log` 永远成功；`events.on/emit` 不依赖外部扩展也能工作。
 //! - `with_audit` 注入的 `AuditRecorder` 在 hostcall 路径上准确触发一次。
 //!
@@ -157,5 +157,5 @@ async fn dispatch_llm_without_provider_returns_err() {
     };
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(!res.ok);
-    assert!(res.error.unwrap().contains("004"));
+    assert!(res.error.unwrap().contains("007"));
 }

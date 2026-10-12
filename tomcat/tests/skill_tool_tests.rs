@@ -7,7 +7,10 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tomcat::core::llm::system_prompt::{WorkspaceContext, WorkspaceState};
+use tomcat::core::llm::system_prompt::{
+    AvailableSkillsSection, SystemPromptBuilder, WorkspaceContext, WorkspaceState,
+    WorkspaceStateSection,
+};
 use tomcat::core::llm::{ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene};
 use tomcat::{
     init_context_state, run_chat_turn, AppConfig, AppError, BashResult, Capabilities, ChatContext,
@@ -111,22 +114,20 @@ impl FixedResolver {
     }
 
     fn resolved_call(&self, model: &str) -> ResolvedCall {
-        ResolvedCall {
-            provider_impl: self.provider.clone(),
-            model: model.to_string(),
-            api: "openai".to_string(),
-            provider: "deepseek".to_string(),
-            base_url: Some(common::DEEPSEEK_TEST_API_BASE.to_string()),
-            key_source: common::DEEPSEEK_TEST_API_KEY_ENV.to_string(),
-            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
-            capabilities: Capabilities {
-                vision: false,
-                files: false,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
-        }
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.api = "openai-responses".to_string();
+        call.provider = "idatatlas".to_string();
+        call.base_url = Some(common::IDATATLAS_TEST_BASE_URL.to_string());
+        call.key_source = common::IDATATLAS_TEST_API_KEY_ENV.to_string();
+        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.capabilities = Capabilities {
+            vision: false,
+            files: false,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        };
+        call
     }
 }
 
@@ -149,7 +150,6 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.global_services.llm = provider.clone();
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
@@ -189,8 +189,7 @@ impl PrimitiveExecutor for SkillReadPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         unreachable!()
     }
@@ -231,7 +230,7 @@ fn cli_tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEv
 }
 
 fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     let mut content = format!("---\nname: {name}\ndescription: {description}\n");
     if user_only {
@@ -242,7 +241,7 @@ fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_onl
 }
 
 fn write_live_skill_fixture(workspace: &Path, name: &str, description: &str, secret_token: &str) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).expect("create live skill dir");
     let content = format!(
         "---\nname: {name}\ndescription: {description}\n---\n# Live Commit Skill\nsecret-token: {secret_token}\n1. Run git status.\n"
@@ -252,51 +251,50 @@ fn write_live_skill_fixture(workspace: &Path, name: &str, description: &str, sec
 
 fn build_system_text(ctx: &ChatContext, skill_set: &tomcat::core::skill::SkillSet) -> String {
     let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
-    tomcat::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
-        WorkspaceContext {
-            agent_workspace_dir: ctx
-                .scope_services
-                .agent_workspace_dir
-                .to_string_lossy()
-                .to_string(),
-            agent_definition_dir: ctx
-                .scope_services
-                .agent_definition_dir
-                .to_string_lossy()
-                .to_string(),
-            agent_plans_dir: "~/.tomcat/plans".to_string(),
-            agent_trail_dir: ctx
-                .scope_services
-                .agent_trail_dir
-                .to_string_lossy()
-                .to_string(),
-            tool_lines: Some(
-                tomcat::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
-                    true,
-                ),
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(WorkspaceStateSection::new(WorkspaceState {
+        read_write: vec![],
+        read_only: vec![],
+        path_rules: vec![],
+    })));
+    if let Some(section) =
+        AvailableSkillsSection::from_skill_set(skill_set, budget, &ctx.config.skills)
+    {
+        builder.register(Box::new(section));
+    }
+    builder.build(&WorkspaceContext {
+        agent_workspace_dir: ctx
+            .scope_services
+            .agent_workspace_dir
+            .to_string_lossy()
+            .to_string(),
+        agent_definition_dir: ctx
+            .scope_services
+            .agent_definition_dir
+            .to_string_lossy()
+            .to_string(),
+        agent_plans_dir: "~/.tomcat/plans".to_string(),
+        agent_trail_dir: ctx
+            .scope_services
+            .agent_trail_dir
+            .to_string_lossy()
+            .to_string(),
+        tool_lines: Some(
+            tomcat::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
+                true,
             ),
-        },
-        WorkspaceState {
-            read_write: vec![],
-            read_only: vec![],
-            path_rules: vec![],
-        },
-        Some(skill_set),
-        Some(&ctx.config.skills),
-        budget,
-    )
+        ),
+    })
 }
 
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
-    const ENV_KEY: &str = "TOMCAT_SKILL_TOOL_TEST_KEY";
-
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
-    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let _api_guard = EnvGuard::set(common::IDATATLAS_TEST_API_KEY_ENV, "stub");
     let _cwd_guard = CurrentDirGuard::set(workspace.path());
 
     write_skill_fixture(workspace.path(), "commit", "Create a git commit", false);
@@ -309,7 +307,7 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    common::apply_openai_responses_test_config(&mut cfg, ENV_KEY, None);
+    common::apply_idatatlas_app_config(&mut cfg);
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
     let skill_set =
@@ -326,7 +324,7 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
         cli_tool_call_stream("call_skill", "load_skill", r#"{"name":"commit"}"#),
         cli_text_stream("SKILL_OK"),
     ]));
-    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+    install_fixed_resolver(&mut ctx, mock_llm, &common::idatatlas_test_model());
 
     let mut state = init_context_state(
         &ctx.session_runtime.session,
@@ -377,7 +375,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     if std::env::var("PI_LIVE_SKILL").ok().as_deref() != Some("1") {
         return;
     }
-    let _api_key = common::require_deepseek_api_key("live_skill_load_roundtrip_with_real_llm");
+    let _api_key = common::require_idatatlas_api_key("live_skill_load_roundtrip_with_real_llm");
 
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -395,7 +393,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    common::apply_deepseek_app_config(&mut cfg);
+    common::apply_idatatlas_app_config(&mut cfg);
     cfg.workspace.workspace_roots = vec![workspace.path().to_string_lossy().to_string()];
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 

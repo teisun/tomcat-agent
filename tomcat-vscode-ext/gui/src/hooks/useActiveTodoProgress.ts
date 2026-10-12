@@ -1,4 +1,4 @@
-import type { WebviewPlanState, WebviewTodo } from "../types";
+import type { WebviewPlanFileState, WebviewTodo } from "../types";
 
 export interface ActiveTodoProgress {
   activeTodo: WebviewTodo | null;
@@ -49,11 +49,11 @@ function computeProgress(todos: WebviewTodo[]): ActiveTodoProgress | null {
 
 export function selectActiveTodoSource(input: {
   busy: boolean;
-  planState?: WebviewPlanState | null;
+  planState?: WebviewPlanFileState | null;
   planTodos: WebviewTodo[];
   sessionTodos: WebviewTodo[];
 }): WebviewTodo[] | null {
-  const planStates: WebviewPlanState[] = ["planning", "executing", "pending", "completed"];
+  const planStates: WebviewPlanFileState[] = ["planning", "executing", "pending"];
   if (input.planState && planStates.includes(input.planState)) {
     return input.planTodos;
   }
@@ -67,7 +67,7 @@ export function selectActiveTodoSource(input: {
 
 export function useActiveTodoProgress(input: {
   busy: boolean;
-  planState?: WebviewPlanState | null;
+  planState?: WebviewPlanFileState | null;
   planTodos: WebviewTodo[];
   sessionTodos: WebviewTodo[];
 }): ActiveTodoProgress | null {

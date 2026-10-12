@@ -23,17 +23,23 @@ description: 递增 CLI/EXT 版本，推 develop/main/master，先发 CLI 再发
 
 ## 核心规则
 
-- 默认做 **patch +1**
-  - CLI：`tomcat/Cargo.toml`
-  - EXT：`tomcat-vscode-ext/package.json`
-- EXT 必须同时更新：
-  - `tomcat-vscode-ext/package-lock.json`
-  - `tomcat-vscode-ext/gui/package.json`
-  - `tomcat-vscode-ext/gui/package-lock.json`
-  - `tomcat-vscode-ext/package.json` 里的 `tomcat.bundledCliVersion`
-- **先 CLI，后 EXT**
-- `develop -> main`、`develop -> master` 只能 **fast-forward**
-- 发现非预期脏文件时先停下来问用户
+- `release-versions.json` 是唯一可以手改的版本来源，记录三个独立事实：
+  - `cli`：CLI 发布版本
+  - `extension.version`：EXT 发布版本
+  - `extension.bundledCli`：该 EXT 实际内置的 CLI 版本
+- `tomcat/Cargo.toml`、`tomcat/Cargo.lock`、EXT `package.json` / `package-lock.json` 都是命令生成的镜像，禁止逐个手改。
+- 私有 GUI 不独立发布，因此 GUI manifest 和 lockfile 没有 release version。
+- 默认标准发版执行 **CLI + EXT patch +1**，并让新 EXT pin 新 CLI；仍然坚持 **先发布 CLI、资产就绪后再发布 EXT**。
+- `develop -> main`、`develop -> master` 只能 **fast-forward**。
+- 发现非预期脏文件时先停下来问用户。
+
+```text
+release-versions.json
+├─ cli ───────────────> Cargo.toml + Cargo.lock
+├─ extension.version ─> EXT package.json + package-lock.json
+└─ extension.bundledCli
+                        └> EXT package.json tomcat.bundledCliVersion
+```
 
 ## 1. 起手检查
 
@@ -43,69 +49,75 @@ description: 递增 CLI/EXT 版本，推 develop/main/master，先发 CLI 再发
 git status --short
 git branch --show-current
 git tag --list | tail -n 40
+node scripts/release-version.mjs check
 ```
 
 要求：
 
 - 当前分支是 `develop`
 - 工作区只有本次 release 相关改动
+- 当前所有版本镜像一致
 - 目标 tag 还不存在：
   - `cli-v<new_cli_version>`
   - `ext-v<new_ext_version>`
 
-## 2. 改版本
+## 2. 用一条命令改版本
 
-默认把当前版本都做 patch `+1`。
-
-需要修改：
-
-- `tomcat/Cargo.toml`
-- `tomcat-vscode-ext/package.json`
-- `tomcat-vscode-ext/package-lock.json`
-- `tomcat-vscode-ext/gui/package.json`
-- `tomcat-vscode-ext/gui/package-lock.json`
-
-EXT / GUI 推荐直接用：
+标准 CLI + EXT patch 发版只执行：
 
 ```bash
-cd tomcat-vscode-ext
-npm version --no-git-tag-version <new_ext_version>
-npm --prefix gui version --no-git-tag-version <new_ext_version>
+node scripts/release-version.mjs bump --all patch
 ```
 
-然后手改：
+它会同时修改根版本源以及 Cargo/npm 必要镜像，并把新 EXT 的 bundled CLI pin 指向新 CLI。不要再运行 `npm version`，也不要手改 Cargo/npm 镜像。
 
-- `tomcat/Cargo.toml` 的 CLI 版本
-- `tomcat-vscode-ext/package.json` 的 `tomcat.bundledCliVersion`
-
-## 3. 检查 Cargo.lock
-
-CLI release workflow 用的是：
+少数独立发版场景使用：
 
 ```bash
-cargo build --locked --release
+node scripts/release-version.mjs bump --cli patch
+node scripts/release-version.mjs bump --extension patch
 ```
 
-所以改完版本后必须看：
+CLI-only 和 EXT-only 都会保留当前 `extension.bundledCli`，不会偷偷改变已经定义好的 VSIX 内容。需要指定精确值时使用：
 
 ```bash
-git diff -- tomcat/Cargo.lock
+node scripts/release-version.mjs set \
+  --cli <new_cli_version> \
+  --extension <new_ext_version> \
+  --bundled-cli <cli_version_bundled_by_the_new_ext>
 ```
 
-处理规则：
+改变 bundled CLI 会改变 VSIX 内容，因此同一次操作必须提供一个新的 EXT 版本。
 
-- 如果没变化：继续
-- 如果只是根包版本跟着变了（例如 `0.1.8 -> 0.1.9`）：把它一起提交
-- 如果出现其他超预期变化：停止并询问用户
+## 3. 审核生成结果并做只读检查
 
-## 4. 先跑 guard
+执行：
+
+```bash
+git diff -- release-versions.json tomcat/Cargo.toml tomcat/Cargo.lock \
+  tomcat-vscode-ext/package.json tomcat-vscode-ext/package-lock.json
+node scripts/release-version.mjs check
+```
+
+预期 diff 只能包含三个业务版本及其必要镜像。Cargo.lock 只能改变唯一 `tomcat` 根包版本，EXT lock 只能改变顶层和根包版本；出现依赖变化就停止调查。
+
+如果维护者选择直接编辑 `release-versions.json`，随后运行：
+
+```bash
+node scripts/release-version.mjs sync
+node scripts/release-version.mjs check
+```
+
+`sync` 会先验证所有输入、在内存中计算全部目标，再写文件；输入错误时不会写任何目标。修正根清单或坏镜像后重新运行即可，不要用手改多个镜像“恢复”。
+
+## 4. 再跑发版 guard
 
 ```bash
 node .github/scripts/release/check-cli-tag.mjs . cli-v<new_cli_version>
 node .github/scripts/release/check-ext-tag.mjs . ext-v<new_ext_version>
 ```
 
-guard 失败就先修版本文件，不要继续。
+guard 会再次先检查根清单、Cargo/npm 镜像和 bundled CLI pin，再检查 tag；失败就回到版本命令修复，不要继续。
 
 ## 5. 提交并推 develop
 
@@ -201,5 +213,6 @@ gh release view ext-v<new_ext_version> --repo teisun/tomcat-agent --json url,ass
 
 - 不要 force push
 - 不要在 CLI release 资产没出来前先打 EXT tag
-- 不要忽略 `Cargo.lock` 的合法版本漂移
+- 不要手改 Cargo/npm 版本镜像；只操作根清单或版本命令
+- 不要漏提交命令生成的 Cargo.lock / package-lock 版本变化
 - 不要把本地打包成功当成 GitHub release 完成

@@ -18,10 +18,14 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use tokio_stream::StreamExt;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::core::llm::{ChatRequest, StreamEvent};
-use crate::infra::error::{llm_source_chain, llm_stage, llm_summary};
+use crate::core::llm::{
+    retry_delay::{is_provider_retry_cancelled, with_provider_retry_cancel},
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
+    StreamEvent, TokenUsage,
+};
+use crate::infra::error::{llm_source_chain, llm_stage, llm_stream_terminal_error, llm_summary};
 use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message};
 
 use super::error_classifier::classify_error;
@@ -61,17 +65,115 @@ pub(crate) fn extract_path_from_partial_args(args: &str) -> Option<String> {
     serde_json::from_str::<String>(&format!("\"{}\"", raw)).ok()
 }
 
+fn compress_shape_tokens(tokens: &[&'static str]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let token = tokens[idx];
+        let mut count = 1usize;
+        while idx + count < tokens.len() && tokens[idx + count] == token {
+            count += 1;
+        }
+        if count == 1 {
+            out.push(token.to_string());
+        } else {
+            out.push(format!("{token} x{count}"));
+        }
+        idx += count;
+    }
+    out.join(",")
+}
+
+fn describe_message_shape(message: &ChatMessage) -> String {
+    let role = match message.role {
+        ChatMessageRole::System => "system",
+        ChatMessageRole::User => "user",
+        ChatMessageRole::Assistant => "assistant",
+        ChatMessageRole::Tool => "tool",
+    };
+    let mut tokens: Vec<&'static str> = Vec::new();
+    match message.role {
+        ChatMessageRole::System => tokens.push("input_text"),
+        ChatMessageRole::User => match &message.content {
+            Some(ChatMessageContent::Text(_)) | None => tokens.push("input_text"),
+            Some(ChatMessageContent::Parts(parts)) => {
+                let has_text = parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        ChatMessageContentPart::InputText { .. }
+                            | ChatMessageContentPart::InputReference { .. }
+                    )
+                });
+                if has_text || parts.is_empty() {
+                    tokens.push("input_text");
+                }
+                for part in parts {
+                    match part {
+                        ChatMessageContentPart::InputImage { .. }
+                        | ChatMessageContentPart::InputImageRef { .. } => {
+                            tokens.push("input_image")
+                        }
+                        ChatMessageContentPart::InputFile { .. } => tokens.push("input_file"),
+                        ChatMessageContentPart::InputText { .. }
+                        | ChatMessageContentPart::InputReference { .. } => {}
+                    }
+                }
+            }
+        },
+        ChatMessageRole::Assistant => {
+            let has_text = match &message.content {
+                Some(ChatMessageContent::Text(text)) => !text.is_empty(),
+                Some(ChatMessageContent::Parts(parts)) => parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        ChatMessageContentPart::InputText { .. }
+                            | ChatMessageContentPart::InputReference { .. }
+                    )
+                }),
+                None => false,
+            };
+            if has_text {
+                tokens.push("output_text");
+            }
+            tokens.extend(std::iter::repeat_n(
+                "function_call",
+                message.tool_calls.as_deref().unwrap_or(&[]).len(),
+            ));
+        }
+        ChatMessageRole::Tool => tokens.push("function_call_output"),
+    }
+    if tokens.is_empty() {
+        tokens.push("empty");
+    }
+    format!("{role}[{}]", compress_shape_tokens(&tokens))
+}
+
+fn describe_request_shape(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .map(describe_message_shape)
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 pub(super) async fn run_chat_stream(
     agent: &mut AgentLoop,
     req: ChatRequest,
+    attempt: u32,
+    max_attempts: u32,
 ) -> Result<StreamOutcome, LoopError> {
+    // 诊断日志只记录“形状”（角色、part 类型与个数），绝不记录任何正文 / base64，
+    // 否则会把图片/PDF 的大字节写进日志，违反 image-attachments 文档里的写放大约束。
+    let request_shape = describe_request_shape(&req);
+    let request_input_items = req.messages.len();
+    let request_model = req.model.clone();
     // 提前 clone 跨 await 持有的 Arc / token，解除 &mut agent 借用。
     let cancel = agent.cancel_token.clone();
     let llm = Arc::clone(&agent.llm);
 
     // ── LLM connect：chat_stream 建连 await 可被取消 ──
     let mut stream = {
-        let connect = llm.chat_stream(req);
+        let connect = with_provider_retry_cancel(cancel.clone(), llm.chat_stream(req));
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -85,11 +187,26 @@ pub(super) async fn run_chat_stream(
                     thinking_text: None,
                     reasoning_continuation: None,
                     continuity: None,
+                    usage: None,
                     aborted: true,
                 });
             }
             conn = connect => match conn {
                 Ok(s) => s,
+                Err(e) if cancel.is_cancelled() && is_provider_retry_cancelled(&e) => {
+                    return Ok(StreamOutcome {
+                        content_buf: String::new(),
+                        tool_calls_buf: Vec::new(),
+                        finish_reason: None,
+                        error_message: None,
+                        error_code: None,
+                        thinking_text: None,
+                        reasoning_continuation: None,
+                        continuity: None,
+                        usage: None,
+                        aborted: true,
+                    });
+                }
                 Err(e) => {
                     let snippet: String = e.to_string().chars().take(200).collect();
                     let summary = llm_summary(&e).unwrap_or_else(|| snippet.clone());
@@ -111,11 +228,13 @@ pub(super) async fn run_chat_stream(
     let mut content_buf = String::new();
     let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
     let mut finish_reason: Option<String> = None;
+    let mut error_reason: Option<String> = None;
     let mut error_message: Option<String> = None;
     let mut error_code: Option<String> = None;
     let mut thinking_text: Option<String> = None;
     let mut reasoning_continuation: Option<crate::core::llm::ReasoningContinuation> = None;
     let mut continuity: Option<crate::core::llm::ContinuityMetadata> = None;
+    let mut usage: Option<TokenUsage> = None;
     let mut pending_notice: Option<(String, String)> = None;
     let mut aborted_during_stream = false;
     let mut streaming_announced: Vec<bool> = Vec::new();
@@ -232,13 +351,9 @@ pub(super) async fn run_chat_stream(
                 if finish_reason.is_none() {
                     finish_reason = Some(reason.clone());
                 }
+                error_reason = Some(reason);
                 error_message = Some(message.clone());
                 error_code = code.clone();
-                agent.emit_event(AgentEvent::LlmError {
-                    reason,
-                    error_code: code,
-                    error_message: message,
-                });
             }
             Ok(StreamEvent::LlmNotice {
                 finish_reason: notice_reason,
@@ -267,11 +382,51 @@ pub(super) async fn run_chat_stream(
             Ok(StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
-                ..
+                cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
+                reasoning_tokens,
+                text_tokens,
             }) => {
-                if let Some(ref mut ctx_state) = agent.context_state {
+                usage = Some(TokenUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    total_tokens,
+                    reasoning_tokens,
+                    text_tokens,
+                });
+                info!(
+                    target: "tomcat_chat_diag",
+                    phase = "llm_usage",
+                    provider = agent.llm.provider_name(),
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                );
+                let tail_changed = if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.update_api_usage(prompt_tokens, completion_tokens);
+                    ctx_state
+                        .session_obs
+                        .observe_provider_usage(prompt_tokens, cache_read_tokens);
+                    ctx_state.session_obs.last_request_tail_changed()
+                } else {
+                    false
+                };
+                if let Some(plan_runtime) = agent.config.plan_runtime.as_ref() {
+                    plan_runtime.record_plan_cache_usage(
+                        prompt_tokens,
+                        cache_read_tokens,
+                        tail_changed,
+                    );
                 }
+                // A tool-using turn may remain active for many more LLM/tool
+                // rounds. Publish the provider-backed measurement here rather
+                // than waiting for logical TurnEnd, so the composer waterline
+                // becomes visible immediately after the first real usage.
+                agent.emit_context_metrics(true);
             }
             Err(e) => {
                 // Err 分支先发 MessageEnd 再返回，保证 UI 配对。
@@ -295,6 +450,95 @@ pub(super) async fn run_chat_stream(
         }
     }
 
+    if let Some(message) = error_message.clone() {
+        let reason = error_reason
+            .clone()
+            .or_else(|| finish_reason.clone())
+            .unwrap_or_else(|| "error".to_string());
+        let loop_err = classify_error(llm_stream_terminal_error(
+            agent.llm.provider_name().to_string(),
+            message.clone(),
+            error_code.clone(),
+        ));
+        let will_retry = matches!(&loop_err, LoopError::Retryable(_)) && attempt < max_attempts;
+        let discarded_text_chars = content_buf.chars().count();
+        let discarded_tool_calls = tool_calls_buf
+            .iter()
+            .map(|tool_call| {
+                serde_json::json!({
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                })
+            })
+            .collect::<Vec<_>>();
+        let displayed_message = if content_buf.trim().is_empty() {
+            message.clone()
+        } else {
+            format!(
+                "{message}{}",
+                crate::infra::i18n::tr(
+                    if discarded_text_chars == 1 {
+                        "agentLoop.discarded.one"
+                    } else {
+                        "agentLoop.discarded.other"
+                    },
+                    &[("count", &discarded_text_chars.to_string())]
+                )
+            )
+        };
+        warn!(
+            target: "tomcat_chat_diag",
+            phase = "stream_terminal_error",
+            model = %request_model,
+            provider = agent.llm.provider_name(),
+            code = ?error_code,
+            message = %message,
+            input_items = request_input_items,
+            shape = %request_shape,
+            discarded_text_chars,
+            discarded_tool_calls = discarded_tool_calls.len(),
+            will_retry,
+            attempt
+        );
+        if let Err(error) = agent.persist_custom_entry_if_needed(serde_json::json!({
+            "event": "stream_terminal_error",
+            "reason": reason,
+            "code": error_code,
+            "message": message,
+            "discarded_text": content_buf,
+            "discarded_tool_calls": discarded_tool_calls,
+            "attempt": attempt,
+        })) {
+            warn!(%error, "failed to persist terminal-stream diagnostic");
+        }
+        agent.emit_event(AgentEvent::LlmError {
+            reason,
+            error_code,
+            error_message: displayed_message,
+        });
+        agent.emit_event(AgentEvent::MessageEnd {
+            message: Message(serde_json::json!({})),
+            assistant_message_id: assistant_message_id.clone(),
+        });
+        agent.clear_pending_assistant_entry_id();
+        return Err(loop_err);
+    }
+
+    if finish_reason.is_some() && usage.is_none() {
+        warn!(
+            target: "tomcat_chat_diag",
+            phase = "stream_terminal_usage_missing",
+            model = %request_model,
+            provider = agent.llm.provider_name(),
+            finish_reason = ?finish_reason,
+            input_items = request_input_items,
+            shape = %request_shape,
+            attempt,
+            "terminal stream frame did not include usage"
+        );
+    }
+
     agent.emit_event(AgentEvent::MessageEnd {
         message: Message(serde_json::json!({})),
         assistant_message_id: assistant_message_id.clone(),
@@ -315,6 +559,7 @@ pub(super) async fn run_chat_stream(
         thinking_text,
         reasoning_continuation,
         continuity,
+        usage,
         aborted: aborted_during_stream,
     })
 }

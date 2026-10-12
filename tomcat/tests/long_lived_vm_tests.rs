@@ -8,20 +8,211 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tomcat::{
     parse_manifest, wire, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
     PluginManager, PluginRuntimeKey, PluginRuntimeManager, PluginStatus,
-    SharedPluginRuntimeManager, VmActorHandle, VmActorState, VmCommand,
+    SharedPluginRuntimeManager, VmActorHandle, VmActorState,
 };
 
-fn stub_handle() -> VmActorHandle {
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    VmActorHandle {
-        cmd_tx: tx,
-        state: Arc::new(AtomicU8::new(VmActorState::Created as u8)),
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_vm_start_is_single_flight() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("plugin.json"),
+        make_manifest_json("single-flight"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("index.js"),
+        "pi.emit('vm_init'); pi.on('noop', function(){});",
+    )
+    .unwrap();
+    let bus = Arc::new(DefaultEventBus::new());
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = count.clone();
+    tomcat::EventBus::on(
+        bus.as_ref(),
+        "vm_init",
+        Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let runtime = Arc::new(PluginRuntimeManager::new());
+    let mut manager = PluginManager::new(bus);
+    manager.set_plugin_runtime_manager(runtime.clone());
+    manager.set_plugin_engine(tomcat::PluginEngine::global(None).unwrap());
+    manager.set_host_dispatcher(dispatcher);
+    manager
+        .register_catalog_plugin(
+            tmp.path(),
+            parse_manifest(&make_manifest_json("single-flight")).unwrap(),
+        )
+        .unwrap();
+    let manager = Arc::new(manager);
+    let futures = (0..8).map(|_| manager.start_session_vm("same-session", "single-flight"));
+    let handles = futures_util::future::join_all(futures).await;
+    let first = handles[0].as_ref().unwrap();
+    for handle in &handles {
+        assert!(Arc::ptr_eq(&first.state, &handle.as_ref().unwrap().state));
     }
+    assert_eq!(runtime.len(), 1);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "same key initializes exactly once"
+    );
+    let other = manager
+        .start_session_vm("other-session", "single-flight")
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(&first.state, &other.state));
+    assert_eq!(runtime.len(), 2);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "different sessions initialize independently"
+    );
+    manager.end_session("same-session").await.unwrap();
+    manager.end_session("other-session").await.unwrap();
+    assert_eq!(runtime.start_gate_count(), 0);
+    std::fs::write(
+        tmp.path().join("index.js"),
+        "throw new Error('init-failed');",
+    )
+    .unwrap();
+    assert!(manager
+        .start_session_vm("retry", "single-flight")
+        .await
+        .is_err());
+    assert!(runtime.is_empty());
+    std::fs::write(tmp.path().join("index.js"), "pi.on('noop', function(){});").unwrap();
+    let retry = manager
+        .start_session_vm("retry", "single-flight")
+        .await
+        .unwrap();
+    assert_eq!(runtime.len(), 1);
+    manager.end_session("retry").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while first.current_state() != VmActorState::Stopped
+            || other.current_state() != VmActorState::Stopped
+            || retry.current_state() != VmActorState::Stopped
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Fill the queue while the VM is provably handling another event. Removing
+/// the sender must still stop it even when the shutdown envelope cannot fit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_event_queue_cleanup_still_stops_vm() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("plugin.json"),
+        make_manifest_json("full-queue"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("index.js"),
+        "pi.on('block',function(){pi.emit('blocked');});",
+    )
+    .unwrap();
+    let bus = Arc::new(DefaultEventBus::new());
+    let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
+    let blocked_tx = std::sync::Mutex::new(Some(blocked_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    tomcat::EventBus::on(
+        bus.as_ref(),
+        "blocked",
+        Box::new(move |_| {
+            if let Some(tx) = blocked_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3));
+            Ok(())
+        }),
+    );
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let mut manager = PluginManager::new(bus);
+    manager.set_plugin_runtime_manager(Arc::new(PluginRuntimeManager::new()));
+    manager.set_plugin_engine(tomcat::PluginEngine::global(None).unwrap());
+    manager.set_event_channel_capacity(1);
+    manager.set_host_dispatcher(dispatcher.clone());
+    manager
+        .register_catalog_plugin(
+            tmp.path(),
+            parse_manifest(&make_manifest_json("full-queue")).unwrap(),
+        )
+        .unwrap();
+    let handle = manager
+        .start_session_vm("session", "full-queue")
+        .await
+        .unwrap();
+    manager
+        .dispatch_session_event(
+            "session",
+            "full-queue",
+            "block",
+            serde_json::json!({}),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), blocked_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    manager
+        .dispatch_session_event(
+            "session",
+            "full-queue",
+            "queued",
+            serde_json::json!({}),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    assert!(manager
+        .dispatch_session_event(
+            "session",
+            "full-queue",
+            "overflow",
+            serde_json::json!({}),
+            serde_json::json!({})
+        )
+        .is_err());
+    manager.end_session("session").await.unwrap();
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while handle.current_state() != VmActorState::Stopped {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    manager.end_session("session").await.unwrap();
+}
+
+fn created_handle() -> VmActorHandle {
+    let engine = tomcat::PluginEngine::global(None).unwrap();
+    let instance = engine
+        .create_instance(&uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    // No Init is sent: the real actor remains Created until its senders drop.
+    tomcat::ext::vm_actor::VmActor::spawn(instance, std::path::PathBuf::new(), 8)
 }
 
 fn make_manifest_json(id: &str) -> String {
@@ -49,6 +240,7 @@ fn make_plugin_instance(id: &str) -> PluginInstance {
     PluginInstance {
         id: id.to_string(),
         manifest,
+        fingerprint: None,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -69,8 +261,9 @@ fn make_plugin_instance(id: &str) -> PluginInstance {
 /// [RuntimeManager 双键 insert/get] session_id + plugin_id 精确查找
 ///
 /// 验收标准：插件全局变量可跨事件保持 — 基础设施层面验证双键管理正确。
-#[test]
-fn test_runtime_manager_insert_get_by_composite_key() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_runtime_manager_insert_get_by_composite_key() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = tracing::info_span!("test_runtime_manager_insert_get_by_composite_key").entered();
 
@@ -78,7 +271,7 @@ fn test_runtime_manager_insert_get_by_composite_key() -> Result<(), Box<dyn std:
     let key = PluginRuntimeKey::new("session-1", "plugin-a");
 
     tracing::info!("Arrange: 创建 RuntimeManager 与 VmRuntimeKey(session-1/plugin-a)");
-    mgr.insert(key.clone(), stub_handle());
+    mgr.insert(key.clone(), created_handle());
 
     tracing::info!("Act: get 同 key 和不同 key");
     let found = mgr.get(&key);
@@ -98,17 +291,13 @@ fn test_runtime_manager_insert_get_by_composite_key() -> Result<(), Box<dyn std:
 /// [VmActorHandle 状态查询] 外部可通过 handle.current_state() 感知 actor 状态
 ///
 /// 验收标准：已注册 handler 在多次事件中持续有效 — handle 状态可正确反映 actor 生命周期。
-#[test]
-fn test_vm_actor_handle_state_transitions() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_vm_actor_handle_state_transitions() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span = tracing::info_span!("test_vm_actor_handle_state_transitions").entered();
 
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let state = Arc::new(AtomicU8::new(VmActorState::Created as u8));
-    let handle = VmActorHandle {
-        cmd_tx: tx,
-        state: state.clone(),
-    };
+    let handle = created_handle();
+    let state = handle.state.clone();
 
     tracing::info!("Arrange: 创建 VmActorHandle，初始 state = Created");
     assert_eq!(handle.current_state(), VmActorState::Created);
@@ -127,46 +316,6 @@ fn test_vm_actor_handle_state_transitions() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// [VmActorHandle dispatch] 向 handle 发送 VmCommand::DispatchEvent
-///
-/// 验收标准：验证 channel 通信正常，命令可到达 actor 端。
-#[tokio::test]
-async fn test_vm_actor_handle_dispatch_event_command() -> Result<(), Box<dyn std::error::Error>> {
-    common::setup_logging();
-    let _span = tracing::info_span!("test_vm_actor_handle_dispatch_event_command").entered();
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    let handle = VmActorHandle {
-        cmd_tx: tx,
-        state: Arc::new(AtomicU8::new(VmActorState::Running as u8)),
-    };
-
-    tracing::info!("Arrange: 创建 VmActorHandle 并持有 rx");
-    tracing::info!("Act: dispatch Init + DispatchEvent + Shutdown");
-
-    handle.dispatch(VmCommand::Init).await?;
-    handle
-        .dispatch(VmCommand::DispatchEvent {
-            event_type: "test_event".into(),
-            data: serde_json::json!({"seq": 1}),
-            context: serde_json::json!({}),
-        })
-        .await?;
-    handle.shutdown().await?;
-
-    tracing::info!("Assert: rx 收到 3 条命令");
-    let cmd1 = rx.recv().await.unwrap();
-    assert!(matches!(cmd1, VmCommand::Init));
-
-    let cmd2 = rx.recv().await.unwrap();
-    assert!(matches!(cmd2, VmCommand::DispatchEvent { .. }));
-
-    let cmd3 = rx.recv().await.unwrap();
-    assert!(matches!(cmd3, VmCommand::Shutdown));
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // 场景 3：多会话隔离
 // ---------------------------------------------------------------------------
@@ -174,8 +323,9 @@ async fn test_vm_actor_handle_dispatch_event_command() -> Result<(), Box<dyn std
 /// [多会话隔离] 不同 session_id 下同一 plugin_id 的 handle 相互独立
 ///
 /// 验收标准：多会话上下文隔离（状态不串会话）
-#[test]
-fn test_multi_session_isolation_in_runtime_manager() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::test]
+async fn test_multi_session_isolation_in_runtime_manager() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = tracing::info_span!("test_multi_session_isolation_in_runtime_manager").entered();
 
@@ -184,19 +334,10 @@ fn test_multi_session_isolation_in_runtime_manager() -> Result<(), Box<dyn std::
     let key_s1 = PluginRuntimeKey::new("session-A", "plugin-x");
     let key_s2 = PluginRuntimeKey::new("session-B", "plugin-x");
 
-    let (tx1, _rx1) = tokio::sync::mpsc::channel(1);
-    let state1 = Arc::new(AtomicU8::new(VmActorState::Running as u8));
-    let handle1 = VmActorHandle {
-        cmd_tx: tx1,
-        state: state1.clone(),
-    };
-
-    let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
-    let state2 = Arc::new(AtomicU8::new(VmActorState::Created as u8));
-    let handle2 = VmActorHandle {
-        cmd_tx: tx2,
-        state: state2.clone(),
-    };
+    let handle1 = created_handle();
+    let state1 = handle1.state.clone();
+    state1.store(VmActorState::Running as u8, Ordering::Relaxed);
+    let handle2 = created_handle();
 
     tracing::info!(
         "Arrange: 为 session-A/plugin-x(Running) 和 session-B/plugin-x(Created) 各创建 handle"
@@ -234,18 +375,18 @@ fn test_multi_session_isolation_in_runtime_manager() -> Result<(), Box<dyn std::
 /// [session 清理] remove_session 后该 session 下所有 handle 被移除，其他 session 不受影响
 ///
 /// 验收标准：关闭流程无悬挂线程、无 pending 泄漏
-#[test]
-fn test_session_cleanup_removes_all_handles_for_session() -> Result<(), Box<dyn std::error::Error>>
-{
+#[tokio::test]
+async fn test_session_cleanup_removes_all_handles_for_session(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_session_cleanup_removes_all_handles_for_session").entered();
 
     let mgr = PluginRuntimeManager::new();
-    mgr.insert(PluginRuntimeKey::new("sess-1", "p1"), stub_handle());
-    mgr.insert(PluginRuntimeKey::new("sess-1", "p2"), stub_handle());
-    mgr.insert(PluginRuntimeKey::new("sess-1", "p3"), stub_handle());
-    mgr.insert(PluginRuntimeKey::new("sess-2", "p1"), stub_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-1", "p1"), created_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-1", "p2"), created_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-1", "p3"), created_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-2", "p1"), created_handle());
 
     tracing::info!("Arrange: sess-1 下 3 个 handle，sess-2 下 1 个 handle，共 4 个");
     assert_eq!(mgr.len(), 4);
@@ -272,18 +413,25 @@ async fn test_plugin_manager_end_session_cleans_runtime_manager(
     let _span =
         tracing::info_span!("test_plugin_manager_end_session_cleans_runtime_manager").entered();
 
+    let temp = tempfile::tempdir()?;
     let bus = Arc::new(DefaultEventBus::new());
-    let dispatcher = Arc::new(HostApiDispatcher::new(bus.clone()));
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
+    );
     let rm: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
-
     let mut mgr = PluginManager::new(bus);
-    mgr.set_host_dispatcher(dispatcher.clone());
+    mgr.set_host_dispatcher(dispatcher);
     mgr.set_plugin_runtime_manager(rm.clone());
-
-    rm.insert(PluginRuntimeKey::new("sess-x", "plugin-a"), stub_handle());
-    rm.insert(PluginRuntimeKey::new("sess-x", "plugin-b"), stub_handle());
-    dispatcher.register_event_channel("sess-x/plugin-a", 4);
-    dispatcher.register_event_channel("sess-x/plugin-b", 4);
+    mgr.set_plugin_engine(tomcat::PluginEngine::global(None)?);
+    let mut handles = Vec::new();
+    for id in ["plugin-a", "plugin-b"] {
+        let root = temp.path().join(id);
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join("plugin.json"), make_manifest_json(id))?;
+        std::fs::write(root.join("index.js"), "pi.on('noop', function(){});")?;
+        mgr.register_catalog_plugin(&root, parse_manifest(&make_manifest_json(id))?)?;
+        handles.push(mgr.start_session_vm("sess-x", id).await?);
+    }
 
     tracing::info!("Arrange: PluginManager 注入 RuntimeManager(2 个 handle) + dispatcher");
     assert_eq!(rm.len(), 2);
@@ -293,6 +441,16 @@ async fn test_plugin_manager_end_session_cleans_runtime_manager(
 
     tracing::info!("Assert: rm 为空，所有 handle 已清理");
     assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while handles
+            .iter()
+            .any(|handle| handle.current_state() != VmActorState::Stopped)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("real session VMs must finish after end_session");
 
     Ok(())
 }

@@ -20,24 +20,38 @@
 //! - `submodules_test`：直接调用 `pub(super)` 子模块函数的焦小测
 //!   （handle_overflow_retry / execute_tool）。
 
+/// Reuse the same primitive stub for focused real tool-entry regressions.
+pub(super) fn mock_primitive(
+) -> std::sync::Arc<dyn crate::core::tools::primitive::PrimitiveExecutor> {
+    std::sync::Arc::new(mocks::MockPrimitiveExecutor)
+}
+
 mod assistant_message_id_test;
 mod background_monitor_test;
 mod classify_test;
 mod compaction_provider_accessor_test;
+mod completion_guard_test;
 mod current_tail_guard_behavior_test;
+mod current_tail_guard_real_llm_runtime_test;
 mod current_tail_guard_runtime_test;
 mod current_tail_guard_test;
 mod current_tail_provider_routing_test;
 mod defaults_test;
+mod ephemeral_tail_test;
 mod events_order_test;
 mod interrupt_test;
 mod metrics_test;
 mod mocks;
 mod preheat_provider_routing_test;
+mod request_shape_test;
 mod run_basic_test;
 mod session_envelope_test;
+mod signal_completion_test;
 mod steering_followup_test;
+mod steering_injection_test;
 mod stream_handler_test;
 mod submodules_test;
 mod tool_call_arguments_test;
+mod tool_exec_batch_test;
 mod tool_exec_dedup_test;
+mod tool_media_batch_test;

@@ -26,9 +26,9 @@ use super::config::LogConfig;
 pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), super::error::AppError> {
     let level = cfg.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {
-        return Err(super::error::AppError::Config(format!(
-            "无效的日志级别: {}",
-            cfg.level
+        return Err(super::error::AppError::Config(crate::infra::i18n::tr(
+            "config.invalidLog",
+            &[("value", &cfg.level)],
         )));
     }
     // 同一套过滤规则用于 stderr 与文件，避免两次解析 `RUST_LOG` 出现语义不一致。

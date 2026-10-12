@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveRelayFields, envNameForRelaySlug } from "./relayDerive";
+import type { SettingsModelView } from "../../../src/shared/settingsProtocol";
+import {
+  deriveRelayFields,
+  envNameForRelaySlug,
+  findConfiguredRelayByBaseUrl,
+} from "./relayDerive";
 
 describe("relayDerive", () => {
   it("derives stable slugs from common relay hosts", () => {
@@ -68,5 +73,26 @@ describe("relayDerive", () => {
     expect(envNameForRelaySlug("fcodex", "anthropic-messages")).toBe(
       "FCODEX_ANTHROPIC_API_KEY",
     );
+  });
+
+  it("reuses explicitly configured relay credentials by exact normalized endpoint", () => {
+    const configured: SettingsModelView = {
+      api: "openai",
+      apiKeyEnv: "TEAM_GATEWAY_KEY",
+      baseUrl: "https://gateway.example.test/v1",
+      capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
+      id: "team/gpt-5.6",
+      keyPresent: true,
+      modelName: "gpt-5.6",
+      provider: "team-gateway",
+      source: "user",
+    };
+
+    expect(
+      findConfiguredRelayByBaseUrl([configured], "https://gateway.example.test/v1/"),
+    ).toBe(configured);
+    expect(
+      findConfiguredRelayByBaseUrl([configured], "https://other.example.test/v1"),
+    ).toBeNull();
   });
 });

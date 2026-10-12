@@ -8,12 +8,44 @@
 //! - `TokenUsage::default` / `StreamEvent::ContentDelta` 序列化默认值。
 
 use super::super::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ContextRefKind, ContextReference, ContinuityMetadata, FileSource, ImageSource,
-    ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
-    TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
+    ChatMessageContentPart, ChatMessageRole, ChatRequest, ContextRefKind, ContextReference,
+    ContinuityMetadata, FileSource, ImageSource, MessageKind, ReasoningContinuation,
+    ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES,
+    IMAGE_MAX_BYTES,
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
+use crate::infra::events::ToolDisplay;
+use crate::infra::i18n::{tr_in, Locale};
+
+#[test]
+fn tool_media_kind_roundtrips_without_claiming_user_input() {
+    let parts = vec![ChatMessageContentPart::image_file_id("file-test").unwrap()];
+    let media = ChatMessage::tool_media(parts.clone());
+    assert_eq!(media.kind, MessageKind::ToolMedia);
+    assert!(!media.kind.is_normal());
+    assert!(media.kind.is_replay_input());
+    assert!(
+        media.starts_logical_turn(),
+        "stage A preserves existing transport windows"
+    );
+    let persisted = serde_json::to_value(&media).unwrap();
+    assert_eq!(persisted["kind"], "tool_media");
+    assert_eq!(
+        serde_json::from_value::<ChatMessage>(persisted)
+            .unwrap()
+            .kind,
+        MessageKind::ToolMedia
+    );
+    assert_eq!(
+        MessageKind::from_persisted(Some("tool_media")),
+        MessageKind::ToolMedia
+    );
+    assert_eq!(
+        ChatMessage::user_with_parts(parts).kind,
+        MessageKind::Normal
+    );
+}
 
 #[test]
 fn chat_message_constructors() {
@@ -26,6 +58,72 @@ fn chat_message_constructors() {
 
     let s = ChatMessage::system("you are helpful");
     assert!(matches!(s.role, ChatMessageRole::System));
+
+    let summary = ChatMessage::compaction_summary("compact old context", "summary-marker");
+    assert_eq!(summary.kind, MessageKind::CompactionSummary);
+    assert_eq!(summary.msg_id.as_deref(), Some("summary-marker"));
+}
+
+#[test]
+fn chat_message_kind_persists_non_normal_values_and_defaults_legacy_rows() {
+    let normal = serde_json::to_value(ChatMessage::user("normal")).unwrap();
+    assert!(
+        normal.get("kind").is_none(),
+        "Normal remains omitted for backwards-compatible transcript rows"
+    );
+    let legacy: ChatMessage = serde_json::from_value(normal).unwrap();
+    assert_eq!(legacy.kind, MessageKind::Normal);
+
+    let mut signal = ChatMessage::user("background complete");
+    signal.kind = MessageKind::Signal;
+    let persisted = serde_json::to_value(&signal).unwrap();
+    assert_eq!(persisted["kind"], "signal");
+    let restored: ChatMessage = serde_json::from_value(persisted).unwrap();
+    assert_eq!(restored.kind, MessageKind::Signal);
+}
+
+#[test]
+fn ephemeral_tail_texts_extracts_only_nonblank_runtime_instructions_in_order() {
+    let mut first_tail = ChatMessage::user("first runtime instruction");
+    first_tail.kind = MessageKind::EphemeralTail;
+    let mut blank_tail = ChatMessage::user(" \n ");
+    blank_tail.kind = MessageKind::EphemeralTail;
+    let mut multipart_tail = ChatMessage::user_with_parts(vec![ChatMessageContentPart::text(
+        "multipart runtime state is invalid",
+    )]);
+    multipart_tail.kind = MessageKind::EphemeralTail;
+    let mut second_tail = ChatMessage::user("second runtime instruction");
+    second_tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("durable user input"),
+        first_tail,
+        blank_tail,
+        multipart_tail,
+        second_tail,
+    ];
+
+    assert!(is_ephemeral_tail(&messages[1]));
+    assert!(!is_ephemeral_tail(&messages[0]));
+    assert_eq!(
+        ephemeral_tail_texts(&messages).collect::<Vec<_>>(),
+        vec!["first runtime instruction", "second runtime instruction"]
+    );
+}
+
+#[test]
+fn message_kind_plan_build_roundtrips_and_starts_a_turn() {
+    let mut build = ChatMessage::user("start building /tmp/plan.plan.md");
+    build.kind = MessageKind::PlanBuild;
+
+    let persisted = serde_json::to_value(&build).unwrap();
+    assert_eq!(persisted["kind"], "plan_build");
+    let restored: ChatMessage = serde_json::from_value(persisted).unwrap();
+    assert_eq!(restored.kind, MessageKind::PlanBuild);
+    assert!(MessageKind::PlanBuild.is_replay_input());
+    assert!(
+        !MessageKind::PlanBuild.is_non_turn_start(),
+        "the kickoff message must remain a real user turn"
+    );
 }
 
 #[test]
@@ -101,7 +199,10 @@ fn chat_message_completion_metadata_roundtrip() {
                 had_tool_call: false,
                 replay_requirement: ReplayRequirement::SameProfileOptional,
             }),
-        );
+        )
+        .with_tool_display(Some(ToolDisplay::Text {
+            text: "edited src/app.ts".to_string(),
+        }));
     let json = serde_json::to_value(&msg).unwrap();
     assert_eq!(json["finish_reason"], "error:boom");
     assert_eq!(json["error_message"], "boom");
@@ -120,6 +221,7 @@ fn chat_message_completion_metadata_roundtrip() {
     assert!(stripped_json.get("thinking_text").is_none());
     assert!(stripped_json.get("reasoning_continuation").is_none());
     assert!(stripped_json.get("continuity").is_none());
+    assert!(stripped_json.get("tool_display").is_none());
 }
 
 #[test]
@@ -164,14 +266,20 @@ fn chat_request_serialize_snake_case() {
         model: "gpt-4".to_string(),
         temperature: Some(0.5),
         max_tokens: Some(100),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: Some("session:main".to_string()),
         tools: None,
     };
     let j = serde_json::to_string(&req).unwrap();
     assert!(j.contains("model"));
     assert!(j.contains("messages"));
+    assert!(!j.contains("cache_key"));
+    assert!(!j.contains("ephemeral_tail_count"));
 }
 
 #[test]
@@ -193,9 +301,13 @@ fn chat_request_serializes_hydrate_recovered_tool_round_for_openai_wire() {
         model: "gpt-4".to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     let j = serde_json::to_value(&req).unwrap();
@@ -379,6 +491,38 @@ fn context_reference_selection_to_prompt_text_escapes_path_quotes() {
 }
 
 #[test]
+fn invocation_reference_freezes_body_and_projects_typed_blocks() {
+    for (kind, tag) in [
+        (ContextRefKind::Command, "command"),
+        (ContextRefKind::Skill, "skill"),
+    ] {
+        let reference = ContextReference {
+            ref_kind: kind,
+            path: ".cursor/commands/review\".md".into(),
+            label: "/review".into(),
+            resource_id: Some("command:test".into()),
+            line_start: None,
+            line_end: None,
+            text: Some("BODY".into()),
+        };
+        let projected = reference.to_prompt_text();
+        assert!(projected.starts_with(&format!("<{tag} name=")));
+        assert!(projected.contains("BODY"));
+        assert!(!projected.contains("hint="));
+        if tag == "command" {
+            assert!(projected.contains("&quot;"));
+        } else {
+            assert!(projected.contains("location=\"SKILL.md\""));
+        }
+        let part = ChatMessageContentPart::reference(reference);
+        assert_eq!(part.estimated_chars(), projected.chars().count());
+        let back: ChatMessageContentPart =
+            serde_json::from_value(serde_json::to_value(&part).unwrap()).unwrap();
+        assert_eq!(part, back);
+    }
+}
+
+#[test]
 fn context_reference_file_to_prompt_text_mentions_path() {
     let reference = ContextReference::file("src/app.ts", "app.ts");
     assert_eq!(reference.to_prompt_text(), "[file reference] src/app.ts");
@@ -412,6 +556,7 @@ fn content_part_serde_roundtrip_reference() {
             line_start: Some(10),
             line_end: Some(12),
             text: Some(text),
+            ..
         } } if path == "src/app.ts" && label == "app.ts:10-12" && text == "const answer = 42;"
     ));
     assert_eq!(
@@ -438,6 +583,27 @@ fn content_part_serde_roundtrip_image_b64() {
             ..
         }
     ));
+}
+
+#[test]
+fn content_part_serde_roundtrip_image_blob_ref_without_inline_bytes() {
+    let sha = "a".repeat(64);
+    let part = ChatMessageContentPart::image_blob_ref(sha.clone(), "image/png", None).unwrap();
+    let value = serde_json::to_value(&part).unwrap();
+
+    assert_eq!(value["type"], "input_image_ref");
+    assert_eq!(value["blob_sha"], sha);
+    assert_eq!(value["mime_type"], "image/png");
+    assert!(value.get("image_b64").is_none());
+    assert!(matches!(
+        serde_json::from_value::<ChatMessageContentPart>(value).unwrap(),
+        ChatMessageContentPart::InputImageRef { .. }
+    ));
+}
+
+#[test]
+fn image_blob_ref_rejects_non_canonical_sha() {
+    assert!(ChatMessageContentPart::image_blob_ref("A".repeat(64), "image/png", None).is_err());
 }
 
 #[test]
@@ -470,7 +636,11 @@ fn content_part_serde_roundtrip_file_id() {
 fn image_base64_data_rejects_invalid_base64() {
     let err = ChatMessageContentPart::image_base64_data("image/png", "***not-base64***")
         .expect_err("非法 base64 应拒绝");
-    assert!(err.to_string().contains("base64 解码失败"));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "media.decodeFailed",
+        &[("operation", "image_base64_data"), ("detail", "")]
+    )));
 }
 
 #[test]
@@ -482,10 +652,19 @@ fn image_base64_data_rejects_non_whitelisted_mime() {
 
 #[test]
 fn image_b64_rejects_missing_path() {
+    let expected = tr_in(
+        Locale::En,
+        "media.statFailed",
+        &[
+            ("operation", "image_b64"),
+            ("path", "/nonexistent/never-here-xyzz.png"),
+            ("detail", ""),
+        ],
+    );
     let err = ChatMessageContentPart::image_b64("image/png", "/nonexistent/never-here-xyzz.png")
         .expect_err("路径不存在应拒绝");
     let s = err.to_string();
-    assert!(s.contains("无法 stat"), "错误文案应提示 stat 失败: {}", s);
+    assert!(s.contains(&expected), "{s}");
 }
 
 #[test]
@@ -556,6 +735,15 @@ fn content_part_serde_rejects_input_file_with_no_source() {
 
 #[test]
 fn file_b64_rejects_missing_path() {
+    let expected = tr_in(
+        Locale::En,
+        "media.statFailed",
+        &[
+            ("operation", "file_b64"),
+            ("path", "/nonexistent/never-here-xyzz.pdf"),
+            ("detail", ""),
+        ],
+    );
     let err = ChatMessageContentPart::file_b64(
         "a.pdf",
         "application/pdf",
@@ -563,7 +751,7 @@ fn file_b64_rejects_missing_path() {
     )
     .expect_err("路径不存在应拒绝");
     let s = err.to_string();
-    assert!(s.contains("无法 stat"), "错误文案应提示 stat 失败: {}", s);
+    assert!(s.contains(&expected), "{s}");
 }
 
 #[test]
@@ -578,7 +766,11 @@ fn file_b64_rejects_oversize() {
 #[test]
 fn image_file_id_rejects_empty() {
     let err = ChatMessageContentPart::image_file_id("   ").expect_err("空 file_id 应拒绝");
-    assert!(err.to_string().contains("不能为空"));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "media.fileIdEmpty",
+        &[("operation", "image_file_id")]
+    )));
 }
 
 #[tokio::test]
@@ -608,5 +800,9 @@ async fn file_upload_rejects_empty_bytes_before_network() {
     let err = ChatMessageContentPart::file_upload(&client, "a.pdf", "application/pdf", &[])
         .await
         .expect_err("空字节应在发请求前失败");
-    assert!(err.to_string().contains("为空"));
+    assert!(err.to_string().contains(&tr_in(
+        Locale::En,
+        "media.emptyUpload",
+        &[("operation", "file_upload")]
+    )));
 }

@@ -3,51 +3,29 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import type { DiffFragment, DiffPresentation, DiffRange } from "../shared/diffPresentation";
+import { getLocale, pluralKey, t } from "../shared/i18n";
+
 const DIFF_SCHEME = "tomcat-diff";
 
 type DiffSide = "original" | "proposed";
 
-interface PreparedFileChange {
-  absolutePath: string;
-  displayPath: string;
-  existedBefore: boolean;
-  hasStructuredDiff: boolean;
-  originalContent: string;
-  proposedContent: string;
-  toolCallId: string;
+function formatDiffRange(range: DiffRange): string {
+  return range.start === range.end ? `L${range.start}` : `L${range.start}-${range.end}`;
 }
 
-interface FallbackDiffPair {
-  after: string;
-  before: string;
-}
-
-function toSearchParams(side: DiffSide): string {
-  return new URLSearchParams({ side }).toString();
-}
-
-function encodeDiffPathSegment(value: string): string {
-  return encodeURIComponent(value);
-}
-
-function createPreparedDiffPath(toolCallId: string, fileName: string): string {
-  return `/${encodeDiffPathSegment(toolCallId)}/${encodeDiffPathSegment(fileName)}`;
-}
-
-function preparedDiffKeyFromPath(diffPath: string): string | null {
-  const encodedKey = diffPath.split("/").filter(Boolean)[0];
-  if (!encodedKey) {
-    return null;
-  }
-  try {
-    return decodeURIComponent(encodedKey);
-  } catch {
-    return null;
-  }
+function fragmentFileName(fileName: string, fragment: DiffFragment, index: number, total: number): string {
+  const extension = path.extname(fileName);
+  const name = fileName.slice(0, fileName.length - extension.length);
+  const ranges = [
+    fragment.oldRange ? t("ide.oldRange", { range: formatDiffRange(fragment.oldRange) }) : "",
+    fragment.newRange ? t("ide.newRange", { range: formatDiffRange(fragment.newRange) }) : "",
+  ].filter(Boolean).join(" → ");
+  return t("ide.fragment", { name, index: index + 1, total, ranges: ranges ? ` · ${ranges}` : "", extension });
 }
 
 export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Disposable {
-  private readonly preparedChanges = new Map<string, PreparedFileChange>();
+  private readonly previewContents = new Map<string, string>();
   private readonly providerRegistration: vscode.Disposable;
 
   constructor() {
@@ -59,111 +37,121 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
 
   dispose(): void {
     this.providerRegistration.dispose();
-    this.preparedChanges.clear();
+    this.previewContents.clear();
   }
 
-  async rememberToolStart(_toolCallId: string, _args: unknown): Promise<void> {
-    // Structured diffs from Rust are the only trustworthy source of "before".
-  }
-
-  async rememberToolResult(
+  async openDiffPreview(
+    sessionId: string,
     toolCallId: string,
     displayPath: string,
-    fallbackDiff?: FallbackDiffPair,
-  ): Promise<PreparedFileChange> {
-    const absolutePath = this.resolveWorkspacePath(displayPath);
-    const proposedUri = vscode.Uri.file(absolutePath);
-    const proposedContent = (await this.readFileIfExists(proposedUri)) ?? fallbackDiff?.after ?? "";
-
-    const change: PreparedFileChange = {
-      absolutePath,
-      displayPath,
-      existedBefore: fallbackDiff ? fallbackDiff.before.length > 0 : proposedContent.length > 0,
-      hasStructuredDiff: Boolean(fallbackDiff),
-      originalContent: fallbackDiff?.before ?? "",
-      proposedContent,
-      toolCallId,
-    };
-    this.preparedChanges.set(toolCallId, change);
-    return change;
-  }
-
-  getPreparedChange(toolCallId: string): PreparedFileChange | undefined {
-    return this.preparedChanges.get(toolCallId);
-  }
-
-  createFileAnchor(displayPath: string): vscode.Uri {
-    return vscode.Uri.file(this.resolveWorkspacePath(displayPath));
-  }
-
-  async openPreparedDiff(toolCallId: string): Promise<void> {
-    const change = this.requirePreparedChange(toolCallId);
-    const title = `${path.basename(change.absolutePath)}: Original ↔ Tomcat`;
-    const originalUri = this.createPreparedDiffUri(toolCallId, path.basename(change.absolutePath), "original");
-    const proposedUri = this.createPreparedDiffUri(toolCallId, path.basename(change.absolutePath), "proposed");
-    await this.ensureSideBySideDiffRendering();
-
-    await vscode.commands.executeCommand(
-      "vscode.diff",
-      originalUri,
-      proposedUri,
-      title,
-      { preview: false },
-    );
-  }
-
-  async openReconstructedDiff(
-    toolCallId: string,
-    displayPath: string,
-    before: string,
-    after: string,
+    presentation: DiffPresentation,
   ): Promise<void> {
-    const absolutePath = this.resolveWorkspacePath(displayPath);
-    this.preparedChanges.set(toolCallId, {
-      absolutePath,
-      displayPath,
-      existedBefore: before.length > 0,
-      hasStructuredDiff: true,
-      originalContent: before,
-      proposedContent: after,
-      toolCallId,
+    if (presentation.fragments.length === 0) {
+      throw new Error(t("ide.noChanges"));
+    }
+
+    const fileName = path.basename(displayPath);
+    const pairs = presentation.fragments.map((fragment, index) => {
+      const label = presentation.kind === "full"
+        ? fileName
+        : fragmentFileName(fileName, fragment, index, presentation.fragments.length);
+      const createUri = (side: DiffSide, content: string): vscode.Uri => {
+        const uri = vscode.Uri.from({
+          scheme: DIFF_SCHEME,
+          path: `/${label}`,
+          query: new URLSearchParams({
+            sessionId,
+            toolCallId,
+            fragment: String(index),
+            side,
+          }).toString(),
+        });
+        this.previewContents.set(uri.toString(), content);
+        return uri;
+      };
+      const original = createUri("original", fragment.before);
+      const proposed = createUri("proposed", fragment.after);
+      return { original, proposed };
     });
-    await this.openPreparedDiff(toolCallId);
-  }
 
-  async applyPreparedEdit(toolCallId: string): Promise<boolean> {
-    const change = this.requirePreparedChange(toolCallId);
-    const targetUri = vscode.Uri.file(change.absolutePath);
-    const edit = new vscode.WorkspaceEdit();
-
-    if (await this.fileExists(targetUri)) {
-      const document = await vscode.workspace.openTextDocument(targetUri);
-      const endLine = Math.max(document.lineCount - 1, 0);
-      const endCharacter = document.lineAt(endLine).text.length;
-      edit.replace(targetUri, new vscode.Range(0, 0, endLine, endCharacter), change.proposedContent);
+    await this.ensureSideBySideDiffRendering();
+    if (presentation.kind === "full") {
+      const { original, proposed } = pairs[0];
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        original,
+        proposed,
+        t("ide.originalTitle", { file: fileName }),
+        { preview: false },
+      );
     } else {
-      edit.createFile(targetUri, { ignoreIfExists: true, overwrite: true });
-      edit.insert(targetUri, new vscode.Position(0, 0), change.proposedContent);
+      await vscode.commands.executeCommand(
+        "vscode.changes",
+        t(pluralKey(getLocale(), "ide.fragments.other", pairs.length), { file: fileName, count: pairs.length }),
+        pairs.map(({ original, proposed }): [vscode.Uri, vscode.Uri, vscode.Uri] => [
+          proposed, original, proposed,
+        ]),
+      );
     }
-
-    const applied = await vscode.workspace.applyEdit(edit);
-    if (!applied) {
-      return false;
-    }
-
-    const document = await vscode.workspace.openTextDocument(targetUri);
-    await document.save();
-    await vscode.window.showTextDocument(document, { preview: false });
-    return true;
   }
 
-  async showFile(displayPath: string): Promise<void> {
+  async openSessionFileDiff(sessionId: string, sourceTurnId: string, filePath: string, before: string): Promise<void> {
+    const fileName = path.basename(filePath);
+    const original = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${fileName}`, query: new URLSearchParams({ sessionId, sourceTurnId, path: filePath, side: "baseline" }).toString() });
+    this.previewContents.set(original.toString(), before);
+    let modified = vscode.Uri.file(filePath);
+    try {
+      const stat = await vscode.workspace.fs.stat(modified);
+      if (stat.type & vscode.FileType.Directory) throw new Error(t("ide.directory"));
+    } catch (error) {
+      if (!(error instanceof vscode.FileSystemError) || error.code !== "FileNotFound") throw error;
+      modified = vscode.Uri.from({ scheme: DIFF_SCHEME, path: `/${fileName}`, query: new URLSearchParams({ sessionId, sourceTurnId, path: filePath, side: "missing" }).toString() });
+      this.previewContents.set(modified.toString(), "");
+    }
+    await this.ensureSideBySideDiffRendering();
+    await vscode.commands.executeCommand("vscode.diff", original, modified, t("ide.baselineTitle", { file: fileName }), { preview: false });
+  }
+
+  async showFile(displayPath: string, line?: number): Promise<void> {
     const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
-    if (!(await this.fileExists(uri))) {
-      throw new Error(`File not found: ${uri.fsPath}`);
+    let stat: vscode.FileStat;
+    try {
+      stat = await vscode.workspace.fs.stat(uri);
+    } catch (error) {
+      if (!(error instanceof vscode.FileSystemError)) {
+        throw error;
+      }
+      throw new Error(t("ide.fileMissing", { path: uri.fsPath }));
+    }
+    if (stat.type & vscode.FileType.Directory) {
+      await vscode.commands.executeCommand("revealInExplorer", uri);
+      return;
     }
     const document = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(document, { preview: false });
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    if (typeof line === "number" && Number.isFinite(line) && line > 0) {
+      const targetLine = Math.min(Math.max(0, Math.trunc(line) - 1), Math.max(document.lineCount - 1, 0));
+      const targetCharacter = document.lineAt(targetLine).text.length;
+      const range = new vscode.Range(targetLine, 0, targetLine, targetCharacter);
+      const selection = new vscode.Selection(
+        new vscode.Position(targetLine, 0),
+        new vscode.Position(targetLine, targetCharacter),
+      );
+      if ("selection" in editor) {
+        editor.selection = selection;
+      }
+      if (vscode.window.activeTextEditor) {
+        vscode.window.activeTextEditor.selection = selection;
+      }
+      if ("revealRange" in editor && typeof editor.revealRange === "function") {
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      } else if (vscode.window.activeTextEditor?.revealRange) {
+        vscode.window.activeTextEditor.revealRange(
+          range,
+          vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+        );
+      }
+    }
   }
 
   /**
@@ -173,7 +161,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
   async openWith(displayPath: string, viewType: string): Promise<void> {
     const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
     if (!(await this.fileExists(uri))) {
-      throw new Error(`File not found: ${uri.fsPath}`);
+      throw new Error(t("ide.fileMissing", { path: uri.fsPath }));
     }
     try {
       await vscode.commands.executeCommand("vscode.openWith", uri, viewType);
@@ -184,34 +172,11 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {
-    const side = new URLSearchParams(uri.query).get("side") as DiffSide | null;
-    const changeKey = preparedDiffKeyFromPath(uri.path);
-    const change = changeKey ? this.preparedChanges.get(changeKey) : undefined;
-    if (!change || !side) {
-      return "";
+    const content = this.previewContents.get(uri.toString());
+    if (content === undefined) {
+      throw new Error(t("ide.diffExpired"));
     }
-
-    return side === "original" ? change.originalContent : change.proposedContent;
-  }
-
-  private requirePreparedChange(toolCallId: string): PreparedFileChange {
-    const change = this.preparedChanges.get(toolCallId);
-    if (!change) {
-      throw new Error(`No prepared file change found for ${toolCallId}`);
-    }
-    return change;
-  }
-
-  private createPreparedDiffUri(
-    toolCallId: string,
-    fileName: string,
-    side: DiffSide,
-  ): vscode.Uri {
-    return vscode.Uri.from({
-      scheme: DIFF_SCHEME,
-      path: createPreparedDiffPath(toolCallId, fileName),
-      query: toSearchParams(side),
-    });
+    return content;
   }
 
   private async fileExists(uri: vscode.Uri): Promise<boolean> {
@@ -221,18 +186,6 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     } catch (error) {
       if (error instanceof vscode.FileSystemError) {
         return false;
-      }
-      throw error;
-    }
-  }
-
-  private async readFileIfExists(uri: vscode.Uri): Promise<string | undefined> {
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      return new TextDecoder().decode(bytes);
-    } catch (error) {
-      if (error instanceof vscode.FileSystemError) {
-        return undefined;
       }
       throw error;
     }

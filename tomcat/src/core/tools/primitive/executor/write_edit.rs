@@ -31,7 +31,7 @@ use crate::core::tools::pipeline::edit_normalize::{
 use crate::core::tools::primitive::diff::{build_line_diff, build_simple_diff, line_diff_stat};
 use crate::core::tools::primitive::{
     EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation,
-    WriteFileResult, EDIT_REPLACE_ALL_MARKER,
+    WriteFileResult, EDIT_INSERT_AFTER_MARKER, EDIT_INSERT_BEFORE_MARKER, EDIT_REPLACE_ALL_MARKER,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
@@ -46,11 +46,7 @@ fn rollback_failure_error(
     write_error: AppError,
     rollback_error: std::io::Error,
 ) -> AppError {
-    AppError::Primitive(format!(
-        "{operation} commit failed for {} and rollback from {} also failed: write_error={write_error}; rollback_error={rollback_error}",
-        path.display(),
-        backup_path.display(),
-    ))
+    AppError::Primitive(format!("{operation} commit failed for {} and rollback from {} also failed: write_error={write_error}; rollback_error={rollback_error}", path.display(), backup_path.display()))
 }
 
 fn commit_with_backup<F>(
@@ -127,9 +123,24 @@ pub(super) async fn write_file_impl(
     if let Some(err) = url_like_fs_miss(path) {
         return Err(err);
     }
-    let (path_buf, scope, grant) = executor
-        .gate_check_path(PrimitiveOperation::Write, path, plugin_id)
-        .await?;
+    let Some(checked_path) = super::helpers::until_cancelled(
+        cancel,
+        executor.gate_check_path(PrimitiveOperation::Write, path, plugin_id),
+    )
+    .await
+    else {
+        return Ok(WriteFileResult {
+            path: path.to_string(),
+            written: false,
+            bytes_written: 0,
+            diff_hint: None,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        });
+    };
+    let (path_buf, scope, grant) = checked_path?;
     let path_str = path_buf.to_string_lossy().to_string();
 
     // T2-P0-016 PR-C 二道防线：tool_exec 已先做 `exists && !overwrite` 早退，
@@ -138,8 +149,7 @@ pub(super) async fn write_file_impl(
     let pre_existed = path_buf.exists();
     if !overwrite && pre_existed {
         return Err(AppError::Primitive(format!(
-            "Exists: 路径 `{}` 已存在；如需替换请显式 `overwrite=true`",
-            path
+            "Exists: Path `{path}` already exists; explicitly set `overwrite=true` to replace it"
         )));
     }
 
@@ -148,7 +158,9 @@ pub(super) async fn write_file_impl(
     // 只是回执里不带 diff 摘要。
     let original: Option<String> = if overwrite && pre_existed {
         let path_for_read = path_buf.clone();
-        tokio::task::spawn_blocking(move || crate::infra::platform::read_file_utf8(&path_for_read).ok())
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::read_file_utf8(&path_for_read).ok()
+        })
         .await
         .map_err(|e| AppError::Primitive(format!("write pre-read join error: {e}")))?
     } else {
@@ -169,9 +181,24 @@ pub(super) async fn write_file_impl(
     let original_for_secrets = original.as_deref().unwrap_or("");
     if let Some(hits) = scan_new_content_for_secrets(original_for_secrets, final_text) {
         let preview = crate::core::security::secrets::format_preview(&hits);
-        let approved = executor
-            .require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id)
-            .await?;
+        let Some(confirmation) = super::helpers::until_cancelled(
+            cancel,
+            executor.require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id),
+        )
+        .await
+        else {
+            return Ok(WriteFileResult {
+                path: path_str,
+                written: false,
+                bytes_written: 0,
+                diff_hint: None,
+                added: None,
+                removed: None,
+                diff: None,
+                diff_truncated: false,
+            });
+        };
+        let approved = confirmation?;
         if !approved {
             executor.audit.record_primitive(PrimitiveAuditEntry {
                 operation: AuditPrimitiveOp::Write,
@@ -184,10 +211,7 @@ pub(super) async fn write_file_impl(
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
-            return Err(AppError::Primitive(format!(
-                "SecretsRejected: write 内容命中 {} 条潜在敏感信息且用户拒绝写入；磁盘未被修改",
-                hits.len()
-            )));
+            return Err(AppError::Primitive(format!("SecretsRejected: write content matched potential secrets ({}); the user refused the write, and disk contents were not modified", hits.len())));
         }
     }
 
@@ -232,6 +256,7 @@ pub(super) async fn write_file_impl(
             added: None,
             removed: None,
             diff: None,
+            diff_truncated: false,
         });
     }
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -261,7 +286,8 @@ pub(super) async fn write_file_impl(
         diff_hint,
         added: Some(added),
         removed: Some(removed),
-        diff,
+        diff: diff.lines,
+        diff_truncated: diff.truncated,
     })
 }
 
@@ -275,9 +301,22 @@ pub(super) async fn edit_file_impl(
     if let Some(err) = url_like_fs_miss(path) {
         return Err(err);
     }
-    let (path_buf, scope, grant) = executor
-        .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
-        .await?;
+    let Some(checked_path) = super::helpers::until_cancelled(
+        cancel,
+        executor.gate_check_path(PrimitiveOperation::Edit, path, plugin_id),
+    )
+    .await
+    else {
+        return Ok(EditFileResult {
+            path: path.to_string(),
+            applied: false,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        });
+    };
+    let (path_buf, scope, grant) = checked_path?;
     let path_str = path_buf.to_string_lossy().to_string();
 
     // T2-P0-017 PR-D：行号路径（dispatcher / extension）保留，LLM 主路径走 `apply_string_edits`。
@@ -298,7 +337,7 @@ pub(super) async fn edit_file_impl(
         }
     })
     .await
-    .map_err(|e| AppError::Primitive(format!("edit apply join error: {e}")))?;
+    .map_err(|e| AppError::Primitive(format!("Edit application task failed: {e}")))?;
 
     let (original, new_content) = match result {
         Ok(v) => v,
@@ -323,9 +362,22 @@ pub(super) async fn edit_file_impl(
     // 用户拒 → 返回 SecretsRejected，磁盘字节级未变；用户允 → 继续写盘。
     if let Some(hits) = scan_new_content_for_secrets(&original, &new_content) {
         let preview = crate::core::security::secrets::format_preview(&hits);
-        let approved = executor
-            .require_user_confirmation(PrimitiveOperation::Edit, &preview, plugin_id)
-            .await?;
+        let Some(confirmation) = super::helpers::until_cancelled(
+            cancel,
+            executor.require_user_confirmation(PrimitiveOperation::Edit, &preview, plugin_id),
+        )
+        .await
+        else {
+            return Ok(EditFileResult {
+                path: path_str,
+                applied: false,
+                added: None,
+                removed: None,
+                diff: None,
+                diff_truncated: false,
+            });
+        };
+        let approved = confirmation?;
         if !approved {
             executor.audit.record_primitive(PrimitiveAuditEntry {
                 operation: AuditPrimitiveOp::Edit,
@@ -338,10 +390,7 @@ pub(super) async fn edit_file_impl(
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
-            return Err(AppError::Primitive(format!(
-                "SecretsRejected: edit 内容命中 {} 条潜在敏感信息且用户拒绝写入；磁盘未被修改",
-                hits.len()
-            )));
+            return Err(AppError::Primitive(format!("SecretsRejected: edit content matched potential secrets ({}); the user refused the write, and disk contents were not modified", hits.len())));
         }
     }
 
@@ -358,7 +407,7 @@ pub(super) async fn edit_file_impl(
         )
     })
     .await
-    .map_err(|e| AppError::Primitive(format!("edit commit join error: {e}")))??;
+    .map_err(|e| AppError::Primitive(format!("Edit commit task failed: {e}")))??;
     if !applied {
         executor.audit.record_primitive(PrimitiveAuditEntry {
             operation: AuditPrimitiveOp::Edit,
@@ -377,6 +426,7 @@ pub(super) async fn edit_file_impl(
             added: None,
             removed: None,
             diff: None,
+            diff_truncated: false,
         });
     }
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -397,7 +447,8 @@ pub(super) async fn edit_file_impl(
         applied: true,
         added: Some(added),
         removed: Some(removed),
-        diff,
+        diff: diff.lines,
+        diff_truncated: diff.truncated,
     })
 }
 
@@ -406,6 +457,14 @@ struct EditSegment<'a> {
     old: &'a str,
     new: &'a str,
     replace_all: bool,
+    mode: EditSegmentMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditSegmentMode {
+    Replace,
+    InsertBefore,
+    InsertAfter,
 }
 
 #[derive(Clone, Debug)]
@@ -420,20 +479,33 @@ fn parse_segment(op: &EditOperation) -> Result<EditSegment<'_>, AppError> {
     let raw_old = op
         .old_content
         .as_deref()
-        .ok_or_else(|| AppError::Primitive("edit: old_content 缺失".to_string()))?;
+        .ok_or_else(|| AppError::Primitive("edit: old_content is missing".to_string()))?;
     let (replace_all, old) = match raw_old.strip_prefix(EDIT_REPLACE_ALL_MARKER) {
         Some(rest) => (true, rest),
         None => (false, raw_old),
     };
+    let (mode, old) = match old.strip_prefix(EDIT_INSERT_BEFORE_MARKER) {
+        Some(anchor) => (EditSegmentMode::InsertBefore, anchor),
+        None => match old.strip_prefix(EDIT_INSERT_AFTER_MARKER) {
+            Some(anchor) => (EditSegmentMode::InsertAfter, anchor),
+            None => (EditSegmentMode::Replace, old),
+        },
+    };
+    if replace_all && mode != EditSegmentMode::Replace {
+        return Err(AppError::Primitive(
+            "edit: replace_all can only be used with mode=replace".to_string(),
+        ));
+    }
     if old.is_empty() {
         return Err(AppError::Primitive(
-            "edit: old_content 不能为空字符串".to_string(),
+            "edit: old_content cannot be empty".to_string(),
         ));
     }
     Ok(EditSegment {
         old,
         new: op.new_content.as_str(),
         replace_all,
+        mode,
     })
 }
 
@@ -459,16 +531,10 @@ fn apply_string_edits(
 ) -> Result<(String, String), AppError> {
     let disk_text = read_file_utf8(path_buf).map_err(|e| match e {
         AppError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData => AppError::Primitive(
-            format!(
-                "BinaryFile: `{}` 不是有效的 UTF-8 文本，edit 仅支持文本文件；请改用 read 查看二进制提示或换用合适工具",
-                user_path
-            ),
+            format!("BinaryFile: `{user_path}` is not valid UTF-8 text; edit only supports text files. Use read for a binary hint or an appropriate tool"),
         ),
         AppError::Primitive(msg) if msg.contains("UTF-8") || msg.contains("invalid utf-8") => {
-            AppError::Primitive(format!(
-                "BinaryFile: `{}` 不是 UTF-8 文本，edit 拒绝执行 ({})",
-                user_path, msg
-            ))
+            AppError::Primitive(format!("BinaryFile: `{user_path}` is not UTF-8 text; edit refused ({msg})"))
         }
         other => other,
     })?;
@@ -485,10 +551,7 @@ fn apply_string_edits(
         let seg = parse_segment(op)?;
         let n_old = crate::core::tools::pipeline::edit_normalize::normalize_for_match(seg.old);
         if n_old.is_empty() {
-            return Err(AppError::Primitive(format!(
-                "edit: edits[{}] 的 old_content 归一化后为空（仅含 BOM/零宽字符），无法匹配",
-                idx
-            )));
+            return Err(AppError::Primitive(format!("edit: edits[{idx}] old_content is empty after normalization (only BOM/zero-width characters); cannot match")));
         }
         let lf_new: String = normalize_to_lf(seg.new).into_owned();
 
@@ -501,27 +564,27 @@ fn apply_string_edits(
             if let Some(diag) =
                 diagnose_line_prefix_notfound(&n_old, &n_text, &n_to_w_map, &working_lf)
             {
-                return Err(AppError::Primitive(format!(
-                    "NotFound (line_prefix_suspected): edits[{}] 的 old_content 在文件 `{}` 中未找到；检测到 old_content 像是把 read 的{}一起粘贴进来了，这些前缀只是展示噪音，不属于文件内容。请去掉前缀后重试；剥离前缀后大约在第 {} 行能对上。若你刚重读过文件，请确认 old_content 确实来自当前读取范围，而且在文件里是一段连续原文。old_content 摘要(escape_debug)={}",
-                    idx,
-                    user_path,
-                    diag.style.label(),
-                    diag.hit_line,
-                    old_summary
-                )));
+                return Err(AppError::Primitive(format!("NotFound (line_prefix_suspected): edits[{idx}] old_content was not found in `{user_path}`; it appears to include read's {}, which is display-only, not file content. Remove those prefixes and retry; the stripped text matches near line {}. If you just reread the file, use one continuous excerpt from the current read window. old_content summary (escape_debug)={old_summary}", diag.style.label(), diag.hit_line)));
             }
-            return Err(AppError::Primitive(format!(
-                "NotFound: edits[{}] 的 old_content 在文件 `{}` 中未找到 (已尝试 BOM/换行/引号/不可见字符归一化; 请检查上下文是否唯一或扩大上下文)。如果你刚重读过文件，请确认 old_content 确实来自当前读取范围，且在文件里是一段连续原文；否则这通常是 Stale 或把多段内容拼在一起了。old_content 摘要(escape_debug)={}",
-                idx,
-                user_path,
-                old_summary
-            )));
+            return Err(AppError::Primitive(format!("NotFound: edits[{idx}] old_content was not found in `{user_path}` after BOM/newline/quote/invisible-character normalization. Expand context if needed. If you just reread the file, use one continuous excerpt from the current read window; otherwise this is usually Stale or text stitched from separate ranges. old_content summary (escape_debug)={old_summary}")));
         }
         if !seg.replace_all && n_hits.len() > 1 {
-            return Err(AppError::Primitive(format!(
-                "Ambiguous: edits[{}] 的 old_content 在文件 `{}` 中出现 {} 次; 请扩大上下文使其唯一, 或设置 replace_all: true",
-                idx, user_path, n_hits.len()
-            )));
+            let hit_lines = n_hits
+                .iter()
+                .map(|start| {
+                    // `n_text` only normalizes matching-relevant characters and preserves
+                    // newlines, so its byte offset gives the user the same line number they
+                    // see in a fresh `read`.
+                    n_text.as_bytes()[..*start]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count()
+                        + 1
+                })
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(AppError::Primitive(format!("Ambiguous: edits[{idx}] old_content occurs {} times in `{user_path}` (matching lines: {hit_lines}); expand context to make it unique. To replace every match, explicitly set replace_all: true", n_hits.len())));
         }
         if !seg.replace_all {
             n_hits.truncate(1);
@@ -529,15 +592,22 @@ fn apply_string_edits(
         for n_start in n_hits {
             let n_end = n_start + n_old.len();
             let w_start = *n_to_w_map.get(n_start).ok_or_else(|| {
-                AppError::Primitive("edit: normalize map index out of range (start)".to_string())
+                AppError::Primitive(
+                    "edit: normalization map start index is out of range".to_string(),
+                )
             })?;
             let w_end = *n_to_w_map.get(n_end).ok_or_else(|| {
-                AppError::Primitive("edit: normalize map index out of range (end)".to_string())
+                AppError::Primitive("edit: normalization map end index is out of range".to_string())
             })?;
+            let (start, end) = match seg.mode {
+                EditSegmentMode::Replace => (w_start, w_end),
+                EditSegmentMode::InsertBefore => (w_start, w_start),
+                EditSegmentMode::InsertAfter => (w_end, w_end),
+            };
             spans.push(PlannedEditSpan {
                 edit_idx: idx,
-                start: w_start,
-                end: w_end,
+                start,
+                end,
                 replacement: lf_new.clone(),
             });
         }
@@ -552,7 +622,7 @@ fn apply_string_edits(
         let e1 = left.end;
         let s2 = right.start;
         let e2 = right.end;
-        if s2 < e1 {
+        if s2 < e1 || (s1 == e1 && s1 == s2 && s2 == e2) {
             let left_lines = format_line_range(&working_lf, s1, e1);
             let right_lines = format_line_range(&working_lf, s2, e2);
             let nested_pair = if e2 <= e1 {
@@ -563,17 +633,12 @@ fn apply_string_edits(
                 None
             };
             let overlap_hint = if let Some((outer_idx, inner_idx)) = nested_pair {
-                format!(
-                    "检测到嵌套包含：edits[{}] 完全覆盖了 edits[{}]；这通常说明你同时提交了“大段替换”和它内部的“子段替换”，请删除其中一段或先合并成一段。",
-                    outer_idx, inner_idx
-                )
+                format!("Nested spans: edits[{outer_idx}] completely covers edits[{inner_idx}]. This usually means both a larger replacement and its inner replacement were submitted; remove one or merge them first.")
             } else {
-                "两段修改覆盖到了同一片原文，请合并为单段或拆成两次 edit 调用。".to_string()
+                "Both edits cover the same source text. Merge them or use two separate edit calls."
+                    .to_string()
             };
-            return Err(AppError::Primitive(format!(
-                "Overlap: 文件 `{}` 中 edits[{}] ({}) 与 edits[{}] ({}) 发生交叠。{}",
-                user_path, left.edit_idx, left_lines, right.edit_idx, right_lines, overlap_hint
-            )));
+            return Err(AppError::Primitive(format!("Overlap: In `{user_path}`, edits[{}] ({left_lines}) overlaps edits[{}] ({right_lines}). {overlap_hint}", left.edit_idx, right.edit_idx)));
         }
     }
 
@@ -605,8 +670,8 @@ enum ReadDisplayPrefixStyle {
 impl ReadDisplayPrefixStyle {
     fn label(self) -> &'static str {
         match self {
-            Self::CatN => " cat -n 行号前缀（`  N\\t...`）",
-            Self::Hashline => " hashline 前缀（`N#XX:...`）",
+            Self::CatN => " cat -n line prefixes (`  N\\t...`)",
+            Self::Hashline => " hashline prefixes (`N#XX:...`)",
         }
     }
 }
@@ -716,9 +781,9 @@ fn format_line_range(text: &str, start: usize, end: usize) -> String {
     let end_probe = end.saturating_sub(1).min(text.len().saturating_sub(1));
     let end_line = line_number_for_byte_offset(text, end_probe);
     if start_line == end_line {
-        format!("第 {} 行", start_line)
+        format!("line {start_line}")
     } else {
-        format!("第 {}-{} 行", start_line, end_line)
+        format!("lines {start_line}-{end_line}")
     }
 }
 
@@ -804,8 +869,7 @@ fn apply_line_oriented_edits(
                     let end = edit.end_line.unwrap_or(start_line_val) as usize;
                     if start < 1 || end > lines.len() || start > end {
                         return Err(AppError::Primitive(format!(
-                            "Replace 行号无效: {}..{}",
-                            start, end
+                            "Replace line range is invalid: {start}..{end}"
                         )));
                     }
                     let idx = start - 1;
@@ -828,7 +892,9 @@ fn apply_line_oriented_edits(
             EditOperationType::Insert => {
                 let at = edit.start_line.unwrap_or(0) as usize;
                 if at > lines.len() {
-                    return Err(AppError::Primitive(format!("Insert 行号超出: {}", at)));
+                    return Err(AppError::Primitive(format!(
+                        "Insert line is out of range: {at}"
+                    )));
                 }
                 lines.insert(at, edit.new_content.clone());
             }
@@ -837,8 +903,7 @@ fn apply_line_oriented_edits(
                 let end = edit.end_line.unwrap_or(start as u64) as usize;
                 if start < 1 || end > lines.len() || start > end {
                     return Err(AppError::Primitive(format!(
-                        "Delete 行号无效: {}..{}",
-                        start, end
+                        "Delete line range is invalid: {start}..{end}"
                     )));
                 }
                 for _ in 0..=(end - start) {

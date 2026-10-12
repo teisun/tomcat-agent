@@ -5,7 +5,7 @@
 //! ## 多模态 parts
 //!
 //! [`ChatMessageContentPart`] 是 `#[serde(tag = "type", rename_all = "snake_case")]`
-//! 三态枚举：`InputText` / `InputImage` / `InputFile`，对齐 OpenAI Responses 的
+//! 四态枚举：`InputText` / `InputImage` / `InputImageRef` / `InputFile`，对齐 OpenAI Responses 的
 //! `input_text` / `input_image` / `input_file` content part 形状。
 //!
 //! - **A 通道（inline base64）**：调用方传 `(mime_type, &Path)` 让 helper
@@ -28,8 +28,11 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::thinking_policy::ThinkingLevel;
-use crate::core::llm::openai_files::{FilePurpose, OpenAiFilesClient};
+use crate::core::llm::files_api::FilesApiAdapter;
+use crate::core::llm::openai_files::FilePurpose;
 use crate::infra::error::AppError;
+use crate::infra::events::ToolDisplay;
+use crate::infra::i18n::tr;
 
 /// inline 图片字节上限（解码后），与 [`pi_agent_rust/src/tools.rs`] 对齐。
 pub const IMAGE_MAX_BYTES: usize = 4_718_592;
@@ -72,6 +75,8 @@ pub enum ChatMessageContent {
 pub enum ContextRefKind {
     Selection,
     File,
+    Command,
+    Skill,
 }
 
 /// 结构化上下文引用，既用于 transcript 落盘，也用于发送前投影成 LLM 可读文本。
@@ -93,6 +98,8 @@ pub enum ContextRefKind {
 #[serde(rename_all = "snake_case")]
 pub struct ContextReference {
     pub ref_kind: ContextRefKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
     pub path: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +120,7 @@ impl ContextReference {
     ) -> Self {
         Self {
             ref_kind: ContextRefKind::Selection,
+            resource_id: None,
             path: path.into(),
             label: label.into(),
             line_start,
@@ -124,6 +132,7 @@ impl ContextReference {
     pub fn file(path: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             ref_kind: ContextRefKind::File,
+            resource_id: None,
             path: path.into(),
             label: label.into(),
             line_start: None,
@@ -154,9 +163,23 @@ impl ContextReference {
                 )
             }
             ContextRefKind::File => format!("[file reference] {}", self.path),
+            ContextRefKind::Command => format!(
+                "<command name=\"{}\" source=\"{}\">\n{}\n</command>",
+                crate::core::skill::load::xml_escape(&self.label),
+                crate::core::skill::load::xml_escape(&self.path),
+                self.text.as_deref().unwrap_or_default()
+            ),
+            ContextRefKind::Skill => format!(
+                "<skill name=\"{}\" location=\"SKILL.md\">\n{}\n</skill>",
+                crate::core::skill::load::xml_escape(self.label.trim_start_matches('/')),
+                self.text.as_deref().unwrap_or_default()
+            ),
         }
     }
 }
+
+/// Webview SVG rasterization produces PNG; shared by first send and hydration.
+pub(crate) const IMAGE_PROVIDER_RENDITION_MIME: &str = "image/png";
 
 /// 单条 content part：文本 / 引用 / 图片 / 文件 四态枚举，wire 由 provider 适配层翻译。
 ///
@@ -169,6 +192,7 @@ impl ContextReference {
 /// {"type": "input_text",  "text": "..."}
 /// {"type": "input_reference", "ref_kind": "file", "path": "src/app.ts", "label": "app.ts"}
 /// {"type": "input_image", "mime_type": "image/png", "image_b64": "...", "detail": "high"}
+/// {"type": "input_image_ref", "blob_sha": "<sha256>", "mime_type": "image/png"}
 /// {"type": "input_image", "file_id": "file-abc"}
 /// {"type": "input_file",  "filename": "x.pdf", "mime_type": "application/pdf", "file_b64": "..."}
 /// {"type": "input_file",  "file_id": "file-abc"}
@@ -190,6 +214,18 @@ pub enum ChatMessageContentPart {
         /// vision detail：`auto` / `low` / `high`，可选，默认 auto。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+    },
+    /// Durable transcript representation of a sent image. Before a message reaches a
+    /// provider this is resolved from `AttachmentBlobStore` into `InputImage`.
+    InputImageRef {
+        blob_sha: String,
+        mime_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_sha: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
     },
     /// 文件（PDF / markdown 等）：inline base64 或已知 file_id（二选一）。
     InputFile {
@@ -281,31 +317,44 @@ impl ChatMessageContentPart {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
-            return Err(AppError::Llm(format!(
-                "image_b64: 不支持的 mime_type {:?}, 仅允许 {:?}",
-                mime, ALLOWED_IMAGE_MIMES
+            return Err(AppError::Llm(tr(
+                "media.unsupportedMime",
+                &[
+                    ("operation", "image_b64"),
+                    ("mime", &format!("{mime:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         let path_ref = path.as_ref();
         let meta = std::fs::metadata(path_ref).map_err(|e| {
-            AppError::Llm(format!(
-                "image_b64: 无法 stat 路径 {}: {}",
-                path_ref.display(),
-                e
+            AppError::Llm(tr(
+                "media.statFailed",
+                &[
+                    ("operation", "image_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         if meta.len() as usize > IMAGE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "image_b64: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
-                meta.len(),
-                IMAGE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.imageTooLarge",
+                &[
+                    ("operation", "image_b64"),
+                    ("bytes", &meta.len().to_string()),
+                    ("limit", &IMAGE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         let bytes = std::fs::read(path_ref).map_err(|e| {
-            AppError::Llm(format!(
-                "image_b64: 读取 {} 失败: {}",
-                path_ref.display(),
-                e
+            AppError::Llm(tr(
+                "media.readFailed",
+                &[
+                    ("operation", "image_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -326,25 +375,76 @@ impl ChatMessageContentPart {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
-            return Err(AppError::Llm(format!(
-                "image_base64_data: 不支持的 mime_type {:?}, 仅允许 {:?}",
-                mime, ALLOWED_IMAGE_MIMES
+            return Err(AppError::Llm(tr(
+                "media.unsupportedMime",
+                &[
+                    ("operation", "image_base64_data"),
+                    ("mime", &format!("{mime:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         let data = data_base64.into();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(data.as_bytes())
-            .map_err(|e| AppError::Llm(format!("image_base64_data: base64 解码失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "media.decodeFailed",
+                    &[
+                        ("operation", "image_base64_data"),
+                        ("detail", &e.to_string()),
+                    ],
+                ))
+            })?;
         if decoded.len() > IMAGE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "image_base64_data: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
-                decoded.len(),
-                IMAGE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.imageTooLarge",
+                &[
+                    ("operation", "image_base64_data"),
+                    ("bytes", &decoded.len().to_string()),
+                    ("limit", &IMAGE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         Ok(Self::InputImage {
             source: ImageSource::Inline(ImageInlineSource {
                 mime_type: mime,
+                data,
+            }),
+            detail: None,
+        })
+    }
+
+    /// Build an archival SVG image part after the caller has applied the stricter
+    /// SVG safety validation. This representation is for transcript persistence;
+    /// providers receive a rasterized PNG copy instead.
+    pub(crate) fn validated_svg_base64_for_transcript(
+        data_base64: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let data = data_base64.into();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|error| {
+                AppError::Llm(tr(
+                    "media.decodeFailed",
+                    &[
+                        ("operation", "validated_svg_base64_for_transcript"),
+                        ("detail", &error.to_string()),
+                    ],
+                ))
+            })?;
+        if decoded.is_empty() || decoded.len() > IMAGE_MAX_BYTES {
+            return Err(AppError::Llm(tr(
+                "media.svgSize",
+                &[
+                    ("bytes", &decoded.len().to_string()),
+                    ("limit", &IMAGE_MAX_BYTES.to_string()),
+                ],
+            )));
+        }
+        Ok(Self::InputImage {
+            source: ImageSource::Inline(ImageInlineSource {
+                mime_type: "image/svg+xml".to_string(),
                 data,
             }),
             detail: None,
@@ -362,21 +462,34 @@ impl ChatMessageContentPart {
     ) -> Result<Self, AppError> {
         let path_ref = path.as_ref();
         let meta = std::fs::metadata(path_ref).map_err(|e| {
-            AppError::Llm(format!(
-                "file_b64: 无法 stat 路径 {}: {}",
-                path_ref.display(),
-                e
+            AppError::Llm(tr(
+                "media.statFailed",
+                &[
+                    ("operation", "file_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         if meta.len() as usize > FILE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "file_b64: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
-                meta.len(),
-                FILE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.fileTooLarge",
+                &[
+                    ("operation", "file_b64"),
+                    ("bytes", &meta.len().to_string()),
+                    ("limit", &FILE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         let bytes = std::fs::read(path_ref).map_err(|e| {
-            AppError::Llm(format!("file_b64: 读取 {} 失败: {}", path_ref.display(), e))
+            AppError::Llm(tr(
+                "media.readFailed",
+                &[
+                    ("operation", "file_b64"),
+                    ("path", &path_ref.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
+            ))
         })?;
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Self::InputFile {
@@ -397,12 +510,23 @@ impl ChatMessageContentPart {
         let data = data_base64.into();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(data.as_bytes())
-            .map_err(|e| AppError::Llm(format!("file_base64_data: base64 解码失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Llm(tr(
+                    "media.decodeFailed",
+                    &[
+                        ("operation", "file_base64_data"),
+                        ("detail", &e.to_string()),
+                    ],
+                ))
+            })?;
         if decoded.len() > FILE_MAX_BYTES {
-            return Err(AppError::Llm(format!(
-                "file_base64_data: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
-                decoded.len(),
-                FILE_MAX_BYTES
+            return Err(AppError::Llm(tr(
+                "media.fileTooLarge",
+                &[
+                    ("operation", "file_base64_data"),
+                    ("bytes", &decoded.len().to_string()),
+                    ("limit", &FILE_MAX_BYTES.to_string()),
+                ],
             )));
         }
         Ok(Self::InputFile {
@@ -418,11 +542,49 @@ impl ChatMessageContentPart {
     pub fn image_file_id(file_id: impl Into<String>) -> Result<Self, AppError> {
         let id = file_id.into();
         if id.trim().is_empty() {
-            return Err(AppError::Llm("image_file_id: file_id 不能为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.fileIdEmpty",
+                &[("operation", "image_file_id")],
+            )));
         }
         Ok(Self::InputImage {
             source: ImageSource::Uploaded(ImageUploadedSource { file_id: id }),
             detail: None,
+        })
+    }
+
+    /// Build the byte-free transcript form of an image that already lives in the
+    /// attachment content store. The SHA is validated again when it is read.
+    pub fn image_blob_ref(
+        blob_sha: impl Into<String>,
+        mime_type: impl Into<String>,
+        detail: Option<String>,
+    ) -> Result<Self, AppError> {
+        let mime_type = mime_type.into();
+        let mime_lower = mime_type.to_ascii_lowercase();
+        if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) && mime_lower != "image/svg+xml" {
+            return Err(AppError::Llm(tr(
+                "media.blobMime",
+                &[
+                    ("mime", &format!("{mime_type:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
+            )));
+        }
+        let blob_sha = blob_sha.into();
+        if blob_sha.len() != 64
+            || !blob_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AppError::Llm(tr("media.blobSha", &[])));
+        }
+        Ok(Self::InputImageRef {
+            blob_sha,
+            mime_type,
+            detail,
+            provider_sha: None,
+            filename: None,
         })
     }
 
@@ -433,7 +595,10 @@ impl ChatMessageContentPart {
     ) -> Result<Self, AppError> {
         let id = file_id.into();
         if id.trim().is_empty() {
-            return Err(AppError::Llm("file_file_id: file_id 不能为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.fileIdEmpty",
+                &[("operation", "file_file_id")],
+            )));
         }
         Ok(Self::InputFile {
             source: FileSource::Uploaded(FileUploadedSource {
@@ -447,7 +612,7 @@ impl ChatMessageContentPart {
     ///
     /// 仅在当前 provider 声明支持 Files API 时应调用；否则请回退 inline helper。
     pub async fn image_upload(
-        client: &OpenAiFilesClient,
+        adapter: &(impl FilesApiAdapter + ?Sized),
         mime_type: impl Into<String>,
         bytes: &[u8],
         filename: impl Into<String>,
@@ -456,15 +621,22 @@ impl ChatMessageContentPart {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
-            return Err(AppError::Llm(format!(
-                "image_upload: 不支持的 mime_type {:?}, 仅允许 {:?}",
-                mime, ALLOWED_IMAGE_MIMES
+            return Err(AppError::Llm(tr(
+                "media.unsupportedMime",
+                &[
+                    ("operation", "image_upload"),
+                    ("mime", &format!("{mime:?}")),
+                    ("allowed", &format!("{ALLOWED_IMAGE_MIMES:?}")),
+                ],
             )));
         }
         if bytes.is_empty() {
-            return Err(AppError::Llm("image_upload: 文件内容为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.emptyUpload",
+                &[("operation", "image_upload")],
+            )));
         }
-        let upload = client
+        let upload = adapter
             .upload(FilePurpose::Vision, &filename, &mime, bytes)
             .await?;
         Self::image_file_id(upload.id)
@@ -472,7 +644,7 @@ impl ChatMessageContentPart {
 
     /// 上传通用文件到 OpenAI Files（B 通道），并返回 `file_id` part。
     pub async fn file_upload(
-        client: &OpenAiFilesClient,
+        adapter: &(impl FilesApiAdapter + ?Sized),
         filename: impl Into<String>,
         mime_type: impl Into<String>,
         bytes: &[u8],
@@ -480,9 +652,12 @@ impl ChatMessageContentPart {
         let filename = filename.into();
         let mime = mime_type.into();
         if bytes.is_empty() {
-            return Err(AppError::Llm("file_upload: 文件内容为空".to_string()));
+            return Err(AppError::Llm(tr(
+                "media.emptyUpload",
+                &[("operation", "file_upload")],
+            )));
         }
-        let upload = client
+        let upload = adapter
             .upload(FilePurpose::UserData, &filename, &mime, bytes)
             .await?;
         Self::file_file_id(upload.id, Some(filename))
@@ -493,7 +668,7 @@ impl ChatMessageContentPart {
         match self {
             Self::InputText { text } => text.chars().count(),
             Self::InputReference { reference } => reference.to_prompt_text().chars().count(),
-            Self::InputImage { .. } => IMAGE_CHAR_ESTIMATE,
+            Self::InputImage { .. } | Self::InputImageRef { .. } => IMAGE_CHAR_ESTIMATE,
             Self::InputFile { .. } => FILE_CHAR_ESTIMATE,
         }
     }
@@ -512,15 +687,84 @@ fn decode_b64_len(data: &str) -> Result<usize, base64::DecodeError> {
 }
 
 /// Internal semantic tag for messages that share the same LLM wire role.
-/// `#[serde(skip)]` — never serialized; defaults to `Normal` on deserialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// The `kind` field is transcript metadata, not a provider-wire role. Persisting it makes
+/// restart hydration reproduce the same semantic message chain that the model saw in memory.
+/// Legacy transcript rows omit it and deserialize as [`MessageKind::Normal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageKind {
     #[default]
     Normal,
     /// Steering instruction injected mid-turn; LLM sees `role: user`.
     Steering,
+    /// Completion guard instruction; preserves the old `Steering` turn-boundary semantics.
+    Nudge,
+    /// Background task completion signal; preserves the old normal-user turn-boundary semantics.
+    Signal,
+    /// Synthetic user message written when the user starts or resumes a plan from the UI.
+    PlanBuild,
+    /// Tool-returned media carried as user for transport compatibility, never genuine input.
+    /// Stage A preserves its existing replay/window boundary; new tool-owned media supersedes it later.
+    ToolMedia,
     /// Compaction summary replacing older messages; LLM sees `role: user`.
     CompactionSummary,
+    /// Request-only runtime state appended after the persisted conversation.
+    /// It must never establish a logical user turn or a reasoning replay window.
+    EphemeralTail,
+}
+
+impl MessageKind {
+    pub const fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    pub fn from_persisted(value: Option<&str>) -> Self {
+        match value {
+            Some("steering") => Self::Steering,
+            Some("nudge") => Self::Nudge,
+            Some("signal") => Self::Signal,
+            Some("plan_build") => Self::PlanBuild,
+            Some("tool_media") => Self::ToolMedia,
+            Some("compaction_summary") => Self::CompactionSummary,
+            Some("ephemeral_tail") => Self::EphemeralTail,
+            _ => Self::Normal,
+        }
+    }
+
+    pub const fn is_non_turn_start(self) -> bool {
+        matches!(self, Self::Steering | Self::Nudge | Self::EphemeralTail)
+    }
+
+    pub const fn is_replay_input(self) -> bool {
+        matches!(
+            self,
+            Self::Normal | Self::Signal | Self::PlanBuild | Self::ToolMedia
+        )
+    }
+}
+
+/// `EphemeralTail` is request-scoped runtime state, not a dialogue turn.
+///
+/// The sole producer, [`EphemeralTailProvider`](crate::core::agent_loop::EphemeralTailProvider),
+/// renders a `String`; keeping that contract text-only lets every provider
+/// adapter move the same tail into its instruction channel without treating
+/// attachments or projected context as runtime instructions.
+pub(crate) fn is_ephemeral_tail(message: &ChatMessage) -> bool {
+    matches!(message.kind, MessageKind::EphemeralTail)
+}
+
+/// Iterate the non-blank request-scoped runtime instructions in wire order.
+///
+/// Provider adapters decide where these instructions belong (`system` for
+/// Messages / Chat Completions and `instructions` for Responses), but all must
+/// exclude them from their durable conversation history.
+pub(crate) fn ephemeral_tail_texts(messages: &[ChatMessage]) -> impl Iterator<Item = &str> {
+    messages
+        .iter()
+        .filter(|message| is_ephemeral_tail(message))
+        .filter_map(ChatMessage::text_content)
+        .filter(|text| !text.trim().is_empty())
 }
 
 /// Assistant turn 中 opaque continuity blob 的格式标签。
@@ -582,7 +826,7 @@ pub struct ContinuityMetadata {
 /// 单条对话消息（与 OpenAI API 兼容，wire 格式为 snake_case）。
 ///
 /// `finish_reason/error_message/error_code` 会随 transcript assistant message 一起持久化；
-/// `msg_id/kind/timestamp` 仍是纯本地 bookkeeping，不出进程边界。
+/// `msg_id/timestamp` 仍是纯本地 bookkeeping；`kind` 是持久化 transcript 元数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatMessage {
@@ -614,15 +858,21 @@ pub struct ChatMessage {
     /// replay 所需的 turn 级元数据；旧 transcript 缺失时按 None 兼容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuity: Option<ContinuityMetadata>,
+    /// 本条 assistant 消息对应的 provider 账目；持久化到 transcript 供事故回溯。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
     /// turn/tool 折叠标题；仅本地持久化与 transcript/webview 恢复使用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_title: Option<String>,
+    /// 工具结构化展示元数据；仅本地持久化与 transcript/webview 恢复使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_display: Option<ToolDisplay>,
 
     /// Transcript `MessageEntry.id` — set during hydration or after `append_message`.
     #[serde(skip)]
     pub msg_id: Option<String>,
-    /// Semantic tag distinguishing steering / compaction-summary from normal messages.
-    #[serde(skip)]
+    /// Semantic tag distinguishing user input, steering, system nudge, and signal messages.
+    #[serde(default, skip_serializing_if = "MessageKind::is_normal")]
     pub kind: MessageKind,
     /// ISO-8601 timestamp from the transcript, used for day-based filtering.
     #[serde(skip)]
@@ -630,6 +880,15 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// Whether this message begins a logical turn for compaction/window calculations.
+    ///
+    /// This preserves the pre-persistence behavior: steering and completion nudges do not
+    /// start turns; normal user input, background signals, and branch summaries do.
+    pub const fn starts_logical_turn(&self) -> bool {
+        matches!(self.kind, MessageKind::CompactionSummary)
+            || (matches!(self.role, ChatMessageRole::User) && !self.kind.is_non_turn_start())
+    }
+
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::User,
@@ -644,7 +903,9 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -667,11 +928,20 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
         }
+    }
+
+    /// A transport carrier for media returned by tools, not a user-submitted attachment.
+    pub fn tool_media(parts: Vec<ChatMessageContentPart>) -> Self {
+        let mut message = Self::user_with_parts(parts);
+        message.kind = MessageKind::ToolMedia;
+        message
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
@@ -688,7 +958,9 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -712,7 +984,9 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -733,7 +1007,9 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -754,7 +1030,9 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -775,14 +1053,21 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
+            tool_display: None,
             msg_id: None,
             kind: MessageKind::Steering,
             timestamp: None,
         }
     }
 
-    pub fn compaction_summary(text: impl Into<String>) -> Self {
+    /// Builds a synthetic compaction summary with the durable transcript marker id that owns it.
+    ///
+    /// A summary without this id is indistinguishable from an ordinary user message to later
+    /// persistence paths, which is how historical summaries leaked into the transcript as user
+    /// bubbles. Keep the id mandatory at construction time.
+    pub fn compaction_summary(text: impl Into<String>, entry_id: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Text(text.into())),
@@ -796,8 +1081,10 @@ impl ChatMessage {
             thinking_text: None,
             reasoning_continuation: None,
             continuity: None,
+            usage: None,
             summary_title: None,
-            msg_id: None,
+            tool_display: None,
+            msg_id: Some(entry_id.into()),
             kind: MessageKind::CompactionSummary,
             timestamp: None,
         }
@@ -829,9 +1116,21 @@ impl ChatMessage {
         self
     }
 
+    /// 把本轮 provider usage 归属到最终 assistant 消息，避免只留在易失的 ContextState。
+    pub fn with_usage(mut self, usage: Option<TokenUsage>) -> Self {
+        self.usage = usage;
+        self
+    }
+
     /// 为 assistant/tool 回合附加 transcript/webview 使用的折叠摘要标题。
     pub fn with_summary_title(mut self, summary_title: Option<String>) -> Self {
         self.summary_title = summary_title;
+        self
+    }
+
+    /// 为 tool 回合附加 transcript/webview 使用的结构化展示数据。
+    pub fn with_tool_display(mut self, tool_display: Option<ToolDisplay>) -> Self {
+        self.tool_display = tool_display;
         self
     }
 
@@ -845,19 +1144,48 @@ impl ChatMessage {
         cloned.thinking_text = None;
         cloned.reasoning_continuation = None;
         cloned.continuity = None;
+        cloned.usage = None;
         cloned.summary_title = None;
+        cloned.tool_display = None;
         cloned
     }
 
-    /// Replace the text content in-place (used by L0/L1 compaction on tool results).
+    /// Replace textual payload without dropping attachments from multipart tool results.
     pub fn set_text_content(&mut self, text: String) {
+        if self.role == ChatMessageRole::Tool {
+            if let Some(ChatMessageContent::Parts(parts)) = &mut self.content {
+                parts.retain(|part| !matches!(part, ChatMessageContentPart::InputText { .. }));
+                parts.insert(0, ChatMessageContentPart::text(text));
+                return;
+            }
+        }
         self.content = Some(ChatMessageContent::Text(text));
     }
 
-    /// Helper to extract text content (for backward compat).
+    /// Tool multipart results contain one textual payload followed by media.
+    /// Non-tool structured content retains its original first_text() contract.
     pub fn text_content(&self) -> Option<&str> {
         match &self.content {
             Some(ChatMessageContent::Text(s)) => Some(s),
+            Some(ChatMessageContent::Parts(parts)) if self.role == ChatMessageRole::Tool => {
+                parts.iter().find_map(|p| match p {
+                    ChatMessageContentPart::InputText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn text_content_mut(&mut self) -> Option<&mut String> {
+        match &mut self.content {
+            Some(ChatMessageContent::Text(text)) => Some(text),
+            Some(ChatMessageContent::Parts(parts)) if self.role == ChatMessageRole::Tool => {
+                parts.iter_mut().find_map(|p| match p {
+                    ChatMessageContentPart::InputText { text } => Some(text),
+                    _ => None,
+                })
+            }
             _ => None,
         }
     }
@@ -898,6 +1226,19 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Provider-wire output cap resolved from the selected model's capability.
+    ///
+    /// `max_tokens` above remains the caller's optional product request; this
+    /// value is the already-clamped result providers serialize to their
+    /// protocol-specific field. It is local-only because every provider uses a
+    /// different wire key.
+    #[serde(skip)]
+    pub resolved_output_limit: Option<u32>,
+    /// Correlates request-side prompt fingerprints with provider usage
+    /// diagnostics. It is generated only while fingerprint diagnostics are
+    /// explicitly enabled and never leaves the process.
+    #[serde(skip)]
+    pub diagnostic_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     /// 会话级模型覆盖（不发给 API，仅用于选模型）。
@@ -905,6 +1246,13 @@ pub struct ChatRequest {
     pub model_override: Option<String>,
     #[serde(skip)]
     pub thinking_level: Option<ThinkingLevel>,
+    /// Per-run speed snapshot; never deserialized from plugin requests.
+    #[serde(skip)]
+    pub speed: Option<super::Speed>,
+    /// Provider routing hint for prompt-cache affinity. This is intentionally
+    /// local-only and must not be serialized as part of a generic request.
+    #[serde(skip)]
+    pub cache_key: Option<String>,
     /// OpenAI function calling: tool definitions sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
@@ -914,10 +1262,26 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TokenUsage {
+    /// Total input tokens for this request, including cache reads and cache
+    /// writes. Cache fields below are a cost-accounting breakdown, not values
+    /// to add again. Future pricing must apply provider cache tiers instead of
+    /// multiplying this total by one input price.
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Input tokens read from a provider prompt cache, when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    /// Input tokens written to a provider prompt cache, when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
+    /// Provider 明确给出的 reasoning 输出 token；未给出时保持 None，绝不猜测。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+    /// 正文输出 token。仅当 provider 同时给出总输出和 reasoning 时可精确得出。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tokens: Option<u32>,
 }
 
 /// Thinking/Reasoning 增量来源：原始推理链路（raw）或模型给出的摘要（summary）。
@@ -1004,6 +1368,10 @@ pub enum StreamEvent {
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
+        cache_read_tokens: Option<u32>,
+        cache_write_tokens: Option<u32>,
         total_tokens: Option<u32>,
+        reasoning_tokens: Option<u32>,
+        text_tokens: Option<u32>,
     },
 }

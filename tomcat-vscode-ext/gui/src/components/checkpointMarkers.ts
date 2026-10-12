@@ -1,5 +1,20 @@
 import type { WebviewCheckpoint, WebviewCheckpointMarker, WebviewTimelineItem } from "../types";
 
+/** Scan once; both the bubble affordance and confirmation use the same write evidence. */
+export function messageIdsWithWritesAfter(timeline: WebviewTimelineItem[]): Set<string> {
+  const ids = new Set<string>();
+  let hasWrites = false;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (item.type === "message" && item.kind === "user" && hasWrites) ids.add(item.id);
+    if (item.type === "tool" && (item.display?.kind === "file"
+      || (item.display?.kind === "files" && item.display.files.some((file) => file.status === "applied")))) {
+      hasWrites = true;
+    }
+  }
+  return ids;
+}
+
 export function createCheckpointMarker(
   checkpoint: WebviewCheckpoint,
 ): WebviewCheckpointMarker | null {

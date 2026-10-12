@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import * as os from "node:os";
 import path from "node:path";
 
 import * as vscode from "vscode";
@@ -22,10 +23,12 @@ import type {
 } from "../../serveClient/wire";
 import type {
   SettingsCapabilities,
+  SettingsConnectorReceipt,
   SettingsHostFrame,
   SettingsIntent,
   SettingsModelCapabilities,
   SettingsModelInput,
+  SettingsModelRemovalReceipt,
   SettingsModelView,
   SettingsProviderKeyInput,
   SettingsProviderKeyView,
@@ -34,13 +37,54 @@ import type {
 } from "../../shared/settingsProtocol";
 import { isSettingsIntent as isSettingsIntentMessage } from "../../shared/settingsProtocol";
 import { resolveWebviewEntryAssets } from "../guiAssets";
+import type {
+  ConnectorConfigPath,
+  ConnectorConfigPaths,
+  ConnectorInput,
+  ConnectorProject,
+  ConnectorToolFilter,
+  ConnectorToolView,
+  ConnectorView,
+} from "../../shared/connectorsProtocol";
+import {
+  ConnectorProtocolError,
+  normalizeConnectorView,
+  parseConnectorProject,
+  parseProjectTrustPayload,
+  parseConnectorToolCatalog,
+  parseSetConnectorToolEnabledResponse,
+} from "../../shared/connectorsProtocol";
+import { ConnectorReloadTracker } from "./ConnectorReloadTracker";
+
+const CONNECTOR_CAPABILITIES = {
+  add: "add_connector",
+  filter: "set_connector_tool_filter",
+  toggle: "set_connector_tool_enabled",
+  list: "list_connectors",
+  listTools: "list_connector_tools",
+  login: "login_connector",
+  reload: "reload_connector",
+  remove: "remove_connector",
+  trustProject: "trust_project",
+} as const;
 
 function getNonce(): string {
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return (
+    Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+function connectorToolToggleKey(configKey: string, rawName: string): string {
+  return JSON.stringify([configKey, rawName]);
+}
+function toolFilterSignature(connector: ConnectorView | undefined): string {
+  return JSON.stringify({
+    exclude: connector?.toolFilter?.exclude ?? [],
+    include: connector?.toolFilter?.include ?? [],
+  });
 }
 
 function parseCapabilities(value: unknown): SettingsModelCapabilities {
@@ -62,23 +106,47 @@ function parseCapabilities(value: unknown): SettingsModelCapabilities {
   };
 }
 
+function parseStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function parseNumberArray(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (entry): entry is number =>
+          typeof entry === "number" && Number.isInteger(entry) && entry > 0,
+      )
+    : [];
+}
+
 function parseModelView(value: WireModelView): SettingsModelView {
   return {
     api: value.api,
     apiKeyEnv: value.apiKeyEnv,
     baseUrl: value.baseUrl ?? null,
     capabilities: parseCapabilities(value.capabilities),
-    contextWindow: typeof value.contextWindow === "number" ? value.contextWindow : null,
+    contextWindow:
+      typeof value.contextWindow === "number" ? value.contextWindow : null,
+    contextWindowOptions: parseNumberArray(value.contextWindowOptions),
+    description: value.description ?? null,
     id: value.id,
     keyPresent: value.keyPresent === true,
+    maxOutputTokens:
+      typeof value.maxOutputTokens === "number" ? value.maxOutputTokens : null,
     modelName: value.modelName ?? null,
     provider: value.provider,
     source: value.source === "user" ? "user" : "builtin",
+    supportedReasoningLevels: parseStringArray(value.supportedReasoningLevels),
+    supportedSpeeds: value.supportedSpeeds ?? [],
     thinkingFormat: value.thinkingFormat ?? null,
   };
 }
 
-function parseProviderKeyView(value: WireProviderKeyView): SettingsProviderKeyView {
+function parseProviderKeyView(
+  value: WireProviderKeyView,
+): SettingsProviderKeyView {
   return {
     envName: value.envName,
     keyPresent: value.keyPresent === true,
@@ -87,12 +155,45 @@ function parseProviderKeyView(value: WireProviderKeyView): SettingsProviderKeyVi
   };
 }
 
-function parseModelsPayload(payload: ListModelsPayload | undefined): SettingsModelView[] {
+function parseModelsPayload(
+  payload: ListModelsPayload | undefined,
+): SettingsModelView[] {
   return payload?.models?.map(parseModelView) ?? [];
 }
 
-function parseProviderKeysPayload(payload: ListProviderKeysPayload | undefined): SettingsProviderKeyView[] {
+function parseProviderKeysPayload(
+  payload: ListProviderKeysPayload | undefined,
+): SettingsProviderKeyView[] {
   return payload?.keys?.map(parseProviderKeyView) ?? [];
+}
+
+function parseConnectorConfigPath(value: unknown): ConnectorConfigPath | undefined {
+  if (!isRecord(value) || typeof value.display !== "string" || typeof value.raw !== "string") {
+    return undefined;
+  }
+  return { display: value.display, raw: value.raw };
+}
+
+function parseConnectorConfigPaths(payload: unknown): ConnectorConfigPaths | undefined {
+  if (!isRecord(payload) || !isRecord(payload.configPaths)) return undefined;
+  const global = parseConnectorConfigPath(payload.configPaths.global);
+  const workspace = parseConnectorConfigPath(payload.configPaths.workspace);
+  return global ? { global, ...(workspace ? { workspace } : {}) } : undefined;
+}
+
+function parseConnectorsPayload(payload: unknown): {
+  connectors: ConnectorView[];
+  project: ConnectorProject | null;
+  configPaths?: ConnectorConfigPaths;
+} {
+  if (!isRecord(payload) || !Array.isArray(payload.connectors)) throw new ConnectorProtocolError();
+  return {
+    connectors: payload.connectors
+      .map(normalizeConnectorView)
+      .filter((connector): connector is ConnectorView => connector !== null),
+    configPaths: parseConnectorConfigPaths(payload),
+    project: parseConnectorProject(payload.project ?? null),
+  };
 }
 
 function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
@@ -108,18 +209,29 @@ function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
       web_search: model.capabilities.webSearch,
     },
     contextWindow: model.contextWindow ?? null,
+    contextWindowOptions: model.contextWindowOptions ?? null,
+    description: model.description ?? null,
     id: model.id,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     modelName: model.modelName ?? null,
     provider: model.provider,
+    supportedReasoningLevels: model.supportedReasoningLevels ?? null,
+    supportedSpeeds: model.supportedSpeeds ?? null,
     thinkingFormat: model.thinkingFormat ?? null,
   };
 }
 
 export interface SettingsPanelDeps {
   ensureInitialized(): Promise<InitializeResult>;
+  expectedCliVersion: string | null;
   extensionUri: vscode.Uri;
+  extensionVersion: string | null;
   messenger: TomcatMessenger;
+  /** Clear the global Build preference if it points to a model being removed. */
+  clearBuildModelPreference?(modelId: string): Promise<boolean | void> | boolean | void;
   onModelCatalogChanged?(): Promise<void> | void;
+  /** The extension host, not a webview/editor heuristic, owns workspace choice. */
+  selectConnectorWorkspaceRoot?(): Promise<string | null>;
 }
 
 type SettingsDomAction = {
@@ -150,10 +262,10 @@ function parseSettingsDomRect(value: unknown): SettingsDomRect | undefined {
   }
   const { height, left, top, width } = value;
   if (
-    typeof height === "number"
-    && typeof left === "number"
-    && typeof top === "number"
-    && typeof width === "number"
+    typeof height === "number" &&
+    typeof left === "number" &&
+    typeof top === "number" &&
+    typeof width === "number"
   ) {
     return { height, left, top, width };
   }
@@ -173,6 +285,13 @@ function parseSettingsDomRects(value: unknown): SettingsDomSnapshot["rects"] {
   return { apiKeyInput, keySlotBox, keySlotInput };
 }
 
+type ConnectorToolToggleLock = {
+  requestId: string;
+  rawName: string;
+  enabled: boolean;
+};
+
+import { getLocale, subscribeLocale, isUiPreferences, normalizeLocale, setLocale, t, type LanguagePreference } from "../../shared/i18n";
 export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private webviewReady = false;
@@ -185,6 +304,21 @@ export class SettingsPanel implements vscode.Disposable {
     }
   >();
   private route: SettingsRoute = "models";
+  private connectorRefreshTimer?: ReturnType<typeof setInterval>;
+  private connectorRefreshInterval = 0;
+  private connectorEpoch = 0;
+  private connectorReadSequence = 0;
+  private connectorToolsReadSequence = 0;
+  private connectorRefreshPending?: Promise<void>;
+  private connectorRefreshAgain = false;
+  private connectorToolsRequested?: string;
+  private readonly connectorReloads = new ConnectorReloadTracker();
+  private readonly connectorToolToggleLocks = new Map<string, ConnectorToolToggleLock>();
+  private projectTrustPending = false;
+  private readonly subscriptions: Array<{ dispose(): void }> = [];
+  private connectorContextValue?: { workspaceRoot?: string | null };
+  private connectorContextSelection?: Promise<{ workspaceRoot?: string | null }>;
+  private viewEpoch = 0;
   private state: SettingsStateSnapshot = {
     capabilities: {
       listModels: false,
@@ -193,22 +327,151 @@ export class SettingsPanel implements vscode.Disposable {
       setProviderKey: false,
       upsertModel: false,
     },
+    expectedCliVersion: null,
+    extensionVersion: null,
     models: [],
     providerKeys: [],
+    connectors: [],
+    connectorTools: [],
+    selectedConnector: null,
     ready: false,
     route: "models",
+    serverVersion: null,
+    warnings: null,
   };
 
-  constructor(private readonly deps: SettingsPanelDeps) {}
+  constructor(private readonly deps: SettingsPanelDeps) {
+    this.subscriptions.push({ dispose: subscribeLocale(() => this.postState()) });
+    const exit = deps.messenger.onExit?.(() => {
+      this.state.uiPreferences = null;
+      this.state.connectorLogin = null;
+      this.state.languageStatus = "failed";
+      this.connectorEpoch += 1;
+      this.viewEpoch += 1;
+      this.connectorToolsReadSequence += 1;
+      this.connectorToolsRequested = undefined;
+      this.connectorContextSelection = undefined;
+      this.connectorReloads.disconnected();
+      const connectorToolToggles = { ...this.state.connectorToolToggles };
+      for (const [configKey, operation] of this.connectorToolToggleLocks) {
+        connectorToolToggles[connectorToolToggleKey(configKey, operation.rawName)] = {
+          requestId: operation.requestId,
+          configKey,
+          rawName: operation.rawName,
+          enabled: operation.enabled,
+          error: t("settings.host.resultUnknown"),
+        };
+      }
+      this.connectorToolToggleLocks.clear();
+      this.state = { ...this.state, ready: false, error: t("settings.host.connectionLost"), connectorTools: [], connectorToolsIdentity: null, connectorReloads: this.connectorReloads.snapshot(), connectorToolToggles };
+      this.postState();
+      this.updateConnectorPoller();
+    });
+    if (exit) this.subscriptions.push(exit);
+    const workspace = vscode.workspace.onDidChangeWorkspaceFolders?.(() => {
+      this.resetConnectorViewLifecycle();
+      if (this.route === "connectors" && this.webviewReady) void this.refreshState();
+    });
+    if (workspace) this.subscriptions.push(workspace);
+  }
+
+  async onServeConnectionChanged(ready: boolean): Promise<void> {
+    if (!ready && this.route === "general") this.viewEpoch += 1;
+    this.state.ready = ready;
+    if (ready) {
+      this.state.uiPreferences = null;
+      this.state.languageStatus = undefined;
+      if (this.webviewReady && this.route === "general") {
+        await this.refreshGeneral();
+        return;
+      }
+    }
+    this.postState();
+  }
+
+  onProjectTrusted(): void {
+    if (this.route === "connectors" && this.webviewReady) void this.refreshConnectors(true);
+  }
+
+  private setRoute(route: SettingsRoute): void {
+    if (route !== this.route) this.resetConnectorViewLifecycle();
+    this.route = route;
+    this.state = { ...this.state, route };
+    this.updateConnectorPoller();
+    // Navigation must not wait for model/key discovery: the old page may have
+    // different controls and otherwise stays interactive with the wrong route.
+    this.postState();
+  }
 
   private shouldPreserveFocus(): boolean {
     return process.env.TOMCAT_E2E_SCREENSHOT !== "1";
   }
 
+  private async connectorContext(): Promise<{ workspaceRoot?: string | null }> {
+    if (this.connectorContextValue) {
+      return this.connectorContextValue;
+    }
+    if (!this.connectorContextSelection) {
+      const epoch = this.connectorEpoch;
+      this.connectorContextSelection = (async () => {
+        const workspaceRoot = this.deps.selectConnectorWorkspaceRoot
+          ? await this.deps.selectConnectorWorkspaceRoot()
+          : await this.selectDefaultConnectorWorkspaceRoot();
+        if (epoch !== this.connectorEpoch) throw new Error(t("settings.host.selectionSuperseded"));
+        const context = { workspaceRoot };
+        this.connectorContextValue = context;
+        return context;
+      })();
+    }
+    return this.connectorContextSelection;
+  }
+
+  private async selectDefaultConnectorWorkspaceRoot(): Promise<string | null> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      return null;
+    }
+    if (folders.length === 1) {
+      return folders[0].uri.fsPath;
+    }
+    const selected = await vscode.window.showWorkspaceFolderPick({
+      placeHolder: t("host.selectWorkspace"),
+    });
+    return selected?.uri.fsPath ?? null;
+  }
+
+  private resetConnectorViewLifecycle(): void {
+    this.state.connectorLogin = null;
+    if (this.connectorRefreshTimer) {
+      clearInterval(this.connectorRefreshTimer);
+      this.connectorRefreshTimer = undefined;
+    }
+    // A closed settings panel must not retain a project chosen for a prior view.
+    // The next view explicitly asks the Host again, including in multi-root workspaces.
+    this.connectorContextValue = undefined;
+    this.connectorContextSelection = undefined;
+    this.viewEpoch += 1;
+    this.connectorEpoch += 1;
+    this.connectorReadSequence += 1;
+    this.connectorToolsReadSequence += 1;
+    this.connectorToolsRequested = undefined;
+    this.connectorRefreshInterval = 0;
+    this.connectorRefreshAgain = false;
+    this.connectorReloads.clear();
+    this.connectorToolToggleLocks.clear();
+    this.projectTrustPending = false;
+    this.state = { ...this.state, connectors: [], connectorProject: null, connectorTrustPending: false, connectorConfigPaths: undefined, connectorTools: [], connectorToolsIdentity: null, selectedConnector: null, connectorReloads: {}, connectorToolToggles: {}, connectorReceipt: null };
+  }
+
   dispose(): void {
+    this.webviewReady = false;
+    for (const subscription of this.subscriptions.splice(0)) subscription.dispose();
+    this.resetConnectorViewLifecycle();
     for (const pending of this.pendingDomSnapshots.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error("Settings panel disposed before DOM snapshot completed."));
+      pending.reject(
+        new Error("Settings panel disposed before DOM snapshot completed."),
+      );
     }
     this.pendingDomSnapshots.clear();
     this.panel?.dispose();
@@ -216,7 +479,7 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   reveal(route: SettingsRoute = "models"): void {
-    this.route = route;
+    this.setRoute(route);
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Active, this.shouldPreserveFocus());
       void this.refreshState();
@@ -225,31 +488,36 @@ export class SettingsPanel implements vscode.Disposable {
     this.webviewReady = false;
     this.panel = vscode.window.createWebviewPanel(
       "tomcat.settings",
-      "Tomcat Settings",
+      `Tomcat ${t("settings.title")}`,
       {
         preserveFocus: this.shouldPreserveFocus(),
         viewColumn: vscode.ViewColumn.Active,
       },
       {
         enableScripts: true,
-        localResourceRoots: [vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist")],
+        localResourceRoots: [
+          vscode.Uri.joinPath(this.deps.extensionUri, "gui", "dist"),
+        ],
         retainContextWhenHidden: true,
       },
     );
     this.panel.onDidDispose(() => {
       for (const pending of this.pendingDomSnapshots.values()) {
         clearTimeout(pending.timeout);
-        pending.reject(new Error("Settings panel closed before DOM snapshot completed."));
+        pending.reject(
+          new Error("Settings panel closed before DOM snapshot completed."),
+        );
       }
       this.pendingDomSnapshots.clear();
+      this.resetConnectorViewLifecycle();
       this.webviewReady = false;
       this.panel = undefined;
     });
     this.panel.webview.onDidReceiveMessage((message: unknown) => {
       if (
-        isRecord(message)
-        && message.type === "__test.dom_snapshot"
-        && typeof message.messageId === "string"
+        isRecord(message) &&
+        message.type === "__test.dom_snapshot" &&
+        typeof message.messageId === "string"
       ) {
         const pending = this.pendingDomSnapshots.get(message.messageId);
         if (!pending) {
@@ -270,6 +538,46 @@ export class SettingsPanel implements vscode.Disposable {
     });
     this.panel.webview.html = this.renderHtml(this.panel.webview);
     void this.refreshState();
+  }
+
+  private async refreshGeneral(): Promise<void> {
+    const epoch = ++this.viewEpoch;
+    try {
+      const initialized = await this.deps.ensureInitialized();
+      if (epoch !== this.viewEpoch) return;
+      this.state = { ...this.state,
+        capabilities: { ...this.state.capabilities, setUiLanguage: hasServeCapability(initialized, "set_ui_language") },
+        uiPreferences: this.state.uiPreferences ?? initialized.uiPreferences ?? null,
+        hostLocale: normalizeLocale(vscode.env.language ?? "en"),
+        expectedCliVersion: this.deps.expectedCliVersion,
+        extensionVersion: this.deps.extensionVersion,
+        serverVersion: initialized.serverVersion,
+        ready: true, error: null,
+      };
+    } catch (error) {
+      if (epoch !== this.viewEpoch) return;
+      this.state = { ...this.state, ready: false, error: String(error) };
+    }
+    this.postState();
+  }
+
+  private async setUiLanguage(language: LanguagePreference): Promise<void> {
+    if (this.state.languageStatus === "saving" || !this.state.ready || !this.state.capabilities.setUiLanguage) return;
+    this.state = { ...this.state, languageStatus: "saving", error: null };
+    this.postState();
+    try {
+      const response = await this.deps.messenger.request({ type: "set_ui_language", language });
+      if (!response.success || !isUiPreferences(response.payload)) {
+        throw new Error(response.error ?? t("settings.language.failed"));
+      }
+      // The write belongs to this window, not the currently selected settings route.
+      // A navigation or panel close must not discard an acknowledged preference.
+      this.state = { ...this.state, uiPreferences: response.payload, languageStatus: "saved" };
+      setLocale(response.payload.effective);
+    } catch (error) {
+      this.state = { ...this.state, languageStatus: "failed", error: String(error) };
+    }
+    this.postState();
   }
 
   __testingSnapshot(): {
@@ -327,9 +635,12 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async handleIntent(intent: SettingsIntent): Promise<void> {
     switch (intent.type) {
+      case "setUiLanguage":
+        await this.setUiLanguage(intent.data.language);
+        return;
       case "settings.ready":
         this.webviewReady = true;
-        this.route = intent.data?.route ?? this.route;
+        this.setRoute(intent.data?.route ?? this.route);
         await this.refreshState();
         return;
       case "listModels":
@@ -339,7 +650,10 @@ export class SettingsPanel implements vscode.Disposable {
         await this.refreshProviderKeys();
         return;
       case "upsertModel":
-        await this.handleUpsertModel(intent.data.model, intent.data.providerKey);
+        await this.handleUpsertModel(
+          intent.data.model,
+          intent.data.providerKey,
+        );
         return;
       case "removeModel":
         await this.handleRemoveModel(intent.data.modelId);
@@ -347,6 +661,312 @@ export class SettingsPanel implements vscode.Disposable {
       case "setProviderKey":
         await this.handleSetProviderKey(intent.data.envName, intent.data.value);
         return;
+      case "listConnectors":
+      case "reloadConnectors":
+        await this.refreshState();
+        return;
+      case "listConnectorTools":
+        this.state = { ...this.state, selectedConnector: intent.data.configKey };
+        await this.loadConnectorTools(intent.data.configKey, true);
+        return;
+      case "reloadConnector":
+        await this.handleConnectorReload(intent.data.configKey, intent.messageId);
+        return;
+      case "addConnector":
+        await this.handleAddConnector(intent.data.connector, intent.messageId, intent.data.trustProject === true);
+        return;
+      case "trustProject":
+        await this.handleTrustProject(intent.data.projectRoot);
+        return;
+      case "removeConnector":
+      case "loginConnector":
+      case "cancelLoginConnector":
+      case "logoutConnector":
+        await this.handleConnectorAction(intent.type, intent.data.configKey, intent.messageId);
+        return;
+      case "openConnectorConfig":
+        await this.openConnectorConfig(intent.data.configKey, intent.data.scope);
+        return;
+      case "setConnectorToolFilter": {
+        const epoch = this.connectorEpoch;
+        try {
+          const context = await this.connectorContext();
+          if (epoch !== this.connectorEpoch) return;
+          const response = await this.deps.messenger.sendSetConnectorToolFilter(
+            intent.data.configKey, intent.data.filter.include, intent.data.filter.exclude, context,
+          );
+          if (epoch !== this.connectorEpoch) return;
+          this.connectorToolsReadSequence += 1;
+          this.connectorToolsRequested = undefined;
+          this.state = { ...this.state, connectorTools: [], connectorToolsIdentity: null,
+            error: response.success ? null : response.error ?? t("settings.host.toolsUpdateFailed"),
+            status: response.success ? t("settings.host.toolsUpdated") : null };
+          this.postState();
+          await this.refreshConnectors(true);
+        } catch (error) {
+          if (epoch !== this.connectorEpoch) return;
+          this.state = { ...this.state, error: String(error) };
+          this.postState();
+        }
+        return;
+      }      case "setConnectorToolEnabled":
+        await this.handleConnectorToolEnabled(
+          intent.data.configKey,
+          intent.data.rawName,
+          intent.data.enabled,
+          intent.messageId,
+        );
+        return;
+
+    }
+  }
+
+  private async handleConnectorToolEnabled(
+    configKey: string,
+    rawName: string,
+    enabled: boolean,
+    requestId: string,
+  ): Promise<void> {
+    const epoch = this.connectorEpoch;
+    if (this.state.capabilities.connectorCapabilities?.toggle !== true) {
+      const error = t("settings.host.toggleUnsupported");
+      this.state = {
+        ...this.state,
+        connectorToolToggles: {
+          ...this.state.connectorToolToggles,
+          [connectorToolToggleKey(configKey, rawName)]: {
+            requestId,
+            configKey,
+            rawName,
+            enabled,
+            configSaved: false,
+            runtimeApplied: false,
+            error,
+          },
+        },
+        error,
+      };
+      this.postState();
+      return;
+    }
+    const source = this.state.connectors?.find((entry) => entry.configKey === configKey);
+    if (!source || source.overridden || source.state !== "connected" || !this.connectorContextValue) {
+      const error = t("settings.host.toggleUnavailable");
+      this.state = {
+        ...this.state,
+        connectorToolToggles: {
+          ...this.state.connectorToolToggles,
+          [connectorToolToggleKey(configKey, rawName)]: {
+            requestId,
+            configKey,
+            rawName,
+            enabled,
+            configSaved: false,
+            runtimeApplied: false,
+            error,
+          },
+        },
+        error,
+      };
+      this.postState();
+      return;
+    }
+    const reload = this.state.connectorReloads?.[configKey];
+    if (reload?.phase === "pending" || reload?.phase === "accepted") {
+      const error = t("settings.host.toggleReloading");
+      this.state = {
+        ...this.state,
+        connectorToolToggles: {
+          ...this.state.connectorToolToggles,
+          [connectorToolToggleKey(configKey, rawName)]: {
+            requestId,
+            configKey,
+            rawName,
+            enabled,
+            configSaved: false,
+            runtimeApplied: false,
+            error,
+          },
+        },
+        error,
+      };
+      this.postState();
+      return;
+    }
+    if (this.connectorToolToggleLocks.has(configKey)) {
+      this.state = {
+        ...this.state,
+        connectorToolToggles: {
+          ...this.state.connectorToolToggles,
+          [connectorToolToggleKey(configKey, rawName)]: {
+            requestId,
+            configKey,
+            rawName,
+            enabled,
+            configSaved: false,
+            runtimeApplied: false,
+            error: t("settings.host.togglePending"),
+          },
+        },
+      };
+      this.postState();
+      return;
+    }
+    // Any list that began before this write cannot authoritatively replace a
+    // matching receipt. The next ordinary refresh will obtain a new catalog.
+    this.connectorReadSequence += 1;
+    this.connectorToolsReadSequence += 1;
+    this.connectorToolsRequested = undefined;
+    this.connectorToolToggleLocks.set(configKey, { requestId, rawName, enabled });
+    try {
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch) return;
+      const response = await this.deps.messenger.sendSetConnectorToolEnabled(
+        configKey,
+        rawName,
+        enabled,
+        context,
+      );
+      if (epoch !== this.connectorEpoch) return;
+      const payload = parseSetConnectorToolEnabledResponse(response.payload, {
+        configKey,
+        rawName,
+        enabled,
+      });
+      const { configSaved, runtimeApplied } = payload;
+      const completed = response.success && configSaved && runtimeApplied;
+      const rejected = !response.success && !configSaved && !runtimeApplied;
+      const partial = !response.success && configSaved && !runtimeApplied;
+      if (!completed && !rejected && !partial) {
+        throw new ConnectorProtocolError();
+      }
+      const successKey = enabled ? "settings.host.toolEnabled" : "settings.host.toolDisabled";
+      const error = completed
+        ? null
+        : response.error ?? (partial
+          ? t("settings.host.syncUnknown")
+          : t("settings.host.toggleFailed"));
+      if (completed) this.confirmConnectorToolEnabled(configKey, rawName, enabled);
+      const receipt = {
+        requestId,
+        configKey,
+        rawName,
+        enabled,
+        configSaved,
+        runtimeApplied,
+        error,
+      };
+      this.state = {
+        ...this.state,
+        connectorToolToggles: {
+          ...this.state.connectorToolToggles,
+          [connectorToolToggleKey(configKey, rawName)]: receipt,
+        },
+        error,
+        status: completed
+          ? t(successKey)
+          : partial
+            ? t("settings.host.toolPartial", { detail: error ?? "" }).trim()
+            : error,
+      };
+      this.postState();
+      // A durable write may need a later retry of cache synchronization; never
+      // replay the mutation itself merely because this auxiliary refresh fails.
+      if (configSaved) void this.refreshConnectors(true);
+    } catch (error) {
+      if (epoch !== this.connectorEpoch) return;
+      const message = String(error);
+      this.state = {
+        ...this.state,
+        connectorToolToggles: {
+          ...this.state.connectorToolToggles,
+          [connectorToolToggleKey(configKey, rawName)]: {
+            requestId,
+            configKey,
+            rawName,
+            enabled,
+            configSaved: undefined,
+            runtimeApplied: undefined,
+            error: message,
+          },
+        },
+        error: message,
+      };
+      this.postState();
+      // A missing/invalid response is not evidence that the write failed. Use
+      // the normal read path only; it never replays this mutation.
+      void this.refreshConnectors(true);
+    } finally {
+      if (this.connectorToolToggleLocks.get(configKey)?.requestId === requestId) {
+        this.connectorToolToggleLocks.delete(configKey);
+      }
+    }
+  }
+
+  /** Apply a full matching receipt only to the directory it was sent from. */
+  private confirmConnectorToolEnabled(
+    configKey: string,
+    rawName: string,
+    enabled: boolean,
+  ): void {
+    const connector = this.state.connectors?.find((entry) => entry.configKey === configKey);
+    const identity = this.state.connectorToolsIdentity;
+    if (!connector || connector.state !== "connected" || !identity
+      || identity.configKey !== configKey || identity.generation !== connector.generation
+      || identity.attempt !== connector.attempt) return;
+    const tools = this.state.connectorTools ?? [];
+    if (!tools.some((tool) => tool.rawName === rawName)) return;
+    const nextTools = tools.map((tool) => tool.rawName === rawName ? { ...tool, enabled } : tool);
+    const toolCount = nextTools.filter((tool) => tool.enabled).length;
+    this.state = {
+      ...this.state,
+      connectorTools: nextTools,
+      connectors: this.state.connectors?.map((entry) => entry.configKey === configKey
+        ? { ...entry, toolCount }
+        : entry),
+    };
+  }
+
+  private async openConnectorConfig(
+    configKey?: string,
+    scope?: "global" | "workspace",
+  ): Promise<void> {
+    const connector = configKey
+      ? this.state.connectors?.find((entry) => entry.configKey === configKey)
+      : undefined;
+    const scopedConfigPath = scope === "global"
+      ? this.state.connectorConfigPaths?.global
+      : scope === "workspace"
+        ? this.state.connectorConfigPaths?.workspace
+        : undefined;
+    const rawConfigPath = connector?.configPathRaw ?? scopedConfigPath?.raw;
+    const configPath =
+      rawConfigPath && rawConfigPath.startsWith("~")
+        ? path.join(os.homedir(), rawConfigPath.slice(2))
+        : rawConfigPath;
+    if (!configPath) {
+      await this.refreshState(t("settings.host.configUnavailable"));
+      return;
+    }
+    try {
+      if (!fs.existsSync(configPath)) {
+        fs.mkdirSync(path.dirname(configPath), { recursive: true });
+        try {
+          fs.writeFileSync(
+            configPath,
+            '{\n  "mcpServers": {}\n}\n',
+            { encoding: "utf8", flag: "wx" },
+          );
+        } catch (error) {
+          if (!(isRecord(error) && error.code === "EEXIST")) {
+            throw error;
+          }
+        }
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(configPath));
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      await this.refreshState(t("settings.host.configOpenFailed", { detail: String(error) }));
     }
   }
 
@@ -355,20 +975,29 @@ export class SettingsPanel implements vscode.Disposable {
     providerKey?: SettingsProviderKeyInput,
   ): Promise<void> {
     try {
-      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      const capabilities = this.buildCapabilities(
+        await this.deps.ensureInitialized(),
+      );
       if (!capabilities.upsertModel) {
-        await this.refreshState("Model management is unavailable for this serve instance.");
+        await this.refreshState(
+          t("settings.host.modelUnavailable"),
+        );
         return;
       }
-      const response = await this.deps.messenger.sendUpsertModel(toWireModelEntryInput(model));
+      const response = await this.deps.messenger.sendUpsertModel(
+        toWireModelEntryInput(model),
+      );
       if (!response.success) {
-        await this.refreshState(response.error ?? "Unable to save model.");
+        await this.refreshState(response.error ?? t("settings.host.modelSaveFailed"));
         return;
       }
+      const warnings = response.payload?.warnings ?? null;
       if (providerKey) {
         if (!capabilities.setProviderKey) {
           await this.refreshState(
-            "Model saved, but this serve instance cannot store API keys yet.",
+            t("settings.host.keyUnsupported"),
+            null,
+            warnings,
           );
           await this.deps.onModelCatalogChanged?.();
           return;
@@ -379,61 +1008,356 @@ export class SettingsPanel implements vscode.Disposable {
         );
         if (!keyResponse.success) {
           await this.refreshState(
-            `Model saved, but API key was not stored: ${keyResponse.error ?? "Unknown error."}`,
+            t("settings.host.keySaveFailed", { detail: keyResponse.error ?? t("error.unknown") }),
+            null,
+            warnings,
           );
           await this.deps.onModelCatalogChanged?.();
           return;
         }
-        await this.refreshState(null, `Saved ${providerKey.envName}.`);
+        await this.refreshState(
+          null,
+          t("settings.host.savedKey", { name: providerKey.envName }),
+          warnings,
+        );
         await this.deps.onModelCatalogChanged?.();
         return;
       }
-      await this.refreshState(null, "Model saved.");
+      await this.refreshState(null, t("settings.host.modelSaved"), warnings);
       await this.deps.onModelCatalogChanged?.();
     } catch (error) {
       await this.refreshState(String(error), null);
+    }
+  }
+
+  private async handleTrustProject(projectRoot: string): Promise<void> {
+    if (this.projectTrustPending) return;
+    const epoch = this.connectorEpoch;
+    if (this.state.connectorProject?.root !== projectRoot
+      || this.state.connectorProject.trusted
+      || this.state.capabilities.connectorCapabilities?.trustProject !== true) {
+      this.state = { ...this.state, error: t("settings.host.trustChanged") };
+      this.postState();
+      return;
+    }
+    this.projectTrustPending = true;
+    this.state = { ...this.state, connectorTrustPending: true };
+    this.postState();
+    try {
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch) return;
+      if (!context.workspaceRoot || this.state.connectorProject?.root !== projectRoot) {
+        throw new Error(t("settings.host.selectionChanged"));
+      }
+      const response = await this.deps.messenger.sendTrustProject(projectRoot);
+      if (epoch !== this.connectorEpoch) return;
+      if (!response.success) throw new Error(response.error ?? t("settings.host.trustFailed"));
+      const result = parseProjectTrustPayload(response.payload);
+      if (!result.trusted || result.projectRoot !== projectRoot || result.error) {
+        throw new ConnectorProtocolError();
+      }
+      this.state = { ...this.state, error: null, status: t("settings.host.trusted") };
+      await this.refreshConnectors(true);
+    } catch (error) {
+      if (epoch === this.connectorEpoch) {
+        this.state = { ...this.state, error: String(error) };
+      }
+    } finally {
+      this.projectTrustPending = false;
+      if (epoch === this.connectorEpoch) {
+        this.state = { ...this.state, connectorTrustPending: false };
+        this.postState();
+      }
+    }
+  }
+
+  private async handleAddConnector(
+    input: ConnectorInput,
+    requestId: string,
+    trustProject: boolean,
+  ): Promise<void> {
+    const epoch = this.connectorEpoch;
+    const failed = (error: string): void => {
+      if (epoch !== this.connectorEpoch) return;
+      const receipt: SettingsConnectorReceipt = {
+        configSaved: false,
+        connectionStarted: false,
+        error,
+        name: input.name,
+        requestId,
+      };
+      this.state = {
+        ...this.state,
+        connectorReceipt: receipt,
+        error,
+        status: t("settings.host.addFailed"),
+      };
+      this.postState();
+      void this.refreshState(error, t("settings.host.addFailed"), null, receipt);
+    };
+    try {
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch) return;
+      if (trustProject && (input.scope !== "workspace" || !context.workspaceRoot
+        || this.state.connectorProject?.trusted !== false
+        || this.state.capabilities.connectorCapabilities?.trustProject !== true)) {
+        failed(t("settings.host.addTrustChanged"));
+        return;
+      }
+      const response = await this.deps.messenger.sendAddConnector({
+        args: input.args ?? [],
+        command: input.command ?? "",
+        auth: input.auth,
+        env: input.env,
+        headers: input.headers,
+        name: input.name,
+        oauth: input.oauth,
+        context,
+        scope: input.scope,
+        ...(trustProject ? { trustProject: true } : {}),
+        url: input.url,
+      });
+      if (epoch !== this.connectorEpoch) return;
+      if (!response.success) {
+        failed(response.error ?? t("settings.host.addUnavailable"));
+        return;
+      }
+      const payload = isRecord(response.payload) ? response.payload : {};
+      const configSaved = payload.configSaved === true;
+      const connectionStarted = payload.connectionStarted === true;
+      const postSaveError = typeof payload.postSaveError === "string" ? payload.postSaveError : null;
+      if (!configSaved) {
+        failed(postSaveError ?? t("settings.host.addUnacknowledged"));
+        return;
+      }
+      const receipt: SettingsConnectorReceipt = {
+        configSaved,
+        connectionStarted,
+        error: postSaveError,
+        name: input.name,
+        requestId,
+      };
+      const status = connectionStarted
+        ? t("settings.host.addStarted")
+        : t("settings.host.addNotStarted", { detail: postSaveError ? ` ${postSaveError}` : "" });
+      this.state = {
+        ...this.state,
+        connectorReceipt: receipt,
+        error: null,
+        status,
+      };
+      this.postState();
+      void this.refreshState(null, status, null, receipt);
+    } catch (error) {
+      failed(String(error));
+    }
+  }
+
+  private publishConnectorReloads(): void {
+    this.state = { ...this.state, connectorReloads: this.connectorReloads.snapshot() };
+    this.postState();
+    this.updateConnectorPoller();
+  }
+
+  private async handleConnectorReload(configKey: string, requestId: string): Promise<void> {
+    if (this.connectorToolToggleLocks.has(configKey)) {
+      const entry = this.connectorReloads.begin(configKey, requestId);
+      if (entry) {
+        this.connectorReloads.finish(
+          entry,
+          "failed",
+          t("settings.host.reloadPending"),
+          "rejected",
+        );
+        this.publishConnectorReloads();
+      }
+      return;
+    }
+    const entry = this.connectorReloads.begin(configKey, requestId);
+    if (!entry) return;
+    const epoch = this.connectorEpoch;
+    if (this.state.selectedConnector === configKey) {
+      this.connectorToolsReadSequence += 1;
+      this.connectorToolsRequested = undefined;
+      this.state = { ...this.state, connectorTools: [], connectorToolsIdentity: null };
+    }
+    this.publishConnectorReloads();
+    try {
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch || !this.connectorReloads.active(entry)) return;
+      const response = await this.deps.messenger.sendReloadConnector(configKey, context);
+      if (epoch !== this.connectorEpoch || !this.connectorReloads.active(entry)) return;
+      if (!response.success) {
+        this.connectorReloads.finish(entry, "failed", response.error ?? t("settings.host.reloadRejected"), "rejected");
+      } else {
+        this.connectorReloads.accept(entry, response.payload, this.connectorReadSequence, Date.now());
+      }
+    } catch (error) {
+      if (epoch !== this.connectorEpoch) return;
+      const incompatible = error instanceof ConnectorProtocolError;
+      this.connectorReloads.finish(entry, "unknown", incompatible ? t("connector.protocolMismatch") : t("settings.host.reloadUnknown", { detail: String(error) }), incompatible ? "incompatible" : "connection-lost");
+    }
+    if (epoch !== this.connectorEpoch) return;
+    this.publishConnectorReloads();
+    // Never turn a read failure into another Reload. A read started before the
+    // acknowledgement cannot settle this receipt, even if it finishes later.
+    void this.refreshConnectors(true);
+  }
+
+  private async handleConnectorAction(
+    action: "removeConnector" | "loginConnector" | "logoutConnector" | "cancelLoginConnector",
+    configKey: string,
+    requestId: string,
+  ): Promise<void> {
+    const epoch = this.connectorEpoch;
+    try {
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch) return;
+      const response = action === "removeConnector"
+        ? await this.deps.messenger.sendRemoveConnector(configKey, context)
+        : action === "loginConnector"
+          ? await this.deps.messenger.sendLoginConnector(configKey, context)
+            : action === "cancelLoginConnector"
+              ? await this.deps.messenger.sendCancelLoginConnector(configKey, context)
+              : await this.deps.messenger.sendLogoutConnector(configKey, context);
+      if (epoch !== this.connectorEpoch) return;
+      this.state = { ...this.state, connectorLogin: { configKey, requestId, phase: response.success && action === "loginConnector" ? "authorizing" : "settled" } };
+      this.state = { ...this.state, error: response.success ? null : response.error ?? t("settings.host.operationFailed"), status: response.success ? action === "loginConnector" ? t("settings.host.authorizing") : t("settings.host.updated") : null };
+      this.postState();
+      await this.refreshConnectors(true);
+    } catch (error) {
+      if (epoch !== this.connectorEpoch) return;
+      this.state = { ...this.state, connectorLogin: { configKey, requestId, phase: "settled" }, error: String(error) };
+      this.postState();
     }
   }
 
   private async handleRemoveModel(modelId: string): Promise<void> {
+    let buildPreferenceCleared = false;
+    const report = async (
+      error: string | null,
+      status: string | null,
+      warnings: string[],
+      success: boolean,
+    ) => {
+      const modelRemovalReceipt = { modelId, success, warnings };
+      // Publish the authoritative operation result before an auxiliary catalog reload.
+      // The form can stop its spinner even if that later read is slow or fails.
+      this.state = {
+        ...this.state,
+        error,
+        modelRemovalReceipt,
+        status,
+        warnings,
+      };
+      this.postState();
+      try {
+        await this.refreshState(error, status, warnings, null, modelRemovalReceipt);
+        if (success) await this.deps.onModelCatalogChanged?.();
+      } catch (refreshError) {
+        // Catalog reads cannot revoke either a successful or rejected delete receipt.
+        const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        this.state = {
+          ...this.state,
+          warnings: [...(this.state.warnings ?? []), `${t("settings.host.modelsLoadFailed")} ${detail}`],
+        };
+        this.postState();
+      }
+    };
+    const failed = async (error: unknown) => {
+      const warnings = buildPreferenceCleared
+        ? [t("settings.host.prefCleared")]
+        : [];
+      await report(String(error), null, warnings, false);
+    };
     try {
-      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      const capabilities = this.buildCapabilities(
+        await this.deps.ensureInitialized(),
+      );
       if (!capabilities.removeModel) {
-        await this.refreshState("Model removal is unavailable for this serve instance.");
+        await failed(t("settings.host.removeUnavailable"));
         return;
       }
+      // This write belongs to the extension host. Await it before asking serve to delete,
+      // so a remembered Build choice cannot point to an ID that no longer exists.
+      buildPreferenceCleared =
+        (await this.deps.clearBuildModelPreference?.(modelId)) === true;
+      this.state = {
+        ...this.state,
+        error: null,
+        modelRemovalReceipt: null,
+        status: t("settings.host.removing", { name: modelId }),
+        warnings: null,
+      };
+      this.postState();
       const response = await this.deps.messenger.sendRemoveModel(modelId);
       if (!response.success) {
-        await this.refreshState(response.error ?? "Unable to remove model.");
+        await failed(response.error ?? t("settings.host.removeFailed"));
         return;
       }
-      await this.refreshState(null, "Model removed.");
-      await this.deps.onModelCatalogChanged?.();
+      const removalWarnings = (response.payload as { warnings?: unknown } | null)
+        ?.warnings;
+      const warnings = Array.isArray(removalWarnings)
+        ? removalWarnings.filter((warning): warning is string => typeof warning === "string")
+        : [];
+      await report(
+        null,
+        warnings.length > 0 ? t("settings.host.removedWarnings") : t("settings.host.removed"),
+        warnings,
+        true,
+      );
     } catch (error) {
-      await this.refreshState(String(error), null);
+      await failed(error);
     }
   }
 
-  private async handleSetProviderKey(envName: string, value: string): Promise<void> {
+  private async handleSetProviderKey(
+    envName: string,
+    value: string,
+  ): Promise<void> {
     try {
-      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      const capabilities = this.buildCapabilities(
+        await this.deps.ensureInitialized(),
+      );
       if (!capabilities.setProviderKey) {
-        await this.refreshState("API key storage is unavailable for this serve instance.");
+        await this.refreshState(
+          t("settings.host.keyStorageUnavailable"),
+        );
         return;
       }
-      const response = await this.deps.messenger.sendSetProviderKey(envName, value);
+      const response = await this.deps.messenger.sendSetProviderKey(
+        envName,
+        value,
+      );
       if (!response.success) {
-        await this.refreshState(response.error ?? "Unable to store API key.");
+        await this.refreshState(response.error ?? t("settings.host.keyStoreFailed"));
         return;
       }
-      await this.refreshState(null, `Saved ${envName}.`);
+      await this.refreshState(null, t("settings.host.savedKey", { name: envName }));
       await this.deps.onModelCatalogChanged?.();
     } catch (error) {
       await this.refreshState(String(error), null);
     }
   }
 
-  private async refreshState(error: string | null = null, status: string | null = null): Promise<void> {
+  private async refreshState(
+    error: string | null = null,
+    status: string | null = null,
+    warnings: string[] | null = null,
+    connectorReceipt: SettingsConnectorReceipt | null = null,
+    modelRemovalReceipt: SettingsModelRemovalReceipt | null = null,
+  ): Promise<void> {
+    if (this.route === "general") {
+      await this.refreshGeneral();
+      return;
+    }
+    if (this.route === "connectors") {
+      this.state = { ...this.state, error: error ?? this.state.error, status: status ?? this.state.status, connectorReceipt: connectorReceipt ?? this.state.connectorReceipt };
+      this.postState();
+      await this.refreshConnectors(true);
+      return;
+    }
+    const viewEpoch = ++this.viewEpoch;
     const initializeResult = await this.deps.ensureInitialized();
     const capabilities = this.buildCapabilities(initializeResult);
     const providerKeysResult = capabilities.listProviderKeys
@@ -442,14 +1366,23 @@ export class SettingsPanel implements vscode.Disposable {
     const modelsResult = capabilities.listModels
       ? await this.fetchModels(this.state.models)
       : { error: null, models: [] };
+    if (viewEpoch !== this.viewEpoch) {
+      return;
+    }
     this.state = {
+      ...this.state,
       capabilities,
       error: error ?? modelsResult.error ?? providerKeysResult.error,
+      expectedCliVersion: this.deps.expectedCliVersion,
+      extensionVersion: this.deps.extensionVersion,
       models: modelsResult.models,
+      modelRemovalReceipt,
       providerKeys: providerKeysResult.providerKeys,
       ready: true,
       route: this.route,
+      serverVersion: initializeResult.serverVersion,
       status,
+      warnings,
     };
     this.postState();
   }
@@ -467,10 +1400,14 @@ export class SettingsPanel implements vscode.Disposable {
       ...this.state,
       capabilities,
       error: error ?? providerKeysResult.error,
+      expectedCliVersion: this.deps.expectedCliVersion,
+      extensionVersion: this.deps.extensionVersion,
       providerKeys: providerKeysResult.providerKeys,
       ready: true,
       route: this.route,
+      serverVersion: initializeResult.serverVersion,
       status,
+      warnings: null,
     };
     this.postState();
   }
@@ -482,7 +1419,7 @@ export class SettingsPanel implements vscode.Disposable {
       const response = await this.deps.messenger.sendListModels();
       if (!response.success) {
         return {
-          error: response.error ?? "Unable to load models.",
+          error: response.error ?? t("settings.host.modelsLoadFailed"),
           models: fallback,
         };
       }
@@ -498,14 +1435,148 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
+  private updateConnectorPoller(): void {
+    const interval = !this.webviewReady || this.route !== "connectors" ? 0
+      : this.connectorReloads.busy || this.state.connectors?.some((entry) => entry.state === "connecting") ? 1000 : 5000;
+    if (interval === this.connectorRefreshInterval) return;
+    if (this.connectorRefreshTimer) clearInterval(this.connectorRefreshTimer);
+    this.connectorRefreshTimer = undefined;
+    this.connectorRefreshInterval = interval;
+    if (interval) this.connectorRefreshTimer = setInterval(() => {
+      if (this.connectorReloads.expire(Date.now())) this.publishConnectorReloads();
+      void this.refreshConnectors();
+    }, interval);
+  }
+
+  private async refreshConnectors(afterCurrent = false): Promise<void> {
+    if (this.connectorRefreshPending) {
+      if (afterCurrent) this.connectorRefreshAgain = true;
+      return this.connectorRefreshPending;
+    }
+    const run = (async () => {
+      do {
+        this.connectorRefreshAgain = false;
+        await this.refreshConnectorSnapshot();
+      } while (this.connectorRefreshAgain && this.route === "connectors");
+    })();
+    this.connectorRefreshPending = run;
+    try { await run; }
+    finally {
+      if (this.connectorRefreshPending === run) this.connectorRefreshPending = undefined;
+      this.updateConnectorPoller();
+    }
+  }
+
+  private async refreshConnectorSnapshot(): Promise<void> {
+    const epoch = this.connectorEpoch;
+    try {
+      const initialized = await this.deps.ensureInitialized();
+      const capabilities = this.buildCapabilities(initialized);
+      if (epoch !== this.connectorEpoch || this.route !== "connectors") return;
+      if (!capabilities.connectorCapabilities?.list) {
+        this.state = { ...this.state, capabilities, ready: true };
+        this.postState();
+        return;
+      }
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch) return;
+      const read = ++this.connectorReadSequence;
+      const response = await this.deps.messenger.sendListConnectors(context);
+      if (epoch !== this.connectorEpoch || read !== this.connectorReadSequence) return;
+      if (!response.success) throw new Error(response.error ?? t("settings.host.connectorsLoadFailed"));
+      const parsed = parseConnectorsPayload(response.payload);
+      const previous = this.state.connectors?.find((entry) => entry.configKey === this.state.selectedConnector);
+      this.connectorReloads.expire(Date.now());
+      this.connectorReloads.observe(parsed.connectors, read);
+      this.state = {
+        ...this.state, capabilities, ready: true,
+        error: isRecord(response.payload) && typeof response.payload.error === "string" ? response.payload.error : null,
+        expectedCliVersion: this.deps.expectedCliVersion, extensionVersion: this.deps.extensionVersion,
+        serverVersion: initialized.serverVersion, connectors: parsed.connectors,
+        connectorProject: parsed.project,
+        connectorConfigPaths: parsed.configPaths, connectorReloads: this.connectorReloads.snapshot(),
+      };
+      const selected = parsed.connectors.find((entry) => entry.configKey === this.state.selectedConnector);
+      const click = selected && this.state.connectorReloads?.[selected.configKey];
+      const waiting = click?.phase === "pending" || click?.phase === "accepted";
+      const filterChanged = Boolean(previous && selected
+        && toolFilterSignature(previous) !== toolFilterSignature(selected));
+      const identityChanged = !selected || selected.state !== "connected" || waiting
+        || previous?.generation !== selected.generation || previous?.attempt !== selected.attempt;
+      if (identityChanged) {
+        this.connectorToolsReadSequence += 1;
+        this.connectorToolsRequested = undefined;
+        this.state = { ...this.state, selectedConnector: selected?.configKey ?? null, connectorTools: [], connectorToolsIdentity: null };
+      } else if (filterChanged) {
+        // A filter-only refresh must not erase the management catalog before its
+        // replacement arrives. Its response still gets a new read sequence.
+        this.connectorToolsReadSequence += 1;
+        this.connectorToolsRequested = undefined;
+      }
+      this.postState();
+      if (selected?.state === "connected" && !waiting) void this.loadConnectorTools(selected.configKey);
+    } catch (error) {
+      if (epoch !== this.connectorEpoch) return;
+      // A failed list is not evidence that recovery failed. Keep its receipt.
+      this.state = { ...this.state, error: String(error), ready: true };
+      this.postState();
+    }
+  }
+
+  private async loadConnectorTools(configKey: string, force = false): Promise<void> {
+    const connector = this.state.connectors?.find((entry) => entry.configKey === configKey);
+    const epoch = this.connectorEpoch;
+    const click = this.state.connectorReloads?.[configKey];
+    if (!connector || connector.state !== "connected" || click?.phase === "pending" || click?.phase === "accepted") {
+      this.state = { ...this.state, connectorTools: [], connectorToolsIdentity: null };
+      this.postState();
+      return;
+    }
+    const identity = JSON.stringify([epoch, configKey, connector.generation, connector.attempt]);
+    if (!force && identity === this.connectorToolsRequested) return;
+    this.connectorToolsRequested = identity;
+    const read = ++this.connectorToolsReadSequence;
+    const current = (): boolean => epoch === this.connectorEpoch && read === this.connectorToolsReadSequence && this.state.selectedConnector === configKey;
+    try {
+      if (connector.compatibilityError) throw new Error(connector.compatibilityError);
+      const context = await this.connectorContext();
+      if (!current()) return;
+      const response = await this.deps.messenger.sendListConnectorTools(configKey, context);
+      if (!current()) return;
+      if (!response.success) throw new Error(response.error ?? t("settings.host.toolsLoadFailed"));
+      const catalog = parseConnectorToolCatalog(response.payload, configKey);
+      const latest = this.state.connectors?.find((entry) => entry.configKey === configKey);
+      if (latest?.state !== "connected" || latest.generation !== catalog.generation || latest.attempt !== catalog.attempt) {
+        // Retry on the existing polling interval, not a hot read/refresh loop
+        // if the remote catalog repeatedly carries inconsistent metadata.
+        this.connectorToolsRequested = undefined;
+        return;
+      }
+      this.state = { ...this.state, connectorTools: catalog.tools, connectorToolsIdentity: { configKey, generation: catalog.generation, attempt: catalog.attempt }, error: null };
+      this.postState();
+    } catch (error) {
+      if (!current()) return;
+      // Deduplicate successful/in-flight reads, not a failed directory lookup.
+      // The existing poller may retry this read; it must never issue Reload.
+      this.connectorToolsRequested = undefined;
+      // A failed read is not proof the source has no tools. Keep the last
+      // management catalog and let the existing poller retry without Reload.
+      this.state = { ...this.state, error: String(error) };
+      this.postState();
+    }
+  }
+
   private async fetchProviderKeys(
     fallback: SettingsProviderKeyView[],
-  ): Promise<{ error: string | null; providerKeys: SettingsProviderKeyView[] }> {
+  ): Promise<{
+    error: string | null;
+    providerKeys: SettingsProviderKeyView[];
+  }> {
     try {
       const response = await this.deps.messenger.sendListProviderKeys();
       if (!response.success) {
         return {
-          error: response.error ?? "Unable to load provider keys.",
+          error: response.error ?? t("settings.host.keysLoadFailed"),
           providerKeys: fallback,
         };
       }
@@ -521,19 +1592,41 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private buildCapabilities(initializeResult: InitializeResult): SettingsCapabilities {
+  private buildCapabilities(
+    initializeResult: InitializeResult,
+  ): SettingsCapabilities {
     return {
-      listModels: hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS),
+      listModels: hasServeCapability(
+        initializeResult,
+        SERVE_CAPABILITY_LIST_MODELS,
+      ),
       listProviderKeys: hasServeCapability(
         initializeResult,
         SERVE_CAPABILITY_LIST_PROVIDER_KEYS,
       ),
-      removeModel: hasServeCapability(initializeResult, SERVE_CAPABILITY_REMOVE_MODEL),
+      removeModel: hasServeCapability(
+        initializeResult,
+        SERVE_CAPABILITY_REMOVE_MODEL,
+      ),
       setProviderKey: hasServeCapability(
         initializeResult,
         SERVE_CAPABILITY_SET_PROVIDER_KEY,
       ),
-      upsertModel: hasServeCapability(initializeResult, SERVE_CAPABILITY_UPSERT_MODEL),
+      upsertModel: hasServeCapability(
+        initializeResult,
+        SERVE_CAPABILITY_UPSERT_MODEL,
+      ),
+      connectorCapabilities: {
+        add: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.add),
+        filter: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.filter),
+        toggle: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.toggle),
+        list: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.list),
+        listTools: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.listTools),
+        login: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.login),
+        reload: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.reload),
+        remove: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.remove),
+        trustProject: hasServeCapability(initializeResult, CONNECTOR_CAPABILITIES.trustProject),
+      },
     };
   }
 
@@ -541,9 +1634,10 @@ export class SettingsPanel implements vscode.Disposable {
     if (!this.panel) {
       return;
     }
+    this.panel.title = `Tomcat ${t("settings.title")}`;
     const frame: SettingsHostFrame = {
       channel: "state",
-      content: this.state,
+      content: { ...this.state, locale: getLocale() },
       messageId: `settings-state-${Date.now()}`,
     };
     void this.panel.webview.postMessage(frame);
@@ -551,7 +1645,11 @@ export class SettingsPanel implements vscode.Disposable {
 
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
-    const assets = resolveWebviewEntryAssets(distRoot, "settings.html", "settings.js");
+    const assets = resolveWebviewEntryAssets(
+      distRoot,
+      "settings.html",
+      "settings.js",
+    );
     if (assets.scripts.length === 0) {
       return this.renderFallbackHtml(
         "Tomcat settings assets are missing. Run `npm run build` in `tomcat-vscode-ext` first.",
@@ -571,16 +1669,16 @@ export class SettingsPanel implements vscode.Disposable {
       )
       .join("\n    ");
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}" data-settings-route="${this.route}">
   <head>
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"
+      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src ${webview.cspSource} 'nonce-${nonce}';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     ${styleTags}
-    <title>Tomcat Settings</title>
+    <title>Tomcat ${t("settings.title")}</title>
   </head>
   <body>
     <div id="root"></div>
@@ -591,7 +1689,7 @@ export class SettingsPanel implements vscode.Disposable {
 
   private renderFallbackHtml(message: string): string {
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${getLocale()}" data-settings-route="${this.route}">
   <body>
     <pre>${message}</pre>
   </body>

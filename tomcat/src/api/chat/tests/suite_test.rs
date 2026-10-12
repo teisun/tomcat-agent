@@ -1,12 +1,16 @@
 use super::super::*;
+use crate::api::chat::has_resumable_tail_ask_question;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
-use crate::api::chat::run_loop::compose_planned_turn_messages;
-use crate::core::session::manager::init_context_state;
+use crate::api::chat::run_loop::{
+    append_planned_messages_with_rehydrate_retry, build_tool_definitions,
+    compose_planned_turn_messages, should_auto_drain_resume,
+};
+use crate::core::session::manager::{init_context_state, MessageAppendSink};
 use crate::SessionEntry;
 use crate::{
-    AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
-    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
-    RetentionPolicy, SessionManager,
+    AgentRunOutcome, AppConfig, AppError, CheckpointDiff, CheckpointError, CheckpointId,
+    CheckpointKind, CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport,
+    CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy, SessionManager,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -14,9 +18,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 fn spawn_single_response_server(
     status: u16,
@@ -79,6 +84,70 @@ impl Drop for EnvGuard {
     }
 }
 
+struct FailFirstAppendInvariantSink {
+    delegate: Arc<dyn MessageAppendSink>,
+    failed_once: AtomicBool,
+}
+
+impl FailFirstAppendInvariantSink {
+    fn new(delegate: Arc<dyn MessageAppendSink>) -> Self {
+        Self {
+            delegate,
+            failed_once: AtomicBool::new(false),
+        }
+    }
+}
+
+impl MessageAppendSink for FailFirstAppendInvariantSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        if !self.failed_once.swap(true, Ordering::SeqCst) {
+            return Err(AppError::invariant(
+                "append_message_chain",
+                "injected once to exercise rehydrate retry",
+            ));
+        }
+        self.delegate.append_message(value)
+    }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.delegate.append_custom_entry(extra)
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.delegate.append_message_with_id(value, forced_id)
+    }
+}
+
+struct AlwaysFailAppendSink;
+
+impl MessageAppendSink for AlwaysFailAppendSink {
+    fn append_message(&self, _value: serde_json::Value) -> Result<String, AppError> {
+        Err(AppError::Permission(
+            "injected ordinary append failure".to_string(),
+        ))
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Err(AppError::Permission(
+            "injected ordinary append failure".to_string(),
+        ))
+    }
+
+    fn append_message_with_id(
+        &self,
+        _value: serde_json::Value,
+        _forced_id: &str,
+    ) -> Result<String, AppError> {
+        Err(AppError::Permission(
+            "injected ordinary append failure".to_string(),
+        ))
+    }
+}
+
 struct CurrentDirGuard {
     _lock: crate::test_support::TestLockGuard<'static>,
     previous: PathBuf,
@@ -103,7 +172,7 @@ impl Drop for CurrentDirGuard {
 }
 
 fn write_session_plugin_fixture(workspace: &Path, plugin_id: &str, activation: &str) {
-    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    let plugin_dir = workspace.join(".agents").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let manifest = json!({
         "id": plugin_id,
@@ -134,10 +203,10 @@ __pi_start_event_loop();
     .expect("write plugin main");
 }
 
-// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 PlanState 过滤。
-// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 PlanState::Chat 时等价）。
+// The request catalog is mode-stable; handlers, not catalog visibility,
+// enforce plan-mode policy.
 fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
-    crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
+    crate::core::plan_runtime::catalog::all_tools_with_policy(false)
 }
 
 #[test]
@@ -159,6 +228,335 @@ fn compose_planned_turn_messages_preserves_auto_turn_follow_up_order() {
     assert_eq!(planned.len(), 2);
     assert_eq!(planned[0].text_content(), first.text_content());
     assert_eq!(planned[1].text_content(), second.text_content());
+}
+
+#[test]
+fn resume_pending_question_command_is_the_only_command_that_auto_drains() {
+    use crate::api::chat::commands::ChatCommandOutcome;
+    use crate::api::chat::run_loop::should_resume_after_command;
+    assert!(should_resume_after_command(
+        &ChatCommandOutcome::ResumePendingQuestion
+    ));
+    assert!(!should_resume_after_command(&ChatCommandOutcome::Handled));
+    assert!(!should_resume_after_command(
+        &ChatCommandOutcome::Continue {
+            line: "normal user input".into(),
+            echo_user: false,
+            history_line: None
+        }
+    ));
+}
+
+#[test]
+fn resume_without_pending_question_does_not_start_a_zero_input_turn() {
+    assert!(
+        !should_auto_drain_resume(true, false),
+        "an assistant-ended transcript has no causal input for another LLM request"
+    );
+    assert!(should_auto_drain_resume(true, true));
+    assert!(!should_auto_drain_resume(false, true));
+}
+
+#[test]
+fn resume_after_healed_dangling_tool_call_waits_for_user_input() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_RESUME_HEALED_TOOL_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "update the deployment manifest"
+        }))
+        .expect("seed user message");
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_crashed_bash",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": r#"{"command":"deploy"}"#
+                }
+            }]
+        }))
+        .expect("seed dangling non-replay-safe tool call");
+
+    let state = init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys")
+        .expect("hydrate heals a dangling tool call");
+
+    assert!(
+        state
+            .messages
+            .last()
+            .is_some_and(|message| message.role == crate::core::llm::ChatMessageRole::Tool),
+        "hydrate must append a durable synthetic tool result for the crashed call"
+    );
+    let has_pending_question = has_resumable_tail_ask_question(&ctx.session_runtime.session)
+        .expect("inspect healed transcript tail");
+    assert!(
+        !has_pending_question,
+        "a healed non-replay-safe tool is not a pending ask_question"
+    );
+    assert!(
+        !should_auto_drain_resume(true, has_pending_question),
+        "--resume must wait for an explicit user message after a healed ordinary tool call"
+    );
+
+    // SAFETY: remove the test-only model credential variable.
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+/// Capture the actual provider boundary; request assembly remains production code.
+#[derive(Default)]
+struct ChatTurnRecorder {
+    requests: Mutex<Vec<crate::ChatRequest>>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::llm::LlmProvider for ChatTurnRecorder {
+    fn provider_name(&self) -> &str {
+        "chat-turn-recorder"
+    }
+
+    async fn chat(
+        &self,
+        _request: crate::ChatRequest,
+    ) -> Result<crate::core::llm::ChatResponse, AppError> {
+        Ok(crate::core::llm::ChatResponse {
+            id: None,
+            choices: vec![crate::core::llm::ChatResponseChoice {
+                index: 0,
+                message: crate::ChatMessage::assistant("Recorded title"),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        request: crate::ChatRequest,
+    ) -> Result<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<crate::core::llm::StreamEvent, AppError>>
+                + Send
+                + Unpin,
+        >,
+        AppError,
+    > {
+        self.requests.lock().unwrap().push(request);
+        Ok(Box::new(tokio_stream::iter(vec![
+            Ok(crate::core::llm::StreamEvent::ContentDelta {
+                delta: "Recorded reply".into(),
+            }),
+            Ok(crate::core::llm::StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }),
+        ])))
+    }
+
+    fn count_tokens(&self, _messages: &[crate::ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+struct ChatTurnResolver {
+    catalog: Arc<crate::core::llm::ModelCatalog>,
+    recorder: Arc<ChatTurnRecorder>,
+}
+
+impl crate::core::llm::LlmResolver for ChatTurnResolver {
+    fn resolve(
+        &self,
+        _scene: crate::core::llm::LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<crate::core::llm::ResolvedCall, AppError> {
+        let entry = self
+            .catalog
+            .lookup_explicit(session_override.unwrap_or("gpt-5.4"))?;
+        Ok(
+            crate::core::llm::ResolvedCall::from_provider_and_entry_unchecked(
+                self.recorder.clone(),
+                &entry,
+            ),
+        )
+    }
+}
+
+fn install_chat_turn_recorder(ctx: &mut ChatContext) -> Arc<ChatTurnRecorder> {
+    let recorder = Arc::new(ChatTurnRecorder::default());
+    ctx.global_services.llm_resolver = Arc::new(ChatTurnResolver {
+        catalog: ctx.global_services.model_catalog.snapshot(),
+        recorder: recorder.clone(),
+    });
+    ctx.session_runtime.suppress_cli_output = true;
+    recorder
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn working_messages_keep_compacted_history_and_current_input_at_tail() {
+    use crate::core::session::{BranchSummaryEntry, TranscriptEntry};
+    const ENV_KEY: &str = "TOMCAT_CHAT_TIMING2_WIRING_TEST_KEY";
+    let _key = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    ctx.config.context.keep_recent_turns = 1;
+    ctx.config.context.layer0_single_result_max_chars = 500;
+    ctx.config.context.layer0_placeholder_threshold_chars = 100;
+    let old_result = "old-result-".repeat(25);
+    let history = [
+        crate::ChatMessage::user("covered user"),
+        crate::ChatMessage::assistant("old full history"),
+        crate::ChatMessage::user("old tool turn"),
+        crate::ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![json!({
+                "id":"old-tool-call", "type":"function",
+                "function":{"name":"read", "arguments":"{\"path\":\"old-tool.txt\"}"}
+            })],
+        ),
+        crate::ChatMessage::tool("old-tool-call", &old_result),
+        crate::ChatMessage::assistant("old tool completed"),
+        crate::ChatMessage::user("latest completed turn"),
+        crate::ChatMessage::assistant("latest completed reply"),
+    ];
+    let ids = history
+        .iter()
+        .map(|message| {
+            ctx.session_runtime
+                .session
+                .append_message(serde_json::to_value(message).unwrap())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let budget = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, None)
+        .unwrap()
+        .limits
+        .input_budget_tokens
+        * 4;
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    state.apply_limits(
+        &ctx.resolve_call(crate::core::llm::LlmScene::Main, None)
+            .unwrap()
+            .limits,
+    );
+    // Below the hard guard: a later over-budget recovery must not hide a broken timing-2 wire.
+    state.update_api_usage((state.context_budget_tokens * 3 / 4) as u32, 0);
+    assert!((0.70..0.80).contains(&state.usage_ratio()));
+    let marker_id = format!("ready-summary-{}", ids[1]);
+    crate::core::session::transcript::append_entry(
+        &transcript_path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(ids[0].clone()),
+            covered_end_id: Some(ids[1].clone()),
+            covered_count: Some(2),
+            is_boundary: Some(false),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+            superseded: false,
+        }),
+    )
+    .unwrap();
+    state
+        .preheat
+        .restore_completed(crate::core::session::manager::CompactionResult {
+            summary_text: "summary replaces old history".into(),
+            covered_start_id: ids[0].clone(),
+            covered_end_id: ids[1].clone(),
+            covered_count: 2,
+            transcript_compaction_entry_id: Some(marker_id),
+            estimated_covered_tokens_before: Some(50),
+            estimated_summary_tokens: Some(5),
+            estimated_tokens_saved: Some(45),
+            preheat_elapsed_ms: 0,
+        });
+    let outcome = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+        &ctx,
+        Some(crate::ChatMessage::user("current user input")),
+        &mut snapshot,
+        &mut state,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "{outcome:?}"
+    );
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    assert!(messages.iter().any(|message| message.kind
+        == crate::core::llm::MessageKind::CompactionSummary
+        && message.text_content() == Some("summary replaces old history")));
+    assert!(messages.iter().any(|message| message.text_content()
+        == Some("[Previous tool result replaced to save context space]")));
+    assert!(messages
+        .iter()
+        .all(|message| message.text_content() != Some("old full history")
+            && message.text_content() != Some(old_result.as_str())));
+    assert_eq!(
+        messages.last().unwrap().kind,
+        crate::core::llm::MessageKind::EphemeralTail
+    );
+    let current = &messages[messages.len() - 2];
+    assert_eq!(current.text_content(), Some("current user input"));
+    let entries = ctx.session_runtime.session.get_entries(64).unwrap();
+    let persisted = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(entry)
+                if entry.message["role"] == "user"
+                    && entry.message["content"] == "current user input" =>
+            {
+                Some(entry)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted.len(),
+        1,
+        "compaction must not append the current input twice"
+    );
+    assert_eq!(current.msg_id, persisted[0].id);
+    assert_eq!(state.session_obs.compaction_count, 1);
+    assert!(state
+        .messages
+        .iter()
+        .any(|message| message.text_content() == Some("summary replaces old history")));
+    assert_eq!(
+        state
+            .messages
+            .last()
+            .and_then(crate::ChatMessage::text_content),
+        Some("Recorded reply")
+    );
+    assert!(state
+        .messages
+        .iter()
+        .all(|message| message.kind != crate::core::llm::MessageKind::EphemeralTail));
 }
 
 #[test]
@@ -206,7 +604,7 @@ fn build_tool_definitions_contains_config_tools() {
 }
 
 #[test]
-fn build_tool_definitions_default_view_excludes_plan_only_tools() {
+fn build_tool_definitions_default_view_includes_plan_tools_for_handler_policy() {
     let defs = build_tool_definitions_default_view();
     let names: Vec<String> = defs
         .iter()
@@ -214,10 +612,303 @@ fn build_tool_definitions_default_view_excludes_plan_only_tools() {
         .collect();
     for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
         assert!(
-            !names.contains(&plan_tool.to_string()),
-            "CHAT 默认视图不应暴露 plan_only 工具 {plan_tool}, got: {names:?}"
+            names.contains(&plan_tool.to_string()),
+            "stable tool surface must include {plan_tool}, got: {names:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn tool_catalog_is_identical_across_all_mode_and_executing_combinations() {
+    const ENV_KEY: &str = "TOMCAT_STABLE_TOOL_SURFACE_TEST_KEY";
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let chat = build_tool_definitions(&ctx).await;
+
+    ctx.session_runtime
+        .plan_runtime
+        .enter_plan()
+        .expect("enter Plan mode");
+    let planning = build_tool_definitions(&ctx).await;
+
+    ctx.session_runtime
+        .plan_runtime
+        .exit_plan()
+        .expect("return to Chat mode");
+    ctx.session_runtime.plan_runtime.seed_active_plan_for_test(
+        "executing-catalog-test".to_string(),
+        crate::core::plan_runtime::file_store::PlanFileState::Executing,
+    );
+    let executing = build_tool_definitions(&ctx).await;
+
+    let planning_names = planning
+        .iter()
+        .filter_map(|tool| tool.get("function")?.get("name")?.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        !planning_names.contains("package_install"),
+        "package_install must be hidden from a planning prompt"
+    );
+    assert_eq!(
+        serde_json::to_string(&chat).expect("serialize tools"),
+        serde_json::to_string(&executing).expect("serialize tools"),
+        "the actual LLM tool array must not change when a plan becomes executing"
+    );
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn mcp_connection_lifecycle_keeps_prompt_snapshot_until_source_removed() {
+    const ENV_KEY: &str = "TOMCAT_MCP_PREFIX_STABILITY_TEST_KEY";
+    let _api_key = EnvGuard::set(ENV_KEY, "stub");
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace directory");
+
+    let mut cfg = AppConfig::default();
+    cfg.connector.enabled = true;
+    cfg.storage.work_dir = Some(dir.path().join("work").to_string_lossy().into_owned());
+    crate::test_support::write_models_override(
+        dir.path().join("work").as_path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)],
+    );
+    let mcp_config_path = dir.path().join("work").join("mcp.json");
+    fs::create_dir_all(mcp_config_path.parent().expect("MCP config parent"))
+        .expect("MCP config directory");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp/fake_stdio_server.mjs");
+    fs::write(
+        &mcp_config_path,
+        json!({
+            "mcpServers": {
+                "fake": {
+                    "command": "node",
+                    "args": [fixture],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write MCP config");
+
+    let ctx = ChatContext::from_config_with_overrides(
+        cfg,
+        crate::api::chat::ChatContextOverrides::default().with_session_cwd_override(workspace),
+    )
+    .expect("chat context");
+    let budget = crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let connecting = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let connectors = ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .expect("connector registry")
+        .clone();
+
+    let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < ready_deadline {
+        if !connectors.mcp_manager().list_servers().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !connectors.mcp_manager().list_servers().is_empty(),
+        "fake MCP must become ready to exercise the lifecycle transition; statuses={:?}",
+        connectors
+            .mcp_manager()
+            .statuses()
+            .into_iter()
+            .map(|status| format!("{}:{}", status.name, status.state.code()))
+            .collect::<Vec<_>>()
+    );
+    let ready = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+
+    connectors
+        .mcp_manager()
+        .remove_configured_server("fake", &ctx.config)
+        .expect("disconnect fake MCP");
+    assert!(
+        connectors.mcp_manager().list_servers().is_empty(),
+        "removed source must disappear from the live deferred catalog"
+    );
+    let disconnected = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+
+    // Connection readiness is a runtime transition and must not change the
+    // prompt. Removing the only configured source is different: it disables
+    // connector discovery and intentionally removes its four host tools.
+    assert_eq!(
+        ready.system_text(),
+        connecting.system_text(),
+        "MCP connection readiness may not change the system prompt prefix"
+    );
+    assert_eq!(
+        ready.tool_definitions(),
+        connecting.tool_definitions(),
+        "MCP connection readiness may not change the function-definition prefix"
+    );
+    assert_eq!(
+        ready.signature(),
+        connecting.signature(),
+        "MCP connection readiness may not change the cache signature"
+    );
+    assert_ne!(disconnected.signature(), connecting.signature());
+    assert!(disconnected
+        .tool_definitions()
+        .iter()
+        .all(|definition| definition["function"]["name"] != "tool_search"));
+    assert!(
+        connecting
+            .tool_definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"] == "tool_search"),
+        "the constant discovery entry remains available before connection"
+    );
+    assert!(
+        connecting.tool_definitions().iter().all(|definition| {
+            definition["function"]["name"]
+                .as_str()
+                .is_none_or(|name| name != "mcp__fake__capture")
+        }),
+        "the concrete MCP catalog must never enter the prompt-facing tool array"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn request_prefix_is_byte_identical_across_turns() {
+    const ENV_KEY: &str = "TOMCAT_RUNTIME_TAIL_PREFIX_TEST_KEY";
+    let _key = EnvGuard::set(ENV_KEY, "stub");
+    let (dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let budget = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, None)
+        .unwrap()
+        .limits
+        .input_budget_tokens
+        * 4;
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    for (index, input) in ["first request", "after grant", "in plan", "after plan"]
+        .into_iter()
+        .enumerate()
+    {
+        match index {
+            1 => {
+                ctx.session_runtime.session_grants.add(
+                    dir.path().join("granted-after-turn-start"),
+                    crate::core::permission::GrantTrigger::UserConfirm,
+                );
+            }
+            2 => {
+                ctx.session_runtime.plan_runtime.enter_plan().unwrap();
+            }
+            3 => {
+                ctx.session_runtime.plan_runtime.exit_plan().unwrap();
+            }
+            _ => {}
+        }
+        let outcome = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+            &ctx,
+            Some(crate::ChatMessage::user(input)),
+            &mut snapshot,
+            &mut state,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, AgentRunOutcome::Completed(_)),
+            "{outcome:?}"
+        );
+    }
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        4,
+        "each actual Chat turn must reach the provider"
+    );
+    let initial = &requests[0];
+    for (index, request) in requests.iter().enumerate().skip(1) {
+        let previous = &requests[index - 1];
+        // A grant only changes the tail. Planning deliberately changes tool docs too;
+        // exclude that system message, not the durable conversation, in that case.
+        let start = usize::from(previous.tools != request.tools);
+        let stable_len = previous.messages.len() - 1;
+        assert!(
+            serde_json::to_vec(&previous.messages[start..stable_len]).unwrap()
+                == serde_json::to_vec(&request.messages[start..stable_len]).unwrap(),
+            "turn {index}: the existing history/prefix changed"
+        );
+        assert_eq!(
+            request.messages.last().unwrap().kind,
+            crate::core::llm::MessageKind::EphemeralTail
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .filter(|message| message.kind == crate::core::llm::MessageKind::EphemeralTail)
+                .count()
+                == 1
+        );
+        assert_eq!(request.cache_key, initial.cache_key);
+    }
+    assert!(
+        initial.cache_key.is_some(),
+        "exercise the production cache-key wiring"
+    );
+    assert_eq!(initial.tools, requests[1].tools);
+    assert_eq!(initial.tools, requests[3].tools);
+    assert_eq!(
+        initial.messages[0].text_content(),
+        requests[3].messages[0].text_content()
+    );
+    assert_ne!(
+        initial.messages.last().unwrap().text_content(),
+        requests[1].messages.last().unwrap().text_content()
+    );
+    assert_ne!(
+        requests[1].messages.last().unwrap().text_content(),
+        requests[2].messages.last().unwrap().text_content()
+    );
+    let has_install = |request: &crate::ChatRequest| {
+        request
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "package_install")
+    };
+    assert!(has_install(initial));
+    assert!(
+        !has_install(&requests[2]),
+        "Planning changes the actual tool surface: refresh the shared snapshot"
+    );
+    assert!(has_install(&requests[3]));
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text_content() == Some("Recorded reply")),
+        "history appended by the previous real turn must reach the next request"
+    );
+    assert!(
+        !fs::read_to_string(transcript_path)
+            .unwrap()
+            .contains("<workspace_state>"),
+        "runtime workspace state is ephemeral, not durable history"
+    );
+    assert!(state
+        .messages
+        .iter()
+        .all(|message| message.kind != crate::core::llm::MessageKind::EphemeralTail));
 }
 
 #[test]
@@ -262,6 +953,7 @@ fn effective_model_uses_session_override() {
         updated_at: 0,
         session_file: None,
         cwd: None,
+        project_root: None,
         thinking_level: None,
         model_override: Some("gpt-5.2".to_string()),
         input_tokens: None,
@@ -290,6 +982,7 @@ fn effective_model_uses_global_when_no_override() {
         updated_at: 0,
         session_file: None,
         cwd: None,
+        project_root: None,
         thinking_level: None,
         model_override: None,
         input_tokens: None,
@@ -524,9 +1217,13 @@ fn record_failure_does_not_break_turn() {
     });
     let mut state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
-    let messages = vec![crate::ChatMessage::assistant(
-        "checkpoint failure should be nonfatal",
-    )];
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![crate::ChatMessage::assistant(
+            "checkpoint failure should be nonfatal",
+        )],
+    );
 
     let appended_ids =
         persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::TurnEnd).unwrap();
@@ -549,6 +1246,94 @@ fn record_failure_does_not_break_turn() {
     assert!(detail.contains("CommandTimedOut"));
 
     // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+struct SlowRecordStore {
+    calls: Arc<AtomicUsize>,
+    sleep: Duration,
+}
+
+impl CheckpointStore for SlowRecordStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        std::thread::sleep(self.sleep);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CheckpointId::null())
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn prune(&self, _retention: RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn checkpoint_recording_does_not_block_turn_persistence_on_runtime() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_CKPT_BACKGROUND_RECORD_KEY";
+
+    let (_dir, mut ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let calls = Arc::new(AtomicUsize::new(0));
+    ctx.scope_services.checkpoint_store = Arc::new(SlowRecordStore {
+        calls: Arc::clone(&calls),
+        sleep: Duration::from_millis(500),
+    });
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let started = Instant::now();
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![crate::ChatMessage::assistant(
+            "durable before background checkpoint",
+        )],
+    );
+    let appended_ids = persist_turn_result(&ctx, &mut state, messages, CheckpointKind::TurnEnd)
+        .expect("checkpoint scheduling must not break turn persistence");
+
+    assert_eq!(appended_ids.len(), 1);
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "checkpoint record must not delay returning control to the turn"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "record runs after persist_turn_result returns"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background checkpoint should eventually run");
+
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
@@ -651,7 +1436,10 @@ fn chat_context_attaches_cli_ask_question_panel() {
     unsafe { std::env::set_var(ENV_KEY, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     assert!(
-        ctx.session_runtime.plan_runtime.ask_question_panel().is_some(),
+        ctx.session_runtime
+            .plan_runtime
+            .ask_question_panel()
+            .is_some(),
         "CLI ChatContext 应默认挂载 AskQuestionPanel，避免真 LLM 调 ask_question 时直接报工具不可用"
     );
     // SAFETY: 清理测试环境变量。
@@ -748,6 +1536,74 @@ fn checkpoint_recording_test_context(
     (dir, ctx, transcript_path)
 }
 
+fn pre_persist_turn_messages(
+    ctx: &ChatContext,
+    state: &mut crate::ContextState,
+    messages: Vec<crate::ChatMessage>,
+) -> Vec<crate::ChatMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            let row_id = ctx
+                .session_runtime
+                .session
+                .append_message(serde_json::to_value(&message).expect("serialize test message"))
+                .expect("pre-persist test message");
+            message.msg_id = Some(row_id);
+            state.messages.push(message.clone());
+            message
+        })
+        .collect()
+}
+
+fn chat_turn_test_context(
+    entries: &[crate::test_support::TestModelOverride<'_>],
+) -> (tempfile::TempDir, ChatContext, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    crate::test_support::write_models_override(dir.path(), entries);
+
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
+    ctx.session_runtime
+        .session
+        .create_session(&session_key, None)
+        .unwrap();
+    let transcript_path = ctx
+        .session_runtime
+        .session
+        .current_transcript_path()
+        .unwrap()
+        .expect("transcript path");
+    (dir, ctx, transcript_path)
+}
+
+fn pdf_user_message() -> crate::ChatMessage {
+    let pdf_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"%PDF-1.4\n%%EOF\n",
+    );
+    crate::ChatMessage::user_with_parts(vec![
+        crate::ChatMessageContentPart::text("Read this PDF"),
+        crate::ChatMessageContentPart::file_base64_data("brief.pdf", "application/pdf", pdf_b64)
+            .expect("build pdf part"),
+    ])
+}
+
+fn image_user_message() -> crate::ChatMessage {
+    let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"fake-png");
+    crate::ChatMessage::user_with_parts(vec![
+        crate::ChatMessageContentPart::text("Inspect this image"),
+        crate::ChatMessageContentPart::image_base64_data("image/png", image_b64)
+            .expect("build image part"),
+    ])
+}
+
 #[test]
 fn append_message_chain_invariant_is_nonfatal() {
     let err = crate::AppError::invariant("append_message_chain", "tool tail broken");
@@ -842,6 +1698,125 @@ fn append_message_chain_rehydrate_reloads_context_from_transcript() {
     );
 
     // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn rehydrate_during_planned_append_retakes_list() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_RETAKE_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "durable history"
+        }))
+        .expect("seed durable history");
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let mut messages = std::mem::take(&mut state.messages);
+    let planned = vec![
+        crate::ChatMessage::user("first planned message"),
+        crate::ChatMessage::user("second planned message"),
+    ];
+    let sink: Arc<dyn MessageAppendSink> = Arc::new(FailFirstAppendInvariantSink::new(Arc::clone(
+        &ctx.session_runtime.message_append_sink,
+    )));
+
+    let first_appended_id = append_planned_messages_with_rehydrate_retry(
+        &ctx,
+        "sys",
+        &ctx.config.context,
+        &planned,
+        &sink,
+        &mut state,
+        &mut messages,
+    )
+    .expect("one append-chain invariant should rehydrate and retry");
+
+    assert!(
+        first_appended_id.is_some(),
+        "the retry must report the durable id of the first planned message"
+    );
+    assert!(
+        state.messages.is_empty(),
+        "rehydrated parking state must be taken back into the working list before retrying"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter_map(crate::ChatMessage::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "durable history",
+            "first planned message",
+            "second planned message",
+        ],
+        "rehydrate must preserve old history and continue every unappended planned message once"
+    );
+    let durable_ids: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.msg_id.as_deref())
+        .collect();
+    assert_eq!(durable_ids.len(), 3);
+    assert_eq!(
+        durable_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        durable_ids.len(),
+        "the retry must not duplicate durable message ids"
+    );
+
+    // SAFETY: remove the test-only model credential variable.
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn append_failure_without_rehydrate_parks_list_back() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_PARK_ON_ERROR_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "durable history"
+        }))
+        .expect("seed durable history");
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let mut messages = std::mem::take(&mut state.messages);
+    let before = serde_json::to_value(&messages).expect("serialize parked list baseline");
+    let sink: Arc<dyn MessageAppendSink> = Arc::new(AlwaysFailAppendSink);
+
+    let error = append_planned_messages_with_rehydrate_retry(
+        &ctx,
+        "sys",
+        &ctx.config.context,
+        &[crate::ChatMessage::user("new message")],
+        &sink,
+        &mut state,
+        &mut messages,
+    )
+    .expect_err("ordinary append error must propagate");
+
+    assert!(
+        matches!(error, AppError::Permission(_)),
+        "a non-invariant append error must not attempt rehydration"
+    );
+    assert!(
+        messages.is_empty(),
+        "after an error the local owner must surrender the list to the parking slot"
+    );
+    assert_eq!(
+        serde_json::to_value(&state.messages).expect("serialize parked list"),
+        before,
+        "an append failure must return the taken list to ContextState unchanged"
+    );
+
+    // SAFETY: remove the test-only model credential variable.
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
@@ -1092,20 +2067,24 @@ fn failed_turn_recovery_is_idempotent_for_the_same_failed_tail() {
     let mut state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     let error = crate::AppError::Llm("gateway 403".to_string());
-    assert!(crate::api::chat::run_loop::recover_context_state_after_failed_turn(
-        &ctx,
-        &ctx.config.context,
-        "sys",
-        &error,
-        &mut state,
-    ));
-    assert!(crate::api::chat::run_loop::recover_context_state_after_failed_turn(
-        &ctx,
-        &ctx.config.context,
-        "sys",
-        &error,
-        &mut state,
-    ));
+    assert!(
+        crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+            &ctx,
+            &ctx.config.context,
+            "sys",
+            &error,
+            &mut state,
+        )
+    );
+    assert!(
+        crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+            &ctx,
+            &ctx.config.context,
+            "sys",
+            &error,
+            &mut state,
+        )
+    );
 
     let texts: Vec<String> = state
         .messages
@@ -1119,7 +2098,10 @@ fn failed_turn_recovery_is_idempotent_for_the_same_failed_tail() {
         .iter()
         .filter(|entry| matches!(entry, crate::core::TranscriptEntry::Error(_)))
         .count();
-    assert_eq!(error_count, 1, "同一 failed tail 重复恢复不应重复追加 Error");
+    assert_eq!(
+        error_count, 1,
+        "同一 failed tail 重复恢复不应重复追加 Error"
+    );
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
@@ -1144,7 +2126,14 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
 
     assert_eq!(
         crate::api::chat::render_error_message(&err),
-        "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
+        format!(
+            "{} · PS-SHA-01JfN78 · Request-Id req_turn2",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
 
     let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
@@ -1166,8 +2155,21 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
         .expect("expected structured error entry");
     assert_eq!(
         error_entry.summary,
-        "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
+        format!(
+            "{} · PS-SHA-01JfN78 · Request-Id req_turn2",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
+    assert_eq!(
+        error_entry.failure_kind.as_deref(),
+        Some("authentication"),
+        "an isolated 403 must not be misclassified as billing"
+    );
+    assert_eq!(error_entry.failure_domain.as_deref(), Some("account"));
     assert!(error_entry.detail.contains("Request-Id: req_turn2"));
     assert!(error_entry.detail.contains("Host: PS-SHA-01JfN78"));
     assert!(error_entry.detail.contains("Authorization: [REDACTED]"));
@@ -1192,6 +2194,28 @@ fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn failed_turn_recovery_renders_actionable_normalized_failure_messages() {
+    let billing = crate::infra::error::llm_http_status_error(
+        "transit",
+        403,
+        r#"{"error":{"code":"insufficient_quota","message":"insufficient balance"}}"#,
+    );
+    assert_eq!(
+        crate::api::chat::render_error_message(&billing),
+        crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "runtime.billing", &[])
+    );
+
+    let overflow = crate::infra::error::llm_stream_terminal_error(
+        "transit",
+        "request exceeds the context window",
+        Some("context_length_exceeded".to_string()),
+    );
+    let rendered = crate::api::chat::render_error_message(&overflow);
+    assert!(rendered.contains("/compact"));
+    assert!(rendered.contains("/restore"));
 }
 
 #[test]
@@ -1286,7 +2310,14 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
 
     assert_eq!(
         crate::api::chat::render_error_message(&err),
-        "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
+        format!(
+            "{} · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
 
     let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
@@ -1296,7 +2327,10 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
         &err,
         &mut state,
     );
-    assert!(changed, "真实 403 失败轮应触发上下文恢复并落一条 Error 记录");
+    assert!(
+        changed,
+        "真实 403 失败轮应触发上下文恢复并落一条 Error 记录"
+    );
 
     let error_entry = crate::core::session::read_entries_tail(&transcript_path, 8)
         .unwrap()
@@ -1313,9 +2347,18 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
     );
     assert_eq!(
         error_entry.summary,
-        "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
+        format!(
+            "{} · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663",
+            crate::infra::i18n::tr_in(
+                crate::infra::i18n::Locale::En,
+                "runtime.apiError",
+                &[("status", "403")]
+            )
+        )
     );
-    assert!(error_entry.detail.contains("Node information: PS-CZX-01wky52"));
+    assert!(error_entry
+        .detail
+        .contains("Node information: PS-CZX-01wky52"));
     assert!(error_entry
         .detail
         .contains("URL: https://aigateway.sunmi.com/v1/responses"));
@@ -1339,7 +2382,11 @@ fn turn_end_writes_checkpoint() {
     });
     let mut state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
-    let messages = vec![crate::ChatMessage::assistant("turn end reply")];
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![crate::ChatMessage::assistant("turn end reply")],
+    );
 
     let appended_ids =
         persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::TurnEnd).unwrap();
@@ -1383,10 +2430,14 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
         "type": "function",
         "function": { "name": "read", "arguments": r#"{"path":"note.txt"}"# }
     })];
-    let messages = vec![
-        crate::ChatMessage::assistant_with_tool_calls(Some("partial reply"), tool_calls),
-        crate::ChatMessage::tool("call_1", "tool result"),
-    ];
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![
+            crate::ChatMessage::assistant_with_tool_calls(Some("partial reply"), tool_calls),
+            crate::ChatMessage::tool("call_1", "tool result"),
+        ],
+    );
 
     let appended_ids =
         persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::Interrupt).unwrap();
@@ -1413,53 +2464,202 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
 }
 
 #[test]
-fn user_prompt_for_mode_formats_all_states() {
-    use crate::core::plan_runtime::PlanState;
+fn user_prompt_for_mode_separates_session_mode_from_plan_lifecycle() {
+    use crate::core::plan_runtime::{file_store::PlanFileState, ActivePlan};
+    use crate::core::session::AgentMode;
 
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Chat),
+        super::super::prompt::user_prompt_for_mode(AgentMode::Chat, None),
         "u[Chat]> "
     );
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Planning),
-        "u[Plan:planning]> "
+        super::super::prompt::user_prompt_for_mode(AgentMode::Plan, None),
+        "u[Plan]> "
     );
+    let executing = ActivePlan {
+        id: "p1".into(),
+        path: std::path::PathBuf::from("/tmp/p1.plan.md"),
+        state: PlanFileState::Executing,
+    };
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Executing {
-            plan_id: "p1".into(),
-        }),
-        "u[Plan:executing]> "
-    );
-    assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Pending {
-            plan_id: "p1".into(),
-        }),
-        "u[Plan:pending]> "
-    );
-    assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanState::Completed {
-            plan_id: "p1".into(),
-        }),
-        "u[Chat]> "
+        super::super::prompt::user_prompt_for_mode(AgentMode::Chat, Some(&executing)),
+        "u[Chat·plan:executing]> "
     );
 }
 
 #[test]
-fn agent_prompt_for_mode_uses_agent_prefix_and_hides_plan_id() {
-    use crate::core::plan_runtime::PlanState;
+fn plan_reminders_follow_session_mode_and_active_plan_lifecycle() {
+    use crate::api::chat::run_loop::render_plan_runtime_reminder;
+    use crate::core::plan_runtime::{file_store::PlanFileState, PlanRuntime};
 
+    let runtime = PlanRuntime::new("plan-reminder-test");
+    assert!(
+        render_plan_runtime_reminder(&runtime).is_none(),
+        "plain Chat must not receive a plan reminder"
+    );
+
+    runtime.enter_plan().expect("enter Plan mode");
+    let planner = render_plan_runtime_reminder(&runtime).expect("Plan mode reminder");
+    assert!(planner.contains("<system_reminder"));
+    assert!(
+        planner.to_lowercase().contains("plan"),
+        "Plan mode must receive planner guidance"
+    );
+
+    runtime.exit_plan().expect("return to Chat mode");
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Executing);
+    let executor = render_plan_runtime_reminder(&runtime).expect("executor reminder");
+    assert!(executor.contains("plan-1"));
+    assert!(
+        executor.contains("<system_reminder"),
+        "an executing plan must receive executor guidance"
+    );
+
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Completed);
+    assert!(
+        render_plan_runtime_reminder(&runtime).is_none(),
+        "completion removes executor guidance without a separate drop action"
+    );
+
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Pending);
+    assert!(
+        render_plan_runtime_reminder(&runtime).is_none(),
+        "parking to pending removes executor guidance"
+    );
+
+    runtime.seed_active_plan_for_test("plan-1".into(), PlanFileState::Executing);
+    assert!(
+        render_plan_runtime_reminder(&runtime)
+            .as_deref()
+            .is_some_and(|reminder| reminder.contains("plan-1")),
+        "resuming execution restores executor guidance"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn validate_capabilities_rejects_pdf_before_appending_user_message() {
+    const ENV_KEY: &str = "TOMCAT_VALIDATE_PDF_BEFORE_APPEND_KEY";
+    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, ctx, transcript_path) =
+        chat_turn_test_context(&[crate::test_support::TestModelOverride {
+            files: false,
+            ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+        }]);
+    let before = fs::read(&transcript_path).expect("read transcript before");
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let outcome = run_chat_turn_with_message(
+        &ctx,
+        Some(pdf_user_message()),
+        "sys",
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("turn outcome");
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let after = fs::read(&transcript_path).expect("read transcript after");
     assert_eq!(
-        super::super::prompt::agent_prompt_for_mode("main", &PlanState::Chat),
-        "agent.main> "
+        before, after,
+        "capability reject 不应把这条 user turn 写进 transcript"
+    );
+    let rendered = String::from_utf8_lossy(&after);
+    assert!(!rendered.contains("brief.pdf"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn validate_capabilities_accepts_pdf_when_files_enabled() {
+    const ENV_KEY: &str = "TOMCAT_VALIDATE_PDF_ENABLED_KEY";
+    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let _no_proxy = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
+    let _no_proxy_lower = EnvGuard::set("no_proxy", "127.0.0.1,localhost");
+    let (base_url, hits, handle) = spawn_single_response_server(404, r#"{"error":"not found"}"#);
+    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[
+        crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+            .with_base_url(&base_url),
+    ]);
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let outcome = run_chat_turn_with_message(
+        &ctx,
+        Some(pdf_user_message()),
+        "sys",
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("turn outcome");
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let rendered = fs::read_to_string(&transcript_path).expect("read transcript after");
+    assert!(
+        rendered.contains("brief.pdf"),
+        "正常路径应保留 user transcript"
     );
     assert_eq!(
-        super::super::prompt::agent_prompt_for_mode(
-            "main",
-            &PlanState::Executing {
-                plan_id: "ship-001".into(),
-            }
-        ),
-        "agent.main[Plan:executing]> "
+        hits.load(Ordering::SeqCst),
+        1,
+        "通过校验后应实际发起一次请求"
+    );
+    handle.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn validate_capabilities_rejects_image_before_appending_user_message() {
+    const ENV_KEY: &str = "TOMCAT_VALIDATE_IMAGE_BEFORE_APPEND_KEY";
+    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, ctx, transcript_path) =
+        chat_turn_test_context(&[crate::test_support::TestModelOverride {
+            vision: false,
+            ..crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
+        }]);
+    let before = fs::read(&transcript_path).expect("read transcript before");
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let outcome = run_chat_turn_with_message(
+        &ctx,
+        Some(image_user_message()),
+        "sys",
+        &mut context_state,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("turn outcome");
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let after = fs::read(&transcript_path).expect("read transcript after");
+    assert_eq!(
+        before, after,
+        "vision reject 不应把这条 user turn 写进 transcript"
+    );
+    let rendered = String::from_utf8_lossy(&after);
+    assert!(!rendered.contains("image/png"));
+}
+
+#[test]
+fn agent_prompt_for_mode_uses_agent_prefix_and_hides_plan_id() {
+    use crate::core::plan_runtime::{file_store::PlanFileState, ActivePlan};
+    use crate::core::session::AgentMode;
+
+    assert_eq!(
+        super::super::prompt::agent_prompt_for_mode("main", AgentMode::Chat, None),
+        "agent.main> "
+    );
+    let executing = ActivePlan {
+        id: "ship-001".into(),
+        path: std::path::PathBuf::from("/tmp/ship-001.plan.md"),
+        state: PlanFileState::Executing,
+    };
+    assert_eq!(
+        super::super::prompt::agent_prompt_for_mode("main", AgentMode::Chat, Some(&executing)),
+        "agent.main[Chat·plan:executing]> "
     );
 }
 
@@ -1489,10 +2689,17 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
     unsafe { std::env::set_var("TOMCAT_CHAT_CLEANUP_TEST_KEY", "stub") };
 
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let runtime = ctx
+    let entry = ctx
         .session_runtime
-        .openai_files_runtime
-        .as_ref()
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())
+        .expect("session lookup should succeed")
+        .expect("current session should exist");
+    let resolved = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, Some(&entry))
+        .expect("main model should resolve");
+    let runtime = ctx
+        .openai_files_runtime_for(&resolved)
         .expect("openai-responses should expose files runtime");
     runtime.enqueue_delete("file-chat-cleanup".to_string(), Some(10), Some(1), "test");
     assert!(runtime.pending_cleanup_count() >= 1);
@@ -1555,14 +2762,11 @@ async fn cleanup_plugin_sessions_on_session_end_releases_current_session_vm() {
         .current_session_id()
         .expect("current session id query")
         .expect("current session id");
-    let instance_id = format!("{session_id}/{PLUGIN_ID}");
-
-    if !plugin_manager.has_session_vm(&session_id, PLUGIN_ID) {
-        plugin_manager
-            .start_session_vm(&session_id, PLUGIN_ID)
-            .await
-            .expect("start session vm");
-    }
+    let instance_id = plugin_manager
+        .start_session_vm(&session_id, PLUGIN_ID)
+        .await
+        .expect("start or reuse session vm")
+        .instance_id;
 
     assert!(
         plugin_manager.has_session_vm(&session_id, PLUGIN_ID),

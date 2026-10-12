@@ -1,6 +1,7 @@
 use super::helpers::{parse_chat_request, parse_tool, plugin_id_from_instance};
 use super::types::HostApiDispatcher;
-use crate::core::{ChatRequest, EditOperation, LlmProvider, LlmScene, StreamEvent};
+use crate::core::tools::primitive::{BashTaskOutputChunk, BashTaskRegistry};
+use crate::core::{ChatRequest, EditOperation, LlmScene, ResolvedCall, StreamEvent};
 use crate::ext::host_binding::HostResponse;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventListenerId, ScopedEventEmitter};
@@ -8,20 +9,86 @@ use dashmap::mapref::entry::Entry;
 use futures_util::StreamExt;
 use std::sync::Arc;
 
+const HOST_TASK_OUTPUT_BLOCK_DEFAULT_WAIT_MS: u64 = 5_000;
+const HOST_TASK_OUTPUT_BLOCK_MIN_WAIT_MS: u64 = 5_000;
+const HOST_TASK_OUTPUT_BLOCK_MAX_WAIT_MS: u64 = 60_000;
+const HOST_TASK_OUTPUT_WAIT_TAIL_MAX_BYTES: u64 = 4_096;
+
+fn clamp_host_task_output_wait_ms(wait_ms_raw: Option<u64>) -> u64 {
+    match wait_ms_raw {
+        Some(0) => HOST_TASK_OUTPUT_BLOCK_MIN_WAIT_MS,
+        Some(v) => v.clamp(
+            HOST_TASK_OUTPUT_BLOCK_MIN_WAIT_MS,
+            HOST_TASK_OUTPUT_BLOCK_MAX_WAIT_MS,
+        ),
+        None => HOST_TASK_OUTPUT_BLOCK_DEFAULT_WAIT_MS,
+    }
+}
+
+async fn read_task_output_blocking(
+    registry: &Arc<BashTaskRegistry>,
+    task_id: &str,
+    since: Option<u64>,
+    wait_ms: u64,
+) -> Result<serde_json::Value, AppError> {
+    let since_value = since.unwrap_or(0);
+    let wake_reason = match tokio::time::timeout(
+        std::time::Duration::from_millis(wait_ms),
+        registry.wait_for_finish(task_id),
+    )
+    .await
+    {
+        Ok(wait) => {
+            wait?;
+            return chunk_with_wake_reason(
+                registry.read_output(task_id, Some(since_value)).await?,
+                "finished",
+            );
+        }
+        Err(_) => "wait_window_elapsed",
+    };
+    let snapshot = registry
+        .read_output_tail(
+            task_id,
+            Some(since_value),
+            HOST_TASK_OUTPUT_WAIT_TAIL_MAX_BYTES,
+        )
+        .await?;
+    if snapshot.finished {
+        chunk_with_wake_reason(
+            registry.read_output(task_id, Some(since_value)).await?,
+            "finished",
+        )
+    } else {
+        chunk_with_wake_reason(snapshot, wake_reason)
+    }
+}
+
+fn chunk_with_wake_reason(
+    chunk: BashTaskOutputChunk,
+    wake_reason: &str,
+) -> Result<serde_json::Value, AppError> {
+    let mut value = serde_json::to_value(chunk).map_err(AppError::Serialize)?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.insert(
+            "wakeReason".to_string(),
+            serde_json::Value::String(wake_reason.to_string()),
+        );
+    }
+    Ok(value)
+}
+
 impl HostApiDispatcher {
-    fn llm_for_request(&self, req: &ChatRequest) -> Result<Arc<dyn LlmProvider>, AppError> {
+    fn resolve_chat_call(&self, req: &ChatRequest) -> Result<ResolvedCall, AppError> {
+        let resolver = self
+            .llm_resolver
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin("LlmResolver not configured (007)".into()))?;
         let model = req.model.trim();
         if !model.is_empty() && model != "default" {
-            let resolver = self
-                .llm_resolver
-                .as_ref()
-                .ok_or_else(|| AppError::Plugin("LlmResolver not configured (007)".into()))?;
-            return Ok(resolver.resolve(LlmScene::Main, Some(model))?.provider_impl);
+            return resolver.resolve(LlmScene::Main, Some(model));
         }
-
-        self.llm
-            .clone()
-            .ok_or_else(|| AppError::Plugin("LlmProvider not configured (004)".into()))
+        resolver.resolve(LlmScene::Main, None)
     }
 
     pub(super) async fn do_read_file(
@@ -102,21 +169,67 @@ impl HostApiDispatcher {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::Plugin("executeBash: missing command".to_string()))?;
         let cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
-        let argv_store: Option<Vec<String>> =
-            params.get("args").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            });
-        let argv_ref = argv_store.as_deref();
-        // T2-P0-016 PR-E.2：扩展 `executeBash` HostCall 参数，可选 `timeout_ms`；
+        // T2-P0-016 PR-E.2：扩展 `executeBash` HostCall 参数，可选 `foreground_wait_ms`；
         // 与 `tool_exec` 同口径在 trait 层接受 `Option<u64>`，未提供则用 config 默认。
-        let timeout_ms = params.get("timeout_ms").and_then(|v| v.as_u64());
+        let foreground_wait_ms = params.get("foreground_wait_ms").and_then(|v| v.as_u64());
         let result = p
-            .execute_bash(command, cwd.as_deref(), plugin_id, argv_ref, timeout_ms)
+            .execute_bash(command, cwd.as_deref(), plugin_id, foreground_wait_ms)
             .await?;
         Ok(HostResponse::ok(
             serde_json::to_value(result).map_err(AppError::Serialize)?,
+        ))
+    }
+
+    pub(super) async fn do_task_output(
+        &self,
+        _plugin_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let Some(registry) = self.bash_task_registry.as_ref() else {
+            return Ok(HostResponse::err("BashTaskRegistry not configured (008)"));
+        };
+        let task_id = params
+            .get("taskId")
+            .or_else(|| params.get("task_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Plugin("taskOutput: missing taskId".to_string()))?;
+        let since = params.get("since").and_then(|v| v.as_u64());
+        let block = params
+            .get("block")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let value = if block {
+            let wait_ms = clamp_host_task_output_wait_ms(
+                params
+                    .get("waitMs")
+                    .or_else(|| params.get("wait_ms"))
+                    .and_then(|v| v.as_u64()),
+            );
+            read_task_output_blocking(registry, task_id, since, wait_ms).await?
+        } else {
+            serde_json::to_value(registry.read_output(task_id, since).await?)
+                .map_err(AppError::Serialize)?
+        };
+        Ok(HostResponse::ok(value))
+    }
+
+    pub(super) async fn do_task_stop(
+        &self,
+        _plugin_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let Some(registry) = self.bash_task_registry.as_ref() else {
+            return Ok(HostResponse::err("BashTaskRegistry not configured (008)"));
+        };
+        let task_id = params
+            .get("taskId")
+            .or_else(|| params.get("task_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Plugin("taskStop: missing taskId".to_string()))?;
+        registry.stop(task_id).await?;
+        Ok(HostResponse::ok(
+            serde_json::json!({ "taskId": task_id, "stopped": true }),
         ))
     }
 
@@ -130,9 +243,11 @@ impl HostApiDispatcher {
             .acquire()
             .await
             .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
-        let req = parse_chat_request(params)?;
-        let llm = self.llm_for_request(&req)?;
-        let resp = llm.chat(req).await?;
+        let mut req = parse_chat_request(params)?;
+        let call = self.resolve_chat_call(&req)?;
+        req.model = call.model.clone();
+        call.apply_resolved_output_limit(&mut req);
+        let resp = call.provider_impl.chat_collect(req).await?;
         Ok(HostResponse::ok(
             serde_json::to_value(resp).map_err(AppError::Serialize)?,
         ))
@@ -148,9 +263,11 @@ impl HostApiDispatcher {
             .acquire()
             .await
             .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
-        let req = parse_chat_request(params)?;
-        let llm = self.llm_for_request(&req)?;
-        let mut stream = llm.chat_stream(req).await?;
+        let mut req = parse_chat_request(params)?;
+        let call = self.resolve_chat_call(&req)?;
+        req.model = call.model.clone();
+        call.apply_resolved_output_limit(&mut req);
+        let mut stream = call.provider_impl.chat_stream(req).await?;
         let mut content = String::new();
         while let Some(ev) = stream.next().await {
             let ev = ev?;
@@ -435,3 +552,7 @@ impl HostApiDispatcher {
         self.session_for_id(&session_id)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/ops_test.rs"]
+mod tests;

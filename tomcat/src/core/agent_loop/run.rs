@@ -7,10 +7,10 @@
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────────────────┐
-//! │  AgentLoop::run(initial_messages)              ← 调用方：api::chat     │
+//! │  AgentLoop::run_turn(initial_messages, start)  ← 调用方：api::chat     │
 //! └────────────────────────────────────────────────────────────────────────┘
-//!    │  ① 入口三检：cancel_token.is_cancelled? │ steering_queue 注入 │
-//!    │              start_idx / context_tail_start 标记
+//!    │  ① 入口三检：cancel_token.is_cancelled? │ start_idx 直接传入 │
+//!    │              steering_queue 注入到已标记的回合尾部
 //!    ▼
 //! ┌── 第一层 Conversation Loop  (本文件 AgentLoop::run) ────────────────────┐
 //! │  emit AgentStart                                                         │
@@ -59,34 +59,68 @@
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::session::{
-    find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT,
+    find_dangling_tail_tool_call_ids,
+    manager::{estimate_msg_chars, INTERRUPTED_TOOL_RESULT_TEXT},
 };
-use crate::infra::error::AppError;
-use crate::infra::events::AgentEvent;
+use crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
+use crate::infra::error::{
+    is_retryable_llm_error, is_unsupported_multimodal_text, llm_http_status, llm_retry_after_ms,
+    llm_stage, llm_summary, AppError,
+};
+use crate::infra::events::{wire, AgentEvent};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
-use super::error_classifier::handle_overflow_retry;
+use super::error_classifier::{handle_overflow_retry, handle_unsupported_multimodal_retry};
 use super::reasoning_loop::run_reasoning_loop;
-use super::steering_injection::inject_steering_messages;
+use super::steering_injection::{inject_follow_up_messages, inject_steering_messages};
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
 
-const RETRY_DELAY_CAP_MS: u64 = 8_000;
+/// 自动无人执行可遇到短暂限流/网络抖动；上限 30 秒既尊重服务端恢复窗口，
+/// 又始终可被取消，不会把 Agent 卡成不可交互。
+const INTERACTIVE_RETRY_DELAY_CAP_MS: u64 = 8_000;
+const UNATTENDED_RETRY_DELAY_CAP_MS: u64 = 30_000;
+/// PLAN/EXEC 无人值守时，临时传输故障与限流获得的总请求预算（含第一次请求）。
+const UNATTENDED_TRANSIENT_MAX_ATTEMPTS: u32 = 10;
 
+fn retry_attempt_budget(unattended_execution: bool, interactive_max_attempts: u32) -> u32 {
+    if unattended_execution {
+        UNATTENDED_TRANSIENT_MAX_ATTEMPTS
+    } else {
+        interactive_max_attempts
+    }
+}
+
+#[cfg(test)]
 pub(super) fn compute_retry_delay_ms(base_delay_ms: u64, attempt: u32, jitter_seed: u64) -> u64 {
+    compute_retry_delay_with_cap_ms(
+        base_delay_ms,
+        attempt,
+        jitter_seed,
+        INTERACTIVE_RETRY_DELAY_CAP_MS,
+    )
+}
+
+fn compute_retry_delay_with_cap_ms(
+    base_delay_ms: u64,
+    attempt: u32,
+    jitter_seed: u64,
+    cap_ms: u64,
+) -> u64 {
     if attempt <= 1 || base_delay_ms == 0 {
         return 0;
     }
     let exp = base_delay_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(2)));
     let jitter_pct = 80 + (jitter_seed % 41);
-    (exp.saturating_mul(jitter_pct) / 100).min(RETRY_DELAY_CAP_MS)
+    (exp.saturating_mul(jitter_pct) / 100).min(cap_ms)
 }
 
-fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32) -> u64 {
+fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32, cap_ms: u64) -> u64 {
     let jitter_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::from(d.subsec_nanos()))
         .unwrap_or(20);
-    compute_retry_delay_ms(base_delay_ms, attempt, jitter_seed)
+    compute_retry_delay_with_cap_ms(base_delay_ms, attempt, jitter_seed, cap_ms)
 }
 
 fn append_missing_interrupted_tool_results(partial_messages: &mut Vec<ChatMessage>) -> usize {
@@ -116,7 +150,50 @@ impl AgentLoop {
     /// 返回 `AgentRunOutcome` 三态：`Completed` / `Interrupted` / `Failed`。
     /// `Interrupted` 与 `Completed` 共用 `AgentRunResult` 载荷，调用方走同一
     /// 持久化路径即可（T-004 / T-017）。
+    /// Compatibility wrapper for callers whose list ends in exactly one user
+    /// message that starts the turn. Call [`Self::run_turn`] when the caller
+    /// already knows the precise boundary.
     pub async fn run(&mut self, initial_messages: Vec<ChatMessage>) -> AgentRunOutcome {
+        let turn_start = initial_messages.len().saturating_sub(1);
+        self.run_turn(initial_messages, turn_start).await
+    }
+
+    /// Runs one turn with the exact index at which its protected tail starts.
+    ///
+    /// The caller computes the boundary while appending the input. Establish it
+    /// before steering is drained, so injected steering belongs to the same
+    /// protected tail rather than changing how the boundary is inferred.
+    pub async fn run_turn(
+        &mut self,
+        initial_messages: Vec<ChatMessage>,
+        turn_start: usize,
+    ) -> AgentRunOutcome {
+        debug_assert!(
+            initial_messages
+                .iter()
+                .all(|message| message.role != ChatMessageRole::System),
+            "system prompt must be assembled only when constructing the LLM request"
+        );
+        debug_assert!(
+            self.context_state
+                .as_ref()
+                .is_none_or(|state| state.messages.is_empty()),
+            "ContextState.messages must be parked empty while AgentLoop owns the working list"
+        );
+        if !self.steering_queue.lock().is_open() {
+            self.steering_queue.lock().open();
+        }
+        let mut messages = initial_messages;
+        self.start_idx = turn_start.min(messages.len());
+        let outcome = self.run_inner(&mut messages).await;
+        self.steering_queue.lock().close_and_clear();
+        self.park_messages(messages);
+        outcome
+    }
+
+    async fn run_inner(&mut self, messages: &mut Vec<ChatMessage>) -> AgentRunOutcome {
+        self.completion_guard_injections = 0;
+        self.silent_reply_allowed = false;
         if self.cancel_token.is_cancelled() {
             // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted
             // 避免 chat_loop 误把"取消信号"传染给下一回合的正常输入。
@@ -133,9 +210,7 @@ impl AgentLoop {
 
         self.emit_event(AgentEvent::AgentStart);
 
-        let mut messages = initial_messages;
-
-        if let Err(err) = inject_steering_messages(self, &mut messages) {
+        if let Err(err) = inject_steering_messages(self, messages) {
             self.emit_event(AgentEvent::AgentEnd {
                 messages: vec![],
                 error: Some(err.to_string()),
@@ -143,53 +218,51 @@ impl AgentLoop {
             return AgentRunOutcome::Failed(err);
         }
 
-        self.context_tail_start = match messages.last() {
-            Some(m) if m.role == ChatMessageRole::User => messages.len().saturating_sub(1),
-            _ => messages.len(),
-        };
-
-        self.start_idx = self.context_tail_start;
-
         loop {
-            match self.run_attempt_loop(&mut messages).await {
+            match self.run_attempt_loop(messages).await {
                 Ok(final_text) => {
                     let new_messages = messages[self.start_idx..].to_vec();
                     let result = AgentRunResult {
                         final_text: final_text.clone(),
                         new_messages,
                     };
+
+                    if self.reasoning_turn_budget_exhausted {
+                        self.hand_back_unfinished_plan("tool_round_budget").await;
+                        self.emit_event(AgentEvent::AgentEnd {
+                            messages: vec![],
+                            error: None,
+                        });
+                        return AgentRunOutcome::Completed(result);
+                    }
+
+                    if self.follow_up_queue.lock().is_empty()
+                        && self.steering_queue.lock().close_if_empty()
+                    {
+                        self.hand_back_unfinished_plan("run_ended_while_executing")
+                            .await;
+                        self.emit_event(AgentEvent::AgentEnd {
+                            messages: vec![],
+                            error: None,
+                        });
+                        return AgentRunOutcome::Completed(result);
+                    }
                     self.emit_event(AgentEvent::AgentEnd {
                         messages: vec![],
                         error: None,
                     });
-
-                    if self.reasoning_turn_budget_exhausted {
-                        self.sync_persisted_messages_into_context(&result.new_messages);
-                        return AgentRunOutcome::Completed(result);
-                    }
-
-                    let mut q = self.follow_up_queue.lock();
-                    if q.is_empty() {
-                        drop(q);
-                        self.sync_persisted_messages_into_context(&result.new_messages);
-                        return AgentRunOutcome::Completed(result);
-                    }
-                    let drained: Vec<_> = q.drain(..).collect();
-                    drop(q);
-                    for msg in drained {
-                        if let Err(err) = self.push_message(&mut messages, msg) {
-                            return AgentRunOutcome::Failed(err);
-                        }
+                    if let Err(err) = inject_steering_messages(self, messages)
+                        .and_then(|_| inject_follow_up_messages(self, messages))
+                    {
+                        return AgentRunOutcome::Failed(err);
                     }
                     continue;
                 }
                 Err(LoopError::Aborted {
                     partial_text,
                     partial_messages,
-                }) => return self.terminate_interrupted(partial_text, partial_messages),
+                }) => return self.terminate_interrupted(messages, partial_text, partial_messages),
                 Err(LoopError::Fatal(e)) => {
-                    let new_messages = messages[self.start_idx..].to_vec();
-                    self.sync_persisted_messages_into_context(&new_messages);
                     self.emit_event(AgentEvent::AgentEnd {
                         messages: vec![],
                         error: Some(e.to_string()),
@@ -203,28 +276,86 @@ impl AgentLoop {
         }
     }
 
+    fn park_messages(&mut self, messages: Vec<ChatMessage>) {
+        if let Some(context_state) = self.context_state.as_mut() {
+            context_state.messages = messages;
+        }
+    }
+
+    async fn hand_back_unfinished_plan(&self, reason: &str) {
+        hand_back_unfinished_plan_if_needed(
+            self.config.subagent_type.is_root(),
+            self.config.plan_runtime.as_ref(),
+            reason,
+        )
+        .await;
+    }
+}
+
+async fn hand_back_unfinished_plan_if_needed(
+    is_root_agent: bool,
+    runtime: Option<&std::sync::Arc<crate::core::plan_runtime::PlanRuntime>>,
+    reason: &str,
+) {
+    if !is_root_agent {
+        return;
+    }
+    let Some(runtime) = runtime else {
+        return;
+    };
+    let Some(path) = runtime.active_plan_path() else {
+        return;
+    };
+    let Ok(plan) = crate::core::plan_runtime::file_store::read_plan(&path) else {
+        return;
+    };
+    if matches!(
+        runtime.next_action(&plan.frontmatter).await,
+        crate::core::plan_runtime::NextAction::Done
+            | crate::core::plan_runtime::NextAction::HandOff { .. }
+    ) {
+        return;
+    }
+    if let Err(error) = runtime.hand_back_stalled_plan(reason, None) {
+        warn!(%error, reason, "failed to hand back unfinished plan at run exit");
+    }
+}
+
+impl AgentLoop {
     /// 终结 Conversation Loop 的 `Interrupted` 分支：先发独立 `Interrupted` 事件
     /// （T2-P0-007 引入的细分订阅点），再发兼容老订阅者的 `AgentEnd(error="interrupted")`，
     /// 最后封装 `AgentRunOutcome::Interrupted` 返回。
     fn terminate_interrupted(
         &mut self,
+        messages: &mut Vec<ChatMessage>,
         partial_text: String,
-        mut partial_messages: Vec<ChatMessage>,
+        partial_messages: Vec<ChatMessage>,
     ) -> AgentRunOutcome {
-        let added_tool_results = append_missing_interrupted_tool_results(&mut partial_messages);
-        if added_tool_results > 0 {
-            if let Some(ref mut ctx_state) = self.context_state {
-                for _ in 0..added_tool_results {
-                    ctx_state.on_message_appended(INTERRUPTED_TOOL_RESULT_TEXT.len());
-                }
+        let mut repaired_tail = partial_messages;
+        let added_tool_results = append_missing_interrupted_tool_results(&mut repaired_tail);
+        for message in repaired_tail
+            .iter()
+            .skip(repaired_tail.len().saturating_sub(added_tool_results))
+        {
+            if let Err(error) = self.push_message(messages, message.clone()) {
+                tracing::warn!(%error, "failed to persist interrupted tool-result repair");
+            } else if let Some(ctx_state) = self.context_state.as_mut() {
+                ctx_state.on_message_appended(estimate_msg_chars(message));
             }
         }
-        self.sync_persisted_messages_into_context(&partial_messages);
-        let tool_results_count = partial_messages
+        let new_messages = messages[self.start_idx.min(messages.len())..].to_vec();
+        let tool_results_count = new_messages
             .iter()
             .filter(|m| m.role == ChatMessageRole::Tool)
             .count();
         let partial_text_len = partial_text.chars().count();
+        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+            "event": "agent.interrupted",
+            "partial_text_len": partial_text_len,
+            "tool_results_count": tool_results_count,
+        })) {
+            tracing::warn!(%error, "failed to persist agent interruption marker");
+        }
         self.emit_event(AgentEvent::Interrupted {
             partial_text_len,
             tool_results_count,
@@ -235,7 +366,7 @@ impl AgentLoop {
         });
         AgentRunOutcome::Interrupted(AgentRunResult {
             final_text: partial_text,
-            new_messages: partial_messages,
+            new_messages,
         })
     }
 
@@ -245,19 +376,51 @@ impl AgentLoop {
         messages: &mut Vec<ChatMessage>,
     ) -> Result<String, LoopError> {
         let mut last_err: Option<AppError> = None;
-        for attempt in 1..=self.config.max_attempts {
+        let mut unsupported_multimodal_hits = 0u32;
+        let unattended_execution = self.config.unattended_retry
+            || self
+                .config
+                .plan_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.executing_plan_id())
+                .is_some();
+        let max_attempts = retry_attempt_budget(unattended_execution, self.config.max_attempts);
+        let retry_delay_cap_ms = if unattended_execution {
+            UNATTENDED_RETRY_DELAY_CAP_MS
+        } else {
+            INTERACTIVE_RETRY_DELAY_CAP_MS
+        };
+        for attempt in 1..=max_attempts {
             if attempt > 1 {
-                let delay_ms = next_retry_delay_ms(self.config.retry_base_delay_ms, attempt);
+                let delay_ms = last_err
+                    .as_ref()
+                    .and_then(llm_retry_after_ms)
+                    .unwrap_or_else(|| {
+                        next_retry_delay_ms(
+                            self.config.retry_base_delay_ms,
+                            attempt,
+                            retry_delay_cap_ms,
+                        )
+                    });
                 let err_msg = last_err
                     .as_ref()
                     .map(ToString::to_string)
-                    .unwrap_or_else(|| "retry".to_string());
+                    .unwrap_or_else(|| crate::infra::i18n::tr("agentLoop.retry", &[]));
                 self.emit_event(AgentEvent::AutoRetryStart {
                     attempt,
-                    max_attempts: self.config.max_attempts,
+                    max_attempts,
                     delay_ms,
                     error_message: err_msg,
                 });
+                if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                    "event": wire::WIRE_AUTO_RETRY_START,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "delay_ms": delay_ms,
+                    "error_message": last_err.as_ref().map(ToString::to_string),
+                })) {
+                    warn!(error = %error, "auto retry start transcript write failed");
+                }
                 // Sleep 期间也要响应取消，不然 Ctrl+C 会被"3 秒退避"吃掉
                 let cancel = self.cancel_token.clone();
                 tokio::select! {
@@ -272,7 +435,11 @@ impl AgentLoop {
                 }
             }
 
-            match run_reasoning_loop(self, messages).await {
+            // Stream/tool cancellation is owned by their commit-aware boundaries. Racing
+            // the entire reasoning future here could drop a native writer after it started.
+            let reasoning_result = run_reasoning_loop(self, messages, attempt, max_attempts).await;
+
+            match reasoning_result {
                 Ok(text) => {
                     if attempt > 1 {
                         self.emit_event(AgentEvent::AutoRetryEnd {
@@ -280,6 +447,14 @@ impl AgentLoop {
                             attempt,
                             final_error: None,
                         });
+                        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                            "event": wire::WIRE_AUTO_RETRY_END,
+                            "success": true,
+                            "attempt": attempt,
+                            "final_error": serde_json::Value::Null,
+                        })) {
+                            warn!(error = %error, "auto retry end transcript write failed");
+                        }
                     }
                     return Ok(text);
                 }
@@ -292,32 +467,93 @@ impl AgentLoop {
                             attempt,
                             final_error: Some(err_text),
                         });
+                        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                            "event": wire::WIRE_AUTO_RETRY_END,
+                            "success": false,
+                            "attempt": attempt,
+                            "final_error": e.to_string(),
+                        })) {
+                            warn!(error = %error, "auto retry end transcript write failed");
+                        }
                     }
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
+                    let elevated_retry_kind = is_retryable_llm_error(&e);
+                    // PLAN/EXEC 的 10 次预算用于真实临时传输故障、限流与空响应；
+                    // 其他可恢复类别仍保留交互档 4 次，避免长时间重试一个不会自愈的问题。
+                    if unattended_execution
+                        && !elevated_retry_kind
+                        && attempt >= DEFAULT_AGENT_MAX_ATTEMPTS
+                    {
+                        return Err(LoopError::Fatal(e));
+                    }
                     // L3 overflow trim 与诊断日志统一放在 error_classifier 中处理；
                     // retry 控制流（last_err / max_attempts 判定）仍由本函数持有，
                     // 保证"谁拥有 attempt 循环谁决定终止"。
-                    let _stats = handle_overflow_retry(self, messages, attempt, &e);
+                    let overflow_hit = crate::infra::error::is_context_overflow(&e);
+                    let overflow_stats = handle_overflow_retry(self, messages, attempt, &e).await;
+                    if self.cancel_token.is_cancelled() {
+                        return Err(self.make_aborted(messages, String::new()));
+                    }
+                    // ContextOverflow 只能在 payload 确实缩小后才允许下一次请求。
+                    // 否则每次都会发送同一份超限上下文，消耗完 attempt 后才给用户一个
+                    // 更晚、更难理解的错误。
+                    if overflow_hit && !overflow_stats.applied {
+                        tracing::warn!(
+                            target: "tomcat_chat_diag",
+                            phase = "context_overflow_no_progress",
+                            attempt,
+                            "context overflow recovery did not shrink the payload; stop retrying"
+                        );
+                        return Err(LoopError::Fatal(e));
+                    }
+                    let unsupported_multimodal_hit = matches!(&e, AppError::LlmDetailed(_))
+                        && llm_stage(&e).is_none()
+                        && llm_http_status(&e).is_none()
+                        && llm_summary(&e)
+                            .as_deref()
+                            .is_some_and(is_unsupported_multimodal_text);
+                    if unsupported_multimodal_hit {
+                        unsupported_multimodal_hits = unsupported_multimodal_hits.saturating_add(1);
+                        let attempts_left_after_this = max_attempts.saturating_sub(attempt);
+                        if unsupported_multimodal_hits >= 2 && attempts_left_after_this >= 1 {
+                            let _stats =
+                                handle_unsupported_multimodal_retry(self, messages, attempt, &e);
+                        }
+                    } else {
+                        unsupported_multimodal_hits = 0;
+                    }
                     last_err = Some(e);
-                    if attempt == self.config.max_attempts {
-                        let fatal = last_err
-                            .take()
-                            .unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+                    if attempt == max_attempts {
+                        let fatal = last_err.take().unwrap_or_else(|| {
+                            AppError::Llm(crate::infra::i18n::tr("llm.retriesExhausted", &[]))
+                        });
                         let final_error = fatal.to_string();
                         self.emit_event(AgentEvent::AutoRetryEnd {
                             success: false,
                             attempt,
-                            final_error: Some(final_error),
+                            final_error: Some(final_error.clone()),
                         });
+                        if let Err(error) = self.persist_custom_entry_if_needed(serde_json::json!({
+                            "event": wire::WIRE_AUTO_RETRY_END,
+                            "success": false,
+                            "attempt": attempt,
+                            "final_error": final_error,
+                        })) {
+                            warn!(error = %error, "auto retry end transcript write failed");
+                        }
                         return Err(LoopError::Fatal(fatal));
                     }
                 }
             }
         }
-        Err(LoopError::Fatal(
-            last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string())),
-        ))
+        Err(LoopError::Fatal(last_err.unwrap_or_else(|| {
+            AppError::Llm(crate::infra::i18n::tr("llm.retriesExhausted", &[]))
+        })))
     }
 }
+
+#[cfg(test)]
+#[path = "tests/run_test.rs"]
+mod tests;

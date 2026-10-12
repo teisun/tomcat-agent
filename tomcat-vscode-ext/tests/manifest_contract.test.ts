@@ -10,6 +10,11 @@ type Manifest = {
       properties?: Record<string, unknown>;
     };
     commands?: Array<Record<string, unknown>>;
+    customEditors?: Array<{
+      priority?: string;
+      selector?: Array<{ filenamePattern?: string }>;
+      viewType?: string;
+    }>;
     keybindings?: Array<Record<string, unknown>>;
     menus?: Record<string, Array<Record<string, unknown>>>;
     views?: Record<string, Array<Record<string, unknown>>>;
@@ -24,6 +29,34 @@ async function readManifest(): Promise<Manifest> {
 }
 
 describe("extension manifest contract", () => {
+  it("resolves every manifest contribution in both static dictionaries", async () => {
+    const root = path.resolve(__dirname, "..");
+    const manifest = await fs.readFile(path.join(root, "package.json"), "utf8");
+    const english = JSON.parse(await fs.readFile(path.join(root, "package.nls.json"), "utf8")) as Record<string, string>;
+    const chinese = JSON.parse(await fs.readFile(path.join(root, "package.nls.zh-cn.json"), "utf8")) as Record<string, string>;
+    const keys = [...manifest.matchAll(/"%([a-zA-Z][\w.]+)%"/gu)].map((match) => match[1]);
+    expect(keys.length).toBeGreaterThan(10);
+    expect(Object.keys(english).sort()).toEqual(Object.keys(chinese).sort());
+    expect([...new Set(keys)].sort()).toEqual(Object.keys(english).sort());
+    for (const key of keys) {
+      expect(english[key].trim()).not.toBe("");
+      expect(chinese[key].trim()).not.toBe("");
+    }
+    const ignore = await fs.readFile(path.join(root, ".vscodeignore"), "utf8");
+    expect(ignore).toContain("!package.nls.json");
+    expect(ignore).toContain("!package.nls.zh-cn.json");
+  });
+
+  it("declares 15/25 layout defaults with bounded integer settings", async () => {
+    const properties = (await readManifest()).contributes?.configuration?.properties;
+    for (const [setting, defaultValue] of [
+      ["tomcat.layout.controlsInset", 15],
+      ["tomcat.layout.contentInset", 25],
+    ] as const) {
+      expect(properties?.[setting]).toMatchObject({ type: "integer", minimum: 0, maximum: 40, default: defaultValue });
+    }
+  });
+
   it("does not contribute a chat participant after the webview-only migration", async () => {
     const manifest = await readManifest();
 
@@ -52,7 +85,7 @@ describe("extension manifest contract", () => {
     const manifest = await readManifest();
 
     expect(manifest.scripts?.["test:unit:core"]).toBe("vitest run --maxWorkers 4 src");
-    expect(manifest.scripts?.["test:integration"]).toBe("vitest run --maxWorkers 1 tests");
+    expect(manifest.scripts?.["test:integration"]).toBe("vitest run --config vitest.integration.config.ts --maxWorkers 1");
     expect(manifest.scripts?.["gate:fast"]).toBe("npm run lint && npm run test:unit");
     expect(manifest.scripts?.["gate:full"]).toBe("tsx scripts/run-vscode-full-gate.ts");
   });
@@ -75,6 +108,23 @@ describe("extension manifest contract", () => {
           type: "webview",
         }),
       ]),
+    );
+  });
+
+  it("contributes .plan.md files to the default Plan preview editor", async () => {
+    const manifest = await readManifest();
+    const editor = manifest.contributes?.customEditors?.find(
+      (candidate) => candidate.viewType === "tomcat.planPreview",
+    );
+
+    expect(editor).toEqual(
+      expect.objectContaining({
+        priority: "default",
+        selector: expect.arrayContaining([
+          expect.objectContaining({ filenamePattern: "*.plan.md" }),
+        ]),
+        viewType: "tomcat.planPreview",
+      }),
     );
   });
 

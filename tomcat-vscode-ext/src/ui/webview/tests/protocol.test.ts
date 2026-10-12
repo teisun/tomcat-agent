@@ -5,9 +5,56 @@ import {
   isHostToWebviewFrame,
   isWebviewIntent,
   PendingMessageTracker,
+  THINKING_LEVELS,
 } from "../protocol";
 
+describe("shared slash intents", () => {
+  it.each([{text:"/reload",sessionId:"s1"},{text:"/install './p' agent",sessionId:null},{text:"/reload"}])("accepts a text-only command shape: %j", (data) => {
+    expect(isWebviewIntent({type:"runSlashCommand",messageId:"slash-1",data})).toBe(true);
+  });
+  it.each([{}, {text:42}, {text:"/reload",sessionId:42}, null])("rejects malformed data: %j", (data) => {
+    expect(isWebviewIntent({type:"runSlashCommand",messageId:"slash-1",data})).toBe(false);
+  });
+});
+
 describe("webview protocol helpers", () => {
+  it("accepts a bounded webview crash report", () => {
+    expect(
+      isWebviewIntent({
+        data: {
+          message: "render exploded",
+          stack: "Error: render exploded",
+        },
+        messageId: "webview-error-1",
+        type: "webviewError",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: { stack: "missing message" },
+        messageId: "webview-error-invalid",
+        type: "webviewError",
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts the HTML-only fallback snapshot after App unmounts", () => {
+    expect(
+      isWebviewIntent({
+        data: { html: '<main data-testid="webview-error-fallback"></main>' },
+        messageId: "webview-error-fallback-snapshot-1",
+        type: "__test.dom_fallback_snapshot",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: {},
+        messageId: "webview-error-fallback-snapshot-invalid",
+        type: "__test.dom_fallback_snapshot",
+      }),
+    ).toBe(false);
+  });
+
   it("accepts valid host and webview frames", () => {
     expect(
       isHostToWebviewFrame({
@@ -28,6 +75,65 @@ describe("webview protocol helpers", () => {
         messageId: "event-1",
       }),
     ).toBe(true);
+    expect(
+      isHostToWebviewFrame({
+        channel: "event",
+        content: {
+          references: [
+            {
+              kind: "file",
+              label: "app.ts",
+              lineEnd: null,
+              lineStart: null,
+              path: "app.ts",
+              text: null,
+              type: "reference",
+            },
+            {
+              kind: "file",
+              label: "folder/",
+              lineEnd: null,
+              lineStart: null,
+              path: "folder/",
+              text: null,
+              type: "reference",
+            },
+          ],
+          sessionId: "s1",
+          type: "insertReferences",
+        },
+        messageId: "event-batch-1",
+      }),
+    ).toBe(true);
+    expect(
+      isHostToWebviewFrame({
+        channel: "sessionView",
+        content: {
+          sessionId: "s1",
+          view: {
+            busy: false,
+            ownedByThisFrontend: true,
+            pendingAttachments: [],
+            planTodos: [],
+            sessionId: "s1",
+            sessionTodos: [],
+            timeline: [],
+          },
+        },
+        messageId: "session-view-1",
+      }),
+    ).toBe(true);
+    expect(
+      isHostToWebviewFrame({
+        channel: "sessionPatch",
+        content: {
+          ops: [{ id: "m1", text: "hello", type: "appendText" }],
+          seq: 1,
+          sessionId: "s1",
+        },
+        messageId: "session-patch-1",
+      }),
+    ).toBe(true);
 
     expect(
       isWebviewIntent({
@@ -36,6 +142,45 @@ describe("webview protocol helpers", () => {
         },
         messageId: "pick-1",
         type: "pickContext",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: { paths: ["src/app.ts", "src"], requestId: "paths-1" },
+        messageId: "resolve-paths-1",
+        type: "resolvePaths",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: { href: "https://example.com/docs" },
+        messageId: "open-link-1",
+        type: "openLink",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: { sessionId: "s1" },
+        messageId: "compact-1",
+        type: "compact",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
+          cwd: "/workspace",
+          operationId: "fork-op-1",
+          segments: [
+            { text: "Inspect ", type: "text" },
+            { kind: "file", label: "app.ts", path: "app.ts", type: "reference" },
+          ],
+          sourceSessionId: "s1",
+          text: "Inspect app.ts",
+        },
+        messageId: "fork-1",
+        type: "forkSession",
       }),
     ).toBe(true);
 
@@ -72,6 +217,23 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          files: [
+            {
+              dataBase64: "UERG",
+              filename: "brief.pdf",
+              mimeType: "application/pdf",
+            },
+          ],
+          sessionId: "s1",
+        },
+        messageId: "attach-1",
+        type: "attachFiles",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
           kind: "file",
           query: "app",
           requestId: "req-1",
@@ -88,22 +250,84 @@ describe("webview protocol helpers", () => {
           route: "models",
         },
         messageId: "settings-1",
-        type: "openModelSettings",
+        type: "openSettings",
       }),
     ).toBe(true);
 
     expect(
       isWebviewIntent({
         data: {
+          sessionId: "s1",
           toolCallId: "tool-1",
         },
         messageId: "open-diff-1",
         type: "openDiff",
       }),
     ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: {
+          sessionId: "s1",
+        },
+        messageId: "resync-session-1",
+        type: "resyncSessionView",
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    { toolCallId: "tool-1" },
+    { sessionId: null, toolCallId: "tool-1" },
+    { sessionId: 1, toolCallId: "tool-1" },
+    { sessionId: "s1" },
+    { sessionId: "s1", toolCallId: null },
+  ])("rejects openDiff without an explicit session and tool identity: %j", (data) => {
+    expect(isWebviewIntent({ data, messageId: "open-diff-invalid", type: "openDiff" })).toBe(false);
+  });
+
+  it("strictly rejects malformed or oversized draft fork captures", () => {
+    const base = {
+      cwd: "/workspace",
+      operationId: "fork-op",
+      segments: [{ text: "draft", type: "text" }],
+      sourceSessionId: "s1",
+      text: "draft",
+    };
+    for (const data of [
+      { ...base, operationId: "" },
+      { ...base, sourceSessionId: "" },
+      { ...base, text: "x".repeat(1024 * 1024 + 1) },
+      { ...base, segments: [{ bytes: "raw", type: "image" }] },
+      { ...base, cwd: 42 },
+    ]) {
+      expect(isWebviewIntent({ data, messageId: "fork-bad", type: "forkSession" })).toBe(false);
+    }
+  });
+
+  it("accepts every supported thinking level from the shared source of truth", () => {
+    for (const level of THINKING_LEVELS) {
+      expect(
+        isWebviewIntent({
+          data: {
+            level,
+            modelId: "claude-4.6-sonnet",
+            sessionId: "s1",
+          },
+          messageId: `thinking-${level}`,
+          type: "setThinkingLevel",
+        }),
+      ).toBe(true);
+    }
   });
 
   it("rejects malformed intents", () => {
+    expect(
+      isWebviewIntent({
+        data: { paths: ["src/app.ts", 42], requestId: "paths-bad" },
+        messageId: "resolve-paths-bad",
+        type: "resolvePaths",
+      }),
+    ).toBe(false);
     expect(
       isWebviewIntent({
         data: {},
@@ -156,10 +380,37 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          level: "ultra",
+          modelId: "claude-4.6-sonnet",
+          sessionId: "s1",
+        },
+        messageId: "thinking-bad-level",
+        type: "setThinkingLevel",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
           uris: ["file:///workspace/app.ts", 42],
         },
         messageId: "drop-2",
         type: "resolveDrop",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
+          files: [
+            {
+              dataBase64: "AA==",
+              filename: "archive.zip",
+              mimeType: "application/zip",
+            },
+          ],
+          sessionId: "s1",
+        },
+        messageId: "attach-bad-mime",
+        type: "attachFiles",
       }),
     ).toBe(false);
     expect(

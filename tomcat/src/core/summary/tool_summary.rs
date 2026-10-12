@@ -81,20 +81,7 @@ fn shell_command_preview(args: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    let argv: Vec<&str> = args
-        .get("args")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-
-    if !argv.is_empty() {
-        let joined_argv = argv.join(" ");
-        if command.is_empty() {
-            bash_command_for_terminal(&joined_argv)
-        } else {
-            bash_command_for_terminal(&format!("{command} {joined_argv}"))
-        }
-    } else if command.is_empty() {
+    if command.is_empty() {
         String::new()
     } else {
         bash_command_for_terminal(command)

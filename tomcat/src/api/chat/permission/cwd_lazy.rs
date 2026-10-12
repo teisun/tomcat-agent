@@ -73,11 +73,10 @@ pub fn parse_choice(s: &str) -> Option<CwdPromptChoice> {
     }
 }
 
+use crate::infra::i18n::tr;
+
 pub fn unrecognized_choice_message(input: &str) -> String {
-    format!(
-        "未识别的选项「{}」；可选项为 [s] / [w] / [c]，本次按取消处理。",
-        input.trim()
-    )
+    tr("terminal.cwd.invalidChoice", &[("choice", input.trim())])
 }
 
 /// 判断 `target` 是否在 `cwd` 子树内（含 cwd 自身）。
@@ -94,30 +93,6 @@ pub fn target_in_cwd(target: &Path, cwd: &Path) -> bool {
 fn cwd_already_authorized(cwd: &Path, gate: &dyn PermissionGate) -> bool {
     let er = gate.effective_roots();
     er.read_write.iter().any(|p| p == cwd) || er.read_only.iter().any(|p| p == cwd)
-}
-
-/// 从 [`crate::core::tools::primitive::DefaultPrimitiveExecutor::gate_check_path`]
-/// 拼装的 `preview` 中提取真实目标路径。
-///
-/// 现行格式（`gate_check_path`）：
-/// ```text
-/// [Read] 读取
-/// 路径: /Users/yan/work/sub/file.txt
-/// 原因: 路径 `/Users/yan/work/sub/file.txt` 不在已授权范围内
-/// ```
-///
-/// 解析失败（`tools::config_tool` 等其它入口不带 `路径:` 行）时返回 `None`，
-/// 装饰器将 fall-through 给底层 provider。
-fn extract_target_from_preview(preview: &str) -> Option<PathBuf> {
-    for line in preview.lines() {
-        if let Some(rest) = line.strip_prefix("路径: ") {
-            let s = rest.trim();
-            if !s.is_empty() {
-                return Some(PathBuf::from(s));
-            }
-        }
-    }
-    None
 }
 
 /// TTY 场景下从 stdin 读一行；EOF/IO 错误返回 `None`。
@@ -177,14 +152,27 @@ impl CwdLazyPrompt {
 
     fn render_prompt(&self, target: &Path) {
         eprintln!("─────────────────────────────────────────────────────────────");
-        eprintln!("当前目录 {} 尚未授权访问。", self.cwd.display());
-        eprintln!("即将操作: {}", target.display());
-        eprintln!("[s] 本次会话期间允许访问");
         eprintln!(
-            "[w] 以后也允许访问（写入配置 ~/.tomcat/tomcat.config.toml workspace.workspace_roots）"
+            "{}",
+            tr(
+                "terminal.cwd.unauthorized",
+                &[("path", &self.cwd.display().to_string())]
+            )
         );
-        eprintln!("[c] 取消本次操作（后续按文件粒度逐次询问）");
-        eprint!("选择 {}: ", CWD_PROMPT_CHOICES);
+        eprintln!(
+            "{}",
+            tr(
+                "terminal.cwd.target",
+                &[("path", &target.display().to_string())]
+            )
+        );
+        eprintln!("{}", tr("terminal.cwd.session", &[]));
+        eprintln!("{}", tr("terminal.cwd.persist", &[]));
+        eprintln!("{}", tr("terminal.cwd.cancel", &[]));
+        eprint!(
+            "{}",
+            tr("terminal.cwd.choose", &[("choices", CWD_PROMPT_CHOICES)])
+        );
         let _ = io::stderr().flush();
     }
 }
@@ -207,40 +195,41 @@ impl UserConfirmationProvider for CwdLazyPrompt {
         operation: PrimitiveOperation,
         preview: &str,
         plugin_id: &str,
+        target: Option<PathBuf>,
         suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
         if self.dismissed.load(Ordering::Acquire) {
             return self
                 .inner
-                .confirm_decision(operation, preview, plugin_id, suggested_root)
+                .confirm_decision(operation, preview, plugin_id, target, suggested_root)
                 .await;
         }
 
         if matches!(operation, PrimitiveOperation::Bash) {
             return self
                 .inner
-                .confirm_decision(operation, preview, plugin_id, suggested_root)
+                .confirm_decision(operation, preview, plugin_id, target, suggested_root)
                 .await;
         }
 
-        let Some(target) = extract_target_from_preview(preview) else {
+        let Some(target_path) = target.as_deref() else {
             return self
                 .inner
-                .confirm_decision(operation, preview, plugin_id, suggested_root)
+                .confirm_decision(operation, preview, plugin_id, target, suggested_root)
                 .await;
         };
 
-        if !target_in_cwd(&target, &self.cwd) {
+        if !target_in_cwd(target_path, &self.cwd) {
             return self
                 .inner
-                .confirm_decision(operation, preview, plugin_id, suggested_root)
+                .confirm_decision(operation, preview, plugin_id, target, suggested_root)
                 .await;
         }
 
         if cwd_already_authorized(&self.cwd, &*self.gate) {
             return self
                 .inner
-                .confirm_decision(operation, preview, plugin_id, suggested_root)
+                .confirm_decision(operation, preview, plugin_id, target, suggested_root)
                 .await;
         }
 
@@ -248,11 +237,11 @@ impl UserConfirmationProvider for CwdLazyPrompt {
             self.dismissed.store(true, Ordering::Release);
             return self
                 .inner
-                .confirm_decision(operation, preview, plugin_id, suggested_root)
+                .confirm_decision(operation, preview, plugin_id, target, suggested_root)
                 .await;
         }
 
-        self.render_prompt(&target);
+        self.render_prompt(target_path);
         let raw_choice = read_choice_from_stdin().unwrap_or_default();
         let choice = parse_choice(&raw_choice).unwrap_or_else(|| {
             eprintln!("{}", unrecognized_choice_message(&raw_choice));
@@ -288,13 +277,24 @@ impl CwdLazyPrompt {
                     canon.to_string_lossy().into_owned(),
                 ) {
                     eprintln!(
-                        "✗ 持久化失败：{}；已改为仅本次会话允许访问 {}",
-                        e,
-                        canon.display()
+                        "{}",
+                        tr(
+                            "terminal.cwd.persistFailed",
+                            &[
+                                ("detail", &e.to_string()),
+                                ("path", &canon.display().to_string())
+                            ]
+                        )
                     );
                 }
                 self.session_grants.add(canon, GrantTrigger::CwdLazyPrompt);
-                eprintln!("✓ {} 本次会话期间允许访问", self.cwd.display());
+                eprintln!(
+                    "{}",
+                    tr(
+                        "terminal.cwd.allowed",
+                        &[("path", &self.cwd.display().to_string())]
+                    )
+                );
                 Ok(ConfirmDecision::AllowOnce)
             }
             CwdPromptChoice::AllowSessionOnly => {
@@ -302,12 +302,18 @@ impl CwdLazyPrompt {
                 ensure_not_denied(&*self.gate, &canon)?;
                 self.session_grants
                     .add(canon.clone(), GrantTrigger::CwdLazyPrompt);
-                eprintln!("✓ {} 本次会话期间允许访问", canon.display());
+                eprintln!(
+                    "{}",
+                    tr(
+                        "terminal.cwd.allowed",
+                        &[("path", &canon.display().to_string())]
+                    )
+                );
                 Ok(ConfirmDecision::AllowOnce)
             }
             CwdPromptChoice::Cancel => {
                 self.dismissed.store(true, Ordering::Release);
-                eprintln!("✓ 已取消：本会话内不再就 cwd 范围弹此提示，转入逐文件确认");
+                eprintln!("{}", tr("terminal.cwd.cancelled", &[]));
                 Ok(ConfirmDecision::Deny)
             }
         }
@@ -341,10 +347,9 @@ impl CwdLazyPrompt {
 
 fn ensure_not_denied(gate: &dyn PermissionGate, path: &Path) -> Result<(), AppError> {
     match gate.check(PrimitiveOperation::Read, &path.to_string_lossy())? {
-        PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
-            "该路径已被禁止访问，无法加入当前会话或配置：{} ({})",
-            path.display(),
-            reason
+        PermissionDecision::Deny { reason } => Err(AppError::Permission(tr(
+            "terminal.cwd.denied",
+            &[("path", &path.display().to_string()), ("reason", &reason)],
         ))),
         _ => Ok(()),
     }

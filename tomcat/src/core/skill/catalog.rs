@@ -1,4 +1,5 @@
 use crate::infra::config::SkillsConfig;
+use crate::infra::i18n::tr;
 
 use super::model::{Skill, SkillSet};
 
@@ -50,9 +51,12 @@ pub fn render_skill_inventory(skill_set: &SkillSet) -> String {
     let mut lines = Vec::new();
 
     if skill_set.by_name.is_empty() {
-        lines.push("发现 0 条 skill。".to_string());
+        lines.push(tr("skill.inventory.empty", &[]));
     } else {
-        lines.push(format!("发现 {} 条 skill：", skill_set.by_name.len()));
+        lines.push(tr(
+            "skill.inventory.count",
+            &[("count", &skill_set.by_name.len().to_string())],
+        ));
         for skill in skill_set.by_name.values() {
             let mut tags = vec![skill.source.as_str().to_string()];
             if skill.disable_model_invocation {
@@ -68,14 +72,14 @@ pub fn render_skill_inventory(skill_set: &SkillSet) -> String {
     }
 
     if !skill_set.warnings.is_empty() {
-        lines.push("warnings:".to_string());
+        lines.push(tr("cli.package.warnings", &[]));
         for warning in &skill_set.warnings {
             lines.push(format!("  - {warning}"));
         }
     }
 
     if !skill_set.diagnostics.is_empty() {
-        lines.push("diagnostics:".to_string());
+        lines.push(tr("skill.inventory.diagnostics", &[]));
         for diagnostic in &skill_set.diagnostics {
             lines.push(format!(
                 "  - {}: {}",

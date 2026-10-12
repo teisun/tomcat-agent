@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 
 import * as vscode from "vscode";
@@ -5,6 +6,7 @@ import * as vscode from "vscode";
 import { TOMCAT_CONFIG_SECTION } from "../../constants";
 import { buildFileReference } from "./contextReferences";
 import type { ContextSearchMatch } from "./protocol";
+import type { PathResolution } from "../../shared/pathResolution";
 
 const DEFAULT_CONTEXT_SEARCH_LIMIT = 20;
 const DEFAULT_CONTEXT_SEARCH_MAX_FILES = 20_000;
@@ -37,6 +39,12 @@ export interface ContextSearchRequest {
   token?: vscode.CancellationToken;
 }
 
+export interface PathResolveRequest {
+  /** Directory used to resolve relative paths; omit for the first workspace folder. */
+  relativeBase?: string;
+  paths: readonly string[];
+}
+
 export interface SearchCandidate {
   displayPath: string;
   isDirectory: boolean;
@@ -52,6 +60,21 @@ interface CachedSearchCandidate extends Omit<SearchCandidate, "isOpen"> {
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, "/");
+}
+
+function resolveCandidatePath(value: string, relativeBase?: string): string {
+  const trimmed = value.trim();
+  if (path.isAbsolute(trimmed)) {
+    return path.normalize(trimmed);
+  }
+  if (trimmed.startsWith("~/")) {
+    return path.join(os.homedir(), trimmed.slice(2));
+  }
+  if (relativeBase) {
+    return path.resolve(relativeBase, trimmed);
+  }
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  return path.resolve(workspaceRoot ?? process.cwd(), trimmed);
 }
 
 function parsePositiveInteger(value: string | undefined): number | undefined {
@@ -271,7 +294,9 @@ function buildCachedCandidate(uri: vscode.Uri, isDirectory: boolean): CachedSear
 
 export class ContextSearchService implements vscode.Disposable {
   private cache: ContextSearchCache | null = null;
+  private readonly directPathCache = new Map<string, PathResolution["kind"]>();
   private dirty = false;
+  private indexRevision = 0;
   private readonly watcher: vscode.FileSystemWatcher | null;
 
   constructor() {
@@ -279,10 +304,10 @@ export class ContextSearchService implements vscode.Disposable {
       ? vscode.workspace.createFileSystemWatcher("**/*")
       : null;
     this.watcher?.onDidCreate(() => {
-      this.dirty = true;
+      this.markDirty();
     });
     this.watcher?.onDidDelete(() => {
-      this.dirty = true;
+      this.markDirty();
     });
   }
 
@@ -318,14 +343,52 @@ export class ContextSearchService implements vscode.Disposable {
       })),
       request.query.trim(),
     );
-    const truncated =
-      ranked.length > config.limit || (cache.truncated && ranked.length >= config.limit);
+    const truncated = cache.truncated || ranked.length > config.limit;
 
     return {
       matches: ranked.slice(0, config.limit).map((candidate) => candidate.match),
       truncated,
       workspaceAvailable,
     };
+  }
+
+  /**
+   * Resolve free-form Markdown path candidates for a rendered webview.
+   *
+   * The @-mention index is consulted when it is already warm. We intentionally
+   * do not build a 20,000-file index merely to validate a handful of path
+   * chips; cold requests fall back to `workspace.fs.stat` and are cached until
+   * the existing filesystem watcher reports a create/delete change.
+   */
+  async resolvePaths(request: PathResolveRequest): Promise<PathResolution[]> {
+    const indexedKinds = this.indexedPathKinds();
+    const uniquePaths = [...new Set(request.paths.map((path) => path.trim()).filter(Boolean))];
+    return Promise.all(
+      uniquePaths.map(async (candidate): Promise<PathResolution> => {
+        const resolvedPath = resolveCandidatePath(candidate, request.relativeBase);
+        const normalizedPath = normalizePath(resolvedPath);
+        const indexedKind = indexedKinds.get(normalizedPath);
+        if (indexedKind) {
+          return { kind: indexedKind, path: candidate, resolvedPath };
+        }
+
+        const cachedKind = this.directPathCache.get(normalizedPath);
+        if (cachedKind) {
+          return { kind: cachedKind, path: candidate, resolvedPath };
+        }
+
+        let kind: PathResolution["kind"] = "missing";
+        try {
+          const stat = await vscode.workspace.fs.stat(vscode.Uri.file(resolvedPath));
+          kind = stat.type & vscode.FileType.Directory ? "directory" : "file";
+        } catch {
+          // A failed stat must not become a clickable chip. Permission errors
+          // are deliberately treated like missing paths: the safer UI is code.
+        }
+        this.directPathCache.set(normalizedPath, kind);
+        return { kind, path: candidate, resolvedPath };
+      }),
+    );
   }
 
   async ensureCache(
@@ -336,20 +399,46 @@ export class ContextSearchService implements vscode.Disposable {
       return this.cache;
     }
 
-    const files = await vscode.workspace.findFiles("**/*", undefined, maxFiles, token);
-    const directories = deriveDirectories(files);
-    const cache: ContextSearchCache = {
-      candidates: [
-        ...files.map((uri) => buildCachedCandidate(uri, false)),
-        ...directories.map((uri) => buildCachedCandidate(uri, true)),
-      ],
-      maxFiles,
-      truncated: files.length >= maxFiles,
-    };
-    if (!token?.isCancellationRequested) {
-      this.cache = cache;
-      this.dirty = false;
+    // A create/delete during the async listing invalidates that snapshot. Rebuild
+    // once for this query; under ongoing churn keep the cache dirty, not immortal.
+    for (let pass = 0; ; pass += 1) {
+      const revision = this.indexRevision;
+      const files = await vscode.workspace.findFiles("**/*", undefined, maxFiles, token);
+      const directories = deriveDirectories(files);
+      const cache: ContextSearchCache = {
+        candidates: [
+          ...files.map((uri) => buildCachedCandidate(uri, false)),
+          ...directories.map((uri) => buildCachedCandidate(uri, true)),
+        ],
+        maxFiles,
+        truncated: files.length >= maxFiles,
+      };
+      const cancelled = token?.isCancellationRequested === true;
+      const current = revision === this.indexRevision;
+      if (!cancelled && current) {
+        this.cache = cache;
+        this.dirty = false;
+      }
+      if (cancelled || current || pass === 1) return cache;
     }
-    return cache;
+  }
+
+  private indexedPathKinds(): Map<string, PathResolution["kind"]> {
+    if (!this.cache || this.dirty) {
+      return new Map();
+    }
+    return new Map(
+      this.cache.candidates.map((candidate) => [
+        candidate.normalizedFsPath,
+        candidate.isDirectory ? "directory" : "file",
+      ]),
+    );
+  }
+
+  private markDirty(): void {
+    this.indexRevision += 1;
+    this.cache = null;
+    this.directPathCache.clear();
+    this.dirty = true;
   }
 }

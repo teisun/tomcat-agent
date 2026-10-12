@@ -1,8 +1,9 @@
+import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../../../serveClient/initialize";
@@ -20,12 +21,18 @@ import type {
   PlanPreviewHostFrame,
   PlanPreviewStateSnapshot,
 } from "../../../shared/planPreviewProtocol";
+import { ContextSearchService } from "../../webview/contextSearch";
+import { translate } from "../../../shared/i18n";
 
 const __testing = (
   vscode as typeof vscode & {
     __testing: {
       reset(): void;
+      deleteFile(filePath: string): void;
+      fireDidChangeFile(filePath: string): void;
+      registerFile(filePath: string, text: string): void;
       setConfiguration(key: string, value: unknown): void;
+      setWarningMessageHandler(handler: (message: string, items: string[]) => unknown): void;
     };
   }
 ).__testing;
@@ -47,6 +54,10 @@ class FakeWebview {
     return true;
   }
 
+  fireMessage(message: unknown): void {
+    this.receiveEmitter.fire(message);
+  }
+
   stateFrames(): PlanPreviewStateSnapshot[] {
     return (this.messages as PlanPreviewHostFrame[])
       .filter((frame) => frame.channel === "state")
@@ -61,6 +72,7 @@ class FakeWebview {
 
 class FakeWebviewPanel {
   active: boolean;
+  disposed = false;
   readonly webview = new FakeWebview();
   private readonly viewStateEmitter = new vscode.EventEmitter<void>();
   private readonly disposeEmitter = new vscode.EventEmitter<void>();
@@ -77,12 +89,23 @@ class FakeWebviewPanel {
   }
 
   fireDispose(): void {
+    this.disposed = true;
     this.disposeEmitter.fire();
+  }
+
+  dispose(): void {
+    this.fireDispose();
   }
 }
 
-function fakeDocument(text: string, docPath: string) {
-  return { getText: () => text, uri: vscode.Uri.file(docPath) };
+function hostRefreshCounters(provider: PlanPreviewEditorProvider): {
+  hostStatePostAttempts: number;
+  hostStatePostDeliveries: number;
+} {
+  return provider as unknown as {
+    hostStatePostAttempts: number;
+    hostStatePostDeliveries: number;
+  };
 }
 
 async function flush(): Promise<void> {
@@ -95,14 +118,18 @@ async function resolveEditor(
   text: string,
   docPath: string,
   active = true,
-): Promise<{ panel: FakeWebviewPanel }> {
+): Promise<{ document: vscode.CustomDocument; panel: FakeWebviewPanel }> {
+  if (!fs.existsSync(docPath)) {
+    virtualPlanTexts.set(docPath, text);
+  }
+  const document = provider.openCustomDocument(vscode.Uri.file(docPath));
   const panel = new FakeWebviewPanel(active);
-  provider.resolveCustomTextEditor(
-    fakeDocument(text, docPath) as unknown as vscode.TextDocument,
+  provider.resolveCustomEditor(
+    document,
     panel as unknown as vscode.WebviewPanel,
   );
   await flush();
-  return { panel };
+  return { document, panel };
 }
 
 const PLAN_TEXT = `---
@@ -125,7 +152,13 @@ Body paragraph.
 `;
 
 function initResult(capabilities: string[]): InitializeResult {
-  return { capabilities, protocolVersion: 1, sessionId: null };
+  return {
+    attachmentRoot: null,
+    capabilities,
+    protocolVersion: 1,
+    serverVersion: null,
+    sessionId: null,
+  };
 }
 
 function makeDeps(
@@ -139,6 +172,7 @@ function makeDeps(
       .mockResolvedValue(initResult(["set_plan_mode", "list_models"])),
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getBuildModel: vi.fn().mockReturnValue(""),
+    getSessionModel: vi.fn().mockReturnValue(""),
     messenger: {
       sendListModels: vi.fn().mockResolvedValue({
         payload: { models: [{ id: "gpt-5.4", keyPresent: true }] },
@@ -146,7 +180,7 @@ function makeDeps(
       }),
     } as never,
     openExternal: vi.fn().mockResolvedValue(undefined),
-    openWorkspaceFile: vi.fn().mockResolvedValue(undefined),
+    openFile: vi.fn().mockResolvedValue(undefined),
     setBuildModel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -155,6 +189,44 @@ function makeDeps(
 function makeDoc(text = PLAN_TEXT, docPath = "/workspace/plans/sample.plan.md"): PlanPreviewDocumentLike {
   return { getText: () => text, path: docPath };
 }
+
+const refreshTempDirs: string[] = [];
+const virtualPlanTexts = new Map<string, string>();
+const realReadFileSync = fs.readFileSync;
+
+async function createTempPlanFile(text: string): Promise<string> {
+  const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-refresh-"));
+  refreshTempDirs.push(dir);
+  const planPath = path.join(dir, "sample.plan.md");
+  await fsPromises.writeFile(planPath, text, "utf8");
+  return planPath;
+}
+
+beforeEach(() => {
+  __testing.reset();
+  virtualPlanTexts.clear();
+  vi.spyOn(fs, "readFileSync").mockImplementation(
+    ((file: unknown, ...args: unknown[]) => {
+      if (typeof file === "string") {
+        const text = virtualPlanTexts.get(file);
+        if (text !== undefined) {
+          return text;
+        }
+      }
+      return Reflect.apply(realReadFileSync, fs, [file, ...args]);
+    }) as never,
+  );
+});
+
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(
+    refreshTempDirs.map((dir) => fsPromises.rm(dir, { force: true, recursive: true })),
+  );
+  refreshTempDirs.length = 0;
+  virtualPlanTexts.clear();
+  vi.restoreAllMocks();
+});
 
 describe("deriveCanBuild", () => {
   it("is false whenever the serve lacks set_plan_mode", () => {
@@ -207,6 +279,14 @@ describe("classifyPlanLink", () => {
     expect(classifyPlanLink("neighbor.md#heading", planPath)).toEqual({
       kind: "file",
       path: path.resolve("/workspace/plans", "neighbor.md"),
+    });
+  });
+
+  it("keeps a local link's first source line while resolving its file path", () => {
+    expect(classifyPlanLink("docs/design.md:59-103", planPath)).toEqual({
+      kind: "file",
+      line: 59,
+      path: path.resolve("/workspace/plans", "docs/design.md"),
     });
   });
 });
@@ -291,7 +371,7 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       vi.fn(),
     );
     expect(deps.openExternal).toHaveBeenCalledWith("https://example.com");
-    expect(deps.openWorkspaceFile).not.toHaveBeenCalled();
+    expect(deps.openFile).not.toHaveBeenCalled();
   });
 
   it("routes relative links to the workspace file opener", async () => {
@@ -302,14 +382,14 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       makeDoc(PLAN_TEXT, "/workspace/plans/sample.plan.md"),
       vi.fn(),
     );
-    expect(deps.openWorkspaceFile).toHaveBeenCalledWith(
+    expect(deps.openFile).toHaveBeenCalledWith(
       path.resolve("/workspace/plans", "docs/design.md"),
     );
   });
 
   it("falls back to external open when the workspace file cannot be opened", async () => {
     const deps = makeDeps({
-      openWorkspaceFile: vi.fn().mockRejectedValue(new Error("missing")),
+      openFile: vi.fn().mockRejectedValue(new Error("missing")),
     });
     const provider = new PlanPreviewEditorProvider(deps);
     await provider.handleIntent(
@@ -318,6 +398,45 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       vi.fn(),
     );
     expect(deps.openExternal).toHaveBeenCalledWith("docs/design.md");
+  });
+
+  it("opens inline file-path intents through the IDE with line numbers", async () => {
+    const deps = makeDeps();
+    const provider = new PlanPreviewEditorProvider(deps);
+    await provider.handleIntent(
+      {
+        data: { line: 7, path: "src/test/fixtures/plan-preview.ts" },
+        messageId: "1",
+        type: "openFile",
+      },
+      makeDoc(),
+      vi.fn(),
+    );
+    expect(deps.openFile).toHaveBeenCalledWith("src/test/fixtures/plan-preview.ts", 7);
+  });
+
+  it("shows a toast when an inline file-path open fails", async () => {
+    const deps = makeDeps({
+      openFile: vi.fn().mockRejectedValue(new Error("cannot open inline path")),
+    });
+    const toastSpy = vi
+      .spyOn(vscode.window, "showErrorMessage")
+      .mockResolvedValue(undefined as never);
+    const provider = new PlanPreviewEditorProvider(deps);
+    try {
+      await provider.handleIntent(
+        {
+          data: { line: 7, path: "src/test/fixtures/plan-preview.ts" },
+          messageId: "1",
+          type: "openFile",
+        },
+        makeDoc(),
+        vi.fn(),
+      );
+      expect(toastSpy).toHaveBeenCalledWith("cannot open inline path");
+    } finally {
+      toastSpy.mockRestore();
+    }
   });
 
   it("persists the build model and re-posts state", async () => {
@@ -331,6 +450,77 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
     );
     expect(deps.setBuildModel).toHaveBeenCalledWith("gpt-5.4");
     expect(postState).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["success", "rejected", "transport"])("routes speed and reports %s", async (outcome) => {
+    const sendSetSpeed = outcome === "transport"
+      ? vi.fn().mockRejectedValue(new Error("offline"))
+      : vi.fn().mockResolvedValue({ success: outcome === "success", error: "invalid_speed" });
+    const provider = new PlanPreviewEditorProvider(makeDeps({
+      ensureSession: vi.fn().mockResolvedValue("s1"), messenger: { sendSetSpeed } as never,
+    }));
+    const toast = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined as never);
+    const postState = vi.fn().mockResolvedValue(undefined);
+    try {
+      await provider.handleIntent({ messageId: "speed", type: "setSpeed", data: { modelId: "relay/model", speed: "fast" } }, makeDoc(), postState);
+      expect(sendSetSpeed).toHaveBeenCalledWith("s1", "relay/model", "fast");
+      expect(postState).toHaveBeenCalledTimes(outcome === "success" ? 1 : 0);
+      if (outcome !== "success") expect(toast).toHaveBeenCalledWith(expect.stringContaining(outcome === "rejected" ? "invalid_speed" : "offline"));
+    } finally { toast.mockRestore(); }
+  });
+
+  it.each(["accepted", "negative-ack", "transport"] as const)("handles plan-picker preference updates (%s)", async (mode) => {
+    const reply = (error: string) => mode === "transport"
+      ? vi.fn().mockRejectedValue(new Error(error))
+      : vi.fn().mockResolvedValue({ success: mode === "accepted", error: mode === "accepted" ? null : error });
+    const sendSetContextWindow = reply("invalid tier");
+    const sendSetThinkingLevel = reply("unsupported effort");
+    const deps = makeDeps({
+      ensureSession: vi.fn().mockResolvedValue("session-1"),
+      messenger: {
+        sendSetContextWindow,
+        sendSetThinkingLevel,
+      } as never,
+    });
+    const toastSpy = vi
+      .spyOn(vscode.window, "showErrorMessage")
+      .mockResolvedValue(undefined as never);
+    const provider = new PlanPreviewEditorProvider(deps);
+    const postState = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await provider.handleIntent(
+        {
+          data: { contextWindow: 1_000_000, modelId: "gpt-5.6" },
+          messageId: "set-context",
+          type: "setContextWindow",
+        },
+        makeDoc(),
+        postState,
+      );
+      await provider.handleIntent(
+        {
+          data: { level: "xhigh", modelId: "gpt-5.6" },
+          messageId: "set-effort",
+          type: "setThinkingLevel",
+        },
+        makeDoc(),
+        postState,
+      );
+
+      expect(sendSetContextWindow).toHaveBeenCalledWith("session-1", "gpt-5.6", 1_000_000);
+      expect(sendSetThinkingLevel).toHaveBeenCalledWith("session-1", "gpt-5.6", "xhigh");
+      if (mode === "accepted") {
+        expect(toastSpy).not.toHaveBeenCalled();
+        expect(postState).toHaveBeenCalledTimes(2);
+      } else {
+        expect(toastSpy).toHaveBeenCalledWith(translate("en", "plan.host.contextError", { detail: "invalid tier" }));
+        expect(toastSpy).toHaveBeenCalledWith(translate("en", "plan.host.effortError", { detail: "unsupported effort" }));
+        expect(postState).not.toHaveBeenCalled();
+      }
+    } finally {
+      toastSpy.mockRestore();
+    }
   });
 
   it("builds the plan using the planId parsed from the document", async () => {
@@ -372,6 +562,48 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       "selected snippet",
       undefined,
     );
+  });
+
+  it("resolves inline plan paths from the workspace instead of plan storage", async () => {
+    const resolvePaths = vi
+      .spyOn(ContextSearchService.prototype, "resolvePaths")
+      .mockResolvedValue([
+        {
+          kind: "file",
+          path: "src/app.ts",
+          resolvedPath: "/workspace/src/app.ts",
+        },
+      ]);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const postEvent = vi.fn().mockResolvedValue(undefined);
+
+    try {
+      await provider.handleIntent(
+        {
+          data: { paths: ["src/app.ts"], requestId: "paths-1" },
+          messageId: "resolve-1",
+          type: "resolvePaths",
+        },
+        makeDoc(PLAN_TEXT, "/home/user/.tomcat/plans/plan.plan.md"),
+        vi.fn(),
+        postEvent,
+      );
+
+      expect(resolvePaths).toHaveBeenCalledWith({ paths: ["src/app.ts"] });
+      expect(postEvent).toHaveBeenCalledWith({
+        requestId: "paths-1",
+        results: [
+          {
+            kind: "file",
+            path: "src/app.ts",
+            resolvedPath: "/workspace/src/app.ts",
+          },
+        ],
+        type: "pathsResolved",
+      });
+    } finally {
+      resolvePaths.mockRestore();
+    }
   });
 });
 
@@ -477,6 +709,218 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
   it("requestCaptureSelection is a no-op when no plan editor is focused", async () => {
     const { provider } = setup();
     await expect(provider.requestCaptureSelection()).resolves.toBeUndefined();
+  });
+});
+
+  it("posts the document before a slow model service has initialized", async () => {
+    const provider = new PlanPreviewEditorProvider(
+      makeDeps({
+        ensureInitialized: vi.fn().mockImplementation(
+          () => new Promise<InitializeResult>(() => undefined),
+        ),
+      }),
+    );
+
+    const { panel } = await resolveEditor(
+      provider,
+      PLAN_TEXT,
+      "/workspace/plans/slow-service.plan.md",
+    );
+
+    expect(panel.webview.lastState()).toMatchObject({
+      availableModels: [],
+      bodyMarkdown: expect.stringContaining("Body paragraph."),
+      canBuild: false,
+    });
+  });
+
+describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
+  it("opens an opaque readonly document with no text buffer or save capability", () => {
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const document = provider.openCustomDocument(
+      vscode.Uri.file("/workspace/plans/readonly.plan.md"),
+    );
+
+    expect(document.uri.fsPath).toBe("/workspace/plans/readonly.plan.md");
+    expect(document).not.toHaveProperty("getText");
+    expect(document).not.toHaveProperty("save");
+    expect(document).not.toHaveProperty("isDirty");
+  });
+
+  it("refreshes an open preview from disk even when the VS Code document is stale", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "Disk refreshed paragraph.");
+    const planPath = await createTempPlanFile(oldText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Old buffered paragraph.");
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    await provider.refreshFromServeEvent("plan-xyz");
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Disk refreshed paragraph.");
+  });
+
+  it("never writes the plan file while refreshing agent-written disk content", async () => {
+    const initialText = PLAN_TEXT.replace("Body paragraph.", "Initial disk paragraph.");
+    const agentText = PLAN_TEXT.replace("Body paragraph.", "Agent-written disk paragraph.");
+    const planPath = await createTempPlanFile(initialText);
+    const writeSpy = vi.spyOn(fs, "writeFileSync");
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    await resolveEditor(provider, initialText, planPath);
+
+    await fsPromises.writeFile(planPath, agentText, "utf8");
+    await provider.refreshFromServeEvent("plan-xyz");
+
+    expect(fs.readFileSync(planPath, "utf8")).toBe(agentText);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it("refreshes from disk when its watcher receives a change", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Before watcher change.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "After watcher change.");
+    const planPath = await createTempPlanFile(oldText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    __testing.fireDidChangeFile(planPath);
+    await flush();
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("After watcher change.");
+  });
+
+  it("refreshes from disk when an atomic rename is reported as a create", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Before atomic rename.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "After atomic rename.");
+    const planPath = await createTempPlanFile(oldText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    __testing.registerFile(planPath, newText);
+    await flush();
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("After atomic rename.");
+  });
+
+  it("watches plan files outside the workspace", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Outside workspace before.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "Outside workspace after.");
+    const planPath = await createTempPlanFile(oldText);
+    expect(planPath.startsWith("/workspace/")).toBe(false);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    __testing.fireDidChangeFile(planPath);
+    await flush();
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Outside workspace after.");
+  });
+
+  it("closes the panel when its plan file is deleted", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+
+    await fsPromises.rm(planPath, { force: true });
+    __testing.deleteFile(planPath);
+
+    expect(panel.disposed).toBe(true);
+    expect(provider.getActivePlanPath()).toBeNull();
+  });
+
+  it("always renders agent-written disk text while applying the event's non-text plan state", async () => {
+    const diskText = PLAN_TEXT.replace("Body paragraph.", "Agent-written disk paragraph.");
+    const planPath = await createTempPlanFile(diskText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, diskText, planPath);
+
+    await provider.refreshFromServeEvent("plan-xyz", null, "executing");
+
+    expect(panel.webview.lastState()).toMatchObject({
+      bodyMarkdown: expect.stringContaining("Agent-written disk paragraph."),
+      canBuild: false,
+      state: "executing",
+    });
+  });
+
+  it("records a state-post attempt before asynchronous snapshot construction settles", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+    const initialSnapshot = panel.webview.lastState();
+    expect(initialSnapshot).toBeDefined();
+    const before = { ...hostRefreshCounters(provider) };
+
+    let resolveSnapshot!: (snapshot: PlanPreviewStateSnapshot) => void;
+    const deferredSnapshot = new Promise<PlanPreviewStateSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    vi.spyOn(provider, "buildState").mockReturnValue(deferredSnapshot);
+    const postSnapshot = (
+      provider as unknown as {
+        postSnapshot(
+          path: string,
+          text: string,
+          ui: { toolbarStyle: "hybrid" },
+        ): Promise<void>;
+      }
+    ).postSnapshot(planPath, PLAN_TEXT, { toolbarStyle: "hybrid" });
+
+    expect(hostRefreshCounters(provider).hostStatePostAttempts).toBe(before.hostStatePostAttempts + 1);
+    await flush();
+    expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(
+      before.hostStatePostDeliveries + 1,
+    );
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Body paragraph.");
+
+    resolveSnapshot(initialSnapshot!);
+    await postSnapshot;
+    expect(hostRefreshCounters(provider).hostStatePostDeliveries).toBe(
+      before.hostStatePostDeliveries + 2,
+    );
+  });
+
+  it("falls back to the canonicalized path hint when the event has no planId", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "Canonical refresh paragraph.");
+    const planPath = await createTempPlanFile(oldText);
+    const aliasPath = path.join(path.dirname(planPath), "alias.plan.md");
+    await fsPromises.symlink(planPath, aliasPath);
+
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+    await fsPromises.writeFile(planPath, newText, "utf8");
+
+    await provider.refreshFromServeEvent(null, aliasPath);
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Canonical refresh paragraph.");
+  });
+
+  it("is a no-op when no open preview matches the incoming event", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+    const frameCount = panel.webview.stateFrames().length;
+
+    await provider.refreshFromServeEvent("missing-plan");
+
+    expect(panel.webview.stateFrames()).toHaveLength(frameCount);
+  });
+
+  it("swallows disk read failures during an external refresh", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+    const frameCount = panel.webview.stateFrames().length;
+
+    await fsPromises.rm(planPath, { force: true });
+    await provider.refreshFromServeEvent("plan-xyz");
+
+    expect(panel.webview.stateFrames()).toHaveLength(frameCount);
   });
 });
 

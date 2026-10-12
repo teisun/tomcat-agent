@@ -18,7 +18,9 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation};
+use crate::core::llm::{
+    ChatMessage, ChatMessageContentPart, ContinuityMetadata, ReasoningContinuation, TokenUsage,
+};
 use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::infra::error::AppError;
 use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
@@ -29,14 +31,165 @@ use super::tool_summary_update;
 use super::turn_summary;
 use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 
-fn plugin_tool_model_text(result: &serde_json::Value) -> String {
-    result
-        .get("content")
-        .cloned()
-        .unwrap_or_else(|| result.clone())
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_else(|_| String::from("{}")))
+/// `InputImage` / `InputFile` 不按原始 base64 长度计入上下文。这里的固定估算与
+/// 既有 read 工具的 follow-up 记账契约保持一致。
+fn follow_up_parts_chars(parts: &[ChatMessageContentPart]) -> usize {
+    parts
+        .iter()
+        .map(|part| match part {
+            ChatMessageContentPart::InputText { text } => text.chars().count(),
+            ChatMessageContentPart::InputReference { reference } => {
+                reference.to_prompt_text().chars().count()
+            }
+            ChatMessageContentPart::InputImage { .. }
+            | ChatMessageContentPart::InputImageRef { .. } => 3600,
+            ChatMessageContentPart::InputFile { .. } => 8000,
+        })
+        .sum()
+}
+
+/// Keep provider bytes out of durable tool rows and UI frames. Subagents use the
+/// same agent-level repository, even when they only have a JSONL append sink.
+fn tool_messages_with_media(
+    agent: &AgentLoop,
+    id: &str,
+    text: &str,
+    parts: Vec<ChatMessageContentPart>,
+    display: Option<crate::infra::events::ToolDisplay>,
+) -> Result<
+    (
+        ChatMessage,
+        ChatMessage,
+        Vec<crate::infra::events::ToolMediaRef>,
+    ),
+    AppError,
+> {
+    use crate::core::llm::{ChatMessageContent, ImageSource};
+    use crate::core::session::attachments::AttachmentBlobStore;
+    use crate::infra::events::ToolMediaRef;
+    use base64::Engine as _;
+    let mut provider = ChatMessage::tool(id, text).with_tool_display(display.clone());
+    let mut archival = ChatMessage::tool(id, text).with_tool_display(display);
+    let mut media = Vec::new();
+    if parts.is_empty() {
+        return Ok((provider, archival, media));
+    }
+    let store = agent
+        .session_manager
+        .as_ref()
+        .map(|session| session.attachment_store())
+        .or_else(|| {
+            (!agent.config.agent_trail_dir.is_empty()).then(|| {
+                AttachmentBlobStore::new(
+                    &std::path::Path::new(&agent.config.agent_trail_dir).join("sessions"),
+                )
+            })
+        });
+    let mut saved = vec![ChatMessageContentPart::text(text)];
+    for part in &parts {
+        if let ChatMessageContentPart::InputImage {
+            source: ImageSource::Inline(image),
+            detail,
+        } = part
+        {
+            if let Some(store) = &store {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .map_err(|e| {
+                        AppError::Config(crate::infra::i18n::tr(
+                            "agentLoop.toolImageBase64",
+                            &[("detail", &e.to_string())],
+                        ))
+                    })?;
+                let sha = store.put(&bytes)?;
+                saved.push(ChatMessageContentPart::image_blob_ref(
+                    sha.clone(),
+                    image.mime_type.clone(),
+                    detail.clone(),
+                )?);
+                media.push(ToolMediaRef::InputImageRef {
+                    blob_sha: sha,
+                    mime_type: image.mime_type.clone(),
+                    bytes: bytes.len() as u64,
+                });
+                continue;
+            }
+            if agent.config.message_append_sink.is_some() {
+                return Err(AppError::Config(crate::infra::i18n::tr(
+                    "agentLoop.imageStoreRequired",
+                    &[],
+                )));
+            }
+        }
+        saved.push(part.clone());
+    }
+    let mut live = vec![ChatMessageContentPart::text(text)];
+    live.extend(parts);
+    provider.content = Some(ChatMessageContent::Parts(live));
+    archival.content = Some(ChatMessageContent::Parts(saved));
+    Ok((provider, archival, media))
+}
+
+/// A provider may emit more than one tool call in an assistant message. If a steering message
+/// arrives after one has completed, the remaining calls must still receive terminal results before
+/// any user message is appended; otherwise the OpenAI tool-call chain is invalid.
+fn append_steered_tool_result(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    tc: &ToolCallInfo,
+    tool_results: &mut Vec<Message>,
+) -> Result<(), LoopError> {
+    let steered_text =
+        "[Tool call skipped because a steering message superseded the remaining tool batch.]"
+            .to_string();
+    let args = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+    agent.emit_event(AgentEvent::ToolExecutionStart {
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.name.clone(),
+        args: args.clone(),
+    });
+    agent.emit_extension_event(ExtensionEvent::ToolCall {
+        tool_name: tc.name.clone(),
+        tool_call_id: tc.id.clone(),
+        input: args.clone(),
+    });
+    agent.emit_extension_event(ExtensionEvent::ToolResult {
+        tool_name: tc.name.clone(),
+        tool_call_id: tc.id.clone(),
+        input: args,
+        content: vec![ContentBlock(serde_json::json!({ "text": steered_text }))],
+        details: None,
+        is_error: true,
+    });
+    agent.emit_event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.name.clone(),
+        result: ToolOutput(serde_json::json!(steered_text)),
+        display: None,
+        media: Vec::new(),
+        is_error: true,
+    });
+    if let Some(ref mut ctx_state) = agent.context_state {
+        ctx_state.on_message_appended(steered_text.len());
+    }
+    agent
+        .push_message(messages, ChatMessage::tool(&tc.id, &steered_text))
+        .map_err(LoopError::Fatal)?;
+    tool_results.push(Message(serde_json::json!({ "content": steered_text })));
+    Ok(())
+}
+
+fn tool_parallelism_event(
+    tool_calls_per_turn: usize,
+    tool_results_completed: usize,
+    steered: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "agent.tool_parallelism",
+        "tool_calls_per_turn": tool_calls_per_turn,
+        "tool_results_completed": tool_results_completed,
+        "steered": steered,
+    })
 }
 
 fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: serde_json::Value) {
@@ -55,6 +208,7 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
         tool_name: tc.name.clone(),
         result: ToolOutput(serde_json::json!(INTERRUPTED_TOOL_RESULT_TEXT)),
         display: None,
+        media: Vec::new(),
         is_error: true,
     });
 }
@@ -64,7 +218,7 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
 /// ## 参数语义（**严禁混淆**，混淆即 T-017 类 token 水位漂移的孪生 bug）
 ///
 /// - `assistant_content`: 本轮 delta 累积（`outcome.content_buf`），用于
-///   `on_message_appended(assistant_chars)` 的**当次**计费。
+///   `on_assistant_message_appended(assistant_chars)` 的 fallback 上下文估算。
 ///   **不得**传跨轮累积的 `final_text`，否则历史轮 token 会被重复计入。
 /// - `partial_text_for_abort`: cancel 分支构造 `make_aborted(messages, partial)`
 ///   时使用；此处传 `&final_text`（已累积）即可，因为 partial_text 的语义就是
@@ -94,10 +248,14 @@ fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: 
 /// ## Steering break
 ///
 /// 每个 tool 执行完毕后检查 `steering_queue`；非空则通过
-/// `inject_steering_messages(...)` 统一走「记账 + append/persist + push」通道，
-/// 然后 `steered = true; break;`。**当次** tool 的 result 已入 messages；余下
-/// tool_calls **不执行**。调用方应 `continue` reasoning loop 让下一次 LLM 请求
-/// 携带 steering 消息。
+/// `steered = true` 标记当前 batch；余下 tool_calls **不执行**，但先各自写入一个
+/// “skipped by steering” terminal tool result。媒体随各自工具结果入列；
+/// 等整个 tool batch 闭合后才写入 steering。调用方随后 `continue` reasoning loop，让下一次
+/// LLM 请求携带 steering 消息。
+///
+/// 这是不带 usage 的测试便利包装；生产路径统一调用
+/// [`run_tool_calls_with_usage`]，以便将 provider usage 透传到落盘事件。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tool_calls(
     agent: &mut AgentLoop,
@@ -112,12 +270,50 @@ pub(super) async fn run_tool_calls(
     reasoning_continuation: Option<ReasoningContinuation>,
     continuity: Option<ContinuityMetadata>,
 ) -> Result<DispatchOutcome, LoopError> {
+    run_tool_calls_with_usage(
+        agent,
+        messages,
+        tool_calls,
+        assistant_content,
+        partial_text_for_abort,
+        finish_reason,
+        error_message,
+        error_code,
+        thinking_text,
+        reasoning_continuation,
+        continuity,
+        None,
+    )
+    .await
+}
+
+fn must_settle_on_cancel(name: &str) -> bool {
+    // Writes settle their commit boundary; create_plan settles the saved plan's review
+    // decision. Dropping either future can hide a completed disk side effect from the UI.
+    matches!(name, "write" | "edit" | "hashline_edit" | "create_plan")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_tool_calls_with_usage(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    tool_calls: &[ToolCallInfo],
+    assistant_content: &str,
+    partial_text_for_abort: &str,
+    finish_reason: Option<String>,
+    error_message: Option<String>,
+    error_code: Option<String>,
+    thinking_text: Option<String>,
+    reasoning_continuation: Option<ReasoningContinuation>,
+    continuity: Option<ContinuityMetadata>,
+    usage: Option<TokenUsage>,
+) -> Result<DispatchOutcome, LoopError> {
     let persisted_arguments: Vec<String> = tool_calls
         .iter()
         .map(tool_exec::persisted_tool_call_arguments)
         .collect();
 
-    // ── 1. 计费：assistant 消息（含 tool_calls wire payload 估算） ──
+    // ── 1. 记录 assistant 消息（含 tool_calls wire payload 估算） ──
     if let Some(ref mut ctx_state) = agent.context_state {
         let assistant_chars = assistant_content.len()
             + tool_calls
@@ -125,7 +321,13 @@ pub(super) async fn run_tool_calls(
                 .zip(persisted_arguments.iter())
                 .map(|(tc, persisted_args)| tc.name.len() + persisted_args.len() + tc.id.len() + 40)
                 .sum::<usize>();
-        ctx_state.on_message_appended(assistant_chars);
+        // Only this response's usage includes its text and tool-call arguments.
+        // Without it, retain the estimate on top of any older usage sample.
+        if usage.is_some() {
+            ctx_state.on_assistant_message_appended(assistant_chars);
+        } else {
+            ctx_state.on_message_appended(assistant_chars);
+        }
     }
 
     // ── 2. push assistant_with_tool_calls ──
@@ -160,16 +362,40 @@ pub(super) async fn run_tool_calls(
                     )
                     .with_completion_metadata(finish_reason, error_message, error_code)
                     .with_summary_title(summary_title.clone())
-                    .with_reasoning_state(
-                        thinking_text,
-                        reasoning_continuation,
-                        continuity,
-                    ),
+                    .with_reasoning_state(thinking_text, reasoning_continuation, continuity)
+                    .with_usage(usage),
                     &forced_id,
                 )
                 .map_err(LoopError::Fatal)?,
         )
     };
+
+    // 须在 assistant 落盘之后：整段压缩后内存只剩摘要，本批 assistant 是唯一可回退的归属。
+    let owner_id = messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m.role == crate::core::llm::ChatMessageRole::User
+                && m.kind == crate::core::llm::MessageKind::Normal
+        })
+        .and_then(|m| m.msg_id.as_deref())
+        .or_else(|| agent.file_baselines.as_ref().map(|b| b.message_id.as_str()))
+        .or(assistant_message_id.as_deref());
+    if let Some(owner_id) = owner_id {
+        if agent
+            .file_baselines
+            .as_ref()
+            .is_none_or(|b| b.message_id != owner_id || !b.keep_is_current())
+        {
+            agent.file_baselines = agent.session_manager.as_ref().and_then(|s| {
+                let path = s.current_transcript_path().ok()??;
+                let cwd = crate::core::checkpoint::file_baselines::session_cwd(&path)?;
+                crate::core::checkpoint::file_baselines::TurnFileBaselines::new(
+                    &path, owner_id, cwd,
+                )
+            });
+        }
+    }
 
     let mut tool_results: Vec<Message> = Vec::new();
     let mut steered = false;
@@ -177,10 +403,8 @@ pub(super) async fn run_tool_calls(
     // ── 3. block_tool_calls 短路 ──
     if agent.block_tool_calls {
         for tc in tool_calls {
-            let blocked_msg = format!(
-                "[Tool call blocked: context usage too high. Tool '{}' was not executed.]",
-                tc.name
-            );
+            let blocked_msg =
+                crate::infra::i18n::tr("agentLoop.contextBlockedTool", &[("name", &tc.name)]);
             if let Some(ref mut ctx_state) = agent.context_state {
                 ctx_state.on_message_appended(blocked_msg.len());
             }
@@ -199,7 +423,7 @@ pub(super) async fn run_tool_calls(
 
     // ── 4. 顺序调度 ──
     let cancel: CancellationToken = agent.cancel_token.clone();
-    for tc in tool_calls {
+    for (tool_index, tc) in tool_calls.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
         }
@@ -221,9 +445,7 @@ pub(super) async fn run_tool_calls(
 
         // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` 由
         // PrimitiveExecutor::execute_bash 内部兜底，保证子进程 / HTTP 连接被及时释放。
-        // PR-RJ T3-c：返回值新增 `follow_up_parts`——image / pdf 等需要在
-        // **下一条 user 消息** 注入 `Parts` 的场景由本调度器在 push tool 之后立刻
-        // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
+        // Attachments belong to this tool. Provider adapters project any wire-only carrier.
         let outcome = if let Some(registry) = agent.tool_registry.clone() {
             match registry.get_tool(tc.name.as_str()).await {
                 Ok(_) => {
@@ -240,30 +462,25 @@ pub(super) async fn run_tool_calls(
                             return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
                         }
                         result = exec => match result {
-                            Ok(result) => tool_exec::ToolExecOutcome {
-                                model_text: plugin_tool_model_text(&result),
-                                is_error: false,
-                                follow_up_parts: Vec::new(),
-                                display: None,
-                            },
+                            Ok(result) => tool_exec::media::extract_mcp_tool_result_media(
+                                &result,
+                                agent.config.openai_files_runtime.as_ref(),
+                            ).await,
                             Err(err) => tool_exec::ToolExecOutcome::err(err.to_string()),
                         },
                     }
                 }
                 Err(AppError::Tool(_)) => {
-                    let expose_skills_to_reviewer =
-                        agent
-                            .config
-                            .plan_runtime
-                            .as_ref()
-                            .is_some_and(|rt| rt.expose_skills_to_reviewer())
-                            && agent.config.skill_set.as_ref().is_some_and(|skill_set| {
-                                !skill_set.read().visible_skills().is_empty()
-                            });
-                    let exec = tool_exec::execute_tool_full_with_policy(
+                    let expose_skills_to_reviewer = agent
+                        .config
+                        .skill_set
+                        .as_ref()
+                        .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
+                    let exec = tool_exec::execute_tool_full_with_policy_and_connectors(
                         &agent.primitive,
                         agent.config.session_id.as_str(),
                         &agent.config_backend,
+                        &agent.package_install_backend,
                         &agent.bash_task_registry,
                         Some(&agent.config.read_file_state),
                         agent.config.openai_files_runtime.as_ref(),
@@ -272,21 +489,29 @@ pub(super) async fn run_tool_calls(
                         agent.todos_runtime.as_ref(),
                         agent.config.plan_runtime.as_ref(),
                         agent.config.skill_set.as_ref(),
+                        agent.connector_registry.as_ref(),
+                        agent.plugin_engine_config.as_ref(),
                         agent.config.subagent_type,
-                        agent.config.review_kind,
                         expose_skills_to_reviewer,
                         &cancel,
                         tc,
                         Some(&agent.emitter),
                         agent.completion_routes.as_ref(),
+                        agent.file_baselines.as_ref(),
                     );
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            emit_interrupted_tool_events(agent, tc, args.clone());
-                            return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                    if must_settle_on_cancel(tc.name.as_str()) {
+                        // These native tools observe cancellation themselves and settle their
+                        // disk/result boundary before the turn may report that it has stopped.
+                        exec.await
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => {
+                                emit_interrupted_tool_events(agent, tc, args.clone());
+                                return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                            }
+                            out = exec => out,
                         }
-                        out = exec => out,
                     }
                 }
                 Err(err) => tool_exec::ToolExecOutcome::err(err.to_string()),
@@ -294,18 +519,14 @@ pub(super) async fn run_tool_calls(
         } else {
             let expose_skills_to_reviewer = agent
                 .config
-                .plan_runtime
+                .skill_set
                 .as_ref()
-                .is_some_and(|rt| rt.expose_skills_to_reviewer())
-                && agent
-                    .config
-                    .skill_set
-                    .as_ref()
-                    .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
-            let exec = tool_exec::execute_tool_full_with_policy(
+                .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
+            let exec = tool_exec::execute_tool_full_with_policy_and_connectors(
                 &agent.primitive,
                 agent.config.session_id.as_str(),
                 &agent.config_backend,
+                &agent.package_install_backend,
                 &agent.bash_task_registry,
                 Some(&agent.config.read_file_state),
                 agent.config.openai_files_runtime.as_ref(),
@@ -314,27 +535,37 @@ pub(super) async fn run_tool_calls(
                 agent.todos_runtime.as_ref(),
                 agent.config.plan_runtime.as_ref(),
                 agent.config.skill_set.as_ref(),
+                agent.connector_registry.as_ref(),
+                agent.plugin_engine_config.as_ref(),
                 agent.config.subagent_type,
-                agent.config.review_kind,
                 expose_skills_to_reviewer,
                 &cancel,
                 tc,
                 Some(&agent.emitter),
                 agent.completion_routes.as_ref(),
+                agent.file_baselines.as_ref(),
             );
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    emit_interrupted_tool_events(agent, tc, args.clone());
-                    return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+            if must_settle_on_cancel(tc.name.as_str()) {
+                exec.await
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        emit_interrupted_tool_events(agent, tc, args.clone());
+                        return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                    }
+                    out = exec => out,
                 }
-                out = exec => out,
             }
         };
         let model_text = outcome.model_text;
         let is_error = outcome.is_error;
         let display = outcome.display;
         let follow_up_parts = outcome.follow_up_parts;
+        let media_chars = follow_up_parts_chars(&follow_up_parts);
+        let (mut tool_message, mut archival_message, media) =
+            tool_messages_with_media(agent, &tc.id, &model_text, follow_up_parts, display.clone())
+                .map_err(LoopError::Fatal)?;
 
         agent.emit_extension_event(ExtensionEvent::ToolResult {
             tool_name: tc.name.clone(),
@@ -352,6 +583,7 @@ pub(super) async fn run_tool_calls(
             tool_name: tc.name.clone(),
             result: ToolOutput(serde_json::json!(model_text.clone())),
             display: display.clone(),
+            media,
             is_error,
         });
 
@@ -366,49 +598,45 @@ pub(super) async fn run_tool_calls(
         );
 
         if let Some(ref mut ctx_state) = agent.context_state {
-            ctx_state.on_message_appended(model_text.len());
+            ctx_state.on_message_appended(model_text.len() + media_chars);
         }
 
         agent
-            .push_message(messages, ChatMessage::tool(&tc.id, &model_text))
+            .persist_message_if_needed(&mut archival_message)
+            .map_err(LoopError::Fatal)?;
+        tool_message.msg_id = archival_message.msg_id;
+        agent
+            .push_message(messages, tool_message)
             .map_err(LoopError::Fatal)?;
         tool_results.push(Message(
             serde_json::json!({ "content": model_text.clone() }),
         ));
 
-        // PR-RJ T3-c：read 命中 image / pdf → tool 消息已经写了占位句，
-        // 这里紧接着 push 一条 user 消息把真正的 InputImage / InputFile 注入对话。
-        // 注意时序：必须**在** tool 消息之后、steering break 之前——
-        // 1) tool→user 顺序固定，OpenAI Responses 才能把 part 关联到上一条 tool；
-        // 2) 若 follow-up 之后被 steering break 跳过剩余 tool，下一轮 LLM
-        //    仍能看到完整的「占位句 + 实物」对，不丢图。
-        if !follow_up_parts.is_empty() {
-            let parts_chars: usize = follow_up_parts
-                .iter()
-                .map(|p| match p {
-                    crate::core::llm::ChatMessageContentPart::InputText { text } => {
-                        text.chars().count()
-                    }
-                    crate::core::llm::ChatMessageContentPart::InputReference { reference } => {
-                        reference.to_prompt_text().chars().count()
-                    }
-                    crate::core::llm::ChatMessageContentPart::InputImage { .. } => 3600,
-                    crate::core::llm::ChatMessageContentPart::InputFile { .. } => 8000,
-                })
-                .sum();
-            if let Some(ref mut ctx_state) = agent.context_state {
-                ctx_state.on_message_appended(parts_chars);
-            }
-            agent
-                .push_message(messages, ChatMessage::user_with_parts(follow_up_parts))
-                .map_err(LoopError::Fatal)?;
-        }
-
-        // Steering break：每个 tool 执行后检查 queue；非空则注入 + 跳过剩余。
-        if inject_steering_messages(agent, messages).map_err(LoopError::Fatal)? {
+        // Steering may preempt remaining work, never the tool-result protocol. Close the
+        // remaining calls with explicit skipped results, then inject steering after this loop.
+        if !agent.steering_queue.lock().is_empty() {
             steered = true;
+            for skipped_tc in &tool_calls[tool_index + 1..] {
+                append_steered_tool_result(agent, messages, skipped_tc, &mut tool_results)?;
+            }
             break;
         }
+    }
+
+    if steered {
+        let injected = inject_steering_messages(agent, messages).map_err(LoopError::Fatal)?;
+        debug_assert!(
+            injected,
+            "steering queue was non-empty when the batch was preempted"
+        );
+    }
+
+    if let Some(plan_runtime) = agent.config.plan_runtime.as_ref() {
+        plan_runtime.write_transcript_custom(tool_parallelism_event(
+            tool_calls.len(),
+            tool_results.len(),
+            steered,
+        ));
     }
 
     Ok(DispatchOutcome {
@@ -417,3 +645,7 @@ pub(super) async fn run_tool_calls(
         steered,
     })
 }
+
+#[cfg(test)]
+#[path = "tests/tool_dispatcher_test.rs"]
+mod tests;

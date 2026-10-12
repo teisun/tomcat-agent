@@ -6,7 +6,9 @@ use tracing::info;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, StreamEvent,
 };
-use crate::core::summary::title_generator::{is_bare_tool_count, sanitize_purpose_clause};
+use crate::core::summary::title_generator::{
+    build_turn_summary_prompt, is_bare_tool_count, sanitize_purpose_clause,
+};
 use crate::core::summary::{
     fallback_command_summary, fallback_turn_summary, generate_command_summary,
     generate_session_title, generate_turn_summary, ToolSnapshot,
@@ -158,7 +160,7 @@ async fn generate_turn_summary_timeout_falls_back_to_rules() {
     let title = generate_turn_summary(None, &tools, &SlowLlm, "utility-flash").await;
 
     info!(target: "test", phase = "assert");
-    assert_eq!(title, "Ran ls");
+    assert_eq!(title, "Ran shell command");
 }
 
 #[tokio::test]
@@ -211,6 +213,16 @@ fn fallback_turn_summary_multiple_reads_uses_file_count() {
 }
 
 #[test]
+fn fallback_turn_summary_hides_raw_shell_command() {
+    let tools = vec![ToolSnapshot {
+        tool_name: "bash".into(),
+        summary: "command=cargo test --lib --manifest-path tomcat/Cargo.toml long_test_name".into(),
+    }];
+
+    assert_eq!(fallback_turn_summary(&tools), "Ran shell command");
+}
+
+#[test]
 fn fallback_turn_summary_avoids_raw_json_for_ask_question() {
     let tools = vec![ToolSnapshot {
         tool_name: "ask_question".into(),
@@ -220,6 +232,47 @@ fn fallback_turn_summary_avoids_raw_json_for_ask_question() {
     let title = fallback_turn_summary(&tools);
 
     assert_eq!(title, "Asked question");
+}
+
+#[test]
+fn fallback_turn_summary_uses_non_repetitive_plan_phrasing() {
+    let create = vec![ToolSnapshot {
+        tool_name: "create_plan".into(),
+        summary: "goal=rollback sequencing".into(),
+    }];
+    let update = vec![ToolSnapshot {
+        tool_name: "update_plan".into(),
+        summary: "plan_id=plan_rollback".into(),
+    }];
+
+    assert_eq!(fallback_turn_summary(&create), "Drafted the plan");
+    assert_eq!(fallback_turn_summary(&update), "Revised the plan");
+    assert_ne!(fallback_turn_summary(&create), "Created plan");
+    assert_ne!(fallback_turn_summary(&update), "Updated plan");
+}
+
+#[test]
+fn build_turn_summary_prompt_guides_plan_only_titles() {
+    let prompt = build_turn_summary_prompt(
+        Some("work out the rollback ordering"),
+        &[ToolSnapshot {
+            tool_name: "update_plan".into(),
+            summary: "plan_id=plan_rollback".into(),
+        }],
+    );
+
+    assert!(
+        prompt.contains("Created plan for <purpose>"),
+        "prompt should mention the create_plan plan-only title rule: {prompt}"
+    );
+    assert!(
+        prompt.contains("Updated plan for <purpose>"),
+        "prompt should mention the update_plan plan-only title rule: {prompt}"
+    );
+    assert!(
+        prompt.contains("do NOT repeat a raw shell command, flags, paths, or test names"),
+        "prompt should keep raw shell syntax out of the turn title: {prompt}"
+    );
 }
 
 /// 两阶段 mock：purpose 从句调用（prompt 含 "PURPOSE"）返回 purpose，其余返回 title。
@@ -295,6 +348,42 @@ async fn generate_turn_summary_appends_purpose_when_bare_count() {
 
     info!(target: "test", phase = "assert");
     assert_eq!(title, "Used 3 tools for finding coffee shops in Shenzhen");
+}
+
+#[tokio::test]
+async fn fallback_purpose_uses_tool_facts_not_its_display_label() {
+    use crate::infra::i18n::{tr_in, Locale};
+
+    let llm = MockTwoPhaseLlm {
+        title: String::new(),
+        purpose: "finding missing tests".into(),
+    };
+    let tools = mixed_tools();
+    assert_eq!(
+        fallback_turn_summary(&tools),
+        tr_in(Locale::En, "summary.tools.other", &[("count", "3")])
+    );
+    let title = generate_turn_summary(Some("think"), &tools, &llm, "utility-flash").await;
+    assert_eq!(
+        title,
+        tr_in(
+            Locale::En,
+            "summary.purpose.other",
+            &[("count", "3"), ("purpose", &llm.purpose)]
+        )
+    );
+
+    // This one tool renders like a count, but must not trigger a purpose request.
+    let named_like_a_count = [ToolSnapshot {
+        tool_name: "3_tools".into(),
+        summary: String::new(),
+    }];
+    let title =
+        generate_turn_summary(Some("think"), &named_like_a_count, &llm, "utility-flash").await;
+    assert_eq!(
+        title,
+        tr_in(Locale::En, "summary.used", &[("name", "3 tools")])
+    );
 }
 
 #[tokio::test]

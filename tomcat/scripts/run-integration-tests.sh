@@ -10,9 +10,10 @@
 #   ./scripts/run-integration-tests.sh clippy               # 仅 cargo clippy --all-targets -- -D warnings
 #   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（cargo test --lib）
 #   ./scripts/run-integration-tests.sh doctest              # 仅文档测试（cargo test --doc）
-#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + serial 兜底空组）
+#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + 六个 serial 目标）
 #   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（nextest 4 并发，含原串行组已放开的 binary）
-#   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（默认空）
+#   ./scripts/run-integration-tests.sh integration-parallel -E 'test(=case_name)' # 聚焦重跑；后续参数原样传给 nextest
+#   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（也支持 nextest 过滤参数）
 #   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM 显式层（nextest real-llm profile，max-threads=2）
 #   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组（需当前 OpenAI target 对应 key）
 #   ./scripts/run-integration-tests.sh gate-fast            # 快门禁：clippy → lib → doctest → integration
@@ -24,6 +25,11 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# The runtime marks this parent shell as an active agent. Integration tests launch
+# disposable CLI processes that intentionally mutate their own temporary HOME;
+# do not let that parent-only safety marker leak into those isolated processes.
+unset TOMCAT_AGENT_ACTIVE
+
 . "$REPO_ROOT/scripts/test-groups.sh"
 
 # 非 TTY（IDE/CI/管道）下若继承 EDITOR=vim 等，子进程会阻塞等输入，表现为测试「卡死」。
@@ -33,6 +39,13 @@ export VISUAL=true
 export GIT_EDITOR=true
 export PAGER=cat
 export GIT_PAGER=cat
+# Script preflight and Rust helpers must use the same exported credential set.
+# Direct cargo tests may still opt into their documented dotenv discovery.
+export TOMCAT_TEST_EXPORTED_ENV_ONLY=1
+# Local HTTP fixtures must not be routed through a developer's outbound proxy.
+# Preserve existing exclusions and all proxy settings for real remote providers.
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
 
 NEXTTEST_INSTALL_HINT="cargo install cargo-nextest --locked"
 
@@ -65,18 +78,24 @@ build_test_args() {
 }
 
 openai_responses_target() {
-  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4}"
+  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-idatatlas/gpt-5.6-terra}"
 }
 
 openai_responses_key_env() {
   local target
   target="$(openai_responses_target)"
   case "$target" in
+    idatatlas/*)
+    printf '%s' "IDATATLAS_OPENAI_API_KEY"
+    ;;
+    fcodex/*)
+    printf '%s' "FCODEX_OPENAI_API_KEY"
+    ;;
     gpt-5.2|gpt-5.4|gpt-5.5|gpt-5.6)
     printf '%s' "OPENAI_API_KEY"
     ;;
     *)
-    printf '%s' "${TOMCAT_E2E_OPENAI_KEY_ENV:-OPENAI_GATEWAY_API_KEY}"
+    printf '%s' "LITELLM_SUNMI_API_KEY"
     ;;
   esac
 }
@@ -87,11 +106,9 @@ missing_required_envs_for_real_llm() {
   if [ -z "${!openai_key_env}" ]; then
     printf '%s\n' "$openai_key_env"
   fi
-  if [ -z "$DEEPSEEK_API_KEY" ]; then
-    printf '%s\n' "DEEPSEEK_API_KEY"
-  fi
-  if [ -z "$MIMO_API_KEY" ]; then
-    printf '%s\n' "MIMO_API_KEY"
+  # CLI/LLM/plan delivery fixtures deliberately remain on IDATATLAS.
+  if [ "$openai_key_env" != "IDATATLAS_OPENAI_API_KEY" ] && [ -z "${IDATATLAS_OPENAI_API_KEY:-}" ]; then
+    printf '%s\n' "IDATATLAS_OPENAI_API_KEY"
   fi
 }
 
@@ -131,11 +148,16 @@ run_integration_parallel() {
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
-  done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}")
+  done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}" "${TOMCAT_INTEGRATION_FEATURE_TESTS[@]}")
 
+  # `assert_cmd::cargo::cargo_bin("tomcat")` launches target/debug/tomcat directly.
+  # nextest rebuilds test crates but does not necessarily refresh that executable, so
+  # an integration gate could exercise a stale serve/CLI binary after a library edit.
+  log_phase "构建 integration 依赖的 tomcat 二进制"
+  cargo build --bin tomcat
   ensure_nextest
   log_phase "开始 integration-parallel（默认 integration 门禁，nextest 4 并发）"
-  cargo nextest run --no-fail-fast "${args[@]}"
+  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}" "$@"
   local status=$?
   log_phase "结束 integration-parallel"
   return $status
@@ -154,7 +176,7 @@ run_integration_serial() {
 
   ensure_nextest
   log_phase "开始 integration-serial（nextest serial 兜底组）"
-  cargo nextest run --no-fail-fast "${args[@]}"
+  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}" "$@"
   local status=$?
   log_phase "结束 integration-serial"
   return $status
@@ -178,12 +200,12 @@ run_integration_real_llm() {
     fi
   done < <(missing_required_envs_for_real_llm)
   if [ "${#missing[@]}" -ne 0 ]; then
-    echo "跳过 integration-real-llm：未设置 ${missing[*]}（当前 OpenAI target=$(openai_responses_target)）" >&2
-    return 0
+    echo "未运行 integration-real-llm：未设置 ${missing[*]}（当前 OpenAI target=$(openai_responses_target)）；不计通过" >&2
+    return 2
   fi
   ensure_nextest
-  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；需 ${openai_key_env} + DEEPSEEK_API_KEY + MIMO_API_KEY）"
-  cargo nextest run --profile real-llm --no-fail-fast
+  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；target key=${openai_key_env}，delivery key=IDATATLAS_OPENAI_API_KEY）"
+  PI_LIVE_OPENAI_RESPONSES=1 cargo nextest run --profile real-llm --no-fail-fast
   local status=$?
   log_phase "结束 integration-real-llm"
   return $status
@@ -213,10 +235,11 @@ run_integration_openai_responses_wire() {
   local openai_key_env
   openai_key_env="$(openai_responses_key_env)"
   if [ -z "${!openai_key_env}" ]; then
-    log_phase "跳过 integration-openai-responses-wire：当前 OpenAI target=$(openai_responses_target) 未设置 ${openai_key_env}"
-    return 0
+    log_phase "未运行 integration-openai-responses-wire：当前 OpenAI target=$(openai_responses_target) 未设置 ${openai_key_env}；不计通过"
+    return 2
   fi
 
+  export PI_LIVE_OPENAI_RESPONSES=1 PI_LIVE_OPENAI_FILES=1
   log_phase "开始 integration-openai-responses-wire（仅 OpenAI Responses wire 真链路组）"
   local fail=0
   local cmd
@@ -254,10 +277,10 @@ case "$CMD" in
     run_integration
     ;;
   integration-parallel)
-    run_integration_parallel
+    run_integration_parallel "${@:2}"
     ;;
   integration-serial)
-    run_integration_serial
+    run_integration_serial "${@:2}"
     ;;
   integration-real-llm)
     run_integration_real_llm
@@ -290,7 +313,7 @@ case "$CMD" in
     echo "用法: $0 [release|clippy|lib|doctest|integration|integration-parallel|integration-serial|integration-real-llm|integration-openai-responses-wire|gate-fast|gate-full|all|-h]" >&2
     echo "  默认与 all：clippy → lib → doctest → integration" >&2
     echo "  gate-full：gate-fast → integration-real-llm" >&2
-    echo "  integration-real-llm 需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY；不进默认门禁，须显式触发" >&2
+    echo "  integration-real-llm 需当前 Responses target 对应 key；不进默认门禁，须显式触发" >&2
     exit 2
     ;;
 esac

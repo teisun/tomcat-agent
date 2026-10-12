@@ -1,4 +1,5 @@
-use crate::core::{LlmProvider, LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
+use crate::core::tools::primitive::BashTaskRegistry;
+use crate::core::{LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
 use crate::ext::PluginManager;
@@ -33,9 +34,9 @@ pub struct HostApiDispatcher {
     pub(super) event_bus: Arc<dyn EventBus>,
     pub(super) primitive: Option<Arc<dyn PrimitiveExecutor>>,
     pub(super) tools: Option<Arc<dyn ToolRegistry>>,
-    pub(super) llm: Option<Arc<dyn LlmProvider>>,
     pub(super) llm_resolver: Option<Arc<dyn LlmResolver>>,
     pub(super) session: Option<Arc<SessionManager>>,
+    pub(super) bash_task_registry: Option<Arc<BashTaskRegistry>>,
     pub(super) session_registry: Arc<DashMap<String, Weak<SessionManager>>>,
     pub(super) audit: Option<Arc<dyn AuditRecorder>>,
     pub(super) async_results: Arc<DashMap<String, AsyncCallStatus>>,
@@ -87,16 +88,16 @@ impl HostApiDispatcher {
         let fetch_client = build_outbound_client(
             options,
             OutboundClientErrorKind::Tool,
-            "创建默认 net.fetch HTTP 客户端失败",
+            "Could not create the default net.fetch HTTP client",
         )
         .expect("create default net.fetch client");
         Self {
             event_bus,
             primitive: None,
             tools: None,
-            llm: None,
             llm_resolver: None,
             session: None,
+            bash_task_registry: None,
             session_registry: Arc::new(DashMap::new()),
             audit: None,
             async_results: Arc::new(DashMap::new()),
@@ -212,12 +213,6 @@ impl HostApiDispatcher {
         self
     }
 
-    /// 注入 LLM Provider。
-    pub fn with_llm(mut self, l: Arc<dyn LlmProvider>) -> Self {
-        self.llm = Some(l);
-        self
-    }
-
     /// 注入 LLM Resolver（按显式 model 路由 provider）。
     pub fn with_llm_resolver(mut self, resolver: Arc<dyn LlmResolver>) -> Self {
         self.llm_resolver = Some(resolver);
@@ -227,6 +222,11 @@ impl HostApiDispatcher {
     /// 注入 SessionManager（会话 API）。
     pub fn with_session(mut self, s: Arc<SessionManager>) -> Self {
         self.session = Some(s);
+        self
+    }
+
+    pub fn with_bash_task_registry(mut self, registry: Arc<BashTaskRegistry>) -> Self {
+        self.bash_task_registry = Some(registry);
         self
     }
 

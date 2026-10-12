@@ -92,7 +92,7 @@ impl Drop for CurrentDirGuard {
 }
 
 fn write_session_plugin_fixture(workspace: &Path, plugin_id: &str, activation: &str) {
-    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    let plugin_dir = workspace.join(".agents").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let manifest = json!({
         "id": plugin_id,
@@ -391,12 +391,19 @@ fn assert_session_subcommand_cleans_plugin_vm(build_sub: impl FnOnce(String) -> 
         .current_session_id()
         .unwrap()
         .expect("current session id");
-    if !plugin_manager.has_session_vm(&session_id, PLUGIN_ID) {
+    let instance_id = if plugin_manager.has_session_vm(&session_id, PLUGIN_ID) {
+        ctx.scope_services
+            .scope_container
+            .dispatcher
+            .session_instance_ids(&session_id)
+            .into_iter()
+            .find(|id| id.rsplit('/').next() == Some(PLUGIN_ID))
+            .expect("active session VM should have a concrete instance id")
+    } else {
         rt.block_on(plugin_manager.start_session_vm(&session_id, PLUGIN_ID))
-            .expect("start session vm");
-    }
-
-    let instance_id = format!("{session_id}/{PLUGIN_ID}");
+            .expect("start session vm")
+            .instance_id
+    };
     assert!(
         plugin_manager.has_session_vm(&session_id, PLUGIN_ID),
         "fixture should have an active session VM before running session command"
@@ -410,7 +417,12 @@ fn assert_session_subcommand_cleans_plugin_vm(build_sub: impl FnOnce(String) -> 
         "session VM should register an event channel before running session command"
     );
 
-    let result = run_session(build_sub(session_id.clone()), &cfg);
+    let sub = build_sub(session_id.clone());
+    if matches!(&sub, SessionSub::Delete { .. }) {
+        // Model an idle, explicitly closed runtime while its cached VM still needs cleanup.
+        ctx.session_runtime.session.release_session_usage();
+    }
+    let result = run_session(sub, &cfg);
     assert!(
         result.is_ok(),
         "session subcommand should succeed while cleaning plugin VM: {result:?}"

@@ -2,8 +2,9 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::super::cmd_install::{run, InstallCommand, InstallTarget};
+use super::super::cmd_install::{run, InstallTarget};
 use super::super::parse::ChatCommandOutcome;
+use super::super::shared::run_terminal_shared;
 use crate::api::chat::panels::{Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel};
 use crate::api::chat::{ChatContext, ChatContextOverrides};
 use crate::core::SessionMode;
@@ -159,16 +160,20 @@ async fn run_install_refreshes_current_session_inventory() {
                 skipped: false,
                 picked_recommended: true,
             }],
-            cancelled: false,
+            outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
         }]));
     let ctx = build_ctx(work.path(), panel);
+    let context_budget_chars =
+        crate::infra::config::compute_context_budget_chars(&ctx.config.context);
+    let mut prompt_snapshot =
+        crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
+    let before_text = prompt_snapshot.system_text().to_string();
+    let before_tools = prompt_snapshot.tool_definitions().to_vec();
 
-    let outcome = run(
+    let outcome = run_terminal_shared(
         &ctx,
-        InstallCommand {
-            source: source.path().to_string_lossy().to_string(),
-            target: None,
-        },
+        "install",
+        vec![source.path().to_string_lossy().to_string()],
     )
     .await;
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
@@ -183,6 +188,27 @@ async fn run_install_refreshes_current_session_inventory() {
         tools.iter().any(|tool| tool.name == "release_tool"),
         "plugin static tool should become visible immediately"
     );
+    assert!(
+        crate::api::chat::refresh_prompt_snapshot(
+            &ctx,
+            context_budget_chars,
+            &mut prompt_snapshot,
+        )
+        .await,
+        "installing a plugin or skill must rebuild the shared request snapshot"
+    );
+    assert_ne!(prompt_snapshot.system_text(), before_text);
+    assert_ne!(prompt_snapshot.tool_definitions(), before_tools);
+    assert!(
+        prompt_snapshot
+            .system_text()
+            .contains("- release_tool: tool description"),
+        "the system inventory and function array must derive from the same tool observation"
+    );
+    assert!(prompt_snapshot
+        .tool_definitions()
+        .iter()
+        .any(|definition| { definition["function"]["name"].as_str() == Some("release_tool") }));
 }
 
 #[tokio::test]
@@ -201,16 +227,14 @@ async fn run_install_cancelled_has_no_side_effects() {
     let panel: Arc<dyn AskQuestionPanel> =
         Arc::new(MockAskQuestionPanel::new(vec![AskQuestionResult {
             answers: vec![],
-            cancelled: true,
+            outcome: crate::core::plan_runtime::AskQuestionOutcome::Skipped,
         }]));
     let ctx = build_ctx(work.path(), panel);
 
-    let outcome = run(
+    let outcome = run_terminal_shared(
         &ctx,
-        InstallCommand {
-            source: source.path().to_string_lossy().to_string(),
-            target: None,
-        },
+        "install",
+        vec![source.path().to_string_lossy().to_string()],
     )
     .await;
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
@@ -246,13 +270,11 @@ async fn install_live_refresh_does_not_execute_plugin() {
 
     let outcome = run(
         &ctx,
-        InstallCommand {
-            source: source.path().to_string_lossy().to_string(),
-            target: Some(InstallTarget::CurrentProject),
-        },
+        &source.path().to_string_lossy(),
+        InstallTarget::CurrentProject,
     )
     .await;
-    assert!(matches!(outcome, ChatCommandOutcome::Handled));
+    assert!(outcome.ok, "{}", outcome.text);
 
     let tools = ctx
         .global_services
@@ -268,7 +290,7 @@ async fn install_live_refresh_does_not_execute_plugin() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn install_keeps_active_session_plugin_catalog_stable() {
+async fn install_replaces_active_session_plugin_at_command_boundary() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -345,13 +367,11 @@ pi.registerTool({
 
     let outcome = run(
         &ctx,
-        InstallCommand {
-            source: source.path().to_string_lossy().to_string(),
-            target: Some(InstallTarget::CurrentProject),
-        },
+        &source.path().to_string_lossy(),
+        InstallTarget::CurrentProject,
     )
     .await;
-    assert!(matches!(outcome, ChatCommandOutcome::Handled));
+    assert!(outcome.ok, "{}", outcome.text);
 
     let tools_after = ctx
         .global_services
@@ -360,16 +380,16 @@ pi.registerTool({
         .await
         .expect("list tools after refresh");
     assert!(
-        tools_after.iter().any(|tool| tool.name == "loaded_old"),
-        "active session plugin should retain old static tool entry"
+        !tools_after.iter().any(|tool| tool.name == "loaded_old"),
+        "old tool must leave the shared menu at the command boundary"
     );
     assert!(
-        !tools_after.iter().any(|tool| tool.name == "loaded_new"),
-        "active session VM should block new manifest tools from surfacing mid-session"
+        tools_after.iter().any(|tool| tool.name == "loaded_new"),
+        "replacement static tool must be visible immediately"
     );
     assert!(
-        plugin_manager.has_session_vm(&session_id, "loaded-plugin"),
-        "current session VM should stay attached after /install"
+        !plugin_manager.has_session_vm(&session_id, "loaded-plugin"),
+        "the current session's stale Lazy VM must be retired after /install"
     );
 
     plugin_manager

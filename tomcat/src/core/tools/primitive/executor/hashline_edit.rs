@@ -23,15 +23,16 @@
 //! 3. 解析每条 `pos` / `end` 为 `(line_no, expected_hash)`；
 //!    - 行号越界 → `OutOfRange`；
 //!    - 实际行哈希 ≠ 期望 → `HashMismatch`（语义同 read 侧 stale）；
+//!    - 一趟收集全部无效锚点，返回 `HashlineValidationFailed`，不给模型「修一个再撞一个」；
 //! 4. 收集所有 `(start_line, end_line, replacement)` 区间，按行号检查重叠；
 //! 5. 自下而上 splice → `new_content` → `write_file_atomic`；写失败回滚 `.bak`。
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::read::compute_line_hash;
 use super::DefaultPrimitiveExecutor;
-use crate::core::tools::primitive::diff::{build_line_diff, line_diff_stat};
+use crate::core::tools::primitive::diff::{build_line_diff, line_diff_stat, LineDiff};
 use crate::core::tools::primitive::{
-    EditFileResult, FileDiffLine, HashlineOp, HashlineSegment, PrimitiveOperation,
+    EditFileResult, HashlineOp, HashlineSegment, PrimitiveOperation,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
@@ -42,9 +43,47 @@ enum HashlineEditOutcome {
     Applied {
         added: u32,
         removed: u32,
-        diff: Option<Vec<FileDiffLine>>,
+        diff: LineDiff,
     },
     Cancelled,
+}
+
+#[derive(Debug)]
+enum HashlineAnchorValidationKind {
+    OutOfRange {
+        line_no: u64,
+        total_lines: u64,
+    },
+    Mismatch {
+        line_no: u64,
+        expected_hash: String,
+        actual_hash: String,
+        line_excerpt: String,
+    },
+}
+
+#[derive(Debug)]
+struct HashlineAnchorValidationError {
+    segment_index: usize,
+    field: &'static str,
+    kind: HashlineAnchorValidationKind,
+}
+
+impl HashlineAnchorValidationError {
+    fn render(&self) -> String {
+        match &self.kind {
+            HashlineAnchorValidationKind::OutOfRange {
+                line_no,
+                total_lines,
+            } => format!("- edits[{}].{}: OutOfRange: Anchor line {line_no} exceeds the file's {total_lines} lines", self.segment_index, self.field),
+            HashlineAnchorValidationKind::Mismatch {
+                line_no,
+                expected_hash,
+                actual_hash,
+                line_excerpt,
+            } => format!("- edits[{}].{}: HashMismatch: Anchor {line_no}#{expected_hash} does not match current line {line_no} hash {actual_hash}; latest anchor `{line_no}#{actual_hash}`; current line excerpt {line_excerpt:?}", self.segment_index, self.field),
+        }
+    }
 }
 
 /// 主执行入口（被 `DefaultPrimitiveExecutor` 的 trait 实现调用）。
@@ -59,9 +98,22 @@ pub async fn hashline_edit_impl(
     if let Some(err) = url_like_fs_miss(path) {
         return Err(err);
     }
-    let (path_buf, scope, grant) = executor
-        .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
-        .await?;
+    let Some(checked_path) = super::helpers::until_cancelled(
+        cancel,
+        executor.gate_check_path(PrimitiveOperation::Edit, path, plugin_id),
+    )
+    .await
+    else {
+        return Ok(EditFileResult {
+            path: path.to_string(),
+            applied: false,
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+        });
+    };
+    let (path_buf, scope, grant) = checked_path?;
     let path_str = path_buf.to_string_lossy().to_string();
     let path_for_edit = path_buf.clone();
     let user_path = path.to_string();
@@ -70,10 +122,7 @@ pub async fn hashline_edit_impl(
     let outcome = tokio::task::spawn_blocking(move || -> Result<HashlineEditOutcome, AppError> {
         let original = read_file_utf8(&path_for_edit).map_err(|e| match e {
             AppError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData => {
-                AppError::Primitive(format!(
-                    "BinaryFile: `{}` 不是 UTF-8 文本，hashline_edit 拒绝执行",
-                    user_path
-                ))
+                AppError::Primitive(format!("BinaryFile: `{user_path}` is not UTF-8 text; hashline_edit refused"))
             }
             other => other,
         })?;
@@ -81,53 +130,54 @@ pub async fn hashline_edit_impl(
         let total_lines = raw_lines.len() as u64;
 
         let mut spans: Vec<(u64, u64, String)> = Vec::new();
-        for seg in &segments_for_edit {
-            if seg.start_line > total_lines {
-                return Err(AppError::Primitive(format!(
-                    "OutOfRange: hashline_edit 锚点行号 {} 超过文件总行数 {}",
-                    seg.start_line, total_lines
-                )));
-            }
-            let actual_start_line = strip_trailing_newline(raw_lines[(seg.start_line - 1) as usize]);
-            let actual_start_hash = compute_line_hash(actual_start_line, seg.start_line);
-            if actual_start_hash != seg.start_hash {
-                return Err(AppError::Primitive(format!(
-                    "HashMismatch: 锚点 {}#{} 与当前文件第 {} 行哈希 {} 不一致；请重新 `read hashline=true` 拿到最新锚点",
-                    seg.start_line, seg.start_hash, seg.start_line, actual_start_hash
-                )));
-            }
-            if seg.end_line != seg.start_line {
-                if seg.end_line > total_lines {
-                    return Err(AppError::Primitive(format!(
-                        "OutOfRange: hashline_edit end 行号 {} 超过文件总行数 {}",
-                        seg.end_line, total_lines
-                    )));
-                }
-                let actual_end = strip_trailing_newline(raw_lines[(seg.end_line - 1) as usize]);
-                let actual_end_hash = compute_line_hash(actual_end, seg.end_line);
-                if actual_end_hash != seg.end_hash {
-                    return Err(AppError::Primitive(format!(
-                        "HashMismatch: end 锚点 {}#{} 与当前文件第 {} 行哈希 {} 不一致",
-                        seg.end_line, seg.end_hash, seg.end_line, actual_end_hash
-                    )));
-                }
-            }
-            let span = match seg.op {
-                HashlineOp::Replace => (seg.start_line, seg.end_line, seg.lines.clone()),
-                HashlineOp::Insert => (seg.start_line, seg.start_line - 1, seg.lines.clone()),
-                HashlineOp::Delete => (seg.start_line, seg.end_line, String::new()),
+        let mut validation_errors = Vec::new();
+        for (segment_index, seg) in segments_for_edit.iter().enumerate() {
+            let start_valid = validate_anchor(
+                &mut validation_errors,
+                segment_index,
+                "pos",
+                seg.start_line,
+                &seg.start_hash,
+                &raw_lines,
+                total_lines,
+            );
+            let end_valid = if seg.end_line == seg.start_line {
+                start_valid
+            } else {
+                validate_anchor(
+                    &mut validation_errors,
+                    segment_index,
+                    "end",
+                    seg.end_line,
+                    &seg.end_hash,
+                    &raw_lines,
+                    total_lines,
+                )
             };
-            spans.push(span);
+
+            if start_valid && end_valid {
+                let span = match seg.op {
+                    HashlineOp::Replace => (seg.start_line, seg.end_line, seg.lines.clone()),
+                    HashlineOp::Insert => (seg.start_line, seg.start_line - 1, seg.lines.clone()),
+                    HashlineOp::Delete => (seg.start_line, seg.end_line, String::new()),
+                };
+                spans.push(span);
+            }
+        }
+        if !validation_errors.is_empty() {
+            let details = validation_errors
+                .iter()
+                .map(HashlineAnchorValidationError::render)
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(AppError::Primitive(format!("HashlineValidationFailed: Invalid anchors: {}; file was not modified. Reread all affected ranges with `read hashline=true` for current anchors:\n{details}", validation_errors.len())));
         }
         spans.sort_by_key(|(s, _, _)| *s);
         for w in spans.windows(2) {
             let (_, e1, _) = &w[0];
             let (s2, _, _) = &w[1];
             if *s2 <= *e1 {
-                return Err(AppError::Primitive(format!(
-                    "Overlap: hashline_edit 段在行 [{}..{}] 与下一段起始行 {} 相交",
-                    w[0].0, e1, s2
-                )));
+                return Err(AppError::Primitive(format!("Overlap: hashline_edit range [{}..{e1}] overlaps the next range starting at line {s2}", w[0].0)));
             }
         }
 
@@ -195,6 +245,7 @@ pub async fn hashline_edit_impl(
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         Err(e) => {
@@ -232,7 +283,8 @@ pub async fn hashline_edit_impl(
                 applied: true,
                 added: Some(added),
                 removed: Some(removed),
-                diff,
+                diff: diff.lines,
+                diff_truncated: diff.truncated,
             })
         }
     }
@@ -241,4 +293,59 @@ pub async fn hashline_edit_impl(
 fn strip_trailing_newline(line: &str) -> &str {
     let line = line.strip_suffix('\n').unwrap_or(line);
     line.strip_suffix('\r').unwrap_or(line)
+}
+
+fn validate_anchor(
+    validation_errors: &mut Vec<HashlineAnchorValidationError>,
+    segment_index: usize,
+    field: &'static str,
+    line_no: u64,
+    expected_hash: &str,
+    raw_lines: &[&str],
+    total_lines: u64,
+) -> bool {
+    if line_no == 0 || line_no > total_lines {
+        validation_errors.push(HashlineAnchorValidationError {
+            segment_index,
+            field,
+            kind: HashlineAnchorValidationKind::OutOfRange {
+                line_no,
+                total_lines,
+            },
+        });
+        return false;
+    }
+
+    let current_line = strip_trailing_newline(raw_lines[(line_no - 1) as usize]);
+    let actual_hash = compute_line_hash(current_line);
+    if actual_hash == expected_hash {
+        return true;
+    }
+
+    validation_errors.push(HashlineAnchorValidationError {
+        segment_index,
+        field,
+        kind: HashlineAnchorValidationKind::Mismatch {
+            line_no,
+            expected_hash: expected_hash.to_string(),
+            actual_hash,
+            line_excerpt: line_excerpt(current_line),
+        },
+    });
+    false
+}
+
+fn line_excerpt(line: &str) -> String {
+    const MAX_CHARS: usize = 80;
+
+    let mut chars = line.trim().chars();
+    let excerpt: String = chars.by_ref().take(MAX_CHARS).collect();
+    if excerpt.is_empty() {
+        return "(empty line)".to_string();
+    }
+    if chars.next().is_some() {
+        format!("{excerpt}…")
+    } else {
+        excerpt
+    }
 }

@@ -23,14 +23,21 @@ import type {
   ServeCommand,
   ServeEvent,
   GetMessagesParams,
+  ConnectorReloadReceipt,
+  ListConnectorToolsPayload,
   ListModelsPayload,
   ListProviderKeysPayload,
+  ProjectTrustPayload,
   ModelEntryInput,
   RemoveModelResponse,
+  SetConnectorToolEnabledResponse,
   SetProviderKeyResponse,
   SetPlanModeAction,
   UpsertModelResponse,
 } from "./wire";
+
+import type { Speed } from "../shared/modelSpeed";
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface TomcatMessengerLogger {
   debug?(message: string): void;
@@ -76,6 +83,7 @@ export type ControlRequestHandlerResult =
 
 export type ControlRequestHandler = (
   frame: ControlRequestFrame,
+  context: { generation: number; signal: AbortSignal },
 ) =>
   | Promise<ControlRequestHandlerResult | void>
   | ControlRequestHandlerResult
@@ -107,8 +115,18 @@ function createDisposable(callback: () => void): DisposableLike {
   };
 }
 
+type OwnedChild = {
+  child: ChildProcessWithoutNullStreams;
+  closed: Promise<void>;
+  exited: boolean;
+  stopping: boolean;
+  killTimer?: NodeJS.Timeout;
+  termTimer?: NodeJS.Timeout;
+};
+
 export class TomcatMessenger {
   private readonly controlHandlers = new Map<string, ControlRequestHandler>();
+  private readonly activeControlRequests = new Map<string, AbortController>();
   private readonly controlRequestListeners = new Set<
     (frame: ControlRequestFrame) => void
   >();
@@ -119,6 +137,11 @@ export class TomcatMessenger {
   private readonly pendingResponses = new Map<string, PendingResponse>();
   private readonly stderrListeners = new Set<(chunk: string) => void>();
   private child?: ChildProcessWithoutNullStreams;
+  // A child can exit/restart before its pipes close. Keep ownership until close.
+  private readonly ownedChildren = new Set<OwnedChild>();
+  private disposalPromise?: Promise<void>;
+  private childAbort?: AbortController;
+  private childGeneration = 0;
   private disposed = false;
   private stderrText = "";
   private stdoutBuffer = "";
@@ -158,15 +181,38 @@ export class TomcatMessenger {
     );
 
     this.child = child;
+    this.observeChildClose(child);
+    const abortController = new AbortController();
+    const generation = ++this.childGeneration;
+    this.childAbort = abortController;
     this.stderrText = "";
     this.stdoutBuffer = "";
 
     child.stdout.on("data", (chunk: Buffer) => {
-      this.handleStdoutChunk(chunk);
+      if (this.child === child && this.childGeneration === generation) {
+        this.handleStdoutChunk(chunk);
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      this.handleStderrChunk(chunk);
+      if (this.child === child && this.childGeneration === generation) {
+        this.handleStderrChunk(chunk);
+      }
     });
+    child.stdin.on("error", (error) => this.handleChildExit(child, {
+      code: child.exitCode,
+      error,
+      signal: child.signalCode,
+    }));
+    child.stdout.on("error", (error) => this.handleChildExit(child, {
+      code: child.exitCode,
+      error,
+      signal: child.signalCode,
+    }));
+    child.stderr.on("error", (error) => this.handleChildExit(child, {
+      code: child.exitCode,
+      error,
+      signal: child.signalCode,
+    }));
     child.on("error", (error) => {
       this.handleChildExit(child, {
         code: child.exitCode,
@@ -182,6 +228,15 @@ export class TomcatMessenger {
   restart(): void {
     this.shutdown("TomcatMessenger restarting");
     this.start();
+  }
+
+  /**
+   * Stops the current child without immediately starting another one. Lifecycle
+   * recovery is owned by ServeConnectionSupervisor; callers should normally use
+   * that supervisor rather than calling this directly.
+   */
+  stop(): void {
+    this.shutdown("TomcatMessenger stopped");
   }
 
   updateOptions(options: Partial<TomcatMessengerOptions>): void {
@@ -209,18 +264,107 @@ export class TomcatMessenger {
   }
 
   dispose(): void {
+    this.disposeWithGrace(0);
+  }
+
+  private disposeWithGrace(graceMs: number): void {
     if (this.disposed) {
       return;
     }
 
     this.disposed = true;
-    this.shutdown("TomcatMessenger disposed");
+    this.shutdown("TomcatMessenger disposed", graceMs);
+    for (const owned of this.ownedChildren) this.terminateChild(owned, 500, graceMs);
     this.controlHandlers.clear();
     this.controlRequestListeners.clear();
     this.eventListeners.clear();
     this.exitListeners.clear();
     this.frameErrorListeners.clear();
     this.stderrListeners.clear();
+  }
+
+  /**
+   * Disables new work immediately, allows a short EOF grace period, then waits
+   * for every owned generation's process AND stdio close. The budget includes escalation.
+   * Repeated calls share the first call's promise/budget. Timeout is a failure,
+   * not permission for a fixture to delete a directory a child may still use.
+   */
+  disposeAsync({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+    if (this.disposalPromise) return this.disposalPromise;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
+      return Promise.reject(new RangeError("disposeAsync timeoutMs must be a positive timer duration"));
+    }
+    // Give EOF a short opportunity to settle checkpoint/title writes before a
+    // signal interrupts the process. Synchronous dispose retains its old timing.
+    this.disposeWithGrace(Math.min(500, timeoutMs / 4));
+    const pending = [...this.ownedChildren];
+    for (const owned of pending) this.terminateChild(owned, Math.min(1_000, timeoutMs / 2));
+    let timer: NodeJS.Timeout;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const remaining = [...this.ownedChildren];
+        const detail = remaining.map(({ child }) =>
+          `pid=${child.pid ?? "unknown"} exit=${child.exitCode} signal=${child.signalCode}`).join("; ");
+        // Release our pipes as a last resort, but still report the missed deadline.
+        for (const owned of remaining) {
+          this.signalChild(owned, "SIGKILL");
+          owned.child.stdin.destroy();
+          owned.child.stdout.destroy();
+          owned.child.stderr.destroy();
+        }
+        reject(new Error(`timed out closing tomcat serve after ${timeoutMs}ms: ${detail}`));
+      }, timeoutMs);
+    });
+    this.disposalPromise = Promise.race([
+      Promise.all(pending.map((owned) => owned.closed)).then(() => undefined),
+      deadline,
+    ]).finally(() => clearTimeout(timer));
+    return this.disposalPromise;
+  }
+
+  private observeChildClose(child: ChildProcessWithoutNullStreams): void {
+    let resolveClosed!: () => void;
+    const owned: OwnedChild = {
+      child,
+      closed: new Promise<void>((resolve) => { resolveClosed = resolve; }),
+      exited: false,
+      stopping: false,
+    };
+    this.ownedChildren.add(owned);
+    child.once("exit", () => { owned.exited = true; });
+    child.once("close", () => {
+      clearTimeout(owned.killTimer);
+      clearTimeout(owned.termTimer);
+      this.ownedChildren.delete(owned);
+      resolveClosed();
+    });
+  }
+
+  private signalChild(owned: OwnedChild, signal: NodeJS.Signals): void {
+    if (owned.exited || !this.ownedChildren.has(owned)) return;
+    try { owned.child.kill(signal); } catch (error) {
+      this.log("warn", `failed to signal tomcat ${signal}: ${toError(error).message}`);
+    }
+  }
+
+  private terminateChild(owned: OwnedChild, graceMs = 500, eofGraceMs = 0): void {
+    if (!this.ownedChildren.has(owned)) return;
+    if (!owned.stopping) {
+      owned.stopping = true;
+      try {
+        if (!owned.child.stdin.destroyed) owned.child.stdin.end();
+      } catch (error) {
+        this.log("warn", `failed to close tomcat stdin: ${toError(error).message}`);
+      }
+      if (eofGraceMs > 0) {
+        owned.termTimer = setTimeout(() => this.signalChild(owned, "SIGTERM"), eofGraceMs).unref();
+      } else {
+        this.signalChild(owned, "SIGTERM");
+      }
+    }
+    if (!this.ownedChildren.has(owned) || owned.exited) return;
+    clearTimeout(owned.killTimer);
+    owned.killTimer = setTimeout(() => this.signalChild(owned, "SIGKILL"), graceMs).unref();
   }
 
   send(command: ServeCommand): void {
@@ -308,6 +452,89 @@ export class TomcatMessenger {
     ) as Promise<TypedResponseFrame<UpsertModelResponse>>;
   }
 
+  sendListConnectors(
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ context, type: "list_connectors" }, timeoutMs);
+  }
+
+  sendListConnectorTools(
+    configKey: string,
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<ListConnectorToolsPayload>> {
+    return this.request({ configKey, context, type: "list_connector_tools" }, timeoutMs) as Promise<TypedResponseFrame<ListConnectorToolsPayload>>;
+  }
+
+  sendAddConnector(input: {
+    name: string;
+    command: string;
+    args: string[];
+    url?: string | null;
+    headers?: Record<string, string>;
+    auth?: "none" | "bearer" | "oauth";
+    env?: Record<string, string>;
+    oauth?: unknown;
+    scope: "global" | "workspace";
+    trustProject?: boolean;
+    context: { workspaceRoot?: string | null };
+  }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ ...input, type: "add_connector" }, timeoutMs);
+  }
+
+  sendRemoveConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "remove_connector" }, timeoutMs);
+  }
+
+  /** This wait ends at acceptance, not at completion of the recovery round. */
+  sendReloadConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ConnectorReloadReceipt>> {
+    return this.request({ configKey, context, type: "reload_connector" }, timeoutMs) as Promise<TypedResponseFrame<ConnectorReloadReceipt>>;
+  }
+  sendGetProjectTrust(path: string, timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ProjectTrustPayload>> {
+    return this.request({ path, type: "get_project_trust" }, timeoutMs) as Promise<TypedResponseFrame<ProjectTrustPayload>>;
+  }
+
+  sendTrustProject(projectRoot: string, timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ProjectTrustPayload>> {
+    return this.request({ projectRoot, type: "trust_project" }, timeoutMs) as Promise<TypedResponseFrame<ProjectTrustPayload>>;
+  }
+
+  sendTestConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "test_connector" }, timeoutMs);
+  }
+
+  sendLoginConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = 300_000): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "login_connector" }, timeoutMs);
+  }
+
+  sendLogoutConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "logout_connector" }, timeoutMs);
+  }
+
+  sendCancelLoginConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "cancel_login_connector" }, timeoutMs);
+  }
+  sendSetConnectorToolFilter(
+    configKey: string,
+    include: string[],
+    exclude: string[],
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ configKey, context, exclude, include, type: "set_connector_tool_filter" }, timeoutMs);
+  }
+
+  sendSetConnectorToolEnabled(
+    configKey: string,
+    rawName: string,
+    enabled: boolean,
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<SetConnectorToolEnabledResponse>> {
+    return this.request({ configKey, context, enabled, rawName, type: "set_connector_tool_enabled" }, timeoutMs) as Promise<TypedResponseFrame<SetConnectorToolEnabledResponse>>;
+  }
+
+
   sendRemoveModel(
     modelId: string,
     timeoutMs = this.timeoutMs(),
@@ -363,7 +590,7 @@ export class TomcatMessenger {
   sendSetThinkingLevel(
     sessionId: string | null | undefined,
     model: string,
-    level: "high" | "low" | "medium" | "xhigh",
+    level: string,
     timeoutMs = this.timeoutMs(),
   ): Promise<ResponseFrame> {
     return this.request(
@@ -372,6 +599,32 @@ export class TomcatMessenger {
         model,
         sessionId,
         type: "set_thinking_level",
+      },
+      timeoutMs,
+    );
+  }
+
+  sendSetSpeed(
+    sessionId: string | null | undefined,
+    model: string,
+    speed: Speed,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ model, speed, sessionId, type: "set_speed" }, timeoutMs);
+  }
+
+  sendSetContextWindow(
+    sessionId: string | null | undefined,
+    model: string,
+    contextWindow: number,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request(
+      {
+        contextWindow,
+        model,
+        sessionId,
+        type: "set_context_window",
       },
       timeoutMs,
     );
@@ -441,11 +694,12 @@ export class TomcatMessenger {
     handler: (
       request: AskQuestionWireRequest,
       frame: ControlRequestFrame,
+      context: { generation: number; signal: AbortSignal },
     ) => Promise<AskQuestionResult | AskQuestionWireResponse> | AskQuestionResult | AskQuestionWireResponse,
   ): DisposableLike {
-    return this.registerControlRequestHandler("ask_question", async (frame) => {
+    return this.registerControlRequestHandler("ask_question", async (frame, context) => {
       const request = parseAskQuestionRequest(frame.payload);
-      const response = await handler(request, frame);
+      const response = await handler(request, frame, context);
       return {
         kind: "response",
         payload: normalizeAskQuestionResponse(request.requestId, response),
@@ -496,7 +750,7 @@ export class TomcatMessenger {
   }
 
   private timeoutMs(): number {
-    return this.options.requestTimeoutMs ?? 30_000;
+    return this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   private withCommandId(command: RequestCommand): RequestCommand & { id: string } {
@@ -529,10 +783,16 @@ export class TomcatMessenger {
     child.stdin.write(line, "utf8");
   }
 
-  private shutdown(reason: string): void {
+  private shutdown(reason: string, eofGraceMs = 0): void {
     this.rejectPending(new Error(reason));
 
     const child = this.child;
+    this.childAbort?.abort(reason);
+    for (const abort of this.activeControlRequests.values()) {
+      abort.abort(reason);
+    }
+    this.activeControlRequests.clear();
+    this.childAbort = undefined;
     this.child = undefined;
     this.stdoutBuffer = "";
     this.stderrText = "";
@@ -541,20 +801,10 @@ export class TomcatMessenger {
       return;
     }
 
-    child.stdout.removeAllListeners();
-    child.stderr.removeAllListeners();
-    child.removeAllListeners();
-
-    try {
-      if (!child.stdin.destroyed) {
-        child.stdin.end();
-      }
-    } catch (error) {
-      this.log("warn", `failed to close tomcat stdin: ${toError(error).message}`);
-    }
-
-    if (!child.killed) {
-      child.kill();
+    // Keep close/error observers and continue draining old-generation output.
+    // Existing identity/generation checks prevent stale data reaching the UI.
+    for (const owned of this.ownedChildren) {
+      if (owned.child === child) this.terminateChild(owned, 1_000, eofGraceMs);
     }
   }
 
@@ -655,12 +905,32 @@ export class TomcatMessenger {
 
       const handler = this.controlHandlers.get(frame.subtype);
       if (handler) {
-        void this.runControlHandler(handler, frame);
+        const abort = new AbortController();
+        this.activeControlRequests.set(frame.requestId, abort);
+        const parentSignal = this.childAbort?.signal;
+        const abortForChildExit = () => abort.abort();
+        parentSignal?.addEventListener("abort", abortForChildExit, { once: true });
+        void this.runControlHandler(handler, frame, this.childGeneration, abort.signal)
+          .finally(() => {
+            parentSignal?.removeEventListener("abort", abortForChildExit);
+            if (this.activeControlRequests.get(frame.requestId) === abort) {
+              this.activeControlRequests.delete(frame.requestId);
+            }
+          });
       }
       return;
     }
 
     const pending = this.pendingControl.get(frame.requestId);
+    if (frame.type === "control_cancel") {
+      const active = this.activeControlRequests.get(frame.requestId);
+      active?.abort();
+      if (!pending) {
+        if (!active) this.log("debug", `dropping unknown control cancel ${frame.requestId}`);
+        return;
+      }
+    }
+
     if (!pending) {
       this.log("debug", `dropping unknown control frame ${frame.requestId}`);
       return;
@@ -674,9 +944,13 @@ export class TomcatMessenger {
   private async runControlHandler(
     handler: ControlRequestHandler,
     frame: ControlRequestFrame,
+    generation: number,
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (!signal) return;
     try {
-      const result = await handler(frame);
+      const result = await handler(frame, { generation, signal });
+      if (signal.aborted || generation !== this.childGeneration || !this.child) return;
       if (!result) {
         return;
       }
@@ -696,6 +970,7 @@ export class TomcatMessenger {
         result.payload,
       );
     } catch (error) {
+      if (signal.aborted || generation !== this.childGeneration || !this.child) return;
       this.emitFrameError(toError(error));
       this.sendControlCancel(frame.requestId, frame.sessionId, null);
     }
@@ -709,16 +984,24 @@ export class TomcatMessenger {
       return;
     }
 
-    this.child = undefined;
-    this.stdoutBuffer = "";
-
     const error =
       event.error ??
       new Error(
         `tomcat serve exited (code=${String(event.code)}, signal=${String(event.signal)})`,
       );
 
+    this.childAbort?.abort(error);
+    this.childAbort = undefined;
+    this.child = undefined;
+    this.stdoutBuffer = "";
+
     this.rejectPending(error);
+
+    if (event.error) {
+      for (const owned of this.ownedChildren) {
+        if (owned.child === child) this.terminateChild(owned);
+      }
+    }
 
     const payload: TomcatMessengerExit = {
       code: event.code,

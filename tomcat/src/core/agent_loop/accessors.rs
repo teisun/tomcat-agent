@@ -27,8 +27,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
-use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::llm::{ChatMessage, LlmProvider, MessageKind, ResolvedCall};
 use crate::core::session::manager::{generate_entry_id, ContextState};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::event_bus::{EventBus, ScopedEventEmitter};
@@ -38,7 +39,7 @@ use super::types::{AgentLoop, AgentLoopConfig, BackgroundCompletionRoutes, LoopE
 
 impl AgentLoop {
     pub fn new(
-        llm: Arc<dyn LlmProvider>,
+        binding: ResolvedCall,
         primitive: Arc<dyn PrimitiveExecutor>,
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
@@ -48,19 +49,25 @@ impl AgentLoop {
             Arc::clone(&event_bus),
             Some(config.session_id.clone()),
         );
+        let llm = binding.provider_impl.clone();
         Self {
+            binding,
             llm,
             primitive,
             emitter,
             session_manager: None,
+            file_baselines: None,
             config_backend: None,
+            package_install_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
             web_search_runtime: None,
             todos_runtime: None,
             tool_registry: None,
+            connector_registry: None,
+            plugin_engine_config: None,
             config,
-            steering_queue: Arc::new(Mutex::new(Vec::new())),
+            steering_queue: Arc::new(Mutex::new(super::SteeringInbox::default())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,
             cancel_token,
@@ -69,7 +76,9 @@ impl AgentLoop {
             pending_assistant_entry_id: None,
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
-            context_tail_start: 0,
+            completion_guard_injections: 0,
+            silent_reply_allowed: false,
+            last_reply_silent: false,
         }
     }
 
@@ -83,6 +92,15 @@ impl AgentLoop {
         self
     }
 
+    /// Inject the immutable session-scoped package installation backend.
+    pub fn with_package_install_backend(
+        mut self,
+        backend: super::config_backend::SharedPackageInstallBackend,
+    ) -> Self {
+        self.package_install_backend = Some(backend);
+        self
+    }
+
     /// T2-P0-016 PR-I：注入 bash 后台任务注册表，启用
     /// `bash run_in_background=true` / `task_output` / `task_stop` / `task_list`
     /// 四件套；不调用此方法时上述工具命中返回「未启用」错误，同步 `bash` 不受影响。
@@ -91,6 +109,23 @@ impl AgentLoop {
         registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     ) -> Self {
         self.bash_task_registry = Some(registry);
+        self
+    }
+
+    /// 注入连接器目录；deferred MCP 工具只能经稳定的 `tool_*` 内置元工具触达，
+    /// 不再被逐个注册进 ToolRegistry / prompt 前缀。
+    pub fn with_connector_registry(
+        mut self,
+        registry: Arc<crate::core::connector::ConnectorRegistry>,
+    ) -> Self {
+        self.connector_registry = Some(registry);
+        self
+    }
+
+    /// `tool_run_code` uses the already-configured plugin VM resource limits rather than
+    /// inventing a second JavaScript runtime policy.
+    pub fn with_plugin_engine_config(mut self, config: crate::ext::PluginEngineConfig) -> Self {
+        self.plugin_engine_config = Some(config);
         self
     }
 
@@ -153,7 +188,7 @@ impl AgentLoop {
 
     /// serve / host 模式：注入 session 级共享 `steering_queue`，允许连接外部在当前
     /// run 进行中把 steering 消息塞进下一次 attempt 的注入通道。
-    pub fn with_shared_steering_queue(mut self, queue: Arc<Mutex<Vec<ChatMessage>>>) -> Self {
+    pub fn with_shared_steering_queue(mut self, queue: Arc<Mutex<super::SteeringInbox>>) -> Self {
         self.steering_queue = queue;
         self
     }
@@ -161,7 +196,7 @@ impl AgentLoop {
     /// P1：注入 `ChatContext` 持有的 session 级 `completion_routes` 路由表。
     ///
     /// `task_output(block=true)` 路径据此做 claim-on-entry，并在 wake 时按
-    /// `Finished / NewOutput / Timeout / Cancel` 四态维护 entry；详见
+    /// `Finished / Timeout / Cancel` 三态维护 entry（中途输出不再打断等待）；详见
     /// [`super::types::CompletionRoute`] 与 docs。
     pub fn with_completion_routes(mut self, routes: BackgroundCompletionRoutes) -> Self {
         self.completion_routes = Some(routes);
@@ -179,28 +214,34 @@ impl AgentLoop {
     /// 测试用：注入 steering_queue，便于 mock 在工具执行中推入 steering 消息。
     #[cfg(test)]
     pub fn new_with_steering_queue(
-        llm: Arc<dyn LlmProvider>,
+        binding: ResolvedCall,
         primitive: Arc<dyn PrimitiveExecutor>,
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
         cancel_token: CancellationToken,
-        steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
+        steering_queue: Arc<Mutex<super::SteeringInbox>>,
     ) -> Self {
         let emitter = ScopedEventEmitter::new_optional(
             Arc::clone(&event_bus),
             Some(config.session_id.clone()),
         );
+        let llm = binding.provider_impl.clone();
         Self {
+            binding,
             llm,
             primitive,
             emitter,
             session_manager: None,
+            file_baselines: None,
             config_backend: None,
+            package_install_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
             web_search_runtime: None,
             todos_runtime: None,
             tool_registry: None,
+            connector_registry: None,
+            plugin_engine_config: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,
@@ -211,7 +252,9 @@ impl AgentLoop {
             pending_assistant_entry_id: None,
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
-            context_tail_start: 0,
+            completion_guard_injections: 0,
+            silent_reply_allowed: false,
+            last_reply_silent: false,
         }
     }
 
@@ -235,6 +278,14 @@ impl AgentLoop {
 
     pub fn set_context_state(&mut self, state: Option<ContextState>) {
         self.context_state = state;
+    }
+
+    pub fn wire_model(&self) -> &str {
+        self.binding.wire_model()
+    }
+
+    pub fn catalog_id(&self) -> &str {
+        self.binding.catalog_id()
     }
 
     pub fn take_context_state(&mut self) -> Option<ContextState> {
@@ -284,6 +335,13 @@ impl AgentLoop {
         &self,
         msg: &mut ChatMessage,
     ) -> Result<(), crate::infra::error::AppError> {
+        if msg.kind == MessageKind::CompactionSummary {
+            warn!(
+                msg_id = ?msg.msg_id,
+                "refusing to persist a compaction summary as an ordinary message"
+            );
+            return Ok(());
+        }
         let Some(ref sink) = self.config.message_append_sink else {
             return Ok(());
         };
@@ -312,6 +370,16 @@ impl AgentLoop {
         Ok(row_id)
     }
 
+    pub(super) fn persist_custom_entry_if_needed(
+        &self,
+        extra: serde_json::Value,
+    ) -> Result<(), crate::infra::error::AppError> {
+        let Some(ref sink) = self.config.message_append_sink else {
+            return Ok(());
+        };
+        sink.append_custom_entry(extra)
+    }
+
     pub(super) fn push_message(
         &self,
         messages: &mut Vec<ChatMessage>,
@@ -333,29 +401,18 @@ impl AgentLoop {
         Ok(row_id)
     }
 
-    pub(super) fn sync_persisted_messages_into_context(&mut self, messages: &[ChatMessage]) {
-        let Some(ref mut ctx_state) = self.context_state else {
-            return;
-        };
-        for msg in messages {
-            let Some(msg_id) = msg.msg_id.as_deref() else {
-                continue;
-            };
-            let exists = ctx_state
-                .messages
-                .iter()
-                .any(|existing| existing.msg_id.as_deref() == Some(msg_id));
-            if !exists {
-                ctx_state.messages.push(msg.clone());
-            }
-        }
-    }
-
     /// 刷新实时 token 指标并发射 `ContextMetricsUpdate` 事件（仅当 `context_state`
-    /// 存在时）。先用 `&mut ctx_state` 把 `live` 字段刷新一次，再用 `&ctx_state`
+    /// 存在时）。
+    ///
+    /// `provider_usage_measured` describes this event's sample, rather than
+    /// whether an older API-usage baseline happens to be present in
+    /// `ContextState`. A provider `Usage` event passes `true`; pre-request and
+    /// post-compaction snapshots pass `false` and remain useful estimates.
+    ///
+    /// 先用 `&mut ctx_state` 把 `live` 字段刷新一次，再用 `&ctx_state`
     /// 拿快照构造事件——分段借用避免 `emit_event` 的 `&self` 与 `ctx_state`
     /// 的可变借用冲突。
-    pub(super) fn emit_context_metrics(&mut self) {
+    pub(super) fn emit_context_metrics(&mut self, provider_usage_measured: bool) {
         if let Some(ref mut ctx_state) = self.context_state {
             let input_tokens_used = ctx_state.estimated_token_count();
             let context_utilization_ratio = ctx_state.usage_ratio();
@@ -370,11 +427,18 @@ impl AgentLoop {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
                 input_tokens_used: ctx_state.live.input_tokens_used,
                 context_utilization_ratio: ctx_state.live.context_utilization_ratio,
+                provider_usage_measured,
                 compaction_count: ctx_state.session_obs.compaction_count,
                 compaction_tokens_freed: ctx_state.session_obs.compaction_tokens_freed,
                 total_tool_result_bytes_persisted: ctx_state
                     .session_obs
                     .tool_result_chars_persisted,
+                prompt_tokens_total: ctx_state.session_obs.prompt_tokens_total,
+                cache_read_tokens_total: ctx_state.session_obs.cache_read_tokens_total,
+                cache_hit_ratio: ctx_state.session_obs.cache_hit_ratio(),
+                consecutive_miss_max: ctx_state.session_obs.consecutive_cache_miss_max,
+                tail_changed_count: ctx_state.session_obs.tail_changed_count,
+                tail_change_miss_tokens: ctx_state.session_obs.tail_change_miss_tokens,
                 preheat_in_progress: ctx_state.live.preheat_in_progress,
                 preheat_result_pending: ctx_state.live.preheat_result_pending,
             });

@@ -17,7 +17,9 @@
 
 本文把安装层补齐为一个统一的 `PackageManager`：
 
-1. 提供两个安装前门：外层 shell CLI `tomcat install` / `tomcat uninstall` / `tomcat packages`，以及 code/claw 会话内的 `/install`。
+> **当前实现（2026-09）**：除 CLI 和 `/install` 外，原生 `package_install` 工具也可安装本地 package、裸 plugin 或裸 skill。它要求操作级确认，接受 `source`、`scope`（`scope` / `agent` / `global`），并返回 `inventory_dirty` 让下一轮会话清单刷新。项目层由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`；不要再按本文旧图中硬编码的 `<project>/.tomcat` 写文件。
+
+1. 提供两个前门：外层 shell CLI `tomcat install` / `tomcat uninstall` / `tomcat packages`，以及终端与 VS Code 会话内的 `/reload`、`/install`、`/uninstall`。共享命令表 `SHARED_SLASH_COMMANDS` 同时是菜单来源和执行白名单。
 2. 一个 package 可同时携带 plugin 与 skill，但 **package 只是安装/分发单元**；runtime 内存中仍然分开走 plugin 与 skill 两条链路。
 3. 安装目标是三层可见范围：`global` / `agent` / `scope`。若用户未显式传目标层，**交互式入口弹出三选一**（`当前project` / `agent` / `global`）；仅在非交互 shell 下才 fallback 到 `当前project(scope)`。
 4. 安装只做**静态校验 + 文件落位 + 分层登记**，不在安装期执行插件代码。
@@ -27,6 +29,27 @@
 **说人话**：现在 Tomcat 已经知道“该去三层目录里找东西”，但还没有一套像样的“把东西装进这三层目录里”的统一入口。`PackageManager` 要补的不是新的运行时，而是新的**安装管理面**：用户既可以在外层 shell 里装，也可以在会话里直接 `/install`；装进去以后，磁盘上仍然是 `plugins/` 和 `skills/` 两类目录，内存里也仍然是 plugin/skill 两套子系统，`packages/` 只是新增的一本总账。
 
 ---
+
+## 当前会话内前门与清单同步
+
+```text
+终端适配层 ─┐
+            ├→ SHARED_SLASH_COMMANDS → run_shared_slash_command → SlashReply { ok, text }
+Serve/VS Code┘                              │
+                      /install、/uninstall：PackageManager 静态事务
+                                            ↓
+                      三个命令共用 sync_resource_inventory
+                                            ↓
+                     发现/指纹 → 比对 → 撤销/收尾/上架 → 激活本会话 → 刷新提示词
+```
+
+共享执行器不交互；缺参数返回用法。只有终端适配层可在缺目标层时弹选择面板；Serve 必须明确传层。`/uninstall` 按指定层的包账本找包，手工资源需删除该层目录再 `/reload`。包名不等于插件工具名。
+
+核对按 scope 串行；文件 I/O 与来源指纹置于 `spawn_blocking`。单个 Skill 或插件文件读失败时，跳过坏项并提示，其余资源照常核对；只有根目录无法扫描、根路径解析失败或插件登记簿无法读取/解析时，才保留相应类别的旧清单，避免把整类发现失败误当卸载。插件目录一轮只扫一次，点号临时目录不参与发现。有效 ID 集合区分新增/删除；同 ID 的根路径、manifest 字节或入口字节指纹改变才更新，无变化保持 VM、注册表和提示词缓存。
+
+删除插件时，共享工具表立即下架该插件，已获准调用可以收尾。更新插件时，本会话清理过期 VM 登记并通知退出，再按正常策略激活；其他会话在当前轮仍可使用已有的旧 VM，通过 epoch 变化在下一轮核对并切换。健康 VM 的复用不做指纹校验，旧 VM 不能再登记新能力，权限仍按出生清单判断。发送 Shutdown 不等于线程已退出，无关资源不动；不是跨层全局事务，也不引入按代次调度同名插件的机制。
+
+外部 CLI / 手工改动不自动触发当前进程：请 `/reload`。轮前仅保留 epoch 变更开关，暂不开每轮扫盘。计时矩阵数据见本次验收记录后再决定是否开启。以下旧图描述初始安装设计；与本节冲突的 live-refresh 边界以本节为准。
 
 ## 先看总图：文首导读
 
@@ -244,10 +267,12 @@ PackageManager.install()
    │         ├─ plugin: build_plugin_runtime() → PluginCatalog::discover() → scope 命中 roots
    │         └─ skill : reload_skill_set()/spawn_discovery_task() → discover() → scope 命中 roots
    │
-   └─ code/claw 会话内 `/install`
-        ├─ skill : 当前 session 直接 `reload_skill_set()`
-        ├─ plugin: 当前 session refresh catalog stub + static tools
-        └─ 边界：不调用 `load_plugin()` / 不启动 session VM / 不热替换已加载实例
+   └─ 终端/VS Code 会话内 `/install`（`/uninstall` 对称）
+        └─ sync_resource_inventory()
+             ├─ Skill 与 plugin 清单按磁盘核对
+             ├─ 共享工具表增删更新、清理本会话旧 VM 登记并通知退出
+             ├─ 正常激活 Session；静态 Lazy 保持懒加载
+             └─ 有变化才更新 epoch、工具定义与提示词
    │
    ▼
 LLM / 用户只看到当前 scope 有效视图

@@ -1,4 +1,6 @@
 import { acquireVsCodeApiLike, type VsCodeApiLike } from "./settingsProtocol";
+import { isSpeed, type Speed } from "./modelSpeed";
+import type { PathResolution } from "./pathResolution";
 
 export { acquireVsCodeApiLike };
 export type { VsCodeApiLike };
@@ -26,8 +28,24 @@ export type PlanToolbarStyle = "hybrid" | "native";
  * editor always renders the preview; "Markdown" opens the native text editor
  * instead (a separate editor), so there is no in-webview mode any more.
  */
+export interface PlanPreviewModelInfo {
+  capabilities: string[];
+  contextWindow?: number | null;
+  contextWindowOptions: number[];
+  description?: string | null;
+  id: string;
+  modelName?: string | null;
+  selectedContextWindow?: number | null;
+  selectedReasoningLevel?: string | null;
+  supportedReasoningLevels: string[];
+  supportedSpeeds?: Speed[];
+  selectedSpeed?: Speed | null;
+}
+
 export interface PlanPreviewStateSnapshot {
+  locale?: import("./i18n").Locale;
   availableModels: string[];
+  availableModelDetails: Record<string, PlanPreviewModelInfo>;
   /** 1-based source file line for each line of `bodyMarkdown` (see planDocument). */
   bodyLineMap: number[];
   bodyMarkdown: string;
@@ -37,6 +55,8 @@ export interface PlanPreviewStateSnapshot {
   path: string;
   planId: string | null;
   raw: string;
+  /** Model the chat session is currently on; the build-model dropdown falls back to it. */
+  sessionModel: string;
   state: PlanFileState | null;
   title: string | null;
   todos: PlanTodo[];
@@ -45,15 +65,34 @@ export interface PlanPreviewStateSnapshot {
 
 /** DOM/state readout the plan preview webview reports back during E2E tests. */
 export interface PlanPreviewDomSnapshot {
+  /** VS Code's unmodified webview base font size. */
+  baseFontSizePx: number | null;
   bodyHasContent: boolean;
+  /** Rendered plan body text, exposed only for deterministic host E2E assertions. */
+  bodyText: string;
+  /** Computed Plan body reading size; contract is baseFontSizePx + 1. */
+  bodyFontSizePx: number | null;
+  /** Computed inline code size; it must remain at the Plan reading size. */
+  codeFontSizePx: number | null;
   /** Left inset (px) of the rendered markdown body; proves the content column has
    * deliberate side padding instead of sitting flush against the editor edge. */
   bodyInsetLeft: number | null;
   buildModelOptions: string[];
   buildModelValue: string;
+  /** Rendered combined model + reasoning label in the shared picker trigger. */
+  buildModelLabel: string;
+  /** Current scrollTop of the content scroller. */
+  contentScrollTop: number | null;
+  /** Rendered custom-Find counter, such as "1 of 17" or "No results". */
+  findCountText: string | null;
+  /** Whether the in-webview Plan Find control is open. */
+  findVisible: boolean;
   hasActionStrip: boolean;
+  inlinePathCount: number;
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
   mermaidSvgCount: number;
+  /** Computed font size of rendered Mermaid text when the graph contains text. */
+  mermaidFontSizePx: number | null;
   selectionButtonVisible: boolean;
   /** Left inset (px) of the action strip's bounding box; ~0 means it spans the
    * full editor width with no leftover VS Code body padding. */
@@ -61,16 +100,41 @@ export interface PlanPreviewDomSnapshot {
   /** True when the action strip is a sibling of (not nested in) the scroll column. */
   stripOutsideContent: boolean;
   todoCountText: string | null;
+  /** Computed todo copy size; contract is the same Plan reading size. */
+  todoFontSizePx: number | null;
   todoIconSizes: number[];
   todoItemCount: number;
+  todoStatuses: PlanTodoStatus[];
+  /** VS Code-injected theme classes on the webview body. */
+  themeClassName: string;
+  /** 1-based source line of the first visible markdown block, when present. */
+  topVisibleSourceLine: number | null;
   toolbarStyle: PlanToolbarStyle;
+  /** Random id created once per webview document, used to prove Find does not reload it. */
+  webviewInstanceId: string;
+  /**
+   * Test-only counters for locating a broken Plan Preview refresh. The first
+   * three come from the extension host; the last comes from this webview.
+   */
+  refreshCounters: {
+    hostPostAttempts: number;
+    hostPostDeliveries: number;
+    hostRefreshCalls: number;
+    webviewStateFrames: number;
+  };
 }
 
 /** Test-only DOM drive actions issued by the host during E2E tests. */
 export type PlanPreviewDomAction =
   | { kind: "clickBuild" }
+  | { kind: "clickSelector"; selector: string }
   | { kind: "clickSelectionAdd" }
+  | { kind: "setContentScrollTop"; scrollTop: number }
+  | { kind: "setFindQuery"; query: string }
   | { kind: "selectBuildModel"; modelId: string }
+  | { contextWindow: number; kind: "selectContextWindow"; modelId: string }
+  | { kind: "selectSpeed"; speed: Speed; modelId: string }
+  | { kind: "selectThinkingLevel"; level: string; modelId: string }
   | { kind: "selectText"; selector: string };
 
 export type PlanPreviewTestEvent =
@@ -84,6 +148,11 @@ export type PlanPreviewTestEvent =
  */
 export type PlanPreviewEvent =
   | { type: "captureSelectionForChat" }
+  | {
+      requestId: string;
+      results: PathResolution[];
+      type: "pathsResolved";
+    }
   | PlanPreviewTestEvent;
 
 export type PlanPreviewHostFrame =
@@ -119,8 +188,45 @@ export type PlanPreviewIntent =
     }
   | {
       messageId: string;
+      type: "openFile";
+      data: {
+        line?: number;
+        path: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resolvePaths";
+      data: {
+        paths: string[];
+        requestId: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "setBuildModel";
       data: {
+        modelId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setSpeed";
+      data: { speed: Speed; modelId: string };
+    }
+  | {
+      messageId: string;
+      type: "setContextWindow";
+      data: {
+        contextWindow: number;
+        modelId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setThinkingLevel";
+      data: {
+        level: string;
         modelId: string;
       };
     }
@@ -152,8 +258,35 @@ export function isPlanPreviewIntent(value: unknown): value is PlanPreviewIntent 
       return true;
     case "openLink":
       return isRecord(value.data) && typeof value.data.href === "string";
+    case "openFile":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.path === "string" &&
+        (value.data.line === undefined || typeof value.data.line === "number")
+      );
+    case "resolvePaths":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.requestId === "string" &&
+        Array.isArray(value.data.paths) &&
+        value.data.paths.every((path) => typeof path === "string")
+      );
     case "setBuildModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
+    case "setSpeed":
+      return isRecord(value.data) && typeof value.data.modelId === "string" && isSpeed(value.data.speed);
+    case "setContextWindow":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.modelId === "string" &&
+        typeof value.data.contextWindow === "number" &&
+        Number.isInteger(value.data.contextWindow) &&
+        value.data.contextWindow > 0
+      );
+    case "setThinkingLevel":
+      return isRecord(value.data) &&
+        typeof value.data.modelId === "string" &&
+        typeof value.data.level === "string";
     case "addSelectionToChat":
       return isRecord(value.data) && typeof value.data.text === "string";
     default:

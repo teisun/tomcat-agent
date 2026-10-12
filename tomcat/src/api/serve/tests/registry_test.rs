@@ -20,6 +20,24 @@ async fn new_session_registers_slot_in_registry() {
 
     assert_eq!(state.registry.len(), initial_len + 1);
     assert!(state.registry.get(&new_slot.session_id).is_some());
+    assert_eq!(
+        *new_slot.last_context_ratio.lock(),
+        None,
+        "a newly loaded slot must not treat persisted observability as a live measurement"
+    );
+
+    let system_text = new_slot
+        .turn_state
+        .lock()
+        .as_ref()
+        .expect("new session turn state")
+        .prompt_snapshot
+        .system_text()
+        .to_string();
+    assert!(system_text.contains("Agent workspace directory"));
+    assert!(!system_text.contains("Current date and time"));
+    assert!(!system_text.contains("{now}"));
+
     assert!(state
         .registry
         .list()

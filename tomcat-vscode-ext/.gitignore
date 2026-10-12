@@ -3,6 +3,7 @@ out/
 .vscode-test/
 .wire-tmp/
 .artifacts/
+artifacts/
 dist/
 *.vsix
 bin/

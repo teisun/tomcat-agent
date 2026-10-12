@@ -1,9 +1,11 @@
 use serial_test::serial;
 
+use super::super::model_cmd::format_model_cli_line;
 use super::super::models_toml::ensure_default_models_toml;
 use super::super::*;
 use super::mocks::{test_config, with_temp_home, with_tomcat_config_in_home};
-use crate::core::llm::{list_model_views, ModelCatalog, ModelSource};
+use crate::core::llm::{list_model_views, list_model_views_with_prefs, ModelCatalog, ModelSource};
+use crate::{resolve_model_thinking_path, ModelPrefsStore, ThinkingLevel};
 
 #[test]
 #[serial(env_lock)]
@@ -26,6 +28,9 @@ fn run_model_add_list_remove_and_key_roundtrip() {
                 reasoning: true,
                 web_search: false,
                 context_window: Some(200_000),
+                context_window_options: vec![1_000_000, 200_000],
+                max_output_tokens: Some(128_000),
+                description: Some("CLI gateway model".to_string()),
                 thinking_format: Some("anthropic".to_string()),
             },
             &cfg,
@@ -41,7 +46,33 @@ fn run_model_add_list_remove_and_key_roundtrip() {
             .expect("inserted model");
         assert_eq!(inserted.api_key_env, "CLI_GATEWAY_API_KEY");
         assert_eq!(inserted.context_window, Some(200_000));
+        assert_eq!(inserted.context_window_options, vec![200_000, 1_000_000]);
+        assert_eq!(inserted.description.as_deref(), Some("CLI gateway model"));
+        assert_eq!(inserted.max_output_tokens, Some(128_000));
         assert!(!inserted.key_present);
+
+        let prefs = ModelPrefsStore::load(
+            resolve_model_thinking_path(&cfg).expect("model preference path"),
+            ThinkingLevel::Medium,
+        )
+        .expect("model preferences");
+        prefs
+            .set_reasoning("claude-opus-gateway", ThinkingLevel::High)
+            .expect("persist reasoning tier");
+        prefs
+            .set_context_window("claude-opus-gateway", Some(1_000_000))
+            .expect("persist context tier");
+        let selected = list_model_views_with_prefs(&catalog, &prefs)
+            .into_iter()
+            .find(|entry| entry.id == "claude-opus-gateway")
+            .expect("selected model view");
+        let line = format_model_cli_line(&selected);
+        assert!(line.contains("context_window=1000000"), "line: {line}");
+        assert!(line.contains("reasoning=high"), "line: {line}");
+        assert!(
+            line.contains("description=CLI gateway model"),
+            "line: {line}"
+        );
 
         run_model(
             ModelSub::Key {

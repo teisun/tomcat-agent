@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use super::crypto_native::register_crypto_globals;
 use super::engine_config::PluginEngineConfig;
@@ -31,8 +32,15 @@ type HostInvokeFn = dyn Fn(&str) -> Result<String, AppError> + Send + Sync;
 
 #[derive(Debug, Clone, Copy)]
 enum InterruptReason {
+    Cancelled,
     Timeout,
     BudgetExceeded,
+}
+
+#[derive(Clone)]
+struct AgentExecutionControl {
+    cancel: CancellationToken,
+    waiting_on_host: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 struct ExecutionGuardState {
@@ -42,10 +50,12 @@ struct ExecutionGuardState {
     timeout: Duration,
     budget: u64,
     timeout_paused: AtomicBool,
+    agent: Option<AgentExecutionControl>,
+    host_wait_since: Mutex<Option<Instant>>,
 }
 
 impl ExecutionGuardState {
-    fn new(timeout: Duration, budget: u64) -> Self {
+    fn new(timeout: Duration, budget: u64, agent: Option<AgentExecutionControl>) -> Self {
         Self {
             started_at: Mutex::new(Instant::now()),
             interrupt_count: AtomicU64::new(0),
@@ -53,6 +63,8 @@ impl ExecutionGuardState {
             timeout,
             budget,
             timeout_paused: AtomicBool::new(false),
+            agent,
+            host_wait_since: Mutex::new(None),
         }
     }
 
@@ -80,13 +92,56 @@ impl ExecutionGuardState {
         self.resume_timeout();
     }
 
-    fn should_interrupt(&self) -> bool {
+    // Only the agent-code runner calls these at Rust poll boundaries. Sleeping
+    // while real host work is pending is not JS execution; runnable JS is never
+    // exempted, even when a sibling host call remains pending.
+    fn resume_from_host_wait(&self) {
+        if let Some(since) = self.host_wait_since.lock().take() {
+            let mut started = self.started_at.lock();
+            if let Some(adjusted) = started.checked_add(since.elapsed()) {
+                *started = adjusted;
+            }
+        }
+    }
+
+    fn pause_for_host_work(&self) {
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|agent| (agent.waiting_on_host)())
+        {
+            *self.host_wait_since.lock() = Some(Instant::now());
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|agent| agent.cancel.is_cancelled())
+        {
+            *self.reason.lock() = Some(InterruptReason::Cancelled);
+            return true;
+        }
         if self.timeout_paused.load(Ordering::SeqCst) {
             return false;
         }
-        if !self.timeout.is_zero() && self.started_at.lock().elapsed() >= self.timeout {
+        let now = self.host_wait_since.lock().unwrap_or_else(Instant::now);
+        if !self.timeout.is_zero()
+            && now.saturating_duration_since(*self.started_at.lock()) >= self.timeout
+        {
             *self.reason.lock() = Some(InterruptReason::Timeout);
             return true;
+        }
+        false
+    }
+
+    fn should_interrupt(&self) -> bool {
+        if self.stop_requested() {
+            return true;
+        }
+        if self.timeout_paused.load(Ordering::SeqCst) {
+            return false;
         }
         if self.budget > 0 && self.interrupt_count.fetch_add(1, Ordering::SeqCst) + 1 > self.budget
         {
@@ -98,6 +153,7 @@ impl ExecutionGuardState {
 
     fn reason_message(&self) -> Option<String> {
         match *self.reason.lock() {
+            Some(InterruptReason::Cancelled) => Some("execution was cancelled".into()),
             Some(InterruptReason::Timeout) => Some(format!(
                 "execution exceeded {}ms timeout",
                 self.timeout.as_millis()
@@ -172,6 +228,78 @@ impl PluginVmInstance {
         self.run_script_file(&script_path)
     }
 
+    /// Executes one short-lived agent-authored JS snippet through the same QuickJS runtime,
+    /// bridge, heap limit, wall timeout and interrupt budget used by plugins. The caller must
+    /// install a host binding that implements `connector.callTool`.
+    ///
+    /// The snippet body runs inside an async function, so agent code may use `await callTool`.
+    /// Its returned value is serialized as structured JSON rather than flattened into text;
+    /// this preserves MCP image blocks for the agent-loop media splitter.
+    pub fn run_agent_code(&mut self, code: &str) -> Result<serde_json::Value, AppError> {
+        self.run_agent_code_with_cancel(code, CancellationToken::new(), || false)
+    }
+
+    /// Agent-only cancellation and host-wait ownership. Ordinary plugin runs
+    /// keep their existing limits and event-loop behavior.
+    pub(crate) fn run_agent_code_with_cancel(
+        &mut self,
+        code: &str,
+        cancel: CancellationToken,
+        waiting_on_host: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<serde_json::Value, AppError> {
+        let wrapped = format!(
+            r#"
+globalThis.callTool = async function (name, arguments_) {{
+  var response = await globalThis.__pi_hostCallAsync("connector", "callTool", {{
+    name: name,
+    arguments: arguments_ || {{}}
+  }});
+  if (!response || !response.ok) {{
+    throw new Error((response && response.error) || "connector callTool failed");
+  }}
+  return response.data;
+}};
+
+(async function () {{
+  try {{
+    var value = await (async function () {{
+{code}
+    }})();
+    globalThis.__tomcat_agent_code_result = JSON.stringify({{ ok: true, value: value }});
+  }} catch (error) {{
+    globalThis.__tomcat_agent_code_result = JSON.stringify({{
+      ok: false,
+      error: String((error && error.message) || error)
+    }});
+  }}
+}})();
+"#
+        );
+        let value = self.execute_script_with_control(
+            &wrapped,
+            Some(AgentExecutionControl {
+                cancel,
+                waiting_on_host: Arc::new(waiting_on_host),
+            }),
+        )?;
+        let envelope = value.as_object().ok_or_else(|| {
+            AppError::QuickJS("agent code returned invalid result envelope".into())
+        })?;
+        if envelope.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(envelope
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+        Err(AppError::QuickJS(
+            envelope
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("agent code failed without an error message")
+                .to_string(),
+        ))
+    }
+
     pub fn run_script_file(&mut self, path: &Path) -> Result<serde_json::Value, AppError> {
         if !path.exists() {
             return Err(AppError::Io(std::io::Error::new(
@@ -181,8 +309,7 @@ impl PluginVmInstance {
         }
 
         let combined = self.build_combined_script(path, false)?;
-        self.execute_script(&combined)?;
-        Ok(serde_json::Value::Null)
+        self.execute_script(&combined)
     }
 
     /// 长生命周期会话 VM：持续运行直到宿主 `cleanup_instance` 注入 `__shutdown`。
@@ -195,7 +322,7 @@ impl PluginVmInstance {
         }
 
         let combined = self.build_combined_script(path, true)?;
-        self.execute_script(&combined)
+        self.execute_script(&combined).map(|_| ())
     }
 
     pub fn register_host_binding(
@@ -240,7 +367,15 @@ impl PluginVmInstance {
 
     pub fn destroy(self) {}
 
-    fn execute_script(&self, code: &str) -> Result<(), AppError> {
+    fn execute_script(&self, code: &str) -> Result<serde_json::Value, AppError> {
+        self.execute_script_with_control(code, None)
+    }
+
+    fn execute_script_with_control(
+        &self,
+        code: &str,
+        control: Option<AgentExecutionControl>,
+    ) -> Result<serde_json::Value, AppError> {
         let bridge = HostBridge {
             plugin_id: self.plugin_id.clone(),
             host_invoke: self.host_invoke.clone(),
@@ -254,7 +389,11 @@ impl PluginVmInstance {
         } else {
             Some(self.config.quickjs_heap_mb as usize * 1024 * 1024)
         };
-        let guard = Arc::new(ExecutionGuardState::new(timeout, interrupt_budget));
+        let guard = Arc::new(ExecutionGuardState::new(
+            timeout,
+            interrupt_budget,
+            control.clone(),
+        ));
 
         run_with_local_runtime(move || async move {
             guard.reset();
@@ -275,20 +414,64 @@ impl PluginVmInstance {
                 .await
                 .map_err(to_app_js_error)?;
 
-            context
-                .with(|ctx| -> rquickjs::Result<()> {
-                    install_host_globals(
-                        ctx.clone(),
-                        bridge.clone(),
-                        plugin_id.clone(),
-                        guard.clone(),
-                    )?;
-                    ctx.eval::<(), _>(code.as_str())
-                })
-                .await
-                .map_err(|err| to_guarded_app_error(err, &guard))?;
-
-            js_runtime.idle().await;
+            if let Some(control) = control {
+                let eval_guard = guard.clone();
+                // Await only the snippet's top-level promise, not every timer or
+                // unawaited call it ever spawned. Dropping this runtime clears
+                // its scheduler; the Rust owner separately drains MCP children.
+                let evaluation = context.async_with(async |ctx| {
+                    install_host_globals(ctx.clone(), bridge, plugin_id, eval_guard.clone())?;
+                    // Parse trusted bootstrap separately: guest declarations must not run
+                    // before Rust starts the budget, or receive a way to reset it.
+                    ctx.eval::<(), _>(build_runtime_prelude())?;
+                    eval_guard.resume_timeout();
+                    ctx.eval::<rquickjs::Promise<'_>, _>(code.as_str())?
+                        .into_future::<()>()
+                        .await
+                });
+                tokio::pin!(evaluation);
+                let execution = std::future::poll_fn(|cx| {
+                    guard.resume_from_host_wait();
+                    let result = evaluation.as_mut().poll(cx);
+                    if result.is_pending() {
+                        guard.pause_for_host_work();
+                    }
+                    result
+                });
+                tokio::pin!(execution);
+                let mut watchdog = tokio::time::interval(Duration::from_millis(25));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = control.cancel.cancelled() => {
+                            return Err(AppError::QuickJS("agent code execution was cancelled".into()));
+                        }
+                        result = &mut execution => {
+                            result.map_err(|err| to_guarded_app_error(err, &guard))?;
+                            break;
+                        }
+                        _ = watchdog.tick() => {
+                            if guard.stop_requested() {
+                                return Err(AppError::QuickJS(guard.reason_message().unwrap_or_else(|| "agent code interrupted".into())));
+                            }
+                        }
+                    }
+                }
+            } else {
+                context
+                    .with(|ctx| -> rquickjs::Result<()> {
+                        install_host_globals(
+                            ctx.clone(),
+                            bridge.clone(),
+                            plugin_id.clone(),
+                            guard.clone(),
+                        )?;
+                        ctx.eval::<(), _>(code.as_str())
+                    })
+                    .await
+                    .map_err(|err| to_guarded_app_error(err, &guard))?;
+                js_runtime.idle().await;
+            }
 
             if let Some(reason) = guard.reason_message() {
                 return Err(AppError::QuickJS(format!(
@@ -307,7 +490,23 @@ impl PluginVmInstance {
                 return Err(AppError::QuickJS(fatal_error));
             }
 
-            Ok(())
+            let agent_code_result = context
+                .with(|ctx| {
+                    ctx.globals()
+                        .get::<_, Option<String>>("__tomcat_agent_code_result")
+                })
+                .await
+                .map_err(to_app_js_error)?;
+            agent_code_result
+                .map(|result| {
+                    serde_json::from_str(&result).map_err(|error| {
+                        AppError::QuickJS(format!(
+                            "agent code result serialization failed: {error}"
+                        ))
+                    })
+                })
+                .transpose()
+                .map(|result| result.unwrap_or(serde_json::Value::Null))
         })
     }
 
@@ -333,15 +532,9 @@ impl PluginVmInstance {
         };
 
         let mut script = format!(
-            "// --- pi_runtime_prelude.js (auto-injected) ---\n{PI_RUNTIME_PRELUDE}\n\
-             // --- pi_crypto_shim.js ---\n{PI_CRYPTO_SHIM}\n\
-             // --- pi_bridge.js (auto-injected) ---\n{bridge}\n\
-             // --- pi_node_shim.js ---\n{PI_NODE_SHIM}\n\
-             // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
-             // --- pi_ms_shim.js ---\n{PI_MS_SHIM}\n\
-             // --- begin user budget window ---\nif (typeof __pi_resume_timeout === 'function') __pi_resume_timeout();\n\
+            "{prelude}// --- begin user budget window ---\nif (typeof __pi_resume_timeout === 'function') __pi_resume_timeout();\n\
              // --- user script ---\n{user_code}",
-            bridge = get_bridge_js_content()
+            prelude = build_runtime_prelude()
         );
 
         if include_main_loop && !user_code.contains("__pi_start_event_loop(") {
@@ -351,6 +544,18 @@ impl PluginVmInstance {
 
         Ok(script)
     }
+}
+
+fn build_runtime_prelude() -> String {
+    format!(
+        "// --- pi_runtime_prelude.js (auto-injected) ---\n{PI_RUNTIME_PRELUDE}\n\
+         // --- pi_crypto_shim.js ---\n{PI_CRYPTO_SHIM}\n\
+         // --- pi_bridge.js (auto-injected) ---\n{bridge}\n\
+         // --- pi_node_shim.js ---\n{PI_NODE_SHIM}\n\
+         // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
+         // --- pi_ms_shim.js ---\n{PI_MS_SHIM}\n",
+        bridge = get_bridge_js_content()
+    )
 }
 
 fn install_host_globals<'js>(
@@ -389,42 +594,47 @@ fn install_host_globals<'js>(
     )?;
     globals.set("__pi_sleep", sleep_fn)?;
 
-    let wait_bridge = bridge.clone();
-    let wait_guard = guard.clone();
-    let wait_fn = Function::new(
-        ctx.clone(),
-        Async(move |timeout_ms: u64| {
-            let wait_bridge = wait_bridge.clone();
-            let wait_guard = wait_guard.clone();
-            async move {
-                // Waiting on the host event queue is idle time, not plugin execution.
-                wait_guard.pause_for_idle_wait();
-                let result = wait_bridge.wait_for_event(timeout_ms).await;
-                wait_guard.resume_after_idle_wait();
-                result.map_err(|e| js_runtime_error(e.to_string()))
-            }
-        }),
-    )?;
-    globals.set("__pi_wait_for_event", wait_fn)?;
     register_crypto_globals(&globals)?;
 
-    let budget_reset_guard = guard.clone();
-    globals.set(
-        "__pi_budget_reset",
-        Func::from(move || -> rquickjs::Result<()> {
-            budget_reset_guard.reset();
-            Ok(())
-        }),
-    )?;
+    // Plugin event/timer ticks keep their per-event budget. Agent snippets instead
+    // use the existing Rust poll-boundary accounting for their whole execution.
+    if guard.agent.is_none() {
+        let wait_bridge = bridge.clone();
+        let wait_guard = guard.clone();
+        let wait_fn = Function::new(
+            ctx.clone(),
+            Async(move |timeout_ms: u64| {
+                let wait_bridge = wait_bridge.clone();
+                let wait_guard = wait_guard.clone();
+                async move {
+                    // Waiting on the host event queue is idle time, not plugin execution.
+                    wait_guard.pause_for_idle_wait();
+                    let result = wait_bridge.wait_for_event(timeout_ms).await;
+                    wait_guard.resume_after_idle_wait();
+                    result.map_err(|e| js_runtime_error(e.to_string()))
+                }
+            }),
+        )?;
+        globals.set("__pi_wait_for_event", wait_fn)?;
 
-    let resume_timeout_guard = guard.clone();
-    globals.set(
-        "__pi_resume_timeout",
-        Func::from(move || -> rquickjs::Result<()> {
-            resume_timeout_guard.resume_timeout();
-            Ok(())
-        }),
-    )?;
+        let budget_reset_guard = guard.clone();
+        globals.set(
+            "__pi_budget_reset",
+            Func::from(move || -> rquickjs::Result<()> {
+                budget_reset_guard.reset();
+                Ok(())
+            }),
+        )?;
+
+        let resume_timeout_guard = guard.clone();
+        globals.set(
+            "__pi_resume_timeout",
+            Func::from(move || -> rquickjs::Result<()> {
+                resume_timeout_guard.resume_timeout();
+                Ok(())
+            }),
+        )?;
+    }
 
     let interrupt_reason_guard = guard.clone();
     globals.set(
@@ -501,241 +711,5 @@ fn get_bridge_js_content() -> std::borrow::Cow<'static, str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{PluginEngineConfig, PluginVmInstance};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    #[test]
-    fn run_script_file_reports_missing_path() {
-        let mut instance =
-            PluginVmInstance::new(PluginEngineConfig::default(), "missing-script".to_string())
-                .expect("create quickjs instance");
-        let missing = std::path::Path::new("/definitely/missing/plugin.js");
-        let err = instance
-            .run_script_file(missing)
-            .expect_err("missing script should fail");
-        assert!(
-            err.to_string().contains("script file not found"),
-            "missing script error should mention path resolution: {err}"
-        );
-    }
-
-    #[test]
-    fn build_combined_script_appends_main_loop_for_session_vm() {
-        let instance =
-            PluginVmInstance::new(PluginEngineConfig::default(), "combined-script".to_string())
-                .expect("create quickjs instance");
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let script_path = dir.path().join("main.js");
-        std::fs::write(&script_path, "pi.log('ready');\n").expect("write user script");
-
-        let combined = instance
-            .build_combined_script(&script_path, true)
-            .expect("build combined script");
-        assert!(
-            combined.contains("// --- pi_main_loop.js ---"),
-            "session VM should inject main loop when plugin does not start it explicitly"
-        );
-        assert!(
-            combined.contains("__pi_start_event_loop"),
-            "combined script should include event loop bootstrap"
-        );
-        assert!(
-            combined.contains("__pi_resume_timeout"),
-            "combined script should resume the timeout budget at the user-code boundary"
-        );
-    }
-
-    #[test]
-    fn run_script_reaches_registered_host_binding() {
-        let mut instance =
-            PluginVmInstance::new(PluginEngineConfig::default(), "host-binding".to_string())
-                .expect("create quickjs instance");
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&call_count);
-        instance
-            .register_host_binding(move |_request_json| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(serde_json::json!({ "ok": true, "data": null }).to_string())
-            })
-            .expect("register host binding");
-
-        instance
-            .run_script("pi.log('hello from inline test');")
-            .expect("run inline script");
-        assert!(
-            call_count.load(Ordering::SeqCst) >= 1,
-            "pi.log should route through the host binding"
-        );
-    }
-
-    #[test]
-    fn heap_limit_rejects_large_allocation() {
-        let script = r#"
-globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
-"#;
-        let mut tight = PluginVmInstance::new(
-            PluginEngineConfig {
-                quickjs_heap_mb: 1,
-                call_timeout_ms: 1_000,
-                interrupt_budget: 1_000_000,
-                ..Default::default()
-            },
-            "heap-limit".to_string(),
-        )
-        .expect("create quickjs instance");
-
-        let err = tight
-            .run_script(script)
-            .expect_err("allocation above heap limit should fail");
-        let mut roomy = PluginVmInstance::new(
-            PluginEngineConfig {
-                quickjs_heap_mb: 8,
-                call_timeout_ms: 1_000,
-                interrupt_budget: 1_000_000,
-                ..Default::default()
-            },
-            "heap-roomy".to_string(),
-        )
-        .expect("create roomy quickjs instance");
-        roomy
-            .run_script(script)
-            .expect("same allocation should fit once heap budget is raised");
-
-        let message = err.to_string();
-        assert!(
-            message.contains("QuickJS") || message.contains("JS执行错误"),
-            "heap guard should surface a QuickJS-side failure, got: {err}"
-        );
-    }
-
-    #[test]
-    fn heap_limit_zero_allows_large_allocation() {
-        let script = r#"
-globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
-"#;
-        let mut unbounded = PluginVmInstance::new(
-            PluginEngineConfig {
-                quickjs_heap_mb: 0,
-                call_timeout_ms: 1_000,
-                interrupt_budget: 1_000_000,
-                ..Default::default()
-            },
-            "heap-unbounded".to_string(),
-        )
-        .expect("create unbounded quickjs instance");
-
-        unbounded
-            .run_script(script)
-            .expect("heap_mb=0 should skip the explicit memory limit");
-    }
-
-    #[test]
-    fn call_timeout_interrupts_long_sync_script() {
-        let mut instance = PluginVmInstance::new(
-            PluginEngineConfig {
-                quickjs_heap_mb: 8,
-                call_timeout_ms: 50,
-                interrupt_budget: 0,
-                ..Default::default()
-            },
-            "call-timeout".to_string(),
-        )
-        .expect("create timeout-scoped quickjs instance");
-
-        let err = instance
-            .run_script("while (true) {}")
-            .expect_err("call_timeout_ms should interrupt a runaway synchronous loop");
-        assert!(
-            err.to_string().contains("50ms timeout"),
-            "timeout error should mention the configured 50ms budget, got: {err}"
-        );
-    }
-
-    #[test]
-    fn wait_for_event_refreshes_timeout_budget_between_idle_ticks() {
-        let mut instance = PluginVmInstance::new(
-            PluginEngineConfig {
-                quickjs_heap_mb: 8,
-                call_timeout_ms: 50,
-                interrupt_budget: 0,
-                ..Default::default()
-            },
-            "idle-budget-reset".to_string(),
-        )
-        .expect("create quickjs instance");
-        instance
-            .register_host_binding(|request_json| {
-                let request: serde_json::Value =
-                    serde_json::from_str(request_json).expect("host request should be JSON");
-                if request["module"] == "__session" && request["method"] == "waitForEvent" {
-                    std::thread::sleep(std::time::Duration::from_millis(30));
-                    return Ok(
-                        serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string(),
-                    );
-                }
-                Ok(serde_json::json!({ "ok": true, "data": null }).to_string())
-            })
-            .expect("register host binding");
-        instance
-            .run_script(
-                r#"
-(async function () {
-  globalThis.__idleBudgetSink = 0;
-  for (var i = 0; i < 4; i += 1) {
-    await __pi_wait_for_event(30);
-    for (var j = 0; j < 5000; j += 1) {
-      globalThis.__idleBudgetSink += j;
-    }
-  }
-})();
-"#,
-            )
-            .expect("idle wait ticks should reset timeout budget instead of tripping it");
-    }
-
-    #[test]
-    fn wait_for_event_can_block_past_call_timeout_without_tripping_idle_vm() {
-        let mut instance = PluginVmInstance::new(
-            PluginEngineConfig {
-                quickjs_heap_mb: 8,
-                call_timeout_ms: 50,
-                interrupt_budget: 0,
-                ..Default::default()
-            },
-            "idle-timeout-pause".to_string(),
-        )
-        .expect("create quickjs instance");
-        instance
-            .register_host_binding(|request_json| {
-                let request: serde_json::Value =
-                    serde_json::from_str(request_json).expect("host request should be JSON");
-                if request["module"] == "__session" && request["method"] == "waitForEvent" {
-                    std::thread::sleep(std::time::Duration::from_millis(80));
-                    return Ok(
-                        serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string(),
-                    );
-                }
-                Ok(serde_json::json!({ "ok": true, "data": null }).to_string())
-            })
-            .expect("register host binding");
-        instance
-            .run_script(
-                r#"
-(async function () {
-  await __pi_wait_for_event(80);
-  globalThis.__idleWaitCompleted = true;
-})();
-"#,
-            )
-            .expect("idle wait should not spend call_timeout_ms while no plugin code is running");
-    }
-
-    #[test]
-    fn destroy_consumes_instance_without_side_effects() {
-        let instance = PluginVmInstance::new(PluginEngineConfig::default(), "destroy".to_string())
-            .expect("create quickjs instance");
-        instance.destroy();
-    }
-}
+#[path = "tests/instance_test.rs"]
+mod tests;

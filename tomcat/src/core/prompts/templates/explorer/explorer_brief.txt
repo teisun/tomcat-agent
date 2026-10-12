@@ -1,0 +1,6 @@
+Investigation task `{task_id}`.
+{workspace_hint}
+{task_prompt}
+
+Answer only this task. End with the `## Findings` / `## Conclusion` / `## Open questions`
+report described in your instructions.

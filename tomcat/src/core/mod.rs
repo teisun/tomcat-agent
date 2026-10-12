@@ -6,10 +6,12 @@ pub mod agent_loop;
 pub mod agent_registry;
 pub mod checkpoint;
 pub mod compaction;
+pub mod connector;
 pub mod llm;
 pub mod package;
 pub mod permission;
 pub mod plan_runtime;
+pub mod project_instructions;
 pub mod prompts;
 pub mod security;
 pub mod session;
@@ -42,18 +44,19 @@ pub use package::{
     PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
 };
 pub use primitives::{
-    BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
-    PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount,
-    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
-    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
+    BashExecutionState, BashNextAction, BashResult, DirEntry, EditFileResult, EditOperation,
+    EditOperationType, PrimitiveExecutor, PrimitiveOperation, ReadBinaryResult, ReadResult,
+    ReadTextResult, SearchFileCount, SearchFileMatch, SearchFilesArgs, SearchFilesOutput,
+    SearchFilesOutputMode, SearchFilesQuery, SearchFilesResultMode, SearchFilesStats,
+    SearchFilesTarget, WriteFileResult,
 };
 pub use session::context_metrics;
 pub use session::{
-    build_context_from_state, compound_turn_id, fnv1a_hex, init_context_state, load_store,
+    compound_turn_id, fnv1a_hex, init_context_state, init_context_state_with_limits, load_store,
     project_root, resolve_session_mode, save_store, session_key_for, session_key_for_agent,
-    ApiUsage, BranchSummaryEntry, CompactionResult, ContextState, ErrorEntry, ModelThinkingStore,
-    SessionEntry, SessionHeader, SessionManager, SessionMode, SessionStore, TranscriptEntry,
-    DEFAULT_SESSION_KEY,
+    ApiUsage, BranchSummaryEntry, CompactionResult, ContextState, ErrorEntry, ModelPrefs,
+    ModelPrefsStore, SessionEntry, SessionHeader, SessionManager, SessionMode, SessionStore,
+    TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use tools::contract::confirmation;
 pub use tools::contract::confirmation::{

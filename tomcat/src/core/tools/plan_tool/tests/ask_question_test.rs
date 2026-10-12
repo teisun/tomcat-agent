@@ -1,12 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use super::common::*;
-use crate::core::plan_runtime::panels::{Answer, AskQuestionResult, MockAskQuestionPanel};
+use crate::core::plan_runtime::panels::{
+    Answer, AskQuestionResult, AskQuestionTermination, MockAskQuestionPanel,
+};
 
 fn rt_planning() -> std::sync::Arc<PlanRuntime> {
     let rt = PlanRuntime::new("s1");
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     rt
 }
 
@@ -27,7 +26,7 @@ fn good_args() -> serde_json::Value {
 async fn ask_question_visible_in_chat() {
     let rt = PlanRuntime::new("s1");
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
         answers: vec![Answer {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
@@ -36,7 +35,7 @@ async fn ask_question_visible_in_chat() {
             picked_recommended: true,
         }],
     }]);
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .expect("CHAT 模式应允许 ask_question");
     assert_eq!(out["cancelled"], false);
@@ -54,7 +53,7 @@ async fn ask_question_emits_transcript_event_on_answer() {
         }));
     }
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
         answers: vec![Answer {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
@@ -64,9 +63,15 @@ async fn ask_question_emits_transcript_event_on_answer() {
         }],
     }]);
 
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
-        .await
-        .unwrap();
+    let out = ask_question::execute_for_tool(
+        &rt,
+        &panel,
+        &good_args(),
+        AskQuestionTermination::default(),
+        Some("ask-call-1"),
+    )
+    .await
+    .unwrap();
     assert_eq!(out["cancelled"], false);
 
     let guard = captured.lock();
@@ -75,9 +80,10 @@ async fn ask_question_emits_transcript_event_on_answer() {
         guard[0]["event"],
         crate::infra::wire::WIRE_PLAN_ASK_QUESTION
     );
-    assert_eq!(guard[0]["mode"], "planning");
+    assert_eq!(guard[0]["mode"], "plan");
     assert_eq!(guard[0]["questions"][0]["id"], "q1");
     assert_eq!(guard[0]["result"]["answers"][0]["question_id"], "q1");
+    assert_eq!(guard[0]["tool_call_id"], "ask-call-1");
 }
 
 #[tokio::test]
@@ -92,11 +98,11 @@ async fn ask_question_emits_transcript_event_on_cancelled() {
         }));
     }
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
-        cancelled: true,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::CancelledUnknown,
         answers: vec![],
     }]);
 
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap();
     assert_eq!(out["cancelled"], true);
@@ -112,19 +118,27 @@ async fn ask_question_emits_transcript_event_on_cancelled() {
 }
 
 #[tokio::test]
-async fn ask_question_invisible_in_exec_returns_tool_error() {
+async fn ask_question_rejected_in_exec_returns_actionable_error() {
     let rt = PlanRuntime::new("s1");
-    rt.set_executing_for_test("plan_x".into());
+    rt.seed_active_plan_for_test("plan_x".into(), PlanFileState::Executing);
     let panel = MockAskQuestionPanel::new(vec![]);
-    let err = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap_err();
     match err {
-        ToolError::InvisibleInMode { tool, mode } => {
+        ToolError::RejectedInMode {
+            tool,
+            mode,
+            guidance,
+        } => {
             assert_eq!(tool, "ask_question");
-            assert_eq!(mode, "executing");
+            assert_eq!(mode, "chat");
+            assert_eq!(
+                guidance,
+                "The plan is executing; record any clarification needed as an open question in the plan"
+            );
         }
-        other => panic!("expected InvisibleInMode, got {other:?}"),
+        other => panic!("expected RejectedInMode, got {other:?}"),
     }
 }
 
@@ -136,7 +150,7 @@ async fn ask_question_schema_bounds_questions_count() {
         &rt,
         &panel,
         &serde_json::json!({"questions": []}),
-        Arc::new(AtomicBool::new(false)),
+        AskQuestionTermination::default(),
     )
     .await
     .unwrap_err();
@@ -158,7 +172,7 @@ async fn ask_question_schema_bounds_questions_count() {
         &rt,
         &panel,
         &serde_json::json!({"questions": many}),
-        Arc::new(AtomicBool::new(false)),
+        AskQuestionTermination::default(),
     )
     .await
     .unwrap_err();
@@ -172,7 +186,7 @@ async fn ask_question_schema_bounds_options_count() {
     let args = serde_json::json!({"questions": [{
         "id":"q1","prompt":"x","options":[{"id":"a","label":"A","recommended":true}]
     }]});
-    let err = ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::BadArgs(_));
@@ -186,7 +200,7 @@ async fn ask_question_schema_bounds_options_count() {
             {"id":"e","label":"E"}
         ]
     }]});
-    let err = ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::BadArgs(_));
@@ -202,7 +216,7 @@ async fn ask_question_requires_exactly_one_recommended() {
             {"id":"b","label":"B"}
         ]
     }]});
-    let err = ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::BadArgs(_));
@@ -213,7 +227,7 @@ async fn ask_question_requires_exactly_one_recommended() {
             {"id":"b","label":"B","recommended":true}
         ]
     }]});
-    let err = ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::BadArgs(_));
@@ -229,7 +243,7 @@ async fn ask_question_rejects_reserved_custom_id() {
             {"id":"b","label":"B"}
         ]
     }]});
-    let err = ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::BadArgs(_));
@@ -238,7 +252,6 @@ async fn ask_question_rejects_reserved_custom_id() {
 #[tokio::test]
 async fn ask_question_blocks_until_answered() {
     let _g = env_mutex().lock();
-    std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
     let rt = rt_planning();
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![Answer {
@@ -248,11 +261,11 @@ async fn ask_question_blocks_until_answered() {
             skipped: false,
             picked_recommended: true,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }])
     .with_delay(std::time::Duration::from_millis(80));
     let start = std::time::Instant::now();
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap();
     assert!(start.elapsed() >= std::time::Duration::from_millis(70));
@@ -264,9 +277,9 @@ async fn ask_question_handles_user_abort_returns_cancelled_not_err() {
     let rt = rt_planning();
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![],
-        cancelled: true,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::CancelledUnknown,
     }]);
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap();
     assert_eq!(out["cancelled"], true);
@@ -274,25 +287,56 @@ async fn ask_question_handles_user_abort_returns_cancelled_not_err() {
 }
 
 #[tokio::test]
-async fn ask_question_first_ctrl_c_returns_cancelled_via_signal() {
+async fn ask_question_first_ctrl_c_returns_interrupted_via_signal() {
     let _g = env_mutex().lock();
-    std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
     let rt = rt_planning();
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }])
     .with_delay(std::time::Duration::from_secs(2));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = Arc::clone(&cancel);
+    let termination = AskQuestionTermination::default();
+    let termination_clone = termination.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        cancel_clone.store(true, Ordering::Relaxed);
+        termination_clone.interrupt();
     });
-    let out = ask_question::execute(&rt, &panel, &good_args(), cancel)
+    let out = ask_question::execute(&rt, &panel, &good_args(), termination)
         .await
         .unwrap();
     assert_eq!(out["cancelled"], true);
+    assert_eq!(out["outcome"], "interrupted");
+}
+
+#[tokio::test]
+async fn custom_answer_limit_counts_unicode_characters_not_bytes() {
+    for glyph in ["a", "中", "🙂"] {
+        for (count, allowed) in [(500, true), (501, false)] {
+            let text = glyph.repeat(count);
+            let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+                outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
+                answers: vec![Answer {
+                    question_id: "q1".into(),
+                    option_ids: vec!["__custom__".into()],
+                    custom_text: Some(text.clone()),
+                    skipped: false,
+                    picked_recommended: false,
+                }],
+            }]);
+            let out = ask_question::execute(
+                &rt_planning(),
+                &panel,
+                &good_args(),
+                AskQuestionTermination::default(),
+            )
+            .await;
+            if allowed {
+                assert_eq!(out.unwrap()["answers"][0]["custom_text"], text);
+            } else {
+                assert!(matches!(out, Err(ToolError::Internal(_))));
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -306,9 +350,9 @@ async fn ask_question_custom_text_required_when_custom_selected() {
             skipped: false,
             picked_recommended: false,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }]);
-    let err = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::Internal(_));
@@ -325,9 +369,9 @@ async fn ask_question_custom_text_forbidden_otherwise() {
             skipped: false,
             picked_recommended: true,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }]);
-    let err = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::Internal(_));
@@ -344,9 +388,9 @@ async fn ask_question_result_carries_picked_recommended_flag() {
             skipped: false,
             picked_recommended: false,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }]);
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap();
     assert_eq!(out["answers"][0]["picked_recommended"], false);
@@ -364,9 +408,9 @@ async fn ask_question_ui_appends_custom_slot_via_panel_round_trip() {
             skipped: false,
             picked_recommended: false,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }]);
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap();
     assert_eq!(out["answers"][0]["option_ids"][0], "__custom__");
@@ -384,9 +428,9 @@ async fn ask_question_result_carries_skipped_flag_for_skipped_question() {
             skipped: true,
             picked_recommended: false,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }]);
-    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .unwrap();
     assert_eq!(out["cancelled"], false);
@@ -405,9 +449,9 @@ async fn ask_question_skipped_answer_rejects_option_ids() {
             skipped: true,
             picked_recommended: false,
         }],
-        cancelled: false,
+        outcome: crate::core::plan_runtime::AskQuestionOutcome::Answered,
     }]);
-    let err = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
         .await
         .expect_err("skipped answer should reject option_ids");
     assert!(
@@ -422,77 +466,26 @@ fn env_mutex() -> &'static parking_lot::Mutex<()> {
 }
 
 #[tokio::test]
-async fn ask_question_timeout_returns_cancelled() {
+async fn ask_question_ignores_removed_timeout_env_and_waits_for_answer() {
     let _g = env_mutex().lock();
-    std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+    std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "1");
+    std::env::set_var("TOMCAT__ASK_QUESTION__TIMEOUT_MS", "1");
     let rt = rt_planning();
-    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
-        answers: vec![],
-        cancelled: false,
-    }])
-    .with_delay(std::time::Duration::from_secs(2));
-    let out = ask_question::execute_with_timeout(
-        &rt,
-        &panel,
-        &good_args(),
-        Arc::new(AtomicBool::new(false)),
-        Some(40),
-    )
-    .await
-    .unwrap();
-    assert_eq!(out["cancelled"], true);
-    assert!(out["answers"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn ask_question_env_overrides_config_timeout() {
-    let _g = env_mutex().lock();
-    let rt = rt_planning();
-    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
-        answers: vec![],
-        cancelled: false,
-    }])
-    .with_delay(std::time::Duration::from_secs(2));
-    std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "40");
-    let out = ask_question::execute_with_timeout(
-        &rt,
-        &panel,
-        &good_args(),
-        Arc::new(AtomicBool::new(false)),
-        Some(60_000),
-    )
-    .await
-    .unwrap();
-    std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
-    assert_eq!(out["cancelled"], true);
-}
-
-#[tokio::test]
-async fn ask_question_zero_timeout_means_no_timeout() {
-    let _g = env_mutex().lock();
-    std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
-    let rt = rt_planning();
-    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
-        cancelled: false,
-        answers: vec![Answer {
-            question_id: "q1".into(),
-            option_ids: vec!["a".into()],
-            custom_text: None,
-            skipped: false,
-            picked_recommended: true,
-        }],
-    }])
+    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult::answered(vec![Answer {
+        question_id: "q1".into(),
+        option_ids: vec!["a".into()],
+        custom_text: None,
+        skipped: false,
+        picked_recommended: true,
+    }])])
     .with_delay(std::time::Duration::from_millis(80));
-    let out = ask_question::execute_with_timeout(
-        &rt,
-        &panel,
-        &good_args(),
-        Arc::new(AtomicBool::new(false)),
-        Some(0),
-    )
-    .await
-    .unwrap();
-    assert_eq!(out["cancelled"], false);
+    let start = std::time::Instant::now();
+    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
+        .await
+        .unwrap();
+    std::env::remove_var("TOMCAT__ASK_QUESTION__TIMEOUT_MS");
+    assert!(start.elapsed() >= std::time::Duration::from_millis(70));
+    assert_eq!(out["outcome"], "answered");
 }
 
 #[tokio::test]
@@ -509,7 +502,7 @@ async fn ask_question_duplicate_question_id_rejected() {
             {"id":"b","label":"B"}
         ]}
     ]});
-    let err = ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false)))
+    let err = ask_question::execute(&rt, &panel, &args, AskQuestionTermination::default())
         .await
         .unwrap_err();
     matches!(err, ToolError::BadArgs(_));

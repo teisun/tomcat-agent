@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 import { planEventState } from "../planState";
 
 describe("planEventState", () => {
-  it("maps pending, enter, and exit events", () => {
+  it("maps plan-file lifecycle events but not legacy mode events", () => {
     expect(planEventState({ type: "plan.pending" })).toBe("pending");
-    expect(planEventState({ type: "plan.enter" })).toBe("planning");
-    expect(planEventState({ type: "plan.exit" })).toBe("chat");
+    expect(planEventState({ type: "plan.stalled" })).toBe("pending");
+    expect(planEventState({ type: "plan.enter" })).toBeNull();
+    expect(planEventState({ type: "plan.exit" })).toBeNull();
   });
 
   it("keeps plan.complete mapped to completed", () => {

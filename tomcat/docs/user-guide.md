@@ -242,6 +242,33 @@ Field meanings:
 - `base_url`: either a bare host or a host with an explicit provider path. tomcat appends the leaf automatically, so `https://api.openai.com` becomes `/v1/...`, while GLM-style paths such as `https://open.bigmodel.cn/api/paas/v4` keep `/api/paas/v4/...`
 - `kimi-k2.7-code` / Moonshot endpoint note: the built-in preset currently defaults to Moonshot China `https://api.moonshot.cn`, because that is the endpoint verified by the live smoke setup in this repo. Moonshot's global platform uses `https://api.moonshot.ai` instead. If your API key was created on the global platform, override `base_url` in `models.toml` to `https://api.moonshot.ai`.
 
+### Model Speed and Effort (VS Code)
+
+```text
+Model menu → Edit a row
+              Speed   Standard / Fast / Ultrafast
+              ──────────────────────────────────
+              Context 400K / 1M
+              Effort  Low … Xhigh / Max
+```
+
+Speed controls service acceleration; Effort controls how much the model reasons. They are independent: Fast + Max is valid when both are supported. Editing a row's Speed does not switch the selected model or change Context/Effort. Choices are remembered per model and take effect on the next run.
+
+- Standard is the default. For models declaring speed control, Tomcat explicitly sends `service_tier = "default"` so an upstream project's paid default cannot enable Fast implicitly.
+- Fast sends `service_tier = "priority"`; Ultrafast sends `service_tier = "ultrafast"`. Acceleration may cost more and the upstream may reject or downgrade a request. A selected option is not proof of the tier actually served.
+- The Speed section appears only for a model with declared accelerated speeds. `supported_speeds` lists only `fast` and/or `ultrafast`; Standard is implicit. An empty list hides the section and omits the request field.
+- Add `max` only to a model's declared `supported_reasoning_levels` when its upstream supports it. This does not automatically change an existing Xhigh preference to Max.
+- Ultrafast availability is model- and account-specific: GPT-6 Astra supports it, GPT-5.6 Sol requires preview access. GPT-6 Sol and GPT-6.1 Sol are not declared as Ultrafast-capable. **Ultra multi-agent mode is not included**, and `ultra` is not a reasoning-effort value.
+
+For an OpenAI Responses model that supports both acceleration tiers, add these fields to its existing `[[models]]` entry:
+
+```toml
+supported_speeds = ["fast", "ultrafast"]
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+```
+
+In **Tomcat Settings → Models → Edit → Advanced**, **Supported effort levels** and **Supported speeds** accept English or Chinese commas. Typing preserves the raw text; Save trims, removes empty items and duplicates. A gateway declaration is an assertion of support, not an automatic gateway capability probe.
+
 ### tomcat model - Manage models and keys without hand-editing files
 
 If you do not want to edit `models.toml` or `.env` manually, use the dedicated model-management subcommands:
@@ -355,6 +382,20 @@ Proxy diagnostics follow these rules:
 
 `tomcat config` reads and writes `tomcat.config.toml`, so you do not need to edit the file by hand.
 
+### Display Language
+
+```text
+Settings → General → Language ─┐
+                              ├─ ui.language in tomcat.config.toml
+Independent CLI config set ────┘
+```
+
+`ui.language` accepts `auto` (default), `zh-CN`, and `en`. Set it from an independent terminal with `tomcat config set ui.language en` (or `zh-CN` / `auto`). Auto uses VS Code's display language for the extension and the system locale for the standalone CLI. `TOMCAT__UI__LANGUAGE` is a process-level override, for example `TOMCAT__UI__LANGUAGE=en tomcat --help`.
+
+Saving in Settings updates the current window and Serve without restarting the session; other windows and standalone processes pick it up next time they start. Existing conversation content and already-produced backend messages are not translated again. Native VS Code contribution labels still follow VS Code's own language. Command names, flags, configuration keys, model IDs, and external diagnostic details do not change.
+
+Session pins, safe deletion, and optional plan-review consent are explained in [the extension guide](../../tomcat-vscode-ext/README.md#sessions-settings-and-plan-review). Review may take several minutes or longer and uses additional model tokens; skipping opens the already-saved plan without starting review or execution.
+
 ### View the Full Config
 
 ```bash
@@ -416,9 +457,9 @@ tomcat config get llm.proxy
 
 If the field does not exist:
 
-```
-未找到配置项: nonexistent.key
-  同级可用项: [...]
+```text
+Configuration key not found: nonexistent.key
+  Sibling keys: [...]
 ```
 
 ### Change a Config Item
@@ -603,7 +644,7 @@ Supported source shapes:
 
 The three visibility layers are:
 
-- `scope`: the current project, written to `<scope_root>/.tomcat/{plugins,skills,packages}`
+- `scope`: the current project, written to `<scope_root>/<workspace.project_resource_dir>/{plugins,skills,packages}` (default `.agents`)
 - `agent`: the current agent, written to `~/.tomcat/agents/<id>/{plugins,skills,packages}`
 - `global`: the globally shared layer, written to `~/.tomcat/{plugins,skills,packages}`
 
@@ -631,19 +672,25 @@ tomcat packages --visibility agent
 tomcat uninstall my-package --visibility scope
 ```
 
-Install from inside chat:
+Manage resources from terminal chat or the VS Code composer:
 
 ```text
-/install ./my-package
-/install ./my-plugin agent
+/reload
+/install './source with space/my-plugin' agent
 /install ./my-skill current-project
+/uninstall my-package agent
 ```
 
-Notes:
+```text
+External CLI / manual file change → /reload → current skills, tools and plugin instances
+Chat /install or /uninstall       → the same synchronization runs automatically
+```
 
-- `current-project` inside `/install` is only a user-facing label; internally it maps to `scope`.
-- In `code` / `claw` sessions, after `/install` succeeds, the current session immediately refreshes `SkillSet` plus the plugin catalog/static tool list, so newly installed skills and static plugin capabilities become visible without restarting the session.
-- This live refresh **does not** execute plugin code inside the install path, and **does not** hot-swap plugin instances that are already loaded. If a plugin is already running in the current session, it keeps using the old instance until a later normal runtime path reactivates it.
+- `/reload` rescans effective Skill and plugin resources, reports additions/removals/updates, and refreshes the next model request. It does not reload arbitrary configuration or reconnect MCP servers. External changes are **not scanned on every prompt**; run `/reload` explicitly.
+- `current-project` is a label for `scope`; `agent` and `global` are also accepted. Terminal `/install` and `/uninstall` can ask for the layer if omitted; VS Code is non-interactive and returns usage instead. Quote paths containing spaces. Slash `/install` does not support `--force`: uninstall first and then install, or use the outer CLI's `tomcat install --force`.
+- `/uninstall` takes the **package name** from `tomcat packages`, not a tool name. It only uninstalls ledger-managed packages in the specified layer. For manually placed resources, delete the directory under that layer's `plugins/` or `skills/`, then run `/reload`.
+- Package installation itself remains static. Synchronization removes deleted plugins from the shared tool catalog and lets already admitted calls finish. For an update, this session clears its stale VM registration and requests shutdown; other sessions may keep using their existing VM for the current turn and switch at the next turn. Old VMs cannot register new capabilities, and their permissions still come from their birth manifest. Static Lazy plugins remain lazy; Session initialization can run during synchronization. Unrelated plugins are preserved.
+- In VS Code, `/` opens suggestions at the start, after whitespace, or on a new line; paths and URLs do not open them. Selecting inserts text, not executes it. Only a leading shared command with **text only** is intercepted on send; mid-message commands and drafts with references/attachments remain ordinary prompts. Waiting commands disable send, compact and Build; replies appear as notice/error bubbles. Older servers without the command table do not show this menu.
 
 ---
 
@@ -720,6 +767,9 @@ Inside interactive chat, tomcat intercepts local commands starting with `/` befo
 
 | Command | Description |
 |---------|-------------|
+| `/reload` | Rescan Skills and plugin tools in the running session |
+| `/install <source> <current-project\|agent\|global>` | Install and synchronize resources |
+| `/uninstall <package-name> <current-project\|agent\|global>` | Uninstall a ledger-managed package and synchronize |
 | `/help` | Show the currently supported local commands |
 | `/path <absolute path>` | Open the authorization menu for one path (this session / write to workspace / read-only / deny / cancel) |
 | `/model` (`current` / `list` / `use <id>`) | View or switch the current session model (catalog = built-in table + `models.toml`) |
@@ -733,6 +783,35 @@ Inside interactive chat, tomcat intercepts local commands starting with `/` befo
 | `/plan list` | List plan files under `~/.tomcat/plans/` |
 
 Dragging or pasting a path and pressing Enter does not open the authorization menu. It is sent to the LLM as a normal chat message. If you need to authorize a path explicitly, use `/path <absolute path>`.
+
+After a successful terminal `/restore`, the durable transcript is reloaded into memory, just like VS Code checkpoint restore. If the restored tail contains an unanswered question, terminal chat resumes it automatically; dry-run and failed restore leave memory unchanged.
+
+#### Project Commands and Rules
+
+```text
+.cursor/commands/*.md or .agents/commands/*.md -> explicit user-turn instructions
+.cursor/rules/*.{md,mdc} or .agents/rules/*.{md,mdc} -> User Custom Instructions
+```
+
+Commands are named by their relative path without `.md` (`git/commit.md` becomes `/git/commit`). Optional frontmatter `description` supplies a menu description; absent descriptions are omitted. Both roots, and a configured `workspace.project_resource_dir`, are scanned recursively (maximum 8 levels); hidden subdirectories and symlinks are skipped. The scope is the session's persisted project root, with cwd fallback for legacy sessions. CLI sessions keep their startup-root semantics; Serve with an explicit cwd may use the Git root. No parent/subproject/home rules are added.
+
+- `/command list` lists names, sources and IDs; `/command use command:.cursor/commands/review.md [intent]` invokes an exact entry.
+- `/review [intent]` in the CLI invokes a unique command. Duplicate names require an exact ID; unknown names remain ordinary chat and built-in commands win collisions.
+- `/skill use <name> <intent>` retains its existing syntax and user-only skill support, but stores the same structured snapshot as a VS Code skill chip.
+- In VS Code, select a menu item to create a yellow chip; unselected `/name` text remains ordinary text. Prompt and follow_up support instruction segments; steer rejects them. Failed loading preserves the draft. Retry uses the already-sent body snapshot; restoring a message to composer and sending again reads the current file.
+- Rules in **both `.md` and `.mdc` require boolean `alwaysApply: true`** in YAML frontmatter. No frontmatter, false, missing, or quoted `"true"` does not apply. `globs`, intelligent selection and rule-specific manual activation are not implemented. Rules refresh at each user-turn boundary and are not injected into internal reviewers/explorers.
+- Runtime instruction reads respect hard Deny, do not grant tool access and do not request per-file confirmation. LLM read/load_skill tools retain the full permission gate. Individual files are capped at 64 KiB; discovery is capped at 4096 entries / 256 candidates / 4 KiB headers with truncation diagnostics. Rule chapters are capped at 32,000 Unicode characters or 10% of the model character budget, whichever is smaller; whole rules only. Explicit invocations have no aggregate body limit beyond existing model-context handling.
+- `/reload` (also install/uninstall receipts) reports Commands/Rules counts and skip reasons. Old servers without `get_instruction_catalog` retain Terminal commands only; new clients migrate old drafts. Downgrading the runtime cannot read newly stored command/skill reference kinds; keep the matching runtime for replay.
+
+Example rule:
+
+```md
+---
+alwaysApply: true
+description: Team conventions
+---
+Follow the team's code style and testing conventions.
+```
 
 #### Recommended Startup Directory for Checkpoints
 
@@ -1080,6 +1159,6 @@ tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
 
-`tomcat plugin load` is still the **runtime loading entry point**. It performs a short-lived initialization check once and writes the registration data into the global `{work_dir}/plugins/registry.json`. By contrast, `tomcat install` and `/install` are the **installation management entry points**: they write the corresponding layer's `plugins/registry.json` and `packages/registry.json` under `scope|agent|global`, but they do not execute plugin code inside the install path. The actual long-lived session VM is still created lazily only when the session first needs that plugin.
+`tomcat plugin load` is still the **runtime loading entry point**. It performs a short-lived initialization check once and writes the registration data into the global `{work_dir}/plugins/registry.json`. By contrast, `tomcat install` and `/install` are the **installation management entry points**: they write the corresponding layer's `plugins/registry.json` and `packages/registry.json` under `scope|agent|global`, but they do not execute plugin code inside the install path. The subsequent session activation creates Session VMs immediately, while static Lazy plugins wait for first use. `/install` and `/reload` reuse that activation policy after synchronizing the inventory.
 
 Implementation details: [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) and [src/ext/README.md](../src/ext/README.md).

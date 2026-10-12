@@ -1,6 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
 import type { WebviewThinkingBlock } from "../types";
+
+function normalizeThinkingDisplayText(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!/^(?:\*\*.+?\*\*\s*){2,}$/.test(trimmed)) {
+        return line;
+      }
+
+      const segments = trimmed.match(/\*\*.+?\*\*/g);
+      return segments ? segments.join("\n") : line;
+    })
+    .join("\n");
+}
 
 function summarizeThinking(text: string): string | null {
   const firstMeaningfulLine = text
@@ -15,33 +31,34 @@ function summarizeThinking(text: string): string | null {
     : firstMeaningfulLine;
 }
 
-export function ThinkingBlock({
+function ThinkingBlockComponent({
   isStreaming = false,
   item,
   variant = "standalone",
 }: {
   isStreaming?: boolean;
   item: WebviewThinkingBlock;
+  onOpenFile?: (path: string, line?: number) => void;
   variant?: "embedded" | "standalone";
 }) {
+  const t = useT();
   const [collapsed, setCollapsed] = useState(true);
-  const summary = useMemo(() => summarizeThinking(item.text), [item.text]);
+  const displayText = useMemo(() => normalizeThinkingDisplayText(item.text), [item.text]);
+  const summary = useMemo(() => summarizeThinking(displayText), [displayText]);
 
   useEffect(() => {
     setCollapsed(true);
   }, [item.id]);
 
   if (variant === "embedded") {
-    return item.text ? (
+    return displayText ? (
       <pre className="tc-thinking-box__body" data-testid="thinking-group-body">
-        {item.text}
+        {displayText}
       </pre>
     ) : null;
   }
 
-  const statusIconClass = isStreaming
-    ? "tc-thinking__status codicon codicon-loading tc-codicon-spin"
-    : "tc-thinking__status codicon codicon-check";
+  const statusIconClass = "tc-thinking__status codicon codicon-lightbulb";
 
   return (
     <section
@@ -49,7 +66,7 @@ export function ThinkingBlock({
       data-testid="thinking-block"
     >
       <button
-        aria-label={collapsed ? "Expand thinking" : "Collapse thinking"}
+        aria-label={t(collapsed ? "thinking.expand" : "thinking.collapse")}
         className="tc-thinking__toggle"
         data-testid="thinking-toggle"
         onClick={() => setCollapsed((value) => !value)}
@@ -63,18 +80,9 @@ export function ThinkingBlock({
           />
           <span className="tc-thinking__heading">
             <span
-              className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer" : ""}`}
+              className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
             >
-              <span>Tomcat · Thinking</span>
-              {isStreaming ? (
-                <span
-                  aria-hidden="true"
-                  className="tc-thinking__dots"
-                  data-testid="thinking-streaming-indicator"
-                >
-                  ...
-                </span>
-              ) : null}
+              <span>{t("thinking.title")}</span>
             </span>
             {collapsed && summary ? (
               <span className="tc-thinking__summary" data-testid="thinking-summary">
@@ -87,9 +95,22 @@ export function ThinkingBlock({
       </button>
       {collapsed ? null : (
         <pre className="tc-thinking__body" data-testid="thinking-body">
-          {item.text}
+          {displayText}
         </pre>
       )}
     </section>
   );
 }
+
+function areThinkingBlockPropsEqual(
+  previous: Readonly<Parameters<typeof ThinkingBlockComponent>[0]>,
+  next: Readonly<Parameters<typeof ThinkingBlockComponent>[0]>,
+): boolean {
+  return (
+    previous.isStreaming === next.isStreaming &&
+    previous.item === next.item &&
+    previous.variant === next.variant
+  );
+}
+
+export const ThinkingBlock = memo(ThinkingBlockComponent, areThinkingBlockPropsEqual);

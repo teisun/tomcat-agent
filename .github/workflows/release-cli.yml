@@ -69,6 +69,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Check version mirrors
+        run: node ../scripts/release-version.mjs check
+
       - name: Validate CLI release tag
         run: node ../.github/scripts/release/check-cli-tag.mjs "${GITHUB_WORKSPACE}" "${{ steps.meta.outputs.release_tag }}"
 

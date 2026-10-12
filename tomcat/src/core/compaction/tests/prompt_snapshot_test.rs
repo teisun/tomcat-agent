@@ -1,4 +1,4 @@
-//! T2-P0-002 Phase B 验收用例 —— 摘要 prompt 9 节模板 snapshot + Compaction 请求显式禁工具。
+//! T2-P0-002 Phase B 验收用例 —— 摘要 prompt 分节模板 snapshot + Compaction 请求显式禁工具。
 //!
 //! 单一事实来源：[`docs/reports/compaction-prompt-cc-vs-pi.md`](../../../../../docs/reports/compaction-prompt-cc-vs-pi.md)
 //! §5.3（BASE）/§5.4（UPDATE）/§5.7.1（Two-pass 决议固化）。
@@ -21,7 +21,7 @@ use crate::core::llm::{
 use crate::infra::error::AppError;
 
 // ---------------------------------------------------------------------------
-// BASE prompt snapshot — 子项 1（9 节模板）
+// BASE prompt snapshot — 子项 1（分节模板）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -41,36 +41,54 @@ fn summarization_prompt_contains_first_reason_directive() {
 }
 
 #[test]
-fn summarization_prompt_contains_9_section_headings() {
-    // 9 节锚点（§5.3 报告唯一来源）：Goal / Constraints & Preferences / Progress（含 Done / In Progress / Blocked）
-    // / Errors Encountered / Key Decisions / Recent User Messages / Next Steps / Critical Context
+fn summarization_prompt_contains_all_section_headings() {
+    // 章节锚点：Goal / Progress（含 Done / In Progress / Blocked）/ Errors Encountered /
+    // Key Decisions / Next Steps / Critical Context。
+    // "Recent User Messages" 已移除 —— 用户原话改由 machine_block 在模型产出后逐字拼接。
     let required_headings = [
         "## Goal",
-        "## Constraints & Preferences",
         "## Progress",
         "### Done",
         "### In Progress",
         "### Blocked",
         "## Errors Encountered",
         "## Key Decisions",
-        "## Recent User Messages",
         "## Next Steps",
         "## Critical Context",
     ];
     for h in required_headings {
         assert!(
             SUMMARIZATION_PROMPT.contains(h),
-            "BASE prompt 缺失 9 节标题：{h}（来源 docs/reports/compaction-prompt-cc-vs-pi.md §5.3）",
+            "BASE prompt 缺失章节标题：{h}（来源 docs/reports/compaction-prompt-cc-vs-pi.md §5.3）",
         );
     }
 }
 
 #[test]
-fn summarization_prompt_recent_user_messages_keeps_last_10() {
-    assert!(
-        SUMMARIZATION_PROMPT.contains("10 most recent non-tool user messages"),
-        "Recent User Messages 节必须明确「最近 10 条用户原话」（统一口径，详见报告 §5.5）",
-    );
+fn summary_prompts_have_no_model_authored_constraints_section() {
+    for (name, prompt) in [
+        ("BASE", SUMMARIZATION_PROMPT),
+        ("UPDATE", UPDATE_SUMMARIZATION_PROMPT),
+    ] {
+        assert!(
+            !prompt.contains("Constraints & Preferences"),
+            "{name} prompt must not ask the model to restate user constraints"
+        );
+    }
+}
+
+#[test]
+fn summarization_prompt_no_longer_asks_the_model_for_user_quotes() {
+    // 让模型复述用户原话正是伪造用户指令的来源；改由 machine_block 逐字拼接。
+    for banned in [
+        "## Recent User Messages",
+        "10 most recent non-tool user messages",
+    ] {
+        assert!(
+            !SUMMARIZATION_PROMPT.contains(banned),
+            "BASE prompt 不应再要求模型复述用户消息：{banned}",
+        );
+    }
 }
 
 #[test]
@@ -90,7 +108,7 @@ fn summarization_prompt_progress_done_carries_file_anchor_hint() {
 }
 
 // ---------------------------------------------------------------------------
-// UPDATE prompt snapshot — 子项 1（增量更新 9 节）
+// UPDATE prompt snapshot — 子项 1（增量更新各节）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -125,7 +143,7 @@ fn update_summarization_prompt_has_rules_block_and_format_reference() {
         "PRESERVE information from the previous summary",
         "ADD new progress, decisions, errors, and context",
         "UPDATE Progress: move items from \"In Progress\" to \"Done\"",
-        "UPDATE \"Next Steps\" and \"Recent User Messages\"",
+        "UPDATE \"Next Steps\"",
         "REMOVE information that is no longer relevant",
         "PRESERVE exact file paths, function names, and error messages",
     ];
@@ -137,9 +155,9 @@ fn update_summarization_prompt_has_rules_block_and_format_reference() {
     }
     assert!(
         UPDATE_SUMMARIZATION_PROMPT.contains(
-            "Use the EXACT same format as the original summary (Goal / Constraints & Preferences / Progress / Errors Encountered / Key Decisions / Recent User Messages / Next Steps / Critical Context)."
+            "Use the EXACT same format as the original summary (Goal / Progress / Errors Encountered / Key Decisions / Next Steps / Critical Context)."
         ),
-        "UPDATE prompt 必须显式列出 9 节格式回链，避免增量更新走形",
+        "UPDATE prompt 必须显式列出各节格式回链，避免增量更新走形",
     );
 }
 
@@ -147,7 +165,7 @@ fn update_summarization_prompt_has_rules_block_and_format_reference() {
 // generate_summary 行为校验 —— 子项 2（ChatRequest.tools = None）
 // ---------------------------------------------------------------------------
 
-/// Mock LLM Provider：捕获 `ChatRequest`，返回固定 9 节摘要。
+/// Mock LLM Provider：捕获 `ChatRequest`，返回固定分节摘要。
 struct CapturingMockProvider {
     captured: Arc<Mutex<Option<ChatRequest>>>,
 }
@@ -203,7 +221,7 @@ async fn compaction_request_carries_no_tools() {
     let (provider, captured) = CapturingMockProvider::new();
     let snapshot = vec![ChatMessage::user("hello"), ChatMessage::assistant("world")];
 
-    let summary = generate_summary(&snapshot, None, &provider, "gpt-5.4")
+    let summary = generate_summary(&snapshot, None, &provider, "gpt-5.4", None, None)
         .await
         .expect("mock provider 应返回非空摘要");
     assert!(
@@ -245,7 +263,7 @@ async fn compaction_request_uses_update_prompt_when_existing_summary_present() {
     let snapshot = vec![ChatMessage::user("next user msg")];
     let previous = "## Goal\nold goal\n## Next Steps\n1. old step";
 
-    let _ = generate_summary(&snapshot, Some(previous), &provider, "gpt-5.2")
+    let _ = generate_summary(&snapshot, Some(previous), &provider, "gpt-5.2", None, None)
         .await
         .expect("mock provider 应返回非空摘要");
 

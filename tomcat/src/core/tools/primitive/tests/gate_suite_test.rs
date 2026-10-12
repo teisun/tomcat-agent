@@ -30,6 +30,7 @@ use crate::infra::{
 #[derive(Debug, Default)]
 struct ProgrammableConfirm {
     answers: Mutex<Vec<ConfirmDecision>>,
+    targets: Mutex<Vec<Option<PathBuf>>>,
 }
 
 #[derive(Default)]
@@ -53,6 +54,7 @@ impl ProgrammableConfirm {
     fn new(decisions: Vec<ConfirmDecision>) -> Self {
         Self {
             answers: Mutex::new(decisions),
+            targets: Mutex::new(Vec::new()),
         }
     }
 }
@@ -74,8 +76,10 @@ impl UserConfirmationProvider for ProgrammableConfirm {
         _operation: PrimitiveOperation,
         _preview: &str,
         _plugin_id: &str,
+        target: Option<PathBuf>,
         _suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
+        self.targets.lock().unwrap().push(target);
         let mut q = self.answers.lock().unwrap();
         if q.is_empty() {
             return Ok(ConfirmDecision::Deny);
@@ -152,21 +156,22 @@ async fn gate_deny_path_rule_blocks_write() {
 
 #[tokio::test]
 async fn gate_need_confirm_allow_once_succeeds() {
-    let ws = workspace_dir("confirm_allow");
-    let outside = workspace_dir("confirm_outside");
-    let exec = make_executor(
-        ws,
-        vec![],
-        Arc::new(ProgrammableConfirm::new(vec![ConfirmDecision::AllowOnce])),
-    );
-    let target = outside.join("o.txt");
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let confirm = Arc::new(ProgrammableConfirm::new(vec![ConfirmDecision::AllowOnce]));
+    let exec = make_executor(ws.path().to_path_buf(), vec![], confirm.clone());
+    let target = outside.path().join("文档 with spaces.txt");
+    let expected_target =
+        crate::infra::platform::normalize_path(&target.to_string_lossy()).unwrap();
     let res = exec
         .write_file(&target.to_string_lossy(), "ok", false, "p1")
         .await
         .unwrap();
     assert!(res.written);
-    let _ = std::fs::remove_file(&target);
-    let _ = std::fs::remove_dir(&outside);
+    assert_eq!(
+        *confirm.targets.lock().unwrap(),
+        vec![Some(expected_target)],
+    );
 }
 
 #[tokio::test]
@@ -200,7 +205,7 @@ async fn gate_bash_forbidden_blocks() {
     let ws = workspace_dir("bash_forbid");
     let exec = make_executor(ws.clone(), vec![], Arc::new(AllowAllConfirmation));
     let r = exec
-        .execute_bash("tomcat config set llm.api_key xxx", None, "p1", None, None)
+        .execute_bash("tomcat config set llm.api_key xxx", None, "p1", None)
         .await;
     assert!(matches!(r, Err(AppError::Permission(_))));
     let _ = std::fs::remove_dir(&ws);
@@ -230,7 +235,7 @@ async fn execute_bash_audit_records_bash_scope() {
         gate.into_arc(),
     );
     let r = exec
-        .execute_bash("echo ok", Some(&ws.to_string_lossy()), "p1", None, None)
+        .execute_bash("echo ok", Some(&ws.to_string_lossy()), "p1", None)
         .await
         .unwrap();
     assert_eq!(r.exit_code, 0);
@@ -250,6 +255,53 @@ async fn execute_bash_audit_records_bash_scope() {
 }
 
 // ── PR-9：Agent trail dir read-only / 凭据 deny 经 executor 落地 ──
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(env_lock)]
+async fn execute_bash_reads_internal_session_with_python() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let sessions = home.path().join(".tomcat/agents/main/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let fixture = sessions.join("session.jsonl");
+    std::fs::write(&fixture, b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _home_guard = HomeGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home.path());
+
+    let workspace = workspace_dir("bash_internal_session_python");
+    let exec = make_executor(workspace.clone(), vec![], Arc::new(AllowAllConfirmation));
+    let command = format!(
+        "python3 -c 'import sys; print(sum(1 for _ in open(sys.argv[1])))' {}",
+        fixture.display()
+    );
+    let result = exec
+        .execute_bash(&command, Some(&workspace.to_string_lossy()), "p1", None)
+        .await
+        .expect("Bash should read the internal session fixture");
+
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stdout.contains("2"),
+        "unexpected stdout: {:?}",
+        result.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture).unwrap().lines().count(),
+        2
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
+}
 
 fn make_executor_with_agent_ro(
     agent_definition_dir: PathBuf,
@@ -369,7 +421,7 @@ async fn gate_bash_approval_allow_once() {
         Arc::new(ProgrammableConfirm::new(vec![ConfirmDecision::AllowOnce])),
     );
     let cmd = format!("rm -rf {}", target.display());
-    let r = exec.execute_bash(&cmd, None, "p1", None, None).await;
+    let r = exec.execute_bash(&cmd, None, "p1", None).await;
     if let Err(AppError::Permission(msg)) = r {
         panic!("permission denied unexpectedly: {}", msg)
     }

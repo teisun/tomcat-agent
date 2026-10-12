@@ -1,32 +1,57 @@
 use std::borrow::Cow;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio_stream::Stream;
+use parking_lot::RwLock;
+use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
 use crate::core::llm::endpoint::build_path_aware_endpoint;
-use crate::core::llm::http_client::build_http_client;
+use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
-use crate::core::llm::retry_delay::provider_retry_delay;
+use crate::core::llm::retry_delay::{provider_retry_delay, sleep_provider_retry_delay};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse, FileSource,
+    ImageSource, StreamEvent,
 };
-use crate::infra::config::LlmRuntimeConfig;
+use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
-    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error, AppError,
-    LlmErrorStage,
+    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error,
+    llm_retry_after_ms, AppError, LlmErrorStage,
 };
 
 use super::super::auth::Credential;
-use super::super::catalog::{infer_default_base_url, ModelEntry};
+use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
+use super::super::thinking_policy::ThinkingFormat;
+use crate::core::llm::{AnthropicFilesAdapter, FilesApiProviderContext, ANTHROPIC_FILES_BETA};
 
 mod stream;
 mod wire;
 
+use crate::infra::i18n::tr;
+
 const PROVIDER_NAME: &str = "anthropic";
+
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+    let retry_at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let remaining = retry_at
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(chrono::Utc::now())
+        .num_milliseconds();
+    Some(remaining.max(0) as u64)
+}
 
 pub(super) struct AnthropicProvider {
     client: reqwest::Client,
@@ -35,23 +60,54 @@ pub(super) struct AnthropicProvider {
     default_model: String,
     catalog_model_id: String,
     retry_count: u32,
+    stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
+    files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
+    files_expires_after_seconds: u64,
     thinking_cfg: crate::infra::config::ThinkingConfig,
+    configured_thinking_format: ThinkingFormat,
+    /// Session-scoped compatibility result. A successful adaptive↔budget
+    /// fallback is reused by this cached provider instead of causing a 400 on
+    /// every subsequent request. It deliberately is not persisted to models.toml:
+    /// one transient upstream failure must not rewrite user configuration.
+    learned_thinking_format: RwLock<Option<ThinkingFormat>>,
     continuity_enabled: bool,
+    capabilities: Capabilities,
 }
 
 impl AnthropicProvider {
+    #[cfg(test)]
     pub(super) fn new(
         entry: &ModelEntry,
         runtime: &LlmRuntimeConfig,
         credential: &Credential,
     ) -> Result<Self, AppError> {
-        let client = build_http_client(runtime, None)?;
+        Self::with_route(
+            entry,
+            runtime,
+            credential,
+            &super::ProviderRoute::new(runtime)?,
+        )
+    }
+
+    pub(super) fn with_route(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+        route: &super::ProviderRoute,
+    ) -> Result<Self, AppError> {
+        let client = route.client.clone();
         let base_url = entry
             .base_url
             .clone()
             .or_else(|| infer_default_base_url(Some(entry.provider.as_str())))
-            .ok_or_else(|| AppError::Config(format!("模型 `{}` 缺少 base_url。", entry.id)))?;
+            .ok_or_else(|| AppError::Config(tr("llm.baseUrlMissing", &[("id", &entry.id)])))?;
+        let configured_thinking_format = ThinkingFormat::parse_or_auto(
+            entry
+                .thinking_format
+                .as_deref()
+                .or(runtime.thinking.format.as_deref()),
+        );
         Ok(Self {
             client,
             base_url,
@@ -59,9 +115,15 @@ impl AnthropicProvider {
             default_model: entry.request_model_name().to_string(),
             catalog_model_id: entry.id.clone(),
             retry_count: runtime.retry_count,
+            stream_timeout_sec: runtime.stream_timeout_sec,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
+            files_adapter: std::sync::OnceLock::new(),
+            files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
+            configured_thinking_format,
+            learned_thinking_format: RwLock::new(None),
             continuity_enabled: runtime.reasoning_continuity.enabled,
+            capabilities: entry.capabilities.clone(),
         })
     }
 
@@ -92,6 +154,18 @@ impl AnthropicProvider {
         ProviderCompatProfile::anthropic_messages(model)
     }
 
+    fn thinking_format_for_wire(&self) -> ThinkingFormat {
+        learned_or_configured_thinking_format(
+            &self.learned_thinking_format,
+            self.configured_thinking_format
+                .resolve_for_api(PROVIDER_NAME),
+        )
+    }
+
+    fn remember_compatible_thinking_format(&self, format: ThinkingFormat) {
+        *self.learned_thinking_format.write() = Some(format);
+    }
+
     async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
     where
         F: Future<Output = Result<T, AppError>>,
@@ -106,18 +180,72 @@ impl AnthropicProvider {
             Err(_) => Err(llm_error(
                 PROVIDER_NAME,
                 LlmErrorStage::NonStreamStale,
-                format!(
-                    "Anthropic 非流式请求长时间无响应: {}s",
-                    self.non_stream_stale_timeout_sec
+                tr(
+                    "llm.anthropicStale",
+                    &[("seconds", &self.non_stream_stale_timeout_sec.to_string())],
                 ),
             )),
         }
     }
 
-    fn auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder
+    fn cached_files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
+        if !self.capabilities.files {
+            return None;
+        }
+        let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
+            self.files_expires_after_seconds
+        } else {
+            files_cfg.expires_after_seconds
+        };
+        let cfg = LlmFilesConfig {
+            expires_after_seconds: expires,
+        };
+        let adapter = self.files_adapter.get_or_init(|| {
+            Arc::new(AnthropicFilesAdapter::from_provider_context(
+                FilesApiProviderContext {
+                    client: self.client.clone(),
+                    base_url: self.base_url.clone(),
+                    api_key: self.api_key.clone(),
+                    retry_count: self.retry_count,
+                },
+                &cfg,
+            ))
+        });
+        Some(adapter.clone())
+    }
+
+    fn auth_headers(
+        &self,
+        builder: reqwest::RequestBuilder,
+        include_files_beta: bool,
+    ) -> reqwest::RequestBuilder {
+        let builder = builder
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", "2023-06-01");
+        if include_files_beta {
+            builder.header("anthropic-beta", ANTHROPIC_FILES_BETA)
+        } else {
+            builder
+        }
+    }
+
+    fn request_uses_uploaded_files(messages: &[ChatMessage]) -> bool {
+        messages.iter().any(|message| {
+            let Some(ChatMessageContent::Parts(parts)) = &message.content else {
+                return false;
+            };
+            parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ChatMessageContentPart::InputImage {
+                        source: ImageSource::Uploaded(_),
+                        ..
+                    } | ChatMessageContentPart::InputFile {
+                        source: FileSource::Uploaded(_),
+                    }
+                )
+            })
+        })
     }
 
     async fn chat_once(
@@ -125,18 +253,37 @@ impl AnthropicProvider {
         request: &ChatRequest,
         stream: bool,
     ) -> Result<reqwest::Response, AppError> {
+        self.chat_once_with_thinking_format(request, stream, self.thinking_format_for_wire())
+            .await
+    }
+
+    async fn chat_once_with_thinking_format(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+        thinking_format: ThinkingFormat,
+    ) -> Result<reqwest::Response, AppError> {
         let model = self.effective_model(request);
         let thinking_cfg = self.thinking_cfg_for_request(request);
+        let files_cfg = LlmFilesConfig {
+            expires_after_seconds: self.files_expires_after_seconds,
+        };
+        let files_adapter = self.cached_files_adapter(&files_cfg);
         let body = wire::build_request_body(
             request,
             &model,
             &thinking_cfg,
+            thinking_format,
             self.continuity_enabled,
             stream,
+            &self.capabilities,
+            files_adapter.as_deref(),
         );
         let url = build_path_aware_endpoint(&self.base_url, "messages");
+        let include_files_beta =
+            self.capabilities.files && Self::request_uses_uploaded_files(&request.messages);
         let response = self
-            .auth_headers(self.client.post(url))
+            .auth_headers(self.client.post(url), include_files_beta)
             .json(&body)
             .send()
             .await
@@ -148,20 +295,31 @@ impl AnthropicProvider {
                     } else {
                         LlmErrorStage::Send
                     },
-                    format!(
-                        "Anthropic {}请求失败",
-                        if stream { "流式" } else { "非流式" }
+                    tr(
+                        if stream {
+                            "llm.anthropicStreamFailed"
+                        } else {
+                            "llm.anthropicRequestFailed"
+                        },
+                        &[],
                     ),
                     anyhow::anyhow!(error),
                 )
             })?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after_ms = parse_retry_after_ms(response.headers());
             let body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "anthropic error".to_string());
-            return Err(llm_http_status_error(PROVIDER_NAME, status.as_u16(), body));
+            let error = llm_http_status_error(PROVIDER_NAME, status.as_u16(), body);
+            return Err(match (error, retry_after_ms) {
+                (AppError::LlmDetailed(detail), Some(delay)) => {
+                    AppError::LlmDetailed(Box::new((*detail).with_retry_after_ms(delay)))
+                }
+                (error, _) => error,
+            });
         }
         Ok(response)
     }
@@ -172,11 +330,42 @@ impl AnthropicProvider {
         stream: bool,
     ) -> Result<reqwest::Response, AppError> {
         let mut last_error = None;
+        let mut thinking_format_fallback_used = false;
         for attempt in 0..=self.retry_count {
             match self.chat_once(request, stream).await {
                 Ok(response) => return Ok(response),
+                Err(error)
+                    if !thinking_format_fallback_used
+                        && is_thinking_format_rejection(&error)
+                        && alternative_thinking_format(self.thinking_format_for_wire())
+                            .is_some() =>
+                {
+                    thinking_format_fallback_used = true;
+                    let fallback = alternative_thinking_format(self.thinking_format_for_wire())
+                        .expect("guarded above");
+                    warn!(
+                        ?fallback,
+                        "Anthropic rejected the configured thinking format; retrying once with its compatible counterpart"
+                    );
+                    match self
+                        .chat_once_with_thinking_format(request, stream, fallback)
+                        .await
+                    {
+                        Ok(response) => {
+                            self.remember_compatible_thinking_format(fallback);
+                            warn!(
+                                ?fallback,
+                                "Anthropic thinking format fallback succeeded; reusing it for this runtime"
+                            );
+                            return Ok(response);
+                        }
+                        Err(fallback_error) => last_error = Some(fallback_error),
+                    }
+                }
                 Err(error) if is_retryable_llm_error(&error) && attempt < self.retry_count => {
-                    let delay = provider_retry_delay(attempt);
+                    let delay = llm_retry_after_ms(&error)
+                        .map(Duration::from_millis)
+                        .unwrap_or_else(|| provider_retry_delay(attempt));
                     warn!(
                         "Anthropic 请求失败，{}ms 后重试 ({}/{}): {}",
                         delay.as_millis(),
@@ -184,14 +373,75 @@ impl AnthropicProvider {
                         self.retry_count,
                         error
                     );
-                    tokio::time::sleep(delay).await;
+                    sleep_provider_retry_delay(delay).await?;
                     last_error = Some(error);
                 }
                 Err(error) => return Err(error),
             }
         }
-        Err(last_error.unwrap_or_else(|| AppError::Llm("Anthropic 请求重试耗尽".to_string())))
+        Err(last_error.unwrap_or_else(|| AppError::Llm(tr("llm.anthropicRetries", &[]))))
     }
+}
+
+fn alternative_thinking_format(format: ThinkingFormat) -> Option<ThinkingFormat> {
+    match format {
+        ThinkingFormat::AnthropicAdaptive => Some(ThinkingFormat::Anthropic),
+        ThinkingFormat::Anthropic => Some(ThinkingFormat::AnthropicAdaptive),
+        _ => None,
+    }
+}
+
+fn learned_or_configured_thinking_format(
+    learned: &RwLock<Option<ThinkingFormat>>,
+    configured: ThinkingFormat,
+) -> ThinkingFormat {
+    (*learned.read()).unwrap_or(configured)
+}
+
+fn is_thinking_format_rejection(error: &AppError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    (text.contains("adaptive")
+        && (text.contains("unsupported")
+            || text.contains("not supported")
+            || text.contains("not available")))
+        || (text.contains("budget_tokens")
+            && (text.contains("unsupported")
+                || text.contains("not supported")
+                || text.contains("not accepted")
+                || text.contains("invalid")))
+}
+
+fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
+    llm_error(
+        PROVIDER_NAME,
+        LlmErrorStage::IdleTimeout,
+        tr(
+            "llm.idleTimeout",
+            &[("seconds", &stream_timeout_sec.to_string())],
+        ),
+    )
+}
+
+fn apply_stream_idle_timeout<S, T>(
+    stream: S,
+    stream_timeout_sec: u64,
+) -> Pin<Box<dyn Stream<Item = Result<T, AppError>> + Send>>
+where
+    S: Stream<Item = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if stream_timeout_sec == 0 {
+        return Box::pin(stream);
+    }
+
+    Box::pin(
+        stream
+            .timeout(Duration::from_secs(stream_timeout_sec))
+            .map(move |item| match item {
+                Ok(event) => event,
+                Err(_) => Err(idle_timeout_error(stream_timeout_sec)),
+            }),
+    )
 }
 
 #[async_trait]
@@ -209,7 +459,7 @@ impl LlmProvider for AnthropicProvider {
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::BodyRead,
-                    "读取 Anthropic 响应失败".to_string(),
+                    tr("llm.anthropicReadFailed", &[]),
                     anyhow::anyhow!(error),
                 )
             })?;
@@ -217,7 +467,7 @@ impl LlmProvider for AnthropicProvider {
                 llm_error_with_source(
                     PROVIDER_NAME,
                     LlmErrorStage::Parse,
-                    "解析 Anthropic JSON 失败".to_string(),
+                    tr("llm.anthropicJsonFailed", &[]),
                     anyhow::anyhow!(error),
                 )
             })?;
@@ -238,10 +488,14 @@ impl LlmProvider for AnthropicProvider {
         let model = self.effective_model(&request);
         let response = self.chat_with_retry(&request, true).await?;
         let source_profile = self.source_profile(&model);
-        Ok(Box::new(stream::AnthropicStream::new(
+        let event_stream = stream::AnthropicStream::new(
             response.bytes_stream(),
             source_profile,
             self.continuity_enabled,
+        );
+        Ok(Box::new(apply_stream_idle_timeout(
+            event_stream,
+            self.stream_timeout_sec,
         )))
     }
 
@@ -259,4 +513,12 @@ impl LlmProvider for AnthropicProvider {
             .sum();
         Ok((total_chars / 3).max(1) as u32)
     }
+
+    fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
+        self.cached_files_adapter(files_cfg)
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/suite_test.rs"]
+mod tests;

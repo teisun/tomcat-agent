@@ -1,72 +1,34 @@
 import type { WebviewSessionTab } from "../../types";
+import type { MessageKey } from "../../../../src/shared/i18n";
 
-export type SessionGroupLabel =
-  | "Today"
-  | "Yesterday"
-  | "Last 7 days"
-  | "Last 30 days"
-  | "Older";
-
+export type SessionGroupId = "pinned" | "today" | "yesterday" | "week" | "month" | "older";
 export interface SessionGroup {
-  label: SessionGroupLabel;
+  id: SessionGroupId;
+  labelKey: MessageKey;
   sessions: WebviewSessionTab[];
 }
-
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const labels: Record<SessionGroupId, MessageKey> = {
+  pinned: "session.pinned", today: "session.date.today", yesterday: "session.date.yesterday",
+  week: "session.date.week", month: "session.date.month", older: "session.date.older",
+};
 
-/**
- * 把会话按 updatedAt 分入时间桶：Today / Yesterday / Last 7 days / Last 30 days / Older。
- * - Today / Yesterday 用本地日历日 0:00 作边界（符合用户对「今天」的直觉）。
- * - Last 7 days / Last 30 days 用 rolling 窗口（now - 7d / now - 30d）。
- * - updatedAt 为 null 的会话归 Older（无法判定时间，放最后）。
- * 输入需已按 updatedAt 倒序（serve 保证）；本函数保持桶内顺序、跳过空桶。
- */
-export function groupSessionsByDate(
-  sessions: WebviewSessionTab[],
-  now: number = Date.now(),
-): SessionGroup[] {
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-  const startOfTodayMs = startOfToday.getTime();
-  const startOfYesterdayMs = startOfTodayMs - MS_PER_DAY;
-  const last7Threshold = now - 7 * MS_PER_DAY;
-  const last30Threshold = now - 30 * MS_PER_DAY;
-
-  const buckets: Record<SessionGroupLabel, WebviewSessionTab[]> = {
-    Today: [],
-    Yesterday: [],
-    "Last 7 days": [],
-    "Last 30 days": [],
-    Older: [],
-  };
-
+/** Stable bucket IDs keep expansion state independent of the display language. */
+export function groupSessionsByDate(sessions: WebviewSessionTab[], now = Date.now()): SessionGroup[] {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const todayMs = today.getTime();
+  const yesterdayMs = todayMs - MS_PER_DAY;
+  const buckets: Record<SessionGroupId, WebviewSessionTab[]> = { pinned: [], today: [], yesterday: [], week: [], month: [], older: [] };
   for (const session of sessions) {
     const ts = session.updatedAt;
-    if (ts === null || Number.isNaN(ts)) {
-      buckets.Older.push(session);
-      continue;
-    }
-    if (ts >= startOfTodayMs) {
-      buckets.Today.push(session);
-    } else if (ts >= startOfYesterdayMs) {
-      buckets.Yesterday.push(session);
-    } else if (ts >= last7Threshold) {
-      buckets["Last 7 days"].push(session);
-    } else if (ts >= last30Threshold) {
-      buckets["Last 30 days"].push(session);
-    } else {
-      buckets.Older.push(session);
-    }
+    const id: SessionGroupId = session.isPinned ? "pinned"
+      : ts === null || Number.isNaN(ts) ? "older"
+      : ts >= todayMs ? "today" : ts >= yesterdayMs ? "yesterday"
+      : ts >= now - 7 * MS_PER_DAY ? "week" : ts >= now - 30 * MS_PER_DAY ? "month" : "older";
+    buckets[id].push(session);
   }
-
-  const order: SessionGroupLabel[] = [
-    "Today",
-    "Yesterday",
-    "Last 7 days",
-    "Last 30 days",
-    "Older",
-  ];
-  return order
-    .map((label) => ({ label, sessions: buckets[label] }))
-    .filter((group) => group.sessions.length > 0);
+  const timestamp = (s: WebviewSessionTab) => s.updatedAt !== null && Number.isFinite(s.updatedAt) ? s.updatedAt : -Infinity;
+  buckets.pinned.sort((a, b) => timestamp(b) - timestamp(a) || b.sessionId.localeCompare(a.sessionId));
+  return (Object.keys(labels) as SessionGroupId[]).map(id => ({ id, labelKey: labels[id], sessions: buckets[id] })).filter(group => group.sessions.length > 0);
 }

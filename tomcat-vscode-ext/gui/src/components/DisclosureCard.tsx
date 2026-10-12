@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { useT } from "../i18n/LocaleProvider";
 
-export type DisclosureStatusVariant = "error" | "running" | "success";
+export type DisclosureStatusVariant =
+  "error" | "neutral" | "running" | "success" | "warning";
 
 export function DisclosureCard({
   bodyTestId,
@@ -23,6 +25,7 @@ export function DisclosureCard({
   statusVariant: DisclosureStatusVariant;
   toggleTestId?: string;
 }) {
+  const t = useT();
   const canToggle = Boolean(preview ?? children);
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [userInteracted, setUserInteracted] = useState(false);
@@ -30,7 +33,7 @@ export function DisclosureCard({
   useEffect(() => {
     setExpanded(defaultExpanded);
     setUserInteracted(false);
-  }, [defaultExpanded, resetKey]);
+  }, [resetKey]);
 
   useEffect(() => {
     if (!userInteracted) {
@@ -58,7 +61,9 @@ export function DisclosureCard({
         {canToggle ? (
           <button
             aria-expanded={expanded}
-            aria-label={expanded ? "Collapse tool result" : "Expand tool result"}
+            aria-label={
+              t(expanded ? "tool.collapse" : "tool.expand")
+            }
             className="tc-disclosure-card__toggle"
             data-testid={toggleTestId}
             onClick={() => {
@@ -67,7 +72,9 @@ export function DisclosureCard({
             }}
             type="button"
           >
-            <span className="tc-disclosure-card__caret">{expanded ? "▾" : "▸"}</span>
+            <span className="tc-disclosure-card__caret">
+              {expanded ? "▾" : "▸"}
+            </span>
           </button>
         ) : null}
       </div>
@@ -78,7 +85,10 @@ export function DisclosureCard({
           </div>
         ) : null
       ) : preview ? (
-        <div className="tc-disclosure-card__preview" data-testid="disclosure-card-preview">
+        <div
+          className="tc-disclosure-card__preview"
+          data-testid="disclosure-card-preview"
+        >
           {preview}
         </div>
       ) : null}

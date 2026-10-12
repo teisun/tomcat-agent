@@ -1,6 +1,17 @@
 import { isRecord, parseTodos } from "../shared/todos";
 import type { TomcatMessenger } from "./TomcatMessenger";
-import type { GetMessagesParams, ListSessionsScope, ResponseFrame } from "./wire";
+import type {
+  GetMessagesParams,
+  ListSessionsScope,
+  ResponseFrame,
+  SlashReply,
+  RetainAttachmentLeaseRef,
+  SessionFile,
+  SessionFilesResponse,
+  SessionFileBaselineResponse,
+  SessionFilesRestoreResponse,
+  SessionFilesKeepResponse,
+} from "./wire";
 
 export interface SessionSummary {
   busy: boolean;
@@ -12,26 +23,33 @@ export interface SessionSummary {
 }
 
 export interface SessionListPayload {
+  /** Scope identity for safe deletion-result reconciliation; absent on legacy Serve. */
+  sessionKey?: string;
   activeSessionId: string | null;
   scope: ListSessionsScope;
   sessions: SessionSummary[];
 }
 
 export interface SessionStatePayload {
+  activePlan?: ActivePlanPayload | null;
+  agentMode?: "chat" | "plan" | null;
   busy: boolean;
   contextRatio?: number | null;
   cwd?: string | null;
   interrupted?: boolean;
-  mode?: string | null;
   model?: string | null;
-  planId?: string | null;
-  planPath?: string | null;
-  planState?: string | null;
   planTodos?: WebviewTodo[];
   sessionId: string;
   sessionKey?: string | null;
   sessionTodos?: WebviewTodo[];
   thinkingLevel?: string | null;
+  workspaceMode?: string | null;
+}
+
+export interface ActivePlanPayload {
+  id: string;
+  path: string;
+  state: "completed" | "executing" | "pending" | "planning";
 }
 
 export interface WebviewTodo {
@@ -80,6 +98,18 @@ export interface RestoreCheckpointPayload {
   warnings: string[];
 }
 
+export interface CompactPayload {
+  afterUsageRatio: number;
+  beforeUsageRatio: number;
+  coveredMessageCount: number;
+}
+
+function requireSuccessfulResponse(response: ResponseFrame, action: string): void {
+  if (!response.success) {
+    throw new Error(response.error ?? `Tomcat ${action} failed`);
+  }
+}
+
 function requireSessionId(response: ResponseFrame): string {
   if (typeof response.sessionId === "string") {
     return response.sessionId;
@@ -125,6 +155,21 @@ function parseCheckpoints(value: unknown): SessionCheckpointPayload[] {
   });
 }
 
+function parseActivePlan(value: unknown): ActivePlanPayload | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.path !== "string") {
+    return null;
+  }
+  switch (value.state) {
+    case "completed":
+    case "executing":
+    case "pending":
+    case "planning":
+      return { id: value.id, path: value.path, state: value.state };
+    default:
+      return null;
+  }
+}
+
 export class SessionRouter {
   private bootstrapSessionId: string | null = null;
 
@@ -154,7 +199,46 @@ export class SessionRouter {
       },
       type: "new_session",
     });
+    requireSuccessfulResponse(response, "new_session");
     return requireSessionId(response);
+  }
+
+  async createDetachedSession(cwd = this.getDefaultCwd()): Promise<string> {
+    const response = await this.messenger.request({
+      params: {
+        cwd,
+        detached: true,
+      },
+      type: "new_session",
+    });
+    requireSuccessfulResponse(response, "detached new_session");
+    return requireSessionId(response);
+  }
+
+  async retainAttachmentLeases(
+    sessionId: string,
+    attachments: RetainAttachmentLeaseRef[],
+  ): Promise<string[]> {
+    const response = await this.messenger.request({
+      params: { attachments },
+      sessionId,
+      type: "retain_attachment_leases",
+    });
+    requireSuccessfulResponse(response, "retain_attachment_leases");
+    const retained = isRecord(response.payload) ? response.payload.retainedShas : null;
+    if (!Array.isArray(retained) || !retained.every((sha): sha is string => typeof sha === "string")) {
+      throw new Error("Tomcat retain_attachment_leases response was invalid");
+    }
+    return retained;
+  }
+
+  async discardDetachedSession(sessionId: string): Promise<boolean> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "discard_detached_session",
+    });
+    requireSuccessfulResponse(response, "discard_detached_session");
+    return isRecord(response.payload) ? response.payload.discarded === true : false;
   }
 
   async switchSession(sessionId: string): Promise<string> {
@@ -162,6 +246,7 @@ export class SessionRouter {
       sessionId,
       type: "switch_session",
     });
+    requireSuccessfulResponse(response, "switch_session");
     return requireSessionId(response);
   }
 
@@ -178,17 +263,15 @@ export class SessionRouter {
       scope,
       type: "list_sessions",
     });
+    requireSuccessfulResponse(response, "list_sessions");
     const payload = response.payload;
-
-    if (!isRecord(payload)) {
-      return {
-        activeSessionId: null,
-        scope,
-        sessions: [],
-      };
+    if (!isRecord(payload) || !Array.isArray(payload.sessions)
+      || !payload.sessions.every(session => isRecord(session) && typeof session.sessionId === "string" && session.sessionId.length > 0)) {
+      throw new Error("Tomcat list_sessions returned an invalid session list");
     }
 
     return {
+      ...(typeof payload.sessionKey === "string" ? { sessionKey: payload.sessionKey } : {}),
       activeSessionId:
         typeof payload.activeSessionId === "string" ? payload.activeSessionId : null,
       scope,
@@ -231,12 +314,12 @@ export class SessionRouter {
           : null,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       interrupted: payload.interrupted === true,
-      mode: typeof payload.mode === "string" ? payload.mode : null,
+      activePlan: parseActivePlan(payload.activePlan),
+      agentMode:
+        payload.agentMode === "chat" || payload.agentMode === "plan"
+          ? payload.agentMode
+          : null,
       model: typeof payload.model === "string" ? payload.model : null,
-      planId: typeof payload.planId === "string" ? payload.planId : null,
-      planPath: typeof payload.planPath === "string" ? payload.planPath : null,
-      planState:
-        typeof payload.planState === "string" ? payload.planState : null,
       planTodos: parseTodos(payload.planTodos),
       sessionId: payload.sessionId,
       sessionKey:
@@ -244,6 +327,8 @@ export class SessionRouter {
       sessionTodos: parseTodos(payload.sessionTodos),
       thinkingLevel:
         typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : null,
+      workspaceMode:
+        typeof payload.workspaceMode === "string" ? payload.workspaceMode : null,
     };
   }
 
@@ -266,6 +351,58 @@ export class SessionRouter {
       sessionId: payload.sessionId,
       upToSeq: typeof payload.upToSeq === "string" ? payload.upToSeq : null,
     };
+  }
+
+  private filePayload(response: ResponseFrame, sessionId: string): Record<string, unknown> {
+    if (!response.success) {
+      const payload = isRecord(response.payload) ? response.payload : {};
+      throw new Error([response.error ?? "File operation failed", payload.path, payload.reason].filter(Boolean).join(": "));
+    }
+    if (!isRecord(response.payload) || response.payload.sessionId !== sessionId || response.sessionId !== sessionId) {
+      throw new Error("Tomcat file response sessionId mismatch");
+    }
+    return response.payload;
+  }
+
+  async getSessionFiles(sessionId: string): Promise<SessionFilesResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "get_session_files", sessionId }), sessionId);
+    if (!(payload.sourceTurnId === null || typeof payload.sourceTurnId === "string") || !Array.isArray(payload.files)) {
+      throw new Error("Invalid Tomcat file changes response");
+    }
+    const files: SessionFile[] = payload.files.map((entry: unknown) => {
+      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.restorable !== "boolean"
+        || !["added", "modified", "deleted"].includes(String(entry.status))
+        || (entry.blockedReason !== undefined && !["backup_missing", "not_regular_file"].includes(String(entry.blockedReason)))
+        || [entry.added, entry.removed].some((n) => n !== undefined && n !== null && (typeof n !== "number" || !Number.isInteger(n) || n < 0))) {
+        throw new Error("Invalid Tomcat file changes entry");
+      }
+      return entry as unknown as SessionFile;
+    });
+    return { sessionId, sourceTurnId: payload.sourceTurnId, files };
+  }
+
+  async getSessionFileBaseline(sessionId: string, sourceTurnId: string, path: string): Promise<SessionFileBaselineResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "get_session_file_baseline", sessionId, sourceTurnId, path }), sessionId);
+    if (payload.sourceTurnId !== sourceTurnId || payload.path !== path || typeof payload.existed !== "boolean" || typeof payload.text !== "string") {
+      throw new Error("Invalid Tomcat file baseline response");
+    }
+    return { sessionId, sourceTurnId, path, existed: payload.existed, text: payload.text };
+  }
+
+  async keepSessionFiles(sessionId: string, sourceTurnId: string): Promise<SessionFilesKeepResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "keep_session_files", sessionId, sourceTurnId }), sessionId);
+    if (typeof payload.sourceTurnId !== "string" || !payload.sourceTurnId.trim() || payload.sourceTurnId === sourceTurnId) {
+      throw new Error("Invalid Tomcat file keep response");
+    }
+    return { sessionId, sourceTurnId: payload.sourceTurnId };
+  }
+
+  async restoreSessionFiles(sessionId: string, sourceTurnId: string, paths: string[]): Promise<SessionFilesRestoreResponse> {
+    const payload = this.filePayload(await this.messenger.request({ type: "restore_session_files", sessionId, sourceTurnId, paths }), sessionId);
+    if (payload.sourceTurnId !== sourceTurnId || !Array.isArray(payload.restored) || !payload.restored.every((p) => typeof p === "string" && paths.includes(p))) {
+      throw new Error("Invalid Tomcat file restore response");
+    }
+    return { sessionId, sourceTurnId, restored: payload.restored as string[] };
   }
 
   async listCheckpoints(sessionId: string): Promise<SessionCheckpointListPayload> {
@@ -346,5 +483,60 @@ export class SessionRouter {
       transcriptTruncated: payload.transcriptTruncated === true,
       warnings: parseStringArray(payload.warnings),
     };
+  }
+
+  async runSlashCommand(sessionId: string, text: string): Promise<SlashReply> {
+    const response = await this.messenger.request({ sessionId, text, type: "run_slash_command" }, 600_000);
+    requireSuccessfulResponse(response, "run_slash_command");
+    const payload = response.payload;
+    if (!isRecord(payload) || typeof payload.ok !== "boolean" || typeof payload.text !== "string") {
+      throw new Error("Tomcat run_slash_command payload is invalid");
+    }
+    return { ok: payload.ok, text: payload.text };
+  }
+
+  async compact(sessionId: string): Promise<CompactPayload> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "compact",
+    } as never);
+    if (!response.success) {
+      throw new Error(response.error ?? "Tomcat compact failed");
+    }
+    const payload = response.payload;
+    if (
+      !isRecord(payload) ||
+      typeof payload.beforeUsageRatio !== "number" ||
+      typeof payload.afterUsageRatio !== "number" ||
+      typeof payload.coveredMessageCount !== "number"
+    ) {
+      throw new Error("Tomcat compact payload is invalid");
+    }
+    return {
+      afterUsageRatio: payload.afterUsageRatio,
+      beforeUsageRatio: payload.beforeUsageRatio,
+      coveredMessageCount: payload.coveredMessageCount,
+    };
+  }
+
+  async resume(sessionId: string): Promise<void> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "resume",
+    } as never);
+    if (!response.success) {
+      throw new Error(response.error ?? "Tomcat resume failed");
+    }
+  }
+
+  async retry(sessionId: string, messageId: string): Promise<void> {
+    const response = await this.messenger.request({
+      messageId,
+      sessionId,
+      type: "retry",
+    } as never);
+    if (!response.success) {
+      throw new Error(response.error ?? "Tomcat retry failed");
+    }
   }
 }

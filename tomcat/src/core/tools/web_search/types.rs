@@ -3,6 +3,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::infra::i18n::tr;
 use crate::infra::{AppError, ToolsWebSearchConfig};
 
 use super::backend::BackendMode;
@@ -41,9 +42,7 @@ impl WebSearchFreshness {
             "week" => Ok(Self::Week),
             "month" => Ok(Self::Month),
             "year" => Ok(Self::Year),
-            other => Err(AppError::Tool(format!(
-                "web_search: `freshness` 非法 `{other}`，允许 day/week/month/year"
-            ))),
+            other => Err(AppError::Tool(tr("search.freshness", &[("value", other)]))),
         }
     }
 
@@ -102,21 +101,21 @@ impl WebSearchRequest {
     ) -> Result<Self, AppError> {
         let query = args.query.trim();
         if query.is_empty() {
-            return Err(AppError::Tool(
-                "web_search: 缺少必填字段 `query`".to_string(),
-            ));
+            return Err(AppError::Tool(tr("search.queryRequired", &[])));
         }
         if query.chars().count() > MAX_QUERY_LEN {
-            return Err(AppError::Tool(format!(
-                "web_search: `query` 过长（>{MAX_QUERY_LEN} 字符）"
+            return Err(AppError::Tool(tr(
+                "search.queryLong",
+                &[("limit", &MAX_QUERY_LEN.to_string())],
             )));
         }
 
         let backend = BackendMode::parse(&cfg.backend)?;
         let count = args.count.unwrap_or(cfg.count) as usize;
         if !(1..=20).contains(&count) {
-            return Err(AppError::Tool(format!(
-                "web_search: `count` 非法 {count}，允许 [1, 20]"
+            return Err(AppError::Tool(tr(
+                "search.count",
+                &[("value", &count.to_string())],
             )));
         }
 
@@ -371,8 +370,13 @@ fn normalize_optional_alpha_code(
     if trimmed.chars().count() != expected_len
         || !trimmed.chars().all(|ch| ch.is_ascii_alphabetic())
     {
-        return Err(AppError::Tool(format!(
-            "web_search: `{field}` 非法 `{trimmed}`，要求 {expected_len} 位字母代码"
+        return Err(AppError::Tool(tr(
+            "search.alphaCode",
+            &[
+                ("field", field),
+                ("value", trimmed),
+                ("length", &expected_len.to_string()),
+            ],
         )));
     }
     Ok(Some(if uppercase {
@@ -412,11 +416,14 @@ fn normalize_domain(value: &str, field: &str) -> Result<Option<String>, AppError
     let domain = maybe_url
         .map(|value| value.trim_end_matches('.').to_ascii_lowercase())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::Tool(format!("web_search: `{field}` 包含非法域名 `{trimmed}`")))?;
+        .ok_or_else(|| {
+            AppError::Tool(tr("search.domain", &[("field", field), ("value", trimmed)]))
+        })?;
 
     if !domain.contains('.') {
-        return Err(AppError::Tool(format!(
-            "web_search: `{field}` 包含非法域名 `{trimmed}`"
+        return Err(AppError::Tool(tr(
+            "search.domain",
+            &[("field", field), ("value", trimmed)],
         )));
     }
     Ok(Some(domain))

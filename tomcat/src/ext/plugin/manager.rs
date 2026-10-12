@@ -71,6 +71,7 @@ use crate::core::ToolRegistry;
 use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
+use crate::infra::i18n::tr;
 use parking_lot::RwLock;
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -176,29 +177,31 @@ impl PluginManager {
         };
 
         if let Some(ref confirm) = self.confirm_permissions {
-            let ok = confirm(&manifest)
-                .map_err(|e| AppError::Permission(format!("权限确认失败: {}", e)))?;
+            let ok = confirm(&manifest).map_err(|e| {
+                AppError::Permission(tr("plugin.confirmFailed", &[("detail", &e.to_string())]))
+            })?;
             if !ok {
                 if let Some(ref a) = self.audit {
                     a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                         plugin_id: manifest.id.clone(),
                         action: "load".to_string(),
                         success: false,
-                        detail: Some("用户拒绝插件授权".to_string()),
+                        detail: Some(tr("plugin.userDenied", &[])),
                     });
                 }
-                return Err(AppError::Permission("用户拒绝插件授权".to_string()));
+                return Err(AppError::Permission(tr("plugin.userDenied", &[])));
             }
         }
 
-        let engine = self.plugin_engine.as_ref().ok_or_else(|| {
-            AppError::Plugin("load_plugin 需要先调用 set_plugin_engine 注入引擎".to_string())
-        })?;
+        let engine = self
+            .plugin_engine
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin(tr("plugin.engineRequired", &[])))?;
 
         let mut instance = match engine.create_instance(&manifest.id) {
             Ok(i) => i,
             Err(e) => {
-                let err = AppError::Plugin(format!("创建插件 VM 实例失败: {}", e));
+                let err = AppError::Plugin(tr("plugin.vmCreate", &[("detail", &e.to_string())]));
                 if let Some(ref a) = self.audit {
                     a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                         plugin_id: manifest.id.clone(),
@@ -220,7 +223,7 @@ impl PluginManager {
         };
         if let Err(e) = instance.register_host_binding(invoke_fn) {
             instance.destroy();
-            let err = AppError::Plugin(format!("注册 host binding 失败: {}", e));
+            let err = AppError::Plugin(tr("plugin.binding", &[("detail", &e.to_string())]));
             if let Some(ref a) = self.audit {
                 a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                     plugin_id: manifest.id.clone(),
@@ -234,7 +237,7 @@ impl PluginManager {
 
         if let Err(e) = instance.run_script(&plugin_code) {
             instance.destroy();
-            let err = AppError::Plugin(format!("插件初始化脚本执行失败: {}", e));
+            let err = AppError::Plugin(tr("plugin.initScript", &[("detail", &e.to_string())]));
             if let Some(ref a) = self.audit {
                 a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                     plugin_id: manifest.id.clone(),
@@ -258,6 +261,11 @@ impl PluginManager {
         let manifest_functions = manifest.functions.clone();
         let plugin_instance = PluginInstance {
             id: manifest.id.clone(),
+            fingerprint: self
+                .plugins
+                .read()
+                .get(&manifest.id)
+                .and_then(|inst| inst.fingerprint),
             manifest: manifest.clone(),
             plugin_vm_instance: Some(instance),
             status: PluginStatus::Loaded,
@@ -308,27 +316,30 @@ impl PluginManager {
         path: &Path,
     ) -> Result<(PathBuf, PluginManifest), AppError> {
         let (root, manifest_path) = if path.is_dir() {
-            let root = path
-                .canonicalize()
-                .map_err(|e| AppError::Plugin(format!("插件目录无效: {}", e)))?;
+            let root = path.canonicalize().map_err(|e| {
+                AppError::Plugin(tr("plugin.directoryInvalid", &[("detail", &e.to_string())]))
+            })?;
             let manifest_path = root
                 .join("plugin.json")
                 .canonicalize()
-                .map_err(|_| AppError::Plugin("插件目录下未找到 plugin.json".to_string()))?;
+                .map_err(|_| AppError::Plugin(tr("plugin.manifestMissing", &[])))?;
             (root, manifest_path)
         } else {
-            let manifest_path = path
-                .canonicalize()
-                .map_err(|e| AppError::Plugin(format!("清单文件无效: {}", e)))?;
+            let manifest_path = path.canonicalize().map_err(|e| {
+                AppError::Plugin(tr("plugin.manifestInvalid", &[("detail", &e.to_string())]))
+            })?;
             let root = manifest_path
                 .parent()
-                .ok_or_else(|| AppError::Plugin("清单路径无父目录".to_string()))?
+                .ok_or_else(|| AppError::Plugin(tr("plugin.manifestParent", &[])))?
                 .canonicalize()
-                .map_err(|e| AppError::Plugin(format!("插件根目录无效: {}", e)))?;
+                .map_err(|e| {
+                    AppError::Plugin(tr("plugin.rootInvalid", &[("detail", &e.to_string())]))
+                })?;
             (root, manifest_path)
         };
-        let json = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| AppError::Plugin(format!("读取清单失败: {}", e)))?;
+        let json = std::fs::read_to_string(&manifest_path).map_err(|e| {
+            AppError::Plugin(tr("plugin.manifestRead", &[("detail", &e.to_string())]))
+        })?;
         let manifest = parse_manifest(&json)?;
         Ok((root, manifest))
     }
@@ -340,22 +351,24 @@ impl PluginManager {
     ) -> Result<String, AppError> {
         let main_path = plugin_root.join(&manifest.main);
         let main_path = main_path.canonicalize().map_err(|e| {
-            AppError::Plugin(format!(
-                "main 入口文件无效或不存在: {} ({}): {}",
-                manifest.main,
-                main_path.display(),
-                e
+            AppError::Plugin(tr(
+                "plugin.mainInvalid",
+                &[
+                    ("name", &manifest.main),
+                    ("path", &main_path.display().to_string()),
+                    ("detail", &e.to_string()),
+                ],
             ))
         })?;
         let root_canon = plugin_root.canonicalize().map_err(AppError::Io)?;
         if !main_path.starts_with(&root_canon) {
-            return Err(AppError::Permission(format!(
-                "main 路径不得超出插件根目录: {}",
-                main_path.display()
+            return Err(AppError::Permission(tr(
+                "plugin.mainOutside",
+                &[("path", &main_path.display().to_string())],
             )));
         }
         let raw = std::fs::read_to_string(&main_path)
-            .map_err(|e| AppError::Plugin(format!("读取 main 脚本失败: {}", e)))?;
+            .map_err(|e| AppError::Plugin(tr("plugin.mainRead", &[("detail", &e.to_string())])))?;
         let ext = main_path
             .extension()
             .and_then(|e| e.to_str())
@@ -371,7 +384,7 @@ impl PluginManager {
         let id = instance.id.clone();
         let mut map = self.plugins.write();
         if map.contains_key(&id) {
-            return Err(AppError::Plugin(format!("plugin already loaded: {}", id)));
+            return Err(AppError::Plugin(tr("plugin.alreadyLoaded", &[("id", &id)])));
         }
         map.insert(id, instance);
         Ok(())
@@ -399,6 +412,7 @@ impl PluginManager {
         let manifest_functions = manifest.functions.clone();
         let instance = PluginInstance {
             id: manifest.id.clone(),
+            fingerprint: None,
             manifest,
             plugin_vm_instance: None,
             status: PluginStatus::Enabled,
@@ -430,7 +444,7 @@ impl PluginManager {
                     slot.insert(instance);
                     Ok(())
                 } else {
-                    Err(AppError::Plugin(format!("plugin already loaded: {}", id)))
+                    Err(AppError::Plugin(tr("plugin.alreadyLoaded", &[("id", &id)])))
                 }
             }
         }
@@ -449,7 +463,7 @@ impl PluginManager {
                     slot.insert(instance);
                     Ok(())
                 } else {
-                    Err(AppError::Plugin(format!("plugin already loaded: {}", id)))
+                    Err(AppError::Plugin(tr("plugin.alreadyLoaded", &[("id", &id)])))
                 }
             }
         }
@@ -474,7 +488,7 @@ impl PluginManager {
         let inst = match map.get_mut(plugin_id) {
             Some(i) => i,
             None => {
-                let e = AppError::Plugin(format!("plugin not found: {}", plugin_id));
+                let e = AppError::Plugin(tr("plugin.notFound", &[("id", plugin_id)]));
                 if let Some(ref a) = self.audit {
                     a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                         plugin_id: plugin_id.to_string(),
@@ -504,7 +518,7 @@ impl PluginManager {
         let inst = match map.get_mut(plugin_id) {
             Some(i) => i,
             None => {
-                let e = AppError::Plugin(format!("plugin not found: {}", plugin_id));
+                let e = AppError::Plugin(tr("plugin.notFound", &[("id", plugin_id)]));
                 if let Some(ref a) = self.audit {
                     a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                         plugin_id: plugin_id.to_string(),
@@ -545,27 +559,34 @@ impl PluginManager {
         plugin_id: &str,
     ) -> Result<VmActorHandle, AppError> {
         let key = PluginRuntimeKey::new(session_id, plugin_id);
-        let runtime_manager = self
-            .plugin_runtime_manager
-            .as_ref()
-            .ok_or_else(|| AppError::Plugin("plugin_runtime_manager not set".into()))?;
+        let runtime_manager = self.plugin_runtime_manager.as_ref().ok_or_else(|| {
+            AppError::Plugin(tr(
+                "plugin.notConfigured",
+                &[("field", "plugin_runtime_manager")],
+            ))
+        })?;
 
-        for (expired_key, expired_handle) in runtime_manager.reap_configured_idle() {
+        for (_, expired_handle) in runtime_manager.reap_configured_idle() {
             let _ = expired_handle.shutdown().await;
             if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                dispatcher.cleanup_instance(&expired_key.to_string());
+                dispatcher.cleanup_instance(&expired_handle.instance_id);
             }
         }
 
+        let gate = runtime_manager.start_gate(&key);
+        let _start_guard = gate.lock().await;
         if let Some(existing) = runtime_manager.get(&key) {
             match existing.current_state() {
                 VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
                     return Ok(existing);
                 }
                 VmActorState::ShuttingDown | VmActorState::Stopped | VmActorState::Error => {
-                    let _ = runtime_manager.remove(&key);
-                    if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                        dispatcher.cleanup_instance(&key.to_string());
+                    if let Some(removed) =
+                        runtime_manager.remove_instance(&key, &existing.instance_id)
+                    {
+                        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+                            dispatcher.cleanup_instance(&removed.instance_id);
+                        }
                     }
                 }
             }
@@ -573,19 +594,29 @@ impl PluginManager {
 
         let _plugin_info = self
             .get_plugin(plugin_id)
-            .ok_or_else(|| AppError::Plugin(format!("plugin '{plugin_id}' not loaded")))?;
+            .ok_or_else(|| AppError::Plugin(tr("plugin.notLoaded", &[("id", plugin_id)])))?;
 
-        let engine = self
-            .plugin_engine
-            .as_ref()
-            .ok_or_else(|| AppError::Plugin("plugin_engine not set".into()))?;
+        let engine = self.plugin_engine.as_ref().ok_or_else(|| {
+            AppError::Plugin(tr("plugin.notConfigured", &[("field", "plugin_engine")]))
+        })?;
 
-        let instance_id = key.to_string();
+        let instance_id = format!("{session_id}/{}/{plugin_id}", uuid::Uuid::new_v4());
         let mut plugin_vm_instance = engine.create_instance(&instance_id)?;
 
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let startup: crate::ext::vm_actor::StartupSignal =
+            Arc::new(parking_lot::Mutex::new(Some(ready_tx)));
         let dispatcher_opt = self.host_dispatcher.read().clone();
         let iid = instance_id.clone();
+        let ready_for_host = startup.clone();
         let invoke_fn = move |request_json: &str| {
+            if let Ok(request) = serde_json::from_str::<crate::ext::HostRequest>(request_json) {
+                if request.module == "__session" && request.method == "waitForEvent" {
+                    if let Some(sender) = ready_for_host.lock().take() {
+                        let _ = sender.send(Ok(()));
+                    }
+                }
+            }
             let resp = invoke_host_func_with(dispatcher_opt.as_deref(), &iid, request_json)?;
             serde_json::to_string(&resp).map_err(AppError::from)
         };
@@ -595,21 +626,50 @@ impl PluginManager {
             dispatcher.register_event_channel(&instance_id, self.event_channel_capacity);
         }
 
-        let plugin_root = {
+        let (plugin_root, birth) = {
             let map = self.plugins.read();
-            map.get(plugin_id)
-                .map(|inst| inst.main_script_path())
-                .ok_or_else(|| {
-                    AppError::Plugin(format!("plugin '{plugin_id}' not found in registry"))
-                })?
+            let inst = map.get(plugin_id).ok_or_else(|| {
+                AppError::Plugin(tr("plugin.registryMissing", &[("id", plugin_id)]))
+            })?;
+            (
+                inst.main_script_path(),
+                crate::ext::runtime_manager::VmBirth {
+                    fingerprint: inst.fingerprint,
+                    manifest: Arc::new(inst.manifest.clone()),
+                },
+            )
         };
 
-        let handle = VmActor::spawn(plugin_vm_instance, plugin_root, self.event_channel_capacity);
+        let handle = VmActor::spawn_with_startup(
+            plugin_vm_instance,
+            plugin_root,
+            self.event_channel_capacity,
+            Some(startup),
+        );
 
-        handle.dispatch(VmCommand::Init).await?;
+        // Install authority before JS initialization can issue any hostcall.
+        runtime_manager.insert_with_birth(key.clone(), handle.clone(), birth);
+        if let Err(error) = handle.dispatch(VmCommand::Init).await {
+            let _ = self.stop_vm_entry(&key, &handle.instance_id).await;
+            return Err(error);
+        }
+        let timeout_ms = engine.config().call_timeout_ms;
+        let initialized = if timeout_ms == 0 {
+            Ok(ready_rx.await)
+        } else {
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), ready_rx).await
+        };
+        let error = match initialized {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(error))) => Some(error),
+            Ok(Err(_)) => Some("plugin initialization worker stopped".to_string()),
+            Err(_) => Some("plugin initialization timed out".to_string()),
+        };
+        if let Some(error) = error {
+            self.stop_vm_entry(&key, &handle.instance_id).await?;
+            return Err(AppError::Plugin(error));
+        }
         self.sync_registered_capabilities(plugin_id);
-
-        runtime_manager.insert(key, handle.clone());
         Ok(handle)
     }
 
@@ -630,32 +690,35 @@ impl PluginManager {
         context: serde_json::Value,
     ) -> Result<(), AppError> {
         let key = PluginRuntimeKey::new(session_id, plugin_id);
+        let mut instance_id = key.to_string();
         if let Some(runtime_manager) = &self.plugin_runtime_manager {
             if let Some(handle) = runtime_manager.get(&key) {
                 match handle.current_state() {
                     VmActorState::Error | VmActorState::Stopped | VmActorState::ShuttingDown => {
-                        let _ = runtime_manager.remove(&key);
-                        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                            dispatcher.cleanup_instance(&key.to_string());
+                        if let Some(removed) =
+                            runtime_manager.remove_instance(&key, &handle.instance_id)
+                        {
+                            if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+                                dispatcher.cleanup_instance(&removed.instance_id);
+                            }
                         }
-                        return Err(AppError::Plugin(format!(
-                            "plugin runtime '{key}' is not healthy; call start_session_vm to rebuild"
+                        return Err(AppError::Plugin(tr(
+                            "plugin.runtimeUnhealthy",
+                            &[("id", &key.to_string())],
                         )));
                     }
                     VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
                         let _ = runtime_manager.touch(&key);
+                        instance_id = handle.instance_id.clone();
                     }
                 }
             }
         }
 
-        let dispatcher = self
-            .host_dispatcher
-            .read()
-            .clone()
-            .ok_or_else(|| AppError::Plugin("host_dispatcher not set".into()))?;
+        let dispatcher = self.host_dispatcher.read().clone().ok_or_else(|| {
+            AppError::Plugin(tr("plugin.notConfigured", &[("field", "host_dispatcher")]))
+        })?;
 
-        let instance_id = key.to_string();
         dispatcher.deliver_event(
             &instance_id,
             EventEnvelope {
@@ -670,10 +733,12 @@ impl PluginManager {
     pub async fn end_session(&self, session_id: &str) -> Result<(), AppError> {
         let t0 = Instant::now();
         tracing::debug!("[end_session] session={session_id} start");
-        let runtime_manager = self
-            .plugin_runtime_manager
-            .as_ref()
-            .ok_or_else(|| AppError::Plugin("plugin_runtime_manager not set".into()))?;
+        let runtime_manager = self.plugin_runtime_manager.as_ref().ok_or_else(|| {
+            AppError::Plugin(tr(
+                "plugin.notConfigured",
+                &[("field", "plugin_runtime_manager")],
+            ))
+        })?;
 
         let removed = runtime_manager.remove_session_entries(session_id);
         tracing::debug!(
@@ -685,8 +750,10 @@ impl PluginManager {
             let _ = handle.shutdown().await;
         }
 
-        let mut instance_ids: BTreeSet<String> =
-            removed.iter().map(|(key, _)| key.to_string()).collect();
+        let mut instance_ids: BTreeSet<String> = removed
+            .iter()
+            .map(|(_, handle)| handle.instance_id.clone())
+            .collect();
 
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             instance_ids.extend(dispatcher.session_instance_ids(session_id));
@@ -730,6 +797,98 @@ impl PluginManager {
             .map(|manager| manager.configured_idle_ttl())
     }
 
+    pub fn set_catalog_fingerprint(&self, plugin_id: &str, fingerprint: u64) {
+        if let Some(instance) = self.plugins.write().get_mut(plugin_id) {
+            instance.fingerprint = Some(fingerprint);
+        }
+    }
+
+    /// Retire shared capabilities without interrupting another session's work.
+    pub fn retire_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
+        let instance = self
+            .plugins
+            .write()
+            .remove(plugin_id)
+            .ok_or_else(|| AppError::Plugin(tr("plugin.notFound", &[("id", plugin_id)])))?;
+        self.event_bus.remove_plugin_listeners(plugin_id);
+        if let Some(tools) = self.tools.read().clone() {
+            tools.unregister_plugin_tools(plugin_id);
+        }
+        if let Some(functions) = self.functions.read().clone() {
+            functions.remove_by_plugin(plugin_id);
+        }
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+            dispatcher.cleanup_plugin_capabilities(plugin_id);
+        }
+        if let Some(vm) = instance.plugin_vm_instance {
+            vm.destroy();
+        }
+        Ok(())
+    }
+
+    pub fn is_instance_current(&self, instance_id: &str) -> bool {
+        let Some((_, plugin)) = instance_id.rsplit_once('/') else {
+            return true;
+        };
+        let map = self.plugins.read();
+        let Some(current) = map.get(plugin) else {
+            return false;
+        };
+        self.plugin_runtime_manager
+            .as_ref()
+            .and_then(|runtime| runtime.birth_for_instance(instance_id))
+            .is_some_and(|birth| birth.fingerprint == current.fingerprint)
+    }
+
+    pub fn instance_manifest(&self, instance_id: &str) -> Option<Arc<PluginManifest>> {
+        if instance_id.contains('/') {
+            return self
+                .plugin_runtime_manager
+                .as_ref()
+                .and_then(|runtime| runtime.birth_for_instance(instance_id))
+                .map(|birth| birth.manifest);
+        }
+        let plugin = instance_id.rsplit('/').next()?;
+        self.plugins
+            .read()
+            .get(plugin)
+            .map(|inst| Arc::new(inst.manifest.clone()))
+    }
+
+    pub async fn stop_stale_session_vms(&self, session_id: &str) -> Result<usize, AppError> {
+        let Some(runtime) = &self.plugin_runtime_manager else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        // Only invoked while this session is idle, never from another session's reload.
+        for key in runtime.session_keys(session_id) {
+            if let Some(handle) = runtime.peek(&key) {
+                if !self.is_instance_current(&handle.instance_id) {
+                    count += usize::from(self.stop_vm_entry(&key, &handle.instance_id).await?);
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    async fn stop_vm_entry(
+        &self,
+        key: &PluginRuntimeKey,
+        instance_id: &str,
+    ) -> Result<bool, AppError> {
+        let Some(runtime) = &self.plugin_runtime_manager else {
+            return Ok(false);
+        };
+        let Some(handle) = runtime.remove_instance(key, instance_id) else {
+            return Ok(false);
+        };
+        let _ = handle.shutdown().await;
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+            dispatcher.cleanup_instance(&handle.instance_id);
+        }
+        Ok(true)
+    }
+
     /// 卸载：移除事件监听、注销工具、销毁插件 VM 实例、从 map 移除。
     pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let instance = {
@@ -737,7 +896,7 @@ impl PluginManager {
             match map.remove(plugin_id) {
                 Some(inst) => inst,
                 None => {
-                    let e = AppError::Plugin(format!("plugin not found: {}", plugin_id));
+                    let e = AppError::Plugin(tr("plugin.notFound", &[("id", plugin_id)]));
                     if let Some(ref a) = self.audit {
                         a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                             plugin_id: plugin_id.to_string(),
@@ -764,8 +923,8 @@ impl PluginManager {
         if let Some(runtime_manager) = &self.plugin_runtime_manager {
             let removed = runtime_manager.remove_plugin(plugin_id);
             if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-                for (key, _handle) in removed {
-                    dispatcher.cleanup_instance(&key.to_string());
+                for (_, handle) in removed {
+                    dispatcher.cleanup_instance(&handle.instance_id);
                 }
             }
         }

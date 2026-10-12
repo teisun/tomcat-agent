@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import type { UiPreferences } from "../shared/i18n";
 
 import { assertRequiredCapabilities, parseInitializePayload } from "./protocol";
 import type { TomcatMessenger } from "./TomcatMessenger";
+import type { SharedSlashCommand } from "./wire";
 
 export const SERVE_CAPABILITY_LIST_MODELS = "list_models";
 export const SERVE_CAPABILITY_LIST_PROVIDER_KEYS = "list_provider_keys";
@@ -18,9 +20,20 @@ export const SERVE_MODEL_ADMIN_CAPABILITIES = [
 ] as const;
 
 export interface InitializeResult {
+  uiPreferences?: UiPreferences | null;
+  /**
+   * Absolute path of the attachment directory, or null on a server that predates it.
+   *
+   * Handed over at handshake time rather than with a session's state because webview
+   * resource roots have to be final before the first render; changing them afterwards
+   * reloads the webview.
+   */
+  attachmentRoot: string | null;
   capabilities: string[];
+  slashCommands?: SharedSlashCommand[];
   protocolVersion: number;
   sessionId: string | null;
+  serverVersion: string | null;
 }
 
 export function hasServeCapability(
@@ -48,13 +61,14 @@ export function hasAnyModelAdminCapability(
 
 export async function initializeServe(
   messenger: TomcatMessenger,
+  timeoutMs?: number,
 ): Promise<InitializeResult> {
   const frame = await messenger.requestControl({
     payload: null,
     requestId: `init-${randomUUID()}`,
     subtype: "initialize",
     type: "control_request",
-  });
+  }, timeoutMs);
 
   if (frame.type !== "control_response") {
     throw new Error(`initialize was cancelled for request ${frame.requestId}`);
@@ -64,8 +78,12 @@ export async function initializeServe(
   assertRequiredCapabilities(payload.capabilities);
 
   return {
+    attachmentRoot: payload.attachmentRoot ?? null,
+    ...(payload.uiPreferences ? { uiPreferences: payload.uiPreferences } : {}),
     capabilities: payload.capabilities,
+    slashCommands: payload.slashCommands ?? [],
     protocolVersion: payload.protocolVersion,
     sessionId: payload.sessionId ?? frame.sessionId ?? null,
+    serverVersion: payload.serverVersion ?? null,
   };
 }

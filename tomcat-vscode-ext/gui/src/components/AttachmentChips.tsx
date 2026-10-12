@@ -1,3 +1,4 @@
+import { useT } from "../i18n/LocaleProvider";
 import type { WebviewPendingAttachment } from "../types";
 
 export function AttachmentChips({
@@ -7,15 +8,16 @@ export function AttachmentChips({
   attachments: WebviewPendingAttachment[];
   onRemove(attachmentId: string): void;
 }) {
+  const t = useT();
   if (!attachments.length) {
     return null;
   }
 
   return (
-    <section className="tc-attachment-chips" aria-label="Pending attachments">
+    <section className="tc-attachment-chips" aria-label={t("attachment.pending")}>
       {attachments.map((attachment) => (
         <button
-          aria-label={`Remove attachment ${attachment.label}`}
+          aria-label={t("attachment.removeNamed", { name: attachment.label })}
           className="tc-chip tc-chip--attachment"
           data-testid="attachment-chip"
           key={attachment.id}

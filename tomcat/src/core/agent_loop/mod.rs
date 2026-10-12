@@ -23,7 +23,7 @@
 //! │   tool_definitions ► 传入 LLM 的工具 JSON Schema 列表                         │
 //! ├──────────────────────────────────────────────────────────────────────────────┤
 //! │ 运行时状态                                                                     │
-//! │   steering_queue  ─► Mutex<Vec<ChatMessage>>（跨线程注入 steering）            │
+//! │   steering_queue  ─► Mutex<SteeringInbox>（接纳开关 + 富输入）                │
 //! │   follow_up_queue ─► Mutex<Vec<ChatMessage>>（同上下文追问）                  │
 //! │   cancel_token    ─► CancellationToken（Ctrl+C / interrupt 中断）            │
 //! │   （流式 delta 通过 EventBus message_update 事件推送到渲染层）                 │
@@ -144,9 +144,26 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use config_backend::{ConfigBackend, SharedConfigBackend};
+/// Narrow cross-module test seam for verifying that context compaction invalidates
+/// `read` stamps before the next real tool invocation. It is test-only so production
+/// callers still go through the agent loop.
+#[cfg(test)]
+pub(crate) async fn execute_tool_for_cross_module_test(
+    primitive: &std::sync::Arc<dyn crate::core::tools::primitive::PrimitiveExecutor>,
+    read_file_state: &std::sync::Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    tool_call: &types::ToolCallInfo,
+) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
+    tool_exec::execute_tool(primitive, &None, &None, Some(read_file_state), tool_call).await
+}
+
+pub use config_backend::{
+    ConfigBackend, PackageInstallBackend, PackageInstallRequest, PackageInstallStatus,
+    PackageInstallToolResource, PackageInstallToolResult, SharedConfigBackend,
+    SharedPackageInstallBackend,
+};
 pub use current_tail_guard::{build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts};
+pub use steering_injection::{SteeringInbox, SteeringInput};
 pub use types::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, BackgroundCompletionRoutes,
-    CompletionRoute, LoopError, SubagentType, ToolCallInfo,
+    CompletionRoute, EphemeralTailProvider, LoopError, SubagentType, ToolCallInfo,
 };

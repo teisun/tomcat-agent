@@ -143,6 +143,10 @@ await pi.exec("ls")
 - submit / poll / timeout / interrupt 都能被统一审计；
 - 对工具调用、宿主函数调用、事件循环都能复用同一套生命周期语义。
 
+`pi.exec`（`tomcat.exec` 的兼容别名）的 `command` 必须包含完整 shell 命令和参数；Unix 使用 `sh -c`，Windows 使用 `cmd /C`。独立 argv 模式已由 `28e7262d` 主动退役，不能照搬 pi-mono 的 `exec(program, args)`。
+
+为保持已有选项位置，使用 `await pi.exec("git status --short", [], { cwd: workspace })`；第二参只可省略或为空数组，非空/错误形态会返回 rejected Promise，不提交命令。第三参仍支持 `cwd`/`foregroundWaitMs`，不会把数组自动拼接为 shell 代码。
+
 ## 长生命周期 VM 的空闲 event loop 与执行预算
 
 session VM 在 `pi_main_loop.js` / `pi_bridge.js` 里通过 `__pi_start_event_loop` 常驻运行：

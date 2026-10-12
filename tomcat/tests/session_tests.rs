@@ -235,9 +235,9 @@ fn test_init_context_state_heals_all_missing_tail_tool_results(
     assert_eq!(healed_tools.len(), 2);
     assert_eq!(healed_tools[0].tool_call_id.as_deref(), Some("call_1"));
     assert_eq!(healed_tools[1].tool_call_id.as_deref(), Some("call_2"));
-    assert!(healed_tools
-        .iter()
-        .all(|m| m.text_content() == Some("[interrupted]")));
+    assert!(healed_tools.iter().all(|m| {
+        m.text_content() == Some(tomcat::core::session::UNKNOWN_RESTART_TOOL_RESULT_TEXT)
+    }));
     Ok(())
 }
 

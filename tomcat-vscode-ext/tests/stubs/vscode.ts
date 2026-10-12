@@ -1,3 +1,5 @@
+export const env = { language: "en" };
+
 type CommandHandler = (...args: any[]) => any;
 type Provider = { provideTextDocumentContent(uri: Uri): string };
 type FileEntry = { text: string; type: number };
@@ -10,17 +12,29 @@ const configurationListeners = new Set<
   (event: { affectsConfiguration(section: string): boolean }) => void
 >();
 const textDocumentChangeListeners = new Set<(event: { document: TextDocument }) => void>();
+const textDocumentSaveListeners = new Set<(document: TextDocument) => void>();
 const fileWatchers = new Set<{
+  changeListeners: Set<(uri: Uri) => void>;
   createListeners: Set<(uri: Uri) => void>;
   deleteListeners: Set<(uri: Uri) => void>;
-  glob: string;
+  glob: string | RelativePattern;
 }>();
 const textDocuments: TextDocument[] = [];
 
 let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
-let infoMessageHandler: ((message: string, items: string[]) => any) | undefined;
-let warningMessageHandler: ((message: string, items: string[]) => any) | undefined;
+type MessageChoice = string | { title: string; isCloseAffordance?: boolean };
+let errorMessageHandler: ((message: string, items: string[]) => any) | undefined;
+let infoMessageHandler: ((message: string, items: MessageChoice[]) => any) | undefined;
+let warningMessageHandler:
+  | ((message: string, items: MessageChoice[], options?: MessageOptionsLike) => any)
+  | undefined;
+
+/** Subset of `vscode.MessageOptions` the extension actually uses. */
+export interface MessageOptionsLike {
+  detail?: string;
+  modal?: boolean;
+}
 let openDialogHandler: ((options: unknown) => Uri[] | Promise<Uri[] | undefined> | undefined) | undefined;
 let lastDiffCommand:
   | {
@@ -28,6 +42,18 @@ let lastDiffCommand:
       modified: Uri;
       options?: unknown;
       title?: string;
+    }
+  | undefined;
+let lastChangesCommand:
+  | {
+      title: string;
+      changes: [Uri, Uri, Uri][];
+    }
+  | undefined;
+let lastRevealRange:
+  | {
+      range: Range;
+      revealType?: number;
     }
   | undefined;
 
@@ -106,13 +132,42 @@ function isInWorkspace(uri: Uri): boolean {
   });
 }
 
-function notifyWatchers(kind: "create" | "delete", uri: Uri): void {
-  const normalized = normalizePath(uri.fsPath);
+function matchesWatcherGlob(
+  glob: string | RelativePattern,
+  candidateUri: Uri,
+): boolean {
+  if (typeof glob === "string") {
+    return globToRegExp(glob).test(normalizePath(candidateUri.fsPath));
+  }
+
+  const basePath = normalizePath(
+    typeof glob.base === "string" ? glob.base : glob.base.fsPath,
+  ).replace(/\/+$/u, "");
+  const candidatePath = normalizePath(candidateUri.fsPath);
+  if (candidatePath === basePath) {
+    return globToRegExp(glob.pattern).test(
+      candidatePath.slice(candidatePath.lastIndexOf("/") + 1),
+    );
+  }
+  if (!candidatePath.startsWith(`${basePath}/`)) {
+    return false;
+  }
+  return globToRegExp(glob.pattern).test(
+    candidatePath.slice(basePath.length + 1),
+  );
+}
+
+function notifyWatchers(kind: "change" | "create" | "delete", uri: Uri): void {
   for (const watcher of fileWatchers) {
-    if (!globToRegExp(watcher.glob).test(normalized)) {
+    if (!matchesWatcherGlob(watcher.glob, uri)) {
       continue;
     }
-    const listeners = kind === "create" ? watcher.createListeners : watcher.deleteListeners;
+    const listeners =
+      kind === "change"
+        ? watcher.changeListeners
+        : kind === "create"
+          ? watcher.createListeners
+          : watcher.deleteListeners;
     for (const listener of listeners) {
       listener(uri);
     }
@@ -268,6 +323,20 @@ export class Uri {
     return new Uri(base.scheme, base.authority, joined.startsWith("/") ? joined : `/${joined}`, base.query);
   }
 
+  with(change: {
+    authority?: string;
+    path?: string;
+    query?: string;
+    scheme?: string;
+  }): Uri {
+    return new Uri(
+      change.scheme ?? this.scheme,
+      change.authority ?? this.authority,
+      change.path ?? this.path,
+      change.query ?? this.query,
+    );
+  }
+
   get fsPath(): string {
     return this.path;
   }
@@ -279,6 +348,13 @@ export class Uri {
   }
 }
 
+export class RelativePattern {
+  constructor(
+    public readonly base: Uri | string,
+    public readonly pattern: string,
+  ) {}
+}
+
 export const FileType = {
   File: 1,
   Directory: 2,
@@ -288,6 +364,13 @@ export const ConfigurationTarget = {
   Global: 1,
   Workspace: 2,
   WorkspaceFolder: 3,
+} as const;
+
+export const TextEditorRevealType = {
+  Default: 0,
+  InCenter: 1,
+  InCenterIfOutsideViewport: 2,
+  AtTop: 3,
 } as const;
 
 export class WorkspaceEdit {
@@ -350,6 +433,9 @@ class TextDocument {
 
   async save(): Promise<boolean> {
     files.set(this.uri.toString(), { text: this.text, type: FileType.File });
+    for (const listener of textDocumentSaveListeners) {
+      listener(this);
+    }
     return true;
   }
 }
@@ -373,6 +459,13 @@ export const commands = {
         options: args[3],
         original: args[0] as Uri,
         title: args[2] as string,
+      };
+      return undefined as T;
+    }
+    if (command === "vscode.changes") {
+      lastChangesCommand = {
+        title: args[0] as string,
+        changes: args[1] as [Uri, Uri, Uri][],
       };
       return undefined as T;
     }
@@ -405,16 +498,55 @@ export const workspace = {
     async readFile(uri: Uri): Promise<Uint8Array> {
       const entry = files.get(uri.toString());
       if (!entry) {
-        throw new FileSystemError(`File not found: ${uri.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${uri.toString()}`), { code: "FileNotFound" });
       }
       return Buffer.from(entry.text, "utf8");
     },
     async stat(uri: Uri): Promise<{ size: number; type: number }> {
       const entry = files.get(uri.toString());
       if (!entry) {
-        throw new FileSystemError(`File not found: ${uri.toString()}`);
+        throw Object.assign(new FileSystemError(`File not found: ${uri.toString()}`), { code: "FileNotFound" });
       }
       return { size: entry.text.length, type: entry.type };
+    },
+    async createDirectory(uri: Uri): Promise<void> {
+      files.set(uri.toString(), { text: "", type: FileType.Directory });
+    },
+    async writeFile(uri: Uri, content: Uint8Array): Promise<void> {
+      files.set(uri.toString(), {
+        text: Buffer.from(content).toString("utf8"),
+        type: FileType.File,
+      });
+    },
+    async delete(uri: Uri): Promise<void> {
+      if (!files.delete(uri.toString())) {
+        throw Object.assign(new FileSystemError(`File not found: ${uri.toString()}`), { code: "FileNotFound" });
+      }
+    },
+    async rename(
+      source: Uri,
+      target: Uri,
+      options?: { overwrite?: boolean },
+    ): Promise<void> {
+      const entry = files.get(source.toString());
+      if (!entry) {
+        throw Object.assign(new FileSystemError(`File not found: ${source.toString()}`), { code: "FileNotFound" });
+      }
+      if (files.has(target.toString()) && options?.overwrite !== true) {
+        throw Object.assign(new FileSystemError(`File exists: ${target.toString()}`), { code: "FileExists" });
+      }
+      files.delete(source.toString());
+      files.set(target.toString(), entry);
+    },
+    async copy(source: Uri, target: Uri, options?: { overwrite?: boolean }): Promise<void> {
+      const entry = files.get(source.toString());
+      if (!entry) {
+        throw Object.assign(new FileSystemError(`File not found: ${source.toString()}`), { code: "FileNotFound" });
+      }
+      if (files.has(target.toString()) && options?.overwrite !== true) {
+        throw Object.assign(new FileSystemError(`File exists: ${target.toString()}`), { code: "FileExists" });
+      }
+      files.set(target.toString(), { ...entry });
     },
   },
   async applyEdit(edit: WorkspaceEdit): Promise<boolean> {
@@ -505,12 +637,14 @@ export const workspace = {
     }
     return results;
   },
-  createFileSystemWatcher(glob: string): {
+  createFileSystemWatcher(glob: string | RelativePattern): {
     dispose(): void;
+    onDidChange(listener: (uri: Uri) => void): Disposable;
     onDidCreate(listener: (uri: Uri) => void): Disposable;
     onDidDelete(listener: (uri: Uri) => void): Disposable;
   } {
     const watcher = {
+      changeListeners: new Set<(uri: Uri) => void>(),
       createListeners: new Set<(uri: Uri) => void>(),
       deleteListeners: new Set<(uri: Uri) => void>(),
       glob,
@@ -519,8 +653,15 @@ export const workspace = {
     return {
       dispose() {
         fileWatchers.delete(watcher);
+        watcher.changeListeners.clear();
         watcher.createListeners.clear();
         watcher.deleteListeners.clear();
+      },
+      onDidChange(listener: (uri: Uri) => void): Disposable {
+        watcher.changeListeners.add(listener);
+        return new Disposable(() => {
+          watcher.changeListeners.delete(listener);
+        });
       },
       onDidCreate(listener: (uri: Uri) => void): Disposable {
         watcher.createListeners.add(listener);
@@ -550,6 +691,12 @@ export const workspace = {
     textDocumentChangeListeners.add(listener);
     return new Disposable(() => {
       textDocumentChangeListeners.delete(listener);
+    });
+  },
+  onDidSaveTextDocument(listener: (document: TextDocument) => void): Disposable {
+    textDocumentSaveListeners.add(listener);
+    return new Disposable(() => {
+      textDocumentSaveListeners.delete(listener);
     });
   },
   openTextDocument: async (uri: Uri): Promise<TextDocument> => {
@@ -583,18 +730,30 @@ export const window = {
   activeTextEditor: undefined as
     | {
         document: TextDocument;
+        revealRange(range: Range, revealType?: number): void;
         selection: Selection;
       }
     | undefined,
   visibleTextEditors: [] as Array<{
     document: TextDocument;
+    revealRange(range: Range, revealType?: number): void;
     selection: Selection;
   }>,
-  async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
+  async showErrorMessage(message: string, ...items: string[]): Promise<string | undefined> {
+    return errorMessageHandler?.(message, items);
+  },
+  async showInformationMessage(message: string, ...items: MessageChoice[]): Promise<MessageChoice | undefined> {
     return infoMessageHandler?.(message, items);
   },
-  async showWarningMessage(message: string, ...items: string[]): Promise<string | undefined> {
-    return warningMessageHandler?.(message, items);
+  // 真实 API 有 (message, options, ...items) 的重载，模态确认框走的就是这一支。
+  async showWarningMessage(
+    message: string,
+    ...rest: Array<MessageOptionsLike | MessageChoice>
+  ): Promise<MessageChoice | undefined> {
+    const [first, ...others] = rest;
+    const options = typeof first === "object" && first !== null && !("title" in first) ? first : undefined;
+    const items = (options ? others : rest) as MessageChoice[];
+    return warningMessageHandler?.(message, items, options);
   },
   async showOpenDialog(options: unknown): Promise<Uri[] | undefined> {
     return openDialogHandler?.(options);
@@ -608,9 +767,19 @@ export const window = {
   async showInputBox(options: InputBoxOptions): Promise<string | undefined> {
     return inputBoxHandler?.(options);
   },
-  async showTextDocument(document: TextDocument, _options?: unknown): Promise<{ document: TextDocument }> {
+  async showTextDocument(
+    document: TextDocument,
+    _options?: unknown,
+  ): Promise<{
+    document: TextDocument;
+    revealRange(range: Range, revealType?: number): void;
+    selection: Selection;
+  }> {
     const editor = {
       document,
+      revealRange(range: Range, revealType?: number) {
+        lastRevealRange = { range, revealType };
+      },
       selection: new Selection(new Position(0, 0), new Position(0, 0)),
     };
     window.activeTextEditor = editor;
@@ -650,8 +819,17 @@ export const __testing = {
     files.delete(uri.toString());
     notifyWatchers("delete", uri);
   },
+  fireDidChangeFile(filePath: string): void {
+    notifyWatchers("change", Uri.file(filePath));
+  },
   get lastDiffCommand() {
     return lastDiffCommand;
+  },
+  get lastChangesCommand() {
+    return lastChangesCommand;
+  },
+  get lastRevealRange() {
+    return lastRevealRange;
   },
   readFile(filePath: string): string | undefined {
     return files.get(Uri.file(filePath).toString())?.text;
@@ -674,12 +852,16 @@ export const __testing = {
     configuration.clear();
     configurationListeners.clear();
     textDocumentChangeListeners.clear();
+    textDocumentSaveListeners.clear();
     quickPickHandler = undefined;
     inputBoxHandler = undefined;
+    errorMessageHandler = undefined;
     infoMessageHandler = undefined;
     warningMessageHandler = undefined;
     openDialogHandler = undefined;
     lastDiffCommand = undefined;
+    lastChangesCommand = undefined;
+    lastRevealRange = undefined;
     textDocuments.length = 0;
     window.activeTextEditor = undefined;
     window.visibleTextEditors = [];
@@ -699,6 +881,14 @@ export const __testing = {
     for (const listener of textDocumentChangeListeners) {
       listener({ document });
     }
+  },
+  fireDidSaveTextDocument(document: TextDocument): void {
+    for (const listener of textDocumentSaveListeners) {
+      listener(document);
+    }
+  },
+  setErrorMessageHandler(handler: typeof errorMessageHandler): void {
+    errorMessageHandler = handler;
   },
   setInfoMessageHandler(handler: typeof infoMessageHandler): void {
     infoMessageHandler = handler;

@@ -3,7 +3,7 @@
 //! 覆盖：
 //!
 //! - `with_primitive`：read/write/edit/executeBash 都通过 `MockPrimitive`，
-//!   并验证 `executeBash` 的 argv 形参可以原样下发到自定义实现。
+//!   并验证 `executeBash` 将完整 shell 命令原样下发到自定义实现。
 //! - `with_llm`：chat / chat_stream / chat_parses_max_tokens_and_temperature。
 //! - `with_tools`：register_tool / list_tools / call_tool / unregister_tool /
 //!   get_active_tools / set_active_tools / register_command 系列；以及
@@ -18,15 +18,63 @@ use std::sync::{Arc, Mutex};
 use super::super::helpers::{normalize_tool_parameters, parse_chat_request};
 use super::super::HostApiDispatcher;
 use super::mocks::{MockLlm, MockPrimitive, MockToolRegistry};
-use crate::core::llm::thinking_policy::ThinkingFormat;
+use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::{
-    BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DirEntry,
-    EditFileResult, EditOperation, LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor,
-    PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent, WriteFileResult,
+    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    DefaultPrimitiveExecutor, DirEntry, EditFileResult, EditOperation, LlmProvider, LlmResolver,
+    LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
+    WriteFileResult,
 };
 use crate::ext::host_binding::HostRequest;
-use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
+use crate::infra::{error::AppError, PrimitiveConfig, TracingAuditRecorder};
+
+#[tokio::test]
+async fn stale_instance_rejects_capability_writes_but_keeps_logging() {
+    use crate::ext::PluginManager;
+    let bus = Arc::new(DefaultEventBus::new());
+    let manager = Arc::new(PluginManager::new(bus.clone()));
+    let dispatcher = HostApiDispatcher::new(bus).with_plugin_manager(Arc::downgrade(&manager));
+    for (module, method) in [
+        ("tools", "registerTool"),
+        ("tools", "unregisterTool"),
+        ("tools", "setActiveTools"),
+        ("commands", "registerCommand"),
+        ("events", "on"),
+        ("events", "subscribe"),
+        ("events", "once"),
+    ] {
+        let response = dispatcher
+            .dispatch_async(
+                "session/missing",
+                HostRequest {
+                    module: module.into(),
+                    method: method.into(),
+                    params: serde_json::json!({}),
+                    call_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!response.ok);
+        assert!(response.error.unwrap().contains("retired instance"));
+    }
+    assert!(
+        dispatcher
+            .dispatch_async(
+                "session/missing",
+                HostRequest {
+                    module: "agent".into(),
+                    method: "log".into(),
+                    params: serde_json::json!({"message":"still finishing"}),
+                    call_id: None
+                }
+            )
+            .await
+            .unwrap()
+            .ok
+    );
+}
 
 #[derive(Clone)]
 struct RecordingLlm {
@@ -96,6 +144,7 @@ impl LlmProvider for RecordingLlm {
 struct StaticResolver {
     provider: Arc<dyn LlmProvider>,
     seen_models: Arc<Mutex<Vec<String>>>,
+    default_model: String,
 }
 
 impl LlmResolver for StaticResolver {
@@ -105,18 +154,16 @@ impl LlmResolver for StaticResolver {
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
         assert_eq!(scene, LlmScene::Main);
-        let model = session_override.unwrap_or_default().to_string();
-        self.seen_models.lock().unwrap().push(model.clone());
-        Ok(ResolvedCall {
-            provider_impl: Arc::clone(&self.provider),
+        self.seen_models
+            .lock()
+            .unwrap()
+            .push(session_override.unwrap_or_default().to_string());
+        let model = session_override.unwrap_or(&self.default_model).to_string();
+        Ok(ResolvedCall::from_parts_unchecked(
+            Arc::clone(&self.provider),
+            model.clone(),
             model,
-            api: "openai".to_string(),
-            provider: "mimo".to_string(),
-            base_url: None,
-            key_source: "TEST_KEY".to_string(),
-            thinking_format: ThinkingFormat::Openai,
-            capabilities: Capabilities::default(),
-        })
+        ))
     }
 }
 
@@ -186,6 +233,59 @@ impl LlmProvider for CapturingLlm {
     }
 }
 
+fn make_real_bash_dispatcher(
+    root: &std::path::Path,
+    with_registry: bool,
+) -> (
+    HostApiDispatcher,
+    Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
+) {
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: root.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let confirmation = Arc::new(AllowAllConfirmation);
+    let audit = Arc::new(TracingAuditRecorder);
+    let persist_dir = root.join("tool-results");
+    let registry = with_registry.then(|| {
+        crate::core::tools::primitive::build_bash_task_registry(
+            &crate::infra::config::ToolsBashConfig {
+                foreground_wait_ms: 8_000,
+                ..Default::default()
+            },
+            persist_dir.clone(),
+            gate.clone(),
+            confirmation.clone(),
+            audit.clone(),
+            BashAstChecker::default(),
+        )
+    });
+
+    let mut exec =
+        DefaultPrimitiveExecutor::new(PrimitiveConfig::default(), confirmation, audit, gate)
+            .with_bash_foreground_wait_ms(8_000)
+            .with_bash_persist_dir(persist_dir);
+    if let Some(shared) = registry.clone() {
+        exec = exec.with_bash_task_registry(shared);
+    }
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let mut dispatcher = HostApiDispatcher::new(bus).with_primitive(Arc::new(exec));
+    if let Some(shared) = registry.clone() {
+        dispatcher = dispatcher.with_bash_task_registry(shared);
+    }
+    (dispatcher, registry)
+}
+
 #[tokio::test]
 async fn dispatch_read_file_with_primitive_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
@@ -206,6 +306,58 @@ async fn dispatch_read_file_with_primitive_returns_ok() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(env_lock)]
+async fn dispatch_execute_bash_reads_internal_session() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let sessions = home.path().join(".tomcat/agents/main/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let fixture = sessions.join("plugin.jsonl");
+    std::fs::write(&fixture, b"plugin-line\n").unwrap();
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _home_guard = HomeGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home.path());
+
+    let root = tempfile::tempdir().expect("plugin workspace tempdir");
+    let (dispatcher, _registry) = make_real_bash_dispatcher(root.path(), true);
+    let req = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": format!("cat {}", fixture.display()),
+            "cwd": root.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+    let response = dispatcher
+        .dispatch_async("inst-internal-session", req)
+        .await
+        .expect("dispatcher call");
+    assert!(
+        response.ok,
+        "internal session read should succeed: {response:?}"
+    );
+    let data = response.data.expect("bash response data");
+    assert!(
+        data["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("plugin-line"),
+        "unexpected plugin bash output: {data}"
+    );
+    assert_eq!(std::fs::read_to_string(&fixture).unwrap(), "plugin-line\n");
+}
 #[tokio::test]
 async fn dispatch_write_file_with_primitive_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
@@ -249,13 +401,176 @@ async fn dispatch_execute_bash_with_primitive_returns_ok() {
 }
 
 #[tokio::test]
-async fn dispatch_execute_bash_with_argv_calls_primitive() {
+async fn dispatch_execute_bash_without_registry_stops_on_wait_expiry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("ext-host-no-registry-leak.txt");
+    let (d, _) = make_real_bash_dispatcher(dir.path(), false);
+    let req = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": format!(
+                "printf ext-host-bounded; sleep 9; printf leaked > {}",
+                marker.display()
+            ),
+            "cwd": dir.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+
+    let res = d.dispatch_async("inst-no-registry", req).await.unwrap();
+    assert!(res.ok, "executeBash 应成功返回有界结果");
+    let data = res.data.expect("bash result");
+    assert_eq!(data["state"], serde_json::json!("stopped"));
+    assert_eq!(data["foregroundWaitExpired"], serde_json::json!(true));
+    assert!(
+        data.get("taskId").is_none(),
+        "无共享 registry 不应回 taskId"
+    );
+    assert!(
+        data["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ext-host-bounded"),
+        "应保留前台已产出输出: {data}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(
+        !marker.exists(),
+        "marker 出现表示 ext host 无 registry 路径仍有 runaway 进程"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_execute_bash_with_registry_supports_task_output_and_task_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (d, registry) = make_real_bash_dispatcher(dir.path(), true);
+    assert!(
+        registry.is_some(),
+        "test fixture should inject shared registry"
+    );
+
+    let start_finish = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": "sleep 9; echo ext-host-finished",
+            "cwd": dir.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+    let start_finish_res = d
+        .dispatch_async("inst-bg-finish", start_finish)
+        .await
+        .unwrap();
+    assert!(start_finish_res.ok);
+    let finish_data = start_finish_res.data.expect("finish bash result");
+    assert_eq!(
+        finish_data["state"],
+        serde_json::json!("running_in_background")
+    );
+    let finish_task_id = finish_data["taskId"]
+        .as_str()
+        .expect("running_in_background result should include taskId")
+        .to_string();
+
+    let output_req = HostRequest {
+        module: "fs".to_string(),
+        method: "taskOutput".to_string(),
+        params: serde_json::json!({
+            "taskId": finish_task_id,
+            "block": true,
+            "waitMs": 60_000
+        }),
+        call_id: None,
+    };
+    let output_res = d
+        .dispatch_async("inst-bg-finish", output_req)
+        .await
+        .unwrap();
+    assert!(output_res.ok, "taskOutput(block) 应返回完成结果");
+    let output_data = output_res.data.expect("task output data");
+    assert_eq!(output_data["finished"], serde_json::json!(true));
+    assert_eq!(output_data["exitCode"], serde_json::json!(0));
+    assert_eq!(output_data["wakeReason"], serde_json::json!("finished"));
+    assert!(
+        output_data["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ext-host-finished"),
+        "taskOutput 应带回终态输出: {output_data}"
+    );
+
+    let start_stop = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": "printf ext-host-stop; sleep 30",
+            "cwd": dir.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+    let start_stop_res = d.dispatch_async("inst-bg-stop", start_stop).await.unwrap();
+    assert!(start_stop_res.ok);
+    let stop_task_id = start_stop_res
+        .data
+        .as_ref()
+        .and_then(|value| value["taskId"].as_str())
+        .expect("background stop case should include taskId")
+        .to_string();
+
+    let stop_req = HostRequest {
+        module: "fs".to_string(),
+        method: "taskStop".to_string(),
+        params: serde_json::json!({ "taskId": stop_task_id.clone() }),
+        call_id: None,
+    };
+    let stop_res = d.dispatch_async("inst-bg-stop", stop_req).await.unwrap();
+    assert!(stop_res.ok, "taskStop 应成功");
+    assert_eq!(
+        stop_res.data.expect("task stop data"),
+        serde_json::json!({ "taskId": stop_task_id, "stopped": true })
+    );
+
+    let stopped_output_req = HostRequest {
+        module: "fs".to_string(),
+        method: "taskOutput".to_string(),
+        params: serde_json::json!({
+            "taskId": stop_task_id,
+            "block": true,
+            "waitMs": 60_000
+        }),
+        call_id: None,
+    };
+    let stopped_output_res = d
+        .dispatch_async("inst-bg-stop", stopped_output_req)
+        .await
+        .unwrap();
+    assert!(stopped_output_res.ok);
+    let stopped_data = stopped_output_res.data.expect("stopped output data");
+    assert_eq!(stopped_data["finished"], serde_json::json!(true));
+    assert_eq!(stopped_data["exitCode"], serde_json::json!(-1));
+    assert!(
+        stopped_data["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ext-host-stop"),
+        "stopped task should still return drained prefix output: {stopped_data}"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_execute_bash_passes_single_command_to_primitive() {
     let ran = Arc::new(AtomicBool::new(false));
     let ran2 = Arc::clone(&ran);
     #[derive(Clone)]
-    struct ArgvPrimitive(Arc<AtomicBool>);
+    struct SingleCommandPrimitive(Arc<AtomicBool>);
     #[async_trait::async_trait]
-    impl PrimitiveExecutor for ArgvPrimitive {
+    impl PrimitiveExecutor for SingleCommandPrimitive {
         async fn read_file(&self, _p: &str, _id: &str) -> Result<String, AppError> {
             Ok(String::new())
         }
@@ -277,6 +592,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn edit_file(
@@ -291,6 +607,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
                 added: None,
                 removed: None,
                 diff: None,
+                diff_truncated: false,
             })
         }
         async fn execute_bash(
@@ -298,15 +615,10 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             cmd: &str,
             _cwd: Option<&str>,
             _id: &str,
-            argv: Option<&[String]>,
-            _timeout_ms: Option<u64>,
+            _foreground_wait_ms: Option<u64>,
         ) -> Result<BashResult, AppError> {
-            if cmd == "echo" {
-                if let Some(a) = argv {
-                    if a.len() == 2 && a[0] == "a" && a[1] == "b" {
-                        self.0.store(true, Ordering::SeqCst);
-                    }
-                }
+            if cmd == "echo a b" {
+                self.0.store(true, Ordering::SeqCst);
             }
             Ok(BashResult {
                 stdout: String::new(),
@@ -325,22 +637,21 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
         }
     }
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(ArgvPrimitive(ran2)));
+    let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(SingleCommandPrimitive(ran2)));
     let req = HostRequest {
         module: "fs".to_string(),
         method: "executeBash".to_string(),
         params: serde_json::json!({
-            "command": "echo",
-            "args": ["a", "b"],
+            "command": "echo a b",
             "pluginId": "p1"
         }),
         call_id: None,
     };
-    let res = d.dispatch_async("inst-argv", req).await.unwrap();
+    let res = d.dispatch_async("inst-single-command", req).await.unwrap();
     assert!(res.ok);
     assert!(
         ran.load(Ordering::SeqCst),
-        "execute_bash 应收到 argv 模式参数"
+        "execute_bash 应收到完整单字符串命令"
     );
 }
 
@@ -403,7 +714,11 @@ fn parse_chat_request_forwards_tools() {
 #[tokio::test]
 async fn dispatch_chat_with_llm_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(StaticResolver {
+        provider: Arc::new(MockLlm),
+        seen_models: Arc::new(Mutex::new(Vec::new())),
+        default_model: "default-model".to_string(),
+    }));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
@@ -417,16 +732,14 @@ async fn dispatch_chat_with_llm_returns_ok() {
 #[tokio::test]
 async fn dispatch_chat_routes_named_model_via_resolver() {
     let bus = Arc::new(DefaultEventBus::new());
-    let (global_llm, global_calls, _) = RecordingLlm::new("global");
     let (resolved_llm, resolved_calls, resolved_models) = RecordingLlm::new("resolved");
     let resolver_models = Arc::new(Mutex::new(Vec::new()));
     let resolver = StaticResolver {
         provider: Arc::new(resolved_llm),
         seen_models: Arc::clone(&resolver_models),
+        default_model: "default-model".to_string(),
     };
-    let d = HostApiDispatcher::new(bus)
-        .with_llm(Arc::new(global_llm))
-        .with_llm_resolver(Arc::new(resolver));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(resolver));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
@@ -436,7 +749,6 @@ async fn dispatch_chat_routes_named_model_via_resolver() {
 
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(res.ok);
-    assert_eq!(global_calls.load(Ordering::SeqCst), 0);
     assert_eq!(resolved_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         resolver_models.lock().unwrap().clone(),
@@ -455,18 +767,16 @@ async fn dispatch_chat_routes_named_model_via_resolver() {
 }
 
 #[tokio::test]
-async fn dispatch_chat_default_model_falls_back_to_global_llm() {
+async fn dispatch_chat_default_model_routes_via_resolver_without_override() {
     let bus = Arc::new(DefaultEventBus::new());
-    let (global_llm, global_calls, global_models) = RecordingLlm::new("global");
-    let (resolved_llm, resolved_calls, _) = RecordingLlm::new("resolved");
+    let (resolved_llm, resolved_calls, resolved_models) = RecordingLlm::new("resolved");
     let resolver_models = Arc::new(Mutex::new(Vec::new()));
     let resolver = StaticResolver {
         provider: Arc::new(resolved_llm),
         seen_models: Arc::clone(&resolver_models),
+        default_model: "resolver-default".to_string(),
     };
-    let d = HostApiDispatcher::new(bus)
-        .with_llm(Arc::new(global_llm))
-        .with_llm_resolver(Arc::new(resolver));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(resolver));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
@@ -476,19 +786,22 @@ async fn dispatch_chat_default_model_falls_back_to_global_llm() {
 
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(res.ok);
-    assert_eq!(global_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(resolved_calls.load(Ordering::SeqCst), 0);
-    assert!(resolver_models.lock().unwrap().is_empty());
+    assert_eq!(resolved_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver_models.lock().unwrap().clone(), vec![String::new()]);
     assert_eq!(
-        global_models.lock().unwrap().clone(),
-        vec!["default".to_string()]
+        resolved_models.lock().unwrap().clone(),
+        vec!["resolver-default".to_string()]
     );
 }
 
 #[tokio::test]
 async fn dispatch_chat_stream_with_llm_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(StaticResolver {
+        provider: Arc::new(MockLlm),
+        seen_models: Arc::new(Mutex::new(Vec::new())),
+        default_model: "default-model".to_string(),
+    }));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletionStream".to_string(),
@@ -850,7 +1163,11 @@ async fn dispatch_events_off_removes_listener() {
 async fn dispatch_chat_parses_max_tokens_and_temperature() {
     let bus = Arc::new(DefaultEventBus::new());
     let (llm, seen_max_tokens, seen_temperatures) = CapturingLlm::new();
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(llm));
+    let d = HostApiDispatcher::new(bus).with_llm_resolver(Arc::new(StaticResolver {
+        provider: Arc::new(llm),
+        seen_models: Arc::new(Mutex::new(Vec::new())),
+        default_model: "capturing-default".to_string(),
+    }));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),

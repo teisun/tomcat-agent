@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
+import { en } from "../../../src/shared/i18n/en";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -71,7 +72,7 @@ describe("ContextSearchDropdown", () => {
       />,
     );
 
-    expect(screen.getByTestId("context-search-loading").textContent).toContain("搜索中");
+    expect(screen.getByTestId("context-search-loading").textContent).toContain("Searching");
 
     rerender(
       <ContextSearchDropdown
@@ -83,7 +84,7 @@ describe("ContextSearchDropdown", () => {
         truncated={false}
       />,
     );
-    expect(screen.getByTestId("context-search-empty").textContent).toContain("未找到匹配文件");
+    expect(screen.getByTestId("context-search-empty").textContent).toContain("No matching files");
 
     rerender(
       <ContextSearchDropdown
@@ -95,8 +96,13 @@ describe("ContextSearchDropdown", () => {
         truncated
       />,
     );
-    expect(screen.getByTestId("context-search-truncated").textContent).toContain(
-      "仅显示前 2 条，输入更精确关键词",
+    expect(screen.getByTestId("context-search-truncated").textContent).toBe(
+      en["context.truncated.other"].replace("{count}", "2"),
+    );
+    rerender(<ContextSearchDropdown loading={false} matches={[]} onSelect={() => undefined} open query="missing" truncated />);
+    expect(screen.getByTestId("context-search-empty").textContent).toBe(en["context.empty"]);
+    expect(screen.getByTestId("context-search-truncated").textContent).toBe(
+      en["context.truncated.other"].replace("{count}", "0"),
     );
   });
 
@@ -108,7 +114,7 @@ describe("ContextSearchDropdown", () => {
 
     expect(screen.queryByTestId("context-search-loading")).toBeNull();
     expect(screen.getAllByTestId("context-search-option")).toHaveLength(2);
-    expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("搜索中");
+    expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("Searching");
   });
 
   it("supports keyboard navigation and selection", () => {

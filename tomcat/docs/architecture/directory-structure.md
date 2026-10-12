@@ -1,6 +1,8 @@
 # 工作目录结构（可视化 companion）
 
 本文档只负责展示默认 `work_dir`（通常为 `~/.tomcat/`）的目录树，**规则、优先级、三层安装布局与账本语义以 [`work-dir-and-data-layout.md`](./work-dir-and-data-layout.md) 为唯一事实源**。
+> **项目资源根当前规则（2026-09）**：项目资源不是此处的 work_dir 树的一部分；使用 `workspace.project_resource_dir`，默认 `<project>/.agents`。不要从旧图中的 `.tomcat` 示例推导项目写入路径。
+
 
 ## 目录树
 

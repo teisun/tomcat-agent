@@ -1,12 +1,16 @@
+import { memo } from "react";
+import { useT } from "../i18n/LocaleProvider";
+
 import type { WebviewCheckpointMarker } from "../types";
 
-export function CheckpointMarker({
+function CheckpointMarkerComponent({
   item,
   onRestore,
 }: {
   item: WebviewCheckpointMarker;
   onRestore(checkpoint: WebviewCheckpointMarker): void;
 }) {
+  const t = useT();
   return (
     <div
       className="tc-checkpoint-marker"
@@ -20,7 +24,7 @@ export function CheckpointMarker({
         onClick={() => onRestore(item)}
         type="button"
       >
-        <span className="tc-checkpoint-marker__label">Restore Checkpoint</span>
+        <span className="tc-checkpoint-marker__label">{t("checkpoint.action")}</span>
         <span aria-hidden="true" className="tc-checkpoint-marker__dot">
           •
         </span>
@@ -33,3 +37,15 @@ export function CheckpointMarker({
     </div>
   );
 }
+
+function areCheckpointMarkerPropsEqual(
+  previous: Readonly<Parameters<typeof CheckpointMarkerComponent>[0]>,
+  next: Readonly<Parameters<typeof CheckpointMarkerComponent>[0]>,
+): boolean {
+  return previous.item === next.item && previous.onRestore === next.onRestore;
+}
+
+export const CheckpointMarker = memo(
+  CheckpointMarkerComponent,
+  areCheckpointMarkerPropsEqual,
+);

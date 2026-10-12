@@ -6,6 +6,8 @@
 //! - agent -> UI 的响应/事件信封
 //! - schema 导出所需的 `schemars` 派生
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +24,12 @@ pub enum ServeAttachmentKind {
 }
 
 /// 多模态消息中的单个附件描述。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+///
+/// **这里只有引用，没有字节。** 字节在粘贴那一刻就已经通过 `ingest_attachment` 交给后端了，
+/// 发送时只说「用那份哈希对应的字节」。这让打字与发送两条路径的载荷都与图片大小无关。
+///
+/// `blob_sha` 与 `file_id` 二选一：前者是本机 ingest 过的字节，后者是已上传到 provider 的文件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServeAttachment {
     pub kind: ServeAttachmentKind,
@@ -30,8 +37,13 @@ pub struct ServeAttachment {
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    /// 已经过 `ingest_attachment` 校验并落盘的字节的 sha256。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_base64: Option<String>,
+    pub blob_sha: Option<String>,
+    /// 发给模型用的那份字节的 sha256。仅 SVG 会与 `blob_sha` 不同（webview 转出的 PNG）。
+    /// 省略则表示模型直接用 `blob_sha`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
 }
@@ -60,6 +72,12 @@ pub struct ServeContextReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServeContentSegment {
+    Instruction {
+        #[serde(rename = "resourceId")]
+        resource_id: String,
+        kind: crate::core::project_instructions::InstructionKind,
+        label: String,
+    },
     Text {
         text: String,
     },
@@ -79,12 +97,45 @@ pub struct ServeMessageParams {
     pub attachments: Vec<ServeAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_message_id: Option<String>,
+    /// Strict steering never implicitly starts an idle session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_if_running: Option<bool>,
 }
 
 impl ServeMessageParams {
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty() && self.attachments.is_empty() && self.user_message_id.is_none()
+        self.segments.is_empty()
+            && self.attachments.is_empty()
+            && self.user_message_id.is_none()
+            && self.only_if_running.is_none()
     }
+}
+
+/// File policy for a historical user-message replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindFiles {
+    Keep,
+    Revert,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindMessage {
+    pub text: String,
+    #[serde(flatten)]
+    pub params: ServeMessageParams,
+}
+
+pub use crate::core::checkpoint::file_baselines::RevertReason;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRewindResponse {
+    pub revert_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert_reason: Option<RevertReason>,
+    pub revert_paths: Vec<String>,
 }
 
 /// 新会话的运行模式。
@@ -127,8 +178,23 @@ pub enum SetPlanModeAction {
 pub struct NewSessionParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub detached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ServeSessionMode>,
+}
+
+/// 历史消息里的图片附件以什么形态回给调用方。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentMode {
+    /// 原样回 transcript 里的 base64。**默认值**，保证 CLI 与既有调用方行为不变。
+    #[default]
+    Inline,
+    /// UI 只回内容哈希引用；字节始终保留在 `attachments/blobs/`。
+    ///
+    /// webview 走这一条：字节由 Chromium 通过资源 URI 自己去拉，完全不进 JS 内存。
+    Reference,
 }
 
 /// `get_messages` 的分页/裁剪参数。
@@ -141,6 +207,8 @@ pub struct GetMessagesParams {
     pub limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub attachment_mode: AttachmentMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -153,12 +221,17 @@ pub struct ListModelsPayload {
 #[serde(rename_all = "camelCase")]
 pub struct UpsertModelResponse {
     pub model: ModelView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveModelResponse {
     pub model_id: String,
+    /// 模型文件已提交删除后，目录缓存刷新失败等不会推翻提交结果的辅助警告。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -183,10 +256,87 @@ impl From<ModelKeyStatus> for SetProviderKeyResponse {
     }
 }
 
+/// Scope is part of connector identity. A Workspace request must carry an
+/// explicit project context; Global never falls back to process cwd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectorScope {
+    Global,
+    Workspace,
+}
+
+/// The VS Code host—not the active chat session or process cwd—selects the
+/// workspace whose connector configuration is being managed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTrustPayload {
+    pub project_root: String,
+    pub trusted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub use crate::core::connector::mcp::manager::{
+    RecoveryStatus as ConnectorRecoveryProgress, ReloadReceipt as ConnectorReloadReceipt,
+};
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorToolPayload {
+    pub model_name: String,
+    pub raw_name: String,
+    pub label: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListConnectorToolsPayload {
+    pub config_key: String,
+    /// Decimal text avoids losing the backend u64 identity in JavaScript.
+    pub generation: String,
+    pub attempt: u8,
+    pub tools: Vec<ConnectorToolPayload>,
+}
+
+/// The result of setting one tool's desired enabled state. These fields describe
+/// this command's durable write and current-process cache synchronization; they
+/// are not an asynchronous job or a second tool catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetConnectorToolEnabledResponse {
+    pub config_key: String,
+    pub raw_name: String,
+    pub enabled: bool,
+    pub config_saved: bool,
+    pub runtime_applied: bool,
+}
+
 /// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServeCommand {
+    #[serde(rename_all = "camelCase")]
+    DeleteSession {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetUiLanguage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        language: crate::infra::config::UiLanguage,
+    },
     #[serde(rename_all = "camelCase")]
     Prompt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +367,65 @@ pub enum ServeCommand {
         #[serde(default, skip_serializing_if = "ServeMessageParams::is_empty")]
         params: ServeMessageParams,
     },
+    /// 在不追加用户消息的前提下，基于当前 transcript 继续请求模型。
+    #[serde(rename_all = "camelCase")]
+    Resume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RewindAndResend {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        session_id: String,
+        message_id: String,
+        files: RewindFiles,
+        message: RewindMessage,
+    },
+    #[serde(rename_all = "camelCase")]
+    PreviewRewind {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        session_id: String,
+        message_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    GetSessionFiles {
+        id: Option<String>,
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    GetSessionFileBaseline {
+        id: Option<String>,
+        session_id: String,
+        source_turn_id: String,
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    RestoreSessionFiles {
+        id: Option<String>,
+        session_id: String,
+        source_turn_id: String,
+        paths: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    KeepSessionFiles {
+        id: Option<String>,
+        session_id: String,
+        source_turn_id: String,
+    },
+    /// 复制指定失败输入为新的活 user message，然后重新开一轮。
+    #[serde(rename_all = "camelCase")]
+    Retry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "messageId")]
+        message_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     GetState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,6 +454,30 @@ pub enum ServeCommand {
         dry_run: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
+    GetInstructionCatalog {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    /// Execute a resource command from the initialize handshake's shared table.
+    #[serde(rename_all = "camelCase")]
+    RunSlashCommand {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        text: String,
+    },
+    /// 主动压缩当前会话上下文，保留摘要以继续会话。
+    #[serde(rename_all = "camelCase")]
+    Compact {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
     SetPlanMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -270,6 +503,25 @@ pub enum ServeCommand {
         session_id: Option<String>,
         model: String,
         level: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetSpeed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        model: String,
+        speed: crate::core::llm::Speed,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetContextWindow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        model: String,
+        #[serde(rename = "contextWindow")]
+        context_window: u32,
     },
     #[serde(rename_all = "camelCase")]
     ListModels {
@@ -301,6 +553,125 @@ pub enum ServeCommand {
         id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    GetProjectTrust {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    TrustProject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        project_root: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ListConnectors {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    ListConnectorTools {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    AddConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        command: String,
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth: Option<Value>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<String>,
+        scope: ConnectorScope,
+        context: ConnectorContext,
+        #[serde(default)]
+        trust_project: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoveConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    TestConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    LoginConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    CancelLoginConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    LogoutConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReloadConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetConnectorToolFilter {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        #[serde(default)]
+        include: Vec<String>,
+        #[serde(default)]
+        exclude: Vec<String>,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetConnectorToolEnabled {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        #[serde(rename = "rawName")]
+        raw_name: String,
+        enabled: bool,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
     NewSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -329,6 +700,14 @@ pub enum ServeCommand {
         id: Option<String>,
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+    },
+    /// 回滚一个尚未进入 live registry 的 detached 会话。幂等；绝不激活目标。
+    #[serde(rename_all = "camelCase")]
+    DiscardDetachedSession {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: String,
     },
     #[serde(rename_all = "camelCase")]
     ListSessions {
@@ -369,31 +748,179 @@ pub enum ServeCommand {
         #[serde(default, skip_serializing_if = "Value::is_null")]
         payload: Value,
     },
+    /// 把一份附件字节交给后端收好，换回内容哈希。
+    ///
+    /// **这是全协议唯一携带图片字节的命令。** 它在粘贴/拖入/选择文件时逐张调用一次，
+    /// 之后所有环节（打字、快照、发送、历史渲染）只传哈希。
+    /// `r-test-payload-contract` 用 schema 静态扫描守住这条不变量。
+    #[serde(rename_all = "camelCase")]
+    IngestAttachment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        attachment: IngestAttachmentInput,
+    },
+    /// 为 detached 目标会话批量保留现有 blob/provider rendition 租约，不携带字节。
+    #[serde(rename_all = "camelCase")]
+    RetainAttachmentLeases {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        params: RetainAttachmentLeasesParams,
+    },
+    /// 补交一张历史图的缩略图（见 [`CacheThumbnailInput`]）。
+    #[serde(rename_all = "camelCase")]
+    CacheAttachmentThumbnail {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        thumbnail: CacheThumbnailInput,
+    },
+}
+
+/// `retain_attachment_leases` 的单个附件引用。只有内容哈希会过 wire；原始字节仍只允许
+/// `ingest_attachment` 携带。`provider_sha` 省略时 provider 与原始 blob 共用同一份字节。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainAttachmentLeaseRef {
+    pub blob_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sha: Option<String>,
+}
+
+/// `retain_attachment_leases` 的入参。后端会把所有 blob/provider SHA 合并去重后原子保留。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainAttachmentLeasesParams {
+    pub attachments: Vec<RetainAttachmentLeaseRef>,
+}
+
+/// `retain_attachment_leases` 的响应。按字典序返回实际保留的去重 SHA 集合。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainAttachmentLeasesResponse {
+    pub retained_shas: Vec<String>,
+}
+
+/// `ingest_attachment` 的入参。
+///
+/// 三份字节各有明确分工，都由 webview 侧的 Chromium 产出：
+/// - `data_base64`：原始字节，用于显示与（非 SVG 时）发给模型
+/// - `thumb_base64`：192px 缩略图，附件条与 filmstrip 只加载它
+/// - `provider_base64`：仅 SVG 需要 —— 模型的视觉接口不认 SVG，webview 用 canvas 转成 PNG
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestAttachmentInput {
+    pub kind: ServeAttachmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub mime_type: String,
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_base64: Option<String>,
+    /// `provider_base64` 的 MIME（SVG 转出的 PNG 即 `image/png`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_mime_type: Option<String>,
+}
+
+/// `cache_attachment_thumbnail` 的入参。
+///
+/// 历史消息里的图片没有经过 `ingest_attachment`（它们的字节来自 transcript），
+/// 所以缩略图要在 webview 第一次渲染那个会话时补生成一次，然后由后端存下来复用。
+/// 之后再打开同一个会话就直接拿 192px 的缩略图，不必再解一遍原图。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheThumbnailInput {
+    /// 缩略图所派生自的那份字节的 sha256。
+    pub source_sha: String,
+    pub thumb_base64: String,
+}
+
+/// `ingest_attachment` 的响应。
+///
+/// 从这里开始，这份附件在系统里的身份就是这几个哈希，不再是字节。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestAttachmentResponse {
+    /// 原始字节的 sha256。
+    pub blob_sha: String,
+    /// 缩略图是否已就绪。
+    ///
+    /// 缩略图按**源字节的哈希**存在 `thumbs/<blob_sha>`，而不是按它自己的哈希存。
+    /// 理由：没有任何人会问「给我哈希是 Y 的那张缩略图」，大家问的都是
+    /// 「给我 blob X 的小图」。按自身哈希存会让它变成一份普通 blob —— 于是要占租约、
+    /// 要参与 GC，而它本质上只是可随时重建的派生数据。所以这里只回一个布尔值，
+    /// URI 也就固定是 `thumbs/<blobSha>`，历史图与新粘贴的图走同一套路径。
+    pub has_thumb: bool,
+    /// 发给模型用的那份字节的 sha256；仅 SVG 会与 `blob_sha` 不同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sha: Option<String>,
+    /// 原始字节数（十进制），扩展层用它做草稿总量预算。
+    pub bytes: u64,
+    pub mime_type: String,
+    pub filename: String,
 }
 
 impl ServeCommand {
     pub fn command_id(&self) -> Option<&str> {
         match self {
             Self::Prompt { id, .. }
+            | Self::SetUiLanguage { id, .. }
+            | Self::DeleteSession { id, .. }
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
+            | Self::Resume { id, .. }
+            | Self::Retry { id, .. }
+            | Self::RewindAndResend { id, .. }
+            | Self::PreviewRewind { id, .. }
+            | Self::GetSessionFiles { id, .. }
+            | Self::GetSessionFileBaseline { id, .. }
+            | Self::RestoreSessionFiles { id, .. }
+            | Self::KeepSessionFiles { id, .. }
             | Self::GetState { id, .. }
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
+            | Self::Compact { id, .. }
+            | Self::RunSlashCommand { id, .. }
+            | Self::GetInstructionCatalog { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
+            | Self::SetSpeed { id, .. }
+            | Self::SetContextWindow { id, .. }
             | Self::ListModels { id, .. }
             | Self::UpsertModel { id, .. }
             | Self::RemoveModel { id, .. }
             | Self::SetProviderKey { id, .. }
             | Self::ListProviderKeys { id, .. }
+            | Self::GetProjectTrust { id, .. }
+            | Self::TrustProject { id, .. }
+            | Self::ListConnectors { id, .. }
+            | Self::ListConnectorTools { id, .. }
+            | Self::AddConnector { id, .. }
+            | Self::RemoveConnector { id, .. }
+            | Self::TestConnector { id, .. }
+            | Self::LoginConnector { id, .. }
+            | Self::CancelLoginConnector { id, .. }
+            | Self::LogoutConnector { id, .. }
+            | Self::ReloadConnector { id, .. }
+            | Self::SetConnectorToolFilter { id, .. }
+            | Self::SetConnectorToolEnabled { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
             | Self::GetMessages { id, .. }
             | Self::CloseSession { id, .. }
+            | Self::DiscardDetachedSession { id, .. }
             | Self::ListSessions { id, .. }
-            | Self::Interrupt { id, .. } => id.as_deref(),
+            | Self::Interrupt { id, .. }
+            | Self::IngestAttachment { id, .. }
+            | Self::RetainAttachmentLeases { id, .. }
+            | Self::CacheAttachmentThumbnail { id, .. } => id.as_deref(),
             Self::ControlRequest { .. }
             | Self::ControlResponse { .. }
             | Self::ControlCancel { .. } => None,
@@ -405,25 +932,57 @@ impl ServeCommand {
             Self::Prompt { session_id, .. }
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
+            | Self::Resume { session_id, .. }
+            | Self::Retry { session_id, .. }
             | Self::GetState { session_id, .. }
             | Self::ListCheckpoints { session_id, .. }
             | Self::RestoreCheckpoint { session_id, .. }
+            | Self::Compact { session_id, .. }
+            | Self::RunSlashCommand { session_id, .. }
+            | Self::GetInstructionCatalog { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
+            | Self::SetSpeed { session_id, .. }
+            | Self::SetContextWindow { session_id, .. }
             | Self::GetMessages { session_id, .. }
             | Self::CloseSession { session_id, .. }
             | Self::Interrupt { session_id, .. }
+            | Self::IngestAttachment { session_id, .. }
+            | Self::CacheAttachmentThumbnail { session_id, .. }
             | Self::ControlRequest { session_id, .. }
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
-            Self::SwitchSession { session_id, .. } => Some(session_id.as_str()),
+            Self::SwitchSession { session_id, .. }
+            | Self::DeleteSession { session_id, .. }
+            | Self::RewindAndResend { session_id, .. }
+            | Self::PreviewRewind { session_id, .. }
+            | Self::GetSessionFiles { session_id, .. }
+            | Self::GetSessionFileBaseline { session_id, .. }
+            | Self::RestoreSessionFiles { session_id, .. }
+            | Self::KeepSessionFiles { session_id, .. }
+            | Self::RetainAttachmentLeases { session_id, .. }
+            | Self::DiscardDetachedSession { session_id, .. } => Some(session_id.as_str()),
             Self::NewSession { .. }
+            | Self::SetUiLanguage { .. }
             | Self::ListModels { .. }
             | Self::UpsertModel { .. }
             | Self::RemoveModel { .. }
             | Self::SetProviderKey { .. }
             | Self::ListProviderKeys { .. }
+            | Self::GetProjectTrust { .. }
+            | Self::TrustProject { .. }
+            | Self::ListConnectors { .. }
+            | Self::ListConnectorTools { .. }
+            | Self::AddConnector { .. }
+            | Self::RemoveConnector { .. }
+            | Self::TestConnector { .. }
+            | Self::LoginConnector { .. }
+            | Self::CancelLoginConnector { .. }
+            | Self::LogoutConnector { .. }
+            | Self::ReloadConnector { .. }
+            | Self::SetConnectorToolFilter { .. }
+            | Self::SetConnectorToolEnabled { .. }
             | Self::ListSessions { .. } => None,
         }
     }
@@ -447,25 +1006,57 @@ impl ServeCommand {
     pub fn wire_type(&self) -> &'static str {
         match self {
             Self::Prompt { .. } => "prompt",
+            Self::SetUiLanguage { .. } => "set_ui_language",
+            Self::DeleteSession { .. } => "delete_session",
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
+            Self::Resume { .. } => "resume",
+            Self::Retry { .. } => "retry",
+            Self::RewindAndResend { .. } => "rewind_and_resend",
+            Self::PreviewRewind { .. } => "preview_rewind",
+            Self::GetSessionFiles { .. } => "get_session_files",
+            Self::GetSessionFileBaseline { .. } => "get_session_file_baseline",
+            Self::RestoreSessionFiles { .. } => "restore_session_files",
+            Self::KeepSessionFiles { .. } => "keep_session_files",
             Self::GetState { .. } => "get_state",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",
+            Self::Compact { .. } => "compact",
+            Self::RunSlashCommand { .. } => "run_slash_command",
+            Self::GetInstructionCatalog { .. } => "get_instruction_catalog",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",
+            Self::SetSpeed { .. } => "set_speed",
+            Self::SetContextWindow { .. } => "set_context_window",
             Self::ListModels { .. } => "list_models",
             Self::UpsertModel { .. } => "upsert_model",
             Self::RemoveModel { .. } => "remove_model",
             Self::SetProviderKey { .. } => "set_provider_key",
             Self::ListProviderKeys { .. } => "list_provider_keys",
+            Self::GetProjectTrust { .. } => "get_project_trust",
+            Self::TrustProject { .. } => "trust_project",
+            Self::ListConnectors { .. } => "list_connectors",
+            Self::ListConnectorTools { .. } => "list_connector_tools",
+            Self::AddConnector { .. } => "add_connector",
+            Self::RemoveConnector { .. } => "remove_connector",
+            Self::TestConnector { .. } => "test_connector",
+            Self::LoginConnector { .. } => "login_connector",
+            Self::CancelLoginConnector { .. } => "cancel_login_connector",
+            Self::LogoutConnector { .. } => "logout_connector",
+            Self::ReloadConnector { .. } => "reload_connector",
+            Self::SetConnectorToolFilter { .. } => "set_connector_tool_filter",
+            Self::SetConnectorToolEnabled { .. } => "set_connector_tool_enabled",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",
             Self::GetMessages { .. } => "get_messages",
             Self::CloseSession { .. } => "close_session",
+            Self::DiscardDetachedSession { .. } => "discard_detached_session",
             Self::ListSessions { .. } => "list_sessions",
             Self::Interrupt { .. } => "interrupt",
+            Self::IngestAttachment { .. } => "ingest_attachment",
+            Self::RetainAttachmentLeases { .. } => "retain_attachment_leases",
+            Self::CacheAttachmentThumbnail { .. } => "cache_attachment_thumbnail",
             Self::ControlRequest { .. } => "control_request",
             Self::ControlResponse { .. } => "control_response",
             Self::ControlCancel { .. } => "control_cancel",
@@ -477,6 +1068,13 @@ impl ServeCommand {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServePlanEvent {
+    #[serde(rename = "session.agent_mode.changed")]
+    SessionAgentModeChanged {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "agentMode", skip_serializing_if = "Option::is_none")]
+        agent_mode: Option<String>,
+    },
     #[serde(rename = "plan.create")]
     PlanCreate {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -532,6 +1130,17 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
     },
+    #[serde(rename = "plan.review.started")]
+    PlanReviewStarted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        #[serde(rename = "transcriptPath", skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+    },
     #[serde(rename = "plan.review")]
     PlanReview {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -543,6 +1152,23 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         aborted: Option<bool>,
     },
+    #[serde(rename = "plan.code_review.started")]
+    PlanCodeReviewStarted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        round: Option<u32>,
+        #[serde(rename = "reviewAttemptId", skip_serializing_if = "Option::is_none")]
+        review_attempt_id: Option<String>,
+        #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        #[serde(rename = "transcriptPath", skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+    },
     #[serde(rename = "plan.code_review")]
     PlanCodeReview {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -553,6 +1179,35 @@ pub enum ServePlanEvent {
         summary: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         aborted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verdict: Option<String>,
+        #[serde(rename = "changesSummary", skip_serializing_if = "Option::is_none")]
+        changes_summary: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        findings: Option<Vec<ServeFinding>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounds: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        round: Option<u32>,
+        #[serde(rename = "reviewAttemptId", skip_serializing_if = "Option::is_none")]
+        review_attempt_id: Option<String>,
+        #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        #[serde(rename = "skipReason", skip_serializing_if = "Option::is_none")]
+        skip_reason: Option<String>,
+    },
+    #[serde(rename = "plan.explorer.started")]
+    PlanExplorerStarted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+        #[serde(rename = "transcriptPath", skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
     },
     #[serde(rename = "plan.verify")]
     PlanVerify {
@@ -587,6 +1242,25 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         rounds: Option<u32>,
     },
+    /// 轮次预算用尽后的 review 收口事件：正常路径无条件放行进 acceptance 并携带残余；
+    /// 基础设施连续故障时仍可能以 handoff outcome 交还用户。
+    #[serde(rename = "plan.code_review.exhausted")]
+    PlanCodeReviewExhausted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounds: Option<u32>,
+        #[serde(rename = "unresolvedFindings", skip_serializing_if = "Option::is_none")]
+        unresolved_findings: Option<Vec<String>>,
+        #[serde(rename = "residualFindings", skip_serializing_if = "Option::is_none")]
+        residual_findings: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+        #[serde(rename = "codeReviewPass", skip_serializing_if = "Option::is_none")]
+        code_review_pass: Option<bool>,
+    },
     #[serde(rename = "plan.complete")]
     PlanComplete {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -597,6 +1271,8 @@ pub enum ServePlanEvent {
         path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
+        #[serde(rename = "cacheObservation", skip_serializing_if = "Option::is_none")]
+        cache_observation: Option<ServeCacheObservation>,
     },
     #[serde(rename = "plan.pending")]
     PlanPending {
@@ -608,6 +1284,19 @@ pub enum ServePlanEvent {
         path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
+    },
+    #[serde(rename = "plan.stalled")]
+    PlanStalled {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(rename = "idleNudges", skip_serializing_if = "Option::is_none")]
+        idle_nudges: Option<u32>,
+        #[serde(rename = "remainingWork", skip_serializing_if = "Option::is_none")]
+        remaining_work: Option<Vec<String>>,
     },
     #[serde(rename = "plan.todos")]
     PlanTodos {
@@ -672,7 +1361,7 @@ pub enum ServeTurnEvent {
     },
 }
 
-/// `tool.*` 自定义事件的 schema 入口（当前仅 `tool.summary_updated`）。
+/// `tool.*` 自定义事件的 schema 入口（`tool.summary_updated` / `background_task_finished`）。
 ///
 /// 单条工具卡片（bash）的标题在命令执行后由 utility 模型异步生成，通过该事件
 /// 按 `toolCallId` 热更新到前端；仅 live 生效，历史重载回落客户端占位。
@@ -688,6 +1377,42 @@ pub enum ServeToolEvent {
         #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
         summary_title: Option<String>,
     },
+    #[serde(rename = "background_task_finished")]
+    BackgroundTaskFinished {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(rename = "exitCode")]
+        exit_code: i32,
+        #[serde(rename = "logPath", skip_serializing_if = "Option::is_none")]
+        log_path: Option<String>,
+        #[serde(rename = "command", skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ServeFinding {
+    pub severity: String,
+    pub area: String,
+    pub note: String,
+}
+
+/// Cache metrics collected during the active build. A missing `cacheHitRatio` means the
+/// provider did not report cache-read usage, not that every request missed.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServeCacheObservation {
+    pub prompt_tokens_total: u64,
+    pub cache_read_tokens_total: u64,
+    pub cache_observed_prompt_tokens_total: u64,
+    pub cache_observed_request_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit_ratio: Option<f64>,
+    pub consecutive_miss_max: u32,
+    pub tail_changed_count: u32,
+    pub tail_change_miss_tokens: u64,
 }
 
 /// plan / session todo 项的 wire schema 形状，与 `shared_todo_ops::items_json` 运行时输出一致。
@@ -696,6 +1421,8 @@ pub struct ServeTodoItem {
     pub id: String,
     pub content: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
 }
 
 /// 普通命令的 ack / error 响应。
@@ -737,6 +1464,21 @@ impl ResponseFrame {
             session_id,
             error: Some(error.into()),
             payload: None,
+        }
+    }
+    pub fn error_with_payload(
+        id: Option<String>,
+        session_id: Option<String>,
+        error: impl Into<String>,
+        payload: Value,
+    ) -> Self {
+        Self {
+            frame_type: "response".to_string(),
+            id,
+            success: false,
+            session_id,
+            error: Some(error.into()),
+            payload: Some(payload),
         }
     }
 }

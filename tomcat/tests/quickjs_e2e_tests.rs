@@ -9,13 +9,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tomcat::{
-    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
-    DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult, EditOperation,
-    FunctionRegistry, HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig,
-    PluginFunctionInvoker, PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus,
-    PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager,
-    StreamEvent, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle,
-    VmActorState, WriteFileResult,
+    parse_manifest, BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse,
+    ChatResponseChoice, DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult,
+    EditOperation, EventBus, FunctionRegistry, HostApiDispatcher, LlmProvider, LlmResolver,
+    LlmScene, PluginEngine, PluginEngineConfig, PluginFunctionInvoker, PluginInstance,
+    PluginManager, PluginRuntimeManager, PluginStatus, PluginToolExecutor, PrimitiveExecutor,
+    PrimitiveOperation, ResolvedCall, SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor,
+    ToolRegistry, TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
 };
 
 type FunctionManagerHarness = (
@@ -75,6 +75,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
         .register_plugin(PluginInstance {
             id: plugin_id.to_string(),
             manifest,
+            fingerprint: None,
             plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: manifest_tool_names,
@@ -256,6 +257,127 @@ fn make_manager_with_dispatcher_and_config(
     (manager, rm)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_timeout_session_start_handles_delayed_initialization_and_events() {
+    let bus = Arc::new(DefaultEventBus::new());
+    bus.on(
+        "startup-delay",
+        Box::new(|_| {
+            // A real hostcall takes longer than the old accidental 1ms startup limit.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(())
+        }),
+    );
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let done_tx = Mutex::new(Some(done_tx));
+    bus.on(
+        "startup-probe-done",
+        Box::new(move |_| {
+            if let Some(sender) = done_tx.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+            Ok(())
+        }),
+    );
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let (manager, rm) = make_manager_with_dispatcher_and_config(
+        bus,
+        dispatcher,
+        PluginEngineConfig {
+            call_timeout_ms: 0,
+            interrupt_budget: 0,
+            ..Default::default()
+        },
+    );
+    let plugin = create_plugin_dir(
+        "zero-start",
+        r#"
+pi.emit('startup-delay');
+pi.on('probe', function() { pi.emit('startup-probe-done'); });
+__pi_start_event_loop();
+"#,
+    );
+    register_plugin(&manager, plugin.path(), "zero-start");
+    let handle = tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.start_session_vm("zero-session", "zero-start"),
+    )
+    .await
+    .expect("startup must finish")
+    .expect("0 must disable the startup timeout");
+    manager
+        .dispatch_session_event("zero-session", "zero-start", "probe", json!({}), json!({}))
+        .unwrap();
+    let processed = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+    manager.end_session("zero-session").await.unwrap();
+    processed.expect("plugin must handle the event").unwrap();
+    assert!(rm.is_empty());
+    assert!(wait_for_state(&handle, VmActorState::Stopped).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_timeout_session_start_reports_initialization_error_and_cleans_up() {
+    let bus = Arc::new(DefaultEventBus::new());
+    bus.on(
+        "startup-delay",
+        Box::new(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(())
+        }),
+    );
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let (manager, rm) = make_manager_with_dispatcher_and_config(
+        bus,
+        dispatcher.clone(),
+        PluginEngineConfig {
+            call_timeout_ms: 0,
+            interrupt_budget: 0,
+            ..Default::default()
+        },
+    );
+    let plugin = create_plugin_dir(
+        "zero-error",
+        "pi.emit('startup-delay'); throw new Error('zero-startup-error-marker');",
+    );
+    register_plugin(&manager, plugin.path(), "zero-error");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.start_session_vm("zero-session", "zero-error"),
+    )
+    .await
+    .expect("initialization error must not hang");
+    let error = match result {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("bad initialization must fail"),
+    };
+    assert!(
+        error.contains(&tomcat::infra::tr("error.prefix.quickjs", &[])),
+        "{error}"
+    );
+    assert!(
+        !error.contains("timed out"),
+        "0 must not introduce a timer: {error}"
+    );
+    assert!(rm.is_empty());
+    assert!(dispatcher
+        .get_event_sender("zero-session/zero-error")
+        .is_none());
+    std::fs::write(plugin.path().join("main.js"), "__pi_start_event_loop();").unwrap();
+    let handle = tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.start_session_vm("zero-session", "zero-error"),
+    )
+    .await
+    .unwrap()
+    .expect("same key must be retryable after repair");
+    manager.end_session("zero-session").await.unwrap();
+    assert!(wait_for_state(&handle, VmActorState::Stopped).await);
+}
+
 struct MockPrimitive;
 
 #[async_trait]
@@ -287,6 +409,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 
@@ -302,6 +425,7 @@ impl PrimitiveExecutor for MockPrimitive {
             added: Some(0),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
         })
     }
 
@@ -310,8 +434,7 @@ impl PrimitiveExecutor for MockPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
-        _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, tomcat::AppError> {
         Ok(BashResult {
             stdout: "ok".to_string(),
@@ -367,6 +490,32 @@ impl LlmProvider for MockLlm {
 
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, tomcat::AppError> {
         Ok(0)
+    }
+}
+
+struct QuickJsFixedResolver {
+    provider: Arc<dyn LlmProvider>,
+}
+
+impl LlmResolver for QuickJsFixedResolver {
+    fn resolve(
+        &self,
+        _scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, tomcat::AppError> {
+        let model = session_override
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .unwrap_or("mock-model");
+        let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
+        call.capabilities = Capabilities {
+            vision: false,
+            files: false,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        };
+        Ok(call)
     }
 }
 
@@ -571,11 +720,12 @@ __pi_start_event_loop();
     );
 
     let bus = Arc::new(DefaultEventBus::new());
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
     let dispatcher = Arc::new(
         HostApiDispatcher::new(bus.clone())
             .with_tokio_handle(tokio::runtime::Handle::current())
             .with_primitive(Arc::new(MockPrimitive))
-            .with_llm(Arc::new(MockLlm)),
+            .with_llm_resolver(Arc::new(QuickJsFixedResolver { provider: llm })),
     );
     let (manager, rm) = make_manager_with_dispatcher(bus, dispatcher);
     register_plugin(&manager, plugin_dir.path(), "readfile-llm-plugin");

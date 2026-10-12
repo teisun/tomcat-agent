@@ -1,12 +1,13 @@
 //! 配置加载、校验与路径解析函数。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::super::brand::{DEFAULT_WORK_DIR, ENV_PREFIX};
 use super::super::error::AppError;
 use super::super::platform::normalize_path;
 use super::types::AppConfig;
+use crate::infra::i18n::tr;
 
 /// 从可选配置文件与环境变量加载并合并为 [`AppConfig`]。
 ///
@@ -41,12 +42,14 @@ fn load_config_impl(
     // 防止 shell 中误设的 `TOMCAT__SECURITY__*` / `TOMCAT__LLM__API_KEY*`
     // 静默覆盖磁盘配置造成提权。
     sanitize_sensitive_env(config_path);
+    warn_removed_ask_question_timeout(config_path);
 
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
             if reject_legacy_keys {
                 reject_legacy_whitelist_keys(p)?;
+                reject_legacy_bash_timeout_key(p)?;
             }
             builder = builder.add_source(::config::File::from(p));
         }
@@ -62,7 +65,45 @@ fn load_config_impl(
     let merged: AppConfig = layered
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;
+    validate_config(&merged)?;
     Ok(merged)
+}
+
+fn warn_removed_ask_question_timeout(config_path: Option<&Path>) {
+    for source in removed_ask_question_timeout_sources(config_path) {
+        tracing::warn!(
+            target: "config",
+            source,
+            "ask_question timeout was removed and is ignored; questions now wait until answered, interrupted, or disconnected"
+        );
+    }
+}
+
+pub(crate) fn removed_ask_question_timeout_sources(
+    config_path: Option<&Path>,
+) -> Vec<&'static str> {
+    let mut sources = Vec::new();
+    if config_path.is_some_and(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| content.parse::<toml::Value>().ok())
+            .and_then(|value| {
+                value
+                    .get("ask_question")
+                    .and_then(|table| table.get("timeout_ms"))
+                    .cloned()
+            })
+            .is_some()
+    }) {
+        sources.push("ask_question.timeout_ms");
+    }
+    if std::env::var_os("TOMCAT_ASK_QUESTION_TIMEOUT_MS").is_some() {
+        sources.push("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+    }
+    if std::env::var_os("TOMCAT__ASK_QUESTION__TIMEOUT_MS").is_some() {
+        sources.push("TOMCAT__ASK_QUESTION__TIMEOUT_MS");
+    }
+    sources
 }
 
 /// 把 TOML 文件中已声明的敏感 key 对应的 env vars 从进程环境中移除，避免
@@ -74,6 +115,21 @@ fn load_config_impl(
 /// - `TOMCAT__PRIMITIVE__PATH_RULES*`
 /// - `TOMCAT__PRIMITIVE__BASH_FORBIDDEN*`
 /// - `TOMCAT__PRIMITIVE__BASH_APPROVAL_REQUIRED*`
+fn reject_legacy_bash_timeout_key(path: &Path) -> Result<(), AppError> {
+    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
+    let value: toml::Value =
+        toml::from_str(&content).map_err(|error| AppError::Config(error.to_string()))?;
+    if value
+        .get("tools")
+        .and_then(|tools| tools.get("bash"))
+        .and_then(|bash| bash.get("timeout_ms"))
+        .is_some()
+    {
+        return Err(AppError::Config(tr("config.legacyTimeout", &[])));
+    }
+    Ok(())
+}
+
 fn sanitize_sensitive_env(config_path: Option<&std::path::Path>) {
     if config_path.is_none_or(|p| !p.exists()) {
         return;
@@ -119,53 +175,41 @@ fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
         .and_then(|v| v.as_table())
         .map(|llm| {
             [
-                (
-                    "provider",
-                    "models.toml 中 [[models]].api（协议线）与 [[models]].provider（厂商）",
-                ),
-                ("api_base", "models.toml 中 [[models]].base_url"),
-                ("api_key_env", "models.toml 中 [[models]].api_key_env"),
+                ("provider", "config.migrateProvider"),
+                ("api_base", "config.migrateApiBase"),
+                ("api_key_env", "config.migrateApiKey"),
             ]
             .into_iter()
             .filter(|(key, _)| llm.contains_key(*key))
-            .map(|(key, target)| format!("llm.{key} -> {target}"))
+            .map(|(key, target)| format!("llm.{key} -> {}", tr(target, &[])))
             .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     if !llm_hits.is_empty() {
-        return Err(AppError::Config(format!(
-            "配置包含已删除的 [llm] 单模型连接字段：{}。请迁移到 models.toml 后重试。",
-            llm_hits.join("; ")
+        return Err(AppError::Config(tr(
+            "config.legacyLlm",
+            &[("fields", &llm_hits.join("; "))],
         )));
     }
     let Some(primitive) = value.get("primitive").and_then(|v| v.as_table()) else {
         return Ok(());
     };
     let legacy = [
-        (
-            "path_whitelist",
-            "workspace.workspace_roots（持久允许根）或 primitive.path_rules（deny/readonly）",
-        ),
-        (
-            "bash_whitelist",
-            "primitive.bash_forbidden / primitive.bash_approval_required 的显式规则",
-        ),
-        (
-            "auto_confirm_whitelist",
-            "删除该字段；现由 primitive.auto_confirm 控制（默认 true）",
-        ),
+        ("path_whitelist", "config.migratePathList"),
+        ("bash_whitelist", "config.migrateBashList"),
+        ("auto_confirm_whitelist", "config.migrateConfirmList"),
     ];
     let hits = legacy
         .iter()
         .filter(|(key, _)| primitive.contains_key(*key))
-        .map(|(key, target)| format!("primitive.{key} -> {target}"))
+        .map(|(key, target)| format!("primitive.{key} -> {}", tr(target, &[])))
         .collect::<Vec<_>>();
     if hits.is_empty() {
         return Ok(());
     }
-    Err(AppError::Config(format!(
-        "配置包含已删除的 legacy whitelist 字段：{}。请按提示迁移后重试。",
-        hits.join("; ")
+    Err(AppError::Config(tr(
+        "config.legacyWhitelist",
+        &[("fields", &hits.join("; "))],
     )))
 }
 
@@ -179,22 +223,18 @@ pub fn resolve_workspace_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, Ap
             continue;
         }
         let p = normalize_path(t)?;
-        let canon = std::fs::canonicalize(&p).map_err(|_| {
-            AppError::Config(format!(
-                "workspace.workspace_roots 路径无效或不可访问: {}",
-                t
-            ))
-        })?;
+        let canon = std::fs::canonicalize(&p)
+            .map_err(|_| AppError::Config(tr("config.rootInvalid", &[("path", t)])))?;
         if !canon.is_dir() {
-            return Err(AppError::Config(format!(
-                "workspace.workspace_roots 不是目录: {}",
-                canon.display()
+            return Err(AppError::Config(tr(
+                "config.rootNotDir",
+                &[("path", &canon.display().to_string())],
             )));
         }
         if !seen.insert(canon.clone()) {
-            return Err(AppError::Config(format!(
-                "workspace.workspace_roots 存在重复: {}",
-                canon.display()
+            return Err(AppError::Config(tr(
+                "config.rootDuplicate",
+                &[("path", &canon.display().to_string())],
             )));
         }
         out.push(canon);
@@ -212,15 +252,69 @@ fn push_builtin_workspace_root(
     std::fs::create_dir_all(&temp).map_err(AppError::Io)?;
     let canon = std::fs::canonicalize(&temp).unwrap_or(temp);
     if !canon.is_dir() {
-        return Err(AppError::Config(format!(
-            "内置 workspace 根不是目录: {}",
-            canon.display()
+        return Err(AppError::Config(tr(
+            "config.builtinNotDir",
+            &[("path", &canon.display().to_string())],
         )));
     }
     if seen.insert(canon.clone()) {
         out.push(canon);
     }
     Ok(())
+}
+
+/// 将项目资源目录配置校验为项目内相对路径。
+///
+/// 该配置只描述项目目录下的一棵资源树，因此拒绝空值、当前/父目录、绝对路径、
+/// home 缩写和旧 `.tomcat` 子树。函数不检查或创建 `project_dir`，调用方可在
+/// 发现、预检或安装阶段按自己的错误边界处理项目是否存在。
+pub fn resolve_project_resource_dir(
+    cfg: &AppConfig,
+    project_dir: &Path,
+) -> Result<PathBuf, AppError> {
+    let relative = validated_project_resource_dir(&cfg.workspace.project_resource_dir)?;
+    Ok(project_dir.join(relative))
+}
+
+fn validated_project_resource_dir(value: &str) -> Result<PathBuf, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Config(tr("config.resourceEmpty", &[])));
+    }
+
+    let path = Path::new(trimmed);
+
+    if trimmed
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".." | "~" | ".tomcat"))
+    {
+        return Err(AppError::Config(tr(
+            "config.resourceBlocked",
+            &[("path", value)],
+        )));
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if name == ".tomcat" => {
+                return Err(AppError::Config(tr("config.resourceLegacy", &[])));
+            }
+            Component::Normal(name) if name == "~" => {
+                return Err(AppError::Config(tr("config.resourceTilde", &[])));
+            }
+            Component::Normal(_) => {}
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(AppError::Config(tr(
+                    "config.resourceRelative",
+                    &[("path", value)],
+                )));
+            }
+        }
+    }
+
+    Ok(path.to_path_buf())
 }
 
 /// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.tomcat/`。
@@ -386,6 +480,21 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     Ok(())
 }
 
+fn invalid_range(field: &str, value: impl ToString, allowed: &str) -> AppError {
+    AppError::Config(tr(
+        "config.invalidRange",
+        &[
+            ("field", field),
+            ("value", &value.to_string()),
+            ("allowed", allowed),
+        ],
+    ))
+}
+
+fn must_be_positive(field: &str) -> AppError {
+    AppError::Config(tr("config.positive", &[("field", field)]))
+}
+
 /// 配置合法性校验入口，应在启动时对 [`load_config`] 得到的配置调用。
 ///
 /// # Arguments
@@ -394,111 +503,122 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
 /// # Errors
 /// * [`AppError::Config`] - `audit_log_retention_days` 为 0、`log.level` 非法、`llm.proxy` 格式非法（非 `http://`/`https://` 开头），或 `llm.files.expires_after_seconds` 越界（非 0 且不在 [3600, 2592000]）时返回。
 pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
-    if cfg.security.audit_log_retention_days == 0 {
-        return Err(AppError::Config(
-            "audit_log_retention_days 必须大于 0".to_string(),
+    cfg.connector.mcp.validate()?;
+    if !(super::types::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS
+        ..=super::types::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS)
+        .contains(&cfg.tools.bash.foreground_wait_ms)
+    {
+        return Err(invalid_range(
+            "tools.bash.foreground_wait_ms",
+            cfg.tools.bash.foreground_wait_ms,
+            "[8000, 16000]",
         ));
+    }
+    if !(1..=super::types::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS)
+        .contains(&cfg.tools.bash.max_output_chars)
+    {
+        return Err(invalid_range(
+            "tools.bash.max_output_chars",
+            cfg.tools.bash.max_output_chars,
+            &format!("[1, {}]", super::types::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS),
+        ));
+    }
+    if cfg.security.audit_log_retention_days == 0 {
+        return Err(must_be_positive("audit_log_retention_days"));
     }
     if cfg.checkpoint.retention_max == 0 {
-        return Err(AppError::Config(
-            "checkpoint.retention_max 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("checkpoint.retention_max"));
     }
     if cfg.checkpoint.retention_days == 0 {
-        return Err(AppError::Config(
-            "checkpoint.retention_days 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("checkpoint.retention_days"));
     }
     let session_mode = cfg.session.default_mode.trim().to_ascii_lowercase();
     if !["code", "claw"].contains(&session_mode.as_str()) {
-        return Err(AppError::Config(format!(
-            "session.default_mode 非法: {}（允许 code / claw）",
-            cfg.session.default_mode
-        )));
+        return Err(invalid_range(
+            "session.default_mode",
+            &cfg.session.default_mode,
+            "code / claw",
+        ));
     }
     let level = cfg.log.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {
-        return Err(AppError::Config(format!(
-            "无效的 log.level: {}",
-            cfg.log.level
+        return Err(AppError::Config(tr(
+            "config.invalidLog",
+            &[("value", &cfg.log.level)],
         )));
     }
     if let Some(ref proxy) = cfg.llm.proxy {
         let u = proxy.trim();
         if !u.starts_with("http://") && !u.starts_with("https://") {
-            return Err(AppError::Config(format!(
-                "llm.proxy 须以 http:// 或 https:// 开头: {}",
-                proxy
+            return Err(AppError::Config(tr(
+                "config.urlScheme",
+                &[("field", "llm.proxy")],
             )));
         }
     }
     let stream_idle_timeout = cfg.llm.stream_timeout_sec;
     if stream_idle_timeout != 0 && !(5..=3_600).contains(&stream_idle_timeout) {
-        return Err(AppError::Config(format!(
-            "llm.stream_timeout_sec 非法: {}（允许 0 或 [5, 3600]）",
-            stream_idle_timeout
-        )));
+        return Err(invalid_range(
+            "llm.stream_timeout_sec",
+            stream_idle_timeout,
+            &tr("config.allowedTimeout", &[]),
+        ));
     }
     let non_stream_stale_timeout = cfg.llm.non_stream_stale_timeout_sec;
     if non_stream_stale_timeout != 0 && !(5..=3_600).contains(&non_stream_stale_timeout) {
-        return Err(AppError::Config(format!(
-            "llm.non_stream_stale_timeout_sec 非法: {}（允许 0 或 [5, 3600]）",
-            non_stream_stale_timeout
-        )));
+        return Err(invalid_range(
+            "llm.non_stream_stale_timeout_sec",
+            non_stream_stale_timeout,
+            &tr("config.allowedTimeout", &[]),
+        ));
     }
     let http_read_timeout = cfg.llm.http_read_timeout_sec;
     if http_read_timeout != 0 && !(5..=3_600).contains(&http_read_timeout) {
-        return Err(AppError::Config(format!(
-            "llm.http_read_timeout_sec 非法: {}（允许 0 或 [5, 3600]）",
-            http_read_timeout
-        )));
+        return Err(invalid_range(
+            "llm.http_read_timeout_sec",
+            http_read_timeout,
+            &tr("config.allowedTimeout", &[]),
+        ));
     }
     let expires = cfg.llm.files.expires_after_seconds;
     if expires != 0 && !(3_600..=2_592_000).contains(&expires) {
-        return Err(AppError::Config(format!(
-            "llm.files.expires_after_seconds 非法: {}（允许 0 或 [3600, 2592000]）",
-            expires
-        )));
+        return Err(invalid_range(
+            "llm.files.expires_after_seconds",
+            expires,
+            &tr("config.allowedExpiry", &[]),
+        ));
     }
     if cfg.skills.prompt_budget_pct > 100 {
-        return Err(AppError::Config(format!(
-            "skills.prompt_budget_pct 非法: {}（允许 [0, 100]）",
-            cfg.skills.prompt_budget_pct
-        )));
+        return Err(invalid_range(
+            "skills.prompt_budget_pct",
+            cfg.skills.prompt_budget_pct,
+            "[0, 100]",
+        ));
     }
     if cfg.skills.prompt_budget_floor_chars == 0 {
-        return Err(AppError::Config(
-            "skills.prompt_budget_floor_chars 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("skills.prompt_budget_floor_chars"));
     }
     if cfg.skills.max_description_chars == 0 {
-        return Err(AppError::Config(
-            "skills.max_description_chars 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("skills.max_description_chars"));
     }
     if cfg.skills.max_skills == 0 {
-        return Err(AppError::Config("skills.max_skills 必须大于 0".to_string()));
+        return Err(must_be_positive("skills.max_skills"));
     }
     if !(1..=20).contains(&cfg.tools.web_search.count) {
-        return Err(AppError::Config(format!(
-            "tools.web_search.count 非法: {}（允许 [1, 20]）",
-            cfg.tools.web_search.count
-        )));
+        return Err(invalid_range(
+            "tools.web_search.count",
+            cfg.tools.web_search.count,
+            "[1, 20]",
+        ));
     }
     if cfg.tools.web_search.cache_capacity == 0 {
-        return Err(AppError::Config(
-            "tools.web_search.cache_capacity 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_search.cache_capacity"));
     }
     if cfg.tools.web_search.cache_ttl_secs == 0 {
-        return Err(AppError::Config(
-            "tools.web_search.cache_ttl_secs 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_search.cache_ttl_secs"));
     }
     if cfg.tools.web_search.timeout_ms == 0 {
-        return Err(AppError::Config(
-            "tools.web_search.timeout_ms 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_search.timeout_ms"));
     }
     for (label, value) in [
         (
@@ -515,46 +635,34 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
         ),
     ] {
         if !value.starts_with("http://") && !value.starts_with("https://") {
-            return Err(AppError::Config(format!(
-                "{label} 须以 http:// 或 https:// 开头"
+            return Err(AppError::Config(tr(
+                "config.urlScheme",
+                &[("field", label)],
             )));
         }
     }
     if cfg.tools.web_fetch.max_redirects == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.max_redirects 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.max_redirects"));
     }
     if cfg.tools.web_fetch.fetch_timeout_ms == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.fetch_timeout_ms 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.fetch_timeout_ms"));
     }
     if cfg.tools.web_fetch.max_http_content_bytes == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.max_http_content_bytes 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.max_http_content_bytes"));
     }
     if cfg.tools.web_fetch.max_markdown_chars == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.max_markdown_chars 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.max_markdown_chars"));
     }
     if cfg.tools.web_fetch.markdown_head_chars == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.markdown_head_chars 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.markdown_head_chars"));
     }
     if cfg.tools.web_fetch.cache_ttl_secs == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.cache_ttl_secs 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.cache_ttl_secs"));
     }
     if cfg.tools.web_fetch.cache_capacity_bytes == 0 {
-        return Err(AppError::Config(
-            "tools.web_fetch.cache_capacity_bytes 必须大于 0".to_string(),
-        ));
+        return Err(must_be_positive("tools.web_fetch.cache_capacity_bytes"));
     }
+    validated_project_resource_dir(&cfg.workspace.project_resource_dir)?;
     resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }

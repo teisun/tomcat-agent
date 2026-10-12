@@ -5,15 +5,15 @@ use async_trait::async_trait;
 
 pub(crate) use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, validate_frontmatter_invariants, write_plan, PlanFile,
-    PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind, TodoStatus,
 };
-pub(crate) use crate::core::plan_runtime::review::{ReviewKind, ReviewSummary};
 pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
-    state::PlanState, PlanRuntime, PlanRuntimeError, ReviewerDispatcher, VerifierDispatcher,
+    CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary, PlanReviewerDispatcher,
+    PlanRuntime, PlanRuntimeError, VerifierDispatcher,
 };
-pub(crate) use crate::core::session::manager::{PlanEventKind, PlanEventRef};
+pub(crate) use crate::core::session::manager::{AgentMode, ResumeControlState};
 pub(crate) use crate::core::tools::plan_tool::{
     ask_question, create_plan, shared_todo_ops, todos, update_plan, ToolError,
 };
@@ -52,7 +52,7 @@ pub fn cleanup_home(p: &std::path::Path) {
 
 pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
     rt.set_max_code_review_rounds(0);
-    rt.enter_planning().unwrap();
+    rt.enter_plan().unwrap();
     let out = create_plan::execute(
         rt,
         create_plan::CreatePlanArgs {
@@ -63,11 +63,13 @@ pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    kind: TodoKind::Work,
                 },
                 create_plan::TodoArg {
                     id: "t2".into(),
                     content: "step 2".into(),
                     status: TodoStatus::Pending,
+                    kind: TodoKind::Work,
                 },
             ],
         },
@@ -84,17 +86,17 @@ pub fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
     plan.frontmatter.session_id = Some(format!("sid-{session_key}"));
     write_plan(&path, &plan, 2000).unwrap();
     rt.set_max_code_review_rounds(0);
-    rt.set_executing_for_test(plan_id.to_string());
+    rt.bind_plan_file_for_test(path);
 }
 
-pub struct MockReviewerDispatcher {
-    summaries: parking_lot::Mutex<Vec<ReviewSummary>>,
+pub struct MockPlanReviewerDispatcher {
+    summaries: parking_lot::Mutex<Vec<PlanReviewSummary>>,
     pub call_count: AtomicUsize,
     pub delay: Option<Duration>,
 }
 
-impl MockReviewerDispatcher {
-    pub fn new(summaries: Vec<ReviewSummary>) -> Self {
+impl MockPlanReviewerDispatcher {
+    pub fn new(summaries: Vec<PlanReviewSummary>) -> Self {
         Self {
             summaries: parking_lot::Mutex::new(summaries),
             call_count: AtomicUsize::new(0),
@@ -104,67 +106,78 @@ impl MockReviewerDispatcher {
 }
 
 #[async_trait]
-impl ReviewerDispatcher for MockReviewerDispatcher {
+impl PlanReviewerDispatcher for MockPlanReviewerDispatcher {
     async fn dispatch(
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        kind: ReviewKind,
         _allow_review_edit: bool,
-    ) -> ReviewSummary {
+    ) -> PlanReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
         }
         let mut q = self.summaries.lock();
         if q.is_empty() {
-            ReviewSummary::aborted_with_kind(kind, "mock 队列耗尽")
+            PlanReviewSummary::aborted_with("mock 队列耗尽")
+        } else {
+            q.remove(0)
+        }
+    }
+}
+
+pub struct MockCodeReviewerDispatcher {
+    summaries: parking_lot::Mutex<Vec<CodeReviewSummary>>,
+    pub call_count: AtomicUsize,
+    pub delay: Option<Duration>,
+}
+
+impl MockCodeReviewerDispatcher {
+    pub fn new(summaries: Vec<CodeReviewSummary>) -> Self {
+        Self {
+            summaries: parking_lot::Mutex::new(summaries),
+            call_count: AtomicUsize::new(0),
+            delay: None,
+        }
+    }
+}
+
+#[async_trait]
+impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _review_state: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
+        _dispatch: &crate::core::plan_runtime::CodeReviewDispatchInfo,
+    ) -> CodeReviewSummary {
+        self.call_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(d) = self.delay {
+            tokio::time::sleep(d).await;
+        }
+        let mut q = self.summaries.lock();
+        if q.is_empty() {
+            CodeReviewSummary::aborted_with("mock 队列耗尽")
         } else {
             let mut summary = q.remove(0);
-            summary.kind = kind;
+            for (index, finding) in summary.findings.iter_mut().enumerate() {
+                if finding.reference.is_empty() {
+                    finding.reference = format!("F{:02}", index + 1);
+                }
+            }
             summary
         }
     }
 }
 
-pub fn ok_review() -> ReviewSummary {
-    ReviewSummary {
+pub fn ok_review() -> PlanReviewSummary {
+    PlanReviewSummary {
         aborted: false,
         summary: "looks ok".into(),
         changes_summary: "none".into(),
         applied_changes: false,
         ..Default::default()
     }
-}
-
-pub fn pass_code_review() -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
-        aborted: false,
-        verdict: Some("pass".into()),
-        summary: "code review passed".into(),
-        changes_summary: "none".into(),
-        applied_changes: false,
-        ..Default::default()
-    }
-}
-
-pub fn fail_code_review() -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
-        aborted: false,
-        verdict: Some("fail".into()),
-        summary: "code review found a concrete issue".into(),
-        changes_summary: "none".into(),
-        applied_changes: false,
-        ..Default::default()
-    }
-}
-
-pub fn aborted_code_review(summary: &str) -> ReviewSummary {
-    let mut review = ReviewSummary::aborted_with_kind(ReviewKind::Code, summary);
-    review.verdict = Some("aborted".into());
-    review
 }
 
 pub struct MockVerifierDispatcher {
@@ -226,32 +239,6 @@ pub fn fail_verify() -> VerifySummary {
     }
 }
 
-pub fn partial_verify() -> VerifySummary {
-    VerifySummary {
-        checks: vec![VerifyCheck {
-            name: "unit test".into(),
-            command: String::new(),
-            result: "skip".into(),
-            output_excerpt: "sandbox blocked".into(),
-        }],
-        verdict: "partial".into(),
-        summary: "verification inconclusive".into(),
-        verifier_turns_limit: 64,
-        verifier_stop_reason: "completed".into(),
-        ..Default::default()
-    }
-}
-
-pub fn aborted_verify(stop_reason: &str, summary: &str) -> VerifySummary {
-    VerifySummary {
-        verdict: "aborted".into(),
-        summary: summary.into(),
-        verifier_turns_limit: 64,
-        verifier_stop_reason: stop_reason.into(),
-        ..Default::default()
-    }
-}
-
 pub fn good_args_with_todo() -> create_plan::CreatePlanArgs {
     create_plan::CreatePlanArgs {
         goal: "g".into(),
@@ -260,6 +247,7 @@ pub fn good_args_with_todo() -> create_plan::CreatePlanArgs {
             id: "t1".into(),
             content: "step".into(),
             status: TodoStatus::Pending,
+            kind: TodoKind::Work,
         }],
     }
 }
@@ -281,7 +269,16 @@ pub fn write_plan_file_at(
             id: "step1".into(),
             content: "do the thing".into(),
             status: TodoStatus::Pending,
+            evidence: Vec::new(),
+            kind: TodoKind::Work,
         }],
+        code_review_pass: false,
+        code_review_rounds: 0,
+        code_review_open_findings: Vec::new(),
+        code_review_disputed_findings: Vec::new(),
+        code_review_handoff: false,
+        code_review_handoff_acknowledged: false,
+        code_review_residual_findings: Vec::new(),
         unknown: Default::default(),
     };
     let plan = PlanFile {

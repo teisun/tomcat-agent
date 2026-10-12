@@ -1,6 +1,6 @@
 use crate::infra::events::ToolDisplay;
 
-use super::super::{ToolExecCtx, ToolExecOutcome};
+use super::super::{ToolExecCtx, ToolExecOutcome, AGENT_PLUGIN_ID};
 
 pub(in super::super) async fn dispatch_plan_tool(
     ctx: &ToolExecCtx<'_>,
@@ -9,15 +9,12 @@ pub(in super::super) async fn dispatch_plan_tool(
     display_out: &mut Option<ToolDisplay>,
 ) -> ToolExecOutcome {
     let Some(rt) = ctx.plan_runtime else {
-        return ToolExecOutcome::err(format!(
-            "plan 工具 `{name}` 不可用：当前 AgentLoop 未注入 PlanRuntime（reviewer 子 Agent 或独立测试路径）"
-        ));
+        return ToolExecOutcome::err(format!("Plan tool `{name}` is unavailable: this AgentLoop has no PlanRuntime (reviewer sub-Agent or isolated test path)"));
     };
-    if name == "create_plan"
-        && ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
-    {
+    if name == "create_plan" && ctx.subagent_type.is_reviewer() {
         return ToolExecOutcome::err(
-            "reviewer 子 Agent 禁止调用 `create_plan`（防套娃；reviewer.md §5.2 / §5.5）",
+            "reviewer sub-Agent may not call `create_plan` (no nesting; reviewer.md §5.2 / §5.5)"
+                .to_string(),
         );
     }
 
@@ -26,13 +23,58 @@ pub(in super::super) async fn dispatch_plan_tool(
     let result: Result<serde_json::Value, plan_tools::ToolError> = match name {
         "create_plan" => {
             match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(args.clone()) {
-                Ok(a) => plan_tools::create_plan::execute_with_reviewer(rt, a, true).await,
+                Ok(a) => {
+                    let termination = crate::core::plan_runtime::AskQuestionTermination::default();
+                    if ctx.cancel.is_cancelled() {
+                        termination.interrupt();
+                    }
+                    let watcher = termination.clone();
+                    let cancel = ctx.cancel.clone();
+                    let bridge = tokio::spawn(async move {
+                        cancel.cancelled().await;
+                        watcher.interrupt();
+                    });
+                    let result = plan_tools::create_plan::execute_for_tool(
+                        rt,
+                        a,
+                        true,
+                        termination,
+                        Some(ctx.tool_call_id),
+                    )
+                    .await;
+                    bridge.abort();
+                    result
+                }
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }
         "update_plan" => {
             match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
-                Ok(a) => plan_tools::update_plan::execute(rt, a).await,
+                Ok(a) => match plan_tools::update_plan::resolve_target_plan_path(
+                    rt,
+                    a.plan_id.clone(),
+                    a.path.clone(),
+                ) {
+                    Ok(path) => {
+                        let target = path.to_string_lossy();
+                        // Authorize before the file lock/read, and pin that target
+                        // rather than resolving a possibly changed active plan again.
+                        let authorized = tokio::select! {
+                            biased;
+                            _ = ctx.cancel.cancelled() => return ToolExecOutcome::err(
+                                "update_plan cancelled before writing".to_string(),
+                            ),
+                            result = ctx.primitive.authorize_write_path(&target, AGENT_PLUGIN_ID) => result,
+                        };
+                        match authorized {
+                            Ok(path) => plan_tools::update_plan::execute_at_path(rt, a, path).await,
+                            Err(error) => {
+                                return ToolExecOutcome::err(format!("update_plan failed: {error}"))
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                },
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }
@@ -45,23 +87,22 @@ pub(in super::super) async fn dispatch_plan_tool(
         "ask_question" => {
             let Some(panel) = rt.ask_question_panel() else {
                 return ToolExecOutcome::err(
-                    "ask_question 不可用：PlanRuntime 未配置 AskQuestionPanel",
+                    "ask_question is unavailable: PlanRuntime has no AskQuestionPanel".to_string(),
                 );
             };
-            let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let watcher_flag = cancel_flag.clone();
+            let termination = crate::core::plan_runtime::AskQuestionTermination::default();
+            let watcher_termination = termination.clone();
             let cancel_clone = ctx.cancel.clone();
             let bridge = tokio::spawn(async move {
                 cancel_clone.cancelled().await;
-                watcher_flag.store(true, std::sync::atomic::Ordering::Release);
+                watcher_termination.interrupt();
             });
-            let timeout_ms = rt.ask_question_timeout_ms();
-            let res = plan_tools::ask_question::execute_with_timeout(
+            let res = plan_tools::ask_question::execute_for_tool(
                 rt,
                 panel.as_ref(),
                 args,
-                cancel_flag,
-                timeout_ms,
+                termination,
+                Some(ctx.tool_call_id),
             )
             .await;
             bridge.abort();
@@ -83,6 +124,6 @@ pub(in super::super) async fn dispatch_plan_tool(
             };
             ToolExecOutcome::ok(v.to_string())
         }
-        Err(e) => ToolExecOutcome::err(format!("{name} 失败：{e}")),
+        Err(e) => ToolExecOutcome::err(format!("{name} failed: {e}")),
     }
 }

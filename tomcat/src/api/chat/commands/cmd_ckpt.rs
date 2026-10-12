@@ -1,5 +1,6 @@
 use crate::api::chat::ChatContext;
 use crate::core::{CheckpointKind, CheckpointMeta, ListOptions};
+use crate::infra::i18n::tr;
 
 use super::parse::ChatCommandOutcome;
 
@@ -7,11 +8,14 @@ pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOu
     let session_id = match ctx.session_runtime.session.current_session_id() {
         Ok(Some(v)) => v,
         Ok(None) => {
-            println!("暂无当前会话。");
+            println!("{}", tr("terminal.noSession", &[]));
             return ChatCommandOutcome::Handled;
         }
         Err(err) => {
-            println!("读取当前 session_id 失败：{err}");
+            println!(
+                "{}",
+                tr("slash.ckpt.sessionFailed", &[("detail", &err.to_string())])
+            );
             return ChatCommandOutcome::Handled;
         }
     };
@@ -22,7 +26,7 @@ pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOu
     {
         Ok(entries) => {
             if entries.is_empty() {
-                println!("暂无 checkpoint。");
+                println!("{}", tr("slash.ckpt.empty", &[]));
                 return ChatCommandOutcome::Handled;
             }
             for meta in entries {
@@ -36,7 +40,10 @@ pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOu
             }
         }
         Err(err) => {
-            println!("checkpoint 列表读取失败：{err}");
+            println!(
+                "{}",
+                tr("slash.ckpt.listFailed", &[("detail", &err.to_string())])
+            );
         }
     }
     ChatCommandOutcome::Handled
@@ -49,8 +56,11 @@ pub(crate) fn run_show(ctx: &ChatContext, checkpoint_id: String) -> ChatCommandO
         .show(&crate::core::CheckpointId::new(checkpoint_id.clone()))
     {
         Ok(Some(meta)) => print_checkpoint_meta(&meta),
-        Ok(None) => println!("未找到 checkpoint: {checkpoint_id}"),
-        Err(err) => println!("checkpoint 元数据读取失败：{err}"),
+        Ok(None) => println!("{}", tr("slash.ckpt.notFound", &[("id", &checkpoint_id)])),
+        Err(err) => println!(
+            "{}",
+            tr("slash.ckpt.metaFailed", &[("detail", &err.to_string())])
+        ),
     }
     ChatCommandOutcome::Handled
 }
@@ -63,12 +73,15 @@ pub(crate) fn run_diff(ctx: &ChatContext, checkpoint_id: String) -> ChatCommandO
     {
         Ok(diff) => {
             if diff.text.trim().is_empty() {
-                println!("当前工作区与 checkpoint {checkpoint_id} 无差异。");
+                println!("{}", tr("slash.ckpt.noDiff", &[("id", &checkpoint_id)]));
             } else {
                 print!("{}", diff.text);
             }
         }
-        Err(err) => println!("checkpoint diff 失败：{err}"),
+        Err(err) => println!(
+            "{}",
+            tr("slash.ckpt.diffFailed", &[("detail", &err.to_string())])
+        ),
     }
     ChatCommandOutcome::Handled
 }

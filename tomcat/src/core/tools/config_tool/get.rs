@@ -2,6 +2,7 @@
 
 use crate::infra::config::AppConfig;
 use crate::infra::error::AppError;
+use crate::infra::i18n::tr;
 
 use super::allowlist;
 
@@ -10,15 +11,21 @@ use super::allowlist;
 /// 返回 JSON 形式的当前值；若 key 不存在但白名单允许，返回 `"not_set"` 字符串。
 pub fn config_get_impl(key: &str, cfg: &AppConfig) -> Result<serde_json::Value, AppError> {
     if !allowlist::is_readable(key) {
-        return Err(AppError::Permission(format!(
-            "配置项 '{}' 不在读白名单内或被硬黑名单拦截",
-            key
+        return Err(AppError::Permission(tr(
+            "configTool.readDenied",
+            &[("key", key)],
         )));
     }
-    let toml_val = toml::Value::try_from(cfg)
-        .map_err(|e| AppError::Config(format!("序列化配置失败: {}", e)))?;
+    let toml_val = toml::Value::try_from(cfg).map_err(|e| {
+        AppError::Config(tr(
+            "configTool.serializeFailed",
+            &[("detail", &e.to_string())],
+        ))
+    })?;
     match resolve_toml_path(&toml_val, key) {
-        Some(v) => toml_to_json(v).map_err(|e| AppError::Config(format!("转换 JSON 失败: {}", e))),
+        Some(v) => toml_to_json(v).map_err(|e| {
+            AppError::Config(tr("configTool.jsonFailed", &[("detail", &e.to_string())]))
+        }),
         None => Ok(serde_json::Value::String("not_set".to_string())),
     }
 }

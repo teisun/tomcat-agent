@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use super::super::*;
 use super::mocks::temp_sessions_dir;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::{ChatMessage, ChatMessageContentPart};
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, EffectiveModelLimits, LimitSource};
 
 const TINY_PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -108,6 +108,7 @@ fn test_estimated_token_count_uses_api_usage_when_present() {
         post_usage_appended_chars: 400,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -116,6 +117,46 @@ fn test_estimated_token_count_uses_api_usage_when_present() {
         state.estimated_token_count(),
         1300,
         "should use API usage base + post_usage increment"
+    );
+}
+
+#[test]
+fn apply_limits_changes_the_compaction_gate_from_opus_to_legacy_unknown_model() {
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 1_088_000,
+        context_budget_chars: 3_488_000,
+        context_budget_tokens: 872_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    assert!(
+        state.usage_ratio() < 1.0,
+        "the Opus 5 872K input budget must not compact this transcript"
+    );
+
+    let legacy_unknown = EffectiveModelLimits {
+        context_window: 400_000,
+        model_max_output_tokens: None,
+        output_reserve_tokens: 128_000,
+        input_budget_tokens: 272_000,
+        context_source: LimitSource::LegacyFallback,
+        output_source: LimitSource::LegacyFallback,
+    };
+
+    state.apply_limits(&legacy_unknown);
+
+    assert_eq!(state.context_budget_tokens, 272_000);
+    assert_eq!(state.context_budget_chars, 1_088_000);
+    assert!(
+        state.usage_ratio() >= 1.0,
+        "the legacy 272K fallback must trigger the normal over-budget compaction path"
     );
 }
 
@@ -130,6 +171,7 @@ fn test_estimated_token_count_fallback_to_chars_when_no_usage() {
         post_usage_appended_chars: 500,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -155,6 +197,7 @@ fn test_usage_ratio_after_invalidate() {
         post_usage_appended_chars: 800,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -192,6 +235,7 @@ fn rewrite_local_tail_chars_updates_estimate_and_post_usage() {
         post_usage_appended_chars: 1_500,
         transcript_path: PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
@@ -221,11 +265,13 @@ fn persist_context_observability_writes_sessions_json() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::from("dummy.jsonl"),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: super::super::types::SessionContextObservation {
             compaction_count: 7,
             compaction_tokens_freed: 12345,
             tool_result_chars_persisted: 999,
+            ..Default::default()
         },
         live: super::super::types::ContextLiveMetrics {
             context_utilization_ratio: 0.42,
@@ -259,7 +305,7 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
     std::fs::create_dir_all(&dir).unwrap();
     let mgr = SessionManager::new(dir.clone());
     let original = mgr.new_current_session(None).expect("original session");
-    mgr.pin_session(&original.session_id);
+    mgr.pin_session(&original.session_id).unwrap();
 
     let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
     let hijacked = external
@@ -275,11 +321,13 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::from("dummy.jsonl"),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: super::super::types::SessionContextObservation {
             compaction_count: 7,
             compaction_tokens_freed: 12345,
             tool_result_chars_persisted: 999,
+            ..Default::default()
         },
         live: super::super::types::ContextLiveMetrics {
             context_utilization_ratio: 0.42,
@@ -306,4 +354,72 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
     assert_eq!(hijacked_entry.context_utilization_ratio, None);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn session_obs_counts_tail_changes_and_miss_tokens() {
+    let mut obs = super::super::types::SessionContextObservation::default();
+
+    obs.observe_ephemeral_tail(Some("tail A"));
+    obs.observe_provider_usage(100, Some(90));
+    obs.observe_ephemeral_tail(Some("tail A"));
+    obs.observe_provider_usage(200, Some(0));
+    obs.observe_ephemeral_tail(Some("tail B"));
+    obs.observe_provider_usage(300, Some(0));
+
+    assert_eq!(obs.tail_changed_count, 1);
+    assert_eq!(obs.tail_change_miss_tokens, 300);
+    assert_eq!(obs.consecutive_cache_miss_max, 2);
+    assert_eq!(obs.prompt_tokens_total, 600);
+    assert_eq!(obs.cache_read_tokens_total, 90);
+    assert_eq!(obs.cache_observed_request_count, 3);
+    assert_eq!(obs.cache_hit_ratio(), Some(0.15));
+}
+
+#[test]
+fn session_obs_keeps_missing_cache_usage_out_of_hit_rate() {
+    let mut obs = super::super::types::SessionContextObservation::default();
+    obs.observe_ephemeral_tail(None);
+    obs.observe_provider_usage(100, None);
+
+    assert_eq!(obs.prompt_tokens_total, 100);
+    assert_eq!(obs.cache_read_tokens_total, 0);
+    assert_eq!(obs.cache_observed_request_count, 0);
+    assert_eq!(obs.cache_hit_ratio(), None);
+    assert_eq!(obs.consecutive_cache_miss_max, 0);
+}
+
+/// Replay the audited build's cardinalities: 343 provider usage records, 146 cold reads, and
+/// the observed 24-request cold streak. Values are normalized to 10k-token requests so this
+/// regression tests the accumulator, not a local absolute-token baseline.
+#[test]
+fn cache_hit_ratio_accumulates_from_provider_usage() {
+    let mut obs = super::super::types::SessionContextObservation::default();
+    let mut samples = Vec::with_capacity(343);
+    samples.extend(std::iter::repeat_n(Some(0), 24));
+    for _ in 0..122 {
+        samples.push(Some(7_142));
+        samples.push(Some(0));
+    }
+    samples.extend(std::iter::repeat_n(Some(7_142), 75));
+    assert_eq!(samples.len(), 343);
+
+    for cache_read_tokens in samples {
+        obs.observe_provider_usage(10_000, cache_read_tokens);
+    }
+
+    assert_eq!(obs.cache_observed_request_count, 343);
+    assert_eq!(obs.consecutive_cache_miss_max, 24);
+    assert_eq!(
+        obs.cache_read_tokens_total,
+        197 * 7_142,
+        "197 of the 343 audited usage samples reported non-zero cache reads"
+    );
+    let hit_rate = obs
+        .cache_hit_ratio()
+        .expect("all replay samples report cache usage");
+    assert!(
+        (hit_rate - 0.41).abs() < 0.005,
+        "audited build's normalized replay should retain its approximately 41% hit ratio, got {hit_rate:.3}"
+    );
 }

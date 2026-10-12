@@ -8,6 +8,7 @@ mod code_cmd;
 mod config_cmd;
 mod init;
 pub(crate) mod init_model_wizard;
+mod localization;
 mod model_cmd;
 mod models_toml;
 mod package_cmd;
@@ -412,6 +413,15 @@ pub enum ModelSub {
         /// context window
         #[arg(long)]
         context_window: Option<u32>,
+        /// 可选 context window 档位（可重复传入）；传入后必须包含 --context-window
+        #[arg(long = "context-window-option")]
+        context_window_options: Vec<u32>,
+        /// maximum output tokens for one request
+        #[arg(long)]
+        max_output_tokens: Option<u32>,
+        /// 模型描述
+        #[arg(long)]
+        description: Option<String>,
         /// thinking format（如 deepseek / doubao / anthropic）
         #[arg(long)]
         thinking_format: Option<String>,
@@ -439,7 +449,6 @@ pub enum ModelKeySub {
 }
 
 const TOMCAT_AGENT_ACTIVE_ENV: &str = "TOMCAT_AGENT_ACTIVE";
-const NESTED_INVOCATION_REFUSAL: &str = "Refusing to run this Tomcat command inside an active Tomcat agent session because it would mutate session or global state. Use the agent's tool calls instead, or run the command from a separate terminal outside the active session.";
 
 fn nested_agent_invocation_active() -> bool {
     matches!(std::env::var(TOMCAT_AGENT_ACTIVE_ENV).as_deref(), Ok("1"))
@@ -479,29 +488,37 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
             matches!(sub, WorkspaceSub::Add { .. } | WorkspaceSub::Remove { .. })
         }
         Commands::Pathrules { sub } => matches!(sub, PathRulesSub::Add { .. }),
-        Commands::Claw { .. }
-        | Commands::Code { .. }
-        | Commands::Serve { .. }
-        | Commands::Chat { .. } => true,
+        // Schema export exits immediately and never starts a session or server.
+        Commands::Serve { print_schema, .. } => !print_schema,
+        Commands::Claw { .. } | Commands::Code { .. } | Commands::Chat { .. } => true,
     }
 }
 
 fn guard_nested_invocation(cmd: Option<&Commands>) -> Result<(), AppError> {
-    if !nested_agent_invocation_active() {
+    guard_nested_invocation_for(nested_agent_invocation_active(), cmd)
+}
+
+// Keep policy independent of process-global environment so tests can supply
+// both inputs without changing the active agent's safety flag.
+fn guard_nested_invocation_for(active: bool, cmd: Option<&Commands>) -> Result<(), AppError> {
+    if !active {
         return Ok(());
     }
     let Some(cmd) = cmd else {
         return Ok(());
     };
     if nested_invocation_mutates_state(cmd) {
-        return Err(AppError::Config(NESTED_INVOCATION_REFUSAL.to_string()));
+        return Err(AppError::Config(crate::infra::i18n::tr(
+            "cli.nestedGuard",
+            &[],
+        )));
     }
     Ok(())
 }
 
 /// 解析参数并执行对应子命令；无子命令时按配置进入默认 session mode。
 pub fn run_cli() -> Result<(), AppError> {
-    let cli = Cli::parse();
+    let cli = localization::parse();
     let had_explicit_command = cli.command.is_some();
 
     guard_nested_invocation(cli.command.as_ref())?;
@@ -515,7 +532,10 @@ pub fn run_cli() -> Result<(), AppError> {
     let config_path = normalize_path(DEFAULT_CONFIG_PATH).ok();
     let cfg = load_config(config_path.as_deref())?;
     if let Err(e) = validate_config(&cfg) {
-        eprintln!("配置不合法: {}", e);
+        eprintln!(
+            "{}",
+            crate::infra::i18n::tr("cli.config.invalid", &[("detail", &e.to_string())])
+        );
         return Ok(());
     }
     ensure_work_dir_structure(&cfg)?;
@@ -601,7 +621,7 @@ pub(crate) fn preload_runtime_env(cfg: &AppConfig) -> Result<(), AppError> {
 
     // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
     dotenvy::from_path(&env_path)
-        .map_err(|error| AppError::Config(format!("加载 {} 失败: {error}", env_path.display())))?;
+        .map_err(|error| crate::infra::config::env_file_error(&env_path, error))?;
     crate::core::llm::auth::refresh_managed_credentials(&env_path)?;
     Ok(())
 }

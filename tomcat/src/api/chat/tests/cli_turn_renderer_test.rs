@@ -18,7 +18,7 @@ use super::{
 use crate::api::render::MarkdownRenderer;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{DefaultEventBus, EventBus, EventContext};
-use crate::infra::events::ToolDisplay;
+use crate::infra::events::{ToolDisplay, ToolDisplayFileEntry, ToolDisplayFileStatus};
 use crate::infra::wire;
 
 #[derive(Default)]
@@ -288,19 +288,19 @@ fn tool_start_emits_gray_summary_on_stderr() {
     assert!(err.contains("\x1b[90m"), "应使用 gray ANSI: {:?}", err);
 }
 
-/// P1（bash background monitor）：真实终端 TTY 下倒计时走单行原地刷新，单位为秒。
+/// P1（bash background monitor）：真实终端 TTY 下倒计时走单行原地刷新，长等待片用 `9m59s` 样式。
 #[test]
 fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
     let (r, w) = make_tty_renderer(ThinkingDisplay::Summary);
     r.on_tool_update(&json!({
         "toolCallId": "blk-1",
         "toolName": "task_output",
-        "args": {"task_id": "t-1", "block": true, "timeout_ms": 3000},
+        "args": {"task_id": "t-1", "block": true, "wait_ms": 3000},
         "partialResult": {
             "phase": "waiting_for_output",
             "taskId": "t-1",
             "since": 0,
-            "timeoutMs": 3000,
+            "waitMs": 3000,
             "remainingMs": 1500
         },
     }));
@@ -325,17 +325,40 @@ fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
 }
 
 #[test]
+fn tool_update_uses_compact_minute_second_countdown_labels() {
+    let (r, w) = make_tty_renderer(ThinkingDisplay::Summary);
+    r.on_tool_update(&json!({
+        "toolCallId": "blk-2",
+        "toolName": "task_output",
+        "args": {"task_id": "t-2", "block": true, "wait_ms": 600000},
+        "partialResult": {
+            "phase": "waiting_for_output",
+            "taskId": "t-2",
+            "since": 0,
+            "waitMs": 600000,
+            "remainingMs": 599000
+        },
+    }));
+    let err = w.stderr();
+    assert!(
+        err.contains("remaining=9m59s/10m00s"),
+        "长等待片应使用紧凑分秒格式: {:?}",
+        err
+    );
+}
+
+#[test]
 fn tool_update_is_suppressed_on_non_tty_stderr() {
     let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_tool_update(&json!({
         "toolCallId": "blk-1",
         "toolName": "task_output",
-        "args": {"task_id": "t-1", "block": true, "timeout_ms": 3000},
+        "args": {"task_id": "t-1", "block": true, "wait_ms": 3000},
         "partialResult": {
             "phase": "waiting_for_output",
             "taskId": "t-1",
             "since": 0,
-            "timeoutMs": 3000,
+            "waitMs": 3000,
             "remainingMs": 1500
         },
     }));
@@ -499,24 +522,14 @@ fn one_line_summary_handles_known_and_unknown_tools() {
 }
 
 #[test]
-fn one_line_summary_handles_bash_argv_and_script_preview() {
+fn one_line_summary_normalizes_single_command_preview() {
     assert_eq!(
-        one_line_summary(
-            "bash",
-            &json!({"command": "bash", "args": ["-lc", "echo hi && pwd"]})
-        ),
-        "command=bash -lc echo hi && pwd"
+        one_line_summary("bash", &json!({"command": "echo hi && pwd"})),
+        "command=echo hi && pwd"
     );
     assert_eq!(
-        one_line_summary(
-            "bash",
-            &json!({"command": "bash", "args": ["-lc", "\n\n  echo first\npwd"]})
-        ),
-        "command=bash -lc echo first pwd"
-    );
-    assert_eq!(
-        one_line_summary("bash", &json!({"command": "bash", "args": ["-lc"]})),
-        "command=bash -lc"
+        one_line_summary("bash", &json!({"command": "\n\n  echo first\npwd"})),
+        "command=echo first pwd"
     );
 }
 
@@ -524,8 +537,8 @@ fn one_line_summary_handles_bash_argv_and_script_preview() {
 fn one_line_summary_does_not_truncate_long_bash_command() {
     let long_path = "/Users/yankeben/.tomcat/temp/cli_real_llm_wwww-mi-com_2794_1779277773225413000/docs/screenshots";
     let script = format!("mkdir -p {long_path} && npm i -D tsx && node scripts/snapshot.ts");
-    let summary = one_line_summary("bash", &json!({"command": "bash", "args": ["-lc", script]}));
-    assert_eq!(summary, format!("command=bash -lc {script}"));
+    let summary = one_line_summary("bash", &json!({"command": script}));
+    assert_eq!(summary, format!("command={script}"));
     assert!(!summary.ends_with('…'));
 }
 
@@ -553,6 +566,36 @@ fn result_summary_picks_best_field_for_success_and_error() {
     assert_eq!(
         result_summary(&json!("No such file or directory"), true),
         "No such file or directory"
+    );
+}
+
+#[test]
+fn result_summary_surfaces_failed_file_read_reason() {
+    let display = ToolDisplay::Files {
+        summary: "已读取 0 个文件，1 个读取失败".to_string(),
+        files: vec![ToolDisplayFileEntry {
+            file: "/tmp/missing.txt".to_string(),
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+            expired: false,
+            range: None,
+            status: Some(ToolDisplayFileStatus::Failed),
+            note: Some("No such file or directory (os error 2)".to_string()),
+        }],
+        expired: false,
+    };
+
+    let summary = result_summary_for_tool(&json!("tool output"), Some(&display), false);
+
+    assert!(
+        summary.contains("No such file or directory"),
+        "failed read reason must remain visible: {summary}"
+    );
+    assert!(
+        summary.contains("os error 2"),
+        "failed read errno must remain visible: {summary}"
     );
 }
 
@@ -621,6 +664,8 @@ fn path_display_shows_absolute_path() {
             added: Some(1),
             removed: Some(0),
             diff: None,
+            diff_truncated: false,
+            expired: false,
         }),
         false,
     );
@@ -665,18 +710,19 @@ fn update_plan_success_shows_absolute_plan_path() {
 
 #[test]
 fn config_set_display_prefers_text_message() {
+    let message = "已设置 llm.default_model = gpt-5.4";
     let payload = json!({
         "applied": true,
-        "message": "已设置 llm.default_model = gpt-5.4",
+        "message": message,
     });
     let summary = result_summary_for_tool(
         &json!(serde_json::to_string(&payload).unwrap()),
         Some(&ToolDisplay::Text {
-            text: "已设置 llm.default_model = gpt-5.4".to_string(),
+            text: message.to_string(),
         }),
         false,
     );
-    assert_eq!(summary, "已设置 llm.default_model = gpt-5.4");
+    assert_eq!(summary, message);
 }
 
 #[test]

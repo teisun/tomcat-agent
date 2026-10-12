@@ -23,8 +23,7 @@ pub(super) fn steering_msg(text: &str) -> ChatMessage {
 }
 
 pub(super) fn summary_msg(text: &str) -> ChatMessage {
-    let mut m = ChatMessage::compaction_summary(text);
-    m.msg_id = Some("summary_0".to_string());
+    let mut m = ChatMessage::compaction_summary(text, "summary_0");
     m.timestamp = Some(TS.to_string());
     m
 }
@@ -81,6 +80,7 @@ pub(super) fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         latest_plan_event: None,
+        resume_control: Default::default(),
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

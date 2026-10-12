@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# 集成测试二进制分类唯一来源。
-# 默认进入并发组；只有 3x 连跑证明确实互踩或压垮机器时，才退回串行兜底组。
+# Default to four-way parallelism. Process-heavy stdio suites use the serial
+# group below: three gate runs showed their isolated Serve children consistently
+# miss the 10-second first-frame budget when launched alongside one another.
 
 TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   audit_tests
+  connector_mcp_tests
+  nested_cli_guard_tests
+  prompt_size_budget
   event_tests
   agent_loop_tests
   bash_assignment_deny
@@ -18,17 +22,18 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   session_tests
   session_concurrency_tests
   plugin_tests
+  package_install_tool_tests
   llm_tests
   llm_gateway_toggle_tests
   context_management_tests
-  plan_runtime_integration_tests
-  plan_e2e_with_mock_llm_tests
+  plan_delivery_flow_e2e
   robustness_tests
   read_tool_tests
   resume_hydration_tests
   skill_tool_tests
   transcript_summary_integration_tests
   integration_gate_config_tests
+  i18n_cli_tests
   cli_tests
   checkpoint_cli_e2e
   resume_hydration_cli_e2e
@@ -37,32 +42,59 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   hostcall_tests
   primitives_tools_tests
   tool_catalog_doc
-  serve_multi_session
-  serve_ask_question_tests
   serve_schema_fixture
-  serve_robustness_tests
-  serve_stdio_e2e
+)
+
+# Local HTTP/OAuth fake, compiled only with the test-server feature.
+TOMCAT_INTEGRATION_FEATURE_TESTS=(
+  connector_http_tests
+)
+
+# Deliberately manual: performance/browser bootstrap or additional paid providers.
+TOMCAT_INTEGRATION_MANUAL_TESTS=(
+  single_list_real_llm_long_session_e2e
+  current_tail_guard_real_llm_e2e
+  resume_hydration_perf
+  verify_skill_browser_scripts
+  model_presets_live_smoke_tests
+  prompt_cache_real_llm_tests
+  ui_acceptance_real_llm_e2e
+  openai_files_integration_tests
+  tool_result_media_real_llm_tests
+)
+
+# Network-only cases inside otherwise offline binaries; run explicitly with the
+# documented PI_LIVE_* opt-ins/provider keys, never in the default gate.
+TOMCAT_INTEGRATION_MANUAL_CASES=(
+  web_search_tool_tests::live_tavily_search_smoke
+  web_search_tool_tests::real_tavily_plugin_web_search
+  web_search_tool_tests::real_brave_plugin_web_search
+  web_search_tool_tests::real_serper_plugin_web_search
+  web_search_tool_tests::real_mimo_web_search
+  web_fetch_tool_tests::live_example_fetch_smoke
+  skill_tool_tests::live_skill_load_roundtrip_with_real_llm
 )
 
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
+  project_trust_cli_tests
+  serve_multi_session
+  serve_ask_question_tests
+  serve_robustness_tests
+  serve_stdio_e2e
+  serve_rewind_and_resend
 )
 
-# 真 LLM E2E（需当前 OpenAI target 对应 key；部分 target 还需 DEEPSEEK_API_KEY / MIMO_API_KEY）。
+# 真 LLM E2E（需当前 Responses target 对应 key；默认是 idatatlas Terra）。
 # 默认快门禁不跑本组；显式 real-llm 层才运行。
 # 这几个 target 现在会在各自测试进程内切到临时 HOME，把 `~/.tomcat/*` 隔离到
 # 私有 tempdir；剩余并发约束只来自 provider API 限流，因此 nextest profile 把本组
 # 限到 max-threads=2，而不再用 -j1 串行到底。
-# 其中 `plan_real_llm_cli_e2e` 现在只保留 planning-only / exec-only 两条窄 CLI smoke，
-# full completion / artifact / transcript 顺序 / EOF settlement 等重断言交给更快的
-# inprocess/runtime 层；CLI 只保留 resume/build wiring、EXEC prompt 与 session 绑定。
 # run-integration-tests.sh 默认跳过本组，用户/CI 需要时按需
 # `./scripts/run-integration-tests.sh integration-real-llm` 显式触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
-  current_tail_guard_real_llm_tests
-  openai_files_integration_tests
   openai_responses_integration_tests
+
   plan_real_llm_inprocess_tests
-  plan_real_llm_cli_e2e
   reasoning_continuity_real_llm_tests
 )
 
@@ -72,10 +104,25 @@ TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS=(
   test_user_background_bash_multiple_timeout_slices_real_llm_cli
   test_user_background_bash_midturn_followup_real_llm_cli
   test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli
+  test_chat_with_valid_config_and_api_key_starts_and_produces_output
+  test_user_asks_pi_a_question
+  test_user_asks_pi_technical_question
+  test_user_asks_pi_to_run_bash_command
+  test_user_sees_read_failure_reason_in_tool_line
+  test_user_asks_pi_to_write_hello_world_bash
+  test_user_chats_with_llm_gets_streaming_response
+  test_user_receives_nonempty_llm_response
+  test_user_chat_resumes_last_session
+  test_user_chat_non_interactive_with_prompt_flag
+)
+
+TOMCAT_INTEGRATION_REAL_LLM_CASES=(
+  llm_tests::test_llm_provider_chat_real_request_returns_ok
+  llm_tests::test_llm_provider_chat_stream_real_request_yields_events
 )
 
 # OpenAI Responses wire 真链路子组：只收口到最终走 `api=openai-responses` 的验收入口。
-# 用途：集中管理 LiteLLM / OpenAI Responses 线上的 live 验收，不混入 DeepSeek / Mimo 分支。
+# 用途：集中管理 idatatlas Terra / OpenAI Responses 线上的 live 验收，不混入 DeepSeek / Mimo 专项分支。
 # 注意：
 # - `reasoning_continuity_real_llm_tests` 只跑 OpenAI Responses 那条 case；
 # - `openai_files_integration_tests` 仍需 `--ignored`，且仅在 `PI_LIVE_OPENAI_FILES=1`
@@ -83,6 +130,6 @@ TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS=(
 TOMCAT_INTEGRATION_OPENAI_RESPONSES_WIRE_COMMANDS=(
   "cargo test -j 1 --test openai_responses_integration_tests -- --nocapture --test-threads=1"
   "cargo test -j 1 --test reasoning_continuity_real_llm_tests openai_responses_roundtrip_replays_reasoning_items -- --nocapture --test-threads=1"
-  "cargo test -j 1 --test openai_files_integration_tests -- --ignored --nocapture --test-threads=1"
+  "cargo test -j 1 --test openai_files_integration_tests openai_ -- --ignored --nocapture --test-threads=1"
 )
 

@@ -1,5 +1,5 @@
 use super::catalog::PluginSource;
-use crate::infra::config::{get_work_dir, resolve_agent_trail_dir};
+use crate::infra::config::{get_work_dir, resolve_agent_trail_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ pub fn plugin_roots(
     Ok(vec![
         (
             PluginSource::Project,
-            agent_workspace_dir.join(".tomcat").join("plugins"),
+            resolve_project_resource_dir(cfg, agent_workspace_dir)?.join("plugins"),
         ),
         (
             PluginSource::Agent,

@@ -1,11 +1,17 @@
 //! Context management data structures (TASK-17 / TASK-20 / TASK-21 §5.7).
 
-use std::path::PathBuf;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+};
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
+use crate::core::llm::{
+    ChatMessage, ChatMessageContent, ChatMessageRole, EffectiveModelLimits, MessageKind,
+};
 use crate::infra::error::AppError;
 use crate::infra::wire;
 
@@ -73,6 +79,74 @@ pub struct SessionContextObservation {
     pub compaction_tokens_freed: usize,
     /// L0 落盘原始 Unicode 字符数（与 `SessionEntry.tool_result_chars_persisted`；事件字段仍名 bytes）。
     pub tool_result_chars_persisted: usize,
+    /// 所有 provider Usage 样本的 prompt token 累计；可用于定位「命中率高但总输入仍过大」。
+    pub prompt_tokens_total: u64,
+    /// provider 明确报告的 cache read token 累计（缺失的 usage 不伪装成 miss）。
+    pub cache_read_tokens_total: u64,
+    /// 仅计入 provider 报告了 cache read 指标的 prompt token，用作命中率分母。
+    pub cache_observed_prompt_tokens_total: u64,
+    /// cache 指标可用的 Usage 样本数；0 表示该 provider 未提供可判读的数据。
+    pub cache_observed_request_count: u32,
+    /// 连续零 cache-read 的最长长度（未报告 cache 字段不改变这个序列）。
+    pub consecutive_cache_miss: u32,
+    pub consecutive_cache_miss_max: u32,
+    /// 有 Usage 的请求中，runtime tail 相对上一请求发生变化的次数。
+    pub tail_changed_count: u32,
+    /// tail 变化请求的 prompt token 总量。它是待排查样本规模，不能反推因果损失。
+    pub tail_change_miss_tokens: u64,
+    /// 不刷盘的请求本地状态：tail 是否变动，供其后的 Usage 样本归因。
+    pub(crate) ephemeral_tail_observed: bool,
+    pub(crate) last_ephemeral_tail_hash: Option<u64>,
+    pub(crate) last_request_tail_changed: bool,
+}
+
+impl SessionContextObservation {
+    /// Record the exact ephemeral-tail shape used by the next provider request.
+    /// Hashing keeps the changing text out of diagnostics and session state.
+    pub fn observe_ephemeral_tail(&mut self, tail: Option<&str>) {
+        let tail_hash = tail.map(|text| {
+            let mut hasher = DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        });
+        self.last_request_tail_changed =
+            self.ephemeral_tail_observed && self.last_ephemeral_tail_hash != tail_hash;
+        self.ephemeral_tail_observed = true;
+        self.last_ephemeral_tail_hash = tail_hash;
+    }
+
+    /// Add one provider Usage sample. An absent `cache_read_tokens` means unavailable, not zero.
+    pub fn observe_provider_usage(&mut self, prompt_tokens: u32, cache_read_tokens: Option<u32>) {
+        self.prompt_tokens_total += u64::from(prompt_tokens);
+        if self.last_request_tail_changed {
+            self.tail_changed_count = self.tail_changed_count.saturating_add(1);
+            self.tail_change_miss_tokens += u64::from(prompt_tokens);
+        }
+        let Some(cache_read_tokens) = cache_read_tokens else {
+            return;
+        };
+        self.cache_observed_request_count = self.cache_observed_request_count.saturating_add(1);
+        self.cache_observed_prompt_tokens_total += u64::from(prompt_tokens);
+        self.cache_read_tokens_total += u64::from(cache_read_tokens);
+        if cache_read_tokens == 0 {
+            self.consecutive_cache_miss = self.consecutive_cache_miss.saturating_add(1);
+            self.consecutive_cache_miss_max = self
+                .consecutive_cache_miss_max
+                .max(self.consecutive_cache_miss);
+        } else {
+            self.consecutive_cache_miss = 0;
+        }
+    }
+
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        (self.cache_observed_prompt_tokens_total > 0).then(|| {
+            self.cache_read_tokens_total as f64 / self.cache_observed_prompt_tokens_total as f64
+        })
+    }
+
+    pub fn last_request_tail_changed(&self) -> bool {
+        self.last_request_tail_changed
+    }
 }
 
 /// 瞬时上下文指标：仅内存，**不**写入 `sessions.json`。
@@ -129,6 +203,103 @@ impl PlanEventRef {
 }
 
 // ---------------------------------------------------------------------------
+// AgentMode / 控制态恢复
+// ---------------------------------------------------------------------------
+
+/// 用户可见的会话模式。
+///
+/// 计划文件的 `planning` / `pending` / `executing` / `completed` 生命周期不属于会话
+/// 模式；它由计划文件 frontmatter 的 `state` 表达。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMode {
+    /// `exec` 是 v2 sidecar 里已经落盘的旧值。它在新模型里等价于 Chat：
+    /// 执行中的事实由计划文件恢复，而不是一个第三会话模式。
+    #[serde(alias = "exec")]
+    Chat,
+    Plan,
+}
+
+impl AgentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+/// 一条 transcript 事件对控制态的影响。字段为 `None` 表示该事件不改动这一项。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanModeTransition {
+    pub mode: Option<AgentMode>,
+    pub plan_id: Option<String>,
+    pub path: Option<PathBuf>,
+}
+
+impl PlanModeTransition {
+    /// 与 [`PlanEventRef::from_custom_event`] 的区别：这里对缺字段是宽容的。
+    /// `plan.enter` 发生时计划文件往往还不存在，既没有 plan_id 也没有 path，
+    /// 但"进了 PLAN 模式"这件事必须被记住。
+    pub fn from_custom_event(extra: &serde_json::Value) -> Option<Self> {
+        let obj = extra.as_object()?;
+        let event = obj.get("event")?.as_str()?;
+        let mode = match event {
+            wire::WIRE_PLAN_ENTER => Some(AgentMode::Plan),
+            wire::WIRE_PLAN_EXIT => Some(AgentMode::Chat),
+            wire::WIRE_PLAN_BUILD | wire::WIRE_PLAN_PENDING | wire::WIRE_PLAN_COMPLETE => {
+                Some(AgentMode::Chat)
+            }
+            wire::WIRE_SESSION_AGENT_MODE_CHANGED => obj
+                .get("agentMode")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|raw| serde_json::from_value(serde_json::Value::String(raw.into())).ok()),
+            // create / update 只绑定计划，不改模式。
+            wire::WIRE_PLAN_CREATE | wire::WIRE_PLAN_UPDATE => None,
+            _ => return None,
+        };
+        Some(Self {
+            mode,
+            plan_id: obj
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            path: obj
+                .get("path")
+                .and_then(|v| v.as_str())
+                .and_then(|raw| crate::infra::platform::normalize_path(raw).ok()),
+        })
+    }
+}
+
+/// 会话恢复时交给 `plan_runtime` 的控制态。由 resume-index sidecar 直接提供，
+/// 无需每次遍历 transcript。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumeControlState {
+    /// `None` 表示 sidecar 里没有这项信息（旧版本 / 全量扫描路径），走推断兜底。
+    pub mode: Option<AgentMode>,
+    pub plan_path: Option<PathBuf>,
+    pub plan_id: Option<String>,
+}
+
+impl ResumeControlState {
+    /// 折叠一条事件的影响。
+    pub fn apply(&mut self, transition: PlanModeTransition) {
+        if let Some(mode) = transition.mode {
+            self.mode = Some(mode);
+        }
+        if transition.plan_id.is_some() {
+            self.plan_id = transition.plan_id;
+        }
+        if transition.path.is_some() {
+            self.plan_path = transition.path;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ContextState
 // ---------------------------------------------------------------------------
 
@@ -144,6 +315,8 @@ pub struct ContextState {
     pub transcript_path: PathBuf,
     /// 单次反向扫描识别出的最近一条 `plan.*` transcript 自定义事件。
     pub latest_plan_event: Option<PlanEventRef>,
+    /// 会话恢复时的模式与计划绑定，优先由 resume-index sidecar 提供。
+    pub resume_control: ResumeControlState,
     /// 异步预热状态机（替代旧 `Option<CompactionSummary>`）。
     pub preheat: Preheat,
     /// 会话累计（刷盘子集）。
@@ -159,10 +332,26 @@ fn _static_assert_context_state_send() {
 }
 
 impl ContextState {
+    /// Apply the limits of the model selected for the next request. This never
+    /// restores compacted history; it only changes the next compaction
+    /// threshold when a session switches models.
+    pub fn apply_limits(&mut self, limits: &EffectiveModelLimits) {
+        self.context_budget_tokens = limits.input_budget_tokens;
+        self.context_budget_chars = limits.input_budget_tokens * 4;
+    }
+
     /// 追加消息后增量更新估算字符数和 post-usage 增量。
     pub fn on_message_appended(&mut self, content_len: usize) {
         self.estimate_context_chars += content_len;
         self.post_usage_appended_chars += content_len;
+    }
+
+    /// Record an assistant response that is already included in the provider's
+    /// `completion_tokens`. Keep it in the full fallback estimate, but do not
+    /// add it to the post-usage delta or the usage-backed estimate would count
+    /// the same output twice.
+    pub fn on_assistant_message_appended(&mut self, content_len: usize) {
+        self.estimate_context_chars += content_len;
     }
 
     /// 估算当前上下文占用的 token 数。
@@ -200,6 +389,17 @@ impl ContextState {
         self.post_usage_appended_chars = 0;
     }
 
+    /// Replace the session-level system-prompt contribution to the fallback
+    /// character estimate. API usage is deliberately invalidated because its
+    /// prompt-token base was measured against the previous system prefix.
+    pub fn replace_system_prompt_chars(&mut self, old_chars: usize, new_chars: usize) {
+        self.estimate_context_chars = self
+            .estimate_context_chars
+            .saturating_sub(old_chars)
+            .saturating_add(new_chars);
+        self.invalidate_api_usage();
+    }
+
     /// mid-turn 改写 current tail 文本后，同步修正内存估算与 appended delta。
     /// 仅适用于「发生在最后一次 Usage 之后」的本轮局部消息改写。
     pub fn rewrite_local_tail_chars(&mut self, old_chars: usize, new_chars: usize) {
@@ -222,43 +422,75 @@ impl ContextState {
 
     /// 将已完成的 CompactionResult 应用到 messages 列表：
     /// 找到最后一条 `msg_id == covered_end_id` 的消息，将其及之前所有消息替换为摘要消息。
-    /// 无匹配时返回 [`AppError::ApplyBoundaryStale`]。
-    pub fn apply_boundary(&mut self, result: CompactionResult) -> Result<(), AppError> {
-        let end_idx = self
-            .messages
+    /// `turn_start` 是当前未完成 tail 在本列表坐标系中的起点；替换前缀后在此处同步
+    /// 平移，避免调用方拥有一个已过期的下标。无匹配时返回
+    /// [`AppError::ApplyBoundaryStale`]。
+    pub fn apply_boundary(
+        &mut self,
+        messages: &mut Vec<ChatMessage>,
+        result: CompactionResult,
+        turn_start: &mut usize,
+    ) -> Result<(), AppError> {
+        let end_idx = messages
             .iter()
             .rposition(|m| m.msg_id.as_deref() == Some(result.covered_end_id.as_str()))
             .ok_or(AppError::ApplyBoundaryStale {
                 covered_end_id: result.covered_end_id.clone(),
             })?;
 
-        let batch_chars: usize = self.messages[..=end_idx]
+        let batch_chars: usize = messages[..=end_idx].iter().map(estimate_msg_chars).sum();
+        let replaced_message_ids = messages[..=end_idx]
             .iter()
-            .map(estimate_msg_chars)
-            .sum();
+            .filter_map(|message| message.msg_id.as_deref())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let summary_chars = result.summary_text.len();
 
-        let mut summary_msg = ChatMessage::compaction_summary(&result.summary_text);
-        summary_msg.msg_id = result.transcript_compaction_entry_id.clone();
+        let summary_entry_id = result
+            .transcript_compaction_entry_id
+            .clone()
+            .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id));
+        let summary_msg = ChatMessage::compaction_summary(&result.summary_text, summary_entry_id);
 
-        self.messages.splice(..=end_idx, [summary_msg]);
+        debug_assert!(
+            *turn_start <= messages.len(),
+            "turn_start must be a valid boundary in the pre-rewrite message list"
+        );
+        let removed = end_idx.saturating_add(1);
+        messages.splice(..=end_idx, [summary_msg]);
+        *turn_start = if *turn_start >= removed {
+            (*turn_start).saturating_sub(removed).saturating_add(1)
+        } else {
+            1
+        };
         self.estimate_context_chars =
-            self.estimate_context_chars.saturating_sub(batch_chars) + result.summary_text.len();
+            self.estimate_context_chars.saturating_sub(batch_chars) + summary_chars;
         self.invalidate_api_usage();
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "history_rewritten",
+            operation = "apply_boundary",
+            chars_freed = batch_chars.saturating_sub(summary_chars),
+            ?replaced_message_ids,
+            summary_chars,
+        );
         Ok(())
-    }
-
-    /// 当前上下文中的 turn 数：user 消息 + compaction 摘要消息之和。
-    pub fn turn_count(&self) -> usize {
-        self.messages
-            .iter()
-            .filter(|m| m.role == ChatMessageRole::User || m.kind == MessageKind::CompactionSummary)
-            .count()
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// 当前消息列表中的 logical turn 数：user 消息 + compaction 摘要消息之和。
+pub fn turn_count(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            message.role == ChatMessageRole::User || message.kind == MessageKind::CompactionSummary
+        })
+        .count()
+}
 
 /// 与 `ContextState::estimated_token_count` 的纯字符 fallback 一致：`chars / 4`。
 #[inline]

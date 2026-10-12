@@ -73,7 +73,7 @@ fn discover_three_tier_first_wins() {
     write_plugin(
         &project_dir
             .path()
-            .join(".tomcat")
+            .join(".agents")
             .join("plugins")
             .join("demo"),
         "demo",
@@ -130,7 +130,7 @@ fn discover_host_root_helper_remains_managed_only() {
     write_plugin(
         &project_dir
             .path()
-            .join(".tomcat")
+            .join(".agents")
             .join("plugins")
             .join("project-function-plugin"),
         "project-function-plugin",
@@ -149,6 +149,38 @@ fn discover_host_root_helper_remains_managed_only() {
 }
 
 #[test]
+fn discover_uses_custom_project_resource_directory() {
+    let work_dir = tempfile::tempdir().expect("create work dir");
+    let project_dir = tempfile::tempdir().expect("create project dir");
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+    cfg.workspace.project_resource_dir = ".team-agents".to_string();
+
+    write_plugin(
+        &project_dir
+            .path()
+            .join(".team-agents")
+            .join("plugins")
+            .join("project-plugin"),
+        "project-plugin",
+        "custom project directory",
+    );
+    write_plugin(
+        &project_dir
+            .path()
+            .join(".agents")
+            .join("plugins")
+            .join("ignored-default-plugin"),
+        "ignored-default-plugin",
+        "must not scan default after customization",
+    );
+
+    let catalog = PluginCatalog::discover(&cfg, project_dir.path()).expect("discover catalog");
+    assert!(catalog.get("project-plugin").is_some());
+    assert!(catalog.get("ignored-default-plugin").is_none());
+}
+
+#[test]
 fn discover_respects_registry_enabled_flags_when_registry_exists() {
     let work_dir = tempfile::tempdir().expect("create work dir");
     let project_dir = tempfile::tempdir().expect("create project dir");
@@ -157,7 +189,7 @@ fn discover_respects_registry_enabled_flags_when_registry_exists() {
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
     cfg.agent.id = "agent-a".to_string();
 
-    let plugin_root = project_dir.path().join(".tomcat").join("plugins");
+    let plugin_root = project_dir.path().join(".agents").join("plugins");
     write_plugin(
         &plugin_root.join("enabled-plugin"),
         "enabled-plugin",
@@ -201,8 +233,111 @@ fn discover_respects_registry_enabled_flags_when_registry_exists() {
     assert!(catalog.get("unregistered-plugin").is_none());
 }
 
+#[test]
+fn discover_ignores_hidden_transaction_directories() {
+    let work = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = project.path().join(".agents/plugins");
+    for name in [".demo.staging.x", ".demo.backup.x"] {
+        write_plugin(&root.join(name), "demo", "unpublished");
+    }
+    write_plugin(&root.join("demo"), "demo", "published");
+    let catalog = PluginCatalog::discover(&cfg, project.path()).unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(
+        catalog.get("demo").unwrap().manifest.description,
+        "published"
+    );
+    assert!(catalog.warnings.is_empty());
+    fs::remove_dir_all(root.join("demo")).unwrap();
+    assert!(PluginCatalog::discover(&cfg, project.path())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn catalog_fingerprint_tracks_content_and_effective_source() {
+    let work = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = project.path().join(".agents/plugins/a");
+    write_plugin(&root, "demo", "same");
+    let fingerprint = || {
+        PluginCatalog::discover(&cfg, project.path())
+            .unwrap()
+            .get("demo")
+            .unwrap()
+            .fingerprint
+    };
+    let original = fingerprint();
+    assert_eq!(fingerprint(), original);
+    fs::write(root.join("index.js"), "// updated entry").unwrap();
+    let changed = fingerprint();
+    assert_ne!(changed, original);
+    fs::rename(&root, root.with_file_name("b")).unwrap();
+    assert_ne!(
+        fingerprint(),
+        changed,
+        "same bytes in another source root are an update"
+    );
+    fs::write(
+        root.with_file_name("b").join("plugin.json"),
+        "broken manifest",
+    )
+    .unwrap();
+    let invalid = PluginCatalog::discover(&cfg, project.path()).unwrap();
+    assert!(invalid.is_empty());
+    assert!(
+        !invalid.unreadable,
+        "a single invalid manifest is not a failed root scan"
+    );
+    assert!(!invalid.diagnostics.is_empty());
+    fs::write(
+        project.path().join(".agents/plugins/registry.json"),
+        "broken registry",
+    )
+    .unwrap();
+    assert!(
+        PluginCatalog::discover(&cfg, project.path())
+            .unwrap()
+            .unreadable
+    );
+}
+
+#[test]
+fn catalog_file_read_failure_isolated_to_entry() {
+    let work = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = project.path().join(".agents/plugins");
+    write_plugin(&root.join("good"), "good", "still discoverable");
+    write_plugin(&root.join("broken"), "broken", "unreadable entry");
+    let entry = root.join("broken/index.js");
+    fs::remove_file(&entry).unwrap();
+    // Exercise both missing files and I/O failure without relying on chmod/UID.
+    for as_directory in [false, true] {
+        if as_directory {
+            fs::create_dir(&entry).unwrap();
+        }
+        let catalog = PluginCatalog::discover(&cfg, project.path()).unwrap();
+        assert!(catalog.get("good").is_some());
+        assert!(catalog.get("broken").is_none());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(catalog.diagnostics[0].path, root.join("broken/plugin.json"));
+        assert!(
+            !catalog.unreadable,
+            "one bad entry must not freeze its category"
+        );
+    }
+}
+
 fn write_plugin(root: &Path, plugin_id: &str, description: &str) {
     fs::create_dir_all(root).expect("create plugin root");
+    fs::write(root.join("index.js"), "// catalog fixture").unwrap();
     fs::write(
         root.join("plugin.json"),
         format!(

@@ -15,12 +15,84 @@ use crate::core::llm::multimodal::{
 use crate::core::llm::tests::mocks::load_dotenv;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextReference,
+    MessageKind, ReasoningContinuation, ReasoningFormat,
 };
 use crate::core::llm::{
     thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
 };
 use crate::infra::error::{llm_http_status_error, AppError};
+use crate::infra::events::ToolDisplay;
 use crate::infra::LlmConfig;
+
+#[test]
+fn tool_owned_media_chat_batch_splits_only_on_wire() {
+    let image = ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap();
+    let mut one = ChatMessage::tool("one", "");
+    one.content = Some(ChatMessageContent::Parts(vec![image.clone()]));
+    let mut two = ChatMessage::tool("two", "");
+    two.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("second"),
+        image,
+    ]));
+    let mut tail = ChatMessage::user("runtime");
+    tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("request"),
+        ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![
+                serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}}),
+                serde_json::json!({"id":"two","type":"function","function":{"name":"read","arguments":"{}"}}),
+            ],
+        ),
+        one,
+        tail,
+        two,
+        ChatMessage::assistant("done"),
+    ];
+    let before = serde_json::to_value(&messages).unwrap();
+    let wire = transport_messages(&messages, "gpt-4.1", false, None);
+    let tools = wire
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v["role"] == "tool")
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(tools, vec![3, 4]);
+    assert_eq!(wire[3]["content"], "[Media attached]");
+    assert_eq!(wire[4]["content"], "second");
+    assert_eq!(wire[5]["role"], "user");
+    assert_eq!(wire[5]["content"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        wire[5]["content"][0]["text"],
+        crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO
+    );
+    assert_eq!(
+        wire[5]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,aGVsbG8="
+    );
+    assert_eq!(wire[6]["role"], "assistant");
+    assert_eq!(serde_json::to_value(messages).unwrap(), before);
+}
+
+#[test]
+fn tool_media_openai_wire_equals_user_media() {
+    let parts = vec![ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap()];
+    assert_eq!(
+        transport_messages(
+            &[ChatMessage::tool_media(parts.clone())],
+            "gpt-4.1",
+            false,
+            None
+        ),
+        transport_messages(
+            &[ChatMessage::user_with_parts(parts)],
+            "gpt-4.1",
+            false,
+            None
+        )
+    );
+}
 
 fn deepseek_entry(api_key_env: &str) -> ModelEntry {
     ModelEntry {
@@ -32,6 +104,11 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec!["high".to_string(), "max".to_string()],
         thinking_format: Some("deepseek".to_string()),
     }
 }
@@ -46,6 +123,16 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: Some("openai".to_string()),
     }
 }
@@ -60,7 +147,86 @@ fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> Mod
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: None,
+    }
+}
+
+fn openai_multimodal_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "gpt-4.1".to_string(),
+        model_name: Some("gpt-4.1".to_string()),
+        api: "openai".to_string(),
+        provider: "openai".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: Capabilities {
+            vision: true,
+            files: true,
+            tools: true,
+            reasoning: false,
+            web_search: false,
+        },
+        context_window: None,
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec![],
+        thinking_format: Some("openai".to_string()),
+    }
+}
+
+fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "kimi-k3".to_string(),
+        model_name: Some("kimi-k3".to_string()),
+        api: "openai".to_string(),
+        provider: "moonshot".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.moonshot.cn".to_string()),
+        capabilities: Capabilities {
+            vision: true,
+            files: true,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        },
+        context_window: Some(1_000_000),
+        context_window_options: Vec::new(),
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: Vec::new(),
+        supported_reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
+        thinking_format: Some("openai".to_string()),
+    }
+}
+
+#[test]
+fn chat_completions_wire_omits_local_message_metadata() {
+    let mut message = ChatMessage::assistant("wire-visible text");
+    message.summary_title = Some("local summary".to_string());
+    message.tool_display = Some(ToolDisplay::Text {
+        text: "local tool display".to_string(),
+    });
+    message.usage = Some(Default::default());
+
+    let body = transport_messages(&[message], "gpt-5", true, None);
+    let serialized = serde_json::to_string(&body).expect("serialize wire body");
+    for local_field in ["tool_display", "summary_title", "usage"] {
+        assert!(
+            !serialized.contains(local_field),
+            "Chat Completions wire leaked local field `{local_field}`: {serialized}"
+        );
     }
 }
 
@@ -114,9 +280,13 @@ fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
         model: "gpt-5.4_litellm-sunmi".to_string(),
         temperature: Some(0.0),
         max_tokens: Some(10),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
     assert_eq!(provider.effective_model(&request), "gpt-5.4");
@@ -173,8 +343,7 @@ fn is_retriable_returns_false_for_non_llm_error() {
 #[test]
 fn parts_with_image_degrade_to_placeholder_text() {
     use base64::Engine;
-    const TINY_PNG_B64: &str =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(TINY_PNG_B64)
         .unwrap();
@@ -185,7 +354,7 @@ fn parts_with_image_degrade_to_placeholder_text() {
         ChatMessageContentPart::text("see this: "),
         part,
     ])];
-    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
     let normalized = normalized.as_ref();
     let expected = format!("see this: {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
     assert!(matches!(
@@ -209,7 +378,7 @@ fn normalize_for_completions_degrades_mixed_image_and_file_history() {
         ]),
     ];
 
-    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
     let normalized = normalized.as_ref();
     let expected_image = format!("image {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
     let expected_file = format!("file {UNSUPPORTED_FILE_INPUT_PLACEHOLDER}");
@@ -239,7 +408,7 @@ fn normalize_for_completions_flattens_references_into_text() {
         )),
         ChatMessageContentPart::text(" after"),
     ])];
-    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
     let normalized = normalized.as_ref();
     assert_eq!(normalized.len(), 1);
     assert!(matches!(
@@ -250,7 +419,416 @@ fn normalize_for_completions_flattens_references_into_text() {
     ));
 }
 
-/// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
+#[test]
+fn normalize_for_completions_keeps_parts_when_supported_image_still_present() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("look "),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string())).unwrap(),
+    ])];
+    let normalized = normalize_for_completions(
+        &msgs,
+        &Capabilities {
+            vision: true,
+            files: false,
+            tools: true,
+            reasoning: false,
+            web_search: false,
+        },
+    );
+    let normalized = normalized.as_ref();
+    let parts = match &normalized[0].content {
+        Some(ChatMessageContent::Parts(parts)) => parts,
+        other => panic!("expected parts content, got {other:?}"),
+    };
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(
+        &parts[0],
+        ChatMessageContentPart::InputText { text } if text == "look "
+    ));
+    assert!(matches!(
+        &parts[1],
+        ChatMessageContentPart::InputImage { .. }
+    ));
+    assert!(matches!(
+        &parts[2],
+        ChatMessageContentPart::InputText { text } if text == UNSUPPORTED_FILE_INPUT_PLACEHOLDER
+    ));
+}
+
+#[test]
+fn normalize_for_completions_leaves_text_messages_borrowed() {
+    let msgs = vec![ChatMessage::user("hello")];
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
+    assert!(matches!(normalized, std::borrow::Cow::Borrowed(_)));
+    let normalized = normalized.as_ref();
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text)) if text == "hello"
+    ));
+}
+
+#[test]
+fn transport_messages_uses_string_content_for_text_only_normalized_history() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::selection(
+            "src/lib.rs",
+            "lib.rs:10-12",
+            Some(10),
+            Some(12),
+            Some("fn hello() {}".to_string()),
+        )),
+        ChatMessageContentPart::text(" after "),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+    ])];
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
+    let expected = format!(
+        "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {{}}\n</selection> after {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}"
+    );
+
+    let wire = transport_messages(normalized.as_ref(), "deepseek-v4-pro", false, None);
+    assert!(wire[0]["content"].is_string());
+    assert_eq!(wire[0]["content"].as_str(), Some(expected.as_str()));
+}
+
+#[test]
+fn transport_messages_strips_incompatible_reasoning_without_changing_visible_assistant_text() {
+    let assistant = ChatMessage::assistant("visible answer").with_reasoning_state(
+        Some("Determining JSON schema item count".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content": "private"}),
+            fallback_text: Some("Determining JSON schema item count".to_string()),
+            provider_refs: None,
+        }),
+        None,
+    );
+    let wire = transport_messages(&[ChatMessage::user("q"), assistant], "gpt-5.4", true, None);
+
+    assert_eq!(wire[1]["content"], "visible answer");
+    assert!(
+        !wire[1]
+            .to_string()
+            .contains("Determining JSON schema item count"),
+        "opaque continuity must not become user-visible assistant content"
+    );
+    assert!(
+        !wire[1].to_string().contains("[reasoning continuity]"),
+        "the removed text-downgrade marker must never reach provider wire"
+    );
+}
+
+#[test]
+fn transport_messages_never_sends_transcript_message_kind_to_provider() {
+    let mut signal = ChatMessage::user("background complete");
+    signal.kind = MessageKind::Signal;
+    let wire = transport_messages(&[signal], "gpt-5.4", false, None);
+
+    assert!(
+        wire[0].get("kind").is_none(),
+        "kind is transcript metadata, not an OpenAI-compatible wire field"
+    );
+}
+
+#[test]
+fn transport_messages_promotes_ephemeral_tail_to_leading_system_instruction() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let wire = transport_messages(
+        &[
+            ChatMessage::system("stable instructions"),
+            ChatMessage::user("inspect the project"),
+            ChatMessage::assistant("I will inspect it"),
+            tail,
+        ],
+        "deepseek-v4-pro",
+        false,
+        None,
+    );
+
+    assert_eq!(
+        wire.len(),
+        3,
+        "the request-only tail is not dialogue history"
+    );
+    assert_eq!(wire[0]["role"], "system");
+    assert_eq!(
+        wire[0]["content"],
+        "stable instructions\n\nruntime-only workspace state"
+    );
+    assert_eq!(wire[1]["role"], "user");
+    assert_eq!(wire[2]["role"], "assistant");
+    assert!(
+        wire.iter()
+            .skip(1)
+            .all(|message| !message.to_string().contains("runtime-only workspace state")),
+        "the tail must be present only in the instruction channel: {wire:?}"
+    );
+    assert!(
+        !serde_json::to_string(&wire)
+            .expect("serialize wire")
+            .contains("\"kind\""),
+        "transcript-only message metadata must not leak to the provider"
+    );
+}
+
+#[test]
+fn transport_messages_creates_leading_system_for_ephemeral_tail_without_system_prompt() {
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+    let wire = transport_messages(
+        &[ChatMessage::user("inspect the project"), tail],
+        "deepseek-v4-pro",
+        false,
+        None,
+    );
+
+    assert_eq!(
+        wire,
+        vec![
+            serde_json::json!({
+                "role": "system",
+                "content": "runtime-only workspace state",
+            }),
+            serde_json::json!({
+                "role": "user",
+                "content": "inspect the project",
+            }),
+        ]
+    );
+}
+
+#[test]
+fn transport_messages_keeps_tool_history_order_when_promoting_ephemeral_tail() {
+    let mut assistant = ChatMessage::assistant("I will read the file");
+    assistant.tool_calls = Some(vec![serde_json::json!({
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": "{\"path\":\"src/lib.rs\"}",
+        }
+    })]);
+    let mut tail = ChatMessage::user("runtime-only workspace state");
+    tail.kind = MessageKind::EphemeralTail;
+
+    let wire = transport_messages(
+        &[
+            ChatMessage::system("stable instructions"),
+            ChatMessage::user("inspect the project"),
+            assistant,
+            ChatMessage::tool("call_1", "file contents"),
+            tail,
+        ],
+        "deepseek-v4-pro",
+        true,
+        None,
+    );
+
+    assert_eq!(
+        wire.iter()
+            .map(|message| message["role"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["system", "user", "assistant", "tool"]
+    );
+    assert_eq!(wire[2]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(wire[3]["tool_call_id"], "call_1");
+    assert_eq!(
+        wire[0]["content"],
+        "stable instructions\n\nruntime-only workspace state"
+    );
+}
+
+#[test]
+fn transport_messages_renders_multimodal_user_content_for_standard_openai() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("look "),
+        ChatMessageContentPart::image_base64_data(
+            "image/png",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        )
+        .expect("inline image"),
+        ChatMessageContentPart::text(" then "),
+        ChatMessageContentPart::file_base64_data("guide.pdf", "application/pdf", "UERG")
+            .expect("inline file"),
+    ])];
+
+    let wire = transport_messages(
+        normalize_for_completions(
+            &msgs,
+            &Capabilities {
+                vision: true,
+                files: true,
+                tools: true,
+                reasoning: false,
+                web_search: false,
+            },
+        )
+        .as_ref(),
+        "gpt-4.1",
+        false,
+        None,
+    );
+
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "look ");
+    assert_eq!(content[1]["type"], "image_url");
+    let image_url = content[1]["image_url"]["url"]
+        .as_str()
+        .expect("image_url.url");
+    assert!(image_url.starts_with("data:image/png;base64,"));
+    assert_eq!(content[2]["type"], "text");
+    assert_eq!(content[2]["text"], " then ");
+    assert_eq!(content[3]["type"], "file");
+    let file_data = content[3]["file"]["file_data"]
+        .as_str()
+        .expect("file.file_data");
+    assert!(file_data.starts_with("data:application/pdf;base64,"));
+    assert!(content.iter().all(|part| {
+        part.get("type") != Some(&serde_json::json!("input_image"))
+            && part.get("type") != Some(&serde_json::json!("input_file"))
+    }));
+}
+
+#[test]
+fn transport_messages_uses_standard_file_id_slots_for_uploaded_parts() {
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: "OPENAI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(
+        &openai_multimodal_entry("OPENAI_API_KEY"),
+        &runtime,
+        &credential,
+    )
+    .expect("provider");
+    let files_adapter = provider
+        .cached_files_adapter(&runtime.files)
+        .expect("files adapter");
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string())).unwrap(),
+    ])];
+
+    let wire = transport_messages(&msgs, "gpt-4.1", false, Some(files_adapter.as_ref()));
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["image_url"]["file_id"], "file-image");
+    assert!(content[0]["image_url"].get("url").is_none());
+    assert_eq!(content[1]["file"]["file_id"], "file-pdf");
+}
+
+#[test]
+fn transport_messages_uses_ms_scheme_for_moonshot_uploaded_images() {
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "moonshot".to_string(),
+        env_name: "MOONSHOT_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(
+        &moonshot_multimodal_entry("MOONSHOT_API_KEY"),
+        &runtime,
+        &credential,
+    )
+    .expect("moonshot provider");
+    let files_adapter = provider
+        .cached_files_adapter(&runtime.files)
+        .expect("moonshot files adapter");
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_file_id("img-123").unwrap(),
+    ])];
+
+    let wire = transport_messages(&msgs, "kimi-k3", false, Some(files_adapter.as_ref()));
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["type"], "image_url");
+    assert_eq!(content[0]["image_url"]["url"], "ms://img-123");
+    assert!(content[0]["image_url"].get("file_id").is_none());
+}
+
+#[test]
+fn transport_messages_degrades_uploaded_parts_when_files_adapter_missing() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string())).unwrap(),
+    ])];
+
+    let wire = transport_messages(&msgs, "gpt-4.1", false, None);
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER);
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], UNSUPPORTED_FILE_INPUT_PLACEHOLDER);
+}
+
+/// Cached token details are read from the provider's non-stream wire shape.
+#[test]
+fn openai_non_stream_usage_reports_cached_tokens() {
+    let response = parse_non_stream_response(
+        br#"{
+            "id":"chatcmpl-1",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+            "usage":{
+                "prompt_tokens":120,
+                "completion_tokens":4,
+                "total_tokens":124,
+                "prompt_tokens_details":{"cached_tokens":96}
+            }
+        }"#,
+    )
+    .expect("valid OpenAI response");
+
+    let usage = response.usage.expect("provider supplied usage");
+    assert_eq!(usage.prompt_tokens, 120);
+    assert_eq!(usage.cache_read_tokens, Some(96));
+    assert_eq!(usage.cache_write_tokens, None);
+}
+
+#[test]
+fn openai_non_stream_usage_accepts_absent_and_null_but_rejects_malformed() {
+    let mut raw = serde_json::json!({
+        "id": "chatcmpl-optional-usage",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+    });
+    for usage in [None, Some(serde_json::Value::Null)] {
+        if let Some(usage) = usage {
+            raw["usage"] = usage;
+        }
+        let response =
+            parse_non_stream_response(&serde_json::to_vec(&raw).unwrap()).expect("optional usage");
+        assert!(response.usage.is_none());
+        assert_eq!(response.choices.len(), 1);
+    }
+    raw["usage"] = serde_json::json!({"prompt_tokens": "bad", "completion_tokens": 1});
+    assert!(parse_non_stream_response(&serde_json::to_vec(&raw).unwrap()).is_err());
+}
+
+#[test]
+fn openai_non_stream_usage_without_cache_details_stays_none() {
+    let response = parse_non_stream_response(
+        br#"{
+            "id":"chatcmpl-1",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}
+        }"#,
+    )
+    .expect("valid OpenAI response");
+
+    assert_eq!(
+        response
+            .usage
+            .expect("provider supplied usage")
+            .cache_read_tokens,
+        None
+    );
+}
+
 #[tokio::test]
 #[ignore = "依赖真实 DeepSeek API 与配额，CI 默认跳过"]
 async fn chat_real_request_response_print() {
@@ -276,9 +854,13 @@ async fn chat_real_request_response_print() {
         model: entry.request_model_name().to_string(),
         temperature: Some(0.0),
         max_tokens: Some(10),
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: None,
+        cache_key: None,
         tools: None,
     };
 
@@ -292,6 +874,69 @@ async fn chat_real_request_response_print() {
                 e
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn speed_completions_http_stream_and_non_stream_keep_max_independent() {
+    use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
+    use crate::core::llm::Speed;
+    use tokio_stream::StreamExt;
+    let speeds = [
+        (None, None),
+        (Some(Speed::Standard), Some("default")),
+        (Some(Speed::Fast), Some("priority")),
+        (Some(Speed::Ultrafast), Some("ultrafast")),
+    ];
+    for stream in [false, true] {
+        let payload = if stream {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n"
+        } else {
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}"#
+        };
+        let server =
+            MockHttpServer::start(vec![ScriptedHttpResponse::json(200, payload); speeds.len()])
+                .await;
+        let mut entry = openai_entry("SPEED_TEST_KEY");
+        entry.base_url = Some(server.base_url.clone());
+        let mut provider = OpenAiProvider::new(
+            &entry,
+            &LlmConfig::default().runtime(),
+            &Credential {
+                provider: "relay".into(),
+                env_name: "SPEED_TEST_KEY".into(),
+                value: "stub".into(),
+            },
+        )
+        .unwrap();
+        provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (speed, _) in speeds {
+            let request = ChatRequest {
+                messages: vec![ChatMessage::user("OK")],
+                model: "gpt-5.6-sol".into(),
+                speed,
+                thinking_level: Some(ThinkingLevel::Max),
+                ..Default::default()
+            };
+            if stream {
+                let mut events = provider.chat_stream(request).await.unwrap();
+                while let Some(event) = events.next().await {
+                    event.unwrap();
+                }
+            } else {
+                provider.chat(request).await.unwrap();
+            }
+        }
+        for (raw, (_, expected)) in server.request_texts().iter().zip(speeds) {
+            let body: serde_json::Value =
+                serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body.get("service_tier").and_then(|v| v.as_str()), expected);
+            assert_eq!(body["reasoning_effort"], "max");
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["model"], "gpt-5.6-sol");
+        }
+        assert_eq!(server.request_count(), 4);
+        server.shutdown().await;
     }
 }
 
@@ -310,9 +955,13 @@ fn thinking_level_override_updates_openai_reasoning_effort() {
         model: entry.request_model_name().to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: Some(ThinkingLevel::Low),
+        cache_key: None,
         tools: None,
     };
 
@@ -338,9 +987,13 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
         model: entry.request_model_name().to_string(),
         temperature: None,
         max_tokens: None,
+        resolved_output_limit: None,
+        diagnostic_request_id: None,
         stream: Some(false),
         model_override: None,
+        speed: None,
         thinking_level: Some(ThinkingLevel::Xhigh),
+        cache_key: None,
         tools: None,
     };
 
@@ -348,7 +1001,7 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
     let fields = resolve_request_fields(&cfg, provider.thinking_format_for_wire());
 
     assert_eq!(cfg.level, "xhigh");
-    assert_eq!(fields.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("xhigh"));
 }
 
 #[test]

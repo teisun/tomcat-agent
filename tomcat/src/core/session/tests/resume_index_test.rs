@@ -1,12 +1,12 @@
-use super::super::manager::{PlanEventKind, SessionManager};
+use super::super::manager::{AgentMode, PlanEventKind, SessionManager};
 use super::super::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, resume_index_path,
-    take_last_inline_rebuild_stats_for_tests, ResumeIndexSource,
+    take_last_inline_rebuild_stats_for_tests, ResumeIndexSource, RESUME_INDEX_SCHEMA_VERSION,
 };
 use super::super::transcript::{
     append_line, insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
-    rewrite_message_text_entries_by_id, set_branch_summary_entry_is_boundary_true, write_header,
-    BranchSummaryEntry, MessageTextRewrite, SessionHeader, TranscriptEntry,
+    rewrite_message_text_entries_by_id, write_header, BranchSummaryEntry, BranchSummaryTextEntry,
+    MessageTextRewrite, SessionHeader, TranscriptEntry,
 };
 
 fn setup_mgr() -> (tempfile::TempDir, SessionManager) {
@@ -81,6 +81,7 @@ fn sidecar_records_latest_boundary_and_plan_event() {
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     super::super::transcript::append_entry(&transcript_path, &boundary).unwrap();
     mgr.append_custom_entry(serde_json::json!({
@@ -97,6 +98,61 @@ fn sidecar_records_latest_boundary_and_plan_event() {
     let plan = load.index.latest_plan_event_ref().expect("latest plan");
     assert_eq!(plan.kind, PlanEventKind::Build);
     assert_eq!(plan.plan_id, "plan_latest");
+}
+
+#[test]
+fn marker_becomes_a_resume_boundary_only_after_its_linked_body_arrives() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    let marker = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some("marker_1".to_string()),
+        parent_id: None,
+        timestamp: "2026-09-10T00:00:00.000Z".to_string(),
+        summary: None,
+        covered_start_id: None,
+        covered_end_id: None,
+        covered_count: Some(1),
+        is_boundary: Some(true),
+        preheat_compaction_id: Some("marker_1".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
+        superseded: false,
+    });
+    super::super::transcript::append_entry(&transcript_path, &marker).unwrap();
+    let pending = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index;
+    assert!(pending.latest_boundary.is_none());
+    assert!(pending.pending_boundary_markers.contains_key("marker_1"));
+
+    super::super::transcript::append_entry(
+        &transcript_path,
+        &TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+            superseded: false,
+            id: Some("marker_1:text".to_string()),
+            parent_id: Some("marker_1".to_string()),
+            timestamp: "2026-09-10T00:00:01.000Z".to_string(),
+            for_id: "marker_1".to_string(),
+            summary: "summary".to_string(),
+        }),
+    )
+    .unwrap();
+    let completed = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index;
+    assert_eq!(
+        completed
+            .latest_boundary
+            .as_ref()
+            .and_then(|anchor| anchor.entry_id.as_deref()),
+        Some("marker_1")
+    );
+    assert!(!completed.pending_boundary_markers.contains_key("marker_1"));
 }
 
 #[test]
@@ -140,7 +196,110 @@ fn sidecar_schema_version_mismatch_falls_back_and_rebuilds() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
-    assert_eq!(rebuilt.index.schema_version, 1);
+    assert_eq!(rebuilt.index.schema_version, RESUME_INDEX_SCHEMA_VERSION);
+}
+
+#[test]
+fn legacy_exec_sidecar_heals_to_chat_on_first_hydrate() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    mgr.append_custom_entry(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_BUILD,
+        "plan_id": "legacy-plan",
+        "path": "/tmp/legacy-plan.plan.md",
+        "state": "executing",
+    }))
+    .unwrap();
+    let sidecar_path = resume_index_path(&transcript_path);
+    let _ = load_or_rebuild_resume_index(&transcript_path).unwrap();
+
+    let mut old_sidecar: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    old_sidecar["schema_version"] = serde_json::json!(2);
+    old_sidecar["agent_mode"] = serde_json::json!("exec");
+    std::fs::write(
+        &sidecar_path,
+        serde_json::to_vec_pretty(&old_sidecar).unwrap(),
+    )
+    .unwrap();
+
+    let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
+    assert_eq!(rebuilt.index.schema_version, RESUME_INDEX_SCHEMA_VERSION);
+    assert_eq!(
+        rebuilt.index.resume_control_state().mode,
+        Some(AgentMode::Chat),
+        "an old exec sidecar is replaced by the event-derived Chat mode"
+    );
+}
+
+#[test]
+fn sidecar_records_plan_mode_without_plan_file() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    mgr.append_message(serde_json::json!({"role":"user","content":"/plan"}))
+        .unwrap();
+    // `/plan` 进入 PLAN 模式时计划文件还不存在，事件里只有 state。
+    mgr.append_custom_entry(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_ENTER,
+        "state": "planning",
+    }))
+    .unwrap();
+
+    let load = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    let control = load.index.resume_control_state();
+    assert_eq!(control.mode, Some(AgentMode::Plan));
+    assert!(control.plan_path.is_none());
+}
+
+#[test]
+fn sidecar_mode_follows_latest_transition_across_rebuild() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let plan_path = transcript_path.with_extension("plan.md");
+    for event in [
+        serde_json::json!({"event": crate::infra::wire::WIRE_PLAN_ENTER, "state": "planning"}),
+        serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_BUILD,
+            "plan_id": "plan_x",
+            "path": plan_path.to_string_lossy(),
+            "state": "executing",
+        }),
+        serde_json::json!({"event": crate::infra::wire::WIRE_PLAN_EXIT, "state": "chat"}),
+        serde_json::json!({"event": crate::infra::wire::WIRE_PLAN_ENTER, "state": "planning"}),
+    ] {
+        mgr.append_custom_entry(event).unwrap();
+    }
+
+    // 增量维护出来的 sidecar 与整表重建必须给出同一个模式。
+    let incremental = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index
+        .resume_control_state();
+    std::fs::remove_file(resume_index_path(&transcript_path)).unwrap();
+    let rebuilt = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index
+        .resume_control_state();
+
+    assert_eq!(incremental.mode, Some(AgentMode::Plan));
+    assert_eq!(incremental, rebuilt);
+    // 模式已回到 PLAN，但上次绑定过的计划路径仍保留，供恢复时读取文件状态。
+    assert_eq!(incremental.plan_id.as_deref(), Some("plan_x"));
+    assert!(incremental.plan_path.is_some());
+}
+
+#[test]
+fn sidecar_without_agent_mode_yields_none_for_inference_fallback() {
+    let (_dir, mgr) = setup_mgr();
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let control = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index
+        .resume_control_state();
+    assert_eq!(control.mode, None);
 }
 
 #[test]
@@ -224,16 +383,16 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
         covered_start_id: None,
         covered_end_id: None,
         covered_count: Some(1),
-        is_boundary: Some(false),
+        is_boundary: Some(true),
         preheat_compaction_id: None,
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
         error: None,
         attempts: None,
+        superseded: false,
     });
     insert_entry_after_message_id(&transcript_path, &anchor_id, &inserted).unwrap();
-    set_branch_summary_entry_is_boundary_true(&transcript_path, "cmp_1").unwrap();
     let changed = rewrite_message_text_entries_by_id(
         &transcript_path,
         &[MessageTextRewrite {
@@ -243,18 +402,38 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
     )
     .unwrap();
     assert_eq!(changed, 1);
+    let _ = take_last_inline_rebuild_stats_for_tests();
     mark_message_entries_after_anchor_superseded(&transcript_path, &anchor_id).unwrap();
-    let inline_stats = take_last_inline_rebuild_stats_for_tests()
-        .expect("rewrite path should record inline rebuild stats");
-    assert_eq!(
-        inline_stats.bytes_scanned, 0,
-        "inline rebuild should reuse in-memory lines instead of rereading transcript"
+    assert!(
+        !resume_index_path(&transcript_path).exists(),
+        "an invalidated boundary cannot keep a fresh-looking index"
     );
-
     let load = load_or_rebuild_resume_index(&transcript_path).unwrap();
-    assert_eq!(load.source, ResumeIndexSource::Existing);
-    assert!(load.index.latest_boundary.is_some());
+    assert_eq!(load.source, ResumeIndexSource::Rebuilt);
+    assert!(load.index.latest_boundary.is_none());
     assert_eq!(load.index.total_entries, 3);
+}
+
+#[test]
+fn supersede_without_a_sidecar_leaves_it_invalid_for_lazy_rebuild() {
+    let (_dir, mgr) = setup_mgr();
+    let anchor_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"anchor"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"later"}))
+        .unwrap();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let sidecar_path = resume_index_path(&transcript_path);
+    std::fs::remove_file(&sidecar_path).unwrap();
+
+    mark_message_entries_after_anchor_superseded(&transcript_path, &anchor_id).unwrap();
+
+    assert!(
+        !sidecar_path.exists(),
+        "a missing sidecar must remain absent until a reader asks for one"
+    );
+    let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
 }
 
 #[test]
@@ -269,6 +448,7 @@ fn cold_rebuild_streams_without_loading_whole_file() {
             id: "sid_resume_rebuild".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

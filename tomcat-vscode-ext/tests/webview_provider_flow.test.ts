@@ -1,14 +1,27 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../src/serveClient/initialize";
 import type {
+  ActivePlanPayload,
+  SessionStatePayload,
   RestoreCheckpointPayload,
   SessionCheckpointListPayload,
   SessionHistoryPayload,
 } from "../src/serveClient/sessionRouter";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 import type { IdeHost } from "../src/ui/webview/types";
+import type { HostToWebviewFrame, WebviewSessionSnapshot, WebviewStateSnapshot } from "../src/ui/webview/protocol";
+import type { StateBroadcaster } from "../src/ui/webview/stateBroadcaster";
+import { mergeSessionViewSnapshot, reconcileStateSnapshot } from "../gui/src/stateReconcile";
+import { applySessionPatchFrame } from "../gui/src/statePatch";
+import { getLocale, setLocale } from "../src/shared/i18n";
+import { en } from "../src/shared/i18n/en";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -16,8 +29,18 @@ const __testing = (
       registerDirectory(dirPath: string): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
+      setConfiguration(key: string, value: unknown): void;
       setOpenDialogHandler(
         handler: ((options: unknown) => vscode.Uri[] | Promise<vscode.Uri[] | undefined> | undefined) | undefined,
+      ): void;
+      setWarningMessageHandler(
+        handler:
+          | ((
+              message: string,
+              items: Array<string | vscode.MessageItem>,
+              options?: { detail?: string; modal?: boolean },
+            ) => string | vscode.MessageItem | undefined)
+          | undefined,
       ): void;
     };
   }
@@ -29,26 +52,30 @@ type MutableSessionState = {
   interrupted: boolean;
   model: string;
   modelThinking: Record<string, string | null>;
-  planId: string | null;
-  planPath: string | null;
-  planState: string;
+  activePlan: ActivePlanPayload | null;
+  agentMode: "chat" | "plan";
+  workspaceMode: string;
   thinkingLevel: string | null;
 };
 
 type BuildProviderOptions = {
+  sessionPinStorage?: Pick<vscode.Memento, "get" | "update">;
+  messageQueueSupported?: boolean;
   getMessagesImpl?: (
     sessionId?: string,
     params?: { cursor?: string | null; limit?: number },
   ) => Promise<SessionHistoryPayload>;
-  getStateImpl?: (sessionId?: string) => Promise<Record<string, unknown>>;
+  getStateImpl?: (sessionId?: string) => Promise<SessionStatePayload>;
   historyMessages?: unknown[];
   historyResponses?: Record<string, SessionHistoryPayload>;
   ideOverrides?: Partial<IdeHost>;
   listCheckpointsImpl?: (sessionId?: string) => Promise<SessionCheckpointListPayload>;
   listModelsPayload?: Record<string, unknown>;
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
-  openModelSettings?: (route?: "models") => void;
+  openSettings?: (route?: "general" | "models" | "connectors") => void;
   requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  retryImpl?: (sessionId: string, messageId: string) => Promise<void>;
+  resumeImpl?: (sessionId: string) => Promise<void>;
   restoreCheckpointImpl?: (
     sessionId: string,
     checkpointId: string,
@@ -56,6 +83,10 @@ type BuildProviderOptions = {
   ) => Promise<RestoreCheckpointPayload>;
   sessionState?: Partial<MutableSessionState>;
 };
+
+function planFixture(state: ActivePlanPayload["state"] = "planning"): ActivePlanPayload {
+  return { id: "plan-1", path: "/workspace/plans/plan-1.plan.md", state };
+}
 
 class FakeMessenger {
   readonly requestCalls: Array<Record<string, unknown>> = [];
@@ -65,6 +96,14 @@ class FakeMessenger {
     model: string;
     sessionId: string | null | undefined;
   }> = [];
+  /**
+   * A real directory standing in for the backend blob store.
+   *
+   * Real, not mocked, because the host decides whether a draft's attachment still exists
+   * by looking for the file. A fake path would make every attachment look missing, and
+   * the "bytes are gone" degradation would be all these tests ever exercised.
+   */
+  readonly attachmentRoot = mkdtempSync(path.join(tmpdir(), "tomcat-blobs-"));
   private readonly listeners = new Set<(event: Record<string, unknown>) => void>();
   listModelsPayload: Record<string, unknown> = {
     models: [{ id: "gpt-5.4" }, { id: "claude-4.6-sonnet" }],
@@ -92,12 +131,60 @@ class FakeMessenger {
 
   async request(command: Record<string, unknown>) {
     this.requestCalls.push(command);
+    const sessionId = String(command.sessionId ?? "session-1");
+    if (command.type === "get_state") {
+      return {
+        payload: { sessionId },
+        sessionId,
+        success: true,
+        type: "response",
+      };
+    }
+    if (command.type === "cache_attachment_thumbnail") {
+      const thumbnail = command.thumbnail as Record<string, unknown>;
+      const sourceSha = String(thumbnail.sourceSha ?? "");
+      mkdirSync(path.join(this.attachmentRoot, "thumbs"), { recursive: true });
+      writeFileSync(
+        path.join(this.attachmentRoot, "thumbs", sourceSha),
+        Buffer.from(String(thumbnail.thumbBase64 ?? ""), "base64"),
+      );
+      return { payload: null, sessionId, success: true, type: "response" };
+    }
+    if (command.type === "ingest_attachment") {
+      const attachment = command.attachment as Record<string, unknown>;
+      const bytes = Buffer.from(String(attachment.dataBase64 ?? ""), "base64");
+      // Content addressing, same as the backend: the hash *is* the name.
+      const blobSha = createHash("sha256").update(bytes).digest("hex");
+      const filename = String(attachment.filename ?? "pasted-image.png");
+      const mimeType = String(attachment.mimeType ?? "image/png");
+      mkdirSync(path.join(this.attachmentRoot, "blobs"), { recursive: true });
+      writeFileSync(path.join(this.attachmentRoot, "blobs", blobSha), bytes);
+      let providerSha: string | null = null;
+      if (typeof attachment.providerBase64 === "string") {
+        const providerBytes = Buffer.from(attachment.providerBase64, "base64");
+        providerSha = createHash("sha256").update(providerBytes).digest("hex");
+        writeFileSync(path.join(this.attachmentRoot, "blobs", providerSha), providerBytes);
+      }
+      return {
+        payload: {
+          blobSha,
+          bytes: bytes.length,
+          filename,
+          hasThumb: typeof attachment.thumbBase64 === "string",
+          mimeType,
+          providerSha,
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      };
+    }
     if (this.requestImpl) {
       return this.requestImpl(command);
     }
     return {
       payload: { accepted: true },
-      sessionId: String(command.sessionId ?? "session-1"),
+      sessionId,
       success: true,
       type: "response",
     };
@@ -142,42 +229,36 @@ class FakeMessenger {
     this.setPlanModeCalls.push(command);
     const sessionId = String(command.sessionId ?? "session-1");
     if (command.action === "enter") {
-      this.sessionState.planId = "plan-1";
-      this.sessionState.planPath = "/workspace/plans/plan-1.plan.md";
-      this.sessionState.planState = "planning";
-      this.emit({
-        path: this.sessionState.planPath,
-        planId: this.sessionState.planId,
-        sessionId,
-        state: this.sessionState.planState,
-        type: "plan.create",
-      });
+      if (this.sessionState.agentMode === "plan") {
+        return { success: false, error: "plan_already_in_mode", type: "response" };
+      }
+      this.sessionState.agentMode = "plan";
     } else if (command.action === "build") {
-      this.sessionState.planId = this.sessionState.planId ?? "plan-1";
-      this.sessionState.planPath = this.sessionState.planPath ?? "/workspace/plans/plan-1.plan.md";
-      this.sessionState.planState = "executing";
+      // This fake models the existing test plan on disk, not enter creating one.
+      if (!command.planId && !this.sessionState.activePlan) {
+        return { success: false, error: "plan_build_blocked", type: "response" };
+      }
+      this.sessionState.activePlan = { ...(this.sessionState.activePlan ?? planFixture()), state: "executing" };
+      this.sessionState.agentMode = "chat";
       this.emit({
-        path: this.sessionState.planPath,
-        planId: this.sessionState.planId,
+        path: this.sessionState.activePlan.path,
+        planId: this.sessionState.activePlan.id,
         sessionId,
-        state: this.sessionState.planState,
+        state: this.sessionState.activePlan.state,
         type: "plan.build",
       });
     } else {
-      this.sessionState.planState = "chat";
-      this.emit({
-        path: this.sessionState.planPath,
-        planId: this.sessionState.planId,
-        sessionId,
-        state: "completed",
-        type: "plan.complete",
-      });
-      this.sessionState.planId = null;
+      if (this.sessionState.agentMode !== "plan") {
+        return { success: false, error: "plan_state_conflict", type: "response" };
+      }
+      this.sessionState.agentMode = "chat";
     }
+    this.emit({ agentMode: this.sessionState.agentMode, sessionId, type: "session.agent_mode.changed" });
     return {
       payload: {
-        planId: this.sessionState.planId,
-        planState: this.sessionState.planState,
+        activePlan: this.sessionState.activePlan,
+        agentMode: this.sessionState.agentMode,
+        sessionId,
       },
       success: true,
       type: "response",
@@ -185,9 +266,11 @@ class FakeMessenger {
   }
 }
 
-function initializeResult(): InitializeResult {
+function initializeResult(messageQueueSupported = false): InitializeResult {
   return {
+    attachmentRoot: null,
     capabilities: [
+      ...(messageQueueSupported ? ["message_queue"] : []),
       "ask_question",
       "list_provider_keys",
       "prompt",
@@ -223,9 +306,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
       "claude-4.6-sonnet": "low",
       "gpt-5.4": "high",
     },
-    planId: null,
-    planPath: null,
-    planState: "chat",
+    activePlan: null,
+    agentMode: "chat",
+    workspaceMode: "code",
     thinkingLevel: "high",
     ...options.sessionState,
   };
@@ -234,6 +317,8 @@ function buildProvider(options: BuildProviderOptions = {}) {
     params?: { cursor?: string | null; limit?: number };
     sessionId?: string;
   }> = [];
+  const retryCalls: Array<{ messageId: string; sessionId: string }> = [];
+  const resumeCalls: string[] = [];
   const sessionRouter = {
     buildResultMetadata(sessionId: string) {
       return { sessionId };
@@ -284,9 +369,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
         contextRatio: sessionState.contextRatio,
         interrupted: sessionState.interrupted,
         model: sessionState.model,
-        planId: sessionState.planId,
-        planPath: sessionState.planPath,
-        planState: sessionState.planState,
+        activePlan: sessionState.activePlan,
+        agentMode: sessionState.agentMode,
+        workspaceMode: sessionState.workspaceMode,
         sessionId: sessionId ?? "session-1",
         thinkingLevel: sessionState.thinkingLevel,
       };
@@ -308,8 +393,22 @@ function buildProvider(options: BuildProviderOptions = {}) {
         ],
       };
     },
+    async retainAttachmentLeases(
+      _sessionId: string,
+      attachments: Array<{ blobSha: string }>,
+    ): Promise<string[]> {
+      return attachments.map((attachment) => attachment.blobSha);
+    },
     async newSession() {
       return "session-1";
+    },
+    async retry(sessionId: string, messageId: string) {
+      retryCalls.push({ messageId, sessionId });
+      await options.retryImpl?.(sessionId, messageId);
+    },
+    async resume(sessionId: string) {
+      resumeCalls.push(sessionId);
+      await options.resumeImpl?.(sessionId);
     },
     async listCheckpoints(sessionId?: string) {
       if (options.listCheckpointsImpl) {
@@ -344,35 +443,247 @@ function buildProvider(options: BuildProviderOptions = {}) {
       return sessionId;
     },
   };
-  const openModelSettings = options.openModelSettings ?? vi.fn();
+  const openSettings = options.openSettings ?? vi.fn();
 
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {
-      applyPreparedEdit: async () => true,
-      openPreparedDiff: async () => undefined,
-      rememberToolResult: async () => ({
-        displayPath: "src/app.ts",
-        originalContent: "",
-        proposedContent: "",
-        toolCallId: "tool-1",
-      }),
-      rememberToolStart: async () => undefined,
       showFile: async () => undefined,
       ...options.ideOverrides,
     } as never,
-    initialize: async () => initializeResult(),
+    // The host learns where attachment bytes live from the handshake, and uses it to grant
+    // the webview read access. Without it every image resolves to nothing.
+    initialize: async () => ({
+      ...initializeResult(options.messageQueueSupported),
+      attachmentRoot: messenger.attachmentRoot,
+    }),
     messenger: messenger as never,
-    openModelSettings,
+    openSettings,
     sessionRouter: sessionRouter as never,
+    sessionPinStorage: options.sessionPinStorage,
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
-  return { historyCalls, messenger, provider, sessionState };
+  return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState };
 }
 
+type BroadcastInternals = {
+  stateBroadcaster: StateBroadcaster;
+  handleServeEvent(event: Record<string, unknown>): Promise<void>;
+  postState(): Promise<void>;
+  postSessionView(sessionId: string): Promise<void>;
+  enrichPlanSession(view: WebviewSessionSnapshot): Promise<WebviewSessionSnapshot>;
+};
+
+async function prepareBroadcastProvider(options: BuildProviderOptions = {}) {
+  const { provider, messenger } = buildProvider({ historyMessages: [], ...options });
+  // Resolve attachment roots before the document's ready handshake, as production does.
+  await provider.dispatchTestIntent({ messageId: "prime-broadcast", type: "ready" });
+  const postedFrames: HostToWebviewFrame[] = [];
+  provider.resolveWebviewView({
+    onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+    show() {}, visible: true,
+    webview: {
+      asWebviewUri: (uri: vscode.Uri) => uri,
+      cspSource: "vscode-test-webview", html: "", options: {},
+      onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+      postMessage: async (frame: HostToWebviewFrame) => { postedFrames.push(frame); return true; },
+    },
+  } as unknown as vscode.WebviewView);
+  await provider.dispatchTestIntent({ messageId: "ready-broadcast", type: "ready" });
+  const internals = provider as unknown as BroadcastInternals;
+  return { provider, messenger, postedFrames, internals };
+}
+
+function stream(internals: BroadcastInternals, sessionId: string, text: string) {
+  return internals.handleServeEvent({
+    assistantMessageEvent: { delta: text, kind: "content_delta" },
+    assistantMessageId: `assistant-${sessionId}`, message: {}, sessionId, type: "message_update",
+  });
+}
+
+function replayFrames(frames: HostToWebviewFrame[]): WebviewStateSnapshot {
+  let state: WebviewStateSnapshot | undefined;
+  for (const frame of frames) {
+    if (frame.channel === "state") {
+      state = reconcileStateSnapshot(state, frame.content);
+    } else if (frame.channel === "sessionView") {
+      if (!state) throw new Error("session view arrived before initial state");
+      state = mergeSessionViewSnapshot(state, frame.content);
+    } else if (frame.channel === "sessionPatch") {
+      if (!state) throw new Error("patch arrived before initial state");
+      const result = applySessionPatchFrame(state, frame.content);
+      if (!result.ok) throw new Error(result.error);
+      state = result.state;
+    }
+  }
+  if (!state) throw new Error("no initial state frame");
+  return state;
+}
+
+/** sha256 of the "png-bytes" fixture, i.e. the name the backend gives it. */
+const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
+
 describe("webview provider integration", () => {
+  it.each([
+    { messageQueueSupported: false, busy: false },
+    { messageQueueSupported: true, busy: false },
+    { messageQueueSupported: true, busy: true },
+  ])("preserves accepted input when draft cleanup fails (queue=$messageQueueSupported, busy=$busy)", async ({ messageQueueSupported, busy }) => {
+    const { provider, messenger, postedFrames } = await prepareBroadcastProvider({ messageQueueSupported, sessionState: { busy } });
+    const previousLocale = getLocale();
+    setLocale("en");
+    const text = "accepted despite local cleanup error";
+    try {
+      await provider.dispatchTestIntent({ type: "syncComposerDraft", messageId: "draft", data: { sessionId: "session-1", text, segments: [] } });
+      await provider.flushDrafts();
+      const originalDelete = vscode.workspace.fs.delete.bind(vscode.workspace.fs);
+      const deletion = vi.spyOn(vscode.workspace.fs, "delete").mockImplementation(async (uri, options) => {
+        if (uri.path.endsWith("/session-1.json")) throw new Error("permission denied");
+        await originalDelete(uri, options);
+      });
+      const warning = vi.spyOn(vscode.window, "showWarningMessage");
+      await provider.dispatchTestIntent({ type: "prompt", messageId: "submit", data: { sessionId: "session-1", text, segments: [], userMessageId: "submitted" } });
+      expect(deletion).toHaveBeenCalled();
+      expect(warning).toHaveBeenCalledWith(en["host.draftCleanupFailed"].replace("{detail}", "permission denied"));
+      const view = replayFrames(postedFrames).sessionViews["session-1"];
+      expect(view.composerDraft.text).toBe("");
+      if (busy) {
+        expect(view.messageQueue?.items).toEqual([expect.objectContaining({ text })]);
+        expect(messenger.requestCalls.filter(call => call.type === "prompt")).toHaveLength(0);
+      } else {
+        expect(messenger.requestCalls.filter(call => call.type === "prompt")).toHaveLength(1);
+        const message = view.timeline.find(item => item.type === "message" && item.kind === "user" && item.text === text);
+        expect(message).toBeDefined();
+        expect(message).not.toHaveProperty("deliveryState", "failed");
+        expect(message).not.toHaveProperty("deliveryError");
+      }
+      if (messageQueueSupported) expect(postedFrames).toContainEqual(expect.objectContaining({
+        channel: "event", content: expect.objectContaining({ type: "composerSubmissionResult", accepted: true, userMessageId: "submitted" }),
+      }));
+    } finally {
+      setLocale(previousLocale);
+      provider.dispose();
+    }
+  });
+
+  it("preserves the original and provider rendition when retrying a rejected image", async () => {
+    let attempts = 0;
+    const { messenger, provider } = buildProvider({
+      requestImpl: async command => command.type === "prompt" && ++attempts === 1
+        ? { success: false, error: "busy" }
+        : { success: true, payload: { accepted: true } },
+    });
+    const original = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
+    // The fake backend treats bytes as opaque; rasterization is covered by imagePipeline.
+    const rendition = Buffer.from("distinct provider png bytes");
+    const providerSha = createHash("sha256").update(rendition).digest("hex");
+    try {
+      await provider.dispatchTestIntent({ type: "ready", messageId: "ready-svg-retry" });
+      await provider.dispatchTestIntent({
+        type: "attachFiles", messageId: "attach-svg-retry",
+        data: { sessionId: "session-1", files: [{
+          filename: "retry.svg", mimeType: "image/svg+xml", dataBase64: original.toString("base64"),
+          providerBase64: rendition.toString("base64"), providerMimeType: "image/png",
+        }] },
+      });
+      await provider.dispatchTestIntent({
+        type: "prompt", messageId: "prompt-svg-retry", data: { sessionId: "session-1", text: "describe the drawing" },
+      });
+      const first = messenger.requestCalls.find(call => call.type === "prompt")!;
+      const params = first.params as { userMessageId: string; attachments: unknown[] };
+      expect(params.attachments).toEqual([expect.objectContaining({
+        blobSha: createHash("sha256").update(original).digest("hex"), providerSha,
+      })]);
+      await provider.dispatchTestIntent({
+        type: "retryUserMessage", messageId: "retry-svg", data: { sessionId: "session-1", messageId: params.userMessageId },
+      });
+      const requests = messenger.requestCalls.filter(call => call.type === "prompt");
+      expect(requests).toHaveLength(2);
+      expect(requests[1].params).toMatchObject({ userMessageId: params.userMessageId, attachments: params.attachments });
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it.each(["state", "session"] as const)("does not replay pending appendText after an immediate %s snapshot", async (kind) => {
+    vi.useFakeTimers();
+    const { postedFrames, provider, internals } = await prepareBroadcastProvider();
+    try {
+      await stream(internals, "s1", "hello");
+      await internals.stateBroadcaster.forceFlush();
+      postedFrames.length = 0;
+      await internals.postState();
+      await stream(internals, "s1", " world");
+      if (kind === "state") await internals.postState();
+      else await internals.postSessionView("s1");
+      await internals.stateBroadcaster.forceFlush();
+      expect(replayFrames(postedFrames).sessionViews.s1.timeline.find(item => item.type === "message")?.text).toBe("hello world");
+    } finally {
+      provider.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("captures every session snapshot before awaiting another session's plan metadata", async () => {
+    vi.useFakeTimers();
+    const { postedFrames, provider, internals } = await prepareBroadcastProvider();
+    const barrier = deferred<void>();
+    const started = deferred<void>();
+    const original = internals.enrichPlanSession.bind(internals);
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await stream(internals, "s1", "one");
+      await stream(internals, "s2", "two");
+      await internals.stateBroadcaster.forceFlush();
+      postedFrames.length = 0;
+      await internals.postState();
+      spy = vi.spyOn(internals, "enrichPlanSession").mockImplementation(async view => {
+        if (view.sessionId === "s1") { started.resolve(); await barrier.promise; }
+        return original(view);
+      });
+      internals.stateBroadcaster.markSession("s1");
+      internals.stateBroadcaster.markSession("s2");
+      const pending = internals.stateBroadcaster.forceFlush();
+      await started.promise;
+      await stream(internals, "s2", " +");
+      barrier.resolve();
+      await pending;
+      await internals.stateBroadcaster.forceFlush();
+      expect(replayFrames(postedFrames).sessionViews.s2.timeline.find(item => item.type === "message")?.text).toBe("two +");
+    } finally {
+      barrier.resolve();
+      spy?.mockRestore();
+      provider.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("projects durable pins without changing last-active or calling the backend", async () => {
+    const values = new Map<string, unknown>();
+    const storage = {
+      get: <T>(key: string, fallback?: T): T => (values.has(key) ? values.get(key) : fallback) as T,
+      update: vi.fn(async (key: string, value: unknown) => { values.set(key, value); }),
+    };
+    const { provider, messenger } = buildProvider({ sessionPinStorage: storage });
+    try {
+      await provider.dispatchTestIntent({ messageId: "ready-pin", type: "ready" });
+      const before = provider.currentState();
+      const id = before.sessions[0].sessionId;
+      const requests = messenger.requestCalls.length;
+      await provider.dispatchTestIntent({ messageId: "pin", type: "setSessionPinned", data: { sessionId: id, pinned: true } });
+      const after = provider.currentState();
+      expect(after.sessions.find(s => s.sessionId === id)?.isPinned).toBe(true);
+      expect(after.activeSessionId).toBe(before.activeSessionId);
+      expect(after.sessions.map(s => [s.sessionId, s.isCurrent, s.updatedAt])).toEqual(before.sessions.map(s => [s.sessionId, s.isCurrent, s.updatedAt]));
+      expect(messenger.requestCalls).toHaveLength(requests);
+      storage.update.mockRejectedValueOnce(new Error("memento failure"));
+      await provider.dispatchTestIntent({ messageId: "unpin", type: "setSessionPinned", data: { sessionId: id, pinned: false } });
+      expect(provider.currentState().sessions.find(s => s.sessionId === id)?.isPinned).toBe(true);
+    } finally { provider.dispose(); }
+  });
+
   it("hydrates history during bootstrap and carries attachments through prompt requests", async () => {
     const { messenger, provider } = buildProvider();
     __testing.registerFile("/workspace/diagram.png", "png-bytes");
@@ -395,13 +706,37 @@ describe("webview provider integration", () => {
       type: "pickContext",
     });
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]).toMatchObject({
-      attachment: {
-        filename: "diagram.png",
-      },
+      // A hash and two URLs. The bytes went to the backend once, at pick time, and the
+      // host holds nothing but this reference from here on.
+      blobSha: PNG_SHA,
+      // The file picker never passes through a webview, so nothing has produced a
+      // thumbnail for this image yet. It must stay marked as such: the strip draws a
+      // placeholder rather than the 4000x3000 original.
+      hasThumb: false,
       kind: "image",
       label: "diagram.png",
       mimeType: "image/png",
     });
+
+    // The webview notices the gap and fills it. Once the thumbnail lands, the attachment
+    // flips over to it — otherwise a picked image would show a placeholder forever.
+    await provider.dispatchTestIntent({
+      data: {
+        blobSha: PNG_SHA,
+        sessionId: "session-1",
+        thumbBase64: Buffer.from("thumb-bytes").toString("base64"),
+      },
+      messageId: "thumb-1",
+      type: "cacheAttachmentThumbnail",
+    });
+    expect(
+      provider.currentState().sessionViews["session-1"]?.pendingAttachments[0],
+    ).toMatchObject({ blobSha: PNG_SHA, hasThumb: true });
+    expect(
+      messenger.requestCalls.filter(
+        (call) => call.type === "cache_attachment_thumbnail",
+      ),
+    ).toHaveLength(1);
 
     await provider.dispatchTestIntent({
       data: {
@@ -415,21 +750,28 @@ describe("webview provider integration", () => {
     const promptRequest = messenger.requestCalls.find((call) => call.type === "prompt");
     expect(promptRequest).toEqual(
       expect.objectContaining({
-        params: {
+        params: expect.objectContaining({
+          // Sending carries the hash the backend already has. This is the whole
+          // write-amplification fix in one assertion: the bytes crossed the boundary
+          // once, at pick time, and the send is a few dozen bytes no matter how large
+          // the image is.
           attachments: [
             expect.objectContaining({
-              dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
+              blobSha: PNG_SHA,
               filename: "diagram.png",
               kind: "image",
               mimeType: "image/png",
             }),
           ],
           userMessageId: expect.any(String),
-        },
+        }),
         sessionId: "session-1",
         text: "send with attachment",
         type: "prompt",
       }),
+    );
+    expect(JSON.stringify(promptRequest)).not.toContain(
+      Buffer.from("png-bytes", "utf8").toString("base64"),
     );
     const userMessageId = (promptRequest?.params as { userMessageId?: string } | undefined)?.userMessageId;
     const sentUserMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
@@ -447,6 +789,139 @@ describe("webview provider integration", () => {
     expect(sentUserMessage).not.toHaveProperty("retryable");
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toHaveLength(0);
 
+    provider.dispose();
+  });
+
+  it("keeps a newer edit when the earlier prompt is acknowledged", async () => {
+    const response = deferred<Record<string, unknown>>();
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) => {
+        if (command.type === "prompt") return response.promise;
+        return { success: true };
+      },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-draft-retirement", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "first prompt" },
+      messageId: "draft-before-prompt",
+      type: "syncComposerDraft",
+    });
+
+    const sending = provider.dispatchTestIntent({
+      data: { sessionId: "session-1", text: "first prompt" },
+      messageId: "prompt-before-new-edit",
+      type: "prompt",
+    });
+    await vi.waitFor(() => expect(messenger.requestCalls.some((call) => call.type === "prompt")).toBe(true));
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "newer draft" },
+      messageId: "draft-after-prompt",
+      type: "syncComposerDraft",
+    });
+    response.resolve({ success: true });
+    await sending;
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "newer draft",
+    });
+    provider.dispose();
+  });
+
+  it("keeps an edit that returns to the same text while a prompt is pending", async () => {
+    const response = deferred<Record<string, unknown>>();
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) =>
+        command.type === "prompt" ? response.promise : { success: true },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-same-text", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "same text" },
+      messageId: "draft-before-same-text-prompt",
+      type: "syncComposerDraft",
+    });
+    const sending = provider.dispatchTestIntent({
+      data: { sessionId: "session-1", text: "same text" },
+      messageId: "same-text-prompt",
+      type: "prompt",
+    });
+    await vi.waitFor(() => expect(messenger.requestCalls.some((call) => call.type === "prompt")).toBe(true));
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "temporary text" },
+      messageId: "draft-temporary-text",
+      type: "syncComposerDraft",
+    });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "same text" },
+      messageId: "draft-returned-to-same-text",
+      type: "syncComposerDraft",
+    });
+    response.resolve({ success: true });
+    await sending;
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "same text",
+    });
+    provider.dispose();
+  });
+
+  it("does not clear a newer composer draft after a successful history retry", async () => {
+    const response = deferred<Record<string, unknown>>();
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) =>
+        command.type === "prompt" ? response.promise : { success: true },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-retry-preserves-draft", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "new draft beside retry" },
+      messageId: "draft-beside-retry",
+      type: "syncComposerDraft",
+    });
+    const internals = provider as unknown as {
+      sendUserMessage(
+        sessionId: string,
+        kind: "prompt",
+        text: string,
+        segments: [],
+        options: { attachments: []; messageId: string; retrying: true },
+      ): Promise<void>;
+    };
+    const retrying = internals.sendUserMessage(
+      "session-1",
+      "prompt",
+      "old failed prompt",
+      [],
+      { attachments: [], messageId: "retrying-user-message", retrying: true },
+    );
+    await vi.waitFor(() => expect(messenger.requestCalls.some((call) => call.type === "prompt")).toBe(true));
+    response.resolve({ success: true });
+    await retrying;
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "new draft beside retry",
+    });
+    provider.dispose();
+  });
+
+  it("keeps the submitted draft after a failed prompt", async () => {
+    const { provider } = buildProvider({
+      requestImpl: async (command) =>
+        command.type === "prompt" ? { error: "offline", success: false } : { success: true },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-failed-draft", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "retry this" },
+      messageId: "draft-before-failure",
+      type: "syncComposerDraft",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1", text: "retry this" },
+      messageId: "failed-prompt",
+      type: "prompt",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "retry this",
+    });
     provider.dispose();
   });
 
@@ -468,60 +943,50 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    const postInsertReference = vi
-      .spyOn(provider, "postInsertReference")
-      .mockResolvedValue(undefined);
-
     await provider.dispatchTestIntent({
       messageId: "pick-context-1",
       type: "pickContext",
     });
 
-    expect(postInsertReference).toHaveBeenCalledTimes(3);
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      1,
-      "session-1",
+    expect(
+      provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
+    ).toMatchObject([
       {
         kind: "file",
         label: "app.ts",
         path: "src/app.ts",
         type: "reference",
+        occurrenceId: expect.any(String),
       },
-    );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      2,
-      "session-1",
       {
         kind: "file",
         label: "folder/",
         path: "src/folder/",
         type: "reference",
       },
-    );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      3,
-      "session-1",
       {
         kind: "file",
         label: "log.txt",
         path: "/outside/log.txt",
         type: "reference",
       },
-    );
+    ]);
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
       expect.objectContaining({
-        attachment: expect.objectContaining({
-          dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
-          filename: "diagram.png",
-          kind: "image",
-          mimeType: "image/png",
-        }),
+        blobSha: PNG_SHA,
+        bytes: "png-bytes".length,
+        filename: "diagram.png",
         kind: "image",
         label: "diagram.png",
         mimeType: "image/png",
         path: "/workspace/diagram.png",
       }),
     ]);
+    // The contract this replaced an assertion on inline base64 with: the snapshot the
+    // webview receives must contain no image bytes anywhere.
+    expect(
+      JSON.stringify(provider.currentState().sessionViews["session-1"]?.pendingAttachments),
+    ).not.toContain(Buffer.from("png-bytes", "utf8").toString("base64"));
 
     const attachmentId = provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]?.id;
     expect(attachmentId).toBeTruthy();
@@ -606,9 +1071,6 @@ describe("webview provider integration", () => {
     const postEventSpy = vi
       .spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent")
       .mockResolvedValue(undefined);
-    const postInsertReference = vi
-      .spyOn(provider, "postInsertReference")
-      .mockResolvedValue(undefined);
 
     await provider.dispatchTestIntent({
       data: {
@@ -636,8 +1098,13 @@ describe("webview provider integration", () => {
       type: "resolveDrop",
     });
 
-    const droppedReference = postInsertReference.mock.calls[0]?.[1];
-    expect(searchReference).toEqual(droppedReference);
+    const droppedReference = provider.currentState()
+      .sessionViews["session-1"]
+      ?.composerDraft
+      ?.segments
+      .find((segment) => segment.type === "reference");
+    const { occurrenceId: _occurrence, ...droppedMetadata } = droppedReference!;
+    expect(searchReference).toEqual(droppedMetadata);
 
     const segments = [
       { text: "Inspect ", type: "text" as const },
@@ -669,7 +1136,6 @@ describe("webview provider integration", () => {
     );
 
     postEventSpy.mockRestore();
-    postInsertReference.mockRestore();
     provider.dispose();
   });
 
@@ -684,10 +1150,6 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    const postInsertReference = vi
-      .spyOn(provider, "postInsertReference")
-      .mockResolvedValue(undefined);
-
     await provider.dispatchTestIntent({
       data: {
         sessionId: "session-1",
@@ -701,35 +1163,27 @@ describe("webview provider integration", () => {
       type: "resolveDrop",
     });
 
-    expect(postInsertReference).toHaveBeenCalledTimes(2);
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      1,
-      "session-1",
+    expect(
+      provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
+    ).toMatchObject([
       {
         kind: "file",
         label: "app.ts",
         path: "src/app.ts",
         type: "reference",
+        occurrenceId: expect.any(String),
       },
-    );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      2,
-      "session-1",
       {
         kind: "file",
         label: "folder/",
         path: "src/folder/",
         type: "reference",
       },
-    );
+    ]);
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
       expect.objectContaining({
-        attachment: expect.objectContaining({
-          dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
-          filename: "mockup.png",
-          kind: "image",
-          mimeType: "image/png",
-        }),
+        blobSha: PNG_SHA,
+        filename: "mockup.png",
         kind: "image",
         label: "mockup.png",
         mimeType: "image/png",
@@ -740,11 +1194,82 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
+  it("keeps sourcePath on clipboard-ingested PDFs in pending and optimistic history without leaking it to serve", async () => {
+    const { messenger, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-pdf-source-path",
+      type: "ready",
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        files: [
+          {
+            dataBase64: Buffer.from("%PDF-1.7\nAcceptance PDF\n", "utf8").toString("base64"),
+            filename: "brief.pdf",
+            mimeType: "application/pdf",
+            sourcePath: "/workspace/docs/brief.pdf",
+          },
+        ],
+        sessionId: "session-1",
+      },
+      messageId: "attach-pdf-source-path",
+      type: "attachFiles",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
+      expect.objectContaining({
+        filename: "brief.pdf",
+        kind: "file",
+        mimeType: "application/pdf",
+        path: "/workspace/docs/brief.pdf",
+      }),
+    ]);
+
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "Read this PDF",
+      },
+      messageId: "prompt-pdf-source-path",
+      type: "prompt",
+    });
+
+    const promptRequest = messenger.requestCalls.find((call) => call.type === "prompt") as
+      | undefined
+      | { params?: { attachments?: Array<Record<string, unknown>> } };
+    expect(promptRequest?.params?.attachments?.[0]).toEqual(
+      expect.objectContaining({
+        filename: "brief.pdf",
+        kind: "file",
+        mimeType: "application/pdf",
+      }),
+    );
+    expect(promptRequest?.params?.attachments?.[0]).not.toHaveProperty("sourcePath");
+
+    const sentUserMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.kind === "user" && item.text === "Read this PDF",
+    );
+    expect(sentUserMessage).toEqual(
+      expect.objectContaining({
+        attachments: [
+          expect.objectContaining({
+            filename: "brief.pdf",
+            path: "/workspace/docs/brief.pdf",
+          }),
+        ],
+      }),
+    );
+
+    provider.dispose();
+  });
+
   it("opens model settings when the composer footer intent fires", async () => {
-    const openModelSettings = vi.fn();
+    const openSettings = vi.fn();
     const { provider } = buildProvider({
       listModelsPayload: { models: [] },
-      openModelSettings,
+      openSettings,
     });
 
     await provider.dispatchTestIntent({
@@ -754,10 +1279,10 @@ describe("webview provider integration", () => {
     await provider.dispatchTestIntent({
       data: { route: "models" },
       messageId: "open-model-settings",
-      type: "openModelSettings",
+      type: "openSettings",
     });
 
-    expect(openModelSettings).toHaveBeenCalledWith("models");
+    expect(openSettings).toHaveBeenCalledWith("models");
     provider.dispose();
   });
 
@@ -937,10 +1462,16 @@ describe("webview provider integration", () => {
             };
       },
     });
+    __testing.registerFile("/workspace/retry-image.png", "png-bytes");
+    __testing.setOpenDialogHandler(() => [vscode.Uri.file("/workspace/retry-image.png")]);
 
     await provider.dispatchTestIntent({
       messageId: "ready-retry-user-message",
       type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      messageId: "pick-retry-attachment",
+      type: "pickContext",
     });
     await provider.dispatchTestIntent({
       data: {
@@ -956,13 +1487,19 @@ describe("webview provider integration", () => {
       (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
     );
     expect(failedUserMessage).toMatchObject({
-      deliveryError: "busy",
+      deliveryError: "A previous request is still running. Wait for it to finish or stop the current task before retrying.",
+      deliveryErrorDetail: "busy",
       deliveryState: "failed",
       retryable: true,
       submitKind: "prompt",
       text: "retry me",
       type: "message",
     });
+    expect(
+      (messenger.requestCalls.find((call) => call.type === "prompt")?.params as {
+        attachments?: Array<{ blobSha?: string }>;
+      }).attachments,
+    ).toEqual([expect.objectContaining({ blobSha: PNG_SHA })]);
     expect(
       failedSession?.timeline.some((item) => item.type === "message" && item.kind === "error"),
     ).toBe(false);
@@ -989,6 +1526,9 @@ describe("webview provider integration", () => {
         retriedRequests[1]?.params as { userMessageId?: string } | undefined
       )?.userMessageId,
     ).toBe(firstUserMessageId);
+    expect(
+      (retriedRequests[1]?.params as { attachments?: Array<{ blobSha?: string }> }).attachments,
+    ).toEqual([expect.objectContaining({ blobSha: PNG_SHA })]);
     const retriedUserMessages =
       provider.currentState().sessionViews["session-1"]?.timeline.filter(
         (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
@@ -1004,6 +1544,177 @@ describe("webview provider integration", () => {
     expect(retriedUserMessages[0]).not.toHaveProperty("deliveryError");
     expect(retriedUserMessages[0]).not.toHaveProperty("deliveryState");
     expect(retriedUserMessages[0]).not.toHaveProperty("retryable");
+  });
+
+  it("retains the abandoned chapter alongside the fresh Retry chapter", async () => {
+    const historyMessages: unknown[] = [
+      {
+        id: "user-1",
+        message: {
+          content: [
+            { text: "retry this image", type: "text" },
+            {
+              blobSha: PNG_SHA,
+              filename: "retry-image.png",
+              mimeType: "image/png",
+              type: "input_image",
+            },
+          ],
+          role: "user",
+          superseded: true,
+          turn_failed: true,
+        },
+        type: "message",
+      },
+      { event: "auto_retry_start", id: "retry-start-1", type: "custom" },
+      { event: "auto_retry_end", id: "retry-end-1", type: "custom" },
+      { detail: "network failed", id: "error-1", summary: "network failed", type: "error" },
+    ];
+    const { messenger, provider, retryCalls, resumeCalls } = buildProvider({
+      getMessagesImpl: async () => ({
+        hasMore: false,
+        messages: historyMessages,
+        nextCursor: null,
+        sessionId: "session-1",
+      }),
+      retryImpl: async () => {
+        historyMessages.push(
+          {
+            id: "user-2",
+            message: {
+              content: [
+                { text: "retry this image", type: "text" },
+                {
+                  blobSha: PNG_SHA,
+                  filename: "retry-image.png",
+                  mimeType: "image/png",
+                  type: "input_image",
+                },
+              ],
+              role: "user",
+            },
+            type: "message",
+          },
+          {
+            id: "assistant-2",
+            message: { content: "recovered answer", role: "assistant" },
+            type: "message",
+          },
+        );
+      },
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-error-retry", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "retry", errorId: "error-1", sessionId: "session-1" },
+      messageId: "recover-error-retry",
+      type: "recoverErrorTurn",
+    });
+
+    expect(retryCalls).toEqual([{ messageId: "user-1", sessionId: "session-1" }]);
+    expect(resumeCalls).toEqual([]);
+    expect(messenger.requestCalls.filter((call) => call.type === "prompt")).toHaveLength(0);
+    const users = provider.currentState().sessionViews["session-1"]?.timeline.filter(
+      (item) => item.type === "message" && item.kind === "user" && item.text === "retry this image",
+    ) ?? [];
+    expect(users).toEqual([
+      expect.objectContaining({
+        abandoned: true,
+        attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+        id: "user-1",
+      }),
+      expect.objectContaining({
+        attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+        id: "user-2",
+      }),
+    ]);
+    const recoveredError = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.id === "error-1",
+    );
+    expect(recoveredError).toMatchObject({ kind: "error" });
+    expect(recoveredError).not.toHaveProperty("recoveryAction");
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "assistant-2",
+      ),
+    ).toMatchObject({ kind: "assistant", text: "recovered answer" });
+    provider.dispose();
+  });
+
+  it("offers Resume after hydration repairs a dangling tool call and continues", async () => {
+    const historyMessages: unknown[] = [
+      {
+        id: "user-1",
+        message: { content: "inspect the project", role: "user" },
+        type: "message",
+      },
+      {
+        id: "assistant-1",
+        message: {
+          content: null,
+          role: "assistant",
+          tool_calls: [
+            {
+              function: { arguments: "{}", name: "read_file" },
+              id: "read-1",
+              type: "function",
+            },
+          ],
+        },
+        type: "message",
+      },
+      { detail: "connection dropped", id: "error-1", summary: "connection dropped", type: "error" },
+      {
+        id: "tool-1",
+        message: { content: "[pending]", role: "tool", tool_call_id: "read-1" },
+        type: "message",
+      },
+    ];
+    const { provider, retryCalls, resumeCalls } = buildProvider({
+      getMessagesImpl: async () => ({
+        hasMore: false,
+        messages: historyMessages,
+        nextCursor: null,
+        sessionId: "session-1",
+      }),
+      resumeImpl: async () => {
+        historyMessages.push({
+          id: "assistant-2",
+          message: { content: "continued after the recovered tool result", role: "assistant" },
+          type: "message",
+        });
+      },
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-error-resume", type: "ready" });
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "error-1",
+      ),
+    ).toMatchObject({ recoveryAction: "resume" });
+
+    await provider.dispatchTestIntent({
+      data: { action: "resume", errorId: "error-1", sessionId: "session-1" },
+      messageId: "recover-error-resume",
+      type: "recoverErrorTurn",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline.filter(
+      (item) => item.type === "message" && item.kind === "user",
+    )).toEqual([expect.objectContaining({ id: "user-1", text: "inspect the project" })]);
+    expect(resumeCalls).toEqual(["session-1"]);
+    expect(retryCalls).toEqual([]);
+    const recoveredError = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.id === "error-1",
+    );
+    expect(recoveredError).toMatchObject({ kind: "error" });
+    expect(recoveredError).not.toHaveProperty("recoveryAction");
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === "assistant-2",
+      ),
+    ).toMatchObject({ kind: "assistant", text: "continued after the recovered tool result" });
+    provider.dispose();
   });
 
   it("clears sending immediately for queued steering messages", async () => {
@@ -1163,9 +1874,8 @@ describe("webview provider integration", () => {
         busy: false,
         contextRatio: 0.42,
         model: "gpt-5.4",
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1185,19 +1895,14 @@ describe("webview provider integration", () => {
 
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
       contextRatio: 0.42,
-      planId: "plan-1",
-      planState: "executing",
+      activePlan: {
+        path: "/workspace/plans/plan-1.plan.md",
+        planId: "plan-1",
+        state: "executing",
+      },
+      agentMode: "chat",
     });
-    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: "/workspace/plans/plan-1.plan.md",
-          planId: "plan-1",
-          state: "executing",
-          type: "plan",
-        }),
-      ]),
-    );
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual([]);
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.some(
         (item) => item.type === "message" && item.kind === "user",
@@ -1331,9 +2036,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1420,9 +2124,8 @@ describe("webview provider integration", () => {
         },
       },
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -1438,8 +2141,8 @@ describe("webview provider integration", () => {
 
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
-      planId: "plan-1",
-      planState: "executing",
+      activePlan: { planId: "plan-1", state: "executing" },
+      agentMode: "chat",
     });
     expect(session?.timeline).toEqual(
       expect.arrayContaining([
@@ -1559,9 +2262,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1701,9 +2403,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1906,9 +2607,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1979,9 +2679,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -2052,6 +2751,34 @@ describe("webview provider integration", () => {
     ).toBe(true);
   });
 
+  it("keeps Chat after Build when busy input is queued and sent once on idle", async () => {
+    const { messenger, provider, sessionState } = buildProvider({ messageQueueSupported: true });
+    const sessionId = "session-1";
+    try {
+      await provider.dispatchTestIntent({ messageId: "ready-build-queue", type: "ready" });
+      await provider.dispatchTestIntent({ messageId: "enter-plan", type: "setPlanMode", data: { sessionId, action: "enter" } });
+      expect(provider.currentState().sessionViews[sessionId].agentMode).toBe("plan");
+      await provider.dispatchTestIntent({ messageId: "build-plan", type: "setPlanMode", data: { sessionId, action: "build", planId: "plan-1" } });
+      sessionState.busy = true;
+      messenger.emit({ type: "agent_start", sessionId });
+      await vi.waitFor(() => expect(provider.currentState().sessionViews[sessionId]).toMatchObject({ busy: true, agentMode: "chat" }));
+      await provider.dispatchTestIntent({ messageId: "queue-X", type: "prompt", data: { sessionId, text: "X", userMessageId: "X" } });
+      expect(provider.currentState().sessionViews[sessionId].messageQueue?.items.map(item => item.userMessageId)).toEqual(["X"]);
+      expect(messenger.requestCalls.filter(call => call.type === "prompt")).toHaveLength(0);
+      sessionState.busy = false;
+      messenger.emit({ type: "agent_idle", sessionId, outcome: "completed" });
+      await vi.waitFor(() => expect(provider.currentState().sessionViews[sessionId].messageQueue?.items).toEqual([]));
+      const prompts = messenger.requestCalls.filter(call => call.type === "prompt");
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toMatchObject({ text: "X", params: { userMessageId: "X" } });
+      expect(prompts[0].params).not.toHaveProperty("agentMode");
+      expect(prompts[0].params).not.toHaveProperty("model");
+      expect(sessionState.agentMode).toBe("chat");
+      expect(provider.currentState().sessionViews[sessionId].agentMode).toBe("chat");
+      expect(messenger.setPlanModeCalls.map(call => call.action)).toEqual(["enter", "build"]);
+    } finally { provider.dispose(); }
+  });
+
   it("tracks enter, build, and exit plan state through provider intents", async () => {
     const { messenger, provider } = buildProvider();
 
@@ -2068,13 +2795,8 @@ describe("webview provider integration", () => {
       type: "setPlanMode",
     });
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
-      planFile: {
-        path: "/workspace/plans/plan-1.plan.md",
-        planId: "plan-1",
-        state: "planning",
-      },
-      planId: "plan-1",
-      planState: "planning",
+      activePlan: null,
+      agentMode: "plan",
     });
 
     await provider.dispatchTestIntent({
@@ -2087,14 +2809,20 @@ describe("webview provider integration", () => {
       type: "setPlanMode",
     });
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
-      planFile: {
+      activePlan: {
         path: "/workspace/plans/plan-1.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planState: "executing",
+      agentMode: "chat",
     });
 
+    // Enter/exit changes the mode without completing the already built plan.
+    await provider.dispatchTestIntent({
+      data: { action: "enter", sessionId: "session-1" },
+      messageId: "plan-enter-again",
+      type: "setPlanMode",
+    });
     await provider.dispatchTestIntent({
       data: {
         action: "exit",
@@ -2104,18 +2832,90 @@ describe("webview provider integration", () => {
       messageId: "plan-exit-1",
       type: "setPlanMode",
     });
-    expect(provider.currentState().sessionViews["session-1"]?.planState).toBe("chat");
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      agentMode: "chat", activePlan: { planId: "plan-1", state: "executing" },
+    });
     expect(messenger.setPlanModeCalls.map((call) => call.action)).toEqual([
       "enter",
       "build",
+      "enter",
       "exit",
     ]);
 
     provider.dispose();
   });
 
-  it("routes plan.todos events onto the matching plan card", async () => {
+  it("asks before building on a model other than the session's", async () => {
     const { messenger, provider } = buildProvider();
+    __testing.setConfiguration("tomcat.plan.buildModel", "deepseek-v4-flash");
+    const prompts: Array<{ detail?: string; message: string }> = [];
+    __testing.setWarningMessageHandler((message, items, options) => {
+      prompts.push({ detail: options?.detail, message });
+      return items[0];
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "session-1" },
+      messageId: "plan-build-1",
+      type: "setPlanMode",
+    });
+
+    // 只陈述事实：两个模型分别是什么、这个值是从哪来的。
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].message).toContain("deepseek-v4-flash");
+    expect(prompts[0].detail).toContain("Session model: gpt-5.4");
+    expect(prompts[0].detail).toContain("This build will use: deepseek-v4-flash");
+    expect(prompts[0].detail).toContain("tomcat.plan.buildModel");
+    expect(messenger.setPlanModeCalls.map((call) => call.action)).toEqual(["build"]);
+    expect(provider.currentState().sessionViews["session-1"]?.model).toBe("deepseek-v4-flash");
+
+    provider.dispose();
+  });
+
+  it("cancelling the build-model prompt neither builds nor switches the model", async () => {
+    const { messenger, provider } = buildProvider();
+    __testing.setConfiguration("tomcat.plan.buildModel", "deepseek-v4-flash");
+    __testing.setWarningMessageHandler(() => undefined);
+
+    await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "session-1" },
+      messageId: "plan-build-cancel",
+      type: "setPlanMode",
+    });
+
+    expect(messenger.setPlanModeCalls).toEqual([]);
+    expect(provider.currentState().sessionViews["session-1"]?.model).toBe("gpt-5.4");
+    expect(provider.currentState().sessionViews["session-1"]?.activePlan?.state).not.toBe("executing");
+
+    provider.dispose();
+  });
+
+  it("does not prompt when the build model already matches the session model", async () => {
+    const { messenger, provider } = buildProvider();
+    __testing.setConfiguration("tomcat.plan.buildModel", "gpt-5.4");
+    let prompted = false;
+    __testing.setWarningMessageHandler(() => {
+      prompted = true;
+      return "Continue Build";
+    });
+
+    await provider.dispatchTestIntent({ messageId: "ready-1", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "session-1" },
+      messageId: "plan-build-same",
+      type: "setPlanMode",
+    });
+
+    expect(prompted).toBe(false);
+    expect(messenger.setPlanModeCalls.map((call) => call.action)).toEqual(["build"]);
+
+    provider.dispose();
+  });
+
+  it("routes plan.todos events onto the active plan state", async () => {
+    const { messenger, provider } = buildProvider({ sessionState: { activePlan: planFixture() } });
 
     await provider.dispatchTestIntent({
       messageId: "ready-plan-todos",
@@ -2143,17 +2943,19 @@ describe("webview provider integration", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const session = provider.currentState().sessionViews["session-1"];
-    const planCard = session.timeline.find(
-      (item) => item.type === "plan" && item.planId === "plan-1",
-    );
-    expect(planCard).toMatchObject({ type: "plan" });
-    expect((planCard as { todos?: unknown[] }).todos).toHaveLength(3);
+    expect(session.activePlan).toMatchObject({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      state: "planning",
+    });
     expect(session.planTodos).toHaveLength(3);
+    expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
     provider.dispose();
   });
 
-  it("appends an error message when opening a file fails", async () => {
+  it("shows a VS Code error message when opening a file fails", async () => {
+    const showErrorSpy = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
     const { provider } = buildProvider({
       ideOverrides: {
         showFile: vi.fn().mockRejectedValue(new Error("boom")),
@@ -2172,12 +2974,16 @@ describe("webview provider integration", () => {
     });
 
     const timeline = provider.currentState().sessionViews["session-1"]?.timeline ?? [];
+    expect(showErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("open file /workspace/missing.ts"),
+    );
     expect(timeline.at(-1)).toMatchObject({
-      kind: "error",
-      text: expect.stringContaining("open file /workspace/missing.ts"),
+      kind: "assistant",
+      text: "restored answer",
       type: "message",
     });
 
+    showErrorSpy.mockRestore();
     provider.dispose();
   });
 
@@ -2231,18 +3037,17 @@ describe("webview provider integration", () => {
     });
 
     expect(historyCalls).toHaveLength(1);
-    expect(provider.currentState().sessionViews["session-1"]?.planState).toBe("planning");
+    expect(provider.currentState().sessionViews["session-1"]?.agentMode).toBe("plan");
 
     provider.dispose();
   });
 
-  it("restores an active plan card and context ratio from getState on ready", async () => {
+  it("restores an active plan ref and context ratio from getState on ready", async () => {
     const { provider } = buildProvider({
       sessionState: {
         contextRatio: 0.42,
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2252,23 +3057,21 @@ describe("webview provider integration", () => {
     });
 
     const session = provider.currentState().sessionViews["session-1"];
-    const planCards = session?.timeline.filter((item) => item.type === "plan");
     expect(session).toMatchObject({
       contextRatio: 0.42,
-      planFile: {
+      activePlan: {
         path: "/workspace/plans/plan-1.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planId: "plan-1",
-      planState: "executing",
+      agentMode: "chat",
     });
-    expect(planCards).toHaveLength(1);
+    expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
     provider.dispose();
   });
 
-  it("replays custom plan history into one card while keeping current state truth", async () => {
+  it("replays custom plan history while keeping current state truth", async () => {
     const { provider } = buildProvider({
       historyMessages: [
         {
@@ -2295,9 +3098,8 @@ describe("webview provider integration", () => {
         },
       ],
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2307,16 +3109,15 @@ describe("webview provider integration", () => {
     });
 
     const session = provider.currentState().sessionViews["session-1"];
-    const planCards = session?.timeline.filter((item) => item.type === "plan");
     const notices = session?.timeline.filter(
       (item) => item.type === "message" && item.kind === "notice",
     );
-    expect(planCards).toHaveLength(1);
-    expect(planCards?.[0]).toMatchObject({
+    expect(session?.activePlan).toMatchObject({
       path: "/workspace/plans/plan-1.plan.md",
       planId: "plan-1",
       state: "executing",
     });
+    expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
     expect(notices).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan review: looks good" }),
@@ -2336,8 +3137,9 @@ describe("webview provider integration", () => {
     });
 
     messenger.emit({
+      agentMode: "plan",
       sessionId: "session-1",
-      type: "plan.enter",
+      type: "session.agent_mode.changed",
     });
     messenger.emit({
       path: "/workspace/plans/plan-1.plan.md",
@@ -2364,18 +3166,77 @@ describe("webview provider integration", () => {
 
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
-      planFile: {
-        path: "/workspace/plans/plan-1.plan.md",
-        state: "chat",
-      },
-      planId: null,
-      planState: "chat",
+      activePlan: null,
+      agentMode: "chat",
     });
-    expect(
-      session?.timeline.filter(
-        (item) => item.type === "plan" && item.path === "/workspace/plans/plan-1.plan.md",
-      ),
-    ).toHaveLength(1);
+    expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
+
+    provider.dispose();
+  });
+
+  it("projects the live code reviewer process into a single review row", async () => {
+    const { messenger, provider } = buildProvider({
+      sessionState: {
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-review-1",
+      type: "ready",
+    });
+
+    messenger.emit({
+      planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
+      sessionId: "session-1",
+      toolCallId: "tc-update",
+      type: "plan.code_review.started",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let review = provider
+      .currentState()
+      .sessionViews["session-1"]?.timeline.find((item) => item.type === "review");
+    expect(review).toMatchObject({
+      id: "review:plan-1:1",
+      planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
+      status: "running",
+      type: "review",
+    });
+
+    messenger.emit({
+      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+      planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
+      rounds: 1,
+      toolCallId: "tc-update",
+      sessionId: "session-1",
+      summary: "Fix the missing null guard before completing the plan.",
+      type: "plan.code_review",
+      verdict: "partial",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const reviews = provider
+      .currentState()
+      .sessionViews["session-1"]?.timeline.filter((item) => item.type === "review");
+    expect(reviews).toHaveLength(1);
+    review = reviews?.[0];
+    expect(review).toMatchObject({
+      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+      planId: "plan-1",
+      rounds: 1,
+      status: "done",
+      summary: "Fix the missing null guard before completing the plan.",
+      type: "review",
+      verdict: "partial",
+    });
 
     provider.dispose();
   });
@@ -2383,9 +3244,8 @@ describe("webview provider integration", () => {
   it("reconciles terminal plan events back to getState truth", async () => {
     const { messenger, provider, sessionState } = buildProvider({
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2394,9 +3254,8 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    sessionState.planId = null;
-    sessionState.planPath = null;
-    sessionState.planState = "chat";
+    sessionState.activePlan = null;
+    sessionState.agentMode = "chat";
     messenger.emit({
       path: "/workspace/plans/plan-1.plan.md",
       planId: "plan-1",
@@ -2408,12 +3267,8 @@ describe("webview provider integration", () => {
 
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
-      planFile: {
-        path: "/workspace/plans/plan-1.plan.md",
-        state: "chat",
-      },
-      planId: null,
-      planState: "chat",
+      activePlan: null,
+      agentMode: "chat",
     });
 
     provider.dispose();
@@ -2584,6 +3439,7 @@ describe("webview provider integration", () => {
     await provider.dispatchTestIntent({
       data: {
         requestId: "ask-1",
+        sessionId: "session-1",
         result: {
           answers: [
             {
@@ -2663,6 +3519,7 @@ describe("webview provider integration", () => {
     await provider.dispatchTestIntent({
       data: {
         requestId: "ask-2",
+        sessionId: "session-1",
         result: {
           answers: [],
           cancelled: true,
@@ -2680,6 +3537,71 @@ describe("webview provider integration", () => {
       },
     });
 
+    provider.dispose();
+  });
+
+  it("keeps pending questions across webview reload, finalizes on child exit, and rejects late clicks", async () => {
+    const { provider } = buildProvider();
+    await provider.dispatchTestIntent({ messageId: "ready-before-reload", type: "ready" });
+    const childLifetime = new AbortController();
+    const responsePromise = provider.askUser(
+      {
+        questions: [{
+          id: "q-exit",
+          allowCustom: false,
+          options: [{ id: "continue", label: "Continue", recommended: true }],
+          prompt: "Continue after reload?",
+        }],
+        requestId: "ask-exit",
+        responseEvent: "response-ask-exit",
+      },
+      "session-1",
+      childLifetime.signal,
+    );
+
+    await provider.dispatchTestIntent({ messageId: "ready-after-reload", type: "ready" });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          request: expect.objectContaining({ requestId: "ask-exit", questions: [expect.objectContaining({ id: "q-exit", allowCustom: false })] }),
+          resolved: false,
+          type: "approval",
+        }),
+      ]),
+    );
+
+    childLifetime.abort(new Error("serve pipe closed"));
+    await expect(responsePromise).resolves.toEqual({
+      requestId: "ask-exit",
+      result: { answers: [], cancelled: true, outcome: "host_disconnected" },
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        requestId: "ask-exit",
+        sessionId: "session-1",
+        result: {
+          answers: [{
+            optionIds: ["continue"],
+            pickedRecommended: true,
+            questionId: "q-exit",
+          }],
+          cancelled: false,
+          outcome: "answered",
+        },
+      },
+      messageId: "late-answer-after-exit",
+      type: "answerQuestion",
+    });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "notice",
+          text: expect.stringContaining("no longer active"),
+          type: "message",
+        }),
+      ]),
+    );
     provider.dispose();
   });
 

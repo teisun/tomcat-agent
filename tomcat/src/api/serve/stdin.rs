@@ -13,6 +13,18 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
     let stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(stdin);
     let mut lines = reader.lines();
+    // Normal commands retain FIFO execution because many mutate session state. Interrupt is a
+    // control-plane signal: keeping it behind a transcript read or model bootstrap would make
+    // "Stop" appear broken even though cancellation itself is healthy.
+    let (normal_tx, mut normal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let normal_state = Arc::clone(&state);
+    let normal_worker = tokio::spawn(async move {
+        while let Some(command) = normal_rx.recv().await {
+            dispatch_command(Arc::clone(&normal_state), command).await?;
+        }
+        Ok::<(), AppError>(())
+    });
+
     while let Some(line) = lines.next_line().await.map_err(AppError::Io)? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -29,9 +41,30 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
                 continue;
             }
         };
-        dispatch_command(Arc::clone(&state), command).await?;
+        route_parsed_command(Arc::clone(&state), &normal_tx, command).await?;
     }
-    Ok(())
+    drop(normal_tx);
+    normal_worker.await.map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "serve.workerPanicked",
+            &[("detail", &error.to_string())],
+        ))
+    })?
+}
+
+/// Keep stateful work FIFO while letting the cancellation control plane preempt that backlog.
+pub(crate) async fn route_parsed_command(
+    state: Arc<ServeState>,
+    normal_tx: &tokio::sync::mpsc::UnboundedSender<ServeCommand>,
+    command: ServeCommand,
+) -> Result<(), AppError> {
+    if matches!(&command, ServeCommand::Interrupt { .. }) {
+        dispatch_command(state, command).await
+    } else {
+        normal_tx
+            .send(command)
+            .map_err(|_| AppError::Config(crate::infra::i18n::tr("serve.workerStopped", &[])))
+    }
 }
 
 pub(crate) async fn dispatch_command(

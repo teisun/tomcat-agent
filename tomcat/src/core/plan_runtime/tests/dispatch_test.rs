@@ -1,7 +1,9 @@
 use super::super::file_store::{
-    write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind,
+    TodoStatus,
 };
 use super::super::{safety, PlanRuntime};
+use crate::core::session::AgentMode;
 
 #[test]
 fn safety_assert_plan_id_safe_accepts_normal_id() {
@@ -51,7 +53,16 @@ fn resolved_plan_path_prefers_active_external_path() {
                     id: "t1".into(),
                     content: "ship".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: Default::default(),
                 }],
+                code_review_pass: false,
+                code_review_rounds: 0,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
+                code_review_residual_findings: Vec::new(),
                 unknown: Default::default(),
             },
             body: "## Goal\nexternal\n".into(),
@@ -69,4 +80,150 @@ fn resolved_plan_path_prefers_active_external_path() {
         runtime.resolved_plan_path("external_path_plan").unwrap(),
         crate::normalize_path(&external_path.to_string_lossy()).unwrap()
     );
+}
+
+#[test]
+fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
+    let workspace = tempfile::tempdir().unwrap();
+    let plan_path = workspace.path().join("concurrent.plan.md");
+    write_plan(
+        &plan_path,
+        &PlanFile {
+            frontmatter: PlanFileFrontmatter {
+                plan_id: "concurrent-plan".into(),
+                goal: "prove concurrent mode transitions are serialized".into(),
+                state: PlanFileState::Planning,
+                session_key: None,
+                session_id: None,
+                created_at: "2026-05-24T00:00:00Z".into(),
+                schema_version: 1,
+                todos: vec![TodoItem {
+                    id: "t1".into(),
+                    content: "ship".into(),
+                    status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: Default::default(),
+                }],
+                code_review_pass: false,
+                code_review_rounds: 0,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
+                code_review_residual_findings: Vec::new(),
+                unknown: Default::default(),
+            },
+            body: "## Goal\nconcurrent transitions\n".into(),
+        },
+        1000,
+    )
+    .unwrap();
+
+    let runtime = PlanRuntime::new("session");
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
+    runtime.enter_plan().unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let exit = {
+        let barrier = barrier.clone();
+        let runtime = runtime.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            runtime.exit_plan()
+        })
+    };
+    let build = {
+        let barrier = barrier.clone();
+        let runtime = runtime.clone();
+        let plan_path = plan_path.to_string_lossy().to_string();
+        std::thread::spawn(move || {
+            barrier.wait();
+            runtime.build_plan(&plan_path, Some("session-id".into()))
+        })
+    };
+
+    assert!(
+        matches!(
+            exit.join().unwrap(),
+            Ok(()) | Err(super::super::PlanRuntimeError::AlreadyInMode(_))
+        ),
+        "exit either performs the only Chat transition or observes build already did"
+    );
+    build.join().unwrap().expect("build must promote the plan");
+
+    assert_eq!(runtime.mode(), AgentMode::Chat);
+    assert_eq!(
+        runtime.executing_plan_id().as_deref(),
+        Some("concurrent-plan")
+    );
+    let mode_events = events
+        .lock()
+        .iter()
+        .filter(|event| {
+            event["event"]
+                .as_str()
+                .is_some_and(|name| name == crate::infra::wire::WIRE_SESSION_AGENT_MODE_CHANGED)
+        })
+        .count();
+    assert_eq!(
+        mode_events, 2,
+        "enter produces Plan and exactly one of exit/build produces Chat"
+    );
+}
+
+#[test]
+fn park_preserves_in_progress_acceptance_without_review_event() {
+    let runtime = PlanRuntime::new("session");
+    let plan_dir = tempfile::tempdir().unwrap();
+    let plan_path = plan_dir.path().join("plan-a.plan.md");
+    let mut frontmatter = super::sample_frontmatter();
+    frontmatter.plan_id = "plan-a".into();
+    frontmatter.state = PlanFileState::Executing;
+    frontmatter.todos.push(TodoItem {
+        id: "acceptance".into(),
+        content: "验收".into(),
+        status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: TodoKind::Acceptance,
+    });
+    write_plan(
+        &plan_path,
+        &PlanFile {
+            frontmatter,
+            body: "## Goal\nreservation test\n".into(),
+        },
+        1_000,
+    )
+    .unwrap();
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
+
+    runtime.bind_plan_file_for_test(plan_path.clone());
+    assert_eq!(
+        runtime.park_executing_plan().unwrap().as_deref(),
+        Some("plan-a")
+    );
+    let persisted = read_plan(&plan_path).unwrap();
+    assert_eq!(
+        persisted.frontmatter.todos.last().unwrap().status,
+        TodoStatus::InProgress,
+        "parking must preserve the visible acceptance state"
+    );
+    let events = events.lock();
+    assert!(events
+        .iter()
+        .all(|event| { event["event"] != crate::infra::wire::WIRE_PLAN_CODE_REVIEW }));
 }

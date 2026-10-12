@@ -7,6 +7,7 @@ import { runTests } from "@vscode/test-electron";
 
 import { resolveVsCodeCli, resolveVsCodeExecutable, seedChatUserSettings } from "./e2eHostFixture";
 import { packageVsix } from "./package-vsix";
+import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 async function seedReverifySettings(
   userDataDir: string,
@@ -90,7 +91,7 @@ async function main(): Promise<void> {
     );
 
     await fs.access(harnessTestsPath);
-    await runTests({
+    await runVsCodeGuiTests(runTests, {
       extensionDevelopmentPath: harnessRoot,
       extensionTestsEnv: {
         ...process.env,

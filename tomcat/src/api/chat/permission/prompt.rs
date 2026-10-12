@@ -1,5 +1,6 @@
 //! 共享路径授权菜单渲染。
 
+use crate::infra::i18n::tr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,20 +21,29 @@ pub fn read_path_prompt(
     suggested_root: Option<PathBuf>,
     note: Option<&str>,
 ) -> io::Result<PathPromptChoice> {
-    println!("\n--- 路径授权 ---");
-    println!("路径: {}", target.display());
+    println!("{}", tr("terminal.permission.title", &[]));
+    println!(
+        "{}",
+        tr(
+            "terminal.permission.path",
+            &[("path", &target.display().to_string())]
+        )
+    );
     if let Some(note) = note {
-        println!("提示: {}", note);
+        println!("{}", tr("terminal.permission.note", &[("note", note)]));
     }
-    println!("  [s] 本次会话允许访问当前目标路径");
+    println!("{}", tr("terminal.permission.session", &[]));
     if let Some(root) = &suggested_root {
         println!(
-            "  [w] 以后也允许访问 {}（写入 workspace.workspace_roots）",
-            root.display()
+            "{}",
+            tr(
+                "terminal.permission.persist",
+                &[("path", &root.display().to_string())]
+            )
         );
     }
-    println!("  [c] 取消 / 拒绝当前操作");
-    print!("选择: ");
+    println!("{}", tr("terminal.permission.cancel", &[]));
+    print!("{}", tr("terminal.permission.choose", &[]));
     io::stdout().flush()?;
 
     let mut line = String::new();

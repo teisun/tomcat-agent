@@ -49,21 +49,18 @@ function hashText(value: string): string {
 }
 
 export function referenceIdentity(reference: WebviewReference): string {
+  if (reference.occurrenceId) return reference.occurrenceId;
   const parts: Array<number | string> = [
     reference.kind,
     reference.path,
     reference.lineStart ?? "",
     reference.lineEnd ?? "",
   ];
-  // Line-less selections (e.g. plan-preview text whose source line could not be
-  // resolved) would otherwise all collapse to `selection::<path>::::` and dedupe
-  // each other away, so only the first snippet per file could ever be inserted.
-  // Discriminate them by a hash of the selected text.
-  if (
-    reference.kind === "selection" &&
-    reference.lineStart == null &&
-    reference.lineEnd == null
-  ) {
+  // A selection is a snapshot of both a source range and its selected text. Ranges
+  // alone are not unique: one source line can contain multiple selections, and a
+  // renderer can temporarily map distinct blocks to the same line. Hashing every
+  // selection keeps those snippets distinct while exact re-adds still dedupe.
+  if (reference.kind === "selection") {
     parts.push(hashText(reference.text ?? ""));
   }
   return parts.join("::");
