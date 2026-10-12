@@ -65,15 +65,18 @@ fn tail_reader_returns_exact_cap_from_large_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.jsonl");
     write_header(&path, &make_header("sid_large")).unwrap();
+    // Reader fixture setup does not exercise resume-index publication. Use the
+    // existing raw JSONL append so 10,000 rows do not rewrite its growing sidecar.
     for idx in 1..=10_000 {
-        append_entry(
+        append_line(
             &path,
-            &make_msg(
+            &serde_json::to_string(&make_msg(
                 &format!("m_{idx}"),
                 "2025-01-01T00:00:01.000Z",
                 "user",
                 format!("msg-{idx}"),
-            ),
+            ))
+            .unwrap(),
         )
         .unwrap();
     }
@@ -180,15 +183,18 @@ fn tail_reader_scans_bounded_bytes_not_whole_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bounded_tail.jsonl");
     write_header(&path, &make_header("sid_bounded")).unwrap();
+    // Keep the real reader and all 20,000 JSONL rows; unrelated resume-index
+    // rewrite/fsync on every fixture row is not part of this scan-cost assertion.
     for idx in 0..20_000 {
-        append_entry(
+        append_line(
             &path,
-            &make_msg(
+            &serde_json::to_string(&make_msg(
                 &format!("m_{idx}"),
                 "2025-01-01T00:00:01.000Z",
                 "user",
                 format!("payload-{idx:05}"),
-            ),
+            ))
+            .unwrap(),
         )
         .unwrap();
     }
@@ -207,15 +213,18 @@ fn tail_reader_before_cost_scales_with_page_size_not_file_size() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bounded_before.jsonl");
     write_header(&path, &make_header("sid_bounded_before")).unwrap();
+    // Keep the real reader and all 20,000 JSONL rows; unrelated resume-index
+    // rewrite/fsync on every fixture row is not part of this scan-cost assertion.
     for idx in 0..20_000 {
-        append_entry(
+        append_line(
             &path,
-            &make_msg(
+            &serde_json::to_string(&make_msg(
                 &format!("m_{idx}"),
                 "2025-01-01T00:00:01.000Z",
                 "user",
                 format!("payload-{idx:05}"),
-            ),
+            ))
+            .unwrap(),
         )
         .unwrap();
     }
