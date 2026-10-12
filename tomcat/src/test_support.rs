@@ -1,9 +1,11 @@
 //! 测试共享辅助。
 //!
-//! 当前提供两把全局锁：
+//! 当前提供一把全局锁，两个入口名：
 //! - `home_env_lock()`：给会临时覆写 `HOME` 或依赖 `dirs::home_dir()` 稳定值的单测复用。
 //! - `cwd_lock()`：给会临时覆写进程级 `current_dir` 的单测复用。
 //!   两者都用于避免 `cargo test` 并行时互相污染。
+//!   两个入口必须是同一把锁：测试会以任意先后顺序同时改 HOME 和 cwd，
+//!   拆成两把锁就会 A 等 B、B 等 A 地死锁。
 //!
 //! 这里显式使用**可重入**锁，原因是：
 //! - 某些测试先拿锁，再调用 `ChatContext::from_config()`；
@@ -32,8 +34,7 @@ pub(crate) fn home_env_lock() -> &'static TestLock {
 }
 
 pub(crate) fn cwd_lock() -> &'static TestLock {
-    static LOCK: OnceLock<TestLock> = OnceLock::new();
-    LOCK.get_or_init(|| TestLock(ReentrantMutex::new(())))
+    home_env_lock()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,3 +103,6 @@ pub(crate) fn write_models_override(work_dir: &Path, entries: &[TestModelOverrid
     }
     std::fs::write(path, text).expect("write test models.toml override");
 }
+
+#[path = "tests/test_support_test.rs"]
+mod tests;
