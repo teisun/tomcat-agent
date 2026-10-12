@@ -91,7 +91,7 @@ LLM 入口在读计划和创建锁文件前，通过原有 PrimitiveExecutor 路
 
 ### 6.2 失败边界
 
-状态/权限/内容/操作校验失败时整批拒绝，不能先写入其中的合法项。文件锁超时与真实 IO/解析失败继续返回原错误；不借文档恢复旧的自动 Code Review/Verifier 门禁，也不新增未实现的 `TOMCAT_UPDATE_PLAN_*` 配置项。锁参数以 `PlanRuntime::lock_timeout_ms` 和 `file_store` 实现为准。
+状态/权限/内容/操作校验失败时整批拒绝，不能先写入其中的合法项。文件锁超时与真实 IO/解析失败继续返回原错误；不借文档恢复旧的自动 Code Review/Verifier 门禁，也不新增未实现的 `TOMCAT_UPDATE_PLAN_*` 配置项。文件锁等待上限目前固定为 2000ms（`file_store::DEFAULT_LOCK_TIMEOUT_MS`）；生产装配不读取 `[plan].lock_timeout_ms`，改这个配置不会生效。
 
 ## 7. 现有回归与验收
 

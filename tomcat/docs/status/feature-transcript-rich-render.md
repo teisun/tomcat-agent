@@ -1,22 +1,25 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-12 14:19 +0800 | DONE | feature/transcript-rich-render | — |
+| Nibbles | 2026-10-12 16:40 +0800 | DONE | feature/transcript-rich-render | — |
 
-### CURRENT REVIEW (2026-10-12)
+### CURRENT STATUS (2026-10-12)
 
-- Full branch review is complete for the frozen `develop..feature/transcript-rich-render` range: 1123/1123 paths, 147 commits. This is review coverage, not acceptance.
-- M3 已按根因提交：`793e081e` 总体整改、`89cef7cc` 纯格式、`2bc62520` 原门禁回归、`8abc3831` 前台匿名捕获/失败释放、`b6eca80f` 跨会话共享缩略图、`e9ce18b4` 如实报告索引截断、`5c5d3c80` Host 契约/夹具对齐、`0c089e08` 真实窄窗验收、`c7553636` 退役 crop 名单清理。Bash 不新增后台命名 sidecar，不恢复 argv；既有锁、授权、排空与诊断日志保留。
-- Rust 有效检查集合：原完整库 3234/0/5 ignored、默认并行 378/0、串行 35/0（`1791768685370-yj8d7h` exit 0），后续 Bash 增量 48/48 + all-targets Clippy/fmt（`1791777451267-qwib56`）；该增量整批 exit 2 是文档 EOF 空行，已修并由 diff-check 提交复核，不改写原命令。当前 debug CLI 已构建；格式、版本镜像、19 项版本脚本/audit 有效，保留 bincode/smartstring/yaml-rust 三条 unmaintained 警告。历史 VM 单次失败在完整库未再现，根因仍未确认。
-- 真实专项 `1791769594329-aislpv` exit 0：生产 Serve 长会话、DeepSeek Chat 工具/推理续接、fcodex Anthropic 真实 read-image→视觉判断→write/Files 归属、真实 Skill 加载、Tavily 插件入口，以及浏览器脚本 bootstrap/正常截图/console-error 负控，各实际执行 1 项。真实模型 profile 原报告 29 PASS 中两项额外 opt-in 诊断未发请求；不算真实供应商覆盖。Windows 停止已补 `taskkill /T /F` 和错误传播，本机未实测 Windows。
-- 扩展有效集合：首次 build 前 `check:wire`、完整 core 746/GUI 826、完整真实 Serve integration 的失败三文件补跑4/4（`1791773162429-ubgb60`），新改动 core42/GUI6/跨层88/typecheck；安装态23与 VSIX五启动场景4+1+3+1+1通过（`1791773308474-2bpuri`）。Devhost 原36/6保留，整改后完整39/3/4pending，剩余3路径断言+Plan完整操作补跑4/4（`1791777451153-is5yjb`），全部42活跃场景有有效覆盖，不冒称原full命令退出0。
-- 实屏：Questions 36 triples、Undo 12场景、@截断桌亮/窄暗40 triples、真实 Host Settings/Plan/Image/queue/inline/Files和Plan Find完整操作已采PNG/AX/console并读验。图片专项改为真实390×844窗口，Send完整/可hit-test、33检查/23 triples通过（`1791778757085-22gqoe`），不以旧180px根shim截图凑绿。MCP安装态真实Serve四phase经原checker/normal与untrusted/add补跑闭合（`1791778419644-ilqkke`），28正常场景triples中Settings scoped errors为0；故意Settings error负控单列。旧crop五个不存在文件是无producer旧名单，当前默认五full-frame均在，helper已只用现行名单并拒绝实际缺图的部分成功。
-- Console/边界如实保留：外层VS Code资源ERR_TIMED_OUT不与产品scoped报告混为一谈；图片缺blob404/越界图403为受控负例，不报全程零错误。原图诊断只实测10 PNG，混合SVG失败显式记录；当前11张缩略图位图1,216,512 B不是RSS保证。Native Save As、首次原生project-trust modal、其他平台仍未自动验收。
-- **全量审查、合并与远端交付已完成**：`verify`最终对账后 `9423494f` 已正常推送 `origin/develop` 并核对SHA/祖先关系（`1791785913151-i57ar9` exit0）。功能候选 `1bb87c1f` 已推；本地 `--no-ff fb731ed9` 保留全部157提交，develop再补测试fixture `23946252` / `dc70bd70`。两侧fast有效集合闭合：Rust逐名3237唯一PASS/5ignored、并行378/串行35，扩展752core/826GUI，详见 [develop集成状态](develop.md)。原失败/STOPPED与补跑严格分列；不发版、不打tag。证据 `.agents/acceptance/review-ebbdacce-findings.md` / `.agents/shots/`。
+```text
+feature/transcript-rich-render 1bb87c1f（已推送 origin）
+  └─ --no-ff 合入 develop：fb731ed9 ──> 已推送 origin/develop
+       └─ 复核后补修附件清理：ff6785f4（见 develop 状态）
+```
+
+- **已完成**：审查覆盖整个分支（147 个提交、1123 个文件路径），验收发现的问题按根因分别提交：`793e081e` 总体整改、`89cef7cc` 纯格式、`2bc62520` 原门禁回归、`8abc3831` 前台匿名输出捕获与失败释放、`b6eca80f` 跨会话共享缩略图、`e9ce18b4` 如实报告索引截断、`5c5d3c80` Host 契约与测试夹具对齐、`0c089e08` 真实窄窗验收、`c7553636` 清理已退役的截图名单。已合入 develop 并推送，合并后的验证见 [develop 集成状态](develop.md)。
+- **Rust 验证**：完整库测试 3234 通过 / 5 忽略，集成测试并行 378、串行 35 全部通过；之后的 Bash 改动另跑 48 个定向测试和 Clippy/fmt（那一批曾因文档末尾多一个空行报错，已修）。版本号镜像、版本脚本的 19 项自测和依赖审计通过，保留 3 条 unmaintained 警告。
+- **真实模型专项**（每项实际跑 1 次）：生产 Serve 长会话、DeepSeek 工具调用与推理续接、Anthropic 真实“读图→判断→写文件”、真实 Skill 加载、Tavily 插件入口，以及浏览器脚本截图和 console 报错负例。
+- **扩展验证**：core 746、GUI 826 个单测；真实 Serve 集成中失败的 3 个文件补跑通过；安装态 23 项、VSIX 5 个启动场景通过；Devhost 42 个活跃场景都有有效覆盖。完整的 Devhost 命令本身没有一次退出码为 0，剩下的场景靠补跑覆盖，不冒称完整通过。
+- **实屏验收**：问题卡、撤销、@ 截断（亮/暗、宽/窄）、设置、计划、图片、队列、内联图片、MCP 安装态四个阶段等都截了图，并核对了无障碍树和 console；图片专项用真实的 390×844 窗口。截图只保存在本机，不入库。
 
 ### BLOCKED (当前风险)
 
-- 本机是 macOS；Windows 进程树停止的运行态保证未验证，不冒称全平台通过。当前发布矩阵仅 macOS/Linux，Windows 一等交付需其平台验证。
-- 必需检查已用有效full/失效目标补跑集合对账闭合，未发现待处理P0/P1或硬门禁目标；不将旧FAILED/STOPPED改写为PASS。最终verify与develop正常推送/包含核对已完成，未验平台/人工边界如上保留。
+- 没有待处理的 P0/P1。
+- 没有验证的：Windows 运行态（进程树停止已改用 `taskkill /T /F` 并传播错误，但没在 Windows 上跑过；发布平台目前只有 macOS/Linux）、原生“另存为”、首次原生项目信任弹窗。原图诊断只实测了 10 张 PNG，混合 SVG 的失败已记录；历史上一次 VM 单测失败没有再出现，根因未确认。console 里外层 VS Code 资源超时和故意构造的图片 404/403 不算产品报错，但也不宣称零报错。
 
 
 ### 近期功能与历史失败（归并原根目录 status，2026-10-11 快照）
@@ -32,7 +35,7 @@
 - Plan Review必需明确固定choice（`allowCustom:false`/稳定optionID）；timeout不启动，答案/replay保留parent create卡，Stop/disconnect隔离继续有效；撤回Revert式dialog方案，无新modal协议。既有Files/Keep/tool-media/volatile queue/rewind/MCP/Provider边界未扩大。
 - 版本原有单次patch从CLI/bundled0.1.71与扩展0.1.85升至0.1.72/0.1.86（五镜像仅版本字段），本轮不再次bump；早先commit准备没有新CLI/VSIX或icon视觉采证，不拿声明当安装验收。
 - 当时原失败保留：4项全树fmt、4项Clippy（chat parsing large_enum_variant、session-files type_complexity/redundant_closure、multimodal items_after_test_module）；preheat两fixture失败后分别通过，代理敏感web-search四项后通过但根因未宣称解决，CDP/startup两次未产图后affected journey绿而不称竞态根治。本轮修复与实屏证据单列，不覆盖原exit。
-- 历史验证数：silent库3178/0/3ignored；Opus整改库3176/3ignored+ownership/media8；产品原库3168/2失败/3ignored再补2，默认并行371/串行35/26skip；扩展717/795、集成180+三focused、installed23/5pending和distribution10/36triples。原gate仍exit1，旧页面未证明后来的扁平notice/retry改动；日志引用 `.agents/acceptance/{silent-completion-20261011,opus-remediation-20261010,product-plan-rereview}.md`。
+- 历史验证数：silent库3178/0/3ignored；Opus整改库3176/3ignored+ownership/media8；产品原库3168/2失败/3ignored再补2，默认并行371/串行35/26skip；扩展717/795、集成180+三focused、installed23/5pending和distribution10/36triples。原gate仍exit1，旧页面未证明后来的扁平notice/retry改动。
 - 原会话Retry须部署CLI后由用户验证，本轮未碰其真实历史；先前file_id端点404、same-turn cached HEAD/wall-clock Keep语义仍按既定边界，不新增legacy备份兼容/稳定公共fragment-tab身份/付费review质量/全平台保证。Cov%未测；本地reports/截图/profiles/制品不入版本库。
 
 ### ✅ DONE (历史已完成记录)

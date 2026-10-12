@@ -7,22 +7,31 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-12 14:19 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-12 16:40 +0800 | ACTIVE | develop | — |
 
 ### CURRENT INTEGRATION (2026-10-12)
 
 ```text
-原 develop 4e1a4867 -> 已验收 feature 1bb87c1f（已推送）
-  -> --no-ff fb731ed9 -> develop定向补漏23946252/dc70bd70
-  -> 两侧fast有效检查集合闭合 -> 最终verify GO -> origin/develop 9423494f 已核对
+develop 4e1a4867 ──┐
+                   ├─ --no-ff fb731ed9：合入 feature/transcript-rich-render（157 个提交全部保留）
+feature 1bb87c1f ──┘
+  ├─ 23946252 / dc70bd70：只修测试
+  ├─ 9423494f / bfbf3bf8：状态文档 ──> 已推送 origin/develop
+  └─ --no-ff ff6785f4：复核后补修 2 处附件清理问题（45687323 / 88bc4b30）
 ```
 
-- 已在本地以 **`--no-ff` merge `fb731ed9`** 合入全分支，parents `4e1a4867` / `1bb87c1f`；功能候选已推 `origin/feature/transcript-rich-render`，本地代码候选 `dc70bd70` + 状态交付 `9423494f` 已完成最终verify并正常推送。原147提交/1123路径逐项闭合，分支另10修复/状态提交；当前净差异1202路径（83额外net主要测试迁移/回归），后续修改/merge差异均对账，Cov%未测保持 —。证据 `.agents/acceptance/review-ebbdacce-{coverage.json,findings.md}` 与 `feature-transcript-rich-render.md`。
-- 合并无文本冲突，初始staged tree完全等于候选；whole diff-check15处旧空白整改已验证Markdown结构/hardbreak等价、planner字词不变。新增develop整改只涉及读取fixture（同50k行/原断言）、planner精确字面值和锁竞争fixture hold-before-spawn；生产writer/锁/协议不改，未引入新机制。
-- **develop Rust fast有效集合**：原 `1791781793026-armtd9` Clippy绿，lib两失败且大fixture长耗时后STOPPED，不改写原命令；`1791783635075-6ld8c2` reader14/14（6.279s）、`1791785005420-iukg7i` prompt/store58/58，`1791785278751-2ffqb1`逐名对账全部3242注册=3237唯一通过/5ignored/0缺漏或未替换失败。`1791783868088-y357u2` exit0补doc（0用例不算行为）、真实debug CLI build、默认并行378/27skip（239.395s）、串行35/0（182.514s）与lib/tests Clippy。fmt和整个基线diff-check绿，不为重复验证再整套重跑。
-- **develop 扩展 fast** `1791781924920-iiipcj` exit0：两侧tsc、core54files/752、GUI81files/826全部通过。既有分支full+真模型/Skill/search、Serve/安装态/VSIX、42活跃Host、图片33checks/23triples和MCP四phase/28正常triples实屏有效；merge后只有Rust测试/文档改动，未失效UI/付费结果。版本CLI/bundled0.1.72、扩展0.1.86，不发布、不打tag。
-- 状态只保留crate路径为权威，根同名文件改导航，近期行为/旧失败/边界已归并且原文Git保留。T2-P1-011原DONE不修改；任务目录未检出本分支或PENDING_INTEGRATION映射，不伪造其他卡迁移。看板由既有 `scripts/aggregate-status.sh` 汇总；feature章节来自保留分支tip，历史ACTIVE不代表develop未包含，当前集成以本节SHA/祖先证据为准。
-- **交付回执（2026-10-12 14:19）**：`load_skill(verify)`/UI checklist后最终对账 `1791785771982-midrp4` exit0；正常推送 `1791785913151-i57ar9` exit0，`ls-remote`/fetch确认 `origin/develop=9423494f0034298327eddcfa2ecafaa6d16f579b`、feature=`1bb87c1f`，两者包含关系及干净工作区已核对。当前追加仅本条事实记录/看板同步，不改源码、测试、依赖或验收范围。明确未验边界：Windows运行态/其他平台、Native Save As、首次原生trust modal、远程OAuth/全供应商矩阵和用户原失败会话Retry。外层VS Code timeout与图片受控404/403保留，不宣称所有console为零；audit三条unmaintained警告保留。
+- **合了什么**：`feature/transcript-rich-render` 的全部内容，功能明细见 [功能分支状态](feature-transcript-rich-render.md)。合并没有文本冲突；之后 develop 上的 `23946252` 把 3 个大读取测试的造数据方式换成直接追加（原来每条都重写一次索引，单个测试跑 20 多分钟），`dc70bd70` 对齐 1 条提示词断言、并让锁竞争测试先拿锁再启动竞争者。这两个提交都只改测试。
+- **合并后验证（fb731ed9 + 两个测试修复）**：
+  - Rust：clippy 无警告；库测试 3242 个注册用例全部有结论，3237 通过、5 个本来就标记忽略、0 失败。第一次整跑有 2 个失败，又被太慢的大测试拖到中止；修好后按测试族补跑并逐个用例名对账，没有把原失败改写成通过。集成测试并行 378 通过 / 27 跳过，串行 35 通过；fmt 通过。
+  - 扩展：两侧 TypeScript 类型检查、core 752 个、GUI 826 个单测通过。功能分支上做过的真实模型、安装态、VSIX 与实屏验收仍然有效，因为合并后只改了 Rust 测试和文档。
+- **复核后补修（ff6785f4）**：复核验收期间的提交，找出 2 处必须改的代码问题：
+  1. 删除会话时，回收图片要把所有会话的 transcript 从头读一遍，而且全程握着全局附件锁；这期间粘贴图片、发送、生成缩略图都会被卡住。现在复用启动清理已有的“指纹缓存账本”，只重读变过的文件（`45687323`）。
+  2. 清理过期租约、缩略图、孤儿图片时，只要有一个文件删不掉，后面的文件就全都不处理了，而且下次还会卡在同一个文件上。现在跳过它继续删，最后仍把第一个错误报出来；但如果“正在使用的图片名单”读不全，仍然整轮放弃，避免误删（`88bc4b30`）。
+  - 验证：短分支上 `core::session` 314 通过 / 2 忽略、Serve 附件测试 22 通过、clippy 与 fmt 通过；新增测试已确认在旧代码上会失败。改动只在 Rust 会话模块，不碰协议和界面，扩展测试未重跑。
+  - 合并后 develop gate-fast **未通过（退出码 1）**：clippy 通过；doctest 通过（该阶段 0 个用例，不算行为验证）；集成测试并行 378 通过 / 27 跳过、串行 35 通过；lib 3239 通过 / 5 忽略 / **1 失败**。失败的是 Bash 测试 `failed_capture_is_reported_after_draining_the_pipe`，它超过了自带的 5 秒上限。单独重跑 20 次又失败 3 次，成功时也要约 4 秒，与这次附件改动无关。根因是 Bash 运行预览 `RuntimePreview::trim` 在超过 1000 行上限时逐字节删除，每删一个字节都要重数整个预览的换行；输出短行越多越慢，而这个测试正好灌入了 2048 行短行。尚未修复。
+- **版本**：CLI 与内置 CLI 0.1.72、扩展 0.1.86；不发版、不打 tag。
+- **没有验证的**：Windows 上的运行（含进程树停止）和其它平台、原生“另存为”、首次原生项目信任弹窗、远程 OAuth 与全部供应商组合、用户原先那个失败会话的 Retry。console 里外层 VS Code 资源超时、以及故意构造的图片 404/403 负例仍在，不宣称零报错；`cargo audit` 的 3 条 unmaintained 警告（bincode、smartstring、yaml-rust）保留。
+- **看板说明**：`INTEGRATION.md` 里的各 feature 章节由脚本从各自分支末端读取，是合并前的快照（例如 transcript-rich-render 那一节仍写着“未交付”），当前事实以本节为准。验收截图和日志只保存在本机、不入库，需要的结论已写在这里。
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0/P1]** `tomcat` 多问题优化链路已在 `develop` 侧完成当前轮收口：GUI/webview 的 `max` reasoning 档位、pre-stream loading 指示、全量 shimmer 覆盖与 `Thinking` 文案已修复；`search_files` description 也已瘦身回归。Rust 侧把多模态从“Responses 独占”推进到“三家共用一套 `ChatMessageContentPart`，各 wire 自己翻 JSON”：新增 `FilesApiAdapter` 存储适配层，`OpenAiFilesRuntime` 改持 `Arc<dyn FilesApiAdapter>`，OpenAI Completions 已支持 inline 图片/PDF 与 uploaded `file_id`，Moonshot uploaded 图片走 `ms://...`，Anthropic Messages 已支持 inline / uploaded 图片与 PDF，并在 uploaded 引用时自动补 `anthropic-beta: files-api-2025-04-14`。内置/本地模型配置同步开启 `kimi-k3`、`kimi-k2.7-code` 与 Anthropic 全系 `files=true`。本地验证已补齐：catalog / openai provider / anthropic wire / adapter 单测通过；`serve_stdio_e2e` 新增 Moonshot `ms://` 与 Anthropic `source.type=file + beta header` 断言通过；live 结果为 **Kimi K3 成功**、**fcodex `/v1/files` 返回 404**、**Anthropic 实 key 返回 401 invalid x-api-key**，后两者已按真实结果记录。@2026-07-20
