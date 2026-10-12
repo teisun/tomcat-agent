@@ -343,8 +343,7 @@ export class ContextSearchService implements vscode.Disposable {
       })),
       request.query.trim(),
     );
-    const truncated =
-      ranked.length > config.limit || (cache.truncated && ranked.length >= config.limit);
+    const truncated = cache.truncated || ranked.length > config.limit;
 
     return {
       matches: ranked.slice(0, config.limit).map((candidate) => candidate.match),

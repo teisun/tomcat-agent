@@ -185,6 +185,19 @@ describe("ContextSearchService", () => {
     service.dispose();
   });
 
+  it.each(["missing-directory/", "app"])("reports a saturated index even with few matches: %s", async query => {
+    process.env[CONTEXT_SEARCH_MAX_FILES_ENV] = "2";
+    __testing.registerFile("/workspace/src/app.ts", "one");
+    __testing.registerFile("/workspace/src/other.ts", "two");
+    __testing.registerFile("/workspace/missing-directory/nested.txt", "not indexed");
+    const service = new ContextSearchService();
+    try {
+      const result = await service.search({ query });
+      expect(result.matches.length).toBeLessThan(20);
+      expect(result.truncated).toBe(true);
+    } finally { service.dispose(); }
+  });
+
   it("recomputes open-file weighting without rebuilding cached candidates", async () => {
     __testing.registerFile("/workspace/lib/app.ts", "export const libApp = true;\n");
     __testing.registerFile("/workspace/src/app.ts", "export const srcApp = true;\n");

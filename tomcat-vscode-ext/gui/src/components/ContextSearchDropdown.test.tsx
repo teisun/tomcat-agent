@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
+import { en } from "../../../src/shared/i18n/en";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -95,8 +96,13 @@ describe("ContextSearchDropdown", () => {
         truncated
       />,
     );
-    expect(screen.getByTestId("context-search-truncated").textContent).toContain(
-      "Showing the first 2 results; enter a more specific query",
+    expect(screen.getByTestId("context-search-truncated").textContent).toBe(
+      en["context.truncated.other"].replace("{count}", "2"),
+    );
+    rerender(<ContextSearchDropdown loading={false} matches={[]} onSelect={() => undefined} open query="missing" truncated />);
+    expect(screen.getByTestId("context-search-empty").textContent).toBe(en["context.empty"]);
+    expect(screen.getByTestId("context-search-truncated").textContent).toBe(
+      en["context.truncated.other"].replace("{count}", "0"),
     );
   });
 
