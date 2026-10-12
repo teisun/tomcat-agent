@@ -494,7 +494,6 @@ pub struct BackgroundTaskLifecycleEvent {
 }
 
 const RUNTIME_PREVIEW_MAX_BYTES: usize = 64 * 1024;
-const RUNTIME_PREVIEW_MAX_LINES: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -537,25 +536,15 @@ impl RuntimePreview {
         (start, self.next_offset, self.sequence, self.truncated)
     }
 
+    /// Only bytes are capped: the webview keeps its own tighter line window and lag recovery
+    /// sends just the last 8 KiB, so a line cap here would cost rescans and change nothing seen.
     fn trim(&mut self) {
-        while self.bytes.len() > RUNTIME_PREVIEW_MAX_BYTES
-            || self.line_count() > RUNTIME_PREVIEW_MAX_LINES
-        {
-            if self.bytes.pop_front().is_some() {
-                self.start_offset = self.start_offset.saturating_add(1);
-                self.truncated = true;
-            } else {
-                break;
-            }
+        let cut = self.bytes.len().saturating_sub(RUNTIME_PREVIEW_MAX_BYTES);
+        if cut > 0 {
+            self.bytes.drain(..cut);
+            self.start_offset = self.start_offset.saturating_add(cut as u64);
+            self.truncated = true;
         }
-    }
-
-    fn line_count(&self) -> usize {
-        if self.bytes.is_empty() {
-            return 0;
-        }
-        self.bytes.iter().filter(|byte| **byte == b'\n').count()
-            + usize::from(self.bytes.back() != Some(&b'\n'))
     }
 
     fn text(&self) -> String {
