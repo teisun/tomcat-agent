@@ -504,3 +504,76 @@ fn rewrite_message_text_entries_by_id_updates_target_messages_only() {
         .collect();
     assert_eq!(contents, vec!["new-a", "new-b", "keep"]);
 }
+
+fn message_entry(id: &str, content: &str) -> TranscriptEntry {
+    TranscriptEntry::Message(MessageEntry {
+        id: Some(id.to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        message: serde_json::json!({"role": "user", "content": content}),
+    })
+}
+
+fn write_test_header(path: &std::path::Path) {
+    write_header(
+        path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+            project_root: None,
+        },
+    )
+    .unwrap();
+}
+
+fn message_ids(path: &std::path::Path) -> Vec<String> {
+    read_entries_tail(path, 10)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(me) => me.id,
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn append_after_torn_tail_keeps_new_entry() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("torn_tail.jsonl");
+    write_test_header(&path);
+    append_entry(&path, &message_entry("m1", "first")).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(br#"{"type":"message","id":"torn","message":{"content":"tas"#)
+        .unwrap();
+
+    append_entry(&path, &message_entry("m2", "second")).unwrap();
+
+    assert_eq!(message_ids(&path), vec!["m1", "m2"]);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.ends_with('\n'));
+    assert!(raw.lines().any(|line| line.ends_with(r#""content":"tas"#)));
+}
+
+#[test]
+fn append_to_clean_tail_does_not_add_blank_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clean_tail.jsonl");
+    write_test_header(&path);
+    append_entry(&path, &message_entry("m1", "first")).unwrap();
+    append_entry(&path, &message_entry("m2", "second")).unwrap();
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.ends_with('\n'));
+    assert!(!raw.contains("\n\n"));
+    assert_eq!(raw.lines().count(), 3);
+    assert_eq!(message_ids(&path), vec!["m1", "m2"]);
+}

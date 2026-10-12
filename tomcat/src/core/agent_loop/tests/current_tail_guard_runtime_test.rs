@@ -144,6 +144,7 @@ async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -372,6 +373,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -454,6 +456,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -506,6 +509,7 @@ async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_with
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)

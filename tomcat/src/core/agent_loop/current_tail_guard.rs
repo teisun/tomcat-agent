@@ -908,6 +908,7 @@ fn apply_collapse_summary(
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let mut turn_start = messages.len();
     temp.apply_boundary(

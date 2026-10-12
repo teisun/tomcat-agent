@@ -65,3 +65,41 @@ fn write_file_atomic_no_parent_error() {
     let r = write_file_atomic(Path::new(""), b"x");
     assert!(r.is_err());
 }
+
+fn temp_file_names(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.') && name.ends_with(".tmp"))
+        .collect()
+}
+
+#[test]
+fn write_file_atomic_with_removes_temp_file_when_writer_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    std::fs::write(&path, "original\n").unwrap();
+
+    let r = write_file_atomic_with(&path, |writer| {
+        writer.write_all(b"partial").map_err(AppError::Io)?;
+        Err(AppError::Io(std::io::Error::from_raw_os_error(28)))
+    });
+
+    assert!(matches!(r, Err(AppError::Io(_))), "{r:?}");
+    assert_eq!(temp_file_names(dir.path()), Vec::<String>::new());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+}
+
+#[test]
+fn write_file_atomic_removes_temp_file_when_rename_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("occupied");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("keep.txt"), "x").unwrap();
+
+    let r = write_file_atomic(&path, b"content");
+
+    assert!(matches!(r, Err(AppError::Io(_))), "{r:?}");
+    assert_eq!(temp_file_names(dir.path()), Vec::<String>::new());
+    assert!(path.join("keep.txt").exists());
+}

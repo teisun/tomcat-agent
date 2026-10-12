@@ -119,6 +119,7 @@ fn build_context_state(messages: Vec<ChatMessage>) -> ContextState {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
 

@@ -75,6 +75,7 @@ fn make_context_state_with_transcript(path: std::path::PathBuf) -> ContextState 
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
 

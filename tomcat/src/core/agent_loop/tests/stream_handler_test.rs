@@ -58,6 +58,7 @@ fn make_context_state() -> ContextState {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
 

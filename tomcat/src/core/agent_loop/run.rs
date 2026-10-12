@@ -339,6 +339,11 @@ impl AgentLoop {
         {
             if let Err(error) = self.push_message(messages, message.clone()) {
                 tracing::warn!(%error, "failed to persist interrupted tool-result repair");
+                // The tool round is now incomplete in memory and on disk; the next turn
+                // must reload (and heal) from the transcript before appending input.
+                if let Some(ctx_state) = self.context_state.as_mut() {
+                    ctx_state.hydrated = false;
+                }
             } else if let Some(ctx_state) = self.context_state.as_mut() {
                 ctx_state.on_message_appended(estimate_msg_chars(message));
             }

@@ -80,6 +80,7 @@ fn over_budget_agent(
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     (agent, messages)
 }
@@ -236,6 +237,7 @@ async fn collapse_summary_uses_compaction_provider_cross_provider() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)

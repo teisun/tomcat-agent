@@ -3123,6 +3123,17 @@ fn persist_turn_input_message(
     message: &ChatMessage,
     params: &ServeMessageParams,
 ) -> Result<PersistedTurnInput, AppError> {
+    // Reloading heals an interrupted tool round, which the chain validator requires before a
+    // user row. While busy, the context belongs to the running turn and must not be replaced.
+    let needs_rehydrate = !slot.is_busy()
+        && slot
+            .turn_state
+            .lock()
+            .as_ref()
+            .is_some_and(|state| !state.context_state.hydrated);
+    if needs_rehydrate {
+        rehydrate_slot_context_state(slot)?;
+    }
     let payload = serde_json::to_value(message)?;
     if let Some(forced_id) = normalized_user_message_id(params) {
         if slot

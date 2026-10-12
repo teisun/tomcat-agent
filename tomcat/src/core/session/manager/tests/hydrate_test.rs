@@ -1324,6 +1324,7 @@ fn hydrated_messages_preserve_turn_order() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let msgs = state.messages.clone();
     assert_eq!(msgs.len(), 3);

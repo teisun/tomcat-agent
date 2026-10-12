@@ -250,6 +250,7 @@ pub(super) fn make_fallback_context_state(
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: false,
     }
 }
 

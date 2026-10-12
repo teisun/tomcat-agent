@@ -323,6 +323,10 @@ pub struct ContextState {
     pub session_obs: SessionContextObservation,
     /// 瞬时指标（`AgentLoop` 经方案 1 只写此处，不写独立 `metrics`）。
     pub live: ContextLiveMetrics,
+    /// `false` means `messages` no longer matches the transcript (a reload
+    /// failed, or a repair could not be persisted). Reload before appending
+    /// input or building a request from it.
+    pub hydrated: bool,
 }
 
 fn _assert_send<T: Send>() {}

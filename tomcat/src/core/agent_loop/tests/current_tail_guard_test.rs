@@ -141,6 +141,7 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -300,6 +301,7 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -402,6 +404,7 @@ async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -472,6 +475,7 @@ async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -566,6 +570,7 @@ async fn midturn_apply_shifts_start_idx_anchor_in_history() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -650,6 +655,7 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     // Incident step 1: at 85%, the mid-turn Fits path starts a snapshot whose anchor is in the
@@ -769,6 +775,7 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let tail_before = messages[3..].to_vec();
 

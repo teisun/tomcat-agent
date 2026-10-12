@@ -81,26 +81,15 @@ pub fn read_file_utf8(path: &Path) -> Result<String, AppError> {
 /// * [`AppError::Config`] - 路径无父目录（如空路径）时返回。
 /// * [`AppError::Io`] - 创建目录、写临时文件或重命名失败时返回。
 pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Config(crate::infra::i18n::tr("platform.noParent", &[])))?;
-    std::fs::create_dir_all(parent).map_err(AppError::Io)?;
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp)
-        .map_err(AppError::Io)?;
-    file.write_all(content).map_err(AppError::Io)?;
-    file.sync_all().map_err(AppError::Io)?;
-    drop(file);
-    std::fs::rename(&tmp, path).map_err(AppError::Io)?;
-    Ok(())
+    write_file_atomic_with(path, |writer| {
+        writer.write_all(content).map_err(AppError::Io)
+    })
 }
 
 /// 流式版本的 [`write_file_atomic`]。调用方直接写入临时文件，随后仍通过 rename 原子替换
 /// 目标文件；适合 JSONL 全文件重写，避免在内存里再拼出第二份完整字符串。
+///
+/// 任一步失败（如磁盘满）都会删除临时文件，目标文件保持原样。
 pub fn write_file_atomic_with(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<std::fs::File>) -> Result<(), AppError>,
@@ -116,13 +105,18 @@ pub fn write_file_atomic_with(
         .write(true)
         .open(&tmp)
         .map_err(AppError::Io)?;
-    let mut writer = BufWriter::new(file);
-    write(&mut writer)?;
-    writer.flush().map_err(AppError::Io)?;
-    writer.get_ref().sync_all().map_err(AppError::Io)?;
-    drop(writer);
-    std::fs::rename(&tmp, path).map_err(AppError::Io)?;
-    Ok(())
+    let result = (|| {
+        let mut writer = BufWriter::new(file);
+        write(&mut writer)?;
+        writer.flush().map_err(AppError::Io)?;
+        writer.get_ref().sync_all().map_err(AppError::Io)?;
+        drop(writer);
+        std::fs::rename(&tmp, path).map_err(AppError::Io)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// 当前进程工作目录（跨平台）。

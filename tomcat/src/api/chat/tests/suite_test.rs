@@ -1856,9 +1856,131 @@ fn append_message_chain_rehydrate_falls_back_when_transcript_reload_fails() {
         state.messages.is_empty(),
         "rehydrate 失败时应退回空消息 fallback，避免继续携带坏掉的 dangling tool_calls"
     );
+    assert!(
+        !state.hydrated,
+        "the fallback must be marked so the next turn reloads before using it"
+    );
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+/// Simulates the state left by a failed reload: an empty, unhydrated context.
+fn mark_context_as_failed_reload_fallback(state: &mut crate::ContextState) {
+    state.messages.clear();
+    state.hydrated = false;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn chat_turn_rehydrates_fallback_context_before_appending_input() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FALLBACK_REHYDRATE_KEY";
+    let _key = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, mut ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    for message in [
+        json!({"role": "user", "content": "q1"}),
+        json!({"role": "assistant", "content": "a1"}),
+    ] {
+        ctx.session_runtime.session.append_message(message).unwrap();
+    }
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, 400_000).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    mark_context_as_failed_reload_fallback(&mut state);
+
+    let outcome = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+        &ctx,
+        Some(crate::ChatMessage::user("继续")),
+        &mut snapshot,
+        &mut state,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "{outcome:?}"
+    );
+    let requests = recorder.requests.lock().unwrap();
+    let texts: Vec<&str> = requests[0]
+        .messages
+        .iter()
+        .filter_map(crate::ChatMessage::text_content)
+        .collect();
+    for expected in ["q1", "a1", "继续"] {
+        assert!(
+            texts.contains(&expected),
+            "the request must carry the durable history, missing {expected:?}: {texts:?}"
+        );
+    }
+    assert!(state.hydrated);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn chat_turn_with_unrecoverable_fallback_fails_before_any_append_or_request() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FALLBACK_FAIL_CLOSED_KEY";
+    let _key = EnvGuard::set(ENV_KEY, "stub");
+    let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role": "user", "content": "q1"}))
+        .unwrap();
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, 400_000).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    // Appended after hydrate so that only the turn's own reload can try to heal it.
+    ctx.session_runtime
+        .session
+        .append_message(json!({
+            "role": "assistant",
+            "tool_calls": [{"id": "call-1", "type": "function",
+                            "function": {"name": "read", "arguments": "{}"}}]
+        }))
+        .unwrap();
+    mark_context_as_failed_reload_fallback(&mut state);
+    // Healing the dangling call needs an append, which a read-only transcript refuses.
+    let original_permissions = fs::metadata(&transcript_path).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&transcript_path, readonly).unwrap();
+    let before = fs::read(&transcript_path).unwrap();
+
+    let outcome = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+        &ctx,
+        Some(crate::ChatMessage::user("继续")),
+        &mut snapshot,
+        &mut state,
+        CancellationToken::new(),
+    )
+    .await;
+    let after = fs::read(&transcript_path).unwrap();
+    fs::set_permissions(&transcript_path, original_permissions).unwrap();
+
+    let outcome = outcome.expect("an IO failure must not end the CLI loop");
+    assert!(
+        matches!(&outcome, AgentRunOutcome::Failed(AppError::Io(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(before, after, "the user message must not be written");
+    assert!(recorder.requests.lock().unwrap().is_empty());
+    assert!(
+        !state.hydrated,
+        "the context stays marked until a reload succeeds"
+    );
 }
 
 #[test]

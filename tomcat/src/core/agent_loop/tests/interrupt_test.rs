@@ -624,6 +624,7 @@ async fn interrupt_appends_interrupted_tool_results_into_single_list_with_ids() 
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
@@ -674,6 +675,119 @@ async fn interrupt_appends_interrupted_tool_results_into_single_list_with_ids() 
         dangling_tool_call_ids(&parked.messages),
         None,
         "the persisted interrupted tool result must close the parked tool-call tail"
+    );
+    assert!(
+        parked.hydrated,
+        "a fully persisted interrupt repair keeps the context in sync with the transcript"
+    );
+}
+
+/// Accepts the first `ok_appends` message rows, then fails like a full disk.
+struct StorageFullAfterSink {
+    ok_appends: usize,
+    attempts: AtomicUsize,
+}
+
+impl StorageFullAfterSink {
+    fn next(&self, id: impl FnOnce(usize) -> String) -> Result<String, AppError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt >= self.ok_appends {
+            return Err(AppError::Io(std::io::Error::from_raw_os_error(28)));
+        }
+        Ok(id(attempt))
+    }
+}
+
+impl MessageAppendSink for StorageFullAfterSink {
+    fn append_message(&self, _value: serde_json::Value) -> Result<String, AppError> {
+        self.next(|attempt| format!("persisted-{attempt}"))
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn append_message_with_id(
+        &self,
+        _value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.next(|_| forced_id.to_string())
+    }
+}
+
+#[tokio::test]
+async fn interrupt_repair_persist_failure_marks_context_unhydrated() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: Some("c2".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    // Only the assistant tool-call row fits; the interrupted results hit a full disk.
+    let sink: Arc<dyn MessageAppendSink> = Arc::new(StorageFullAfterSink {
+        ok_appends: 1,
+        attempts: AtomicUsize::new(0),
+    });
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream_tools])), "gpt-4"),
+        Arc::new(SleepyMockPrimitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            message_append_sink: Some(sink),
+            session_id: "s-int-storage-full".to_string(),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+    agent.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 0,
+        context_budget_chars: 10_000,
+        context_budget_tokens: 2_500,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+        hydrated: true,
+    }));
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        cancel_bg.cancel();
+    });
+    let mut user = ChatMessage::user("read two files");
+    user.msg_id = Some("seeded-user".to_string());
+
+    let outcome = agent.run(vec![user]).await;
+
+    assert!(outcome.is_interrupted(), "{outcome:?}");
+    let parked = agent
+        .take_context_state()
+        .expect("interrupted turn must park its message list");
+    assert!(
+        !parked.hydrated,
+        "unpersisted interrupt repair must force a reload before the next input"
+    );
+    assert!(
+        dangling_tool_call_ids(&parked.messages).is_some(),
+        "the unpersisted repair is absent from memory too, so memory cannot be trusted"
     );
 }
 
@@ -834,6 +948,7 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     // Simulate a stale prior response usage: this stream is cancelled before
     // it emits Usage, so the partial assistant must enter the post-usage delta.
@@ -974,6 +1089,7 @@ async fn assert_interrupt_during_collapse(reactive: bool) {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let cancel_after_collapse_started = cancel.clone();

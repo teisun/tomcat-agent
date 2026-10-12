@@ -2435,6 +2435,310 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
     );
 }
 
+/// Makes the transcript read-only until dropped, so every append fails like a full disk.
+struct ReadonlyTranscript {
+    path: std::path::PathBuf,
+    original: std::fs::Permissions,
+}
+
+impl ReadonlyTranscript {
+    fn new(slot: &Arc<crate::api::serve::SessionSlot>) -> Self {
+        let path = slot
+            .ctx
+            .session_runtime
+            .session
+            .transcript_path(&slot.session_id);
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).unwrap();
+        Self { path, original }
+    }
+}
+
+impl Drop for ReadonlyTranscript {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.path, self.original.clone());
+    }
+}
+
+/// The incident transcript: three tool calls, only the first one answered.
+fn seed_interrupted_tool_round(slot: &Arc<crate::api::serve::SessionSlot>) {
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .append_message(serde_json::json!({"role": "user", "content": "q1"}))
+        .unwrap();
+    session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "checking disk usage",
+            "tool_calls": [
+                {"id": "call-bash", "type": "function",
+                 "function": {"name": "bash", "arguments": "{\"command\":\"df -h\"}"}},
+                {"id": "call-task-list", "type": "function",
+                 "function": {"name": "task_list", "arguments": "{}"}},
+                {"id": "call-read", "type": "function",
+                 "function": {"name": "read", "arguments": "{\"path\":\"a.rs\"}"}}
+            ]
+        }))
+        .unwrap();
+    session
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call-bash",
+            "content": "disk usage"
+        }))
+        .unwrap();
+}
+
+/// Failed-turn recovery whose reload cannot heal the round leaves the unhydrated fallback.
+fn recover_slot_with_failing_reload(slot: &Arc<crate::api::serve::SessionSlot>) {
+    let _readonly = ReadonlyTranscript::new(slot);
+    let mut turn_state = slot.turn_state.lock();
+    let state = turn_state.as_mut().expect("idle slot owns its turn state");
+    let system_text = state.prompt_snapshot.system_text().to_string();
+    crate::api::chat::recover_context_state_after_failed_turn(
+        &slot.ctx,
+        &slot.ctx.config.context,
+        &system_text,
+        &crate::AppError::Io(std::io::Error::from_raw_os_error(28)),
+        &mut state.context_state,
+    );
+    assert!(state.context_state.messages.is_empty());
+    assert!(
+        !state.context_state.hydrated,
+        "a failed reload must leave a marked fallback"
+    );
+}
+
+fn slot_context_hydrated(slot: &Arc<crate::api::serve::SessionSlot>) -> bool {
+    slot.turn_state
+        .lock()
+        .as_ref()
+        .expect("idle slot owns its turn state")
+        .context_state
+        .hydrated
+}
+
+fn request_tool_call_ids(request: &ChatRequest) -> Vec<&str> {
+    request
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect()
+}
+
+fn request_has_text(request: &ChatRequest, text: &str) -> bool {
+    request
+        .messages
+        .iter()
+        .any(|message| message.text_content() == Some(text))
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_after_failed_rehydrate_heals_interrupted_round_and_keeps_history() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("continued")]).await;
+    seed_interrupted_tool_round(&slot);
+    recover_slot_with_failing_reload(&slot);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("continue-after-cleanup".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "继续".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .expect("prompt after disk cleanup must not hit the chain invariant");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "the resumed turn must complete: {lines:?}"
+    );
+
+    let entries = slot
+        .ctx
+        .session_runtime
+        .session
+        .get_entries_for_session(&slot.session_id, 256)
+        .unwrap();
+    crate::core::session::assert_active_tool_result_integrity(&entries)
+        .expect("healed transcript must answer every tool call");
+    let tail: Vec<(String, Option<String>)> = session_message_entries(&slot)
+        .iter()
+        .skip(2)
+        .take(4)
+        .map(|entry| {
+            (
+                entry.message["role"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                entry.message["tool_call_id"].as_str().map(str::to_string),
+            )
+        })
+        .collect();
+    assert_eq!(
+        tail,
+        vec![
+            ("tool".to_string(), Some("call-bash".to_string())),
+            ("tool".to_string(), Some("call-task-list".to_string())),
+            ("tool".to_string(), Some("call-read".to_string())),
+            ("user".to_string(), None),
+        ],
+        "placeholders must be written before the new user row"
+    );
+
+    let captured = requests.0.lock();
+    let request = captured.first().expect("one provider request");
+    assert!(
+        request_has_text(request, "q1"),
+        "the model must see the full history, not just the new input"
+    );
+    assert_eq!(
+        request_tool_call_ids(request),
+        vec!["call-bash", "call-task-list", "call-read"]
+    );
+    assert!(request_has_text(request, "继续"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_fails_closed_while_context_cannot_be_rehydrated() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("must not run")]).await;
+    seed_interrupted_tool_round(&slot);
+    recover_slot_with_failing_reload(&slot);
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let before = std::fs::read_to_string(&transcript).unwrap();
+
+    let readonly = ReadonlyTranscript::new(&slot);
+    dispatch_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("continue-while-full".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "继续".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    drop(readonly);
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("continue-while-full")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("continue-while-full")
+        })
+        .expect("prompt error response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    let error = response["error"].as_str().unwrap_or_default();
+    assert!(
+        error.starts_with("IO error"),
+        "the real cause must surface instead of a chain invariant: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&transcript).unwrap(),
+        before,
+        "the user message must not be written"
+    );
+    assert!(
+        requests.0.lock().is_empty(),
+        "the provider must not be called"
+    );
+    assert!(!slot.is_busy());
+    assert!(!slot_context_hydrated(&slot));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_resume_rehydrates_fallback_context_before_requesting() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_text_stream("resumed")]).await;
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .append_message(serde_json::json!({"role": "user", "content": "q1"}))
+        .unwrap();
+    session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{"id": "call-1", "type": "function",
+                            "function": {"name": "read", "arguments": "{}"}}]
+        }))
+        .unwrap();
+    session
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "placeholder written by hand"
+        }))
+        .unwrap();
+    {
+        let mut turn_state = slot.turn_state.lock();
+        let context_state = &mut turn_state.as_mut().unwrap().context_state;
+        context_state.messages.clear();
+        context_state.hydrated = false;
+    }
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Resume {
+            id: Some("resume-fallback".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").is_none_or(serde_json::Value::is_null)
+        }),
+        "resume must not send the empty fallback: {lines:?}"
+    );
+    let captured = requests.0.lock();
+    let request = captured.first().expect("one provider request");
+    assert!(request_has_text(request, "q1"));
+    assert_eq!(request_tool_call_ids(request), vec!["call-1"]);
+    let entries = session
+        .get_entries_for_session(&slot.session_id, 256)
+        .unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !matches!(entry, crate::core::TranscriptEntry::Error(_))),
+        "no llm_request tail error may be recorded"
+    );
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_prompt_invalid_attachment_returns_error() {

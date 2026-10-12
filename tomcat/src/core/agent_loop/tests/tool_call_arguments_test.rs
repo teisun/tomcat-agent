@@ -351,6 +351,7 @@ async fn tool_dispatch_counts_assistant_only_in_fallback_estimate() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     state.update_api_usage(1_000, (assistant_chars / 4) as u32);
     agent.set_context_state(Some(state));
@@ -432,6 +433,7 @@ async fn tool_dispatch_does_not_double_count_large_tool_call_arguments() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     state.update_api_usage(1_000, (assistant_chars / 4) as u32);
     agent.set_context_state(Some(state));

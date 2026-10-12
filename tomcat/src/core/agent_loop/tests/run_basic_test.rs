@@ -158,6 +158,7 @@ fn overbudget_context_state(messages: Vec<ChatMessage>) -> ContextState {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
 
@@ -1063,6 +1064,7 @@ async fn tail_only_overflow_falls_back_to_collapse_on_first_attempt() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let outcome = loop_.run(initial_messages).await;

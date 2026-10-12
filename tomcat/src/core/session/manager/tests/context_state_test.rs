@@ -112,6 +112,7 @@ fn test_estimated_token_count_uses_api_usage_when_present() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     assert_eq!(
         state.estimated_token_count(),
@@ -135,6 +136,7 @@ fn apply_limits_changes_the_compaction_gate_from_opus_to_legacy_unknown_model() 
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     assert!(
         state.usage_ratio() < 1.0,
@@ -175,6 +177,7 @@ fn test_estimated_token_count_fallback_to_chars_when_no_usage() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     assert_eq!(
         state.estimated_token_count(),
@@ -201,6 +204,7 @@ fn test_usage_ratio_after_invalidate() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     state.invalidate_api_usage();
@@ -239,6 +243,7 @@ fn rewrite_local_tail_chars_updates_estimate_and_post_usage() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     state.rewrite_local_tail_chars(1_200, 200);
@@ -277,6 +282,7 @@ fn persist_context_observability_writes_sessions_json() {
             context_utilization_ratio: 0.42,
             ..Default::default()
         },
+        hydrated: true,
     };
     mgr.persist_context_observability(&state).unwrap();
 
@@ -333,6 +339,7 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
             context_utilization_ratio: 0.42,
             ..Default::default()
         },
+        hydrated: true,
     };
     mgr.persist_context_observability(&state).unwrap();
 

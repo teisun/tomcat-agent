@@ -182,6 +182,7 @@ async fn steering_injected_at_turn_start_stays_in_tail() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let result = match agent.run_turn(vec![history, current_user], 1).await {
@@ -562,6 +563,7 @@ async fn inject_steering_messages_records_context_and_persists_msg_id() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let mut messages = vec![ChatMessage::user("hello")];
@@ -657,6 +659,7 @@ async fn inject_follow_up_messages_records_context_and_persists_msg_id() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let mut messages = vec![ChatMessage::user("hello")];

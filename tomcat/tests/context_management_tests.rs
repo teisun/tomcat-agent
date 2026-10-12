@@ -46,6 +46,7 @@ fn model_capability_budget_changes_the_pre_request_compaction_gate() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     assert!(
         state.usage_ratio() < 0.85,
@@ -605,6 +606,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     let config = ContextConfig {
@@ -797,6 +799,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let mut messages = historical_messages;
     messages.push(current_user);
@@ -879,6 +882,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     let msgs = state.messages.clone();
@@ -935,6 +939,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     info!("Act: compact_tool_results with keep_recent=1");
@@ -1001,6 +1006,7 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     info!("Act: compact with m=1, only >threshold in compactable zone get replaced");
@@ -1066,6 +1072,7 @@ fn test_compact_tool_results_estimate_precise() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     let config = ContextConfig {
@@ -1134,6 +1141,7 @@ async fn test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let result = agent
@@ -1260,6 +1268,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let config = ContextConfig::default();
     let mut messages = std::mem::take(&mut state.messages);
@@ -1585,6 +1594,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let mut messages = historical_messages;
     messages.push(trigger_user);
@@ -1685,6 +1695,7 @@ fn test_force_drop_estimate_consistent_after_l3() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let mut messages = std::mem::take(&mut state.messages);
 
@@ -1824,6 +1835,7 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     let mut m0 = ChatMessage::user("a".repeat(5000));
@@ -1944,6 +1956,7 @@ fn test_check_after_reply_stale_discards_preheat_without_compaction_error() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     state.update_api_usage(900, 0); // ratio >= 0.85
 
@@ -2026,6 +2039,7 @@ async fn test_check_before_request_emits_boundary_switched() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
 
     let mut m0 = ChatMessage::user("a".repeat(5000));
@@ -2173,6 +2187,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let mut messages = std::mem::take(&mut state.messages);
 
@@ -2403,6 +2418,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     let mut messages = historical_messages;
     messages.push(current_user);

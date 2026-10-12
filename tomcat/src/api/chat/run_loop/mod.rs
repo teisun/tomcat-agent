@@ -802,6 +802,20 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         ctx.global_services.event_bus.clone(),
         session_id.clone(),
     ));
+    // Must run before draining queued input: on failure the queued input stays queued.
+    if !context_state.hydrated {
+        match rehydrate::reload_context_state(ctx, system_text) {
+            Ok(fresh) => *context_state = fresh,
+            Err(error) => {
+                let _ = root_event_emitter.emit(AgentEvent::AgentStart);
+                let _ = root_event_emitter.emit(AgentEvent::AgentEnd {
+                    messages: Vec::new(),
+                    error: Some(error.to_string()),
+                });
+                return Ok(AgentRunOutcome::Failed(error));
+            }
+        }
+    }
 
     let entry = ctx
         .session_runtime

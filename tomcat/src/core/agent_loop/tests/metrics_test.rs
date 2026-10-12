@@ -73,6 +73,7 @@ async fn responses_without_usage_accumulate_on_top_of_the_previous_sample() {
             preheat: crate::core::compaction::preheat::Preheat::new(),
             session_obs: Default::default(),
             live: Default::default(),
+            hydrated: true,
         };
         state.update_api_usage(900, 100);
         agent.set_context_state(Some(state));
@@ -179,6 +180,7 @@ async fn provider_usage_metric_is_emitted_before_tool_execution() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let messages = vec![ChatMessage::user("read")];
     let _ = loop_.run(messages).await.unwrap();
@@ -275,6 +277,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let messages = vec![ChatMessage::user("validate")];
     let _ = loop_.run(messages).await.unwrap();
@@ -403,6 +406,7 @@ async fn boundary_application_runs_layer0_before_final_context_metrics() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let mut initial_messages = history;
     initial_messages.push(ChatMessage::user("current input"));
@@ -498,6 +502,7 @@ async fn context_metrics_uses_normalized_anthropic_input_total() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     loop_.run(vec![ChatMessage::user("measure")]).await.unwrap();
@@ -570,6 +575,7 @@ async fn normalized_usage_starts_preheat_at_half_watermark() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     loop_.run(vec![initial_message]).await.unwrap();
@@ -658,6 +664,7 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let messages = vec![ChatMessage::user("multi")];
     let _ = loop_.run(messages).await.unwrap();
@@ -784,6 +791,7 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
@@ -850,6 +858,7 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let _ = first_loop
         .run(vec![ChatMessage::user("first round keeps usage")])

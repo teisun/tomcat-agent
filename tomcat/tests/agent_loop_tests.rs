@@ -1606,6 +1606,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let messages = vec![ChatMessage::user("test metrics")];

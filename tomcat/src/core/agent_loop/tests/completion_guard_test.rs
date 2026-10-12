@@ -103,6 +103,7 @@ fn empty_context_state() -> ContextState {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
 
@@ -259,6 +260,7 @@ async fn layer0_does_not_rewrite_history_without_a_boundary_switch() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let mut messages = state_messages;
 
@@ -342,6 +344,7 @@ async fn successful_boundary_switch_runs_both_layer0_cleanup_steps() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let mut messages = state_messages;
 
@@ -446,6 +449,7 @@ async fn timing5_boundary_cleanup_matches_reference_and_emits_one_release() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let mut messages = state_messages;
 
@@ -618,6 +622,7 @@ async fn layer0_without_boundary_keeps_read_stamp_and_tool_result_intact() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
     let mut messages = state_messages;
 

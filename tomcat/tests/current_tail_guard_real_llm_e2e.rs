@@ -306,6 +306,7 @@ async fn real_terra_agent_loop_applies_preheat_during_build_task() {
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let outcome = tokio::time::timeout(TOTAL_TIMEOUT, agent.run(initial_messages))

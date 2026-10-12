@@ -145,6 +145,7 @@ fn build_precheck_decision_collapses_when_history_only_room_is_not_enough() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::build_precheck_decision(&agent, &messages, 4_000, 1_000);
@@ -187,6 +188,7 @@ async fn mid_turn_guard_fits_is_noop() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -232,6 +234,7 @@ async fn over_budget_without_preheat_still_collapses() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -292,6 +295,7 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -358,6 +362,7 @@ async fn mid_turn_guard_boundary_runs_layer0_before_rebuilding_messages() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     state.preheat.restore_completed(CompactionResult {
         summary_text: "summary".to_string(),
@@ -451,6 +456,7 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -533,6 +539,7 @@ async fn tail_placeholder_waves_still_run_after_a_preheat_boundary() {
         preheat,
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -599,6 +606,7 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -667,6 +675,7 @@ async fn current_tail_guard_catches_a_single_turn_that_jumps_from_low_watermark(
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     };
     for message in messages.iter().skip(2) {
         state.on_message_appended(estimate_msg_chars(message));
@@ -743,6 +752,7 @@ async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompa
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -815,6 +825,7 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -881,6 +892,7 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -918,6 +930,7 @@ async fn collapse_post_weigh_keeps_going_even_if_summary_is_still_over_budget() 
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
@@ -964,6 +977,7 @@ async fn collapse_handles_missing_msg_ids_without_sink() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -1012,6 +1026,7 @@ fn context_state(estimate_context_chars: usize, context_budget_tokens: usize) ->
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
 

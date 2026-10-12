@@ -218,6 +218,7 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }));
 
     let phase_one = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(

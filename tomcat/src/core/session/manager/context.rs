@@ -878,6 +878,7 @@ fn empty_context_state(
         preheat: Preheat::new(),
         session_obs,
         live: super::types::ContextLiveMetrics::default(),
+        hydrated: true,
     }
 }
 
@@ -1001,6 +1002,7 @@ pub fn init_context_state(
         preheat,
         session_obs,
         live: super::types::ContextLiveMetrics::default(),
+        hydrated: true,
     })
 }
 

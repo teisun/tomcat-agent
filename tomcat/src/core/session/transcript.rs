@@ -643,6 +643,7 @@ pub fn append_line(path: &Path, json: &str) -> Result<(), AppError> {
 /// Append to an existing transcript. Only write_header creates a transcript.
 pub fn append_line_with_sync(path: &Path, json: &str, sync: SyncLevel) -> Result<(), AppError> {
     let file = std::fs::OpenOptions::new()
+        .read(true)
         .append(true)
         .open(path)
         .map_err(AppError::Io)?;
@@ -657,19 +658,39 @@ pub(crate) fn append_sidecar_line_with_sync(
 ) -> Result<(), AppError> {
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .map_err(AppError::Io)?;
     append_json_to_file(file, json, sync)
 }
 
+/// A failed append (e.g. disk full) can leave a partial line without a newline.
+/// Terminate it first so the new entry stays on its own parseable line.
 fn append_json_to_file(mut f: std::fs::File, json: &str, sync: SyncLevel) -> Result<(), AppError> {
-    writeln!(f, "{}", json).map_err(AppError::Io)?;
+    let mut line = String::with_capacity(json.len() + 2);
+    if !ends_with_newline_or_is_empty(&mut f).map_err(AppError::Io)? {
+        line.push('\n');
+    }
+    line.push_str(json);
+    line.push('\n');
+    f.write_all(line.as_bytes()).map_err(AppError::Io)?;
     f.flush().map_err(AppError::Io)?;
     if matches!(sync, SyncLevel::SyncData) {
         f.sync_data().map_err(AppError::Io)?;
     }
     Ok(())
+}
+
+fn ends_with_newline_or_is_empty(f: &mut std::fs::File) -> std::io::Result<bool> {
+    let len = f.metadata()?.len();
+    if len == 0 {
+        return Ok(true);
+    }
+    let mut last = [0u8; 1];
+    f.seek(SeekFrom::Start(len - 1))?;
+    f.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
 }
 
 /// 追加一条 TranscriptEntry 到文件。

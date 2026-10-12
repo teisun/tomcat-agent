@@ -84,5 +84,6 @@ pub(super) fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),
+        hydrated: true,
     }
 }
