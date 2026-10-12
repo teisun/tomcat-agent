@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-12 12:36 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| Nibbles | 2026-10-12 14:08 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### CURRENT REVIEW (2026-10-12)
 
@@ -11,13 +11,29 @@
 - 扩展有效集合：首次 build 前 `check:wire`、完整 core 746/GUI 826、完整真实 Serve integration 的失败三文件补跑4/4（`1791773162429-ubgb60`），新改动 core42/GUI6/跨层88/typecheck；安装态23与 VSIX五启动场景4+1+3+1+1通过（`1791773308474-2bpuri`）。Devhost 原36/6保留，整改后完整39/3/4pending，剩余3路径断言+Plan完整操作补跑4/4（`1791777451153-is5yjb`），全部42活跃场景有有效覆盖，不冒称原full命令退出0。
 - 实屏：Questions 36 triples、Undo 12场景、@截断桌亮/窄暗40 triples、真实 Host Settings/Plan/Image/queue/inline/Files和Plan Find完整操作已采PNG/AX/console并读验。图片专项改为真实390×844窗口，Send完整/可hit-test、33检查/23 triples通过（`1791778757085-22gqoe`），不以旧180px根shim截图凑绿。MCP安装态真实Serve四phase经原checker/normal与untrusted/add补跑闭合（`1791778419644-ilqkke`），28正常场景triples中Settings scoped errors为0；故意Settings error负控单列。旧crop五个不存在文件是无producer旧名单，当前默认五full-frame均在，helper已只用现行名单并拒绝实际缺图的部分成功。
 - Console/边界如实保留：外层VS Code资源ERR_TIMED_OUT不与产品scoped报告混为一谈；图片缺blob404/越界图403为受控负例，不报全程零错误。原图诊断只实测10 PNG，混合SVG失败显式记录；当前11张缩略图位图1,216,512 B不是RSS保证。Native Save As、首次原生project-trust modal、其他平台仍未自动验收。
-- **未交付**：候选验收摘要提交/功能分支推送、合并 `develop`、合并后的两侧 fast、集成状态看板和最终远端推送；不发版、不打 tag。原始失败/补跑与逐项索引见 `.agents/acceptance/review-ebbdacce-findings.md`，产物在 `.agents/shots/`。
+- **源码工作已合并/复测完成，远端develop尚待最终verify推送**：功能候选 `1bb87c1f` 已推；本地 `--no-ff fb731ed9` 保留全部157提交，develop再补测试fixture `23946252` / `dc70bd70`。两侧fast有效集合闭合：Rust逐名3237唯一PASS/5ignored、并行378/串行35，扩展752core/826GUI，详见 [develop集成状态](develop.md)。原失败/STOPPED与补跑严格分列；不发版、不打tag。证据 `.agents/acceptance/review-ebbdacce-findings.md` / `.agents/shots/`。
 
 ### BLOCKED (当前风险)
 
 - 本机是 macOS；Windows 进程树停止的运行态保证未验证，不冒称全平台通过。当前发布矩阵仅 macOS/Linux，Windows 一等交付需其平台验证。
-- 当前代码候选未发现尚未补齐的必需门禁目标；M4视觉/失败历史按有效检查集合记录。develop 集成复核与最终推送尚未进行，不提前声称交付 DONE。
+- 必需检查已用有效full/失效目标补跑集合对账闭合，未发现待处理P0/P1或硬门禁目标；不将旧FAILED/STOPPED改写为PASS。最终verify和develop远端推送前仍不称完整交付完成。
 
+
+### 近期功能与历史失败（归并原根目录 status，2026-10-11 快照）
+
+以下事实由原 `docs/status/feature-transcript-rich-render.md` 归并；**当时的 commit-only 限制和失败不是本轮门禁结果**，当前验收以本页顶部及 develop 集成记录为准，原文仍在 Git 的 `1bb87c1f`。
+
+- Silent completion 在已有可见普通回答后，用相同输入确认首个 hidden/thinking-only silent reply；连续静默或末次尝试可正常结束，保留 plan handback。新 run/真实输入撤销许可，工具、Signal/Nudge 和 compaction 保留；`clean_stop` 共用判断，不新增持久回执或历史扫描。
+- notice/warn 扁平为图标+文字；auto-retry 进度保留在 transcript 而不渲染到 webview，耗尽仍显示真实 error。组件/双语与 agent-loop/stream-terminal-error 文档同步，未改 wire。
+- 全上下文 collapse 后首个创建文件批次以落盘后的 assistant ID 兜底文件归属：正常 user → existing turn owner → 本批 assistant；rewind 包含这些角色，无回扫/历史回填。外部Build/Retry解开Stop或发送失败暂停队列，待idle一次发送，队列自身迟到start不解除暂停。
+- 完成 edit/hashline/write 失败默认折叠，展开保留原错误；streaming/用户折叠选择、read/bash/plan失败及batch计数不改。不同compaction模型阻塞调用失败后只向会话provider/model fallback一次；同模型不重试，失败不应用摘要，preheat/manual/config不改。
+- 英中产品文字各由Rust/TS生产者渲染，不重译用户/模型历史；gear/共享 `ui.language`：当前保存窗口立即生效，其他进程重启读，环境覆盖权威，manifest随VS Code语言。General重连采用连接新快照并保留同连接成功保存，断线不可保存，表单/override不丢。
+- icon-only pin/unpin/delete，pin在扩展workspace state，busy拒删且沿用占用/写锁；删会话不擦workspace/plans/shared checkpoint/audit/remote upload，sidecar best-effort警告保留、空稳定锁文件可残留。提交后cleanup警告不被fallback打开错误覆盖。
+- Plan Review必需明确固定choice（`allowCustom:false`/稳定optionID）；timeout不启动，答案/replay保留parent create卡，Stop/disconnect隔离继续有效；撤回Revert式dialog方案，无新modal协议。既有Files/Keep/tool-media/volatile queue/rewind/MCP/Provider边界未扩大。
+- 版本原有单次patch从CLI/bundled0.1.71与扩展0.1.85升至0.1.72/0.1.86（五镜像仅版本字段），本轮不再次bump；早先commit准备没有新CLI/VSIX或icon视觉采证，不拿声明当安装验收。
+- 当时原失败保留：4项全树fmt、4项Clippy（chat parsing large_enum_variant、session-files type_complexity/redundant_closure、multimodal items_after_test_module）；preheat两fixture失败后分别通过，代理敏感web-search四项后通过但根因未宣称解决，CDP/startup两次未产图后affected journey绿而不称竞态根治。本轮修复与实屏证据单列，不覆盖原exit。
+- 历史验证数：silent库3178/0/3ignored；Opus整改库3176/3ignored+ownership/media8；产品原库3168/2失败/3ignored再补2，默认并行371/串行35/26skip；扩展717/795、集成180+三focused、installed23/5pending和distribution10/36triples。原gate仍exit1，旧页面未证明后来的扁平notice/retry改动；日志引用 `.agents/acceptance/{silent-completion-20261011,opus-remediation-20261010,product-plan-rereview}.md`。
+- 原会话Retry须部署CLI后由用户验证，本轮未碰其真实历史；先前file_id端点404、same-turn cached HEAD/wall-clock Keep语义仍按既定边界，不新增legacy备份兼容/稳定公共fragment-tab身份/付费review质量/全平台保证。Cov%未测；本地reports/截图/profiles/制品不入版本库。
 
 ### ✅ DONE (历史已完成记录)
 

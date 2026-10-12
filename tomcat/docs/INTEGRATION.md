@@ -2,583 +2,612 @@
 
 以下由 develop 与各 feature 分支的 status 碎片自动汇总，执行 `/aggregate-status` 更新。
 
-> 注：本文件包含历史集成记录，个别条目会提及当时仍存在的 WasmEdge / `integration-wasm` 等链路；这些内容仅表示**历史上下文**，不代表当前实现。当前插件运行时请以 `rquickjs` 与现行测试/脚本入口为准。
-
-> Plan Runtime 当前口径：运行时不追加验收 todo，也不自动派发收口评审；最终验收由
-> LLM 加载 `verify` skill 后按影响范围完成。详见
-> [`architecture/plan-exec-code-verification.md`](architecture/plan-exec-code-verification.md)。
-
 
 ## develop
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-15 12:26 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-12 14:08 +0800 | ACTIVE | develop | — |
 
-### 2026-07-15 | merge `feature/transcript-ui-and-checkpoints` → develop（develop-side review / acceptance）
+### CURRENT INTEGRATION (2026-10-12)
 
-- **合并范围**：已在本地 `develop` 上 fast-forward 合入 `feature/transcript-ui-and-checkpoints`（`866752c -> 62c8811`），带入 transcript checkpoint restore、checkpoint marker / restore dialog、auto-scroll 真机修复、`.plan.md` custom editor、plan selection-to-chat、thinking purpose title、bash `tool.summary_updated` UI 升级，以及对应 Rust / extension / GUI / host E2E 测试与架构文档。
-- **develop-side 补修**：review 发现 `restore_checkpoint` / `/restore` 只按 `checkpointId` 取 checkpoint，未校验 `session_id`；这会让 `revertFiles=true` 在多 session 共享工作区里存在跨会话误回滚风险。已在 `tomcat/src/api/chat/commands/cmd_restore.rs` 加当前会话归属校验，并补 `serve_restore_checkpoint_rejects_foreign_session_checkpoint` 回归测试；`cargo test -p tomcat serve_restore_checkpoint -- --nocapture` 4/4 通过。
-- **扩展侧验收**：`tomcat-vscode-ext` 的 `npm run gate:fast` **PASS**。merge 影响面复核按高风险场景精跑真实宿主：`TOMCAT_E2E_GREP='renders the \\.plan\\.md custom editor|renders transcript action rows and context groups|keeps sticky user prompts aligned with historical turns in the Tomcat webview|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` **4 passing**，覆盖 plan preview、transcript action rows、sticky history、session switch restore。
-- **Rust fast gate 结果**：先前 `gate-fast` 在 web-search 热区暴露的红点已确认属于测试预算/清理脆弱，而非产品逻辑回归。真实 HTTPS mock + plugin runtime 成功路径在 nextest 满并发下会逼近 5s/10s 外层 timeout；部分用例又在 `end_session` 前 panic，导致大盘表现为 slow/hung。已在 `tomcat/tests/cli_tests.rs` 与 `tomcat/tests/web_search_tool_tests.rs` 统一放宽 success-path wall-clock budget，并保证 timeout/result error 时先 teardown 再失败；focused `cargo test --test web_search_tool_tests works_from_public_api -- --nocapture`、`cargo test --test web_search_tool_tests runtime_auto_routes_to_plugin_backends_after_retryable_failures -- --nocapture`、`cargo test --test web_search_tool_tests runtime_session_vm_survives_idle_beyond_call_timeout -- --nocapture`、`cargo test --test cli_tests test_chat_path_executes_web_search_tool_with_mock_server -- --nocapture` 全绿。随后 `./scripts/run-integration-tests.sh integration-parallel` **364/364 PASS**（1 slow: `real_mimo_web_search`），且 `cargo clippy --all-targets -- -D warnings` / `cargo test --lib` / `cargo test --doc` 再次 **PASS**。
-- **任务卡 / 结论**：此分支无独立 `PENDING_INTEGRATION` 任务卡映射，分支侧证据以 `docs/status/feature-transcript-ui-and-checkpoints.md` 为准。**结论：本地 merge 已完成，develop-side acceptance 现已 GO**；Rust 默认快门禁已闭环。`integration-real-llm` 因本机缺 `OPENAI_API_KEY` 未追加复跑，但这不是本次默认门禁阻塞项。是否将本地 `develop` 推送远端，仍等待用户明确指令。
+```text
+原 develop 4e1a4867 -> 已验收 feature 1bb87c1f（已推送）
+  -> --no-ff fb731ed9 -> develop定向补漏23946252/dc70bd70
+  -> 两侧fast有效检查集合闭合 -> 状态/看板提交 -> 最终verify后正常推develop
+```
 
-### 2026-07-05 | merge `feature/tomcat-vscode-extension` → develop（T2-P1-019 / T2-P1-020 集成验收）
+- 已在本地以 **`--no-ff` merge `fb731ed9`** 合入全分支，parents `4e1a4867` / `1bb87c1f`；功能候选已推 `origin/feature/transcript-rich-render`，本地 develop 代码候选 `dc70bd70`，尚待最终verify/正常推送。原147提交/1123路径逐项闭合，分支另10修复/状态提交；当前净差异1202路径（83额外net主要测试迁移/回归），后续修改/merge差异均对账，Cov%未测保持 —。证据 `.agents/acceptance/review-ebbdacce-{coverage.json,findings.md}` 与 `feature-transcript-rich-render.md`。
+- 合并无文本冲突，初始staged tree完全等于候选；whole diff-check15处旧空白整改已验证Markdown结构/hardbreak等价、planner字词不变。新增develop整改只涉及读取fixture（同50k行/原断言）、planner精确字面值和锁竞争fixture hold-before-spawn；生产writer/锁/协议不改，未引入新机制。
+- **develop Rust fast有效集合**：原 `1791781793026-armtd9` Clippy绿，lib两失败且大fixture长耗时后STOPPED，不改写原命令；`1791783635075-6ld8c2` reader14/14（6.279s）、`1791785005420-iukg7i` prompt/store58/58，`1791785278751-2ffqb1`逐名对账全部3242注册=3237唯一通过/5ignored/0缺漏或未替换失败。`1791783868088-y357u2` exit0补doc（0用例不算行为）、真实debug CLI build、默认并行378/27skip（239.395s）、串行35/0（182.514s）与lib/tests Clippy。fmt和整个基线diff-check绿，不为重复验证再整套重跑。
+- **develop 扩展 fast** `1791781924920-iiipcj` exit0：两侧tsc、core54files/752、GUI81files/826全部通过。既有分支full+真模型/Skill/search、Serve/安装态/VSIX、42活跃Host、图片33checks/23triples和MCP四phase/28正常triples实屏有效；merge后只有Rust测试/文档改动，未失效UI/付费结果。版本CLI/bundled0.1.72、扩展0.1.86，不发布、不打tag。
+- 状态只保留crate路径为权威，根同名文件改导航，近期行为/旧失败/边界已归并且原文Git保留。T2-P1-011原DONE不修改；任务目录未检出本分支或PENDING_INTEGRATION映射，不伪造其他卡迁移。看板由既有 `scripts/aggregate-status.sh` 汇总；feature章节来自保留分支tip，历史ACTIVE不代表develop未包含，当前集成以本节SHA/祖先证据为准。
+- **尚待最后交付步骤**：状态/看板提交、最终verify、fetch后仅推develop并核对SHA/包含关系。明确未验边界：Windows运行态/其他平台、Native Save As、首次原生trust modal、远程OAuth/全供应商矩阵和用户原失败会话Retry。外层VS Code timeout与图片受控404/403保留，不宣称所有console为零；audit三条unmaintained警告保留。
 
-- **合并范围**：已在 `develop` 上以 `git merge --no-ff` 合入 `feature/tomcat-vscode-extension`（merge `2b04acd`），带入 VSCode Chat 扩展 Phase 1 / Phase 2：sidebar webview transcript、`/plan` / `/model` slash、共享会话池与单活跃 ownership、附件与 `Ctx%`、serve plan/model 协议扩展、Phase 2 React webview 与打包链路，以及对应 OpenSpec / 场景库 / 架构文档同步。
-- **develop 侧补修**：Rust 侧在 `src/ext/runtime/instance.rs` 把 QuickJS host bootstrap 排除到插件 timeout budget 之外，修复 `quickjs_e2e_tests::runaway_plugin_timeout_interrupts_when_budget_disabled`；同一提交还带入 `src/core/tools/primitive/executor/write_edit.rs` 的备份提交路径收敛、回滚失败显式报错与对应 overwrite/rollback 边界测试。扩展侧补稳 `hostE2eScenario.ts` / `e2eHostFixture.ts`，把 ownership / transcript-progress 场景改为确定性验收，消除 VSIX 安装 E2E 假红，但不弱化断言；同时修正 `App.tsx` / `Composer.tsx` / `provider.ts` / `handler.ts` 的 ownership 释放、interrupt 可用性与 history loading 收口，并补上单测与安装 E2E 覆盖。
-- **自动化门禁**：`./scripts/run-integration-tests.sh all` **PASS**；`integration-openai-responses-wire` 在 OpenAI 兼容网关 key + `NO_PROXY=<gateway-host>` 口径下 **PASS**；`npm run build` / `npm run test:unit` / `npm run test:integration` / `npm --prefix gui run test` / `npm audit`（0 vulnerabilities）/ `npm run package:vsix` / `npm run test:e2e:vscode-install`（26 passing）/ `npm run verify:vsix`（4 passing，截图裁剪产物已生成）全部通过。
-- **留人工 / 跳过项**：无桌面视觉留人工项；`verify:vsix` 已在可见 VSCode 窗口下完成截图与裁剪。`integration-real-llm` 本分支无新增 target，按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §4 跳过，不视为阻塞。
-- **负责人 / 结论**：Nibbles 已完成 `develop` 侧合并复核；`T2-P1-019` / `T2-P1-020` 转 `DONE`，看板与 status 同步；对应验收提交现已位于 `origin/develop`。
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0/P1]** `tomcat` 多问题优化链路已在 `develop` 侧完成当前轮收口：GUI/webview 的 `max` reasoning 档位、pre-stream loading 指示、全量 shimmer 覆盖与 `Thinking` 文案已修复；`search_files` description 也已瘦身回归。Rust 侧把多模态从“Responses 独占”推进到“三家共用一套 `ChatMessageContentPart`，各 wire 自己翻 JSON”：新增 `FilesApiAdapter` 存储适配层，`OpenAiFilesRuntime` 改持 `Arc<dyn FilesApiAdapter>`，OpenAI Completions 已支持 inline 图片/PDF 与 uploaded `file_id`，Moonshot uploaded 图片走 `ms://...`，Anthropic Messages 已支持 inline / uploaded 图片与 PDF，并在 uploaded 引用时自动补 `anthropic-beta: files-api-2025-04-14`。内置/本地模型配置同步开启 `kimi-k3`、`kimi-k2.7-code` 与 Anthropic 全系 `files=true`。本地验证已补齐：catalog / openai provider / anthropic wire / adapter 单测通过；`serve_stdio_e2e` 新增 Moonshot `ms://` 与 Anthropic `source.type=file + beta header` 断言通过；live 结果为 **Kimi K3 成功**、**fcodex `/v1/files` 返回 404**、**Anthropic 实 key 返回 401 invalid x-api-key**，后两者已按真实结果记录。@2026-07-20
+- [✓] **[P0]** 推理档位 catalog-id / wire-name key 不一致已在 `feature/transcript-rich-render` 修复并待并入：`run_loop` 现与存盘/GetState 一样用 catalog `id` 查 `model-thinking.json`，中转站模型选 `xhigh` 不再被回退成默认 `high`；CLI `0.1.15` / 扩展 `0.1.18`。@2026-07-20
+- [✓] **[P0/P1]** 推理强度（reasoning effort）链路整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：这次不再靠“某家模型名字命中后写死映射/全局降级”硬扛，而是把**模型真正支持哪些档位**上收为 catalog 事实源。现在每个模型都可在 `builtin_models.toml` / `models.toml` 声明 `supported_reasoning_levels`；聊天框下拉按当前模型动态渲染（空列表退化为 `Thinking On/Off`），选中的档位写入 `model-thinking.json`，请求前只做一次 clamp，所以 `gpt-5.x` 的 `xhigh`、`glm/deepseek` 的 `max`、以及只支持 thinking 开关的 `mimo/kimi` 都各走各的真实协议，不再被一把梭硬折叠。与此同时，`ProviderCacheKey` 新增 `catalog_generation`，改 `thinking_format / model_name / capabilities` 后无需重启即可生效；保存模型时空 `thinking_format` 会按 API 自动物化成具体值，不再留下黑盒 `Auto`；现代 Claude `4.6/4.7/4.8` 改走 `anthropic-adaptive`（`thinking.type="adaptive" + output_config.effort`）；若 `openai/openai-responses` 线路被配成不会发 effort 的 format，保存后会回传非致命 warning。Rust focused/unit + serve 集成、GUI 单测与 targeted devhost Add Model E2E 已补齐。@2026-07-19
+- [✓] **[P0]** plan 预览热更新缺陷已在 `feature/transcript-rich-render` 修正并待并入 `develop`：Rust `update_plan` / `create_plan` 的真实写盘路径是 `std::fs` 临时文件 + `rename()` 原子替换磁盘，但 plan 预览过去只监听 `onDidChangeTextDocument` 且只读 `document.getText()`，所以对 `~/.tomcat/plans/*.plan.md` 这类工作区外文件，Agent 改完盘后 VS Code 缓冲区经常不重载，预览就一直停在旧内容。现已把刷新链改成：**serve `plan.update` / `plan.todos` 事件 → sidebar provider 桥接 → `PlanPreviewEditorProvider.refreshFromServeEvent(planId,pathHint)` 从磁盘重读并回推 state 帧**；`pathHint` 走 canonical path 兜底，`PlanPreviewApp` 刷新时保持滚动阅读位置，host E2E 也改成真实 `fs.writeFile` 写盘 + 注入 `plan.update` 取证，不再依赖会误导人的 `workspace.applyEdit` 缓冲编辑路径。@2026-07-19
+- [✓] **[P0]** plan transcript 渲染整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：这次不是继续打补丁保住旧 `type:"plan"` 卡，而是从第一性原理把职责拆开。最终模型是：**`create_plan` 是唯一卡片来源、`update_plan` 每次都留下独立增量事件行，`plan.*` 只更新 ambient `planState / planTodos / planFile`**。因此“`update_plan` 零足迹”和“plan 卡漂到最新 user 附近”这两个问题被同一刀解决：不再抑制 plan 工具行，也不再维护可变的 transcript plan 卡。随后又按用户体验把旧的 pending 过渡补回：`plan.create`（文件一落盘）会把 `path/planId` 盖到运行中的 `create_plan` 工具上，于是**同一张** `PlanFileCard` 会先显示 `view-plan-pending` 点点点，review 跑完、`tool_execution_end` 到来后再切成正常 `View Plan`；`update_plan` 的运行/增量反馈仍留在事件行。UX 收口同步完成：事件行 `View Plan` 扁平常显淡下划线 + 小 chevron，卡片 footer `View Plan` hover 变白，卡片 `Build` 复用 preview 同款黄底黑字非加粗按钮。对应 GUI/state 单测、reload replay 与 devhost plan UX 场景都已迁到新模型。@2026-07-19
+- [✓] **[P0]** TranscriptView 富渲染四次整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：第三轮虽然把真流式 E2E 和运行时预热补上了，但聊天正文仍是“整条消息一次 `useMemo` 烤 HTML、再异步高亮”的架构，所以代码会先无色后上色（FOUC），而且 streaming 每来一个 token 都可能让整篇旧内容重复参与计算。现已对齐 cline 的低爆炸半径路线：**保留 `marked + DOMPurify + DOM 装饰` 管线，不迁 `react-markdown`，只引入『按 markdown 顶层块切分 + `React.memo` 逐块冻结 + `highlight.js` 静态 import/同步上色』**。落地内容包括：`splitTopLevelBlocks()`、同步 `highlightToHtml()`、`ChatMarkdownBlock` 按 `raw` 单 prop memo、`MarkdownBody` 复用同步高亮/代码卡片/内联路径、`.tc-chat-markdown__block { display: contents; }`、`isStreaming` 富渲染死代码拆线，以及 Vite `manualChunks` 把 `highlight.js` 单独切成 `dist/chunks/highlight.js`（当前构建约 **104.58 kB min / 35.64 kB gzip**）。验证新增/收紧到真实行为：GUI 单测断言“同步即有 `code.hljs`、追加尾块只重算新块”，devhost E2E 明确断言“流式尚未结束时，已完成代码块已经带 `hljs-*`；收尾后 mermaid 才出现 `<svg>`”。@2026-07-19
+- [✓] **[P0]** TranscriptView 富渲染二次整改已完成并待并入 develop：聊天里“完全无高亮 / 无 mermaid”的真根因不是配色或 markdown 结构，而是**聊天 webview 的 CSP 比计划预览少了 `'strict-dynamic'` 与 `'unsafe-inline'`**，导致 `ChatMarkdown` / `markdownRuntime` 的 lazy `import()` 分包（`highlight.js` core/语言包、`mermaid`）在 transcript 中被浏览器拦截；卡片结构能出来，但上色和 SVG 永远跑不起来。现已把聊天 CSP 与计划预览对齐，并顺手收敛代码块外观：**不再显示语言标签**；只有带文件路径的围栏才显示头部（文件图标 + basename，hover/title=完整相对路径，点击打开定位行，右侧纯图标 copy），无路径围栏统一为 `bare` 块（无头部，copy 浮在内容区右上角）；正文内联路径显示 basename；`openFile` 失败改为 toast，不再把错误写进 transcript。门禁也补到了真正行为：GUI/provider focused tests 覆盖 basename/title/copy-feedback/toast，host E2E `assertTranscriptRichRenderingFlow` 断言真实 `hljs-*` token span、mermaid `<svg>`、`bare` 块与坏链点击不污染 transcript。@2026-07-18
+- [✓] **[P0]** TranscriptView 富渲染整改已收口（**更正上一条 DONE 的口径**）：真机“一直闪 + 没有卡片/可点链接”的根因不是样式，而是 `ChatMarkdown` 先画半成品 HTML、再在 `useEffect` 里改真实 DOM；React 重设 `innerHTML` 时会把代码卡片/path chip 整块抹掉，形成闪帧。现改为 `closeOpenFence -> marked -> DOMPurify -> 离屏 detached div -> decorateCodeCards/linkifyInlineFilePaths -> div.innerHTML`，把**结构**在 `useMemo` 中先烘焙成成品字符串，第一帧就有代码卡片/文件路径/copy 按钮。`highlight.js` 与 `mermaid` 留在 `useEffect` 做纯增强：前者因 core/语言包走懒加载 `import()`，不能进同步 `useMemo`；后者因 `mermaid.render()` 异步且依赖真实 DOM/SVG。与此同时，**thinking 正文已回退为弱化纯文本 `<pre>`**（不再走 `ChatMarkdown`、不再在 thinking 内生成 clickable path），只保留助手正文与工具调用行的“点文件打开”能力。门禁补强：GUI focused tests 覆盖“正文首帧即成品 + thinking 纯文本”，host E2E `assertTranscriptRichRenderingFlow` 新增 copy 按钮、连续两帧 DOM 稳定，以及 thinking 展开后仅正文侧 clickable path 生效。@2026-07-18
+- [✓] **[P0]** TranscriptView 富渲染已落地：assistant 正文与 thinking 正文统一走 `ChatMarkdown`（`marked + DOMPurify + mermaid + highlight.js`），多行代码/ASCII 围栏升级为代码卡片，带文件路径的围栏标题可点开文件，正文里的 `` `path:line` `` 会渲染成可点击 path chip；`openFile` intent 新增可选 `line` 并贯穿到 `VsCodeIde.showFile(path, line?)` 的 `revealRange + selection`。Rust system prompt 同步新增 `SystemOutputConventions`，约束模型用 inline-code 路径与 `lang path` 围栏稳定产出可点击格式。配套 GUI/ext focused tests、host E2E `assertTranscriptRichRenderingFlow` 与文档已补齐 @2026-07-18
+- [✓] **[P1]** nextest 默认并发已从按 CPU 满开收敛为固定 `4`：`tomcat/.config/nextest.toml` 新增 `profile.default.test-threads = 4`，`integration_gate_config_tests` 加守卫断言，`run-integration-tests.sh` 与 `INTEGRATION_TEST_SPEC` / `INTEGRATION_MERGE_AND_ACCEPTANCE` / `Dispatcher` 文档口径同步改为“默认 4 并发”，避免本机 CPU 满载时放大 I/O、网络 mock 与外部依赖抖动。验证：`cargo test --test integration_gate_config_tests -- --nocapture` 通过 @2026-07-18
+- [✓] **[P0]** 验收整改收尾已合入 `develop`：① 失败错误 `detail` 脱敏补全（`Cookie/Set-Cookie`、`x-api-key`、`password/secret`、裸 `sk-*`、`Basic`）并 8KB 截断；② 失败轮恢复边界/幂等加固（append-invariant 不写 Error、同失败尾幂等）；③ 删除 `@tomcat` participant 与单前端后不可达的 `ownership/uiMode/conflict` 死代码，仅保留 sidebar webview chat box；④ View diff 窄窗并排（`renderSideBySideInlineBreakpoint=0`）、live 403→`agent_idle` 摘要回填、Key slot 对齐与 `KeySlotCombobox` 单测/CSS token。门禁：`cargo test --lib`、`npm run lint`、`npm run test:unit`、目标 host E2E（settings/diff/retry/multi-session/switch-restore）全绿；新包 `tomcat-vscode-ext-0.1.16.vsix`。详情见 `docs/status/feature-transcript-ui-and-checkpoints.md` @2026-07-18
+- [✓] **[P1]** Add Model Key slot 整改完成：凭证清单现每次从 `~/.tomcat/assets/.env` 热重读且只列合法非空 `*_API_KEY`；Relay 建议名按站点 + API 家族区分；Key slot 收敛为可搜索/可输入的唯一入口；新增输入失焦脱敏、共享 Key 覆盖确认、Refresh 与中英文文档。Rust admin 14/14、serve focused 1/1、GUI 12/12、SettingsPanel 5/5、TypeScript lint 均通过 @2026-07-16
+- [✓] **[P1]** reviewer 提示词现统一继承 engineering-standards #6–#8：`code_review.txt` 与 `plan_review.txt` 新增与 `core_identity` / `planner` 一字不差的 first-principles、plain-language+ASCII、UX-first 三句原则；`load_test.rs` 同步扩展 reviewer 双模板逐字守卫。验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过 @2026-07-16
+- [✓] **[P0]** `feature/prompt-optimization` 已 fast-forward 合入 `develop`（`9f940b7 -> 46b7ef7`）：系统提示词/工具描述瘦身、`prompt_guidelines` 聚合、工程规范 #6–#10 固化进 `core_identity`/`planner`、`parallel_tools`/`verification` 段与预算门；同提交附带 `cloud-scale-serving-01/` 方案文档与 `commit-with-status` 路径迁移。详情见 `docs/status/feature-prompt-optimization.md` @2026-07-16
+- [✓] **[P1]** 云化服务技术方案已落盘：`tomcat/docs/architecture/cloud-scale-serving/` 新增 `01-overview` + Phase A/B/C（`02/03/04`），并在架构 README 登记「扩展性与云化」阅读顺序；纠正「全站单 EventBus」误诊，明确 A 期单机 mailbox/热温冷为先落地、本地 `stdio` 零回退；尚未进入 Phase A 编码 @2026-07-15
+- [✓] **[P0]** `feature/transcript-ui-and-checkpoints` 已 fast-forward 合入 `develop`（`866752c -> 62c8811`）；develop-side review 发现并修复跨 session restore 漏洞：`restore_checkpoint` / `/restore` 现拒绝不属于当前会话的 checkpoint，避免 `revertFiles=true` 把共享工作区回滚到别的会话快照；新增 `serve_restore_checkpoint_rejects_foreign_session_checkpoint` 回归测试，`cargo test -p tomcat serve_restore_checkpoint -- --nocapture` 4/4 通过 @2026-07-15
+- [✓] **[P0]** develop-side 扩展快门禁与真实宿主高风险复核完成：`npm run gate:fast` 全绿；`TOMCAT_E2E_GREP='renders the \\.plan\\.md custom editor|renders transcript action rows and context groups|keeps sticky user prompts aligned with historical turns in the Tomcat webview|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` 4/4 通过 @2026-07-15
+- [✓] **[P0]** develop-side Rust web-search 门禁已收口：把 `tomcat/tests/cli_tests.rs` 与 `tomcat/tests/web_search_tool_tests.rs` 中真实 HTTPS mock + plugin runtime 成功路径的外层 wall-clock budget 与 timeout 失败 teardown 对齐，消除 nextest 满并发下的假红 / slow / hung；focused 复核全绿，`./scripts/run-integration-tests.sh integration-parallel` 364/364 通过（仅 `real_mimo_web_search` 被标 slow 但 PASS）@2026-07-15
+- [✓] **[P0]** `feature/add-model-form-redesign` 已快进合入 `develop`（HEAD `68a4f43`）：覆盖 Add Model 双模式 / `ModelView.source` / `ThinkingFormat::Auto` 收口、Composer `@` 上下文搜索，以及 Transcript diff / plan / sticky UX 修复；develop-side review 中顺手补齐 Webview live diff snapshot 复用、`hashline_edit.rs` clippy 收口与对应 E2E 断言对齐 @2026-07-12
+- [✓] **[P1]** 新增根目录 Cursor command `/release-cli-ext`：固化 CLI→EXT 发版顺序（patch+1、develop 推送、main/master fast-forward、cli tag 等资产、ext tag 等资产），减少手工漏步 @2026-07-06
+- [✓] **[P1]** Add Models 架构方案：新增 `tomcat-vscode-ext/docs/architecture/model-management-add-models.md` 总览 + 5 篇子文档（术语/决策/协议/验收/UI ASCII 基线），对齐 Phase 2 文档组织方式 @2026-07-06
+- [✓] **[P1]** Add Models 实现已合入 `develop`：以 `git merge --no-ff` 合并 `feature/add-models`（merge `68ff90a`），并在分支侧与 `develop` 侧完成 Rust/CLI/serve 全量门禁、VS Code 扩展 build/unit/integration/GUI/VSIX install/verify 复跑，验收通过 @2026-07-09
+- [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
-### 2026-06-07 | merge `feature/skill-system` → develop（T2-P1-014 集成验收）
+### 🔌 INTERFACE (接口变更)
+- 推理强度 / 模型配置链路：Rust `ModelEntry` / `UserModelEntry` / `ModelView` / `ModelEntryInput` 现显式携带 `supported_reasoning_levels`，`UpsertModelResponse` 新增 `warnings`；webview state 新增 `availableModelReasoningLevels`，`Composer` 的 thinking 控件改为按模型动态渲染；`ProviderCacheKey` 新增 `catalog_generation` 以支持模型配置热生效；`thinking_format` 空值保存时会按 API 物化；Anthropic 新增 `anthropic-adaptive` 编码路径（`thinking.type=adaptive` + `output_config.effort`）。
+- plan 预览热更新链已从“`onDidChangeTextDocument` + 读旧缓冲”改为 **serve `plan.update` / `plan.todos` → `provider.handleServeEvent()` 桥接 → `PlanPreviewEditorProvider.refreshFromServeEvent(planId, pathHint)` 磁盘重读 → webview `state` 帧重发**；`PlanPreviewDomSnapshot` 新增 `contentScrollTop` / `topVisibleSourceLine`，`PlanPreviewDomAction` 新增 `setContentScrollTop` 供 E2E 锁“刷新不跳顶”。
+- transcript rich rendering 四次整改：前端新增 `splitTopLevelBlocks(markdown)` 与同步 `highlightToHtml(code, language)`；聊天富渲染链改为“父组件切顶层块 + 子块 `React.memo(raw)` + 同步 `hljs` + mermaid 按块异步”，`ChatMarkdown` / `MessageBubble` / `TranscriptView` 不再为 assistant 富渲染透传 `isStreaming`。Vite 产物新增独立 `dist/chunks/highlight.js` 分包以控制首屏成本。
+- transcript rich rendering：前端新增 `ChatMarkdown` / `markdownRuntime`；**assistant 正文**改为 markdown 富渲染；代码围栏支持 `lang path[:line]`，但**不再显示语言标签**，而是按“有无文件路径”分两形态：有路径 → basename 头部 + 纯图标 copy；无路径 → `bare` 块 + 内容区右上角浮动 copy；正文内联 `` `path:line` `` 显示 basename、hover/title 保留完整相对路径并可点击打开；**thinking 正文已回退为弱化纯文本 `<pre>`**，不再解析 markdown，也不再在 thinking 内生成 clickable path。
+- plan transcript / 卡片交互：`WebviewToolCard` 现携带 `planActivity / planId / planPath`；`plan.create` 会把 `path/planId` 提前盖到 running `create_plan` 工具上，因此 `PlanFileCard` 能在 reviewer 运行期间先显示 `view-plan-pending`，完成后再切回 `View Plan`；事件行 `View Plan` 链接改为扁平常显淡下划线 + 小 chevron，卡片 footer `View Plan` 补 hover 变白，卡片 `Build` 复用 `tc-plan-build-button`（黄底 / 黑字 / 非加粗）。
+- `MarkdownBody` 现复用 `buildDecoratedHtml(markdown, sourceLineMap?)`，所以 plan 预览和 transcript 共享同步高亮、代码卡片、copy 按钮与内联文件链接语义，同时保留 `data-source-line`。
+- webview openFile：`gui/types.ts` / `src/ui/webview/protocol.ts` 的 `openFile.data` 新增可选 `line?: number`；`VsCodeIde.showFile(path, line?)` 会把 1-based 行号映射到原生编辑器 `selection + revealRange`。
+- system prompt：`PromptKey::SystemOutputConventions` 加入默认系统提示词 section 链，顺序位于 `tool_instructions` 之后、`parallel_tools` 之前；约束 inline-code 路径、`lang path` 围栏、禁 `file://` / `vscode://` / `【F:...†L...】`。
+- 测试门禁调度：`tomcat/.config/nextest.toml` 的 `profile.default.test-threads` 固定为 `4`；默认 integration / E2E 车道不再按 `num-cpus` 满并发运行，`real-llm` 仍保持 `max-threads=2`。
+- transcript / history：新增 `TranscriptEntry::Error { summary/detail/... }` 与失败 user `turn_failed:true`；`Error.detail` 脱敏覆盖 `authorization/bearer/api_key/token/cookie/set-cookie/x-api-key/password/secret/basic/sk-*`，超 8KB 截断。
+- webview 单前端：删除 `@tomcat` chat participant 与 `ownership/uiMode/conflict` 仲裁层；webview 协议不再携带 `owner/conflictMessage/uiMode`。
+- diff：`VsCodeIde.openPreparedDiff` 在用户未显式配置时将 `diffEditor.renderSideBySideInlineBreakpoint` 设为 `0`，保证窄窗左右并排。
+- `list_provider_keys` 的 wire 形状保持兼容，但语义调整为 `.env` 唯一清单来源：每次调用热重读，仅返回合法非空 `*_API_KEY` 的名称/状态；不再用模型引用补充名称，也不返回完整或部分 Key。`ModelEntryInput.api_key_env` 与 `set_provider_key.envName` 统一校验 `^[A-Z_][A-Z0-9_]*$`。
+- `PromptKey::ReviewerPlan` / `PromptKey::ReviewerCode` 对应模板现内联共享的三条 operating principles（与 `SystemCoreIdentity` / `PlannerReminder` 文案逐字一致）；无对外部客户端的破坏性 API 变更。
+- `BuiltinToolCatalogEntry::prompt_guidelines` + `render_tool_guidelines_with_policy`；`PromptKey::SystemParallelTools` / `SystemVerification`（系统提示词 section priority 22/50）。无对外部客户端的破坏性 API 变更。
+- 新增架构文档入口：`tomcat/docs/architecture/cloud-scale-serving/` 与 `cloud-scale-serving-01/`；不改变现有 `serve` / `stdio` 对外契约。
+- `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
-- **合并范围**：按用户要求将 `feature/skill-system` fast-forward 合入 `develop`（`63150d4 -> 90e1c60`），随后在 develop 侧完成全量 review，并补齐集成过程中暴露的 develop-side 收口：`Skill` 现保留 `allowed_tools` 元数据；`skills.enabled=false` 时不再渲染 `<available_skills>`；`directory-structure.md`、`skill-system.md`、`E2E_SCENARIO_LIBRARY.md`、`Product_Brief.md` 等文档回写到当前实现。
-- **全量 review**：围绕 `core/skill`、`system_prompt`、`tool_exec`、`api/chat/commands/cmd_skill.rs`、`api/cli/skill_cmd.rs`、`infra/config`、`tool-catalog.md` 与 Skill 相关 OpenSpec/架构文档做 develop 侧复核；确认三层发现、`<available_skills>` 渐进式披露、`load_skill` 权限闸门、`/skill`/`tomcat skill` 命令面闭环一致，并修正文档里的 P0/P1 技能根、测试矩阵与 env-gated 场景漂移。
-- **§4 全量验收（develop 侧复跑）**：以 **clean env** 执行 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 全绿（release / clippy / lib / integration-parallel / integration-serial，覆盖 `skill_tool_tests` 与 `cli_tests`）；显式 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm` 通过。集成期先发现一处真实 develop-side 门禁问题：`tests/skill_tool_tests.rs` 的 `useless_format` 触发 clippy，已改为 `.to_string()`；另确认 **不应**在整轮 `all` 前全局 `source .env`，否则会把默认门禁之外的环境分支一并打开，产生失真红灯。
-- **结论**：`feature/skill-system` 已在 develop 侧完成合并、review 与验收；`T2-P1-014` 置为 `DONE`，相关状态/任务索引/OpenSpec 已同步。未推送远端。
+### ⚠️ BLOCKED (阻塞/风险)
+- 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
+- Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
+- 「同会话关内网后反复 403、新会话可恢复」现象已验收可接受（通网后摘要正常），根因未再钉死到 `previous_response_id`；临时诊断日志已移除，后续若复现再开文件日志排障。
 
-### 2026-06-05 | merge `feature/web-search` → develop（T2-P1-012 / T2-P1-013 集成验收）
-
-- **合并范围**：用户指定合并 `feature/web-search` → `develop`；先在功能分支补 `web_search` merge-gap 修复（cache key 纳入 `allowed_domains` / `blocked_domains`、命中过滤拒任意 IP literal / 保留内网 hostname、`tool_exec` 成功路由与 chat-path E2E），并把 `web_fetch` / OpenSpec / 场景库对齐当前实现；随后 `git merge --no-ff` → `748683c`。对应 **T2-P1-012** / **T2-P1-013**。
-- **全量 review（编码规范 4 件套）**：`web_search/{cache,types,mod,tests}.rs`、`submodules_test.rs`、`cli_tests.rs`、`web_search.md`、`web_fetch.md`、`User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`E2E_TEST_SPEC.md`、`INTEGRATION_TEST_SPEC.md` 全量复核：`web_search` 缓存命中现与配置域约束同键；hits 过滤现拒任意 IP literal 与保留内网 hostname；`web_fetch` 的 domain gate / DNS 解析型 SSRF 继续显式登记为后置残余风险；缺失的 `tool_exec` 成功路径与 chat 用户路径覆盖已补齐。
-- **门禁修复（非功能回归）**：首轮 `run-integration-tests.sh all` 暴露两条与 web 工具无关的 `current_tail_guard_runtime_test` HOME/env 竞争型 flaky；已在 `current_tail_guard_runtime_test.rs` 为两条 plan-path 用例补 `#[serial(env_lock)]`，并在 helper 中显式 `create_dir_all(parent)`，复跑后稳定通过。
-- **§4 全量验收（develop 侧复跑）**：`cargo build --release` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib` **1421 passed, 1 ignored** / `run-integration-tests.sh integration` 全绿（含 `cli_tests` **87 passed**、`web_search_tool_tests` **5 passed**、`web_fetch_tool_tests` **2 passed**）；显式 live smoke：在本机配置 Tavily key 后执行 `cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`，以及 `PI_LIVE_WEB_FETCH=1 cargo test --test web_fetch_tool_tests live_example_fetch_smoke -- --nocapture`，均通过。
-- **结论**：`feature/web-search` 已合入 `develop`；`T2-P1-012` / `T2-P1-013` 已在任务索引中保留并置为 `DONE`。`web_fetch` 的 `PermissionGate::Domain` / DNS 解析型 SSRF 仍按文档记录为后置风险，不再与“已实现”口径混淆。未推送远端。
-
-### 2026-06-04 | docs(tools): web_search 项目级 hosted 候选 + 看板/计划规范
-
-- **动机**：`web_search` 的 `auto` 不应绑在当前对话模型 wire 上；只要项目 catalog 里配置了 `capabilities.web_search == true` 的模型，就应作为 hosted 首选，再按 `openai(hosted) → tavily → brave → serper` 降级。同时补齐 Tavily/Brave/Serper 官方契约与 `.env` 密钥位，并把 PLAN 规范要求「todos 覆盖研发流程 + 决策表全部项」写死。
-- **文档**：`web_search.md` 重写 hosted 资格（project-level `hostedCandidateModel`）、决策表、状态机、测试矩阵与配置说明；`web_fetch.md` 对齐 T2-P1-013 任务锚点与 `tool_exec` 目录结构校准块；`PLAN_SPEC.md` 强化 frontmatter/todos/自检清单；`.env.example` 增加三家 HTTP key 样板。
-- **看板**：`TASK_BOARD_002/README.md` 登记 T2-P1-012 / T2-P1-013 及依赖示意；新增任务卡 `tasks/T2-P1-012.md`、`tasks/T2-P1-013.md`。
-- **范围**：仅文档与配置样板，无 `src/` 变更。
-
-### 2026-06-03 | fix(llm): 压缩模型缺钥回退默认模型 + init 对齐 compaction_model
-
-- **动机**：`context.compaction_model` 与主对话模型 provider 不一致时，压缩场景常因缺对应 API Key 失败；init 选模后未同步 `compaction_model`，与默认模型脱节。
-- **实现**：`DefaultLlmResolver::resolve_compaction_call` 在压缩模型不可用时 warn 并回退 `llm.default_model`（同模型路径保留原错）；Compaction 场景按 provider 兼容策略选用 `llm.api_key_env` 作 credential fallback；`apply_model_choice` 写入 `context.compaction_model`。
-- **测试**：`resolver_test` 新增 3 例（回退 / 同模型原错 / Main 不受影响）；`run_basic_test` / `init_model_wizard` 断言 compaction_model 与 init 默认模型一致。
-
-### 2026-06-03 | feat(cli): chat 启动像素风吉祥物 Splash（Tommy）
-
-- **动机**：为 `tomcat chat` 增加轻量品牌感与进门问候，参考 Claude Code / Codex 的启动 Splash，但不改现有 banner 文案、不阻塞 CI/管道输出。
-- **实现**：`assets/splash/tommy_braille/` 4 帧 idle（眨眼/摇尾）；`splash.rs` 编译期嵌入、`[splash]` 配置（`enabled`/`animations`/`max_width`）、`TOMCAT_SPLASH=0`、TTY 守卫（非终端不绘制）、`NO_COLOR` 去色；`chat_loop` 开头调用 `render_mascot` 后照旧打印三行 banner。
-- **测试**：`splash_test` 仅断言帧文件已嵌入（4 帧非空）；`cargo test --lib splash` 1 passed。
-- **文档**：`user-guide.md` §6 补充启动画面说明。
-
-### 2026-06-03 | merge `feature/t2-p0-010-multi-llm-productization` → develop（T2-P0-010 集成验收）
-
-- **合并范围**：用户指定合并当前分支 `feature/t2-p0-010-multi-llm-productization`（9 commit：Wave1 catalog/resolver/chat/init + remediation + MiMo Token Plan 数据表 + cross-profile downgrade + preflight UI 开关 + docs）→ `develop`，`git merge --no-ff` → `d134372`，无冲突。对应 **T2-P0-010**（多 LLM 产品化 Wave 1 基线）。
-- **全量 review（编码规范 4 件套）**：`catalog.rs`（内置表 + `models.toml` 合并、显式 miss 报错、partial 覆盖）、`resolver.rs`（`LlmScene` per-call 解析、catalog 命中按 `entry.base_url` 重定向、能力校验前移给结构化引导错误、`(api,base_url,key_source)` provider 缓存复用）、`auth.rs`（provider→`<PROVIDER>_API_KEY` + 兜底 + 可读错误）、`cmd_model.rs`/`init_model_wizard.rs`/`models_toml.rs`（`/model` 命令族、model-first init、`models.toml` 幂等生成、`.env` 0600）均合规：分层/依赖方向/错误处理/可测试性/注释覆盖到位，文件行数在 L-1/L-2 区间（context.rs 559 / run_loop 506 / stderr 484，advisory 非门禁）。
-- **§4.2.0 行为确认**：model-first 路由按 catalog 命中模型的 `entry.base_url` 取端点，旧 `[llm].api_base` 对内置模型不再生效（`resolver::tests::catalog_route_ignores_legacy_api_base_override`），与架构文档一致。
-- **§4 全量门禁（develop 复跑）**：`cargo build --release`（4m34s）/ `cargo clippy --all-targets -D warnings` / `cargo test --lib` **1347 passed, 1 ignored** / `run-integration-tests.sh integration` **26 bin / 245 test 全绿**（含 `cli_tests` 86、`checkpoint_cli_e2e` 5、`context_management_tests` / `openai_responses_integration_tests` 等）。
-- **real-LLM（OPENAI/DEEPSEEK/MIMO key 均具备）**：`reasoning_continuity_real_llm_tests` **5 passed**（真实跨 provider continuity / downgrade 验证）。
-- **集成期修复（develop 侧，均非弱化断言）**：
-  1. `c26a259` clippy `question_mark`：`replay_policy.rs::classify_replay_downgrade` 冗余 `let...else` 改 `?`。
-  2. `4a70d99` 失败 lib 用例 `test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_content`：分支早期提交加入、窗口特性（§4.2.6）落地后未同步——历史 tool turn 落窗口外应静默 `StripOpaque`，改断言为 wire[1] 无 `reasoning_content` 且保留 tool_call、wire[4] 仍回放（补强）。
-  3. `a8e58de` 失败 E2E `checkpoint_cli_e2e::test_hangup_during_run_leaves_interrupt_ckpt`：旧用例靠 `TOMCAT__LLM__API_BASE` 指向 mock，新路由对内置模型忽略 api_base；改用 `models.toml` 自定义 model 指向 mock endpoint，partial/Interrupt 断言不变。
-- **wasmedge_e2e**：本合并无 Wasm 相关变更，未单独跑 `integration-wasm`（需 `--features wasmedge` 单独入口；与既有集成实践一致）。
-- **反馈 owner（Spike）**：分支标 `PENDING_INTEGRATION` 时全量 `cargo test --lib` 与 `integration` 实际存在上述 2 个红用例（窗口断言漂移 + checkpoint mock 路由），属交付前自检遗漏；已在 develop 修复并复跑全绿，记录于 docs/INTEGRATION.md 供后续注意。
-- **结论**：T2-P0-010 已正确集成；强制门禁与 real-LLM 全绿；看板与任务卡 `PENDING_INTEGRATION → DONE`。未推送远端（待用户确认）。
-
-### 2026-06-01 | merge `feature/reasoning-continuity` → develop（T2-P1-010 集成验收）
-
-- **合并范围**：用户指定合并 `feature/reasoning-continuity`（11 commit）→ `develop`，`git merge --no-ff` → `f21270f`，无冲突。对应 **T2-P1-010**（OpenAI / DeepSeek transcript-first reasoning continuity）。
-- **全量 review（编码规范 4 件套）**：`replay_policy.rs` 集中 replay/downgrade 决策；`openai_responses` 主线 `store=false` + `include=["reasoning.encrypted_content"]`，`previous_response_id` 仅显式配置互斥分支；DeepSeek V4 / reasoner 分族 + same-profile `reasoning_content` replay（tool turn 继续记录更强 replay 约束 metadata）；`switch_current_model` + `model_change` 审计；agent_loop 仅接线。分层/依赖/错误处理/可测试性/注释覆盖合规。**Advisory（非阻塞）**：`openai.rs` **1119 行**（RUST_FILE_LINES L-3 建议拆分区间，同 T2-P1-011 先例仅记录）。
-- **§11 锚点**：`transcript_roundtrip_preserves_reasoning_continuation`、`openai_responses_roundtrip_replays_reasoning_items`、`deepseek_tool_turn_replays_reasoning_content`、`deepseek_non_tool_turn_roundtrip_replays_reasoning_content`、`cross_provider_downgrade_keeps_semantic_history`、`streaming_think_scrubber_hides_split_tags` 均在 develop 可命中；`reasoning_continuity_real_llm_tests` 无 `#[ignore]`/弱化断言。
-- **§1 规格/场景库**：`E2E_SCENARIO_LIBRARY` plan 矩阵与 `plan_real_llm_cli_e2e` / inprocess 分工一致；架构文档测试矩阵与实现对齐。
-- **§4 全量门禁（develop 复跑）**：`run-integration-tests.sh all` → **EXIT_CODE=0**（release / clippy `-D warnings` / lib **1302 passed** / integration-parallel / integration-serial 含 **cli_tests 83 passed**）。
-- **real-LLM 分组**：`integration-real-llm` → **REAL_LLM_EXIT_CODE=0** — `reasoning_continuity_real_llm_tests` **3 passed**；`plan_real_llm_inprocess_tests` **1 passed**（194.9s）；`plan_real_llm_cli_e2e` **2 passed, 1 ignored**（203.8s，full-chain 仍 ignored、smoke 绿）。`current_tail_guard_real_llm_tests` 同组未在本轮单独列出但随脚本全组通过。
-- **结论**：T2-P1-010 已正确集成；强制门禁与 real-LLM 全绿。看板索引移除 T2-P1-010 开放行；任务卡保持 `DONE`。未推送远端。
-
-### 2026-05-31 | fix(agent): 后台 bash 未注入时报 LLM 可执行英文指引
-
-- **动机**：verifier/reviewer 等未注入 `BashTaskRegistry` 的子 Agent 调用 `bash(run_in_background=true)` 或 `task_*` 时，工具结果只返回「未注入 BashTaskRegistry」，CLI 与模型都无法判断应改走前台 bash。
-- **代码**：新增 `background_unavailable` helper，按 `SubagentType` 区分子 Agent（`currently unsupported in this subagent`）与未接线兜底（`Background bash is not enabled in this AgentLoop`）；`bash`/`task_output`/`task_stop`/`task_list` 四分支统一走 helper；`cli_turn_renderer` bash 起始摘要附带 `run_in_background=true` 标记。
-- **测试**：`submodules_test` 更新 no-registry 断言并新增 `tool_exec_verifier_background_bash_without_registry_mentions_subagent`；`cargo test -p tomcat tool_exec_ --lib` 36 passed。
-- **范围外**：未改 `with_bash_task_registry` 主 chat 注入与子 Agent wiring；`cc-fork-01` 子模块 dirty 不纳入。
-
-### 2026-05-31 | style(agent): current-tail guard fmt 残留收口
-
-- **动机**：`fix(plan)` 提交时 `current_tail_guard.rs`、`agent_loop/mod.rs`、`current_tail_guard_real_llm_tests.rs` 的 `cargo fmt` 差异刻意未纳入；本 commit 单独收口，避免 develop 工作树长期带 fmt 噪音。
-- **范围**：仅 import 排序与断行格式化，无行为变更；`cc-fork-01` 子模块 dirty 与无关 untracked 目录不纳入。
-
-### 2026-05-31 | fix(plan): 放宽 `/plan build` 运行态闸门
-
-- **动机**：`tomcat chat` 在 session 仍有 scratchpad todos 或盘内 `Pending`/`Completed` 时，无参或显式 `/plan build <other>` 会被 `BuildBlocked` 误伤；典型场景是 reviewer 把已完成 plan 的 frontmatter 写成 `pending` 且 todos 全 completed，用户无法显式切到另一份 plan。
-- **代码**：`PlanRuntime::build_plan()` — scratchpad `session_todos`（pending/in_progress）改为 warning 不阻塞；内存 `Pending`/`Completed` 允许显式 build 另一份 `planning/pending` plan；仍拒绝 `Executing` 与磁盘 state 不合规；无参 `default_build_target()` 不变（Pending 仍优先续跑当前盘）。
-- **测试**：`build_plan_test` 拆分/新增 `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan`、`pending_session_can_build_another_explicit_plan`；`cargo test -p tomcat plan_build_ --lib` 17 passed。
-- **文档**：`plan-runtime.md`、`tools/planner.md` 同步 G3/G5 闸门与状态转移表。
-- **范围外**：未改 plan 文件自愈合（`pending` + 全 completed todos 仍保持 dirty）；`current_tail_guard` 工作树仅 fmt 残留未纳入本 commit。
-
-### 2026-05-31 | merge `feature/current-tail-aggregate-guard` → develop（T2-P1-011 集成验收）
-
-- **合并范围**：用户指定合并当前分支 `feature/current-tail-aggregate-guard`（4 commit：`1bb4d66` 阶段二实现 / `08f4966` fmt / `42f4ee4` 称重点+steering+测试矩阵收口 / `8085c40` keepalive A/B/C 真 LLM 验证 + 默认压缩模型 gpt-5.2）→ `develop`，`git merge --no-ff`，无冲突。对应 T2-P1-011（current-tail aggregate guard 阶段二预防型上下文减负）。
-- **全量 review（编码规范 4 件套）**：mid-turn precheck/route 决策、`reduce → 先 apply 历史 → 历史再压 → tail 波次 placeholder → 单条 branch_summary collapse + keepalive`、`steering_injection` 统一记账通道、`truncation.rs` 抽出 `persist_tool_result_text`/`is_persisted_tool_result_text` 复用、`session/transcript.rs::rewrite_message_text_entries_by_id` 原子重写、`ContextState::rewrite_local_tail_chars` 计数同步、config 移除 `compaction_turns` 并新增 `current_tail_*` 两字段——分层/依赖方向/错误处理/可测试性/注释覆盖均合规，无设计缺陷。advisory（非阻塞）：`current_tail_guard.rs` ~900 行落入 RUST_FILE_LINES L-3「建议拆分」区间（规范明确非 CI 门禁）；`build_collapse_summary_artifacts_for_test` 命名带 `_for_test` 但被生产路径 `collapse_to_branch_summary` 复用，命名易误导，建议后续重命名。
-- **§1 规格/场景库**：核对 `User_Stories.md` 与 `E2E_SCENARIO_LIBRARY.md`（新增 E2E-CLI-094/095）与当前实现一致，无遗漏。
-- **§4 全量验收门禁（develop 侧复跑，`run-integration-tests.sh all`）**：`release`（4m26s）/ `clippy`（`--all-targets -D warnings`）/ `lib`（1267 passed, 0 failed, 1 ignored）/ `integration-parallel`（全绿）/ `integration-serial`（全绿，含 `cli_tests` 83 passed）全部通过。
-  - **首轮 clippy 红（已直接修复）**：`--all-targets` 暴露两条测试侧 clippy 红线：①`src/core/agent_loop/tests/current_tail_guard_runtime_test.rs:156` `manual_contains`（`iter().any(|t| *t==X)` → `contains(&X)`）；②`tests/current_tail_guard_real_llm_tests.rs:474` `await_holding_lock`（`home_lock()` std Mutex 跨 await 持有）。修复：①改 `contains`；②删除冗余 `home_lock()` 手动锁与随之死代码的 `home_lock` 函数——该用例已由 `#[serial]` + `HomeGuard` 串行化，与同文件 A/B 用例一致，未弱化任何断言。重跑 `clippy` 通过，重跑被改的 `current_tail_guard_runtime_test`（3 passed）通过。
-- **real-LLM 分组（新增 target 须显式跑 `integration-real-llm`，需 OPENAI_API_KEY）**：
-  - `current_tail_guard_real_llm_tests`（本卡新增、并因 clippy 修复被改动）：**A/B/C 3 passed**（两次运行均绿）。
-  - `plan_real_llm_inprocess_tests`（本卡仅改 finalize 断言语义+注释）：首轮 `exec_round_1` 180s 超时红，**重跑通过（254.5s）**——临界超时 flake；超时点在 line 471，早于本卡改动处（~643），与本卡无关。
-  - `plan_real_llm_cli_e2e::cli_full_plan_path_with_real_llm`（本卡**未改动**该文件）：**两次复跑均 240s `EXEC_TIMEOUT` 子进程超时红**。日志显示真实 gpt-5.4 全链路（build→exec 多工具轮→verify→code_review→finalize）确实完成了任务（counter.py 打印 0、plan 完成），仅墙钟超过测试硬超时；全程 `mid_turn_precheck route="fits"`（working≈13k ≪ budget 272k），本次合并的 current-tail guard 未介入、不增加 LLM 调用，**判定为与本合并无关的真实 LLM 时延导致的 liveness 超时**，属出 gate（real-llm 不进 `all`/CI）项。**反馈 owner（Spike）**：建议复核 `tests/plan_real_llm_cli_e2e.rs` 的 `EXEC_TIMEOUT`(240s)/`PLANNING_TIMEOUT`(180s) 与 `plan_real_llm_inprocess_tests.rs` exec_round(180s) 是否需按当前 gpt-5.4 时延上调（liveness 守卫，非断言），见 docs/INTEGRATION.md。
-- **结论**：T2-P1-011 功能已正确集成；强制门禁（release/clippy/lib/integration 含 cli_tests E2E）全绿，本卡自身 real-LLM target 全绿；唯一红项为与本合并无关、出 gate 的 `plan_real_llm_cli_e2e` 真 LLM 时延超时（已记录并反馈 owner）。据此将 T2-P1-011 置 `DONE`。
-- **本流程提交**：`fix(test)` clippy 红线修复 + 本 status/看板/INTEGRATION 文档更新；merge commit 已生成，未推送远端（待用户确认）。
-
-### 2026-05-29 | plan active-binding v4-g implementation + acceptance
-
-- **范围**：在 `develop` 工作树上完成 PlanRuntime active binding v4-g 收口：`PlanMode -> PlanState` 正名、`mode.rs` 删除并由 `state.rs` 接管、`plan.create/build/update` 事件恢复链路落地、`/plan build` 默认源顺序与 `/plan exit` 语义对齐、`update_plan` completed→pending reopen / auto-finalize→Chat(retain) 收口、架构文档（`plan-runtime.md` / `context-management.md` / `agent-loop.md` / `tools/{create-plan,planner,update-plan}.md`）回写。
-- **评审/补漏**：全量回归首次在 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 暴露真实 LLM bash launcher 兼容缺口: 当模型把 `sh -c` / `bash -lc` 放进 `command`、再把脚本正文放进 `args` 时，后台 bash 会把整串 launcher 当成可执行文件名，出现 `ENOENT`。本轮在同步 bash 与后台 bash 两条路径补 `launcher + args` 归一化兼容，并新增单测 `execute_bash_shell_launcher_command_merges_with_argv`、`spawn_shell_launcher_command_merges_with_argv` 锁住该回归。
-- **阶段 T（针对 plan/binding）**：`cargo test --no-run`、`cargo test --lib -- --test-threads=1`、`cargo test --test plan_runtime_integration_tests -- --nocapture --test-threads=1`、`cargo test --test plan_e2e_with_mock_llm_tests -- --nocapture --test-threads=1`、`cargo test --release --test cli_tests test_user_background_bash_autofeed_real_llm_cli -- --nocapture --test-threads=1` 通过。
-- **阶段 T（全量验收）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all > .integration_test_output.log 2>&1` 二次复跑后 `EXIT_CODE=0`；`release` / `clippy` / `lib` / `integration-parallel` / `integration-serial` 全绿，日志末尾为 `=== 全量测试通过 ===`。
-- **看板**：`TASK_BOARD_002/tasks/` 当前无与本次 `develop` 工作树实现直接对应的 `PENDING_INTEGRATION` 任务卡，因此本轮未改 task board，只更新 `docs/status/develop.md`。
-
-### 2026-05-28 | post-merge integration: 12-commit batch (4e7e24c..d2a11cd)
-
-- **范围**：本次按 Nibbles §1→§4 + INTEGRATION_MERGE_AND_ACCEPTANCE.md 对 develop 最近 12 个直接合入的 commit 做后置全量验收：
-  `d2a11cd`（thinking 三档 + Responses 推理去重）/ `eb05a15`（append-invariant rehydrate）/ `52e4acf`（gpt-5.4 默认）/ `e9b43a2`（search_files/bash 前置拦截）/ `b0f7825`（edit NotFound hashline 防呆）/ `90d2842`（折叠态流式 summary + LLM 超时分层）/ `bc3571f`（CLI 可见性 + session 自愈）/ `8ed5aba`（rustyline 18 + macOS IME）/ `f613708`（no-wasm 默认 + Wasm 收窄）/ `36ff58b`（chore: todos）/ `cb43db6`（002 看板瘦身）/ `4e7e24c`（回滚 bash 重定向 gate）。
-- **review**：A 类 8 commit 对照编码规范 4 件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）扫一遍；`types.rs` 956 行 / `run_loop.rs` 943 行接近 L-3 但 RUST_FILE_LINES_SPEC 明确非 CI 门禁，本批次不强制拆分（后续迭代再评估）；`cli_turn_renderer.rs` Minimal 分支锁顺序、`stream.rs::ReasoningState` 的 prefix-strip 兜底 + warn-replace、`cmd_thinking.rs` Toggle 的 CAS-loop 并发安全均无硬伤。唯一缺口落在 TOML `show = true|false` 反序列化兼容没有显式测试。
-- **§1 User_Stories / E2E 场景库**（独立 commit `784d94c`）：Story 7 验收补 `/thinking minimal|summary|full|toggle` 运行时切档、`PI_CHAT_SHOW_THINKING` 与 `[llm.thinking].show` 三档+旧 bool 兼容、Responses reasoning `(item_id,index)` 分桶去重三条；E2E_SCENARIO_LIBRARY 新增 E2E-CLI-043 `/thinking` 三档切换条目；Story 4 / Story 8b 表头补 `--features wasmedge` 与 `integration-wasm` 入口说明（对齐 f613708 之后的 no-wasm 默认编译路径）。
-- **§2 集成测试补漏**（独立 commit `e324636`）：在 `defaults_test.rs` 新增 `thinking_show_toml_legacy_bool_{false,true}_maps_to_{summary,full}` / `thinking_show_toml_string_modes_parse_correctly` / `thinking_show_toml_unknown_string_rejected` 4 个用例，锁住旧 `show = false/true` 写法、三档字符串与非法值反序列化契约；Responses reasoning `(item_id,index)` 去重已有 `responses_chunk_reasoning_mixed_events_are_deduped` / `responses_chunk_reasoning_done_emits_only_missing_suffix` 覆盖，`ThinkingDisplay::Minimal` 占位行已有 `minimal_mode_prints_placeholder_only_once` 覆盖；`test-groups.sh` 与 `tests/` 100% 对齐，无未登记新文件。
-- **§3 E2E 测试补漏**（独立 commit `16e571d`）：把 E2E-CLI-043 落到 `cli_turn_renderer_test.rs::test_user_toggles_thinking_display_modes`，以 `CapturedWriter` mock stdout/stderr 跑 summary → minimal → full 三档差异化输出 + `next_cycle` toggle 循环顺序断言，不依赖真实 LLM API。
-- **§4 全量验收**：`set -a; source .env; set +a && RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all > .integration_test_output.log 2>&1`；`release`（3m30s）/ `clippy`（23s）/ `lib`（13s, 1213 passed）/ `integration-parallel`（1m39s）全绿，`integration-serial`（5m45s）单用例 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 红：bash 4原语在 LLM 首次以 `command="sleep 2; ...", args=[non-empty]` 形态调用时走 argv 分支 → `Command::new("sleep 2; ...")` 直接 ENOENT，模型重试 `sh -c` / `bash -lc` 形态前耗尽配额。同 shell 内 `cargo test --release --test cli_tests test_user_background_bash_autofeed_real_llm_cli` 显式重跑 **连绿 2 次**（99s + 92s，模型第 2 次重试均切到 `sh -c` / `bash -lc` 成功），按 plan §4(3) 判定 LLM 上游瞬抖 + bash primitive 对 args 形状容错不足，本批次不强制修复 bash primitive，留作 backlog（建议：当 `args` 非空但 `command` 含 shell 元字符 `; | && > <` 时回退 shell 模式）。
-- **结论**：12 个 commit 的全量回归满足 plan §5 退出条件 1–5（A 类全部通过 4 件套 review；User_Stories / E2E 与代码语义齐平；门禁 release/clippy/lib/integration-parallel 全绿，integration-serial 唯一红用例两次重跑连绿；git 工作树清洁仅留本流程修复 commit）；本流程产出 4 个 commit：`784d94c`（docs(stories)）/ `e324636`（test(config)）/ `16e571d`（test(chat)）/ 本条 status 更新；EXIT_CODE 整体首次为 1，但 cli_tests 重跑 2 次绿，可视为通过。
-
-### 2026-05-28 | fix(chat): append invariant 后重建内存上下文
-
-- **代码**：`run_chat_turn` 在命中 `append_message_chain` invariant 后会重新 `init_context_state`，用磁盘 transcript 覆盖坏掉的内存 `context_state`；chat loop 对该错误输出“已尝试从磁盘重新对齐上下文”的继续提示；若重建失败则退回空 `messages` fallback，避免 dangling `assistant.tool_calls` 把后续对话拖进 `No tool output found ...` 死循环。
-- **测试**：新增 `suite_test::{append_message_chain_invariant_is_nonfatal, append_message_chain_rehydrate_reloads_context_from_transcript, append_message_chain_rehydrate_falls_back_when_transcript_reload_fails, non_append_invariant_does_not_rehydrate_context}`；新增 `context_management_tests::test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn` 与 `cli_tests::test_failed_turn_append_invariant_allows_next_turn_in_same_process`，覆盖 invariant 识别、rehydrate success/fallback/no-op，以及同一进程下一轮恢复。
-- **文档**：`session-storage.md` 补充“即时落盘命中 `append_message_chain` invariant 时，当前 chat 进程会从磁盘重建内存上下文”的恢复语义；本批次核对后不新增 `User_Stories` / `E2E_SCENARIO_LIBRARY` 条目，因为 Story 8 既有“失败后可继续下一轮”的用户语义未变化。
-- **阶段 T（门禁）**：`cargo test --lib append_message_chain_ -- --nocapture` 通过；`cargo test --test context_management_tests test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn -- --nocapture` 通过；`cargo test -j 1 --test cli_tests test_failed_turn_append_invariant_allows_next_turn_in_same_process -- --nocapture --test-threads=1` 通过；`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 中 `release` / `clippy` / `lib` / `integration-parallel` 全绿，但 `integration-serial` 被既有真实 LLM 用例 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 卡住，`.integration_phase1_append_rehydrate.log` 末尾 `EXIT_CODE=1`（与本批次 append-invariant 修复无直接关联）。
-
-### 2026-05-26 | chore(llm): 默认模型 gpt-5.2 → gpt-5.4
-
-- **配置/代码**：`DEFAULT_LLM_MODEL`、`tomcat.config.toml.example`、`compaction_model` 默认值及 E2E/集成测试 fallback 统一为 `gpt-5.4`。
-- **脚本**：`verify-openai-apis.sh` 默认只测 `gpt-5.4`，POST 端点支持 `MODELS` 数组循环。
-- **文档**：user-guide、context-management、E2E 场景库等同步模型引用。
-- **阶段 T（门禁）**：未跑全量；纯配置/文档/测试常量变更，无逻辑改动。
-
-### 2026-05-26 | feat(chat,llm): 折叠态流式显示思考摘要 + LLM 超时错误分层
-
-- **Thinking**：`StreamEvent::Thinking` / `thinking_delta` 必填 `source=summary|raw`；`show="summary"`（新默认）时流式渲染 summary、隐藏 raw；`show="minimal"` 时只显示 `[thinking] ...` 占位；`thinking.enabled` 时 Responses 始终请求 `reasoning.summary=auto`。
-- **LLM**：抽取 `http_client`、新增 `LlmError` 阶段化错误；配置补齐 `stream_timeout_sec` / `http_read_timeout_sec` / `non_stream_stale_timeout_sec`。
-- **Plan**：`PlanFileFrontmatter.mode` 重命名为 `state`（`PlanFileState`），文档与单测对齐。
-- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（2026-05-26 16:24）。
-
-### 2026-05-26 | fix(chat): rustyline 18 + macOS IME 稳定
-
-- **依赖**：`rustyline` 15 → 18.0.0（`ReadlineError::WindowResized` → `Signal::Resize`）。
-- **macOS**：禁用 `ExternalPrinter`（search-tools 异步回显）与 `SIGWINCH` 唤醒 readline，避免中文 IME 输入回显异常；非 macOS Unix 仍保留 resize 唤醒 auto-drain。
-- **阶段 T（门禁）**：`cargo build`、`cargo test --lib chat`、`restore_raw_user_message_for_persistence` 单测通过。
-
-### 2026-05-25 | build: 恢复 no-wasm 默认编译 + log.level 默认 warn
-
-- **构建**：`wasmedge-sdk` 改回 optional；新增 feature `wasmedge`，`standalone` 依赖 `wasmedge`；`ext` 默认导出 stub，`--features wasmedge` 才链接真实 WasmEdge。
-- **测试/脚本**：`wasmedge_e2e_tests` / `js_api_alignment_tests` 设 `required-features = wasmedge`；`TOMCAT_WASMEDGE_TESTS` 仅保留上述两项；`run-integration-tests.sh` 默认不 install/source WasmEdge，新增 `integration-wasm`。
-- **其它**：`vm_actor` / `instance_stub` 适配 no-wasm；`doctor`/`init` 对未启用 Wasm 构建给出明确提示；文档与示例配置同步；`log.level` 默认值 `info` → `warn`。
-- **阶段 T（门禁）**：`cargo build`、`cargo test --lib`、`cargo build --features wasmedge` 通过。
-
-### 2026-05-25 | docs: 002 看板瘦身 + TODOS 对照代码清理
-
-- **看板**：`TASK_BOARD_002/README.md` 索引仅保留开放任务 **T2-P0-008 / T2-P0-009 / T2-P1-009**；已完成/已取消 T2 任务卡自 `tasks/` 移除（历史见 Git）；`SCOPE_AND_CONTEXT.md` 同步 Feedback 取消说明。
-- **TODOS**：对照 `develop` 源码与看板状态，移除已实现条目（Plan/Checkpoint/Thinking/compaction 等）与规划冲突项（T-146 Feedback、T-142）；保留 T-153（web 工具 backlog）及 T2 已 DONE 但仍有代码缺口的 follow-up（T-008、T-046、T-148~T-151 等）。
-- **阶段 T**：文档-only，未跑门禁。
-
-### 2026-05-24 | post-review: 回滚 d8b5bf2 bash 重定向路径 gate
-
-- **阶段 R（评审）**：人工评审 `d8b5bf2` 集成审查结论后，决定回滚 `bash_parser` 的 `RedirectTarget` 重定向目标提取及相关单测；shell 排列组合过多，hard-code 无法全覆盖且易误伤（如 `> /dev/null`），与 `fda4b9a` 产品方向一致。
-- **代码**：撤销 `SegmentKind::RedirectTarget`；在 `bash_parser.rs` / `executor/bash.rs` / `bash_task.rs` 加 TODO，重定向写盘等留待 T-151 / `bash_ast` / regex 方案再加强；删除 `extracts_input_redirection_targets`、`execute_bash_redirection_target_is_path_gated`。
-- **阶段 T（门禁）**：`cargo test --lib handles_pipes_and_subcommands execute_bash` 通过。
-
-### 2026-05-24 | merge `feature/plan-mode-enhance` → develop @ 2ecc513
-
-- **阶段 R（评审）**：在 `develop` 上对 `plan_runtime` / `ask_question` / reviewer-verifier / `AgentRegistry` / `bash_parser` / session CLI / preflight 等合入差异做全量 review；补修 develop 侧发现的并发、持久化、审计与 CLI 回归，并补齐对应单测/集成/E2E 覆盖。
-- **阶段 T（门禁）**：首轮全量验收暴露真实 LLM CLI 用例 `test_user_receives_nonempty_llm_response` 的 `30s` 超时门限过紧；与同类用例统一为 `60s` 后，使用 `set -a && . "/Users/yankeben/workspace/Tomcat/tomcat/.env" && set +a && ./scripts/run-integration-tests.sh all` 在 `develop` worktree 复跑，`=== 全量测试通过 ===`（release、clippy、lib、integration-parallel、integration-serial 全绿；总耗时 `757756ms`）。
-- **看板**：`T2-P1-002`、`T2-P1-003`、`T2-P1-004` 由 `PENDING_INTEGRATION` 置为 `DONE`，同步 `TASK_BOARD_002/README.md`。
-
-### 2026-05-12 | merge `feature/llm-files-upload-manager` → develop @ cb924eb
-
-- **阶段 R（评审）**：重点复核 Files 通道与门禁相关差异（`openai_files` 客户端/缓存/清理、`read` 上传分流、`scripts/test-groups.sh`、架构索引与集成测试）；补修代理环境下本地 mock 测试不稳定问题（session/chat cleanup 与 files mock 改为 localhost 直连）。
-- **阶段 T（门禁）**：功能分支与 `develop` 均执行 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`，`tomcat/.integration_test_output.log` 与 `tomcat/.integration_test_output_develop.log` 末尾均为 `EXIT_CODE=0`。
-- **看板**：`T2-P0-015` 由 `PENDING_INTEGRATION` 置为 `DONE`（同步 `TASK_BOARD_002/README.md` 与 `tasks/T2-P0-015.md`）。
-
-### 2026-05-10 | T2-P0-015 OpenAI Files 上传管理进入集成前状态
-
-- **范围**：落地 `OpenAiFilesClient`（`upload/get/delete/list` + retry + `DELETE 404` 幂等）、`ChatMessageContentPart::{image_upload,file_upload}`、会话级双索引 cache（path/hash + inflight 单飞）、`read` inline/upload 决策注入、CLI/chat 退出 cleanup、`[llm.files] expires_after_seconds` 配置链路与文档同步。
-- **阶段 T（门禁）**：已跑关键单测/焦小测（openai_files 模块、tool_exec oversize 路由、chat/session cleanup、config 边界与 env 覆盖、provider lazy files client）；`openai_files_integration_tests` 已新增并完成编译（默认 `#[ignore]`，需 `PI_LIVE_OPENAI_FILES=1` 手动触发真实 API）。
-- **看板**：`TASK_BOARD_002` 中 `T2-P0-015` 更新为 `PENDING_INTEGRATION`（任务卡与总览同步）。
-
-### 2026-05-08 | 架构文档 `llm-stream-events-cli-pipeline.md` 增补 §5.3
-
-- **范围**：Thinking 端到端 ASCII 图、Responses SSE 解析流程图、完整 JSON 样例（A–F）与字段速查，便于对照 `openai_responses/stream.rs` 实现。
-- **阶段 T**：文档-only，未重跑全量门禁。
-
-### 2026-05-08 | merge `feature/thinking-api-display` → develop @ 8c7b86e
-
-- **范围**：T2-P0-006（Thinking/Reasoning 事件链、`CliTurnRenderer`、`/thinking` 命令、persist transcript、协议解析与测试补全）+ 后续稳定性修复（`11739bc`：Responses reasoning 事件兜底 + 真实环境 E2E 稳健性）。
-- **阶段 R（评审）**：对 `develop...feature/thinking-api-display` 的新增/变更代码做全量 review，发现并修复 1 个合并阻塞项：`openai_responses_integration_tests::test_openai_responses_chat_stream_reasoning_emits_thinking` 在上游不稳定无 thinking 输出时会误红（已改为有限重试 + 正文兜底断言，并补 parser 对 `reasoning_summary_part.*` / reasoning `output_item.done` 的提取能力与单测）。
-- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.merge_acceptance_after_fix3.log` 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests`）。
-- **看板**：`T2-P0-006` 由 `PENDING_INTEGRATION` 置为 `DONE`（同步 `TASK_BOARD_002/README.md` 与 `tasks/T2-P0-006.md`）。
-
-### 2026-05-07 | merge `feature/stream-timeout` → develop @ a067393
-
-- **范围**：T2-P0-003（`openai` / `openai-responses` 流式 bytes 层空闲超时、`#T-132` 关闭、单测与 `docs/TODOS.md` 核对）。
-- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests`）。
-- **看板**：`T2-P0-003` 由 `PENDING_INTEGRATION` 置为 `DONE`。
-
-### 2026-05-07 | merge `feature/strengthen-four-core-tools` → develop @ a09ac01
-
-- **阶段 R（评审）**：`scripts/test-groups.sh` 与合入变更面对照完整；`tests/` 下无无理由 `#[ignore]`；User_Stories / E2E 场景库与 read、bash 等已有自动化条目一致。
-- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests` 等）。
-- **看板**：T2-P0-016、T2-P0-017 本提交置为 `DONE`。
-
-### 文档与 OpenSpec（无代码变更）
-
-- [✓] **openspec `edit.md` 小节标题**：§7–§12 在 `##` 下补 `###` 子节并扩展「目录」锚点，改善侧栏大纲与渲染层次。
-- [✓] **[P0]** 看板 **TASK_BOARD_002**（`README` + `tasks/`）：插入 **T2-P0-017**（`edit` 独立任务，锚 [edit.md](../docs/architecture/tools/edit.md)）；收敛 **T2-P0-016**；§1 交付任务数 18→19；§5 拓扑 `P005→P017`。
-- [✓] **规范**：`ARCHITECTURE_SPEC` / `PLAN_SPEC` / `DOCUMENTATION_GUIDE` / `MODULE_README_SPEC` / `DEBUG_SPEC` / `PLAN_SKELETON` —「说人话」段落 + 表格列、去掉 12 岁表述；`Constitution` 二.10 改为先专业后口语。
-- [✓] **read.md**：与 `edit`/`search_files` 同类章节编排收缩；**edit.md** 新增为冻结版 `edit` 工具方案。
-- [✓] **其它**：`Architecture.md` / `interrupt-and-cancellation.md` / `search_files.md` / `plan-mode-execution-playbook` 小步对齐引用或措辞。
+### 集成说明
+- 最新补充（2026-07-20 14:25）：`feature/transcript-rich-render` 推理档位 key 修复门禁全绿；产物 `tomcat-vscode-ext-0.1.18.vsix`，CLI `0.1.15`。
+- 最新补充（2026-07-19 23:40）：推理强度 v2（列表式）分支侧门禁已全绿：`cargo clippy --all-targets -- -D warnings`、`cargo test`（含 `2153` 个 lib tests、integration tests 与 doc tests）、`npm run check:wire`、`npm run lint`、`npm run test:unit`（core `208/208` + gui `299/299`）、`TOMCAT_E2E_GREP='adds a model through settings and uses it in the webview' npm run test:e2e:vscode-devhost`（`1/1`）以及 `npm run package:vsix`；产物为 `tomcat-vscode-ext/tomcat-vscode-ext-0.1.16.vsix`。
+- 最新补充（2026-07-19 18:02）：`feature/transcript-rich-render` 上的 plan transcript 事件行+产物卡模型、pending 呼吸盖章与 View Plan/Build UX 收口已落盘；分支侧门禁为 `npm run lint`、完整 `npm run test:unit`、targeted plan UX / `.plan.md` custom editor devhost E2E、全量 `npm run test:e2e:vscode-devhost` 与 `npm run package:vsix`（`tomcat-vscode-ext-0.1.16.vsix`）全绿。
+- 本轮验收整改收尾验证：`cargo test --lib` 全绿；`npm run lint` + `npm run test:unit`（ext+gui）全绿；`TOMCAT_E2E_GREP='adds a model through settings|applies edits from the Tomcat webview|recovers from a failed same-session retry|keeps multiple Tomcat webview sessions isolated|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` 全绿；`npm run package:vsix` 产出 `tomcat-vscode-ext-0.1.16.vsix`。分支侧细节见 `docs/status/feature-transcript-ui-and-checkpoints.md`。
+- 本轮 Add Model Key slot 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib admin_test` 14/14、`serve_model_admin_roundtrip_updates_key_presence` 1/1、`npm --prefix tomcat-vscode-ext run lint`、GUI `relayDerive.test.ts + SettingsApp.test.tsx` 12/12、`SettingsPanel.test.ts` 5/5 全绿。
+- 本轮 reviewer prompt 对齐已做 focused 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过；未额外触发更大范围门禁。
+- 本轮仅文档：云化技术方案四篇 + 架构 README 地图；无 Rust/扩展代码变更，不触发集成门禁。
+- `feature/transcript-ui-and-checkpoints` 已本地 fast-forward 合入 `develop`（HEAD `62c8811`），覆盖 checkpoint restore / transcript UI / `.plan.md` custom editor / bash summary upgrade；develop-side acceptance 现已 **通过**，结论更新为 **GO**（尚未推送远端）。
+- Rust develop-side 复核确认：先前 web-search 红点并非产品逻辑回归，而是测试自身的预算/清理脆弱。真实 HTTPS mock + plugin runtime 成功路径在 nextest 满并发下会逼近 5s/10s 外层 timeout；部分用例又在 `end_session` 前 panic，导致大盘表现为 slow/hung。现已在 `tomcat/tests/cli_tests.rs` 与 `tomcat/tests/web_search_tool_tests.rs` 放宽 success-path wall-clock budget，并保证 timeout/result error 时先 teardown 再失败；focused `cargo test --test web_search_tool_tests works_from_public_api -- --nocapture`、`cargo test --test web_search_tool_tests runtime_auto_routes_to_plugin_backends_after_retryable_failures -- --nocapture`、`cargo test --test web_search_tool_tests runtime_session_vm_survives_idle_beyond_call_timeout -- --nocapture`、`cargo test --test cli_tests test_chat_path_executes_web_search_tool_with_mock_server -- --nocapture` 全绿。
+- Rust 默认快门禁已重新闭环：`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`、`cargo test --doc` 与 `./scripts/run-integration-tests.sh integration-parallel` 全绿；其中 integration-parallel 为 `364/364 passed`，仅 `real_mimo_web_search` 被 nextest 标 slow 但正常 PASS。
+- 此分支无独立 `PENDING_INTEGRATION` 任务卡映射；develop-side 仅记录合并与验收事实，分支侧证据以 `docs/status/feature-transcript-ui-and-checkpoints.md` 为准，不额外伪造 TASK_BOARD 状态迁移。
+- `feature/add-model-form-redesign` 已在 `develop` 合并验收：扩展 `npm run check:wire`、`npm run gate:fast`、`npx vitest run src/ui/webview/tests/provider.test.ts src/ide/tests/diff_apply_edit.test.ts` 全绿；Devhost 全量先暴露 `applies edits from the Tomcat webview` 回归，补齐 live prepared snapshot 语义后，`TOMCAT_E2E_GREP='applies edits from the Tomcat webview' npm run test:e2e:vscode-devhost` 复绿。
+- 真 LLM 复核本轮未追加 `integration-real-llm`：本机 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 在 `.env` 中存在，但缺 `OPENAI_API_KEY`，不足以按当前高风险清单完整复跑 OpenAI 直连口径；该空白已显式记录，不冒充“全绿”。
+- 面向用户文档已双语化（英文默认 + opencode 式切换栏）：根 README、扩展 README、`user-guide` 各新增 `.zh.md` 中文镜像；`tomcat-vscode-ext/.vscodeignore` 已放行 `README.zh.md` 入 VSIX。
+- 根 README 已对齐双组件 monorepo 现状：补充 `tomcat/` + `tomcat-vscode-ext/` 组件索引、Agent Box/CLI 双入口架构图，并修正终端用户前提（`tomcat init` → `~/.tomcat/assets/.env`；Rust 1.70+ 仅源码构建需要）。
+- 用户文档已切换主推 **Tomcat Agent Box**：根 README、扩展 README、`user-guide` 与 `package.json` 面板/命令文案同步更新，新增 `assets/tomcat-agent-box.png` 截图；`manifest_contract` 与 GUI 单测已复跑通过。
+- 本次 Add Models 按例外流程验收：以 `tomcat-vscode-ext/docs/architecture/model-management-add-models.md` 及其 5 篇子文档作为验收 SSoT，未回填 `TASK_BOARD_002` 任务卡，也未补建 `tomcat/docs/status/feature-add-models.md`；合并与验收口径均按用户确认流程执行。
+- 已在 `develop` 上以 `git merge --no-ff` 合入 `feature/add-models`（merge `68ff90a`），并再次复跑 `tomcat/` 的 `./scripts/run-integration-tests.sh all` 与 `tomcat-vscode-ext/` 的 `npm run build`、`npm run test:unit`、`npm run test:integration`、`npm --prefix gui run test`、`npm run test:e2e:vscode-install`、`npm run verify:vsix`，全部通过。
+- 已在 `develop` 上以 `git merge --no-ff` 合入 `feature/tomcat-vscode-extension`（merge `2b04acd`），覆盖 `T2-P1-019` 与 `T2-P1-020`。
+- Rust develop-side 门禁已通过：`./scripts/run-integration-tests.sh all` 全绿；`integration-openai-responses-wire` 在 LiteLLM 直连网关口径下复跑通过。集成期补修 `tomcat/src/ext/runtime/instance.rs`，把 QuickJS host bootstrap 排除到插件 timeout budget 之外，并补强对应断言，消除 `quickjs_e2e_tests::runaway_plugin_timeout_interrupts_when_budget_disabled` 的假红；同一提交还带入 `tomcat/src/core/tools/primitive/executor/write_edit.rs` 的备份提交路径收敛与回滚失败显式报错，并为 overwrite/rollback 边界补了配套测试。
+- VSCode 扩展门禁已通过：`npm run build`、`npm run test:unit`、`npm run test:integration`、`npm --prefix gui run test`、`npm audit`（0 vulnerabilities）、`npm run package:vsix`、`npm run test:e2e:vscode-install`（26 passing）、`npm run verify:vsix`（4 passing，含截图裁剪产物）。
+- 为消除 VSIX 安装 E2E 的 develop-side 假红，本轮补稳了 `hostE2eScenario.ts` / `e2eHostFixture.ts`：ownership 场景改为显式挂起 participant 问答后再切 webview，transcript UI 场景在常规安装套件允许直接落到最终折叠态，而 `verify:vsix` 继续强制捕获 docked todo/progress 视觉证据；同一提交也修正了 `App.tsx` / `Composer.tsx` / `provider.ts` / `handler.ts` 的 ownership 释放、interrupt 可用性与 history loading 收口，并补上单测与安装 E2E 覆盖。
+- 4 件套 review 已覆盖 `serve`、`summary`、`plan_tool`、`primitive/executor` 与 VSCode 扩展热区；未发现未记录的规范违背。`integration-real-llm` 本轮无新增 target，按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §4 跳过，不构成本次合并阻塞。
+- 结论：`feature/tomcat-vscode-extension` 已在 `develop` 完成合并、复测与验收，`T2-P1-019` / `T2-P1-020` 可转 `DONE`；对应验收提交现已位于 `origin/develop`。
+- 已知残留（本期刻意不补）：插件 `ext/dispatcher/session_ops.rs -> try_append_message_to_session` 的注入路径仍不推送活跃 `session.title_updated`，disk 刷新后的标题正确；本轮仅修复 Prompt → `run_loop` 主链路，即计划中的“放法一”。
 
 ---
 
-## feature-checkpoint-resume
+## feature-add-model-form-redesign
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-05-16 19:28 | PENDING_INTEGRATION | feature/checkpoint-resume | - |
+| Nibbles | 2026-07-12 20:40 +0800 | ACTIVE | feature/add-model-form-redesign | — |
 
 ### ✅ DONE (已完成/进行中)
-- [✓] **[P1]** 认领 `T2-P1-001`：任务卡状态改为 `DOING`、负责人改为 Jerry，并同步看板索引状态与负责人字段。
-- [✓] **[P1]** 创建并切换工作分支 `feature/checkpoint-resume`。
-- [✓] **[P1]** 已落地 `CheckpointStore` / `ShadowGitStore` / `NoopStore` / `SwitchingCheckpointStore`，接入 chat TurnEnd/Interrupt checkpoint、`/ckpt` `/restore`、`superseded`、`last_checkpoint_id`、启动期后台 prune 与 git preflight。
-- [✓] **[P1]** 已补齐 checkpoint 相关单测 / 集成测试 / CLI E2E 与文档收口：新增 `checkpoint_integration_tests`、`checkpoint_cli_e2e`、`chat_git_preflight_tests`、`resume_plan_always_continue`、`startup_prune_scheduled_without_blocking_readline`、`turn_end_writes_checkpoint`、`interrupt_writes_checkpoint_after_partial_persist`，并修复 macOS `/var` vs `/private/var` 工作区别名导致的 checkpoint 仓分裂问题；`tool-catalog.md` 已回归到生成器单一事实源。
-- [✓] **[P1]** 本卡边界内门禁已完成：已按 [`INTEGRATION_MERGE_AND_ACCEPTANCE.md`](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 使用 `scripts/run-integration-tests.sh integration` / `all` 后台日志模板执行，`.integration_test_output.log` 末尾两轮均为 `EXIT_CODE=0`；通过日志已留存为 `.integration_test_output.integration-pass.log` / `.integration_test_output.final-all-pass.log`。
+- [✓] **[P0]** Sticky 底部流式残留 bug 修复：只要最新一轮 user message 仍在屏幕内（顶部或底部都算），sticky 一律隐藏，不再悬浮上一轮问题；待该轮被自身回答顶出一屏后再显示新 sticky @2026-07-12
+- [✓] **[P1]** 验收：`check:wire`、扩展 `lint`、core unit(113)、GUI unit(177)、sticky Devhost 过滤场景全绿；扩展 bump `0.1.10`，`tomcat-vscode-ext-0.1.10.vsix` 已重打（gitignore，不入库）@2026-07-12
+- [✓] **[P0]** Sticky 新提示词 reveal 收口：sticky 改按“视口顶部所属轮次”选择；当前轮 user message 仍露在顶部时先隐藏，不再回退显示旧问题；历史滚动保持按轮次切换 @2026-07-12
+- [✓] **[P1]** 验收：扩展 `lint`、core unit(113)、GUI unit(176)、sticky Devhost 过滤场景全绿；扩展 bump `0.1.9`，`tomcat-vscode-ext-0.1.9.vsix` 已重打（gitignore，不入库）@2026-07-12
+- [✓] **[P0]** Transcript 双 Creating plan 根因修复：plan 抑制改按 `toolName`（运行中尚无 `display`），覆盖 grouped / standalone / raw tool；测试改为真实流式态无 display @2026-07-12
+- [✓] **[P0]** Transcript 横向溢出收口：外层只允许纵向滚，flex 子项 `min-width:0`，长 token `overflow-wrap:anywhere`；宽内容仅在 diff/terminal/code 局部滚动 @2026-07-12
+- [✓] **[P1]** 验收：`check:wire`、`lint`、core unit(113)、GUI unit(175)、Devhost 全量 33 绿；扩展 bump `0.1.8`，`tomcat-vscode-ext-0.1.8.vsix` 已重打（gitignore，不入库）@2026-07-12
+- [✓] **[P0]** Transcript diff/plan UX 修复：`tomcat-diff://` prepared diff 改为 path-key 保住 mixed-case `toolCallId`，View diff 不再白屏；edit 折叠预览改为首个真实变更锚定，不再误看文件尾巴 @2026-07-12
+- [✓] **[P0]** Transcript 计划与 sticky 体验收口：Variant B 保留单个 `Creating plan` 组头、隐藏内层成功 plan 行；`View Plan` 在 create/update plan 期间改为呼吸 `...`；sticky user prompt 可随历史滚动切到对应轮次 @2026-07-12
+- [✓] **[P1]** 验收：`check:wire`、扩展 `lint`、core unit(113)、GUI unit(69)、Devhost 失败集 10 条全绿；修复 fake serve 生成脚本转义与 no-session bootstrap 假死 @2026-07-12
+- [✓] **[P0]** Transcript 视觉整改 v2：Jump 箭头、DisclosureCard/TerminalOutput/DiffView、命令淡黄、read 图标去重；扩展 `0.1.6` @2026-07-12
+- [✓] **[P0]** 核心下发结构化 `FileDiffLine` diff（write/edit/hashline）；`ToolDisplay::File.diff` 贯通 serve schema / wire；View diff 由 host 重建 before/after 打开 `vscode.diff` @2026-07-12
+- [✓] **[P1]** 验收：`cargo test`、扩展 lint/unit/Devhost E2E 全绿；env_lock 串行稳住 HOME 竞态；纯插件包 `tomcat-vscode-ext-0.1.6-pure.vsix` 已打（gitignore，不入库）@2026-07-12
+- [✓] **[P0]** Composer `@` 提及上下文搜索：TipTap Suggestion + host `searchContext`；文件/目录候选、模糊匹配、chip 注入与协议往返；关闭统一走 `exitSuggestion`（单一真源）@2026-07-11
+- [✓] **[P0]** `@` UX 收口：加载中保留旧 matches 防闪、子序列高亮与 host 算法对齐、listbox a11y、候选缓存只刷 `isOpen` @2026-07-11
+- [✓] **[P1]** 验收：`gate:fast` / `test:integration` 绿；Devhost E2E 覆盖文件 `@`、目录、无工作区关闭；纯插件包 `tomcat-vscode-ext-0.1.5-pure.vsix` 已重打（gitignore，不入库）@2026-07-11
+- [✓] **[P0]** 后端 `source` 语义修复：`ModelCatalog` 新增 `builtin_ids` / `is_builtin_seed`；`ModelView.source` 按出厂 seed 判定 Builtin，与「能否删除」(`is_user_model`) 解耦；`tomcat init` 抄入 `models.toml` 的官方模型不再误标为 user @2026-07-10
+- [✓] **[P0]** Add Model UI：分段控件改为标准 Tab（tablist/tab/tabpanel + 方向键）；空官方预置时默认落中转站 Tab 并给出引导；`saveDisabled` 旁显示原因；`findMatchingProviderPreset` 放宽为 provider(+api) 匹配 @2026-07-10
+- [✓] **[P0]** 双锚点表单落地：官方 preset（模式 A）与 relay/base_url 派生（模式 B）；`thinking_format=Auto` 严格按 wire `api` 推断，不再被 model_name 误导 @2026-07-10
+- [✓] **[P1]** 验收门禁：`cargo test`、扩展 `build` / `test:unit` / `test:e2e:vscode-devhost` 全绿；手测清单与 hostE2e 场景已更新；纯插件包 `tomcat-vscode-ext-0.1.5.vsix` 已重打 @2026-07-10
+- [✓] **[P2]** 测试稳定性：`TempHomeGuard` 加进程内锁，消除全量 `cargo test` 下 HOME 并发竞态；Auto thinking 断言对齐默认 `high` effort @2026-07-10
 
 ### 🔌 INTERFACE (接口变更)
-- 已新增 `core::checkpoint::*` 公共类型、`ShadowGitStore` / `NoopStore` / `SwitchingCheckpointStore`，并完成 `ChatContext` / `AgentLoopConfig` 的 `Arc<dyn CheckpointStore>` 注入路径。
-- 已新增 `tomcat chat` 本地命令 `/ckpt list|show|diff`、`/restore <id> [--path ...] [--dry-run]`；`SessionEntry` 已扩展 `last_checkpoint_id`。
+- Transcript plan 抑制：`isSuppressedPlanToolRow` 以 `create_plan` / `update_plan`（及结束态 `display.kind==plan`）为真源，不再依赖运行中尚不存在的 `display`；非 error plan 工具行在 grouped/standalone/raw 路径均不渲染。
+- Transcript 滚动边界：`.tc-stream` 仅纵向滚动；消息/cluster 强制 `min-width:0` + `overflow-wrap:anywhere`，禁止整页横漂；diff/terminal/code 保留局部横滚。
+- `tomcat-diff://` prepared diff URI：host 侧 key 从 `authority` 挪到 `path`，避免 VS Code 规范化 `authority` 小写后丢失 mixed-case `toolCallId`。
+- Transcript Webview：`DiffView` 折叠预览语义从“尾部 tail5”改为“首个真实变更锚定预览”；`PlanFileCard` 新增 creating/busy 呈现；`useAutoScroll` / `App` 贯通 `activeStickyMessageId`。
+- Devhost 测试夹具：新增 plan-tool-ux / sticky-history 场景，bootstrap 接受 `ready + no sessions`，避免空页面假死。
+- `FileDiffLine` / `DiffTag`：核心 `ToolDisplay::File.diff`、`WriteFileResult`/`EditFileResult.diff` 新增结构化行级 diff；serve schema / wire 已同步。
+- Webview：`WebviewToolCard.diff`；`openDiff` 经 host 从 diff 重建 before/after 打开编辑器对比。
+- Webview↔Host：`searchContext` 请求/响应与 context search 相关消息；Composer 经 Suggestion 插件驱动，关闭统一 `exitSuggestion` / `closeMention()`。
+- `ModelCatalog::is_builtin_seed(id)` / `SharedModelCatalog::is_builtin_seed(id)`：新增；按内嵌 `builtin_models.toml` 出厂清单判定。
+- `ModelView.source`：语义从「是否在用户 models.toml」改为「是否在出厂 seed 清单」；GUI Delete 可见性随之变化（seeded 官方模型隐藏 Delete）。
+- `ThinkingFormat::Auto`：运行时仅按 wire `api` 解析；`resolve_for_model` 仅保留给测试/工具路径。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 全仓 `cargo fmt --check` 仍有无关漂移 | 未触达的既有 `tests/*.rs` 存在格式差异；本卡修改文件已逐个 `rustfmt`/`--check` 并通过 | 如需清仓格式化，建议拆独立任务处理 |
-| `wasmedge_e2e_tests` 不在本卡范围 | 用户已明确该套件与本次 checkpoint 卡无关；本卡验收以 `run-integration-tests.sh integration/all` 的 checkpoint 相关门禁为准 | 若要做仓库级 all-green，再单独处理该套件 |
+| 无 | - | - |
+
+### 集成说明
+- 本分支目标：Add Model 双模式 Tab + 官方 seed 语义；叠加 Composer `@` 提及；再叠加 Transcript 扁平化、结构化内联 diff 与 transcript UX 修复（扩展 `0.1.10`）。
+- Transcript：命令/写编辑共用 DisclosureCard；edit 折叠预览改为变更锚定；prepared diff 改 path-key 后，View diff 在真机 mixed-case `toolCallId` 下可稳定打开非空对比。
+- Plan / Sticky：运行态按 `toolName` 抑制内层 plan 行，仅保留单头 + PlanFileCard；运行中 `View Plan` 呼吸提示；sticky 可切回历史轮次，且只要最新一轮 user message 仍在屏幕内（顶部或底部）就保持隐藏，待该轮被自身回答顶出一屏后再显示新 sticky；transcript 外层禁止横滚。
+- `@` 行为：有工作区时敲 `@` 出下拉；无工作区/切会话经 `closeMention()` 关闭；选中注入 context chip，不改 serve/wire。
+- 验收：本轮 `check:wire`、扩展 `lint`、GUI/core unit、sticky Devhost 过滤回归绿；`package:vsix` / 纯插件包不入库。
 
 ---
 
-## feature-current-tail-aggregate-guard
+## feature-add-models
+
+*暂无进度*
+
+---
+
+## feature-prompt-optimization
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Spike | 2026-05-31 13:07 +0800 | DONE | feature/current-tail-aggregate-guard | - |
+| tomcat | 2026-07-16 06:07 +0800 | ACTIVE | feature/prompt-optimization | — |
 
-### DONE
-- [x] [P1] 认领 `T2-P1-011`，确认任务卡为 `DOING` / `Spike`
-- [x] [P1] 切换到 `feature/current-tail-aggregate-guard`
-- [x] [P1] 收口 `ContextConfig` 与 `truncation.rs` 的阶段二配置漂移
-- [x] [P1] 接入 mid-turn precheck + aggregate reduction + single branch_summary collapse
-- [x] [P1] 补齐单测、集成测试、文档同步与交付收口
-- [x] [P1] 补齐 keepalive A/B/C 真实 LLM 验证，`integration-real-llm` 分组全绿
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 系统提示词瘦身优先版落地：`core_identity` 增补运营原则（#6/#7/#8 一字不差复述）、新增 `parallel_tools` / `verification` 段、`tool_instructions` 改为 `{tool_guidelines}` 注入；`catalog.rs` 增加 `prompt_guidelines` 并按成功率红线精简 description @2026-07-16
+- [✓] **[P0]** 工程规范 #6–#10 写入提示词：#6/#7/#8 在 `core_identity.txt` 与 `planner.txt` 逐字一致；#9/#10 落在 planner（多视角测试 / todos 宁多勿少）；UI(#8) 从工具 guidelines 迁出；单测 `standards_6_7_8_are_byte_identical_in_core_identity_and_planner` 防漂移 @2026-07-16
+- [✓] **[P1]** 二次瘦身（常驻去重 + 工具描述去实现细节）：压缩 `background_shell_monitor` / `workspace_state` Config 块；精简 `search_files` / `web_fetch` / `config_*` / `bash` description；轻度压缩 executor/verify 内部重复 @2026-07-16
+- [✓] **[P1]** 回归与文档：红线/聚合/section 顺序单测、`prompt_size_budget` 预算门、`tool-catalog.md` 重生；E2E-PROMPT-026–029 写入场景库 @2026-07-16
+- [✓] **[P2]** 附带同步：`cloud-scale-serving-01/` 方案文档与架构 README / Architecture 入口；`commit-with-status` command 迁至仓库根 `.cursor/commands/`；刷新 `.cursor/rules/engineering-standards.mdc` 措辞与提示词对齐 @2026-07-16
 
-### INTERFACE
-- `context.compaction_turns` 已移除。
-- 新增 `context.current_tail_compactable_min_chars`（默认 `1`）与 `context.current_tail_single_result_max_chars`（默认 `10_000`）。
-- `context.keep_recent_turns` 现在真实驱动历史 placeholder 保护区（默认 `5`）。
-- `context.compaction_model` 默认值改为 `gpt-5.2`；current-tail collapse / preheat 摘要默认沿用这条压缩模型口径。
-- current-tail guard 在每次工具轮结束后、下一次 `llm.chat_stream(...)` 前执行：先吃历史收益，再减 current tail，不够时整份 collapse 为单条 `branch_summary + keepalive`。
-- 新增 `tests/current_tail_guard_real_llm_tests.rs`，把 keepalive 真实验证拆成 A/B/C 三个串行 real-LLM cases，并已登记到 `scripts/test-groups.sh` 的 `TOMCAT_INTEGRATION_REAL_LLM_TESTS`。
+### 🔌 INTERFACE (接口变更)
+- `BuiltinToolCatalogEntry` 新增字段 `prompt_guidelines: &'static [&'static str]`；`render_tool_guidelines_with_policy` 聚合去重后注入 `tool_instructions.txt`。
+- `PromptKey` 新增 `SystemParallelTools` / `SystemVerification`；默认系统提示词 section 链插入 priority 22 / 50。
+- 无对外部客户端的破坏性 API 变更；系统提示词行为契约以 prompt-only 单测与 E2E-PROMPT-026–029 锁定。
 
-### BLOCKED
+### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
 | 无 | - | - |
 
-### TEST
-- 已跑：`cargo fmt --check -- src/core/agent_loop/mod.rs src/core/agent_loop/reasoning_loop.rs src/core/agent_loop/current_tail_guard.rs src/core/agent_loop/tests/mod.rs src/core/agent_loop/tests/current_tail_guard_test.rs src/core/compaction/mod.rs src/core/compaction/truncation.rs src/core/compaction/tests/context_layer0_v2_test.rs src/core/compaction/tests/preheat_and_truncation_test.rs src/core/compaction/tests/turn_boundaries_l3_test.rs src/core/session/manager/types.rs src/core/session/manager/tests/context_state_test.rs src/core/session/mod.rs src/core/session/transcript.rs src/core/session/tests/transcript_mutate_test.rs src/core/tools/config_tool/allowlist.rs src/core/tools/contract/catalog.rs src/infra/config/types/context.rs src/infra/config/tests/context_cfg_test.rs tests/context_management_tests.rs`
-- 已跑：`cargo clippy --all-targets -- -D warnings`
-- 已跑：`cargo test --lib context_config_default_values`
-- 已跑：`cargo test --lib l1_keep_recent_turns_reads_config_value`
-- 已跑：`cargo test --lib current_tail_guard_test`
-- 已跑：`cargo test --lib current_tail_guard_behavior_test -- --nocapture`
-- 已跑：`cargo test --lib current_tail_guard_runtime_test -- --nocapture`
-- 已跑：`cargo test --lib steering_followup_test -- --nocapture`
-- 已跑：`cargo test --lib rewrite_message_text_entries_by_id_updates_target_messages_only`
-- 已跑：`cargo test --lib rewrite_local_tail_chars_updates_estimate_and_post_usage`
-- 已跑：`cargo test --test context_management_tests`
-- 已跑：`cargo test --test context_management_tests test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm -- --nocapture`
-- 已跑：`cargo test --test current_tail_guard_real_llm_tests -- --nocapture --test-threads=1`
-- 已跑：`set -a && source .env && set +a && cargo test --test plan_real_llm_inprocess_tests -- --nocapture --test-threads=1`
-- 已跑：`set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`
-- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致，无需额外补充用户面场景
-- 已核对：新 real-LLM target 已接入 `scripts/test-groups.sh`；普通 `integration` / `all` 仍不跑 keepalive A/B/C，需显式执行 `integration-real-llm`
-- 已提交：`1bb4d66`（阶段二实现）+ 后续 `style(rust)` 提交（补齐分支内遗留的 `cargo fmt` 格式化，无行为变更）
+### 集成说明
+- 本轮以提示词/工具描述静态文本与拼装逻辑为主；验证走 focused lib/doc 测试与 `prompt_size_budget`（CHAT tool defs 25023 / SYS 6996），未跑全量 tarpaulin，Cov% 留空。
+- 云化方案 `cloud-scale-serving-01/` 为文档同步，尚未进入 Phase A 编码。
 
 ---
 
-## feature-llm-files-upload-manager
-
-*暂无进度*
-
----
-
-## feature-plan-mode-enhance
-
-# feature/plan-mode-enhance — Status
-
-> 三卡同分支交付：**T2-P1-002 / T2-P1-003 / T2-P1-004**
-> 计划单一事实来源：[`~/.cursor/plans/plan_三卡单分支_7e09fef1.plan.md`]
-> Dispatcher 偏离说明：本次按用户要求 **三卡同领、同分支**，与默认「一次一卡」不同。
-
----
-
-## 当前状态
-
-| 字段 | 值 |
-|------|------|
-| 负责人 | Tom |
-| 状态 | PENDING_INTEGRATION（plan-mode-full-fix + P9 verifier 全部落地，待合并集成） |
-| 分支 | `feature/plan-mode-enhance` (from `develop`) |
-| 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P9 verifier 完成并完成 remediation 收口（VerifySummary 单一事实源、`max_turns -> aborted`、P0-P6 prompt、gate 边界、full-chain `plan.verify` 断言）→ 待本地验证/集成提交 |
-
-## Phase 进度
-
-- [x] **P0** 认领三卡、切分支、README/任务卡/status 更新
-- [x] **P0.5** 横切前置（依赖 `serde_yaml` / `AgentLoopConfig` + `SubagentType` / 4 plan 工具进 catalog / transcript 事件 type 常量 / `[plan]`+`[reviewer]` config / `gen-tool-catalog` + `tool_catalog_doc` 回归）
-- [x] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover(stub)、user prefix（+ §9.3A P1 单测 38 个全绿；recover 真正生效随 P2 file_store 补齐）
-- [x] **P2** PR-PLB — file_store、ops、tools/{create_plan,update_plan,todos}（stub review，P4 接入）+ §9.3B 单测 38 个全绿（write_plan 原子写/锁/超时；ops 单 in_progress / id 唯一；mode 守卫 / 跨 session 规则 / 自动 completed）
-- [x] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort + §9.3D P3 单测 11 个全绿（panic 隔离、三道闸门、cascade abort BFS、RegistrationGuard balanced）
-- [x] **P4** RV+CP-D — review.rs + ReviewerDispatcher trait + PlanRuntime::dispatch_reviewer + create_plan::execute_with_reviewer + §9.3D 余量单测 19 个全绿（parse 严格 / 多块取最后 / aborted 路径 / lock 先释放 / round 计数 warning）
-- [x] **P5** AQ — ask_question + CliAskQuestionPanel + IdeAskQuestionPanel(stub) + MockAskQuestionPanel + §9.3C 单测 18 个全绿（schema 校验 / 1 recommended 约束 / __custom__ 保留 id / picked_recommended 回填 / cancel 信号 / 阻塞语义 / 出参反向校验）
-- [x] **P6** PR-PLC — /plan build 五件事（disk session_key/id + disk mode=executing + 内存 mode swap + first_exec_turn flag + plan body 缓存）+ 原子回滚（write 失败时内存不动）+ 友好提示（plan_id 不存在引导 create_plan）+ §9.3A build 行 10 个新测全绿（闸门 / completed / disk executing / 不存在 / unsafe / 五件事一次性 / pending 续跑 / 异 session warning / 首轮一次性注入 / 原子回滚 lock-busy）
-- [x] **P7 (核心)** PR-PLE finalize_completed_to_chat + PR-PLF demote_to_pending_on_cancel（释放 lock）+ PR-PLF allow_raw_edit_to_path（canonicalize 双侧）+ attach_cancel_hook/current_cancel_token + 5 个新单测全绿（cancel→pending / cancel_outside_exec_noop / cancel_releases_lock / finalize_completed_clears_first_exec_turn / raw_edit_blocked_for_plan_files）
-- [ ] **P7 (延期)** PR-PLD TodosPanel + RefreshNotifier + milestone checkpoint record(Milestone) + /restore reload_active_plan_from_disk — 需要 chat_loop 装配层联动，推到 P8b 集成测一起做
-- [x] **P8a** 扫尾单测 — D2 attach_cancel_hook_rebinds_replaces_old_token + D9 concurrent_write_plan_serialized_by_lock + 修 P2~P7 测试间 HOME env 污染（orig_home OnceLock + cleanup_home 还原）→ lib 全测 1025 passed / 0 failed
-- [x] **P8b** `plan_runtime_integration_tests` 全绿（8 个端到端用例：full_plan_lifecycle / build→cancel→resume / ask_question 双答案 + Ctrl+C cancelled / reviewer summary 入 tool result / raw_edit guard / todos 路由 / friendly hint）+ 全部 await 用 `tokio::time::timeout(30s)` 包裹（防 D12）+ HOME 隔离 + 串/并行均通过
-- [/] **P8c** `plan_cli_e2e`（部分）— D10 catalog 一致性 `committed_tool_catalog_matches_catalog_renderer` 已绿；完整 E2E-PLAN-001～016（含 mock HTTP / 子进程 / scenario library）规模超出"三卡同分支"范围，转移到独立 PR-PLG 单独交付（chat_loop 已经把 plan_runtime/catalog/reminder/prefix/build 接通，主路径可手动跑）
-- [x] **P8d** gen-tool-catalog 跑通 / `tool_catalog_doc` (D10) 1/0 / cargo test --lib 1025/0 / plan_runtime_integration 8/0；人工 PLAN-UX-01～04 spot-check 留给真实部署
-- [x] **P9 verifier（PR-V0～V3）** DONE Owner=Tom — 已完成 Mini verification prompts + P0-P6 命令发现、internal verifier（`verify.rs` / `SubagentType::Verifier` / `dispatch_verifier` / tool_exec 双保险白名单 / `update_plan` 两次写盘）、`plan.verify` transcript 事件 + `update_plan` tool result `verify` 双通道回传，以及 `[plan].verify_gate = "soft" | "gate"` gate 语义。remediation 追加收口：`transcript.plan.verify` 与 `update_plan.verify` 统一为 normalize 后的最终 `VerifySummary`、`max_turns` 改为“预算耗尽未正常收口 => verdict=aborted / stop_reason=max_turns”、verifier prompt 与 executor Mini 统一 P0-P6、补 `partial/aborted` gate 与 re-complete respawn 回归、real-LLM inprocess E2E 明确断言 `plan.verify`。边界保持不变：**frontmatter 零改造**、唯一配置项仅 `verify_gate`、**不加** `/plan verify` CLI、`VERIFIER_MAX_TURNS = 64`。
-- [x] **真 LLM E2E 轮（2026-05）** 完成 reviewer/verifier 子 Agent 真派发装配；[`tests/plan_real_llm_inprocess_tests.rs`](../../tests/plan_real_llm_inprocess_tests.rs)（E2E-PLAN-RL-002，需 `OPENAI_API_KEY`）现同时断言 transcript 中存在 `plan.review` 与 `plan.verify`，作为 full-chain verifier wiring 最低验收；[`tests/plan_real_llm_cli_e2e.rs`](../../tests/plan_real_llm_cli_e2e.rs) 继续保留黑盒链路，但 verifier 侧以 inprocess 用例作为当前主验收锚点。
-
-## 关键决策
-
-- `ask_question` 因 T2-P0-008 (TUI) 仍 TODO，采用 **CLI MVP**（`readline` + `spawn_blocking`）；IDE 侧为 trait stub
-- reviewer / `dispatch_agent` 共用 `AgentRegistry::spawn_subagent_internal`
-- 测试 hang 防御：所有 L1/L2 async `tokio::time::timeout(30s)` 包裹；L3 子进程 `kill_on_drop` + 120s 上限
-- 测试稳定性：默认 MockLlm/mock HTTP；真 LLM 用例 `#[ignore]`
-- ~~已知 pre-existing 测试串污染：plan tools 测试改 HOME 后不还原 → 与 permission gate 测试并行/串行时都失败；P8b 修：在 `setup_isolated_home` 用 RAII `EnvGuard` 在 cleanup 时还原原 HOME（不属于 P6 回归）~~ **P8a 已修**（orig_home OnceLock 抓取首次 HOME；cleanup_home 还原）
-
-## plan-mode-full-fix 阶段（A-J）
-
-> 单独一轮全量修复，对齐文档与代码、引入 panel/checkpoint/restore/recover、扩 E2E 覆盖；
-> 计划单一事实源：`~/.cursor/plans/plan-mode-full-fix_78a0646c.plan.md`。
-
-- [x] **A** 文档与图修复：plan-runtime / multi-agent / tools/* 8 篇统一口径（含 ask-question CHAT 可见、PLAN 写路径限制等行为变更说明），executor reminder 强调"如何推进任务"为第一要务
-- [x] **B/B1/B11/B12** catalog 可见性回正（PLAN 模式新增 todos/ask_question；EXEC 模式仅 update_plan）+ tool_exec.rs 把 4 plan 工具接入主分发 + ask_question 在 CHAT 可用 + safety.rs 写路径策略（PLAN 限 `~/.tomcat/plans/`、EXEC 全禁写 plan 文件）+ reviewer 段守卫
-- [x] **C** chat_loop 装配：first_exec_turn user_meta 注入、cancel→pending 降级、finalize_completed_to_chat、session_id 透传、recover hook、transcript 写入对齐
-- [x] **D** reviewer 生产派发：ProdReviewerDispatcher 占位（findings/rounds/reload/warning 协议接通）；后续 PR 替换为 AgentRegistry::spawn_subagent_internal 真实派发
-- [x] **E** TodosPanel + RefreshNotifier + plan.panel + Milestone checkpoint record（`[plan].auto_checkpoint_on_milestone`，默认 true）+ `/restore` reload_active_plan_from_disk + `PlanRuntime::recover()` 真实实现（孤儿 executing → pending 降级；当前 session 拥有 → 重挂内存 EXEC）
-- [x] **E2** Milestone schema 完整化（`status: MilestoneStatus` 派生 + `description`）+ `## Todos Board` 自动重写（`<!-- todos-board:auto:begin/end -->` 标记内）+ 一致性校验（`todo.milestone_id` ⇔ `milestones[].todo_ids`）
-- [x] **F** prompts/executor.txt 重写为英文契约（"first priority: drive todos to completion"），prompts/planner.txt 同步；`render_executor_reminder` 支持 `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` 热覆盖
-- [x] **G1/G2/G5** `update_plan` `op→kind`（破坏性一步到位）+ mode 矩阵闸门（Planning 拒 in_progress 等）+ 完整 JSON 返回（applied / plan_mode_before/after / panel_snapshot_id / warnings / items / milestones / active_in_progress）+ completed 全拒（N2）+ 跨 session 策略（N11，Executing 拒 cross-session、Planning/Pending 允许） + N3（`/plan exit` 仅 Planning）
-- [x] **G3** TodosRuntime 持久化（`~/.tomcat/agents/<id>/todos/<session_id>.todo.md`）+ 单文件覆盖模型（`new_todos` 清空 scratchpad，但不再创建/清理额外文件）
-- [x] **G4** `create_plan` `body→draft`（破坏性一步到位）+ `plan_id` 派生（slugify + xxhash）+ 显式 reject 老字段 + `## Notes` 模板补全
-- [x] **H** `plan_e2e_with_mock_llm_tests.rs` 8 例：H1 full lifecycle（6 次 panel + 自动 completed）/ H2 CHAT todos panel scope / H3 PLAN raw edit 守卫 / H4 EXEC plan 文件全禁写 / H5 reviewer aborted 占位 / H6 cancel→pending / H7 Planning 拒 in_progress / H8 milestone checkpoint record
-- [x] **J** CLI 模式指示器（readline 提示符渲染 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` / `[DONE plan_id]`）+ `/plan list` 子命令（扫 `~/.tomcat/plans/` 列 id/mode/goal/created_at）
-- [x] **I** status 收尾 + 终态门禁
-
-### 行为变更（5 条 — commit/CHANGELOG 显著标注）
-
-1. `ask_question` 在 CHAT 可见（之前 PLAN-only）；上层 panel 不变。
-2. PLAN 期 `write`/`edit`/`delete` 仅允许在 `~/.tomcat/plans/*.plan.md`；越界 → ToolError。
-3. EXEC 期 plan 文件全禁 raw 写（必须走 `update_plan` 推进）。
-4. `update_plan` 入参仅 `kind`，旧 `op` **不再兼容**，立即失败。
-5. `create_plan` 入参仅 `draft`（旧 `body` 不再兼容）；`plan_id` 由 runtime 派生，LLM 不再传。
-
-### 终态门禁
-
-```
-cargo test --lib -p tomcat                                  → 1060 passed / 0 failed
-cargo test --test plan_runtime_integration_tests -p tomcat → 8 passed / 0 failed
-cargo test --test plan_e2e_with_mock_llm_tests -p tomcat   → 8 passed / 0 failed（H 新增）
-cargo test --test tool_catalog_doc -p tomcat                → 1 passed / 0 failed（catalog 已重生成提交）
-cargo run --bin gen-tool-catalog -p tomcat                  → OK（UPDATE_TOOL_CATALOG=1 写盘）
-```
-
-## 提交日志
-
-- `983334c` — P0.5 横切前置
-- `c0afa94` — P1 PR-PLA
-- `890bd9f` — P2 PR-PLB
-- `b88515a` — P3 MA
-- `9ce91d3` — P4 RV+CP-D
-- `d2fdd98` — P5 AQ
-- `ee248ca` — P6 PR-PLC
-- `eda722b` — P7 核心防御 (PLE/PLF)
-- `f891b34` — P8a 防御单测 + HOME 污染修
-- `f6ceb15` — P8b 集成测套件 (8 例)
-- `<head>`   — P8c/P8d/done DoD 收口
-
-## 终态验证
-
-```
-cargo test --lib -p tomcat                            → 1025 passed / 0 failed / 1 ignored
-cargo test --test plan_runtime_integration_tests -p tomcat → 8 passed / 0 failed
-cargo test --test tool_catalog_doc -p tomcat              → 1 passed / 0 failed (D10)
-cargo run --bin gen-tool-catalog -p tomcat                → OK
-```
-
-新文件清单（plan_runtime 子树）：
-- `src/api/chat/plan_runtime/mod.rs` — PlanRuntime per-session 编排器
-- `src/api/chat/plan_runtime/{mode,prompts,session_prefix,safety,catalog}.rs` — P1
-- `src/api/chat/plan_runtime/file_store.rs` — P2 持久化 (atomic write + advisory lock)
-- `src/api/chat/plan_runtime/ops.rs` — P2 TodoOp 引擎
-- `src/api/chat/plan_runtime/tools/{create_plan,update_plan,todos}.rs` — P2 三件套
-- `src/api/chat/plan_runtime/review.rs` — P4 ReviewSummary + parse
-- `src/api/chat/plan_runtime/ask_question_panel.rs` — P5 CLI/IDE/Mock panel
-- `src/api/chat/plan_runtime/tools/ask_question.rs` — P5 工具
-- `src/core/agent_registry/mod.rs` — P3 AgentRegistry + spawn_subagent_internal
-- `tests/plan_runtime_integration_tests.rs` — P8b 8 例端到端集成
-
-## DoD（plan §9.7）
-
-- [x] §9.3 单元：表中函数全部存在；新增反向/安全/兼容用例齐（114+ plan_runtime 单测）
-- [x] §9.4 集成：plan_runtime_integration_tests 8 例全绿，含 D1/D2/D8 防御
-- [/] §9.5 CLI E2E：D10 catalog 一致性已绿；E2E-PLAN-001～016 转独立 PR-PLG
-- [x] §7.3 transcript 事件 type 在 session-storage 已注册（P0.5）
-- [x] §8 D1/D2/D8/D9/D10 单元 + 集成测覆盖；D3/D4/D5/D6/D7/D11/D12 转 PR-PLG
-- [/] test-groups.sh：tool_catalog_doc 已分组；plan_runtime_integration 待 P8c PR 时登记
-- [x] 三卡子项 + DoD 主体勾选 / 标 PENDING_INTEGRATION
-
----
-
-## feature-reasoning-continuity
-
-*暂无进度*
-
----
-
-## feature-skill-system
+## feature-tomcat-vscode-extension
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Spike | 2026-06-07 01:37 +0800 | PENDING_INTEGRATION | feature/skill-system | — |
+| Tom | 2026-07-05 10:56 +0800 | PENDING_INTEGRATION | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
-- [✓] **[P1]** 完成 Skill 主链：`core/skill` frontmatter / config / 三层发现 / `SkillSet` 运行时状态 / `<available_skills>` prompt 注入 / `load_skill` 工具 / `/skill` 与 `tomcat skill`
-- [✓] **[P1]** 已补集成与 E2E 覆盖：新增 `tests/skill_tool_tests.rs`，在 `tests/cli_tests.rs` 增补 `/skill` 与 `tomcat skill` 用户路径，并登记 `scripts/test-groups.sh`
-- [✓] **[P1]** 已同步规格文档：`docs/openspec/specs/User_Stories.md` 与 `docs/openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 补齐 Skill 发现/披露/装载/命令场景
-- [✓] **[P1]** 本地门禁通过：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --nocapture`、`./scripts/run-integration-tests.sh all`
+- [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
+- [x] **[P1]** 建立 `feature/tomcat-vscode-extension` 分支并初始化本分支 status 文件。
+- [x] **[P1]** 按 `tomcat-vscode-extension-phase2.md` 与 `02-stage-a-slash-and-serve.md` / `03-stage-b-webview.md` 完成 Phase 2 主体实现：Stage A 的 `/plan` / `/model` slash + serve 协议/状态/事件扩展已落地，Stage B 的 sidebar webview / React GUI / shared pool / ownership / diff bridge 已接通。
+- [x] **[P1]** Rust `serve --print-schema` fixture 已随 Phase 2 协议扩展刷新，`tests/fixtures/serve/serve.schema.json` 与 `tests/fixtures/serve/serve.d.ts` 不再漂移。
+- [x] **[P1]** 纠正此前把内部 `__testing` / host harness 误表述为“真实桌面 UI 验收”的问题；本轮重新以真实 VS Code 桌面 UI 作为最终口径。
+- [x] **[P1]** 侧栏 webview 已收敛为聊天式布局：时间线 transcript（消息 / thinking / tool / approval / plan 卡片）、底部内嵌 composer（`+` / `Chat|Plan` / `Model` / `Ctx%` / 圆形发送）、会话选择栏、停靠 Todo widget、附件 chips 与合并后的 Plan/Build 卡片全部落地。
+- [x] **[P1]** 真实桌面 UI 验收已完成：打开 Tomcat 侧栏、真实发送消息、切模型 `fake-model -> gpt-5.4`、`Chat -> Plan -> Build -> Chat`、打开 `.plan.md` 文件、添加附件并发送、观察 `Ctx 42% -> 58%`，全程不依赖内部注入。
+- [x] **[P1]** 更新交付文档：status、`T2-P1-020` 任务卡、看板索引与 Stage B webview 架构文档已同步到最新实现事实。
+- [x] **[P1]** 按 `/commit-with-status` 完成本地合规提交（聊天式 webview 重构 + 文档同步）。
+- [x] **[P2]** 修复 macOS login bash 下 `tomcat init` / `install.sh` 写入 PATH 后新终端仍找不到 `tomcat`：`auto_add_to_path` 改为 PATH 写 `.bashrc` 并确保 `.bash_profile` source `.bashrc`，`install.sh` 同步补齐。
+- [x] **[P2]** 补全 bash login shell 链路：`.bash_profile` 同时 source `.profile` 与 `.bashrc`，避免截断 `~/.profile` 中已有 Rust/cargo 等通用环境；新增 bash 场景 init 回归测试。
+- [x] **[P1]** 2026-06-26 误删事故后恢复可执行计划：`.cursor/plans/transcript-ui-restore.plan.md`（仿 VSCode Chat 重做 transcript，52 todo，含 utility-flash 默认模型配置）。
+- [x] **[P1]** 新增 Agent 安全规则 `tomcat/.cursor/rules/no-rm-rf.mdc`（禁止 `rm -rf "$VAR"` 跨命令边界等事故形态，alwaysApply）。
+- [x] **[P1]** Transcript UI 仿 VSCode Chat（`transcript-ui-restore.plan.md`）：后端 `core/summary` utility 摘要、`TurnEnd.summaryTitle`、`session.title_updated` / `plan.todos` / `session.todos` wire；前端 ThinkingGroup / ToolRow / FileChip / ProgressRow / user pill / assistant 无框；`utility-flash` 默认 title 模型。
+- [x] **[P1]** 后端单测：`cargo test --lib` 1935 passed（含 `summary::` 6 项、`models_toml` 5 项）。
+- [x] **[P1]** 前端单测：GUI 74 项全绿；webview helper 测试（state / protocol / provider / dual_channel）18 项全绿。
+- [x] **[P1]** §2 Rust 集成测试 `transcript_summary_integration_tests`（575 行 / 7 用例，mock LlmProvider 黑盒）：`TurnEnd.summaryTitle` 三路径（Some/None/utility 失败回退）、`plan.todos`/`session.todos` emit、`get_state` `planTodos`/`sessionTodos`、session title 异步覆盖；登记 `test-groups.sh` PARALLEL；`cargo test --test` → 5 passed; 2 ignored。
+- [x] **[P1]** §3 VSCode 扩展 E2E：`npm run test:e2e:vscode-install` → **15 passing (49s), exit 0**，含 `assertTranscriptUiFlow`（user pill / assistant 无框 / thinking+tool 折叠摘要 / tool 扁平行+竖线+可展开 / FileChip / transcript 内联 progress / 停靠 Todo widget / 合并 Plan 卡 / `session.title_updated`）。
+- [x] **[P1]** §4 verify-vsix 视觉验收：新增 `run-vscode-verify-vsix.ts` + `crop-screenshot.py` + `verify:vsix` script + 截图路径 env 化（`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR`）；`npm run verify:vsix` → 1 passing + 裁剪图视觉确认 10 项 checklist（user pill / assistant 无框 / 折叠摘要 / tool 扁平行+竖线 / FileChip 图标 / bash / transcript 内联 progress / 停靠 Todo widget 折叠态 / Todo widget 展开态 / 合并 Plan 卡）。
+- [x] **[P1]** §4 verify-integration：`./scripts/run-integration-tests.sh integration` → **exit 0，parallel + serial 全绿**；期间发现并修复 `serve_schema_fixture` 漂移（重生成 `tests/fixtures/serve/serve.schema.json` / `serve.d.ts`）；`transcript_summary_integration_tests` 5 passed/2 ignored、`cli_tests` 108 passed/0 failed、`serve_print_schema_matches_fixture` ok。
+- [x] **[P1]** Wave 3 只读 Review：reviewer 结论 §2/§3/§4-vsix 测试有效性基本成立、无明确 bug；唯一实质性缺口为 §2 test 7 异步 `session.title_updated` emit 无活跃覆盖（已记为 stretch），低风险项见 `.cursor/plans/transcript-ui-restore-progress.md`。
+- [x] **[P1]** 2026-06-27 第二轮自查：修复 bash/web_search 变"卡片"根因 bug（`state.ts` tool 事件误调 `clearStreaming` 清掉 `activeAssistantId` → 同轮第 2+ 工具 `assistantMessageId` 丢失 → 孤立 → `ToolCallCard`；改用 `clearThinkingStreaming` 只清 `activeThinkingId`）+ 孤立 tool 兜底由 `ToolCallCard` 改 `ToolRow`；E2E `assertTranscriptUiFlow` 加 `toolRowCount>=3` + `toolCardCount===0` 回归断言；补全 3 项 🟡 缺口（ThinkingGroup 折叠头 check/loading 图标 + spin、shimmer 改 `summaryTitle===null && isStreaming`、ToolRow grep `N results`/search_workspace 分支/web_search 结构化/edit 图标 + bash `<code>cmd</code>`）；gui 67 项单测全绿、ext tsc 干净、`verify:vsix` E2E ✔（read/bash/web_search 三工具均扁平行、零卡片）。详见 `.cursor/plans/transcript-ui-restore-progress.md`"卡片根因修复"节。
+- [x] **[P1]** 2026-06-27 第三轮 transcript UI polish：webview 正式引入 `@vscode/codicons`（`vite base:"./"` 打包 `dist/codicon.ttf`，FileChip / tool / progress / todo 图标恢复）、`FileChip` 基线对齐修正、底部新增仿 VSCode 的停靠 Todo widget（折叠 `Render the transcript UI (2/4)`、展开 `Todos (2/4)` + radio icon 列表）、`PlanFileCard` 与原 `Build` strip 合并为 Cursor 风卡片（标题/描述来自 `.plan.md` frontmatter，footer `View Plan` + `Build`），并新增 provider frontmatter 缓存读取、`TodoListWidget`/`PlanFileCard`/`provider` 单测；`npm --prefix gui run test` 72 passing、`npm run lint` 通过、`npm run verify:vsix` 1 passing，新增裁剪图 `progress` / `todo-expanded` / `collapsed` / `expanded` 四张。
+- [x] **[P1]** 2026-06-27 第四轮 transcript UI polish follow-up：收敛折叠态口径（`collapsed` 在 turn 结束后无 todo widget / 无内联 progress；`progress` 保留忙碌态内联 progress + 停靠 todo widget）、Composer 去掉 `Tomcat is responding...` 并将 `Plan: planning` 下移到 footer、Plan 卡 footer 同行与 `4 todos` 轻量 pill、`verify:vsix` 启动前清空旧 visual 产物并新增 `file-chip` 近景（`scrollIntoView` + 可视区断言）、`ToolRow` 扁平行 inline 组与固定图标列对齐（Read/chip、Ran/code、Searched 文本）；`npm --prefix gui run test` 74 passing、`npm run lint` 通过、`npm run verify:vsix` 1 passing，裁剪图 `collapsed` / `progress` / `todo-expanded` / `expanded` / `file-chip` 五张。
+- [x] **[P1]** 2026-06-27 内置工具 icon 验收：`ToolRow` 补齐 19 个 built-in 工具的 codicon 与可读 label（`load_skill` / `list_dir` / `config_*` / `create_plan` / `update_plan` / `todos` / `ask_question` / task 系列等）；E2E fixture 新增 `tool icon showcase` 场景并断言 `toolRowCount>=19`，`verify:vsix` 产出 `tool-icons` / `tool-icons-bottom` 两张裁剪图便于一次性目视验收。
+- [x] **[P1]** 2026-06-27 Transcript UI 事件接缝整改（planPath / contextRatio / custom `plan.*` history replay / plan transition wire）已落地：后端补 `plan.enter` / `plan.exit` / `plan.pending` / `plan.complete` 事件与 `get_state.contextUtilizationRatio` / `planPath`，前端改为按 `plan.path` 全局单卡收敛并在终态事件后回读 `get_state` 真相；期间发现并修复 cross-owner 观察态 bug（`setOwnership()` 错误清空 `conflictMessage`，导致只读会话误显示可 `Build`）。
+- [x] **[P1]** 2026-06-27 剩余全量 gate 已补跑完成：提权后 `cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --nocapture`、`./scripts/run-integration-tests.sh integration`、`npm run test:unit`、`npm run test:integration`、`npm run test:e2e:vscode-install`、`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=/tmp/tomcat-vsix-verify-artifacts npm run verify:vsix` 全部通过；期间同步修正 1 个受新 `planPath` 语义影响的旧后端测试 `create_plan_multiple_times_overrides_active_planning_id_and_binding_path`。
+- [x] **[P1]** 2026-06-27 `verify:vsix` 进一步补齐计划验收口径：默认增跑 `switch restore` / `reload replay` / `cross-owner` / `transcript UI` 四条安装态用例，并新增三张场景裁剪图 `switch-restore` / `reload-replay` / `cross-owner`，用于人工目视确认 `planCard + Ctx + footer planState` 与自动断言中的 `planCardCount===1` 一致。
+- [x] **[P2]** 2026-06-28 清理 `tomcat-vscode-ext` / `gui` 的 `npm audit` 告警：根包通过 `overrides` 升级 `mocha` 传递依赖 `diff` / `serialize-javascript`，GUI 显式锁定 `esbuild@0.28.1` 并刷新 `vite`，两侧 `npm audit` 均为 0 vulnerabilities。
+- [x] **[P2]** 2026-06-28 修复 serve 集成测试套跑偶发超时：新增 `warmTomcatBinaryForSuite()` 在 `beforeAll` 预热 `cargo build --bin tomcat`，避免首个真实 serve 用例把编译冷启动挤进 30s 测试预算；`npm run test:unit` → 主包 94 + GUI 82 全绿。
 
-### 🔌 INTERFACE
-- 新增顶层 `[skills]` 配置及 env override，驱动 Skill 发现、prompt 预算、禁用列表与 reviewer 暴露策略
-- 新增 `load_skill(name, file?)` 工具、`<available_skills>` prompt section、聊天命令 `/skill list|reload|use` 与外层 CLI `tomcat skill list|reload`
-- 新增集成测试目标 `tests/skill_tool_tests.rs`，并把 Skill 路径接入 `scripts/test-groups.sh`
+### 🔄 IN PROGRESS
+- [ ] 无；当前分支已完成开发、本地门禁与桌面验收，等待 Nibbles 在 `develop` 侧复跑并合并。
 
-### ⚠️ BLOCKED
+### 🔌 INTERFACE (当前口径)
+- 当前唯一真相以 `tomcat-vscode-ext/docs/architecture/tomcat-vscode-extension-phase2.md` 为主，Phase 1 基线继续以 `tomcat-vscode-ext/docs/architecture/tomcat-vscode-extension.md` 为事实起点。
+- 当前分支已具备 Phase 1 基线：`@tomcat` 原生 Chat Participant、`ask_question` 审批回环、`vscode.diff` 预览 / `WorkspaceEdit` 应用、多会话 `sessionId` 路由、serve failed/restart/backpressure UI 降级。
+- 本轮已在同一分支增量落地：Stage A 的 `/plan` / `/model` + serve 协议扩展，以及 Stage B 的 React + Vite webview、timeline 状态模型、`get_messages` 历史补齐、共享项目 scope 会话池、单活跃归属、plan 文件打开、附件透传、context budget 展示与真实 UI 验收入口。
+- 本轮事件接缝增量口径：`get_state` 明确返回 `planPath` / `contextUtilizationRatio`；serve/live/history 统一补齐 `plan.enter` / `plan.exit` / `plan.pending` / `plan.complete`；webview DOM 测试快照新增 `ctxLabel` / `planNoticeReplayed` / `planStateText` / `planCardCount`，用于切会话恢复、reload 历史重放与 cross-owner 观察一致性验收。
+
+### 🧪 ACCEPTANCE
+- Rust：
+  - `cargo build --release` → **exit 0**
+  - `cargo clippy --all-targets -- -D warnings` → **exit 0**
+  - `cargo test --lib -- --nocapture` → **1943 passed / 0 failed / 1 ignored**
+  - `./scripts/run-integration-tests.sh integration`（以 crate `.env` 运行，`NO_PROXY=127.0.0.1,localhost`，`OPENAI_API_KEY` 设本地 mock 占位以驱动 `test_user_chat_skill_list_reload_use` 的本地 mock OpenAI server）→ **exit 0，parallel + serial 全绿**；`serve_schema_fixture` 漂移已通过重生成 `tests/fixtures/serve/serve.schema.json` / `serve.d.ts` 修复；`real_mimo_web_search` 与 `test_user_background_bash_multiple_timeout_slices_real_llm_cli` 为 flaky 真 网络 / 真 LLM 用例（本次通过，非本次改动引入）。
+  - §4 verify-vsix 视觉验收：`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=<dir> npm run verify:vsix` → **4 passing / exit 0**，默认覆盖 `switch restore` / `reload replay` / `cross-owner` / `transcript UI`；脚本启动前清空 `<dir>/tomcat-vsix-visual-*.png` 旧产物；E2E 含 `toolRowCount>=3` + `toolCardCount===0`、`todoWidgetVisible`（progress 态）/ `!todoWidgetVisible`（collapsed 态）、`todoWidgetExpanded`、`todoWidgetItemCount>=4`、`planCardCount>=1`、`planCardTodoCountText==="4 todos"`、`composerFooterPlanStatus==="Plan: planning"`、`ctxLabel`、`planNoticeReplayed`、`planStateText` 与 `planCardCount===1` 等断言，并产出 `<dir>/tomcat-vsix-visual-{switch-restore,reload-replay,cross-owner,collapsed,progress,todo-expanded,expanded,file-chip,tool-icons,tool-icons-bottom}-cropped.png`（`screencapture` 需 VSCode 窗口可见，若被其它全屏 app 遮挡会捕获到遮挡窗口，此时以 E2E DOM 断言为功能验收铁证）。
+  - `./scripts/run-integration-tests.sh integration-openai-responses-wire`
+  - `./scripts/run-integration-tests.sh integration-real-llm`
+- Extension：
+  - `npm audit`（`tomcat-vscode-ext` + `gui`）→ **0 vulnerabilities**
+  - `npm run test:unit` → **exit 0**（主包 `31` files / `94` tests + GUI `14` files / `82` tests 全绿）
+  - `npm run test:integration` → **exit 0**
+  - `npm --prefix gui run test`
+  - `npm run build`
+  - 本轮针对性回归：`tsc -p tsconfig.json --noEmit`、`tsc -p e2e-harness/tsconfig.json`、`vitest run tests/webview_provider_flow.test.ts src/ui/webview/tests/state.test.ts src/ui/participant/tests/planState.test.ts` → **27 passing**
+- 真实桌面 UI：
+  - 隔离 VS Code profile + 安装打包 VSIX 后，以真实侧栏 webview 完成：打开 Tomcat、发送 prompt、切模型、`Chat <-> Plan`、`Build`、打开 plan 文件、添加附件并发送、观察 `Ctx%` 变化。
+  - 本轮安装态补验：`TOMCAT_E2E_GREP="restores plan cards and Ctx after switching sessions|replays plan history after a webview reload|keeps cross-owner plan state in sync in the webview" node --import ./node_modules/tsx/dist/loader.mjs ./scripts/run-vscode-install-e2e.ts`（sandbox 外）→ **3 passing / 0 failing**
+  - 本轮完整安装态回归：`npm run test:e2e:vscode-install`（sandbox 外）→ **18 passing / 0 failing / exit 0**，含 `restores plan cards and Ctx after switching sessions`、`replays plan history after a webview reload`、`keeps cross-owner plan state in sync in the webview` 三条新增场景。
+- Host / UI coverage（当前口径）：
+  - 已完成 host/devhost/install harness 覆盖 participant happy-path、approval、diff/apply、interrupt/restart、多会话路由，以及 Phase 2 的 `/plan`、`/model`、webview streaming、webview diff/apply、webview multi-session、webview ownership、切会话恢复 plan 卡与 `Ctx%`、reload 历史重放、cross-owner plan enter/build/exit 观察一致。
+  - 上述 harness 现统一降级表述为“host integration / internal UI harness”，不再作为“真实桌面 UI 验收”口径。
+- Rust 补测：`cargo test serve_get_state_includes_active_plan_path_and_context_ratio`、`serve_event_pump_streams_plan_transition_events`、`enter_and_exit_write_transition_events`、`completed_and_pending_modes_emit_transition_events`、`finalize_completed_to_chat_does_not_emit_event`、`update_plan_reopen_completed_to_pending_and_emits_plan_pending` → **全部通过**
+- 例外说明：OpenAI Files live 组在 `integration-openai-responses-wire` 中按设计保持 opt-in，因未设置 `PI_LIVE_OPENAI_FILES=1` 而自跳过；`T2-P1-020` 已完成开发与本地验收，并已前移至 `PENDING_INTEGRATION`，等待 Nibbles 在 `develop` 侧复跑与合并。
+
+### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无 | - | - |
+| 无 | — | — |
 
 ---
 
-## feature-stream-timeout
-
-*暂无进度*
-
----
-
-## feature-strengthen-four-core-tools
-
-*暂无进度*
-
----
-
-## feature-t2-p0-010-multi-llm-productization
+## feature-transcript-rich-render
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Spike | 2026-06-02 17:25 +0800 | DONE | feature/t2-p0-010-multi-llm-productization | - |
+| Nibbles | 2026-10-12 12:36 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
-### DONE
-- [x] [P0] 认领 `T2-P0-010`，落地 `ModelCatalog` / `LlmResolver` / `AuthStore` 最小闭环
-- [x] [P0] 新增 `/model current|list|use`，会话级 `model_override` 持久化与 CLI prompt/横幅显示
-- [x] [P0] 扩展 `tomcat init` 为 model-first 向导，按 catalog 推导 provider 凭证
-- [x] [P0] 补齐架构 §11 测试锚点，同步 User Stories / E2E 场景库
-- [x] [P0] G7 legacy `provider/api_base` 兼容与 init 默认 base 归一化回归修复
-- [x] [P0] `cargo fmt`、`cargo clippy -D warnings`、`./scripts/run-integration-tests.sh all` 全绿
-- [x] [P1] DeepSeek replay warning 整改：移除 `had_tool_call` wire gate、删除 warning 指纹去重、同 profile `reasoning_content` 默认回放
-- [x] [P1] 补齐 `deepseek_non_tool_turn_roundtrip_replays_reasoning_content` 与 post-tool final assistant wire 单测
+### CURRENT REVIEW (2026-10-12)
 
-### INTERFACE
-- 新增 `ModelCatalog`、`DefaultLlmResolver`、`AuthStore`；`ChatContext` 主路径经 `resolve_call(LlmScene, override)` 解析 per-call provider。
-- 新增 chat 命令 `/model current|list|use`；`/model use <id>` 写入 `SessionEntry.model_override` 并刷新 CLI 当前模型显示。
-- `tomcat init` 改为 model-first：先选 `default_model`，再推导 `provider/api/api_key_env` 并写入对应 `<PROVIDER>_API_KEY`。
-- `[llm]` 新增可选 `vision_model` / `title_model`；`AgentLoopConfig` 新增 `compaction_llm`。
-- DeepSeek continuity：**capture 与 replay 解耦**；snapshot 一律保留，同 family 兼容 `reasoning_content` 默认回放；`had_tool_call` 仅作 transcript 审计 metadata。
-- Replay downgrade warning 改为结构化分类（`cross_profile` / `same_profile_incompatible`），不再用进程内指纹缓存压日志。
+- Full branch review is complete for the frozen `develop..feature/transcript-rich-render` range: 1123/1123 paths, 147 commits. This is review coverage, not acceptance.
+- M3 已按根因提交：`793e081e` 总体整改、`89cef7cc` 纯格式、`2bc62520` 原门禁回归、`8abc3831` 前台匿名捕获/失败释放、`b6eca80f` 跨会话共享缩略图、`e9ce18b4` 如实报告索引截断、`5c5d3c80` Host 契约/夹具对齐、`0c089e08` 真实窄窗验收、`c7553636` 退役 crop 名单清理。Bash 不新增后台命名 sidecar，不恢复 argv；既有锁、授权、排空与诊断日志保留。
+- Rust 有效检查集合：原完整库 3234/0/5 ignored、默认并行 378/0、串行 35/0（`1791768685370-yj8d7h` exit 0），后续 Bash 增量 48/48 + all-targets Clippy/fmt（`1791777451267-qwib56`）；该增量整批 exit 2 是文档 EOF 空行，已修并由 diff-check 提交复核，不改写原命令。当前 debug CLI 已构建；格式、版本镜像、19 项版本脚本/audit 有效，保留 bincode/smartstring/yaml-rust 三条 unmaintained 警告。历史 VM 单次失败在完整库未再现，根因仍未确认。
+- 真实专项 `1791769594329-aislpv` exit 0：生产 Serve 长会话、DeepSeek Chat 工具/推理续接、fcodex Anthropic 真实 read-image→视觉判断→write/Files 归属、真实 Skill 加载、Tavily 插件入口，以及浏览器脚本 bootstrap/正常截图/console-error 负控，各实际执行 1 项。真实模型 profile 原报告 29 PASS 中两项额外 opt-in 诊断未发请求；不算真实供应商覆盖。Windows 停止已补 `taskkill /T /F` 和错误传播，本机未实测 Windows。
+- 扩展有效集合：首次 build 前 `check:wire`、完整 core 746/GUI 826、完整真实 Serve integration 的失败三文件补跑4/4（`1791773162429-ubgb60`），新改动 core42/GUI6/跨层88/typecheck；安装态23与 VSIX五启动场景4+1+3+1+1通过（`1791773308474-2bpuri`）。Devhost 原36/6保留，整改后完整39/3/4pending，剩余3路径断言+Plan完整操作补跑4/4（`1791777451153-is5yjb`），全部42活跃场景有有效覆盖，不冒称原full命令退出0。
+- 实屏：Questions 36 triples、Undo 12场景、@截断桌亮/窄暗40 triples、真实 Host Settings/Plan/Image/queue/inline/Files和Plan Find完整操作已采PNG/AX/console并读验。图片专项改为真实390×844窗口，Send完整/可hit-test、33检查/23 triples通过（`1791778757085-22gqoe`），不以旧180px根shim截图凑绿。MCP安装态真实Serve四phase经原checker/normal与untrusted/add补跑闭合（`1791778419644-ilqkke`），28正常场景triples中Settings scoped errors为0；故意Settings error负控单列。旧crop五个不存在文件是无producer旧名单，当前默认五full-frame均在，helper已只用现行名单并拒绝实际缺图的部分成功。
+- Console/边界如实保留：外层VS Code资源ERR_TIMED_OUT不与产品scoped报告混为一谈；图片缺blob404/越界图403为受控负例，不报全程零错误。原图诊断只实测10 PNG，混合SVG失败显式记录；当前11张缩略图位图1,216,512 B不是RSS保证。Native Save As、首次原生project-trust modal、其他平台仍未自动验收。
+- **未交付**：候选验收摘要提交/功能分支推送、合并 `develop`、合并后的两侧 fast、集成状态看板和最终远端推送；不发版、不打 tag。原始失败/补跑与逐项索引见 `.agents/acceptance/review-ebbdacce-findings.md`，产物在 `.agents/shots/`。
 
-### BLOCKED
+### BLOCKED (当前风险)
+
+- 本机是 macOS；Windows 进程树停止的运行态保证未验证，不冒称全平台通过。当前发布矩阵仅 macOS/Linux，Windows 一等交付需其平台验证。
+- 当前代码候选未发现尚未补齐的必需门禁目标；M4视觉/失败历史按有效检查集合记录。develop 集成复核与最终推送尚未进行，不提前声称交付 DONE。
+
+
+### ✅ DONE (历史已完成记录)
+
+- [✓] **[P0] 内部诊断目录的 Bash 排障权限已收口**：`DefaultPermissionGate` 仅对 `~/.tomcat/agents/<agent-id>/{sessions,logs,audit}/**` 的 Bash 访问跳过 readonly 拦截；路径按组件匹配，`deny` 仍优先，原生 Write/Edit 和敏感凭据保护不变。前台 executor、后台任务与插件 `executeBash` 都已用临时 JSONL 真实读取回归覆盖。CLI `0.1.55 → 0.1.56`、扩展 `0.1.69 → 0.1.70`、bundled CLI 同步；版本脚本的镜像检查和 19 项自身测试已通过。提交阶段依用户指令不额外运行测试，Cov% 未跑，保持 —。@2026-09-20
+- [✓] **[P0] 通用真实 LLM 验收统一迁移到 idatatlas Terra**：通用 Responses、CLI、计划、skill、checkpoint/resume 与长会话 fixture 统一按 `idatatlas/gpt-5.6-terra` 及完整 catalog capabilities 解析；DeepSeek / Sunmi 专项路径保留隔离。计划真测现真实发现并公布 `verify` skill，最终 acceptance 确实调用 `load_skill(verify)`；批量 read 的 CLI 工具行也保留单文件失败原因，不再只显示“读取失败”计数。验证：`integration-real-llm` 29/29、ignored idatatlas 长会话 E2E、`cargo fmt --check`、`git diff --check` 均通过。Cov% 未跑，保持 —。@2026-09-20
+- [✓] **[P0] Plan 交付收口已去 runtime-owned gate**：计划不再追加 review / acceptance todo，也不再维护 `acceptance_commands` 或 green-build 证据。LLM 可写一个最终 `kind=acceptance` todo；运行时仅在它进入 `in_progress` 时提示 `load_skill(verify)`，且所有 todo 终态即完成。旧 gate kind 容错映射为 `Unknown`，不会保留旧行为；暂停和恢复不再改写 todo 状态。提示词、verify skill、工具契约、架构文档、schema fixture 与交付流测试同步完成。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets`、`cargo test -p tomcat --lib core::skill::`（25 passed）和 `cargo test -p tomcat --lib core::prompts::`（28 passed）。@2026-09-20
+- [✓] **(版本发布)** CLI `0.1.54 → 0.1.55`、扩展 `0.1.68 → 0.1.69`、bundled CLI `0.1.54 → 0.1.55`：使用 `node scripts/release-version.mjs bump --all patch` 更新权威清单与 Cargo/npm 镜像；`node scripts/release-version.mjs check` 通过。Cov% 未跑，保持 —。@2026-09-20
+- [✓] **[P0] Responses 截断误判、流终态重试与计划收口可靠性整改完成**：Responses adapter 不再把 reasoning-only 或正常 completed 回合臆测为 `max_output_tokens`；流内终态错误会丢弃不完整正文/工具调用、保留诊断并回到重试预算；恢复窗口从可重放 user turn 开始，避免截断工具协议。计划收口移除 mtime “新鲜度”警察，completion guard 改看 Git diff 内容指纹；review / acceptance 两道 gate 统一将 `in_progress` 持久化，以盘上状态判重，并由暂停或重启恢复为 pending。卡住计划在界面显示中文原因，busy 状态始终显示进度点；VS Code 验收启动统一使用 basic password store。CLI `0.1.53 → 0.1.54`、扩展 `0.1.67 → 0.1.68`、bundled CLI 同步。验证：Rust fmt、Clippy、9 项定向回归、扩展 lint、wire 检查、GUI 67 files / 585 tests 均通过；首轮 Rust lib 全量测试发现 5 项断言或恢复回归，修复后已定向复验，不宣称全量复跑通过。@2026-09-18
+- [✓] **(版本发布)** CLI `0.1.52 → 0.1.53`、扩展 `0.1.66 → 0.1.67`、bundled CLI `0.1.52 → 0.1.53`：使用 `node scripts/release-version.mjs bump --all patch` 统一更新权威版本清单与 Cargo/npm 镜像，随后 `node scripts/release-version.mjs check` 通过；Cov% 未跑，仍为 —。@2026-09-15
+- [✓] **[P0] 单列表上下文重构（方案 B）主体已落地**：持久消息列表现为唯一权威；回合开始以 `mem::take` 移交给 `AgentLoop`，结束统一停回 `ContextState.messages`。system prompt 移出持久列表，仅在请求组装时附加；L0/L1/L2/L3 均显式操作同一列表并维护 `start_idx`，tail-only overflow 在首次失败时能直接 collapse。已迁移受影响的单元、集成与 ignored 真实 LLM 用例，新增 serve stdio 长会话验收；真实 Terra 长会话、mid-turn/runtime 用例和 `integration-real-llm` 曾完成验收。期间补齐了 tool-only assistant 的 OpenAI-compatible `content: null` wire 兼容、`--resume` 不重放 assistant 尾部，以及代码评审被跳过时的 transcript 审计事件。当前复核已发现后续整改项（steering 的回合起点传递、失败路径归还列表、skipped 评审的低调 UI 呈现与验收记录回填），故分支保持 ACTIVE；本次提交按用户指令不重跑测试。@2026-09-15
+- [✓] **[P0] 计划收口的声明命令—绿构建凭据对账已用真实 Terra 验收**：`acceptance_commands` 仍是验收下限；每条声明必须对应一条已完成、exit 0、晚于最后编辑、命令与 task ID 实际启动值一致的后台任务。新增手动真实 LLM 用例，让 `idatatlas/gpt-5.6-terra` 在同一次 `update_plan` 调用中启动 Acceptance 并提交精确凭据；用隔离 Git 工作区中的 `test -s acceptance_probe.rs && git status --porcelain -- acceptance_probe.rs | grep -q '^??'` 验证 `&&`、管道、`--` 与正则引用均能端到端对账、持久化并收口为 completed。真实用例与 Clippy 均通过；此前 R1–R7 收口整改的完整 Rust lib 验证为 2875 passed / 2 ignored。标准版本脚本已将 CLI `0.1.50 → 0.1.51`、扩展 `0.1.64 → 0.1.65`、bundled CLI 同步为 `0.1.51`，镜像检查通过。Cov% 未测，保持 —。@2026-09-13
+- [✓] **[P0] 可配置项目资源目录、原生包安装与 Creator 内置技能完成**：新增 `workspace.project_resource_dir`（默认 `<project>/.agents`）并让技能、插件、MCP 配置、项目包和验收截图统一使用它；Connector 设置页只显示并打开后端实际下发的配置文件路径，旧响应缺路径时明确显示“Configuration file unavailable”，不再猜测或创建错误文件。`package_install` 进入原生工具契约，完成确认、路径策略递归检查、原子 registry 写入与安装账本；内置 `skill-creator` / `plugin-creator` 可生成可校验技能和含参数验证的插件骨架。验证：Rust 安装/路径层定向 5 项通过，扩展类型检查与 12 项协议/Settings 测试通过，GUI 4 项通过；完整扩展 `lint + 61 files / 560 tests` 通过；浏览器实测 Add Connector 的缺路径状态显示正确、控制台无 error，证据在 `~/.tomcat/temp/connector-path-unavailable/`。完整 Rust `cargo test --lib` 曾发现 scope 测试的旧 `.tomcat` 断言，已改为 `.agents` 并定向复验；另有 Claude adaptive 既有失败未作为本次功能通过证据。收口与已知限制见 [验收整改记录](../reports/acceptance-remediation.md)。@2026-09-12
+- [✓] **[P0] Stop 点击约 30 秒延迟已根治并完成版本升级**：根因是 checkpoint 的影子 Git 进程先写满 stdout/stderr 管道、父线程却先等待进程退出，双方互等至 30 秒超时，`agent_idle` 因而迟迟未发出。现在启动 Git 后立即由两个 reader 线程并发排空两条管道，超时仍会终止并收集完整输出；turn 的 transcript/context observability 继续同步落盘，而耗时的 checkpoint record 转入 blocking pool，不再位于 `agent_idle` 关键路径。`AgentLoop` 外层另有 biased cancel race 作兜底，影子仓开启 Git 大工作树优化。新增大 stdout/stderr、超时、异步持久化及 serve Stop 回归，先前 `cargo test --lib` 为 2817 passed / 0 failed / 2 ignored；本次提交阶段依用户指令未重跑测试。CLI `0.1.49 → 0.1.50`、扩展 `0.1.63 → 0.1.64`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-11
+- [✓] **[P0] 方案 E 预热/恢复收尾与全链验收完成**：预热缓存继续独立持久化为 `.preheat.jsonl`；`*.user_messages.jsonl` 只是 transcript 的可重建用户原话投影，不携带摘要正文。摘要 LLM `await` 返回后只在生成函数内刷新一次侧车，确保 verbatim 可看到等待期间新增或 Retry supersede 后的当前 user 消息；移除后台成功分支的重复刷新。恢复时若摘要已落入 transcript，会忽略同 marker 的缓存，避免重放；缺 marker 的旧缓存安全跳过。current-tail collapse 在覆盖转录尾部时走 O(1) append，保留中段插入兜底，并锁住 marker 应用幂等。真实 LLM 验收覆盖预热→apply→resume、全链 current-tail 与 collapse/replay；`integration-real-llm` 38/38、Rust `integration-parallel` 376/376、CLI E2E 97/97、QuickJS E2E 15/15、扩展 `gate:full` 均通过。兼容 provider 返回 `finish_reason=stop`，并删除只是在复读配置值的 `source_provider` 断言。CLI `0.1.48 → 0.1.49`、扩展 `0.1.62 → 0.1.63`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-11
+- [✓] **[P1] 缓存探针可对照 `prompt_cache_key` 与两种 wire**：`prompt_cache_real_llm_tests` 的增长前缀马拉松不再向 Terra 中转站发送 `temperature` / `max_tokens`（与生产请求同形）；新增 `TOMCAT_E2E_CACHE_PROBE_KEY=on|off` 诊断开关，以及 `interleaved_tail_placement_ab_probe`（同一时刻背靠背对比 tail 并进 `instructions` vs 放 `input` 末项）。实测 idatatlas 上 ON≈OFF（73%≈72%）且掉坑轮精确落到 4608（仅常热 system prefix），说明该网关未把客户端 `prompt_cache_key` 用于 GPT-5.6 可靠匹配；命中抖动不是 Tomcat 拼上下文形状问题。Cov% 未跑，仍为 —。@2026-09-09
+- [✓] **[P0] Build 审计整改与双网关真实验收完成**：`TodoItem.evidence` 仅持久化至 frontmatter / `update_plan` 返回值，不再干扰 Markdown Todos Board；删除可重算的 `tool_results_compacted` transcript marker，将 current-tail guard 合并为 `reasoning_loop` 顶部的单点请求前检查，覆盖新 turn、follow-up、retry 与 resume 首请求。L0 在摘要 boundary 后改为处理最近一个含工具结果的 turn，避免新 user 消息遮蔽前一回合的超大结果。OpenAI Responses 增加 `chat_collect`，使强制 SSE 的中转站仍可向摘要调用方提供完整响应。真实 idatatlas / fcodex `gpt-5.6-terra` 分别验证预热、摘要应用、重启 guard、build E2E、evidence 和缓存；`cargo test -p tomcat --lib` 2804 passed，CLI `0.1.47 → 0.1.48`、扩展 `0.1.61 → 0.1.62`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-09
+- [✓] **[P0] 验收测试与运行脚本整改完成**：Plan / Retry / Resume 测试对齐现有状态和历史保留行为；测试使用独立目录、模型配置和模拟服务，等待 CLI 进程及管道关闭后才清理资源。nested guard 只抽取判断便于测试，不放松原安全规则。VS Code 五种启动入口统一隔离 Electron 环境；截图直接取自测试窗口，不再误拍用户窗口。测试筛选拒绝零匹配，Rust 离线 / 真实联网 / 手动场景分类补齐；VSIX 共享构建并以内容哈希拒绝过期产物。@2026-09-08
+- [✓] **[P0] 整改必验批次完成并保留失败历史**：Rust lib 2779 通过 / 1 ignored、完整默认集成 377 通过 / 25 skipped；扩展 core / GUI / 集成分别 409 / 572 / 143 通过，安装版 19 通过、VSIX 五场景 10 通过，devhost 33 通过 / 4 pending、manual 2 通过、image 1 通过。跳过项不计通过，启动专属场景另在 verify 窗口执行。格式、Clippy、类型检查、wire、release 构建及版本检查通过；失败命令与后续修复分开记录，不宣称原失败的整条命令退出 0。checkpoint 独立复现未重现历史卡点，相关完整测试通过；真实模型后台通知单项通过不代表所有联网测试都已运行。详情见 [验收整改记录](../reports/acceptance-remediation.md)。@2026-09-08
+- [✓] **[P0] 连接器设置改为默认全局并暴露真实配置文件**：`McpConfigSource::Global` 对外标签从 `User` 改为 `Global`；新增连接器默认写入 `~/.tomcat/mcp.json`，设置页可打开该文件或工作区 `.tomcat/mcp.json`。全局连接器由用户自己维护，普通改配置保持信任，只有显式 Deny 才继续拦截；内置 Playwright 默认带 `trusted: true`。`list_connectors` 回传 `configPath` / `configPathRaw`，设置宿主新增 `openConnectorConfig`。验证：serve `control_test` 路径字段、trust 单测（全局编辑仍可信 / Deny 跨编辑仍封锁）、GUI 连接器页与协议归一化单测。CLI `0.1.46 → 0.1.47`、扩展 `0.1.60 → 0.1.61`、bundled CLI 同步；Cov% 未跑，仍为 —。@2026-09-08
+- [✓] **[P0] Connecting 卡死与启动家务活增量化已完成**：历史回放的每条 `agent.interrupted` 以 transcript 行 id 生成独立时间线 id；实时事件继续使用会话内生成 id。timeline 唯一性断言移到写入边界，历史重建先验证候选时间线再替换，因此错误会在肇事 mutation 处抛出，而 `snapshot/view` 仍可把 degraded 状态、Output 错误与 Retry 动作送达界面。附件根目录在首个 webview ready 时若触发文档重载，旧文档的 bootstrap 会被 generation 丢弃，避免一次失败被重载后的成功状态掩盖。serve 启动家务活在握手 2 秒后运行；派生 `.housekeeping.json` 以 `(len, mtime)` 缓存 transcript blob 引用与 sidecar 期限，未变会话不重读、未到期侧车不重写、账本损坏则安全退化为全量重建。VSIX staging 额外排除 macOS `.DS_Store`。验证：扩展 `npm run lint`、`test:unit`（397 core + 569 GUI）、degraded host E2E；Rust `cargo test --locked --lib`（2777 passed, 1 ignored）、Clippy `-D warnings`、release build；纯插件 VSIX（216 files / 1.53 MB）不含 CLI、源码、测试或 macOS 元数据。CLI `0.1.46`、扩展 `0.1.60`、bundled CLI 同步；Cov% 未跑，仍为 —。@2026-09-05
+- [✓] **[P0] 第三版回归复核与补齐已完成**：补齐 render-budget、interrupt fast-path FIFO、sidecar 写入/压实/删除、degraded→Retry 恢复、GC 坏行跳过、3×5 transcript 单次扫描和 `input_image_ref` 物化等 P0/P1 回归；`gap` 行现在带结构化 `skippedLines`，UI 对截断或不能复原的 diff 给出「打开文件」而非伪造左右对比。迁移会删除 `resume-index`，备份不会嵌套旧 `.pre-migrate-*`，并明确提示下一次 serve 启动后的异步清扫。真实样本的活动记录从 `240,895,381B` 降至 `93,642,924B`（99 张图片、2,900 个 display）；含 blob 的活动目录为约 `145.3MiB`，首次迁移保留的回滚备份约 `245.9MiB`，所以暂时占用约 `391MiB` 是预期的安全代价。`analyze_transcript_storage.py` 证明剩余主记录 `93,612,610B` 的 41.35% 是 assistant 正文，32.09% 是 `read/search_files/bash` 工具结果——这不是 inline display 遗留，**30MB 目标不成立**，后续若要继续缩小应另立「历史保留策略」议题。用最终 locked release 对同一历史会话实测 before→after：`initialize 3178.0→2186.7ms`、`switch_session 972.5→363.7ms`、`get_messages 35.0→42.2ms`、普通读取积压后的 `interrupt 0.3→0.3ms`；另外三轮热态 `get_messages` 为 before `35.5/38.0/35.9ms`、after `46.7/44.5/62.2ms`，均低于 200ms，`interrupt` 均远低于 500ms。`cargo test --locked --lib` 通过（2772 passed, 1 ignored），focused GUI 55、Provider 61、degraded Retry host E2E 1 均通过，`npm run lint` / `check:wire` / `cargo build --locked --release` / `git diff --check` 通过。`cargo tree -i rustls` 与 `tokio-rustls` 均为空；Cargo.lock 仍记录上游可选特性元数据，不能靠手删 lock 条目冒充依赖裁剪。@2026-09-04
+- [✓] **[P0]** 近期回归整改（第三版）已完成：transcript 的大型 diff 改为有上下文上限的形状并移入 `*.tool_display.jsonl`，已发送图片改存 CAS 引用；迁移脚本可幂等地转换旧记录。附件启动清理由全量重扫改为标记—清扫并在握手回包后异步执行；`interrupt` 绕过普通命令队列，且 `task_output(block=true)` 被取消时统一落盘 `[interrupted]`，不留下未闭合的工具对。Webview 新增 `degraded`，区分「已连上服务但 bootstrap 失败」；Stop 点击立即显示 `Stopping…`。`reqwest 0.13` 统一为 native-tls，测试 TLS 也改用静态 PKCS#12 夹具，避免 rustls/AWS-LC 双栈。版本统一升为 CLI `0.1.45`、扩展 `0.1.59`、bundled CLI `0.1.45`。验证覆盖迁移语义、附件 GC、异步中断、schema/tool catalog fixture、降级提示与 Stop E2E；默认 Nextest 运行发现的 fixture 漂移均已重生成并通过复验，`cargo fmt --check`、Clippy `-D warnings`、`cargo build --locked --release`、提示词预算、版本一致性和 diff 空白检查通过。真 LLM 用例由 Nextest profile 单列，未纳入默认门禁。Cov% 未跑，仍为 —。@2026-09-04
+- [✓] **[P0]** Bash/Edit/Plan review 收口及 argv 展示链清理已完成：bash LLM 契约和同步/异步摘要统一为单一完整 `command` 字符串，进程层统一经 `sh -c` / `cmd /C` 执行，删除 argv 双模以消除 `spawn ENOENT`；edit 成功后回传有界、带行号的当前磁盘视图，`NotFound` 时按 `old_content` 的唯一就近行回喂真相；code review 改为首轮全量、后续 mtime 增量审查，默认最多两轮，到界无条件进入 acceptance 并留下残余 finding，P1 计划不符必须引用计划原文。版本统一升为 CLI `0.1.43`、扩展 `0.1.57`、bundled CLI `0.1.43`。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets -- -D warnings`、`cargo test -p tomcat --lib one_line_summary`（5 passed）、`release-version check`、`git diff --check` 全绿；Cov% 未跑，仍为 —。@2026-09-03
+- [✓] **[P0]** `hashline_edit` 在中文、纯符号和空白行不再因行号平移而制造 `HashMismatch`：`compute_line_hash` 收敛为纯内容指纹，行号仅负责定位；一次调用可批量处理互不重叠的原始快照区间，全部锚点先校验、再自下向上套用，所以上方插入/删除不会改变同批下方锚点。无效锚点现在一次汇总 `HashMismatch` / `OutOfRange` 并保证不写盘；提示词与工具契约说明 prose/Markdown 优先 `edit`、新插入文本须重读后再改。验证：hashline 相关 19 项、prompt/catalog、派生工具文档、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 全绿。CLI `0.1.40 → 0.1.41`、扩展 `0.1.54 → 0.1.55`、bundled CLI `0.1.40 → 0.1.41`；纯插件包 `tomcat-vscode-ext-0.1.55.vsix`（1.52 MB，SHA-256 `4f9c9ff5adc8bdfc27ab6b89647da657287dc928512ef2e55d127b85175446e3`）不含 `bin/tomcat`。Cov% 未跑，仍为 —。@2026-09-02
+- [✓] **[P0]** Transcript 通用工具卡不再丢失连接器/未知工具的调用参数：`tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 有可读标签与图标，`tool_call` 只展示内层 MCP arguments；无专属卡片的当前和未来工具都会在展开区显示 JSON 参数（4,000 字符上限且不截断 Unicode）。同时纠正 `ServeConnectionSupervisor` 的冷启动回归：initialize 握手预算从错误的 12 秒恢复为 `max(60 秒, 常规请求 30 秒)`；进程仍存活却未握手时只终止一次并引导 View Logs/Retry，不再杀掉冷启动半成品形成重启活锁；真实进程退出继续走原有有界退避自动恢复。新增慢握手 fake serve 和开发态、纯 VSIX 安装态 E2E（延迟 15 秒仍 ready），另锁住握手超时单次失败和子进程崩溃重试的单测。扩展 `0.1.52 → 0.1.54`；验证：ToolRow focused GUI 测试、`npm run lint`、supervisor 12/12、devhost 慢握手 E2E、完整 `npm run verify:vsix` 与 VSIX 解压校验通过；Cov% 未跑，仍为 —。@2026-09-02
+- [✓] **[P0]** MCP 工具改为渐进式披露：具体 MCP schema 不再注册进 `ToolRegistry` 或进入 prompt 前缀；仅静态暴露 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 与 `connectors` skill 索引，运行态目录通过 `McpManager` 按需查询。`tool_call` / 代码 VM 复用 MCP trust、串行调用与图片回流，修复直连结果一层包装漏读 `isError:true` 的错误状态；L1 source 卡片优先用 MCP 握手元数据说明能力。CLI `0.1.39 → 0.1.40`、扩展 `0.1.51 → 0.1.52`、bundled CLI 同步。验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、完整 `cargo test`、MCP manager/media/端到端回归与 `release-version check` 全绿。Cov% 未跑，仍为 —。@2026-09-01
+- [✓] **[P0]** 打包后用 Cursor/VS Code 同款 `yauzl` 真读 VSIX 每一段；目录对不上或解压失败则删包并让 `package:vsix` 失败，避免再把坏 zip 交给安装器。CLI `0.1.38 → 0.1.39`、扩展 `0.1.50 → 0.1.51`、bundled CLI 同步；`release-version check` 通过。本机纯插件 `tomcat-vscode-ext-0.1.51.vsix`（1.52 MB，SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`）不含 `bin/tomcat`。验证：VSIX 解压门禁单测、完整 `npm run package:vsix`。@2026-08-30
+- [✓] **[P0]** 完成 `connector_mcp_rectification_68b6b688`：MCP 浮动 npm 版本会告警但不阻断；`/connector list` 与 serve 摘要均含安全信任状态（command/args/cwd 快照，env 值永不落盘或回传）；新增按需 `list_connector_tools`，避免摘要携带全量工具。`shot.mjs` 支持默认 `.tomcat/shots/` 输出并在缺依赖时指向 bootstrap。补齐 manager 断线/超时/重连、启动注册撤销、Chat/serve 命令、Cursor 配置兼容和图片回流测试，并让技术方案与 UI 验收计划贴合代码。@2026-08-30
+- [✓] **[P0]** MCP 一轮多工具调用的图片回流改为先补齐全部 terminal tool result、再追加 `InputImage`，避免 OpenAI 拒绝不完整 tool-call 链；steering 打断的未执行调用也显式标记为 skipped。新增批次消息顺序回归，并补齐 opt-in 真实视觉 LLM E2E：headless 路径验证 PNG 回流，headed 路径经 MCP 真实 `navigate → click → screenshot`，把可检查的点击后 PNG 保留在仓库 `.tomcat/shots/headed-interaction.png`。真实 `fcodex/gpt-5.6-terra` headed 用例通过（88.97s）。@2026-08-30
+
+- [✓] **[P0]** Composer 与 Plan Preview 本轮体验/验收闭环：完成态 plan 已不再向 Composer 注入待办 widget；Tomcat Box / Ready to chat 外壳移除右侧多余 10px 内边距；截图 E2E 窄化根节点后以 `try/finally` 恢复宽度，避免后续画面被挤压。Plan Preview 自定义编辑器 E2E 改为由已编辑正文中的唯一 token 推导真实源行，并按每次选择操作前后的引用数验证，保留重复选择不新增 chip 的断言，修复错误期望 `:0` 导致的等待超时。验证：focused Provider 47 passed、`npm run lint:extension`、`npm run test:e2e:vscode-devhost`（33 passing）、`git diff --check` 与 `npm run package:vsix` 通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix`（1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`）不含测试/源码/CLI 目录。@2026-08-29
+
+- [✓] **[P0]** Plan Preview 首帧不再被可选的 serve 初始化/模型目录请求阻塞：宿主先同步发送文档正文、待办与文件态，随后再发送模型/Build 能力的增强帧；每个面板以 generation 丢弃较晚返回的旧增强帧，避免旧正文覆盖新刷新。Plan 入口复用 `WebviewErrorBoundary`，若渲染异常会给出 Reload 页面而非空白标签。回归：慢初始化服务下仍立即收到正文帧；`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build` 和 `git diff --check` 通过。@2026-08-29
+- [✓] **[P0]** Plan Preview Find 已从会漂移的 fixed 几何覆盖层改为文本内联装饰：所有命中和当前命中分别保留，箭头导航只切换当前 class；高亮随真实文字排版滚动，不会飘到无关位置。当前命中通过真实 `span.scrollIntoView({ block: "center" })` 居中，避免环回第一个匹配时计数已更新但视口仍停在底部。`MarkdownBody` 对未变的正文/行映射做 memo，防止无关宿主状态刷新替换命中节点。验证：Find focused GUI 测试 34 passed、`tsc --noEmit`、真实 Dev Host `.plan.md` E2E（含末尾命中、环回首项的滚动断言和截图）均通过；纯插件 `tomcat-vscode-ext-0.1.50.vsix` 已重打，SHA-256=`f100696e3cbf5fc304e45bf88fab8cb286971b58642e67151cb9258ebe923506`。@2026-08-29
+- [✓] **[P0]** `read` 去重不再把不同排版当成同一次读取：新增 `ReadRenderMode` 统一普通文本、普通行号与 hashline 的实际输出形态；仅当文件未变、上次范围覆盖本次请求、排版相同且旧 tool 结果仍在上下文时才返回 `File unchanged` stub，否则重新读取真实内容。executor 的预算计算与最终渲染共用同一归一逻辑；stub 明确提示用 `line_numbers` / `hashline` 取得另一种排版而非改文件。补齐形态互切黑白盒测试和 Layer 0 驱逐后必须真读的集成回归；`code_review_is_stale` 同步按 Clippy 建议收敛。CLI `0.1.37 → 0.1.38`、扩展 `0.1.49 → 0.1.50`、bundled CLI `0.1.37 → 0.1.38`；`release-version check` 通过，纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已生成且不含 `bin/tomcat`。验证：`cargo fmt --check`、Clippy、read/dedup/edit 相关单测与集成测试、`git diff --check`、`npm run package:vsix` 均通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-27
+- [✓] **(版本发布)** CLI `0.1.36 → 0.1.37`、扩展 `0.1.48 → 0.1.49`、bundled CLI `0.1.36 → 0.1.37`：使用 `node scripts/release-version.mjs bump --all patch` 统一更新权威版本清单与 Cargo/npm 镜像，随后 `node scripts/release-version.mjs check` 通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-26
+- [✓] **[P0]** Plan 收口显式化与效率整改：`create_plan` 现在追加 runtime-owned `[gate] review` / `[gate] Acceptance`（`TodoKind` 区分 work 与 gate）；`update_plan` 用可见 gate 驱动 code review → acceptance，返回 `code_review_pass` / `green_build_pass` / 四相 `next_step`，并在代码编辑后同时使两个 gate 失效。非代码 diff 自动跳过两个 gate；验收证据仍要求真实后台任务、exit 0 与编辑后新鲜度。executor/planner/verification prompt 与通用 verify skill 同步明确 focused 检查和最终验收的分工。另完成子 Agent unattended retry 解耦、seed brief transcript 审计落盘、reviewer 相对路径/cwd 纠偏与不存在路径的真实根回显；删除已废弃的隐式收口状态机并补齐 acceptance 拒绝分支与同源文案测试。验证：`cargo build -p tomcat`、`cargo test -p tomcat --lib`（2670 passed, 1 ignored）、`plan_e2e_with_mock_llm_tests`（15 passed）、`cargo fmt --check`、`git diff --check` 均通过；Cov% 未跑 tarpaulin，仍为 —。@2026-08-26
+- [✓] **[P0]** session 用户输入侧车 + UPDATE 机器区回灌修复：新建 `user_message_sidecar`，压缩入口（preheat / `/compact` / current-tail collapse）在 LLM 返回后从 transcript 懒重建 `*.user_messages.jsonl`（仅 active Normal user 原始 JSON；fingerprint + integrity 命中跳过；IO 失败降级省略路径）；机器区 verbatim 收紧为 Normal-only 并在关闭标签前追加侧车路径提示；`messages_to_text` 的 `[Previous Summary]` 与 system `{existing_summary}` 双通道 strip 旧 control/verbatim；删除/枚举/附件 GC 排除侧车并不再误当会话。顺带 `#[cfg(test)]` 收口 `compute_retry_delay_ms` release dead_code，以及 clippy 参数对象收拢。验证：计划记录 `cargo fmt --check`、`clippy -D warnings`、`cargo build --release`、串行 `--lib` 与 `context_management_tests` 全绿；Cov% 未跑 tarpaulin，仍为 —。@2026-08-11
+- [✓] **[P0]** Composer 撤销隔离：Tiptap `contentEditable` 上的 Mod+Z/Y（含 Shift-Z）在 `handleDOMEvents.keydown` 中 `stopPropagation()`，阻断 VS Code webview→workbench 转发，避免二次 `execCommand('undo')` 隔字撤销，以及旧可写计划预览被 undo 改盘；撤销/重做只由本地 history 处理。P0 GUI：撤销恰好一次且 window 冒泡监听未触发；P1 host E2E：只读预览活动时 `undo` 后计划文件字节不变。CLI `0.1.35 → 0.1.36`、扩展 `0.1.47 → 0.1.48`、bundled CLI 同步；纯插件 `tomcat-vscode-ext-0.1.48.vsix`。@2026-08-10
+- [✓] **[P0]** `.plan.md` 预览数据丢失根治：`PlanPreviewEditorProvider` 从可写 `CustomTextEditorProvider` 迁为无文本缓冲的 `CustomReadonlyEditorProvider`；所有预览/serve 刷新只读磁盘，逐面板 `FileSystemWatcher` 覆盖 change/create（原子 rename）并在 delete 时关闭面板，彻底移除 `tomcat.plan.autoSave` 与 `TextDocument.save()` 路径。手改仍只经原生 Markdown 编辑器保存；Provider 46、GUI 19、serve 事件集成和聚焦真机 plan E2E 通过。CLI `0.1.34 → 0.1.35`、扩展 `0.1.46 → 0.1.47`、bundled CLI 同步。@2026-08-10
+- [✓] **[P0]** `ask_question` 实时卡片闪现/消失根治：工具卡与问答卡此前共用裸 `toolCallId` 作时间线 `.id`，增量 patch、分组和 React key 会把两张卡当同一张；问答卡现使用 `approval:<toolCallId>` 渲染键，跨重连合并仍用 `toolCallId`。状态仓库强制每个 session 的 timeline id 唯一；补齐实时共存、interrupt、patch≡full、GUI DOM 与 host E2E（fake serve 也发真实的 tool start + control request）回归。扩展 `0.1.45 → 0.1.46`，`bundledCli=0.1.34` 不变。@2026-08-10
+- [✓] **(版本发布)** CLI `0.1.33 → 0.1.34`、扩展 `0.1.44 → 0.1.45`（`bundledCli=0.1.34`）：`node scripts/release-version.mjs bump --all patch`；`check` 通过。便于验收交付门禁与 in_progress≤3 文案对齐后的整包安装。@2026-08-10
+- [✓] **[P1]** in_progress≤3 文案对齐：`executor.txt` 与 `update_plan` 工具顶层 description 写清「最多三个互不依赖」；参数层 `status` 描述去掉整表上限复读（只保留字段语义 / executing 约束）；`plan-runtime.md` / `todos.md` / `update-plan.md` / `planner.md` 与派生 `tool-catalog.md` 同步。@2026-08-10
+- [✓] **[P0]** 执行效率与交付收口门禁：计划完成态硬门控 `code_review_pass` + `green_build_pass`（证据走 `BashTaskRegistry` 的本会话 task、精确命令与零退出码）；code review 按 P0/P1 过滤、轮次局部 finding ref、`dispute_findings`（仅 wontfix）、abort 退还轮次、infra-retry 耗尽停 completion_guard；默认 `max_code_review_rounds=4`；内置 `verify` skill 要求验收期改代码时自审、补测试并重跑受影响检查；diff-gate 仅对代码路径生效。效率侧：`edit` schema `{path,edits}`、并行 edit/read 提示、无人值守 Retry-After、压缩保留 `logPath`、最多 3 个 `in_progress` todo、web_search 发 `model_name` 并 hosted 失败自动回退。扩展：`WebviewErrorBoundary` 冒烟 + fake-serve 收口 E2E；架构文档 `delivery-accuracy-and-completeness.md`。验证：`cargo test --lib`、`cargo fmt --check`、`git diff --check`、扩展 lint、包装 VSIX ErrorBoundary/close-out E2E。@2026-08-10
+- [✓] **[P0]** ModelPicker 扁平触发器与弹出方向收口：扁平样式落到 `.tc-model-picker-trigger`（三表面一致），删死代码 `.tc-plan-model-select*`；PlanFileCard 菜单 `placement=above`（同 Composer），PlanActionStrip 保持 `below`；§7.6 文档更正。内置目录移除低于 4.6 的官方 Claude（`claude-sonnet-4-5` / `claude-opus-4-5` / `claude-opus-4-1`）。版本 CLI `0.1.32 → 0.1.33`、扩展 `0.1.43 → 0.1.44`（`bundledCli=0.1.33`）。验证：GUI PlanFileCard/PlanActionStrip/ModelPicker、`catalog_test`、`release-version check`、纯插件 `tomcat-vscode-ext-0.1.44.vsix`。@2026-08-08
+- [✓] **[P0]** ModelPicker 二次整改收口：子 Agent 继承会话 Effort（`ProdReviewer`/`Verifier` 经 `clamp_reasoning_level`）；`ask_question` 统一以 `toolCallId` 为身份并加诚实占位 `live`（历史 `[pending]` 被动、重臂后可答、sticky 只收 live）；Composer / Plan 卡 / Plan 预览三处经 `buildPickerModels` 叠加会话 Context+Effort；Settings 新建 relay 按名复用（`models.toml` 优先于内置）九字段预填、Context/Max output 只读默认 400K/128K，端点先精确匹配再启发式；Plan 预览 RPC 失败 toast；`SetContextWindow` trim；文档 `model-picker.md`（单档 Context、偏差表、§8 复用、ask_question 不变量）。暂缓官方 `gpt-5.6-*` 入 `models.toml`。版本 CLI `0.1.31 → 0.1.32`、扩展 `0.1.42 → 0.1.43`（`bundledCli=0.1.32`）。验证：扩展 core 365 + GUI 511、serve commands 85、plan/ask_question 集成、重臂握手回归、`release-version check`、纯插件 `tomcat-vscode-ext-0.1.43.vsix`。@2026-08-08
+- [✓] **[P0]** ModelPicker + Context/Effort 整改收口：Composer / Plan 卡共用单一 `ModelPicker`（固定宽列表、token 搜索、行内 `model id + effort`、始终可见 Edit、配置浮层 `createPortal` 左右竖中对齐且独立于列表）；`builtin_models.toml` 收录官方 `context_window_options`（默认档规则：满档 1M 不涨价用 1M，涨价用 400K；1.05M 并入 1M；去掉 `none` effort）；`model-thinking` 偏好改为 `{reasoning, context_window}` 对象（开发期不做旧串格式兼容）；Settings 新建中转站按 model name 拷贝内置档位/能力且 Context 不可手填；Webview 根挂 `WebviewErrorBoundary`；`package-vsix --skip-build` 增加预构建产物新鲜度门禁；`accept:image` 修 fake-serve `retain_attachment_leases` 与 macOS 窗口定位（弃用找 Electron 的 osascript）。版本 CLI `0.1.30 → 0.1.31`、扩展 `0.1.41 → 0.1.42`（`bundledCli=0.1.31`）。验证：相关 Rust admin/catalog/model_thinking/serve commands 与 GUI ModelPicker/Composer/Settings/Transcript 单测；fake-serve lease 单测；host E2E ModelPicker 与 image acceptance 路径。@2026-08-08
+- [✓] **[P0]** Ctx% 稳定水位整改：冷启动 / 重启后在首个 provider usage 前仍留空；一旦显示过，本进程 slot 生命周期内绝不再因“本轮没有新 usage”而变空。`StreamEvent::Usage` 到达即广播实测水位（早于工具执行）；后续 prompt、系统提示刷新、L0/L2/L3、`/compact`、`/restore` 与模型输入预算变化都广播最佳估算来原位更新已有水位。`providerUsageMeasured=true` 现严格表示本条 event 直接来自 provider usage，`false` 表示估算：它只能让已定基水位更新，不能让冷启动 slot 伪显示，也不能清空已有数字。`get_state` 继续只读 `SessionSlot.last_context_ratio`，不回读 `sessions.json`。验证覆盖 provider usage→工具执行时序、估算保持/冷启动留空、两条 prompt 的 usage pending、compact/rehydrate、模型预算切换、webview state 与 host E2E，Composer 固定宽度不跳版。@2026-08-06
+- [✓] **[P0]** Chat Completions 的移动 `EphemeralTail` 缓存退化已根治：runtime state 不再作为每轮末尾 `user` 出站，而由三 adapter 共用的 text-tail 提取规则归一化到各自 instruction 通道（Anthropic system suffix、Responses `instructions`、Chat Completions leading system）。Chat Completions 的非流式/流式共用 `transport_messages`，所以只改一处；无 system 会安全新建 leading system，tool/reasoning 历史顺序与 transcript metadata 均有回归锁定。真实 DeepSeek `deepseek-v4-pro` 六轮 Agent-shaped 探针：旧 user tail `11,648 → 11,648 → 11,648 → 14,080 → 16,512 → 19,072`，稳定 system tail `13,184 → 13,184 → 15,616 → 18,176 → 20,608 → 23,168`（r6 命中率 `74.6% → 90.3%`）；r3 单次 grant 变化 `3,072`、r4 恢复 `18,176`、r6 `23,168`。版本 CLI `0.1.28 → 0.1.29`、扩展 `0.1.39 → 0.1.40`（`bundledCli=0.1.29`）；验证：`cargo fmt --check`、`cargo test --lib`（2572 passed, 1 ignored）、三 adapter 单测、DeepSeek 真机探针、`release-version check` 与纯插件 `tomcat-vscode-ext-0.1.40.vsix`（无 `bin/tomcat`）通过。@2026-08-06
+- [✓] **[P0]** OpenAI Responses 缓存不随 Agent 对话增长已根治：运行时 `EphemeralTail` 原先作为末尾 user input，下一回合新增的 assistant / reasoning / tool 项会插到它前面，令历史 input 前缀在约 8.7K 截断。现在 tail 仅合入顶层 `instructions`，`input` 只保留 append-only 持久历史；支持 `previous_response_id` 的路由也只发送锚点之后的新项。新增仅记录哈希的 wire fingerprint 和真实 main-agent / transcript replay 探针，fcodex HTTP 的 `previous_response_id` 400 已排除为默认路径。真实 transcript 大结果马拉松读缓存 `0 → 48,640 → 52,736 → 56,832 → 60,928 → 65,024`。版本 CLI `0.1.27 → 0.1.28`、扩展 `0.1.38 → 0.1.39`（`bundledCli=0.1.28`）；纯插件包 `tomcat-vscode-ext-0.1.39.vsix` 已生成。验证：Responses 定向单测、真实 fcodex 探针、`npm run package:vsix` 通过。@2026-08-05
+- [✓] **[P0]** Anthropic Prompt 缓存与 L0/水位复查收口：fcodex 实测推翻「同一 user 消息内、tail 前中间 block 作 D」的 Design X；Anthropic wire 将 `EphemeralTail` 转为不单独打 `cache_control` 的 system 后缀，D 落在最新持久消息完整末尾；OpenAI Responses 的后续修法见上述独立条目。L0 与成功 L2 boundary 结构性绑定；水位计数修掉 tool_dispatch 双计与 abort 低估；补 8 轮 CI 结构门禁与 fcodex 八轮真实门禁（r8 hit≈89.5%），并去掉 `read=0/write>0` 预热放行。版本 CLI `0.1.26 → 0.1.27`、扩展 `0.1.37 → 0.1.38`（`bundledCli=0.1.27`）。验证：`cargo test --lib`（2566 passed）、`release-version check`、定向 `prompt_cache_real_llm_tests` ignored 门禁通过。@2026-08-05
+- [✓] **[P0]** 失败回合 / `max_tokens` / Prompt 缓存整改与二次复查收口：`EffectiveModelLimits` 统一上下文与输出预算；`ChatRequest.resolved_output_limit` 按请求解析 Anthropic/OpenAI wire 上限，去掉 provider 实例缓存的输出上限；空回合守卫回到截断/`reasoning_continuation`/thinking 三选一，不再用 `completion_tokens>0` 误判；classic thinking 下限升至协议 1024；配置键迁到 `context_window_fallback` / `output_reserve_tokens` 且目录加载期校验 `0 < max_output_tokens ≤ context_window`。UI 恢复「按钮消失、错误/中断卡保留」；Retry copy-forward 旧输入 `abandoned` 仍可见；中断卡 live+hydrate 去重为 1。指纹日志默认关闭、O(n) 滚动哈希、user with/without-tail 成对指纹。版本 CLI `0.1.24 → 0.1.26`、扩展 `0.1.35 → 0.1.37`（`bundledCli=0.1.26`）。验证：`cargo fmt/clippy`、`cargo test --lib`（2537 passed）、webview unit 475、E2E 33、`release-version check` 全绿；真实 DeepSeek multi-timeout CLI 仍可能因模型少一次 `task_output` 失败（非本轮回归）。@2026-08-04
+- [✓] **[P0]** Prompt 前缀缓存实现复核补全：`ToolSurface` + `SystemPromptSnapshot` 统一 CLI/serve 刷新路径；权限与计划 reminder 进 ephemeral 尾部，稳定 system/tools 前缀；Anthropic `cache_control` 显式 ≤4 断点预算；`PromptCacheKeyFamily` 收拢 main/subagent/compaction/title/extension key；OpenAI/Responses 解析 `cached_tokens`；删除会重新引入抖动的死入口；补 P0/Layer0/真实 LLM probe 与 20 轮基线（DeepSeek ~93.87%、fcodex Anthropic ~99.98%、fcodex Responses ~71.18%）。版本 CLI `0.1.23 → 0.1.24`、扩展 `0.1.34 → 0.1.35`（`bundledCli=0.1.24`）。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`release-version check` 全绿。@2026-08-03
+- [✓] **[P0]** PlanState 五态拆成会话模式与计划文件态：`AgentMode` 仅 `Chat|Plan`，`ActivePlan{id,path,state}` 承载 planning/pending/executing/completed；Build 回到 Chat 且不因计划完成改模式；取消 executing 降为 pending；`session.agent_mode.changed` + `activePlan` 载荷（protocol v2 / resume schema 3）；executor reminder 按 `executing_plan_id()` 注入；`MessageKind::PlanBuild` 摘要渲染与 pending→Resume 文案。门禁修复同轮落地：预览 dirty 缓冲权威 + `tomcat.plan.autoSave`；confirmed-overflow 至少删一 turn；恢复占位符对齐 PENDING/UNKNOWN_RESTART；E2E 补 interrupt→Resume 与完成后仍在 Chat。验证：`cargo fmt/clippy`、`gate-fast`、`npm run check:wire`/`gate:fast`、`test:e2e:vscode-devhost` 全绿。@2026-08-03
+- [✓] **[P0]** resolver 迁移后的 14 条 Rust 红测已按根因收口：serve `FixedResolver` 经 `from_provider_and_entry_unchecked` 保留 catalog capabilities；`HostApiDispatcher` 用同一次 `ResolvedCall` 盖章 wire model；会话级缓存 `OpenAiFilesRuntime` 让 enqueue/cleanup 共享队列；compaction 未解析夹具、bash `wait_for_finish`、dispatcher `007` 断言对齐。验证：`cargo test --lib`（2479 passed, 1 ignored）。@2026-08-02
+- [✓] **[P0]** 提示词整合、链接可点击与摘要待办回归已收口：聊天/计划预览外链走 `openLink`；文件路径改为「预筛候选 → 宿主 `resolvePaths` 存在性校验 → 再渲染可点 chip」，并支持 `path:59-103` / `#L10-L20`；验证规则并入 `system/verification.txt`，planner/executor 去重，S6/S7/S8 字节对齐且 code review 去掉不适用的 S7；EXEC 恢复 `todos`；压缩摘要用 `ProgressSource` 保证 PlanFile 与 session scratchpad 二选一；thinking 截断/误作正文改为显式失败并补日志。版本 CLI `0.1.22 → 0.1.23`、扩展 `0.1.33 → 0.1.34`（`bundledCli=0.1.23`）。验证：Rust 提示词/工具/摘要/agent_loop 分批绿；扩展 `npm test`（core 344 + gui 471）与 `npm run lint` 绿；`node scripts/release-version.mjs check` 通过；完整 `cargo test --lib`（2479 passed, 1 ignored）通过。@2026-08-02
+- [✓] **[P0]** smart picker 多选引用竞态已修：`35131f9` 把多选改成并发逐项通知后，旧“仅第一项”的草稿回写会覆盖完整选择，文件夹 chip 偶发消失。现改为一次 draft 替换 + 一次 `insertReferences` 批量事件；Composer 用单次 TipTap 事务插入全部引用且只同步一次完整草稿；本地脏草稿会合并 host 新增引用而不丢 chip。验证：`routes smart picker selections into attachments and context chips` 安装包 E2E 绿；扩展 `npm run gate:full` 全绿。@2026-08-02
+- [✓] **[P1]** release 构建 dead-code/unused-import 告警收口：仅测试使用的 `assert_active_tool_result_integrity`、`run_tool_calls`、`finalize_turn_after_text` 加 `#[cfg(test)]`，生产路径继续走 `*_with_usage`；`cargo check --lib` 无上述 4 条 warning。@2026-08-01
+- [✓] **[P0/P1]** Retry/Resume 失败恢复已按 append-only transcript 收口：Retry 在同一把 transcript 锁内先给源 user 与其后的残留消息盖 `superseded`（源行另带 `turn_failed`），再复制出新 user；重启注水不会重复提示词，也不会留下无归属的半截 assistant。Resume 不复制 user，只在完整 tool-result 活尾巴（含 `[pending]` 自愈占位）时续跑。磁盘继续保留失败 user、auto-retry custom 和 error 供审计；界面则只投影当前尝试——点击 Retry/Resume 或发送新提示后，已了结的错误卡消失；Retry 的旧 user 气泡也随之隐藏，Resume 保留原 user 与工具链。`role:tool` 的自愈占位不误判为对话继续，错误卡仍可给 Resume。压缩按钮位于新建按钮右侧，改用 `codicon-layers`。验证：Rust 定向 copy-forward/幂等盖章与 extension state/provider/flow 回归通过；带截图的 host E2E Retry/Resume 两路径通过；扩展 `gate:full` 全绿。@2026-08-02
+- [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
+- [✓] **[P0]** 主助手与 PLAN 的表达规范已分层：主助手保留总览/复杂章节 ASCII 图、言简意赅、术语通俗解释和背景交代；PLAN 区分问题四个子章节与功能需求三个子章节，并要求完整说明写入计划。关键决策保留具体文件/符号/契约、前后行为及范围边界，删除强制 non-goals 和重复旧文；既有 milestone/todo 拆解、验收策略与审查器模板不变。回归按通用与计划专属要求分别校验，提示词定向 28 项通过，最后精简文案后 planner 单项复验通过；`rustfmt --check`、`git diff --check` 通过。未测覆盖率，Cov% 保持 —。@2026-09-15
+- [✓] **[P0]** Plan Preview selection 去重修复：列表项获得精确源行，selection identity 始终纳入文本快照 hash；不同条目可连续加入、完全相同引用仍去重，wire 协议不变；补齐 blockquote 内列表项递归行号映射与 2s 连续稳定性 host E2E 断言。@2026-07-29
+- [✓] **[P1]** 真实 PLAN 行为冒烟覆盖简单单面任务与双问题非简单任务：两类场景都只用直接读工具、`dispatch_agent=0`，分别生成 flat linear todos 与 milestone todos；结构和通俗解释要求通过，同时保留 renderer 样例预期与 todo/正文矛盾的生成质量风险。@2026-07-29
+- [✓] **(版本发布)** CLI `0.1.21` + Extension `0.1.31` + bundled CLI `0.1.21`：统一执行 `node scripts/release-version.mjs bump --all patch`，已验证 `check` 通过且 Cargo/npm 镜像一致。@2026-07-28
+- [✓] **[P0]** code review 耗时失控与子 Agent 可观测性根治已在本地源码二进制上完成实测闭环：completion guard 现在只看 `subagent_type.is_root()`，只读子 Agent（`CodeReviewer` / `Verifier` / `Explorer`）不再持有 `plan_runtime`，避免把父计划执行态误带进子 loop；`tool_display` 改为随 transcript 持久化，reload 后单文件 / 批量单文件仍保持可点 diff 卡，多文件保持列表卡；`ReviewRow` running 态新增 `round + elapsed`；`plan.review.started` / `plan.code_review.started` / `plan.explorer.started` 会在主 transcript 写入 `child_session_id + transcript_path`，子 transcript 派发即创建并先写 `subagent.transcript.meta`；provider 重试等待可被 cancel 打断；`search_files` Tier2 超时 warning 改成先收窄 `path/glob/file_type`。最关键的真实回归数据来自**工作区本地编译的** `target/debug/tomcat`（不是系统已安装旧版）：`fcodex/gpt-5.6-sol + xhigh` 的最小真实 build 链路中，planning `119.896s`，exec 总墙钟 `381.499s`，`plan.code_review.started -> plan.code_review(pass)` `318.363s`；reviewer 第 1 次尝试在 `180s` 触发 `auto_retry_start`（`LLM调用错误: 流式空闲超时: stream_timeout_sec=180s`），第 2 次尝试约 62s 后成功返回 `pass`；主 transcript 已实测含 `child_session_id` 与 `transcript_path`，子 transcript 含 `auto_retry_start/auto_retry_end` 与最终 `<review>`，重复 review 块回落为 1 次真实 started + 1 次 pass 收口，不再出现 60 分钟无返回黑洞。@2026-07-28
+- [✓] **[P0]** CLI / VS Code 扩展版本管理已收敛：新增根权威清单 `release-versions.json`，将 CLI、扩展和 bundled CLI pin 作为三个独立发布事实；零依赖 Node 工具提供 `bump` / `set` / `sync` / `check`，定点同步 Cargo/npm manifest 与 lockfile，并以验证优先、单快照和 rename 防止漂移、坏输入写入及并发覆盖；release guards、CLI/EXT workflows 与独立 version-sync CI 全部接入同一检查；私有 GUI 不再携带无意义版本。验证：版本 unit/fixture `19/19`、guard `10/10`、扩展 integration `342 passed`、GUI `438/438`、`cargo build --locked --release`、`tomcat --version=0.1.20`、npm CI/compile/GUI build/VSIX 打包与包内 `0.1.30 + bundled 0.1.20` 检查均通过。@2026-07-28
+- [✓] **[P0]** 子 Agent 模型/Provider 绑定根治：删除 ChatContext 启动期冻结的 `llm` / `openai_files_runtime`；`ResolvedCall` 密封 + `catalog_id`；`AgentLoop::new(binding)`；4 类子 Agent 派发时经 `LlmResolver` 配对；解析失败 `model_unresolved`、首包 LLM Fatal 用 `[no transcript]`；架构不变量扫描 + 集成回归 `subagent_uses_provider_matching_session_model_not_startup_default`；文档 `docs/architecture/llm/model-provider-binding.md`。@2026-07-27
+- [✓] **[P0]** Agent 交付控制整改已落地：PLAN/EXEC 控制态写入 `resume-index`（schema 2）并 fail-closed 恢复；压缩摘要后置机器区块；EXEC 下 text-only 回合走 completion guard；`max_code_review_rounds` 默认 8，`verdict≠pass` / 轮次用尽均不收口、交还用户；reviewer/verifier 派发改记 catalog id（修线上名串台）；新增只读 `Explorer` + `dispatch_agent`；`read`/`edit` 支持批量、`search_files` 默认 ±3 行上下文、ReadStamp 区间包含 + 压缩失效；GUI 批量 files 卡片、Build 模型去掉 Session default 并在与会话模型不同时确认。冒烟抓到并修了两处真实缺陷：strict schema 空壳字段导致批量 edit 互斥误判、以及顶层把同一意图抄进 `path`/`edits` 时不应再罚往返。离线复算脚本 `scripts/replay-tool-metrics.py` 可对历史 transcript 回放批量/去重收益。版本 CLI `0.1.19 → 0.1.20`、扩展 `0.1.29 → 0.1.30`（`bundledCliVersion=0.1.20`）。验证：Rust lib `2361 passed`；plan mock/integration 套件绿；扩展 `gate:full` 绿；既有无关红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 与 HEAD 基线一致，未记为本轮回归。@2026-07-27
+- [✓] **[P0]** provider 流内终局错误链路已补齐到真正可自愈：空回答里的 `response.failed` / `LlmError` 不再只在流层发事件，而是会回 Attempt Loop 参与现有重试预算；第一次按原样重试，连续第二次仍被判“不接受多模态”时仅在内存里把 `input_image` / `input_file` 降级成占位文本再试一次，`content_filter` 这类确定性拒绝仍保持一次终局。前端红字去重同步收口：`reason` 只做标签，不再把同一句正文打两遍；`auto_retry_start` 渲染成 notice，不再伪装成 error。验收盲区也补上了：之前测试矩阵只有“附件能否存 / 能否画 / 能否回放”，缺了整整一列“provider 在流里拒绝”场景；现在 Rust 侧新增 wire/unit + serve integration 覆盖 `response.failed -> raw retry -> degrade retry -> terminal/error budget`，扩展 acceptance 侧新增 fake-serve 脚本化 `llm_error`、重试 notice / 降级 notice、以及“重试成功后红字不残留”验收截图。定位工具同时沉淀为 `tomcat/scripts/replay-turn-payload.py`，可直接拿 transcript 某一轮 user turn 对真 `/v1/responses` 重放，只打印请求 shape 与终局事件、不打字节。本机复测：同一份 10:58 transcript 真实重放成功返回 `response.completed`，坐实“不是 PDF 本身不合法，而是上游/中转偶发拒绝 + 我们此前没把流内终局错误送回重试主路”。**发布顺序必须是 CLI 先发，或 CLI/扩展同发；只发扩展等于什么都没修。** @2026-07-27
+- [✓] **[P0]** 附件体验收尾与 transcript 内联图已闭环：预览工具栏统一切到 codicon，复制成功会亮 `1.5s` 对勾；`attachImages` 泛化为 `attachFiles`，PDF 与图片共用粘贴 / 拖拽 / 选择器 / 历史 reference 全链路，`sourcePath` 只作 UI hover / reopen 元数据贯通到 pending 与 history，PDF 在 composer / history 中改为 48px `PDF` 方块；assistant 正文新增 **display-only** 本地内联图支线，只有 `![alt](path)` 且路径落在 workspace 或 `os.tmpdir()` 授权范围内时才直渲并可轻量放大，远程或越界路径一律降级成文本，不进 Rust CAS。`SystemOutputConventions` 也同步扩到 `![...](path)`，这是 transcript 富渲染里**第二次“提示词—渲染耦合”扩展**；由于 prompt 通过 `include_str!` 编译进 CLI，发布顺序必须是**CLI 与扩展同发，或先发 CLI**。验证：`npm run accept:image` 全绿并产出 `09-14` 新验收图；`npm run gate:full`、`npm run test:integration` 全绿；`cargo test` 当前被独立红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 阻塞（30s 子进程退出超时，已单例复跑确认，与本轮附件 / prompt 改动文件无交集）。@2026-07-26
+- [✓] **[P1]** AI 辅助配置出库已完成：仅 `/.cursor/rules/` 与 `/.cursor/plans/` 加入 `.gitignore` 并从 Git 索引移除，本地文件保留不删，`/.cursor/commands/` 继续受版本控制。@2026-07-26
+- [✓] **[P0]** 图片附件链路整改已落地：草稿权威从 Rust 草稿目录迁到扩展层 `ComposerDraftStore`（只存文本与哈希引用）；Rust 新增内容寻址 `AttachmentBlobStore` 与 `ingest_attachment` / `cache_attachment_thumbnail`，`initialize` 握手下发 `attachmentRoot`；webview 用 `asWebviewUri` + 192px 缩略图回填，SVG 走 typed `blob:` 显示、栅格化 PNG 作 `providerSha`。验收：`accept:image` 22 checks 全绿，11 图位图实测约 480MB → 1.16MB，打字 outbound 0 字节；版本 CLI `0.1.17 → 0.1.18`、扩展 `0.1.27 → 0.1.28`（`bundledCliVersion=0.1.18`）。本机产物（不入库）`tomcat-cli-v0.1.18-x86_64-apple-darwin.tar.gz` 与纯插件 `tomcat-vscode-ext-0.1.28.vsix`。@2026-07-26
+- [✓] **[P0]** 流式回答“整本重发”性能债已收口：host 抽出 `StateBroadcaster`（约 16ms 攒发 + force flush），`applyEvent` 产出 `none|patch|session` mutation，过桥按三层择帧——`state`（结构变化）/`sessionView`（单会话整份）/`sessionPatch`（timeline 热路径 `appendText|upsert|remove` + per-session `seq`）。GUI 用 `mergeSessionViewSnapshot` / `applySessionPatchFrame` 接帧，seq 跳号或 target 缺失即 `resyncSessionView`；`TOMCAT_DISABLE_SESSION_PATCHES=1` 可一键退回单会话帧。叶子热路径组件补 `React.memo`；新增 bridge bench（`npm run bench:webview-bridge`）与 patch≡full 等价性测试。bench after：`sessionPatch` ~167B vs full ~328KB（~1965x）、行渲染每 delta 1 vs 500（500x）、patch merge ~95x 快于 full reconcile。扩展 `0.1.26 → 0.1.27`；本机纯插件 `tomcat-vscode-ext-0.1.27.vsix`。验证：`test:unit`（core 232 / gui 359）、`test:integration`（304，含等价性与 provider_flow）、`verify:vsix`、`compile` 全绿；E2E 库登记 `E2E-VSCEXT-034/035`。@2026-07-24
+- [✓] **[P0]** Bash 执行与验证耗时整改已落地：`tools.bash.timeout_ms`（到期杀进程）改为 `foreground_wait_ms`（默认 16s，硬夹 8–16s）的**前台观察窗**；到期后有 shared registry 的路径（主 loop / Verifier / CodeReviewer / ext host）`promote_to_background` 转同一 tracked task，模型用 `task_output`/`task_stop` 收口，不再半途杀编译。抽出 `build_bash_task_registry` 统一装配 wait 策略与 background guard；裸 primitive / 隔离单测无 registry 时到期有界停进程组，杜绝 ephemeral registry 泄漏 runaway。ext host 本期补齐 `taskOutput`/`taskStop` HostCall（block wait 夹到宿主 async 超时内），插件 `exec` 可跟前后台。GUI 命令卡支持 liveOutput 增量与前后台同卡转换。版本：CLI `0.1.17`、扩展 `0.1.26`（`bundledCliVersion=0.1.17`）；本机产物 `tomcat-cli-v0.1.17-x86_64-apple-darwin.tar.gz` 与纯插件 `tomcat-vscode-ext-0.1.26.vsix`。验证：相关 Rust lib/E2E（含 Verifier 长命令 `task_output`）与扩展设定/协议版本断言已同步。@2026-07-24
+- [✓] **[P0]** Code Review 时间线 attempt 契约整改：新增父 session scoped `plan.code_review.started`，与 `plan.code_review` 共享 `reviewAttemptId=<planId>:<round>` 和触发 `update_plan` 的 `toolCallId`；最后 todo 完成后先广播 `plan.update`/`plan.todos`，再显示独立 `ReviewRow: Reviewing code...` shimmer，结构化 result 到达后同一 row 原地落定。通用 child `sub_agent_start/end` 只作审计，不再造成 ABORTED 闪烁。Webview 以 attempt 去重并按 toolCallId 锚定 live/history/分页顺序，DOM snapshot 暴露 review identity/status/verdict/top/anchor。`AgentRegistry` 对 drop 的 spawn future 增加 cancel+unregister 清理，避免并发额度泄漏。验证：Rust code-review focused 4 passed、serve schema 11 passed、AgentRegistry（含 drop 竞态）17 passed、extension core 219 passed、GUI 342 passed、wire check 与 lint 全绿；本机纯插件包 `tomcat-vscode-ext-0.1.25.vsix`（不含内置 CLI）已重打供体验安装。@2026-07-23
+- [✓] **[P0]** Shell 命令展示层级修复：结构化 argv（`command` + `args[]`）在命令卡片终端正文漏拼导致只显示 `$ cargo`；现 `ToolRow.fullCommandText` 会重建完整命令并对含空格/引号/空串参数做 shell quoting，预览/展开/程序标签共用同一份完整命令。thinking 组头单 Shell 即时回退从 `Ran <完整原始命令>` 改为 `Ran shell command`，turn title utility prompt 明确要求描述目的、不复述 flags/路径/测试名；不增加 utility 返回值门槛或二次调用。扩展版本 `0.1.24 → 0.1.25`，本机纯插件包 `tomcat-vscode-ext-0.1.25.vsix`（不含内置 CLI）。验证：`cargo test --lib core::summary::tests::title_generator_test`（`18 passed`）、GUI `ToolRow`/`ThinkingGroup`（`48 passed`）、webview `state.test.ts`（`63 passed`）、`npm run lint` / `build:gui` / `package:vsix` 全绿。@2026-07-22
+- [✓] **[P0]** System prompt 去动态时间 + PLAN 修订契约收口：`workspace_context.txt` 去掉 `Current date and time: {now}`，`WorkspaceContextSection` 不再注入本地时钟，使相同 workspace/权限输入下 system prompt **字节级确定性**（便于缓存、对账与回归）；单测改为断言无时间文案/`{now}`，并补「同输入完全一致」与「权限/skill/plugin 变化会反映进 prompt」守卫；serve `new_session` 回归同步锁住。同时重写 `planner.txt`：修订既有计划时正文走 `read`+`edit`/`hashline_edit`，todos 走 `update_plan`，禁止再靠 `create_plan` 叠第二份计划或用 prose 伪计划。@2026-07-22
+- [✓] **[P0]** Code Review 收口整改已落地：完成态不再走对抗式 Verifier（`verify.rs`/dispatcher 保留 dormant）；Plan/Code Reviewer 彻底拆成独立 `SubagentType`、dispatcher、summary 与白名单守卫，仅共享 kind-无关 `<review>` 解析；`update_plan` 收口后跑 code review，non-pass 用强祈使指令引导 reopen/新增修复 todo（默认轮次 1，不自动建 todo）；serve `plan.code_review` 携带 `verdict/findings/changes_summary/rounds`；扩展时间线新增 `ReviewRow`（running shimmer → done 色标 + findings 可展开）。验证：相关 Rust focused/lib（排除无关 flaky net_fetch）与扩展 `npm run lint` + `npm run test:unit` 全绿；本机纯插件包 `tomcat-vscode-ext-0.1.24.vsix`。@2026-07-22
+- [✓] **[P0]** 折叠 `ThinkingGroup` 的 **Group Activity Ticker** 已落地：为了解决“第三轮默认折叠后看不见组内工具进度”，前端新增 [`GroupActivityTicker.tsx`](../../../tomcat-vscode-ext/gui/src/components/GroupActivityTicker.tsx)，在折叠组头下方复刻展开子行骨架（16px 图标列 + 24px 文案缩进 + 左侧连接竖线），并按队列逐个翻牌展示组内工具；当前项完成后以 **2 槽位 `translateY(-50%)`** 平滑滚到下一项，静默间隙则停留在最后一个已完成工具上并继续 shimmer。为避免“组内 streaming 在工具间隙误判结束”，`[TranscriptView.tsx](../../../tomcat-vscode-ext/gui/src/components/TranscriptView.tsx)` 现改为基于 live cluster 末尾 assistant 活动计算 `activeAssistantMessageId`，只给最后一个活跃 context-group 段传 `isLive=true`；`[ThinkingGroup.tsx](../../../tomcat-vscode-ext/gui/src/components/ThinkingGroup.tsx)` 在折叠态挂载 ticker，并把 `isLive` 纳入 memo 比较。另一个关键补丁是保留最后一个 post-user cluster 穿过 `busy=true → false` 的父级切换，这样 ticker 才能真的在 turn 结束时先滚空再平滑收拢，而不是被 `TranscriptView` 提前 remount 掉。验证：focused `npm --prefix gui run test -- src/components/GroupActivityTicker.test.tsx src/components/ThinkingGroup.test.tsx src/components/TranscriptView.test.tsx`（`40 passed`）、全量 `npm run test:unit:gui`（`42 files / 330 tests passed`）与 `npm run lint` 全绿；`E2E_SCENARIO_LIBRARY.md` 已补 `E2E-VSCEXT-010A` 锁住 ticker 翻牌、linger、收尾隐藏与无抖动验收口径。@2026-07-22
+- [✓] **[P0]** 折叠 `ThinkingGroup` ticker 的“滚动即闪”本轮已按**根因改正**：问题不在 ticker 自身高度变化，而在 live context 工具运行时 `ProgressRow` 被阶段性隐藏，导致正在做 `transform` 动画的 ticker 成为 `followBottom` 钉住的底边元素；本轮把 `[ProgressRow.tsx](../../../tomcat-vscode-ext/gui/src/components/ProgressRow.tsx)` / `[TranscriptView.tsx](../../../tomcat-vscode-ext/gui/src/components/TranscriptView.tsx)` 改成 **busy-turn 全回合常驻** 的底部心跳方案：只要当前回合还 `busy=true`，左对齐原生 loading 三个点就一直稳定挂在 live cluster 尾部，不再随 `thinking -> tool -> assistant text` 阶段切换而忽隐忽现；同时给 `[useAutoScroll.ts](../../../tomcat-vscode-ext/gui/src/useAutoScroll.ts)` 保留“已在底部即 no-op”的 `scrollTop` 写入守卫，避免每个新工具都无谓重写底边。配套保留此前两处抗抖收尾：`[GroupActivityTicker.tsx](../../../tomcat-vscode-ext/gui/src/components/GroupActivityTicker.tsx)` 的 `--entering` 高度渐入，用来消掉首个工具的 0→20px 弹出；`[TranscriptView.tsx](../../../tomcat-vscode-ext/gui/src/components/TranscriptView.tsx)` 给“单 context 工具→独立 ToolRow”捷径加 live 尾段豁免，确保 1→2→N 工具期间 `ThinkingGroup`/ticker 不重挂载。视觉上，[`styles.css`](../../../tomcat-vscode-ext/gui/src/styles.css) 仍保留折叠态 ticker 的 `--tc-group-indent` 缩进与 x=8 连接线来强调“这是组内子项”，展开态 grouped tool rows 继续维持上一版的浅缩进 + 极弱两端淡出竖线；另一个相关收口是 `[ThinkingBlock.tsx](../../../tomcat-vscode-ext/gui/src/components/ThinkingBlock.tsx)` 继续保持纯 `<pre>` 低爆炸半径路径，但会把同一行里连续相邻的 `**...**` 原始粗体标题块拆成多行，避免 `**A****B****C**` 挤成一大串。验证：focused GUI `npm --prefix gui run test -- src/components/ProgressRow.test.tsx src/components/TranscriptView.test.tsx src/components/ThinkingBlock.test.tsx src/components/ThinkingGroup.test.tsx`（`4 files / 44 tests passed`）、全量 `npm run test`（`42 files / 336 tests passed`）、`npm run lint` 全绿；targeted devhost E2E `TOMCAT_E2E_GREP="keeps max reasoning and pre-stream loading states working in the webview|streams in the Tomcat webview" npm run test:e2e:vscode-devhost` 也已 `2 passing`。验收版本仍为 `0.1.24`，本机已重打 `tomcat-vscode-ext-0.1.24.vsix` 供体验安装。@2026-07-22
+- [✓] **[P0]** chat-completions 纯文本扁平化已修复：根因是多模态收口提交把 `normalize_for_completions` 退化成「只 degrade、不 flatten」，文本模型历史仍以 `Parts` 发出，导致 3 个既有 provider 单测红。现恢复 **capability-aware 压平**——降级后若消息已无真 `InputImage`/`InputFile`，用 `parts_to_completions_text` 压成 `ChatMessageContent::Text`；仍含受支持多模态 part 则保留 `Parts` 走 `image_url`/`file`。新增边界/集成单测锁住 vision-only 不误压平、Text 透传 `Cow::Borrowed`、纯文本 wire `content` 为 JSON 字符串。验证：目标 3 例 + multimodal/transport 回归 + `cargo test --lib core::llm`（`312 passed, 1 ignored`）全绿；`chat_real_request_response_print --ignored` 真实 DeepSeek 冒烟通过。@2026-07-22
+- [✓] **[P0]** 长任务后台倒计时 / loading **第三轮整改（第一性原理改根）已落地**：两份实测 transcript 坐实前两轮 UX 病灶——`task_output(block=true)` 醒来 **~90% 是 `new_output`**（`cargo build`/`npm test` 每秒几十行日志，`wait_for_change` 一见文件变长就秒醒），倒计时几乎从没真正走过，时间线被短命「Waited for shell」行刷屏。本轮不再在前端补丁，而是**改后端语义（方案 A）**：新增 `[bash_task.rs](../../src/core/tools/primitive/bash_task.rs)` 的 `wait_for_finish(task_id)`——只在终态(Finished/Stopped)返回、**完全忽略日志文件长度**，沿用「先注册 `notified()` 再判状态」的 race-free 顺序，pump flush 唤醒后仍 Running 就接着睡（不 busy-spin）；`[task_output.rs](../../src/core/agent_loop/tool_exec/branches/task_output.rs)` 的 `select!` 把 `wait_for_change` 腿换成 `wait_for_finish`、**删除 `BlockingWakeKind::NewOutput`**，`wakeReason` 收敛为 `finished`/`timeout`；`timeout` 分支改为**始终回有界尾巴**（`read_output_tail`，上限 4KiB，`next_offset` 指向 EOF），`content` 空即表达「本片等待期间无新增输出、疑似静默」，不再一次性回吐 `[since,EOF)` 全量炸上下文；`WakeReason` 枚举与 `wait_for_change` 一并删除，`primitive/mod.rs` 导出同步收敛，无残留死代码。契约/提示词/文档三处同步去掉 `new_output`（`catalog.rs` description+`block/timeout_ms`、`background_shell_monitor.txt` 用法①、`bash.md`、`tool-catalog.md`）。**前端分组**：`[ToolRow.tsx](../../../tomcat-vscode-ext/gui/src/components/ToolRow.tsx)` 的 `isActionTool` 收紧为**仅「运行中的 `block=true`」**才转正为一等公民独立倒计时行（`isRunning && isBlockingTaskOutput`），完成的 `block=true`、任意 `block=false`、`task_stop`、`task_list` 一律进折叠分组；`[TranscriptView.tsx](../../../tomcat-vscode-ext/gui/src/components/TranscriptView.tsx)` 的「单工具直挂」捷径排除 task 家族，孤立的它们也走折叠分组。**防闪**：`[ThinkingGroup.tsx](../../../tomcat-vscode-ext/gui/src/components/ThinkingGroup.tsx)` 流式期间默认折叠、仅 header 文案 shimmer（去掉 `collapsed=!streaming` 自动展开）；`React.memo` 包 `ToolRow`/`ThinkingGroup`/`MessageBubble`（字段级比较器）当「锁」，新增 `[stateReconcile.ts](../../../tomcat-vscode-ext/gui/src/stateReconcile.ts)`（`reconcileStateSnapshot`/`reconcileArrayByKey`/`deepEqual`）让未变 timeline item 复用旧对象引用当「钥匙」，`App.tsx` 收帧时先 reconcile 再 setState，锁+钥匙齐全 memo 才真正生效；`[useAutoScroll.ts](../../../tomcat-vscode-ext/gui/src/useAutoScroll.ts)` 给 `ResizeObserver` 驱动的 followBottom 重钉降频（48ms 内纯高度变化不重复拽底）。**末尾 Loader**：`[ProgressRow.tsx](../../../tomcat-vscode-ext/gui/src/components/ProgressRow.tsx)` 抑制条件去掉 `hasTodos`，静默间隙对话流末尾恢复 `...`（仍保留 `hasActiveThinking`/`hasRunningTool`/`hasStreamingText` 抑制）。验证：Rust focused `cargo test --lib bash_task`（`12/12`，含新 `wait_for_finish_ignores_new_output_until_terminal`/`wait_for_finish_returns_on_natural_exit`）、`cargo test --lib task_output`（`17/17`，含 `finish_blocking_with_timeout_returns_empty_content_when_no_new_output_since`/`finish_blocking_with_timeout_caps_tail_and_advances_to_eof`/`task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still_running`）、`background_monitor` 全绿；`npm run test:unit:core`（`216/216`）与 GUI `npm --prefix gui run test`（`41 files / 319 tests`）全绿。此前记录的 3 个 `openai_provider_test` 既有失败已在同分支后续提交修好。@2026-07-22
+- [✓] **[P0]** 长任务后台 loading 第二轮整改已落地：`task_output(block=true)` 现在不再埋进 thinking 灰组，而是以 **task action row** 独立显示，倒计时行保持 shimmer、逐秒原地更新，并在 slice 结束后翻成 `Waited for shell` / `Stopped waiting for shell`；同时后台 `bash(run_in_background=true)` 卡片不再因为“tool 调用已完成”就假装结束，而是靠新的 `background_task_finished` 真实任务生命周期事件持续显示 `Running in background`，直到后台任务退出后再翻成 `Ran`（非零退出码显示 `Ran · exit N`）。serve 侧还顺手补上了历史缺失的 completion subscriber：插件会话现在也会把 `<background-task-finished ...>` 正确注入各自 session 的 `follow_up_queue`，并在 session cleanup 时回收 subscriber handle，避免长驻 serve 进程泄漏后台协程。验证：Rust focused `cargo test serve_background_task_finish_routes_event_and_queues_follow_up_for_same_session --lib`、`serve_cleanup_aborts_background_task_subscribers --lib`、`serve_dts_preserves_wire_event_session_id --lib`、`serve_event_pump_allowlist_includes_summary_upgrade_events --lib` 全绿；扩展 `npm run gen:wire && npm run check:wire`、`npm run test:unit:core -- src/ui/webview/tests/state.test.ts`、GUI `npm --prefix gui run test -- src/components/ToolRow.test.tsx src/components/TranscriptView.partition.test.ts src/App.test.tsx` 全绿。@2026-07-21
+- [✓] **[P0]** 长任务后台倒计时 / loading 整改已按计划落地并锁住三端口径：`task_output(block=true)` 现在把单次 wait slice 合同从“默认 5s、最多 30s”扩成**实际 clamp 到 5s–10min**（`0` 仍等价非阻塞），`task_output` 的 catalog/schema/tool-catalog 文案同步收口；CLI 的实时监视行改用和面板一致的紧凑倒计时格式（例如 `9m59s`）；webview transcript 则不再吃后端 500ms 心跳，而是在 `tool_execution_start` 时给 `WebviewToolCard` 盖 `startedAt`，由 `ToolRow` 本地每秒递减渲染 `Waiting up to {9m59s} for shell`，结束后原地翻成 `Waited for shell` / `Stopped waiting for shell`。同时，后台 `bash(run_in_background=true)` 的回执 JSON 现在追加了 just-in-time `next` 提示，明确告诉模型什么时候该 `task_output(block=true)`、什么时候继续做别的事并等待 `<background-task-finished ...>` 自动回灌；`task_output` 监视行、前台 bash 与 DisclosureCard 头部三种运行态继续统一走现有 `tc-loading-shimmer`。验证：Rust focused `cargo test --lib clamp_block_timeout_preserves_zero_and_bounds_wait_slices`、`background_ticket_keeps_fields_and_adds_next_hint`、`task_output_timeout_ms_cap_does_not_block_indefinitely`、`task_output_block_true_timeout_is_non_terminal_wait_slice`、`task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still_running`、`background_shell_prompt_mentions_finished_tag`、`task_output_schema_matches_long_wait_slice_contract`、`tool_update_uses_compact_minute_second_countdown_labels`、`cargo test --test prompt_size_budget` 全绿；扩展 `npm run test:unit`（core `214/214` + gui `314/314`）与 `npm run lint` 全绿；`docs/tool-catalog.md` 已重生成，`E2E_SCENARIO_LIBRARY.md` 与 live CLI 背景任务场景也同步换到 5s 下限/10min 上限口径。@2026-07-21
+- [✓] **[P0]** 扩展验收版本已继续上调并完成重打包：`tomcat-vscode-ext/package.json` 已从 `0.1.20` 提升到 `0.1.21`，settings 侧版本断言同步对齐，根 `package-lock.json` 顶层包版本也已校正为同一值，避免 manifest / lockfile 自相矛盾。当前本机验收产物已刷新为 `tomcat-vscode-ext-0.1.21.vsix`。验证：`npm run test:unit:core -- src/ui/settings/SettingsPanel.test.ts`、`npm run test:unit:gui -- src/settings/SettingsApp.test.tsx`、`npm run lint`、`npm run package:vsix` 全绿。@2026-07-21
+- [✓] **[P0]** loading dots 这轮继续按用户反馈做了三次收口：共享 [`LoadingDots.tsx`](../../../tomcat-vscode-ext/gui/src/components/LoadingDots.tsx) 现在不再有“全空白帧”，而是保留统一三槽位占位、以更慢节奏循环 `.` → `..` → `...` → `.`，因此**第一个点始终可见**；同时 dots 自己也挂上 shimmer，不再依赖旁边有没有文字才能表达“系统还在忙”。另一个约束仍保持不变：**有 shimmer 文本的地方不重复挂 dots**，所以 `ThinkingBlock` / `ToolRow` 继续只用 shimmer 文本表达活跃态，而 `ProgressRow` / `PlanFileCard` 这类没有 shimmer 文本可借的 request-gap / pending 位继续复用共享 dots。这样做把“谁负责表达活跃态”收得更干净：文字已经在 shimmer，就别再并排给第二套 loading 节奏；纯占位空窗则交给自带 shimmer 的 dots。验证：`npm run test:unit:gui -- src/components/LoadingDots.test.tsx src/components/ProgressRow.test.tsx src/components/PlanFileCard.test.tsx src/components/TranscriptView.test.tsx src/App.test.tsx`（`65 passed`）、`npm run lint` 全绿。@2026-07-21
+- [✓] **[P0]** `Used N tools` 后的“像卡死”空窗期已按用户指定语义收口：这次没有再往 `ThinkingGroup` 组头塞 waiting dots，而是把 transcript 的**请求级 gap loading** 统一收敛回 `ProgressRow`。具体做法是：`ProgressRow` 删除可见 `Thinking` 文案，只保留呼吸 `...`；`TranscriptView` 不再把“live cluster 里出现过任意 thinking”误判成 `hasActiveThinking`，而是只把**最后一个 truly active live item** 当成正在工作，从而让同一个 `ProgressRow` 同时覆盖 `pre-stream gap`（刚发请求还没出内容）和 `post-tool gap`（tool 全完成、下一次 LLM 输出未到）两段空窗；`ThinkingGroup` / `ThinkingBlock` 的 shimmer 和静态 icon 合同保持不变。为便于验收，扩展版本已从 `0.1.19` 提升到 `0.1.20`，并完成本机打包 `tomcat-vscode-ext-0.1.20.vsix`。门禁：`npm run test:unit:gui -- ProgressRow.test.tsx TranscriptView.test.tsx`（`17 passed`）、Settings 版本断言同步、`npm run lint`，以及 targeted devhost E2E `keeps max reasoning and pre-stream loading states working in the webview`、`streams in the Tomcat webview` 全绿；host E2E 现已额外锁住「pre-stream 纯 `...`、tool 完成后 `ProgressRow` 重新出现、`turn.summary_updated` 只改标题不接管 dots、下一段 assistant 输出一到 `...` 立刻消失」这条真实链路。@2026-07-21
+- [✓] **[P0]** Transcript 加载态与摘要目的句整改已完成：本机运行时 `~/.tomcat/assets/.env` 与仓库 `tomcat/.env` 的 `NO_PROXY/no_proxy` 已追加 `api.deepseek.com`，让 utility 模型 `deepseek-v4-flash` 直连不再走代理超时；[`title_generator.rs`](../../src/core/summary/title_generator.rs) 在 `generate_turn_summary / generate_purpose_clause` 的 utility 超时与错误分支补上 `tracing::warn!`（含 model 名与 err），以后看到 `"Used N tools"` 长期不升级时可直接从日志定位。前端 transcript 侧同步去掉了 `ThinkingGroup` / `ThinkingBlock` 的 loading 转圈，统一改为静态 `codicon-search / codicon-lightbulb`，并把 shimmer 语义收窄到“这一组仍在干活”：有工具未完成才 shimmer，纯 thinking 只有 live cluster 里最后一条才 shimmer，工具一旦做完即刻停；running 工具行文本继续保留 shimmer。门禁已过：`cargo test title_generator --lib`、`cargo test --test transcript_summary_integration_tests`、`npm run test:unit:gui`（`306/306`）、`npm run lint`，以及 targeted devhost E2E `streams in the Tomcat webview`、`keeps max reasoning and pre-stream loading states working in the webview`、`renders transcript action rows and context groups in the Tomcat webview` 全绿；其中 host E2E 额外注入 `turn.summary_updated`，真实锁住 `Used 1 tool -> Used 1 tool for checking the README` 的分组头升级链路。@2026-07-20
+- [✓] **[P0/P1]** 多问题优化链路已在本分支完成最终验收收口：Anthropic 图片此前未做真实请求，本轮补上 `anthropic_inline_image_real_api` 并与 `anthropic_inline_pdf_real_api` 一起走 `fcodex.top + claude-opus-4-8` 实网复测，两条 live 均通过，坐实“经 fcodex 的 anthropic-messages 内联图片/PDF”链路可用；此前 `401 invalid x-api-key` 仅是把 fcodex key 发往官方 `api.anthropic.com` 的端点错配。为便于验收，本轮同时把 CLI / 扩展版本分别提升到 `0.1.16` / `0.1.19`（`bundledCliVersion=0.1.16`），并完成本机打包：`tomcat-cli-v0.1.16-x86_64-apple-darwin.tar.gz` 与 `tomcat-vscode-ext-0.1.19.vsix` 已产出。@2026-07-20
+- [✓] **[P0]** 推理档位 key 不一致已修：`model-thinking.json` / GetState / Composer 用 catalog `id`，但 `run_loop` 曾用 `request_model_name()`（wire 真名）查档位，导致中转站模型（`id≠model_name`，如 `fcodex/gpt-5.6-sol`）选 `xhigh` 后请求回退默认 `high`。现新增 `ChatContext::resolve_thinking_level(model_id)` 单一 helper，`run_loop` 与 GetState 共用 catalog id；集成回归锁住 `reasoning.effort==xhigh`。版本：CLI `0.1.15`、扩展 `0.1.18`（`bundledCliVersion` 同步）；Settings 页展示 Extension/Serve 版本便于核对。@2026-07-20
+- [✓] **[P0/P1]** 推理强度（reasoning effort）链路整改已在本分支收口：核心不再是“代码里写死某个厂商该怎么降级”，而是改成**列表式模型事实源**。现在每个模型可在 `builtin_models.toml` / `models.toml` 声明 `supported_reasoning_levels`，聊天框下拉按当前模型动态出档位（空列表退化为 `Thinking On/Off`），用户选择会写入 `model-thinking.json`，请求前只做一次 clamp，所以 `gpt-5.x` 的 `xhigh`、`glm/deepseek` 的 `max`、以及 `mimo/kimi` 的纯 thinking 开关都能按各自真实协议走，不再被全局 `xhigh -> high` 之类旧逻辑粗暴抹平。与此同时，`ProviderCacheKey` 新增 `catalog_generation`，改 `thinking_format / model_name / capabilities` 后无需重启；保存模型时空 `thinking_format` 会按 API 物化为具体值，不再把 `Auto` 留在落盘配置里；现代 Claude `4.6/4.7/4.8` 改走 `anthropic-adaptive`（`thinking.type="adaptive" + output_config.effort`）；`openai/openai-responses` 若被配成不会发 effort 的 format，保存后会回传非致命 warning。Rust focused/unit + serve 集成、GUI 单测与 targeted devhost Add Model E2E 已覆盖。@2026-07-19
+- [✓] **[P0]** `update_plan` 后 plan 预览不刷新的真根因已修正并锁进真机链路：Rust `update_plan` / `create_plan` 实际是 `std::fs` 写临时文件后 `rename()` 原子替换磁盘，而 plan 预览过去只监听 `onDidChangeTextDocument` 且只读 `document.getText()`，所以对 `~/.tomcat/plans/*.plan.md` 这类工作区外文件，Agent 改完盘后 VS Code 缓冲区常常不重载，预览就一直停在旧内容。现改为：**serve `plan.update` / `plan.todos` 事件 → sidebar provider 桥接 → `PlanPreviewEditorProvider.refreshFromServeEvent(planId,pathHint)` 从磁盘重读并重发 state 帧**，不再依赖不可靠的 TextDocument 热更新；`pathHint` 走 canonical path 兜底，`PlanPreviewApp` 刷新时保持滚动阅读位置（不把用户弹回顶部），host E2E 也从“错误的 `workspace.applyEdit` 改缓冲”改成**真实 `fs.writeFile` 写盘 + 注入 `plan.update`**取证。@2026-07-19
+- [✓] **[P0]** TranscriptView 富渲染四次整改已完成：第三轮虽然补齐了真流式 E2E、预热 `highlight.js`/`mermaid`，但聊天正文仍是“整条消息一次 `useMemo` 烤 HTML，再异步高亮”的架构，所以代码块会先无色再上色（FOUC），而且 streaming 每来新 token 都可能把整篇旧内容重新过一遍。现已正式对齐 cline 的低爆炸半径方案：**保留现有 `marked + DOMPurify + DOM 装饰` 管线，不迁 `react-markdown`，只吸收「按 markdown 顶层块切分 + `React.memo` 逐块冻结 + `highlight.js` 静态 import/同步上色」这两个关键点**。结果是“已完成块永不重算，只有尾块重渲染”，代码一出现就是带 `hljs-*` span 的彩色 HTML；mermaid 继续按块异步渲染。配套还做了：`splitTopLevelBlocks()`、`highlightToHtml()`、`MarkdownBody` 复用同一套同步高亮/代码卡片/内联文件链接、`display: contents` 透明块 wrapper、`isStreaming` 死代码拆线，以及 Vite `manualChunks` 把 `highlight.js` 单独切成 `dist/chunks/highlight.js`（本次构建约 **104.58 kB min / 35.64 kB gzip**）。门禁新增/收紧：GUI 单测验证“同步即有 `code.hljs`、追加尾块只重算新块”，devhost E2E 明确卡住“流式尚未结束时已完成代码块已带 `hljs-*`，收尾后再出现 mermaid `<svg>`”，把这轮架构切换真正锁住。@2026-07-19
+- [✓] **[P0]** TranscriptView 富渲染三次整改已闭环：这次不是只修“静态整段 markdown 一次性渲染”的假场景，而是按真机/devhost 的**逐 token 流式输出**重新取证。最终结论是：上一轮的“假绿”不只是 CSP，还包括 **E2E 根本没模拟真流式**，以及 `ChatMarkdown` 的异步增强（高亮 / mermaid）会在 streaming 期间被反复重渲染打断或抹掉。现已补上统一 `[tc-richrender]` 诊断日志、启动空闲预热 `highlight.js` / `mermaid`、`ChatMarkdown` 的 streaming 去抖 + 收尾必达 + `memo` 化，并把富渲染 E2E 改成分段灌 `content_delta` 后断言真实 `hljs-*` token 与 mermaid `<svg>`，把“看起来过了、真机还是坏”的口子彻底堵死。@2026-07-19
+- [✓] **[P0]** plan transcript 模型已按第一性原理重构：过去把“会不断变化的当前计划卡片”硬塞进 append-only transcript，结果一边靠抑制把 `update_plan` 足迹藏没，一边靠 `find-or-push` 把 plan 卡漂到最新提问附近。现已改成**事件行 + 产物卡**双职责：`create_plan` 在 transcript 中仍是唯一卡片来源，`update_plan` 每次都留下增量事件行（`Checked N · x/total` / 状态迁移 / 回退），`plan.*` 只更新 ambient `planState / planTodos / planFile`，不再生成独立 `type:"plan"` timeline 项。后续又补回了旧体验里的 pending 过渡：`plan.create`（文件刚落盘）一到，就把 `path/planId` 盖到运行中的 `create_plan` 工具上，于是**同一张** `PlanFileCard` 会先显示 `view-plan-pending` 点点点，review 跑完、`tool_execution_end` 到来后再切成正常 `View Plan`；`update_plan` 的运行/增量反馈仍留在事件行。UX 收口同步完成：事件行 `View Plan` 扁平常显淡下划线 + 小 chevron，卡片 footer `View Plan` hover 变白，卡片 `Build` 复用 preview 同款黄底黑字非加粗按钮。对应 GUI/state/ext 单测、devhost plan UX 场景与 reload replay 已覆盖。@2026-07-19
+- [✓] **[P0]** PLAN 模式下“随便写个计划 / 技术方案 / 设计方案”类请求的真根因已订正：问题不是 `create_plan` 工具不可见，而是模型在 PLAN 模式里把请求误当成“正文写一段方案文字”，没有真正调 plan 工具落盘。现已强化 `planner.txt`：只要用户要求写/改计划或方案，就必须调用 `create_plan` / `update_plan` 真正写文件，禁止再产出 prose 伪计划；Rust 守卫测试同步补齐。@2026-07-19
+- [✓] **[P0]** TranscriptView 富渲染二次整改：聊天里“完全无高亮 / 无 mermaid”的真根因不是 `highlight.js` 主题或 markdown 结构，而是**聊天 webview 的 CSP 比计划预览少了 `'strict-dynamic'` 与 `'unsafe-inline'`**；`ChatMarkdown` / `markdownRuntime` 里的 lazy `import()` 分包（`highlight.js` core/语言包与 `mermaid`）在 transcript 中被浏览器拦下，所以卡片结构能出来，但颜色和 SVG 永远出不来。现已把聊天 CSP 对齐到计划预览：放行动态分包与 mermaid 内联样式；同时把代码块 UI 收到最简：**不再显示语言标签**，只有“带文件路径的围栏”才渲染头部（文件图标 + basename，hover/title=完整相对路径，点击打开定位行，右侧纯图标 copy），无路径围栏统一为 `bare` 块（无头部，copy 浮在内容区右上角）；正文内联路径显示 basename；`openFile` 失败改为 toast，不再向 transcript 追加 error 红条。门禁同步补强：GUI/provider focused tests 覆盖 basename/title/copy-feedback/toast，host E2E `assertTranscriptRichRenderingFlow` 升级为断言真实 `hljs-*` token span、mermaid `<svg>`、`bare` 块与坏链点击不污染 transcript。@2026-07-18
+- [✓] **[P0]** TranscriptView 富渲染落地：assistant 正文走 `ChatMarkdown`（`marked + DOMPurify`），多行代码/ASCII 围栏裱成代码卡片，围栏标题与正文 `` `path:line` `` 可点击打开并定位行；`openFile` 协议新增可选 `line`，贯穿到 `VsCodeIde.showFile(path, line?)`；Rust system prompt 新增 `SystemOutputConventions`，约束模型稳定产出可点击格式。@2026-07-18
+- [✓] **[P0]** 真机闪烁/缺卡片整改收口：根因是先画半成品 HTML、再在 `useEffect` 里改真实 DOM，React 重设 `innerHTML` 会抹掉卡片/path chip。现改为在 `useMemo` 里离屏烘焙成品结构（`closeOpenFence -> marked -> DOMPurify -> detached div -> decorate/linkify -> innerHTML`）；`highlight.js`/`mermaid` 留在 `useEffect` 做幂等纯增强。thinking 回退为弱化纯文本 `<pre>`（不解析 markdown、不生成 thinking 内 clickable path）；保留 ToolRow `FileChip` 与助手正文点击打开。@2026-07-18
+- [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
+
+### 🔌 INTERFACE (接口变更)
+- Bash 权限：仅上述三个 Tomcat 内部诊断目录的 Bash 访问不受 readonly 规则阻挡；任何 `deny` 仍优先，原生文件写入工具及 `agent/credentials*`、`auth-profiles*.json` 等敏感路径保护不变。CLI `0.1.56`、扩展 `0.1.70`、`bundledCliVersion=0.1.56`。
+- CLI：`ToolDisplay::Files` 含失败文件时，工具结束摘要会展示该文件的 `note`，使 `read` 的真实路径错误直接可见。
+- **当前交付接口（覆盖下方历史记录）**：`TodoKind` 收敛为 `work|acceptance|unknown`；一个计划最多一个、且仅最终验收可用 `acceptance`。`update_plan` 的 `upsert` 以 `todo_kind` 指定语义类型；所有 todo 完成或取消即完成计划，最终验收开始时返回 verify-skill hint。`acceptance_commands`、`green_build_pass` / evidence 及 runtime-owned gate 不再属于 PlanFile 或工具契约。旧 plan 的未知 kind 保留为 `unknown`，不执行旧 gate 行为。
+- Plan/serve：新增 `plan.stalled { reason, idleNudges?, remainingWork? }` 事件，webview 以本地中文文案显示；移除已废弃的 `plan.code_review.unreviewed_edit`。PlanFile 的 review / acceptance gate 现在都允许持久化 `in_progress`，暂停与恢复会统一刷回 pending。
+- `AgentLoopConfig::system_prompt`：system prompt 不再作为持久 `ChatMessage` 存在，`assemble_request_messages` 在真正发请求时组装它。
+- compaction 原语：`apply_boundary`、L0 清理和 L3 裁剪改为显式接收工作列表与历史上界；`AgentLoop::run` 期间 `ContextState.messages` 是空停车位。
+- `plan.code_review` transcript 事件：无可审代码或 reviewer 时会显式记录 `verdict: "skipped"`，供审计与 UI 后续低调呈现。
+- `LlmProvider::chat_collect(ChatRequest) -> ChatResponse`：新增“完整响应”抽象；普通 provider 直接复用非流式 `chat`，强制 SSE 的 OpenAI Responses 中转站在 adapter 内缓冲流，不把传输限制泄漏给 compaction / title / dispatcher 调用方。
+- 预热恢复：`.preheat.jsonl` 保存尚未落入 transcript 的摘要缓存；`*.user_messages.jsonl` 只保存 active Normal user 的原始行投影，二者职责分离。应用过同一 marker 的摘要优先以 transcript 为准，恢复不二次导入缓存。
+- Checkpoint：持久化时序改为「transcript/context 同步落盘 → `agent_idle` → 后台 checkpoint/Git snapshot」，无新增 serve 协议或用户配置；Git 输出读取和 AgentLoop 取消 race 均为内部实现。
+- 发布版本：CLI `0.1.50`、扩展 `0.1.64`、`bundledCliVersion=0.1.50`。
+- `TomcatMessenger.disposeAsync({ timeoutMs? })`：新增可等待关闭的扩展内部方法，默认 5 秒，超时明确失败；原同步 `dispose()` 调用方式及关闭时序保持兼容。Plan / Acceptance 状态机、用户配置和正式 serve 协议不变，schema fixture 仅补齐已有 `FileDiffLine.skippedLines`。
+- 测试与构建：`test:integration` 使用独立 Vitest 配置并尊重文件筛选；Mocha 四入口开启 `failZero`。`packageVsix(skipBuild: true)` 及验收入口复用构建前验证 `.build-artifacts.json` 的输入/输出内容哈希；该本地产物记录不入库。
+- 发布版本：CLI `0.1.47`、扩展 `0.1.61`、`bundledCliVersion=0.1.47`。
+- Connector：`McpConfigSource::Global` 对外标签改为 `Global`（读侧仍兼容旧 `User`）；`list_connectors` 新增 `configPath` / `configPathRaw`；设置协议新增 `openConnectorConfig`。全局连接器与 `trusted: true` 的配置在普通编辑后保持信任，显式 Deny 跨编辑仍封锁。
+- 构建：新增 Cargo `[profile.fast]`，不影响 `[profile.release]`。
+- HTTP：直接依赖统一为 `reqwest 0.13`（`default-features=false`），显式启用 native-tls；不再编译 rustls、AWS-LC 或其 CMake 工具链。
+- 依赖治理结论见 `docs/architecture/dependency-governance.md`。
+- 发布版本：CLI `0.1.43`、扩展 `0.1.57`、`bundledCliVersion=0.1.43`。
+- `hashline_edit`：锚点指纹改为纯内容；同一调用的多段非重叠操作统一按原始快照校验并自下向上应用。无效锚点会返回聚合 `HashlineValidationFailed`，写入保持全有或全无。
+- Serve 连接监管：新增扩展内部 `ServeConnectionSupervisor` 状态机（`idle|starting|handshaking|backoff|ready|fatal`）和 webview 内部 `connectionStatus`（`connecting|reconnecting|ready|failed`）；不改变 Rust serve RPC、NDJSON wire 或用户配置格式。
+- 打包：`package:vsix` 在 vsce 成功后必须用 `yauzl`（与 Cursor/VS Code `extract` 同款）读完每个条目；失败删除产物。扩展显式依赖 `yauzl`。
+- Connector：新增主配置 `[connector] enabled` / `disabled` 与 `~/.tomcat/mcp.json`、`<workspace>/.tomcat/mcp.json` 的 `mcpServers` 配置面；新增 Chat `/connector {list,add,trust,deny,test,tools,remove,reload}`，以及 serve `list_connectors`、`list_connector_tools`、`add_connector`、`remove_connector`、`set_connector_trust`、`test_connector`、`reload_connector`、`set_connector_tool_filter` capabilities。MCP 具体工具仅以 canonical name `mcp__{server}__{tool}` 存在 `McpManager` 动态目录，通过内置 `tool_search` / `tool_describe` / `tool_call` / `tool_run_code` 按需访问，不进入 ToolRegistry 或 prompt 前缀；MCP 图片结果可作为 `InputImage` 回流。`wire.d.ts` 已生成对应 serve 命令类型。
+- MCP media：同一 assistant tool batch 的所有 tool result 必须先闭合，才可追加含 `InputImage` / `InputFile` 的 user follow-up；steering 跳过的调用也产生 terminal tool result。属于内部对话协议不变量，无新增外部 wire 字段。
+- Verify：内置 skill 来源从单文件 `builtin_verify.md` 迁至 `assets/skills/verify/**`，由 `materialize_builtin_skills` 释放；新增 `scripts/bootstrap.mjs` / `shot.mjs` 等受管验收资产。
+- Transcript：持久化格式新增内部 `input_image_ref`、`*.tool_display.jsonl` 与一次性迁移脚本；`get_messages` 的 `attachment_mode=reference` 返回无字节引用，CLI 默认 inline 仍会物化图片字节。
+- Webview：内部连接状态新增 `degraded`；工具卡 diff 新增 `diffTruncated` / `expired` 展示语义。上述字段均已同步生成 `wire.d.ts`，不改变用户配置。
+
+- Plan Preview 状态帧仍使用既有 `PlanPreviewStateSnapshot` 协议；发送顺序调整为“文档首帧 → 可选模型/能力增强帧”，无新增外部 RPC 或 wire 字段。
+- Plan Preview Find：新增内部 `PlanFindController` / `usePlanFind` 生命周期边界；Find 装饰使用 `.tc-plan-find-fallback-highlight` 文字内联 span，不新增宿主 RPC 或外部 wire 协议。
+- Plan close-out：`TodoItem.kind`（`work|gate_code_review|gate_acceptance`）与 `update_plan` result 的 `code_review_pass` / `green_build_pass` / `next_step{phase,hint}`；`create_plan` result 的 `items[]` 现在含两条 runtime-owned gate。`AgentLoopConfig.unattended_retry` 显式选择 headless retry 预算；CodeReview result 新增 `non_blocking_findings` / `p2_guidance`。
+- 压缩：新增 session 派生侧车 `<session_id>.user_messages.jsonl`（与 transcript 同目录）；`ensure_user_message_sidecar` / `ensure_user_message_sidecar_current`；`machine_block::render_with_sidecar`；`SummaryRequestOptions.transcript_path`；verbatim 候选收紧为 `kind.is_normal()`；UPDATE 时 `messages_to_text` 对 `CompactionSummary` 先 `machine_block::strip`。
+- Session：枚举/附件引用只认主 transcript（排除 `*.user_messages.jsonl`）；`delete_session` 同步删除侧车。
+- Plan 收口：`update_plan` 完成态要求持久化 `code_review_pass` 与带证据的 `green_build_pass`；新增 `dispute_findings`；`max_code_review_rounds` 默认 4，首轮及后续 review 均以当前 Git 代码 diff 为准；两道 gate 的 `in_progress` 都是跨调用的盘上唯一状态，用户点停或崩溃恢复时统一刷回 pending；文件 mtime 新鲜度和自动重开循环已移除，验收期改动由 verify skill 复审、补测试并重跑受影响检查。
+- 内置 skill：`materialize_builtin_skills` / `assets/skills/verify/SKILL.md`（verify）。
+- `edit` 工具入参收敛为 `{path, edits[]}`；`update_plan` 描述允许多至 3 个 `in_progress` todo（运行时 `MAX_IN_PROGRESS_TODOS=3`）。
+- LLM：无人值守重试尊重 `Retry-After`；Anthropic/OpenAI Responses 解析路径补齐。
+- `web_search`：对外请求使用 catalog `model_name`；hosted 失败可自动回退。
+- 架构文档：`docs/architecture/delivery-accuracy-and-completeness.md`；`plan-exec-code-verification.md` / `tools/reviewer.md` / `tool-catalog.md` 同步。
+- `ask_question` webview：`WebviewApprovalCard.live`；跨重连的合并身份为 `toolCallId`（`requestId` 仅路由），但问答卡的 timeline/render id 为 `approval:<toolCallId>`，避免与工具卡撞号；历史 `[pending]` 不再伪造 `pending:` 门票；serve 重臂须在 `initialize` 之后发新 `control_request`。
+- 子 Agent：`ProdReviewerDeps` / verifier 注入 `model_prefs`，派发 `thinking_level` 继承会话 Effort 并夹取。
+- GUI：`buildPickerModels` 叠加会话 Context+Effort 至 Composer / PlanFileCard / PlanActionStrip；Settings `findReusableModelByName`（user 优先）+ `findConfiguredRelayByBaseUrl`；默认档 `DEFAULT_CONTEXT_WINDOW=400K` / `DEFAULT_MAX_OUTPUT_TOKENS=128K` 只读展示。
+- Plan 预览：`setContextWindow` / `setThinkingLevel` RPC 失败 `showErrorMessage`，成功才刷新。
+- 模型 Context 档位：`ModelEntry` / `ModelView` / serve schema / `wire.d.ts` / webview `types` 新增 `context_window_options` 与 `selected_context_window`；serve 命令 `set_context_window`；聊天 `/context`（`cmd_context`）；`model-thinking.json` 偏好值由裸 reasoning 字符串改为 `{ reasoning, context_window }` 对象（开发期不做旧格式读兼容）。
+- GUI：删除 `PlanBuildModelSelect`；Composer / Plan 卡共用 `ModelPicker`（含 portal 配置浮层）；Settings 中转站按内置 model name 继承 API/thinking/档位，Context Window 字段改为只读展示。
+- Webview 根组件挂载 `WebviewErrorBoundary`；`package-vsix --skip-build` 对预构建 gui/extension 产物做输入/输出内容哈希校验（已替代旧 mtime 判断）。
+- 发布版本：CLI `0.1.36`、扩展 `0.1.48`、`bundledCliVersion=0.1.36`。
+- Composer：Mod+Z / Mod+Y / Mod+Shift+Z 在 Tiptap `keydown` 中 `stopPropagation()`，撤销/重做留在本地 history，不转发 workbench。
+- 架构文档：`tomcat-vscode-ext/docs/architecture/model-picker.md`。
+- `context_metrics_update.providerUsageMeasured: boolean`：`true` 只表示**本条事件**直接由 provider usage 产生；`false` 表示最佳估算。消费者在从未收到 `true` 的 cold slot 上必须继续留空；已有基线时必须以 `false` 的 ratio 原位更新而非清空。wire 字段和 schema 不变，仅收紧语义。
+- OpenAI Responses：`build_responses_input` 将 `MessageKind::EphemeralTail` 合入顶层 `instructions` 并排除出 `input`；兼容路由的 `previous_response_id` continuity 以锚点 assistant 的后继索引裁剪 input，避免重复发送服务端已恢复的历史。`TOMCAT_PROMPT_PREFIX_FINGERPRINT=1` 仅输出 prompt 结构哈希，用于安全定位前缀漂移。
+- Anthropic wire：`MessageKind::EphemeralTail` 在出站时转为 `system` 后缀文本块（无独立 `cache_control`）；断点 B 停在稳定 system，D 打最新持久 wire 消息末尾；OpenAI Completions 保持 messages 尾部，Responses 走上述 instructions 提升。
+- L0：成功 boundary apply 后无条件跑 `run_layer0_after_boundary`；`apply_boundary` 已 `invalidate_api_usage`，L0 不再重复失效。
+- 水位计数：`tool_dispatcher` 对含 tool_calls 的 assistant 改走 `on_assistant_message_appended`；abort 部分 assistant 用 `on_message_appended` 宁可高估。
+- Token / 输出上限：`ChatRequest.resolved_output_limit`（调用方 `max_tokens` 与 wire 解析值分离）；`EffectiveModelLimits` 去掉实例级 `wire_output_limit`；`ContextConfig` 权威键 `context_window_fallback` / `output_reserve_tokens`（旧键别名可读、混用报错）；catalog 加载期校验模型 `max_output_tokens`。
+- 空回合守卫：hidden output 仅看截断类 `finish_reason` / `reasoning_continuation` / thinking 文本；`completion_tokens` 只进诊断与 empty_turn 落盘。
+- Webview 恢复 UX：错误卡 dismiss 后保留卡片、去掉 `recoveryAction`；Retry copy-forward 源 user 带 `abandoned`；`agent.interrupted` live+history 去重恰好一张。
+- 会话/计划状态拆分：删除五态 `PlanState`；`AgentMode`=`chat|plan`；`ActivePlan`/`PlanFileState`；`get_state` 用 `agentMode`+`activePlan`，旧 `mode` 改名 `workspaceMode`；新增 `session.agent_mode.changed`；`RESUME_INDEX_SCHEMA_VERSION=3` 公开导出。
+- Build 用户消息：`MessageKind::PlanBuild`（`plan_build`）；扩展渲染为「开始执行计划」折叠摘要；pending 计划 Build 按钮文案 `Resume`。
+- Plan 预览：`PlanPreviewEditorProvider` 改为 `CustomReadonlyEditorProvider`，预览不再拥有 `TextDocument` 缓冲、dirty/undo/save 能力；每个面板以 `RelativePattern(planUri,"*")` 监听 change/create/delete，只从磁盘重读。`refreshFromServeEvent` 同样始终读磁盘；移除 `tomcat.plan.autoSave`。`PlanPreviewDomSnapshot` 增 `bodyText` 供真机 E2E 验证用户手改后的刷新结果。
+- Overflow 恢复：`force_drop_oldest_after_confirmed_overflow`（服务端确认溢出至少删一完整 turn，不删空）。
+- `ResolvedCall::from_provider_and_entry_unchecked(provider, &ModelEntry)`：测试/适配层工厂，从 catalog entry 复制 wire model 与 capabilities；`from_parts_unchecked` 仍默认关闭 vision/files。
+- `SessionRuntime.openai_files_runtime`：会话级缓存 `(provider_key, Arc<OpenAiFilesRuntime>)`；`ChatContext::openai_files_runtime_for(&ResolvedCall)` 按 resolve 身份复用，避免 cleanup 与 enqueue 队列分裂。
+- `HostApiDispatcher::resolve_chat_call`：`do_chat` / `do_chat_stream` 写入 `req.model = call.model` 后再调用 provider；未配置 resolver 错误码保持 `007`。
+- Webview↔Host 新增路径解析往返：`resolvePaths{requestId,paths[]}` → `pathsResolved{requestId,resolutions[]}`（`kind: file|directory|missing`）；聊天与 plan preview 共用 `classifyLink` / `PathResolution`。Webview intent 新增 `openLink`；目录目标由 `VsCodeIde.showFile` 降级为 `revealInExplorer`。
+- 压缩摘要：`ControlSnapshot.progress: Option<ProgressSource>`（`PlanFile` / `SessionScratchpad`）；`override_progress_section` 改吃单一来源并带 Progress 条目预算。
+- EXEC catalog：`todos` 重新可见；`HIDDEN_IN_EXECUTING` 仅排除 `create_plan` / `ask_question`。
+- 失败恢复：新增 `ServeCommand::Retry { message_id }`，核心层以「盖章保留 + 复制前进」创建新 user 行，并确保源行与其后残留消息不再进入 hydrate；`Resume` 仅接受完整 tool-result 活尾巴。webview 错误卡保存 retry anchor，按 Retry/Resume 分流并在成功后刷新 transcript；错误与失败 user 行留在 jsonl 审计，界面只保留当前尝试。
+- Host→Webview 新增批量 `insertReferences{sessionId,references[]}`；picker 确认走一次 draft 替换 + 一次批量事件，单条 `insertReference` 路径保留。Composer 暴露 `insertReferences()`，多引用只产生一次 TipTap 事务与一次草稿同步。
+- transcript：公开 `PENDING_TOOL_RESULT_TEXT` / `INTERRUPTED_TOOL_RESULT_TEXT` / `UNKNOWN_RESTART_TOOL_RESULT_TEXT`；扩展侧 `toolResultPlaceholders.ts` 契约对齐；`replace_tool_result_by_tool_call_id` 允许无旧 result 时追加（悬空 ask_question）；非结构性盖章走 `refresh_resume_index_after_nonstructural_rewrite`；新增按 id 盖章 `mark_user_message_entry_superseded_by_id`。
+- 新增 CLI `/compact`（`cmd_compact`）与 serve compact ratio 字段断言；手动 compact 与自动 overflow 路径分工写入 `context-management.md`。
+- Prompt 缓存面：`ToolSurface` / `SystemPromptSnapshot`（`core/llm/system_prompt.rs`）；`PromptCacheKeyFamily`（`core/llm/prompt_cache_key.rs`）；`SessionTurnState` / CLI 持 snapshot 而非裸 system 文本；运行时权限与 plan reminder 仅经 ephemeral request tail 注入；Anthropic wire 显式断点预算；工具目录不再按 mode 动态过滤可见集合（推翻条件见 `plan-runtime.md`）。
+- `dispatch_agent` catalog description 与 Planner/Executor 行为合同收紧为条件式 Explorer 派发；工具 schema 与 wire 协议不变。
+- Plan Preview Markdown 列表项新增内部 `_sourceLine` 递归标记；`WebviewReference` wire 类型不变，selection 去重身份改为 `path + range + text hash`。
+- 发布版本接口：根 `release-versions.json` 新增 `cli`、`extension.version`、`extension.bundledCli` 三个权威字段；`scripts/release-version.mjs` 提供 `bump` / `set` / `sync` / `check`；Cargo.toml/Cargo.lock 与扩展 package/package-lock 降为生成镜像；私有 GUI manifest/lock 根包不再含 `version`；CLI/EXT tag guard 在检查 tag 前先验证全仓镜像，EXT guard 的 `bundled_cli_version` / `extension_version` GitHub outputs 保持兼容。
+- 子 Agent LLM 绑定：`AgentLoop::new(binding: ResolvedCall, ...)`；`AgentLoopConfig.model` 删除；`ProdReviewerDeps` / `ProdVerifierDeps` 持 `llm_resolver` + `llm_files_config` + `sessions_dir`（不再持冻结 `llm` / `compaction_provider` / `openai_files_runtime`）；`GlobalServices.llm` 与 `HostApiDispatcher.llm` / `with_llm` 删除；`ResolvedCall` 增 `catalog_id` 并密封构造。
+- Agent 交付控制：`ResumeIndex` schema `1 → 2`，新增 `agent_mode` / `active_plan_path`；`PlanRuntime::control_snapshot` / `set_session_model`（catalog id）；`ToolDisplay::Files` + webview `kind:"files"`；工具目录新增 `dispatch_agent`；`read.paths` / `edit.files` 批量入参；`search_files` 默认 content 上下文 ±3；`max_code_review_rounds` 默认 `8`；CLI `0.1.20` / 扩展 `0.1.30`（`bundledCliVersion=0.1.20`）。
+- 附件链路已从“图片专用”泛化为“图片 / PDF 共用”：共享协议文件改名 `attachmentProtocol.ts`，`attachImages`/`ImageAttachmentCandidate`/`attachImagesResult` 改为 `attachFiles`/`AttachmentCandidate`/`attachFilesResult`；校验器按 MIME 分流（图片 4.5MB、PDF 25MB、其他拒绝）；`AttachmentCandidate` / `AttachmentUpload` / `WebviewAttachmentView` / 草稿引用均新增 `kind` 与可选 `sourcePath`。serve `get_messages(reference)` 现在也会把 `input_file` 物化成 `blobSha/bytes/filename/mimeType` 并剥离 base64，修掉历史 PDF 写放大。composer / history 的非图片附件统一渲染成 48px `PDF` 方块。CLI `0.1.18` / 扩展 `0.1.28`（`bundledCliVersion=0.1.18`）。
+- transcript 本地内联图新增一条**显示层专用**支线：host `localResourceRoots` / `mediaRoots` 现在额外覆盖 workspace folders 与 `os.tmpdir()`，并在工作区列表变化时热更新；webview `state` 快照新增 `mediaRoots`，`ChatMarkdown` 在 markdown 装饰阶段只对 `![alt](path)` 做路径白名单解析与 URL 改写，远程 / 越界路径降级成 blocked link；点击图片进入 `ImageLightbox`，不引入新的 Rust 附件协议，也不复制字节进 CAS。
+- Host→Webview 新增 `channel:"sessionView"` / `channel:"sessionPatch"`；Webview→Host 新增 intent `resyncSessionView`。`sessionPatch` ops：`appendText{id,text}` / `upsert{item,afterId?,beforeId?}` / `remove{id}`，带 per-session 自增 `seq`。host 内部 `SessionRenderMutation` + `StateBroadcaster` 择帧；环境变量 `TOMCAT_DISABLE_SESSION_PATCHES=1` 关闭增量、退回 `sessionView`。扩展版本 `0.1.27`。
+- `[tools.bash].timeout_ms` 移除，改为 `foreground_wait_ms`（默认 16000，合法 8000–16000）；到期语义从“杀进程”改为“有 registry 则转 tracked 后台 / 无 registry 则有界停止”。新增 `build_bash_task_registry`；主 loop、Verifier、CodeReviewer、ext host 注入 shared registry。HostCall 新增 `taskOutput` / `taskStop`；插件 SDK `exec` 可带 `foreground_wait_ms`，回执可含后台 `task_id`/`log_path`/`next_actions`。CLI `0.1.17` / 扩展 `0.1.26`（`bundledCliVersion=0.1.17`）。
+- Bash 工具与命令摘要统一只消费完整 `command` 字符串；不再支持或显示可选 `args[]`，进程层始终经 shell 执行。成功 edit 结果附带有界、带行号的编辑后当前视图；`NotFound` 尽力附带目标区域的当前视图，无法可靠定位时才要求重新 read。thinking turn 摘要单 Shell 即时回退改为固定 `Ran shell command`，utility prompt 禁止复述原始 shell 命令。扩展版本 `0.1.25`。
+- `SystemWorkspaceContext` 模板不再含 `Current date and time: {now}`；`WorkspaceContextSection::render` 仅注入四类工作目录路径，同输入下 system prompt 字节级稳定。PLAN 模式 `planner.txt` 修订契约：既有计划正文用 `edit`/`hashline_edit`，todos 用 `update_plan`，禁止再用 `create_plan` 叠第二份计划。
+- `SubagentType::Reviewer` 拆为 `PlanReviewer` / `CodeReviewer`；`PlanRuntime` 双字段 `attach_plan_reviewer` / `attach_code_reviewer`；新增 `ServePlanEvent::PlanCodeReviewStarted`，`PlanCodeReview` 补齐 `round` / `reviewAttemptId` / `toolCallId` / `childSessionId` / `transcriptPath`；webview `WebviewReviewRow` 以 `reviewAttemptId` 为 entity key、`anchorToolCallId` 锚定 `update_plan`，新增 `startedAt` 驱动 running 态 `round + elapsed`，由父 session `plan.code_review.started` + `plan.code_review` 驱动同一 attempt 的 running/done；通用 child lifecycle 只作审计。收口路径不再返回 `verify` 字段（Verifier dormant）。
+- code review / plan reviewer / explorer 的 started 事件现在也会同步落主 transcript custom 行，字段含 `child_session_id + transcript_path`；对应子 transcript 在派发时即创建并写 `subagent.transcript.meta`，所以即便零消息 aborted 也有可定位文件。
+- LLM 流式空闲超时的口径已收紧到**SSE 解析后的事件流**而不是原始字节流；`llm.stream_timeout_sec=180` 在 `fcodex/gpt-5.6-sol + xhigh` 本地实测中会把“只有 keepalive / 无业务事件”的 code review 第 1 次尝试在 180s 打断，再经现有 auto-retry 收口。
+- `tool_display` 现在随 transcript 持久化；单文件与批量单文件统一复用 `File` 卡，多文件批量走 `Files` 列表卡，reload 不再蒸发 diff 卡。
+- serve / webview 新增自定义事件 `background_task_finished{taskId,exitCode,logPath?,command?}`；`EVENT_NAMES` allowlist、`ServeToolEvent` schema、生成的 `wire.d.ts` 与扩展侧 `ServeEvent` 同步更新。`WebviewToolCard` 额外携带 `backgroundTaskId? / backgroundRunning? / backgroundExitCode?`，用于把“bash tool 调用已返回”与“后台真实任务仍在跑”这两条生命线拆开表达。
+- `task_output` 的 wait-slice 合同已更新为：`timeout_ms` schema `maximum 30000 -> 600000`，运行时实际对 `block=true` 的等待做 `5000..600000ms` clamp，`0` 仍等价 `block=false`；`task_output` 描述、`background_shell_monitor.txt`、CLI renderer 倒计时文案与 `docs/tool-catalog.md` 已同步收口。`bash(run_in_background=true)` 的回执 JSON 新增 `next` 字段；webview `WebviewToolCard` 新增 `startedAt?: number`，TranscriptView 的 `task_output(block=true)` 行现在会本地渲染 `Waiting up to {9m59s} for shell` / `Waited for shell` / `Stopped waiting for shell`。
+- 推理档位解析统一走 `ChatContext::resolve_thinking_level(model_id)`（catalog id）；HTTP 请求体仍发 `request_model_name()` 真名，不改变 wire 模型名语义。CLI `0.1.15` / 扩展 `0.1.18`；Settings 展示 Extension 与 Serve 版本。
+- 推理强度 / 模型设置接口现显式暴露 `supported_reasoning_levels` / `supportedReasoningLevels` 与 `warnings`：Rust `ModelEntry` / `UserModelEntry` / `ModelView` / `ModelEntryInput`、serve schema / `wire.d.ts`、`settingsProtocol.ts`、webview state `availableModelReasoningLevels` 全链同步；`Composer` 的 thinking 控件改为按模型动态渲染；`ProviderCacheKey` 新增 `catalog_generation` 支持模型配置热生效；Anthropic 新增 `anthropic-adaptive` 编码路径（`thinking.type=adaptive` + `output_config.effort`）。
+- plan 预览热更新链为 **磁盘 `FileSystemWatcher(change/create)` 或 serve `plan.update` / `plan.todos` → `PlanPreviewEditorProvider.refreshFromServeEvent(planId, pathHint)` → 磁盘重读 → webview `state` 帧重发**；用户手改只在原生文本编辑器缓冲区内发生，保存后由 watcher 刷新预览。测试侧 `PlanPreviewDomSnapshot` 保留 `contentScrollTop` / `topVisibleSourceLine`，`PlanPreviewDomAction` 保留 `setContentScrollTop` 以验证刷新不跳顶。
+- 前端四次整改新增 `splitTopLevelBlocks(markdown)`、同步 `highlightToHtml(code, language)` 与 `dist/chunks/highlight.js` 独立分包；聊天正文改为“父组件切块 + 子块 `React.memo(raw)` + 同步高亮 + mermaid 按块异步”，`ChatMarkdown` / `MessageBubble` / `TranscriptView` 的 assistant 富渲染链不再透传 `isStreaming`。
+- `WebviewToolCard` 新增 `planActivity / planId / planPath`；`create_plan / update_plan` 的可见 transcript 足迹统一改挂在 `tool` 项上，`PlanFileCard` 由 `create_plan` 这条 `tool` 项承载；`plan.*` 事件只维护 ambient 当前态，不再新建/迁移 `type:"plan"` timeline 项，但 `plan.create` 会把 `path/planId` 盖到运行中的 `create_plan` 工具上，以恢复 `view-plan-pending` → `View Plan` 的旧过渡；事件行 `View Plan` 使用 `--plan` 修饰类（常显淡下划线 + chevron），卡片 footer `View Plan` hover 变白，卡片 `Build` 使用可复用的 `tc-plan-build-button`（黄底 / 黑字 / `font-weight: 400`）。
+- 前端新增 `ChatMarkdown` / `markdownRuntime` / `codeFence` / `inlinePath`；assistant 正文富渲染；**代码围栏不再显示语言标签**：有文件路径时显示 basename 头部并可点击打开，无路径时为 `bare` 块 + 内容区右上角浮动 copy；正文内联路径显示 basename，`title` 保留完整相对路径；thinking 为弱化纯文本 `<pre>`。
+- 前端新增 `markdownDecorators` / `richRenderRuntime`；`ChatMarkdown` 支持 streaming 去抖增强、启动预热与统一 `[tc-richrender]` 诊断日志。
+- `MarkdownBody` 现复用 `buildDecoratedHtml(markdown, sourceLineMap?)`，因此 plan 预览与 transcript 共享同一套同步高亮、代码卡片、copy 按钮与内联文件链接语义，同时保留 `data-source-line` 能力。
+- `openFile.data.line?: number`；`VsCodeIde.showFile(path, line?)` → `selection + revealRange`。
+- plan 预览协议新增 `openFile { path, line? }`；plan body 内联路径与 transcript 复用同一套 linkify/open-file 语义。
+- `PromptKey::SystemOutputConventions` 继续承担 transcript 富渲染契约：除原有 clickable path 规则外，现新增 `![alt](path)` 本地图片约定，并显式禁止 `http:` / `https:` / `data:` / `blob:` 图像源；该模板通过 `include_str!` 编译进 CLI（运行期不读盘、不支持 env override），因此这类渲染能力发布时必须与 CLI 一起发版，或先发 CLI。
+
+### ⚠️ BLOCKED (当前风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无 | - | - |
+| 无 | 本次只提交内部诊断目录 Bash 例外和补丁版本升级；依用户指令，提交前不新增测试执行。 | — |
 
-### TEST
-- 已跑：`cargo fmt --all`
-- 已跑：`cargo clippy --all-targets --all-features -- -D warnings`
-- 已跑：`set -a && source .env && set +a && RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`（`EXIT_CODE=0`）
-- 已跑：`cargo fmt --check`；`cargo test replay_policy_deepseek_v4 --lib`；`cargo test classify_replay_downgrade --lib`；`cargo test transport_messages_deepseek --lib`
-- 已跑：`cargo test --test reasoning_continuity_real_llm_tests deepseek_`（3 passed，含 `deepseek_non_tool_turn_roundtrip_replays_reasoning_content`）
-- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致
+### 集成说明
+- 当前提交（2026-09-20 14:11）：Bash 可对 `sessions/`、`logs/`、`audit/` 做内部诊断；deny、敏感路径保护和原生写入限制保持不变。版本脚本已将 CLI 升至 `0.1.56`、扩展升至 `0.1.70`、bundled CLI 升至 `0.1.56`，镜像检查与版本脚本 19 项测试通过；按用户指令，提交前不额外运行测试。
+- 当前提交（2026-09-20 09:53）：通用真实 LLM 配置和真实验收迁移至 idatatlas Terra；完整真实组 `integration-real-llm` 29/29 通过，ignored 长会话 E2E 通过。计划真测已验证 `plan.review`、最终 `load_skill(verify)`、两项 todo 收口和真实 Python 产物；不推送、不发版，Cov% 未跑。
+- 当前提交（2026-09-20 08:04）：Plan 交付收口移除 runtime gate 与 green-build 证据机制，最终验收改为 LLM-authored acceptance todo + verify skill；提示词、契约、文档、测试和 serve fixture 已同步。CLI `0.1.55` / 扩展 `0.1.69` / bundled CLI `0.1.55`；版本镜像检查与 `git diff --check` 通过。Cov% 未跑，保持 —。
+- 最新补充（2026-09-11 21:12）：Stop 约 30 秒卡顿已按根因修复，提交包含 Rust 实现、回归、架构不变量与 CLI `0.1.50` / 扩展 `0.1.64` 的版本镜像；版本工具 `check` 和空白 diff 检查通过。提交阶段依用户指令停止正在执行的 Rust 测试，不将其记为本轮验证。
+- 最新补充（2026-09-11 14:25）：方案 E 六项收尾与版本发布完成。全量门禁：Rust `gate-full`、真实 `integration-real-llm`（38/38）、CLI E2E（97/97）、QuickJS E2E（15/15）以及扩展 `npm run gate:full` 全绿；版本镜像检查与 19 条版本工具测试通过。Cov% 未测，保持 —。
+- 最新补充（2026-09-09 22:01）：缓存马拉松去掉 Terra 拒绝的采样参数，并加上 `TOMCAT_E2E_CACHE_PROBE_KEY` 与交替 wire A/B。不推送、不发版；CLI `0.1.48` / 扩展 `0.1.62` 不变。Cov% 未测，保持 —。
+- 当前提交（2026-09-08 16:08）：验收整改计划于 15:51 完成，本次依用户新指令提交整改源码、测试、说明和状态文件；不推送、不发版。代码与验收结束时的 58 路径快照一致（排除账本的 SHA-256 为 `fabe312fca556e9e8ec2adca5b4d3781012039a207f58cf633098034963920f6`），提交前仅补状态/提交说明，不重复已通过的完整测试。CLI `0.1.47` / 扩展 `0.1.61` / bundled CLI `0.1.47` 不变；Cov% 未测，保持 —。完整命令、真实任务 ID、失败与补跑结果见 [验收整改记录](../reports/acceptance-remediation.md)。
+- 最新补充（2026-09-03 22:09）：依赖去重与 `[profile.fast]` 合入。`Cargo.lock` 573→541；CLI `0.1.44` / 扩展 `0.1.58` / bundled CLI `0.1.44`。验证：fmt、clippy `-D warnings`、`cargo check --all-targets`、`release-version check`、`git diff --check` 全绿。Cov% 未跑，仍为 —。
+- 最新补充（2026-08-30 20:10）：CLI `0.1.39` / 扩展 `0.1.51` / bundled CLI `0.1.39`；`package:vsix` 增加 yauzl 解压门禁。验证：`release-version check`、VSIX 解压单测、完整打包流程；本机纯插件 `tomcat-vscode-ext-0.1.51.vsix` SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`。Cov% 未跑，仍为 —。
+- 最新补充（2026-08-29 15:42）：完成态计划不再渲染 Composer 待办 widget，Tomcat Box 右侧留白已移除；截图 E2E 的根节点宽度现在无论成功或超时都会恢复。Plan Preview 自定义编辑器 E2E 的正文引用源行由唯一 token 推导，并把引用计数断言改为相对当前操作，修复错误 `:0` 行号造成的等待超时。`npm run test:e2e:vscode-devhost` 33 passing、`npm run lint:extension`、`git diff --check` 与 `npm run package:vsix` 均通过；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 为 1.52 MB，SHA-256 `663c50d010536af899725d3bec67ba007f508e41a0adec05064334eebdc3647c`，包内不含源码、测试、E2E harness、node_modules 或 CLI 二进制。Cov% 未跑，仍为 —。
+
+- 最新补充（2026-08-29 13:38）：Plan Preview 现在先展示磁盘中的计划正文和待办，不再等待 serve 初始化或模型目录；延迟增强结果受面板 generation 保护，不能覆盖较新的磁盘刷新。Plan webview 已添加错误边界，异常时显示 Reload 而不再留下空白。验证：`npm run test`（core 371 + GUI 553）、`npm run lint`、`npm run build`、`git diff --check` 全绿；纯插件包 `tomcat-vscode-ext-0.1.50.vsix` 已重打（1,590,261 bytes，SHA-256 `361d3cb5447625d25d9b74a69694df19cda89bfe159375c24457eec062873d74`，包内无 `bin/tomcat`）。Cov% 未跑，仍为 —。
+- 最新补充（2026-08-29 13:07）：Plan Preview Find 移除 fixed 几何覆盖层，改为内联文本装饰并由浏览器定位真实当前 span；补齐命中导航的末尾→首项环回滚动 E2E。Find GUI focused 34 passed、`npm run lint`、真实 Dev Host `.plan.md` E2E 和 `npm run package:vsix` 均通过；Cov% 未跑，仍为 —。
+- 最新补充（2026-08-11 16:46）：user-message sidecar + UPDATE 机器区双通道 strip 已落地；计划 green build（fmt / clippy -D warnings / release / 串行 lib / context_management_tests）通过。Cov% 仍为 —。
+- 最新补充（2026-08-10 23:10）：Composer 撤销不再冒泡到 VS Code workbench；GUI Composer 定向单测与只读计划预览 undo 守卫 E2E 通过；`npm run lint` 绿；版本已升 CLI `0.1.36` / 扩展 `0.1.48` / bundled CLI `0.1.36`；本机纯插件 `tomcat-vscode-ext-0.1.48.vsix`。Cov% 仍为 —。
+- 最新补充（2026-08-10 21:11）：计划预览已改成只读自定义编辑器，磁盘成为唯一权威；watcher/serve 两路刷新均只读磁盘，手改仅走原生 Markdown 编辑器。Provider 46、GUI 19、serve plan event 与聚焦 devhost `.plan.md` E2E 通过；全量扩展集成/host E2E 的既有 fixture 失败详见 BLOCKED。版本已升 CLI `0.1.35` / 扩展 `0.1.47` / bundled CLI `0.1.35`；Cov% 仍为 —。
+- 最新补充（2026-08-10 16:10）：`ask_question` 实时工具卡与问答卡不再共享 timeline `.id`；新增 live / interrupt / patch≡full / GUI DOM 回归，targeted devhost E2E 通过；扩展已升至 `0.1.46`，纯插件 VSIX 已重打。Cov% 仍为 —。
+- 最新补充（2026-08-10 13:56）：版本 bump CLI `0.1.34` / 扩展 `0.1.45` / bundledCli `0.1.34`；`release-version check` 通过。Cov% 仍为 —。
+- 最新补充（2026-08-10 12:24）：in_progress≤3 文案对齐——executor / 工具顶层保留一句，参数层 `status` 不再复读整表上限；架构文档与 `tool-catalog.md` 同步。Cov% 仍为 —。
+- 最新补充（2026-08-10 10:04）：执行效率与交付收口门禁合入。完成态双硬门（code review + green build）、内置 verify skill、edit schema / parallel tools / Retry-After / compaction logPath / 最多 3 in_progress / web_search model_name 回退，以及 ErrorBoundary/fake-serve E2E 与交付准确性文档。验证：`cargo test --lib` ~2637 passed；扩展 lint 与包装 VSIX 相关 E2E 绿。Cov% 本轮未跑 tarpaulin，仍为 —。
+- 最新补充（2026-08-08 09:45）：ModelPicker / Context 档位 / Effort 显示与 portal 配置浮层、WebviewErrorBoundary、VSIX 新鲜度门禁、`accept:image` lease+窗口定位修复已合入工作区；版本 CLI `0.1.31` / 扩展 `0.1.42`。既有本地 `~/.tomcat/models.toml` 若在旧 builtin 物化后未含 `context_window_options`，会盖住嵌入 catalog 的新档位——升级后需重新生成或手工补档位。Cov% 本轮未跑 tarpaulin，仍为 —。
+- 最新补充（2026-08-05 23:13）：OpenAI Responses cache 增长根因与修复已合入。真实 Agent 的 `EphemeralTail` 不能作为移动 input user 项；现请求专用 tail 合并进 `instructions`，持久 `input` 保持只追加。fcodex HTTP 明确拒绝 `previous_response_id`，故不作为默认方案；真实 transcript 大 tool-result probe 已越过多个量化块持续增长至 `65,024` read tokens。验证：Responses 定向单测、真实 fcodex probe、`npm run package:vsix`；CLI `0.1.28` / 扩展 `0.1.39`，本机纯插件包已生成。Cov% 本轮未跑 tarpaulin，仍为 —。
+- 最新补充（2026-08-04 17:02）：失败回合与缓存整改 + 二次复查合入。`resolved_output_limit`、空回合守卫、thinking 下限 1024、配置别名与目录期校验、恢复卡保留/`abandoned`/中断去重、指纹门禁与成对哈希；版本 CLI `0.1.26` / 扩展 `0.1.37`。验证：`cargo fmt/clippy`、`cargo test --lib` 2537 passed、webview unit 475、E2E 33、`release-version check`；真实 DeepSeek multi-timeout CLI 偶发仍记在 BLOCKED。Cov% 本轮未跑 tarpaulin，仍为 —。
+- 最新补充（2026-08-03 22:37）：Prompt 前缀缓存复核补全合入。稳定 ToolSurface/SystemPromptSnapshot + ephemeral 尾部；Anthropic 断点预算与 cache key 家族；OpenAI/Responses cached_tokens；文档与 20 轮命中率基线写入 `context-management.md`；版本 CLI `0.1.24` / 扩展 `0.1.35`。验证：`cargo fmt --check`、`clippy -D warnings`、`./scripts/run-integration-tests.sh gate-fast`、`npm run check:wire && npm run gate:fast`、`node scripts/release-version.mjs check`。Cov% 本轮未跑 tarpaulin，仍为 —。
+- 最新补充（2026-08-03 14:05）：PlanState teardown + 门禁修复合入。会话模式与计划文件生命周期拆分；预览 dirty/autosave、overflow confirmed-drop、恢复占位符与剩余 Plan E2E 已绿。验证口径：Rust `fmt`/`clippy -D warnings`/`run-integration-tests.sh gate-fast`；扩展 `check:wire`/`gate:fast`/`test:e2e:vscode-devhost`。Cov% 本轮未跑 tarpaulin，仍为 —。
+- 最新补充（2026-08-02 21:55）：14 条 Rust 红测已按根因收口：serve `FixedResolver` 从 catalog 保留 capabilities；dispatcher 以同一次 `ResolvedCall` 的 wire model 盖章请求；OpenAI FilesRuntime 改为会话级缓存；未解析 compaction 夹具、bash drain 等待及 resolver 错误码断言已对齐。`cargo test --lib`（2479 passed, 1 ignored）通过；图形化宿主下真实计划文件点击未做人工验收。
+- 最新补充（2026-08-02 09:00）：失败章节整章折叠 + Retry 锚点精确盖章 + smart picker 批量引用事务已合入；扩展版本 `0.1.33`。验证：扩展 `npm run gate:full` 全绿（含安装包 smart-picker E2E）；Rust 定向 copy-forward/幂等盖章与 webview state/provider/flow 回归通过。完整 `cargo test --lib` 既有无关红测仍在 BLOCKED。
+- 最新补充（2026-08-01 11:28）：release 路径 unused/dead_code 四条告警已用 `#[cfg(test)]` 收口；`cargo check --lib` 绿。本机另打纯插件包 `tomcat-vscode-ext-0.1.32.vsix`（不含 CLI，不入库）。
+- 最新补充（2026-08-01 11:04）：卡死机制整改与版本发布合入工作区：CLI `0.1.22` / 扩展 `0.1.32`；错误卡主按钮视觉与真实 Retry/Resume E2E 截图已验收；定向 Rust revive/resume/index 与扩展 MessageBubble/state/provider 测试绿；完整 `cargo test --lib` 仍有既有 serve 附件失败未清。`run-vscode-devhost` 现透传 `TOMCAT_E2E_SCREENSHOT` / `TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR`。
+- 最新补充（2026-07-29 08:36）：定向 Rust 验证通过：`core::prompts::tests::load_test` 24/24、catalog 12/12、`tool_catalog_doc` 2/2、`prompt_size_budget` 3/3；`git diff --check` 通过。
+- 最新补充（2026-07-29 08:36）：VS Code `npm run gate:fast` 通过：24 个 extension/core 测试文件 282 个测试、52 个 GUI 测试文件 442 个测试全部通过；devhost 命令在场景执行前因上述启动路径问题退出。
+- 最新补充（2026-07-29 08:36）：工程规则审计确认 `.cursor/rules/engineering-standards.mdc:7` 的问题章节说明已按计划同步；明确排除 `:10` 的本地 todo 数量规则。Planner `ask_question`、`core_identity`、Plan/Code Reviewer、共享 64 轮预算和 `WebviewReference` wire 类型未被意外修改。
+- 最新补充（2026-07-28 16:10）：提交前补齐 `ServePlanEvent` union 收窄——`plan.explorer.started` 无 `planId`，webview `applyPlanEvent` 改为 `"planId" in event` 后再读；edit-display reload E2E `replays single-file and multi-file edit cards after a webview reload` 现已 `1 passing`。本轮 code review 根治项随此提交合入。
+- 最新补充（2026-07-28 09:38）：版本管理系统已完成并通过 code review。`release-versions.json` 成为 CLI `0.1.20`、扩展 `0.1.30` 与 bundled CLI `0.1.20` 的唯一来源，一条 Node 命令同步 Cargo/npm 必要镜像；PR/push CI 与 release guards 均只读阻止漂移。验证：Node `19/19`、guard `10/10`、extension integration `342 passed`、GUI `438/438`、Cargo locked release build、npm CI/compile/GUI build/VSIX 打包与包内版本断言全绿；完整扩展 `npm run build` 的 `gen:wire` 在当前 Agent 会话中仅因嵌套 Tomcat 安全保护拒绝启动，独立 compile/build/package 均已通过。
+- 最新补充（2026-07-28 16:05）：code review 根治项已用**本地源码二进制** `tomcat/target/debug/tomcat` 做最小真实链路复测，避免被系统已安装旧版 `tomcat 0.1.20` 污染。实测 prompt 走 `planning -> create_plan -> plan reviewer -> build -> update_plan -> code reviewer -> complete`：planning `119.896s`，exec 总墙钟 `381.499s`，`plan.code_review.started(07:59:41.286) -> plan.code_review(pass)(08:04:59.605)` 为 `318.363s`。子 transcript `subagent-sessions/1785225410130_905ad1d4de2614c9-child-code_reviewer-1.jsonl` 清楚记录了 `auto_retry_start{attempt:2, error_message:\"LLM调用错误: 流式空闲超时: stream_timeout_sec=180s\"}` 与后续 `auto_retry_end{success:true}`，说明 `180s` 阈值不会把高推理 code review 直接判死，而是会在真正静默时打断第 1 次 stale 尝试并让第 2 次尝试收口。主 transcript 同时已实测包含 `plan.code_review.started{child_session_id, transcript_path}` 与 `plan.code_review{child_session_id, ...}`，可直接回跳子 transcript 排障；重复 review 块回落为 1 次 started + 1 次最终 pass。
+- 最新补充（2026-07-28 02:43）：子 Agent 模型/Provider 绑定根治合入提交。根因是启动冻结 deepseek 客户端 + 会话 catalog id 分头传；现任何取 provider 必须经 resolver 配对进 `ResolvedCall`。验证：`cargo build` 绿；`cargo test --lib --tests --no-run` 全量可编译；`core::plan_runtime`（127）、`core::agent_loop`（213）、`core::llm::tests`（165）绿；`plan_e2e_with_mock_llm_tests` 14/14 绿（含 `h13_*`）；绑定专项 4+2+1 绿。既有无关 dead_code（`llm_code` / `OpenAiFilesClient::instance_id`）警告仍在，非本轮引入。
+- 最新补充（2026-07-27 21:11）：Agent 交付控制整改已合入本分支工作区并准备提交。核心是把“模式持久化 / 摘要不可伪造 / 未完成不得收工 / 复审非 pass 不收口 / 勘察可派 Explorer / 读写可批量”做成运行时硬约束，而不是再加一堆场景提示词。冒烟验收（A 离线复算 + C 小任务）额外修了 strict-schema 空壳字段与 reviewer catalog-id 串台两处线上缺陷。版本 CLI `0.1.20` / 扩展 `0.1.30`。验证：`cargo test --lib`（`2361 passed`）、plan mock/integration 套件绿、扩展 `npm run gate:full` 绿；`checkpoint_cli_e2e` 既有红测仍在。
+- 最新补充（2026-07-27 02:35）：为修复图片 acceptance 里脚本化 `llm_error` 场景偶发失效，fake-serve 把“一次性 prompt 脚本开关”从共享状态 JSON 拆到独立 sidecar 文件，避免被普通 `persistState()` 覆盖；随后本机重新验收：`npm run accept:image` 绿并产出 `15-retry-and-degrade-notices.png`，`npm run test:integration` 绿，`npm run gate:full` 绿。`cargo test` 仍稳定卡在既有无关红测 `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup`（`child did not exit within 30s`），本轮未触碰该测试所依赖路径。
+- 最新补充（2026-07-27 01:40）：provider 流内终局错误整改已并入本分支：Rust 侧接通 `response.failed/LlmError -> Attempt Loop`，红字去重与 retry/degrade notice 前端同步收口；新增 `replay-turn-payload.py` 可用 transcript 对真 `/v1/responses` 重放，并在本机对 10:58 那轮真实复测拿到 `response.completed`。本轮还正式补上此前缺失的“provider reject”测试矩阵列：wire/unit、serve integration、fake-serve acceptance 与图片 acceptance 截图都已覆盖。
+- 最新补充（2026-07-26 18:06）：附件体验第二轮收口已完成：preview toolbar codicon + copy 对勾、PDF 真剪贴板 / PDF 方块 / history PDF 渲染、transcript `![...](path)` 本地图直渲与轻量放大、`/.cursor/rules` 与 `/.cursor/plans` 出库，以及 `SystemOutputConventions` 对 `![...](path)` 的第二次提示词—渲染耦合同步。验证：`npm run accept:image`、`npm run gate:full`、`npm run test:integration` 全绿；`cargo test` 被独立红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 阻塞，已单例复跑确认。
+- 最新补充（2026-07-26 10:44）：图片附件整改已合入本分支。草稿改扩展层、字节走 CAS；`accept:image` 22/22；内存 480MB→1.16MB；版本 CLI `0.1.18` / 扩展 `0.1.28`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。
+- 最新补充（2026-07-24 21:04）：流式热路径三层发送（state/sessionView/sessionPatch）+ 攒发调度 + seq/resync 已落地；扩展 `0.1.27`；bench after 显示 patch 载荷/行渲染相对全量显著下降；`test:unit` / `test:integration` / `verify:vsix` 全绿；本机纯插件 `tomcat-vscode-ext-0.1.27.vsix`（制品不入库）。
+- 最新补充（2026-07-24 16:08）：Bash timeout→background 与子代理/ext host tracked execution 已落地；版本 CLI `0.1.17` / 扩展 `0.1.26`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。
+- 最新补充（2026-07-22 23:10）：Shell 命令卡片补回 `args[]` 完整展示；thinking 单 Shell 组头即时回退改为 `Ran shell command`；扩展验收版本 `0.1.25`，纯插件包 `tomcat-vscode-ext-0.1.25.vsix`。
+- 最新补充（2026-07-22 21:34）：system prompt 去掉动态时间以保证同输入确定性；`planner.txt` 收口既有计划的 edit/`update_plan` 修订契约；相关 unit/registry 断言已同步。
+- 最新补充（2026-07-22 16:53）：Code Review 收口整改已合入本分支工作区并准备提交。Plan/Code Reviewer 全拆分、Verifier 收口 dormant、`plan.code_review` 富事件 + `ReviewRow` UI；验证：相关 Rust focused/lib 与扩展 `npm run lint` / `npm run test:unit` 全绿；纯插件 `tomcat-vscode-ext-0.1.24.vsix`。
+- 最新补充（2026-07-22 11:44）：折叠组 `GroupActivityTicker` + `ProgressRow` busy-turn 常显 + thinking `**...**` 最小换行整形已落地。验证：focused GUI `44 passed`、全量 `npm run test`（`42 files / 336 tests`）、`npm run lint`、targeted devhost E2E loading/streaming `2 passing`；验收包 `tomcat-vscode-ext-0.1.24.vsix`。
+- 最新补充（2026-07-22 06:19）：chat-completions `normalize_for_completions` 纯文本扁平化已修复并回归：目标 3 例 + multimodal/transport + `cargo test --lib core::llm`（`312 passed, 1 ignored`）全绿；真实 DeepSeek 冒烟 `chat_real_request_response_print --ignored` 通过。此前第三轮倒计时整改中记录的 3 条 OpenAI provider normalization 既有失败已消除。
+- 最新补充（2026-07-21 15:42）：长任务后台倒计时整改已落地。Rust 侧本次以受影响 focused suites 为 gate：`clamp_block_timeout_preserves_zero_and_bounds_wait_slices`、`background_ticket_keeps_fields_and_adds_next_hint`、`task_output_timeout_ms_cap_does_not_block_indefinitely`、`task_output_block_true_timeout_is_non_terminal_wait_slice`、`task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still_running`、`background_shell_prompt_mentions_finished_tag`、`task_output_schema_matches_long_wait_slice_contract`、`tool_update_uses_compact_minute_second_countdown_labels` 与 `cargo test --test prompt_size_budget` 全绿；扩展 `npm run test:unit` 与 `npm run lint` 全绿；`docs/tool-catalog.md` 已用 `gen-tool-catalog` 重生成。额外观察：本机直接跑整库 `cargo test --lib` 曾命中 3 条 OpenAI provider normalization 失败（`openai_provider_test.rs`，与 countdown / prompt / webview 改动无关）；该问题已在同分支后续提交修好。
+- 最新补充（2026-07-21 07:34）：扩展验收版本已继续上调：`package.json` 现为 `0.1.21`，`SettingsPanel.test.ts` / `SettingsApp.test.tsx` 的 extension 版本断言已同步，根 `package-lock.json` 顶层包版本也已对齐；本机重新打包产物为 `tomcat-vscode-ext/tomcat-vscode-ext-0.1.21.vsix`。验证：`npm run test:unit:core -- src/ui/settings/SettingsPanel.test.ts`、`npm run test:unit:gui -- src/settings/SettingsApp.test.tsx`、`npm run lint`、`npm run package:vsix` 全绿。
+- 最新补充（2026-07-21 07:31）：loading dots 又按验收反馈做了一轮精修：共享 [`LoadingDots.tsx`](../../../tomcat-vscode-ext/gui/src/components/LoadingDots.tsx) 现在播放更慢的紧凑序列 `.` → `..` → `...` → `.`，第一个点不会再消失；同时 dots 本身也带 shimmer，因此纯占位 loading 位不需要依赖旁边文案就能表达活跃态。UI 合同仍保持为“**只有没有 shimmer 文本的 loading 位才显示 dots**”，所以 `ProgressRow` / `PlanFileCard` 继续复用共享 dots，而 `ThinkingBlock` / `ToolRow` 在 active 态只保留 shimmer 文本，不再并排追加 dots。验证：GUI targeted `65 passed`、`npm run lint` 全绿。
+- 最新补充（2026-07-21 06:54）：`Used N tools` 后的请求级 loading 语义已按用户指定收口：不再把等待态绑回 `ThinkingGroup` 组头，而是复用 `ProgressRow` 表达两段 gap。实现上 `ProgressRow` 现在只显示呼吸 `...`、不再显示可见 `Thinking`；`TranscriptView` 也不再把“live cluster 中出现过任意 thinking”误当成 active thinking，因此 tool 全完成但请求仍 busy 时，尾部会重新出现同一个 `ProgressRow`，直到新的 thinking / assistant 文本真正到来。扩展版本同步 bump 为 `0.1.20`，本机验收产物为 `tomcat-vscode-ext/tomcat-vscode-ext-0.1.20.vsix`。验证：`npm run test:unit:gui -- ProgressRow.test.tsx TranscriptView.test.tsx`（`17 passed`）、Settings 版本断言同步、`npm run lint`、targeted devhost E2E `keeps max reasoning and pre-stream loading states working in the webview` 与 `streams in the Tomcat webview` 全绿。host E2E 现已真实锁住「pre-stream 纯 dots、post-tool 复用同一 ProgressRow、`turn.summary_updated` 只改标题、下一段输出一来 dots 消失」四段式。
+- 最新补充（2026-07-20 23:02）：Transcript loading UX 整改门禁已通过。后端：`api.deepseek.com` 已加入运行时与仓库 `.env` 的 `NO_PROXY/no_proxy`，`generate_turn_summary / generate_purpose_clause` 的 utility 超时/错误会写 `warn!`；前端：transcript 折叠头 / standalone thinking 已去掉 `codicon-loading tc-codicon-spin`，改为静态 `search / lightbulb` + active-only shimmer。验证：`cargo test title_generator --lib`（`17 passed`）、`cargo test --test transcript_summary_integration_tests`（`10 passed, 1 ignored`）、`npm run test:unit:gui`（`306 passed`）、`npm run lint`，以及 targeted devhost E2E `streams in the Tomcat webview`、`keeps max reasoning and pre-stream loading states working in the webview`、`renders transcript action rows and context groups in the Tomcat webview` 全绿；其中 host E2E 通过注入 `agent_start / tool_execution_start-end / turn.summary_updated` 验证了「执行中 shimmer、做完即停、`Used N tools` 升级成 `Used N tools for <purpose>`」三段式。
+- 最新补充（2026-07-20 21:00）：Anthropic 经 fcodex 的内联多模态 live 已补齐并通过：`PI_LIVE_ANTHROPIC_FILES=1 TOMCAT_E2E_ANTHROPIC_BASE_URL=https://fcodex.top TOMCAT_E2E_ANTHROPIC_MODEL=claude-opus-4-8 cargo test --test openai_files_integration_tests anthropic_inline_ -- --ignored --nocapture` 返回 `2 passed`；同时版本已 bump 为 CLI `0.1.16` / 扩展 `0.1.19`，本机验收产物为 `tomcat/dist/tomcat-cli-v0.1.16-x86_64-apple-darwin.tar.gz` 与 `tomcat-vscode-ext/dist/tomcat-vscode-ext-0.1.19.vsix`。
+- 最新补充（2026-07-20 14:25）：推理档位 catalog-id key 修复门禁全绿：`cargo clippy --all-targets -- -D warnings`、`cargo test`、`npm run check:wire`、`npm run lint`、`npm run test:unit`、targeted `TOMCAT_E2E_GREP='adds a model through settings and uses it in the webview' npm run test:e2e:vscode-devhost`、`npm run package:vsix`；产物 `tomcat-vscode-ext-0.1.18.vsix`。回归用例 `serve_prompt_uses_catalog_id_for_reasoning_lookup_when_model_name_differs` 锁住 id≠model_name 时 `reasoning.effort=xhigh`；本机 release `tomcat 0.1.15` 已装到 `~/.local/bin`，stdio 流式请求体已核对 `"effort":"xhigh"`。
+- 最新补充（2026-07-19 23:40）：推理强度（reasoning effort）v2 列表式整改已完成最终门禁：`cargo clippy --all-targets -- -D warnings`、`cargo test`（含 `2153` 个 lib tests、integration tests 与 doc tests）、`npm run check:wire`、`npm run lint`、`npm run test:unit`（core `208/208` + gui `299/299`）、`TOMCAT_E2E_GREP='adds a model through settings and uses it in the webview' npm run test:e2e:vscode-devhost`（`1/1`）与 `npm run package:vsix` 全绿；VSIX 产物为 `tomcat-vscode-ext-0.1.16.vsix`。本轮新增的 devhost Add Model 场景已真实锁住三件事：relay 保存时 `thinking_format` 自动物化、强改成 `anthropic` 后出现 warning、切到支持 `xhigh` 的模型后聊天框能选档并把当前推理档带进 prompt 链路。
+- 本分支任务已收口，State=DONE，准备合入 `develop`。
+- 最新补充（2026-07-19 18:02）：plan transcript 事件行+产物卡模型、pending 呼吸盖章、View Plan/Build UX 收口已落盘；`npm run lint`、完整 `npm run test:unit`、targeted plan UX / `.plan.md` custom editor devhost E2E、全量 `npm run test:e2e:vscode-devhost` 与 `npm run package:vsix`（`tomcat-vscode-ext-0.1.16.vsix`）全绿。
+- 验证摘要：`npm run lint`、`npm run test:unit`（ext+gui）、Rust prompt 守卫（planner/load/system_prompt/prompt_size_budget）、真流式/plan 预览/plan 排序 targeted devhost E2E、全量 `npm run test:e2e:vscode-devhost`、`npm run package:vsix` 全部通过。
+- 相关历史叙事亦回填 `docs/status/develop.md`；旧分支文档 `feature-transcript-ui-and-checkpoints.md` 同步更正“thinking 也走 ChatMarkdown”的过时口径。
 
 ---
 
-## feature-thinking-api-display
-
-*暂无进度*
-
----
-
-## feature-tool-system-cleanup
-
-*暂无进度*
-
----
-
-## feature-web-search
+## feature-transcript-ui-and-checkpoints
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-05 07:12 +0800 | PENDING_INTEGRATION | feature/web-search | — |
+| tomcat | 2026-07-15 08:53 +0800 | ACTIVE | feature/transcript-ui-and-checkpoints | — |
 
-### ✅ DONE
-- [✓] **[P1]** 认领 `T2-P1-012`，任务卡与看板索引已切到 `DOING / Jerry`
-- [✓] **[P1]** 完成 `PR-WS-A`：注册 `web_search`、落 6 字段 schema、接入 `tool_exec/branches/web_search.rs`，并保持 reviewer / verifier 不开放联网检索
-- [✓] **[P1]** 完成 `PR-WS-S`：实现 Tavily / Brave / Serper adapters、`ToolsWebSearchConfig`、per-provider `.env` / env key、`moka` LRU + TTL cache、`auto` HTTP fallback
-- [✓] **[P1]** 完成 `PR-WS-O`：实现 project-level hosted 候选模型发现、显式 `openai` / `auto` hosted 路径、`openai_server.rs` 归一化与 `Capabilities.web_search`
-- [✓] **[P1]** 完成 `PR-WS-W`：在 `normalize_hits` 落 SSRF / 私网 / loopback / 单段 host 拦截，以及 `allowed_domains` / `blocked_domains` 过滤
-- [✓] **[P1]** 已补 `tests/web_search_tool_tests.rs` 并登记 `scripts/test-groups.sh`
-- [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`./scripts/run-integration-tests.sh lib`、`./scripts/run-integration-tests.sh integration`、在本机配置 Tavily key 后执行 `cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`
-- [✓] **[P1]** 方案复核整改：修正 catalog / tool-catalog 过期占位说明；`web_search.md` 对齐 hosted sidecar 落点；Brave/Serper 域名改写 warning、Tavily warning 命名统一；相关单测 / 集成测复绿
-- [✓] **[P1]** 已完成 `T2-P1-013` 当前批次：`web_fetch` 已注册 `url / prompt / format` schema，接入 catalog / `tool_exec` / chat runtime 注入链，并补 `missing runtime` 友好错误
-- [✓] **[P1]** 已完成 `web_fetch` 主链：`validate.rs` 的 URL 校验 / SSRF 守卫、`http -> https` 首跳升级、受控重定向、`html2md` 转换、超大正文 `.md` 落盘、PDF/图片/二进制落盘、magic 覆盖错误 `content-type`、moka 缓存；`PR-WF-D / PR-WF-P` 继续后置
-- [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test web_fetch --lib`、`cargo test --test web_fetch_tool_tests`、`cargo test --test tool_catalog_doc`
-- [✓] **[P1]** 已完成 `web_fetch` 收口整改：`markdownify.rs` 正则改 `LazyLock`，`validate.rs` 的 secret-prefix 误报收紧为边界匹配，`application/json` / `*xml` 改为 verbatim 返回，`prompt_ignored_mvp` 改为按本次请求现算且不再污染缓存，off-host redirect 结果不进缓存
-- [✓] **[P1]** 文档 / 验收已对齐：`web_fetch.md` 改为显式说明工具描述来自 `catalog.description`、`validate.rs` 当前拒绝所有 IP literal，并登记 DNS 解析型 SSRF 残留；补 `tool_exec` 成功路由到 `web_fetch` 的回归测试并复绿
-- [✓] **[P2]** `PLAN_SPEC.md` 收紧决策表与 todos 映射：已拍板决策须逐项对应 todo，不再允许多项决策合并为一个 todo 而不落点
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Checkpoint 最新一轮消失修复：`setCheckpoints` 不再触发 `rebuildHistoryTimeline`；分隔线改为 GUI 渲染层现算（`checkpointMarkers.ts` + `TranscriptView` checkpoints prop）@2026-07-13
+- [✓] **[P0]** Checkpoint 分隔线缺失修复：`count_worktree_files_until` 改用 `git ls-files --cached --others --exclude-standard`，计数口径≡快照，尊重 `.gitignore` 与 DEFAULT_EXCLUDE_RULES @2026-07-13
+- [✓] **[P1]** 分层验收：state/provider/webview_provider_flow + GUI checkpointMarkers 单测；shadow_git 忽略目录计数与 ignored-only 语义单测；E2E 库登记 VSCEXT-024/025；不含 CLI 的 `0.1.11` VSIX 已手工复验（gitignore，不入库）@2026-07-13
+- [✓] **[P0]** Transcript checkpoint restore 落地：list/restore 协议、三态确认弹层、`revertFiles` 截断对话并可选回滚文件 @2026-07-13
+- [✓] **[P0]** 上一轮进行态收尾：`TranscriptView` 仅 live cluster 持有 thinking streaming；`agent_idle` 经 `settleRunningTools` 收敛残留 running/streaming 工具卡；GUI/state/provider 分层测试 + E2E-VSCEXT-026 @2026-07-13
+- [✓] **[P0]** Sticky reveal 触发加固：`useAutoScroll` 改按 `latestUserMessageId` 变化触发 reveal，护栏 `userMessageCount` 未减少；超一屏后切回 follow-bottom 并显示当前轮 sticky；分层测试 + E2E-VSCEXT-027；ext/gui bump `0.1.12` @2026-07-13
+- [✓] **[P0]** 真机「新提示词不置顶」真因修复：真实浏览器 smoke（Vite dev server + CDP）复现——reset effect 与 reveal effect 共享 `previous*Ref`，`resetKey` 与新 user **同帧变化**时，先声明的 reset 把 ref 洗成"已见过"，静默吞掉 reveal（jsdom mock 布局测不出）。合并为**单一确定性 `useLayoutEffect`**（`resetKey/latestUserMessageId/oldestItemKey/userMessageCount`），reset 分支权威落底、同会话追加必 reveal；真机复验 reveal 到顶→超一屏切 follow-bottom→sticky 全链路 + collision 落底；新增 `useAutoScroll.test.tsx` collision/remount-后发送 两条不变量 + E2E-VSCEXT-028；ext bump `0.1.13` @2026-07-13
+- [✓] **[P0]** 真机「新提示词不置顶」**第二真因**修复（0.1.13 仍复现）：用**生产构建 `gui/dist`** 静态服务 + CDP 复刻真机时序（`busy=false` echo→`busy=true` 翻转→流式）取证——`busy` 翻转使 composer 变高、stream 容器 `clientHeight` 变大，reveal spacer 仍按旧视口算导致**钳底 + `scroll` 事件翻成 follow-bottom**，reveal 当场丢失（jsdom mock `clientHeight` 恒定测不出）。修复：`ResizeObserver` 检测 `clientHeight` 变化即**重算 spacer 并重新固顶**（可增大 spacer）；钳底 `scroll` 事件在当前轮仍装得下时**重新固顶而非 follow-bottom**。生产构建复验：`busy` 翻转后 u2 保持 `top=0`、长回复溢出仍 follow-bottom；新增 `useAutoScroll.test.tsx` 可变 `clientHeight` 两条不变量 + E2E-VSCEXT-029；ext/gui bump `0.1.14` @2026-07-13
+- [✓] **[P0]** `.plan.md` Cursor 风自定义预览编辑器落地：`CustomTextEditorProvider` + Vite 多入口；Preview（正文→N To-dos→四态清单 + 懒加载 mermaid SVG）/ Markdown 只读切换（原生 `editor/title` 溢出菜单）；默认 `tomcat.plan.toolbarStyle=hybrid` 细 sticky 半透明操作条（无白字扁平模型下拉 + 小圆角黄 Build）；全局 `tomcat.plan.buildModel`；选区「加入 Tomcat Chat」（浮动按钮 + `webview/context`）；`planDocument` 统一 frontmatter 解析供预览与聊天卡片复用；host/GUI/E2E（含 mermaidSvgCount + 两路 selection chip）+ 真机自检全绿 @2026-07-14
+- [✓] **[P0/P1]** Plan 选区加入聊天：修「点了不进 chip」+ 稳定 `文件名:行号`。P0 根因是无行号 selection 在 `referenceIdentity` 塌成同一键被 Composer 静默去重；无行号 selection 追加文字 FNV hash；P1 以 `bodyLineMap` + `data-source-line` 替代脆弱原文 substring。host/GUI/E2E（两路含 `:行号` + path3 两段无行号 todo 皆落 chip）全绿；`0.1.14` VSIX 已打包（gitignore）@2026-07-14
+- [✓] **[P0]** Plan 预览顶栏铺满 + 正文底部留白：`body.tc-plan-webview{padding:0}` 去掉 VS Code webview 默认 20px；`.tc-plan-preview__content` 底部 padding 提到 40px；DOM 快照加 `stripInsetLeft` 断言顶栏 inset≈0 @2026-07-15
+- [✓] **[P0]** Thinking 分组标题带目的：`generate_turn_summary` 禁止裸 `Used N tools`；命中后二次 utility 调取 purpose clause，拼成 `Used N tools for <clause>`；title_generator/集成/ThinkingGroup 单测覆盖 @2026-07-15
+- [✓] **[P0]** Bash 卡片终端化（抄 Cursor）：后端 `generate_command_summary` + `tool.summary_updated`（`ServeToolEvent`）异步升级目的短句；ToolRow 头改为 `summaryTitle|Ran` + 命令名标签，正文 `TerminalOutput` 前置 `$ 完整命令`；host/GUI/state/E2E 覆盖；已知限制：live-only，history 重载回落占位 @2026-07-15
+- [✓] **[P0]** Round2：`tool.summary_updated` 补进 serve `event_pump` 白名单（真因：emit 了但未转发）；`commandBinaries` 跳过注释/heredoc/非法 token、上限 3；plan 预览改为 `plan.create` 登记、`plan.review` 后打开；正文左右 padding 16px + `bodyInsetLeft` 断言；event_pump/provider/ToolRow/host E2E 覆盖；`0.1.14` VSIX 已重打 @2026-07-15
 
-### 🔌 INTERFACE
-- `web_search` 现为真实可执行工具，schema 固定为 `query / count / freshness / country / language / domain_filter`
-- 输出统一为 `{ hits, query, backend, stats, truncated, warnings }`
-- `backend=auto` 现按 `openai(hosted project candidate) -> tavily -> brave -> serper` 选择，并在缺 key / 401 / 403 / 429 / 5xx / timeout / transport fail 时自动降级
-- `web_fetch` 已落地为真实可执行工具，schema 为 `url / prompt / format`
-- 输出统一为 `{ url, code, code_text, content_type, bytes, result, total_chars, duration_ms, cached, persisted_output_path, redirect, truncated, warnings }`
-- 本批次安全边界仅包含 URL 校验 / SSRF 守卫、受控重定向与正文/二进制分流；`PermissionScope::Domain` / `check_domain` / host 会话授权仍后置
+### 🔌 INTERFACE (接口变更)
+- Webview store：`session.checkpoints` 与 `timeline` 解耦；timeline 仅含消息/工具项，checkpoint 分隔线由 GUI `injectCheckpointMarkers(timeline, checkpoints)` 现算。
+- Checkpoint 文件计数：shadow git 上限计数改走 `git ls-files -z --cached --others --exclude-standard`，与 `git add -A` 快照口径一致；仅改 ignore 文件的一轮不产生新存档（设计行为）。
+- AutoScroll：reveal 触发输入由 `lastItemIsLatestUser` 改为 `latestUserMessageId`；`agent_idle` 必须结算残留 running 工具卡。
+- AutoScroll（0.1.13）：reset 与 reveal 合并为单一 `useLayoutEffect`，deps 增加 `oldestItemKey`；判定用单一 `revealTrackingRef`，消除双 effect 共享 ref 的同帧竞态。
+- AutoScroll（0.1.14）：reveal 对视口高度变化免疫——`ResizeObserver` 以 `previousClientHeightRef` 侦测 `clientHeight` 变化并重算 spacer 重新固顶；`handleScroll` 在钳底且当前轮仍装得下时重新固顶而非 follow-bottom。
+- Plan Preview：自定义编辑器 `tomcat.planPreview`；协议 `planPreviewProtocol`（state 帧含 mode/toolbarStyle/`bodyLineMap`；intent `setBuildModel`/`build`/`addSelectionToChat`；事件 `captureSelectionForChat`）；配置 `tomcat.plan.buildModel` + 临时 A/B `tomcat.plan.toolbarStyle`（默认 hybrid）；聊天 `PlanFileCard` 与预览共享扁平 `PlanBuildModelSelect` 与统一 Build 行为；`buildSelectionReferenceFromParts` 供编辑器选区与预览选区共用；`MarkdownBody` 块级打 `data-source-line`；`referenceIdentity` 对无行号 selection 追加文字 hash。
+- Serve/wire：新增 `tool.summary_updated`（`ServeToolEvent`，含 `toolCallId` + `summaryTitle`）；**必须列入 `event_pump.EVENT_NAMES` 白名单才会转发到插件**。
+- Plan auto-open：`plan.create` 只登记 `planId→path`；`plan.review` 到达后才 `openWith`（审稿完成再开，避免抢焦点）。
+- Turn summary：裸 `Used N tools` 触发二次 purpose 调用，前端 ThinkingGroup 可渲染 `Used N tools for <purpose>`。
 
-### ⚠️ BLOCKED
+### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无 | - | - |
+| （空）round2 三项已修；`tomcat.plan.toolbarStyle` 仍为临时 A/B | 待合并前决定是否去掉 native 分支 | — |
+
+### 集成说明
+- 本分支目标：Transcript UI + checkpoint restore；已落地 `.plan.md` Cursor 风预览，并完成顶栏铺满/正文留白、thinking 目的标题、bash 卡片终端化，以及 round2 真机断链修复（白名单 + 审稿后打开）。
+- 验收分层：GUI util / TranscriptView / App / state / provider 单测；E2E 场景登记 VSCEXT-026/027/028/029；plan 预览另含 host/GUI/E2E（hybrid 出条、selection 行号、mermaid、stripInsetLeft、bodyInsetLeft、`plan.create`→`plan.review` 才打开、bash summaryTitle）；纯布局/时序真因以真实浏览器 smoke 取证。
+- 已知后续：`tomcat.plan.toolbarStyle` 为临时 A/B，选定后应删 flag 与 native 分支；devhost 全量偶发失败项 `lazy loads a giant historical tool group` 与本轮无关，待另案排查。
 
 ---
