@@ -400,7 +400,7 @@ async fn runtime_preview_is_bounded_by_bytes_and_tracks_offsets() {
 }
 
 #[tokio::test]
-async fn runtime_preview_is_bounded_by_lines_and_streams_are_visible() {
+async fn runtime_preview_keeps_many_short_lines_under_the_byte_cap_and_streams_are_visible() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let mut rx = reg.subscribe_output();
@@ -414,11 +414,23 @@ async fn runtime_preview_is_bounded_by_lines_and_streams_are_visible() {
         .expect("spawn");
     reg.wait_for_finish(&ticket.task_id).await.expect("finish");
     let preview = reg.runtime_preview(&ticket.task_id).expect("preview");
-    assert!(preview.output.lines().count() <= 1000);
-    assert!(preview.truncated);
+    let durable = reg.read_output(&ticket.task_id, None).await.expect("log");
+    assert_eq!(
+        preview.output, durable.content,
+        "2,200 short lines stay below the byte cap, so the preview is not cut by line count"
+    );
+    assert!(!preview.truncated);
+    assert_eq!(preview.start_offset, 0);
     let mut stdout = false;
     let mut stderr = false;
-    while let Ok(event) = rx.try_recv() {
+    loop {
+        // 2,200 lines can outrun the 256-event channel; production recovers from lag with a
+        // snapshot, so skipped deltas are expected and the retained tail still shows both streams.
+        let event = match rx.try_recv() {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        };
         if event.task_id != ticket.task_id {
             continue;
         }
