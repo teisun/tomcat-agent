@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-12 14:08 +0800 | DONE | feature/transcript-rich-render | — |
+| Nibbles | 2026-10-12 14:19 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### CURRENT REVIEW (2026-10-12)
 
@@ -11,12 +11,12 @@
 - 扩展有效集合：首次 build 前 `check:wire`、完整 core 746/GUI 826、完整真实 Serve integration 的失败三文件补跑4/4（`1791773162429-ubgb60`），新改动 core42/GUI6/跨层88/typecheck；安装态23与 VSIX五启动场景4+1+3+1+1通过（`1791773308474-2bpuri`）。Devhost 原36/6保留，整改后完整39/3/4pending，剩余3路径断言+Plan完整操作补跑4/4（`1791777451153-is5yjb`），全部42活跃场景有有效覆盖，不冒称原full命令退出0。
 - 实屏：Questions 36 triples、Undo 12场景、@截断桌亮/窄暗40 triples、真实 Host Settings/Plan/Image/queue/inline/Files和Plan Find完整操作已采PNG/AX/console并读验。图片专项改为真实390×844窗口，Send完整/可hit-test、33检查/23 triples通过（`1791778757085-22gqoe`），不以旧180px根shim截图凑绿。MCP安装态真实Serve四phase经原checker/normal与untrusted/add补跑闭合（`1791778419644-ilqkke`），28正常场景triples中Settings scoped errors为0；故意Settings error负控单列。旧crop五个不存在文件是无producer旧名单，当前默认五full-frame均在，helper已只用现行名单并拒绝实际缺图的部分成功。
 - Console/边界如实保留：外层VS Code资源ERR_TIMED_OUT不与产品scoped报告混为一谈；图片缺blob404/越界图403为受控负例，不报全程零错误。原图诊断只实测10 PNG，混合SVG失败显式记录；当前11张缩略图位图1,216,512 B不是RSS保证。Native Save As、首次原生project-trust modal、其他平台仍未自动验收。
-- **源码工作已合并/复测完成，远端develop尚待最终verify推送**：功能候选 `1bb87c1f` 已推；本地 `--no-ff fb731ed9` 保留全部157提交，develop再补测试fixture `23946252` / `dc70bd70`。两侧fast有效集合闭合：Rust逐名3237唯一PASS/5ignored、并行378/串行35，扩展752core/826GUI，详见 [develop集成状态](develop.md)。原失败/STOPPED与补跑严格分列；不发版、不打tag。证据 `.agents/acceptance/review-ebbdacce-findings.md` / `.agents/shots/`。
+- **全量审查、合并与远端交付已完成**：`verify`最终对账后 `9423494f` 已正常推送 `origin/develop` 并核对SHA/祖先关系（`1791785913151-i57ar9` exit0）。功能候选 `1bb87c1f` 已推；本地 `--no-ff fb731ed9` 保留全部157提交，develop再补测试fixture `23946252` / `dc70bd70`。两侧fast有效集合闭合：Rust逐名3237唯一PASS/5ignored、并行378/串行35，扩展752core/826GUI，详见 [develop集成状态](develop.md)。原失败/STOPPED与补跑严格分列；不发版、不打tag。证据 `.agents/acceptance/review-ebbdacce-findings.md` / `.agents/shots/`。
 
 ### BLOCKED (当前风险)
 
 - 本机是 macOS；Windows 进程树停止的运行态保证未验证，不冒称全平台通过。当前发布矩阵仅 macOS/Linux，Windows 一等交付需其平台验证。
-- 必需检查已用有效full/失效目标补跑集合对账闭合，未发现待处理P0/P1或硬门禁目标；不将旧FAILED/STOPPED改写为PASS。最终verify和develop远端推送前仍不称完整交付完成。
+- 必需检查已用有效full/失效目标补跑集合对账闭合，未发现待处理P0/P1或硬门禁目标；不将旧FAILED/STOPPED改写为PASS。最终verify与develop正常推送/包含核对已完成，未验平台/人工边界如上保留。
 
 
 ### 近期功能与历史失败（归并原根目录 status，2026-10-11 快照）
