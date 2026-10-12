@@ -129,12 +129,10 @@ type TomcatExtensionApi = {
         | "probeImagePipeline"
         | "scrollIntoView"
         | "scrollToEdge"
-        | "setInputValue"
-        | "setRootWidth";
+        | "setInputValue";
       scrollBlock?: "center" | "end" | "nearest" | "start";
       testId?: string;
       value?: string;
-      widthPx?: number | null;
     }): Promise<void>;
     sendWebviewIntent(intent: {
       data?: Record<string, unknown>;
@@ -166,20 +164,34 @@ function requireEnv(name: string): string {
 async function pause(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
-/**
- * Runs a narrow-layout check without letting the test-only root width leak into
- * later screenshots when an assertion or wait fails.
- */
-async function withRootWidth<T>(
+/** Narrow the actual workbench and webview, not an oversized root clipped by its owner. */
+async function withNarrowViewport<T>(
   api: TomcatExtensionApi,
-  widthPx: number,
   work: () => Promise<T>,
 ): Promise<T> {
-  await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx });
+  const driver = await (require(path.resolve(repoRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
+    SettingsFrameDriver: { connectFromEnvironment(root: string): Promise<{
+      setViewport(width: number, height: number): Promise<void>;
+      waitForSnapshot(predicate: (value: { viewport: { width: number; height: number } }) => boolean, description: string): Promise<unknown>;
+      evaluate<T>(expression: string): Promise<T>;
+      close(): void;
+    }> };
+  }).SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
   try {
-    return await work();
+    await driver.setViewport(390, 844);
+    await driver.waitForSnapshot(snapshot => snapshot.viewport.width >= 250 && snapshot.viewport.width <= 400, "Actual narrow chat viewport");
+    const result = await work();
+    assert.ok(await driver.evaluate<boolean>(`(() => {
+      const button=document.querySelector('[data-testid="send-button"]'), editor=document.querySelector('[data-testid="composer-input"]');
+      if(!button || !editor)return false; const b=button.getBoundingClientRect(),e=editor.getBoundingClientRect();
+      const hit=document.elementFromPoint(b.x+b.width/2,b.y+b.height/2);
+      return b.left>=0 && b.right<=innerWidth && b.bottom<=innerHeight && e.right<=innerWidth && (hit===button || button.contains(hit));
+    })()`), "Narrow composer Send must actually fit and be hit-testable");
+    return result;
   } finally {
-    await api.__testing.sendWebviewDomAction({ kind: "setRootWidth", widthPx: null });
+    try { await driver.setViewport(1440, 900); await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar"); }
+    finally { driver.close(); }
   }
 }
 
@@ -530,15 +542,13 @@ suite("Tomcat image attachment visual acceptance", () => {
       );
       screenshots.push(await captureScreenshot("01-composer-single-image.png"));
 
-      await api.__testing.sendWebviewIntent({
-        data: {
-          files: images.slice(1),
-          sessionId,
-        },
-        messageId: "image-acceptance-attach-rest",
-        type: "attachFiles",
-      });
-      const { narrowDraft, skeletonDraft } = await withRootWidth(api, 180, async () => {
+      const { narrowDraft, skeletonDraft } = await withNarrowViewport(api, async () => {
+        // Establish the real layout before attachment arrival so the genuine skeleton
+        // state is not lost while setting up browser discovery/emulation.
+        await api.__testing.sendWebviewIntent({
+          data: { files: images.slice(1), sessionId },
+          messageId: "image-acceptance-attach-rest", type: "attachFiles",
+        });
         // Thumbnails are generated one at a time, so for a moment the strip is a mix of
         // finished images and placeholders. Worth a screenshot: this is the state a user
         // sees right after dropping a folder of photos, and the placeholders are exactly
@@ -753,7 +763,6 @@ suite("Tomcat image attachment visual acceptance", () => {
 
       await api.__testing.executeCommand("workbench.action.closeActiveEditor");
       await api.__testing.focusWebview();
-      await sendDomAction(api, { kind: "setRootWidth", widthPx: null });
       api.__testing.clearObservedEvents();
       await api.__testing.sendWebviewIntent({
         data: {
@@ -1215,8 +1224,8 @@ suite("Tomcat image attachment visual acceptance", () => {
                 : null,
             sourcePixels: `${FIXTURE_WIDTH}x${FIXTURE_HEIGHT}`,
           },
-          // Both sides measured, on the same machine, on the same eleven images: what the
-          // old strip cost when it pointed at the originals, against what it costs now.
+          // PNG-original probe versus all bounded thumbnails; requested/measured/failures
+          // stay explicit. The mixed SVG is not a measured original in this diagnostic.
           memoryBaselineComparison: {
             afterMeasuredBytes: loadedStrip.attachmentBitmapBytes,
             beforeBitmaps: fullResolutionMeasured?.bitmaps ?? [],
@@ -1452,8 +1461,8 @@ suite("Tomcat image attachment visual acceptance", () => {
           },
         },
         limitations: [
-          "The 320px composer case uses the existing test-only root-width shim inside a real VS Code Webview because automated divider dragging is unreliable on macOS.",
-          "Screenshots capture the full VS Code window via macOS screencapture; the copy-success state and codicon font load are checked here, but the native Save As dialog itself still needs manual acceptance.",
+          "The narrow composer check uses the actual 390x844 workbench viewport and its visible chat webview, with a hit-testable Send control; no root-width shim is used for visual acceptance.",
+          "Screenshots and AX/console artifacts come from the isolated test window through CDP. Native Save As dialog interaction still requires manual acceptance.",
           "fullResolutionBytes is the arithmetic cost of decoding the same images at source resolution (11 x 4000 x 3000 x 4), not a second measured run: reintroducing the old data: URI pipeline to measure it would mean shipping the defect again.",
         ],
         screenshots,

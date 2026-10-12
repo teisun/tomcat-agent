@@ -81,6 +81,11 @@ async function assetHashes(root: string, prefix = ""): Promise<Record<string, st
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.join(extensionRoot, "e2e-harness");
+  const phases = ["checker-selftest", "normal", "untrusted", "add-and-trust"] as const;
+  const selectedPhase = process.env.TOMCAT_CONNECTORS_ACCEPT_PHASE;
+  if (selectedPhase && !phases.some(phase => phase === selectedPhase)) {
+    throw new Error(`Unknown connector acceptance phase: ${selectedPhase}`);
+  }
   const executable = path.resolve(process.env.TOMCAT_CONNECTORS_ACCEPT_BINARY ?? path.join(extensionRoot, "../tomcat/target/debug/tomcat"));
   const mcpBinary = path.resolve(process.env.TOMCAT_CONNECTORS_ACCEPT_MCP_BINARY ?? path.join(extensionRoot, "../tomcat/target/debug/test_streamable_http_server"));
   await Promise.all([fs.access(executable), fs.access(mcpBinary)]);
@@ -125,7 +130,7 @@ async function main(): Promise<void> {
     fixture = await startHttpFixture(mcpBinary, installRoot, artifactsRoot);
     // A separate clean profile follows the intentional browser-error probe.
     // Its expected console error cannot poison or excuse normal acceptance.
-    for (const phase of ["checker-selftest", "normal", "untrusted", "add-and-trust"] as const) {
+    for (const phase of phases.filter(phase => !selectedPhase || phase === selectedPhase)) {
       const scenarioRoot = path.join(installRoot, { "checker-selftest": "s", normal: "n", untrusted: "u", "add-and-trust": "a" }[phase]);
       const userDataDir = path.join(scenarioRoot, "u");
       const workspaceDir = path.join(scenarioRoot, "w");

@@ -231,6 +231,10 @@ suite("Installed real-Serve connector acceptance", () => {
       }
       await driver.waitForSnapshot((dom) => dom.buttons.filter((button) => button.testId === "connector-trust-project").length === 1, "one project trust button");
       await driver.capture(path.join(artifacts, "project-trust-awaiting.png"));
+      // Use the normal workbench layout commands, as the existing Settings Reload
+      // scenario does. Two retained sidebars can otherwise reduce the editor to 0px.
+      await api.__testing.executeCommand("workbench.action.closeSidebar");
+      await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
       await driver.setViewport(390, 844);
       // VS Code webview iframe layout update can lag behind main window resize
       await driver.waitForSnapshot((dom) => dom.viewport.width > 0 && dom.viewport.width <= 400, "viewport adjusted to narrow");
