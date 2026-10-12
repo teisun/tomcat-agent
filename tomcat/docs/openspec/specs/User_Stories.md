@@ -191,10 +191,12 @@
 - [ ] participant 持有会话时，webview 作为观察端仍能通过 `plan.enter` / `plan.build` / `plan.pending` / `plan.complete` / `plan.exit` 与终态 `get_state` reconcile 保持 plan footer、plan 卡与后端当前真相一致
 - [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
 - [ ] webview composer 的 `+` 智能选取可将图片 / PDF 作为待发送附件，将工作区文件 / 目录作为 reference chips；发送时附件走 `prompt.params.attachments[]`，reference 作为可恢复消息段保留在 transcript
+- [ ] `@` 搜索维持有界文件索引；达到索引上限时，即使当前查询零/少量命中也提示搜索范围有限，并保留 `+`/拖拽入口，不把未收录的路径伪报为完整搜索结果。
+- [ ] 同一工具图片跨会话出现时复用 agent 共享仓库里的缩略图；生成完成前已有的其他引用也收到更新，不切换会话、不携带图片字节、不用原图替代缺失 thumbnail。
 - [ ] Host 草稿继续防抖保存，正常退出等待当时已排队/在写的草稿并报告写盘错误；某个会话失败不放弃其他会话，不承诺强杀进程时逐键持久。
 - [ ] 后端或队列已接受输入后，仅退休对应草稿版本；保存稿删除失败提示旧稿可能再出现，不把输入改成发送失败、不重发写请求，也不声称磁盘清理成功。自动清理损坏/孤立草稿失败只记录诊断，不阻止用户重新输入。
 - [ ] 历史编辑重发与模型移除保留后端原回执；后续视图/目录刷新失败单独提示，不覆盖原成功或失败原因，不自动重复已经提交的操作。
-- [ ] 编辑器 `Add Selection to Tomcat Chat` 与 Shift 拖放文件上下文都可把引用加入 composer；重复文件引用需去重，reload / 历史回放后仍保留正确的文件名与行号标签
+- [ ] 编辑器/Plan Preview 的 `Add Selection to Tomcat Chat` 与 Shift 拖放文件都可把引用加入 composer；用户再次添加相同文件/选区保留新的 occurrence，只有同一 occurrence 的 event/snapshot 重放去重；reload / 历史回放保持顺序、文件名与行号。
 - [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
 
 ### Story 8e: VSCode webview transcript 仿 Chat 体验（Phase 2+）

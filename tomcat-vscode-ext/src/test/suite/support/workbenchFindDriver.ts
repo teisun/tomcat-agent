@@ -277,6 +277,25 @@ export function assertCleanSettingsConsole(report: ReturnType<typeof settingsCon
   if (report.errors.length) throw new Error(`Settings browser errors: ${JSON.stringify(report.errors)}`);
 }
 
+/** Read-only discovery may lose a document between Runtime.enable and this probe.
+ * Never retry general evaluate(), which also executes user-visible mutations. */
+export async function probeRenderedContext(
+  client: { send(method: string, params: Record<string, unknown>): Promise<unknown> },
+  contextId: number,
+  rootSelector: string,
+): Promise<{ assets: string[] } | null> {
+  try {
+    const result = await client.send("Runtime.evaluate", {
+      contextId, returnByValue: true,
+      expression: `(() => { const assets = [...document.scripts].map(script => script.src).filter(Boolean); return document.querySelector(${JSON.stringify(rootSelector)}) && assets.length ? { assets } : null; })()`,
+    }) as { result?: { value?: { assets: string[] } }; exceptionDetails?: unknown };
+    return result.exceptionDetails ? null : result.result?.value ?? null;
+  } catch (error) {
+    if (error instanceof Error && error.message === "CDP -32000: Cannot find context with specified id") return null;
+    throw error;
+  }
+}
+
 /** A real installed Settings frame, not a mocked state page or the chat frame. */
 export class SettingsFrameDriver {
   private constructor(
@@ -309,13 +328,10 @@ export class SettingsFrameDriver {
               (event.params as { context: { id: number; auxData?: { frameId?: string; isDefault?: boolean } } }).context);
             for (const context of contexts) {
               if (!context.auxData?.isDefault || !context.auxData.frameId) continue;
-              const result = await client.send("Runtime.evaluate", {
-                contextId: context.id, returnByValue: true,
-                expression: `(() => { const assets = [...document.scripts].map(script => script.src).filter(Boolean); return document.querySelector(${JSON.stringify(rootSelector)}) && assets.length ? { assets } : null; })()`,
-              }) as { result?: { value?: { assets: string[] } }; exceptionDetails?: unknown };
-              if (!result.exceptionDetails && result.result?.value) {
+              const rendered = await probeRenderedContext(client, context.id, rootSelector);
+              if (rendered) {
                 retained = selected = true;
-                return new SettingsFrameDriver(main, client, context.id, context.auxData.frameId, target, result.result.value.assets);
+                return new SettingsFrameDriver(main, client, context.id, context.auxData.frameId, target, rendered.assets);
               }
             }
           } finally { if (!selected && client !== main) client.close(); }

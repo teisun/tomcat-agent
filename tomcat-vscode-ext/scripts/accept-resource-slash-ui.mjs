@@ -139,7 +139,20 @@ try {
     await replace("/reload");await page.getByTestId("slash-command-menu").waitFor();await page.keyboard.press("Enter");
     assert.equal((await input.innerText()).trim(),"/reload");await page.getByTestId("send-button").click();
     assert.ok(await page.evaluate(()=>window.__intents.some(i=>i.type === "runSlashCommand")));
-    await replace("@app"); await page.getByTestId("context-search-dropdown").waitFor(); await capture("mention"); await page.keyboard.press("Escape");
+    await replace("@app"); await page.getByTestId("context-search-dropdown").waitFor(); await capture("mention");
+    // The real App must show an index-limit warning even when the simulated Host
+    // has no matches. Backend saturation is independently exercised by core tests.
+    await page.waitForFunction(()=>window.__intents.some(intent=>intent.type === "searchContext" && intent.data.query === "app"));
+    await page.evaluate(()=>{
+      const request=window.__intents.findLast(intent=>intent.type === "searchContext");
+      if(!request) throw new Error("No actual searchContext request to answer");
+      window.postMessage({channel:"event",content:{type:"contextSearchResult",requestId:request.data.requestId,
+        query:request.data.query,sessionId:request.data.sessionId,truncated:true,matches:[]},messageId:`limited-${++window.__seq}`},"*");
+    });
+    await page.getByTestId("context-search-truncated").waitFor();
+    assert.equal(await page.getByTestId("context-search-option").count(),0);
+    await capture("mention-index-limited");
+    await page.keyboard.press("Escape");
     await replace("Long composer line\n".repeat(100));
     const long=await capture("long");assert.ok(long.editor.scrollHeight>long.editor.clientHeight);
     await replace("Long composer line\n".repeat(100) + "/");
@@ -155,10 +168,23 @@ try {
     await page.evaluate(()=>{for(let n=0;n<30;n++)window.postMessage({channel:"event",content:{type:"insertReference",sessionId:"s1",reference:{type:"reference",kind:"file",path:"src/app.ts",label:"app.ts",occurrenceId:`repeat-${n}`}},messageId:`repeat-${n}`},"*");});
     await page.getByTestId('composer-reference-chip').nth(29).waitFor();
     await capture("long-references");
-    const sizes=[long.editor.height,long.surface.height];
+    const sizes=[long.editor.height,long.toolbar.height];
     await page.evaluate(()=>{window.__fixture.sessionViews.s1.pendingAttachments=Array.from({length:11},(_,n)=>({id:`att-${n}`,blobSha:"fixture",kind:"file",mimeType:"application/pdf",filename:`file-${n}.pdf`,label:`file-${n}.pdf`,path:"/fixture/file.pdf"}));window.__emitState();});
     await page.getByRole('list',{name:'Pending attachments',exact:true}).waitFor();
-    const attached=await capture("long-attachments");assert.deepEqual([attached.editor.height,attached.surface.height],sizes);
+    const attached=await capture("long-attachments");
+    // Attachments now belong inside the shared surface (09290499); only the editor
+    // and toolbar keep their independent height. Do not revive the old outside strip.
+    assert.deepEqual([attached.editor.height,attached.toolbar.height],sizes);
+    const strip=await page.getByRole('list',{name:'Pending attachments',exact:true}).evaluate(el=>{
+      const r=el.getBoundingClientRect();
+      return {top:r.top,bottom:r.bottom,insideSurface:!!el.closest('[data-testid="composer-surface"]'),horizontalOverflow:el.scrollWidth>el.clientWidth,
+        singleRow:new Set([...el.children].map(child=>Math.round(child.getBoundingClientRect().top))).size === 1};
+    });
+    assert.equal(strip.insideSurface,true,"Attachment strip belongs to the shared composer surface");
+    assert.ok(strip.top>=attached.surface.top && strip.bottom<=attached.editor.top,"Attachments remain above, not over, the text editor");
+    assert.ok(strip.singleRow,"Attachments never wrap into extra rows");
+    if(scenario.width<=520) assert.ok(strip.horizontalOverflow,"Narrow overflow uses the horizontal strip instead of wrapping");
+    assert.ok(attached.surface.height>long.surface.height,"The shared surface accounts for the visible strip");
     await replace("");await capture("collapsed");
     await page.evaluate(()=>{window.__fixture.sessionViews.s1.pendingAttachments=[];window.__emitState();document.body.style.setProperty('--tc-controls-inset','4px');document.body.style.setProperty('--tc-content-inset','24px');});
     await replace("/");await page.getByTestId("slash-command-menu").waitFor();await capture("custom-insets", [4,24]);

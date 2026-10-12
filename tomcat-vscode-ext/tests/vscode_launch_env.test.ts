@@ -165,7 +165,7 @@ describe("VS Code GUI launch environment", () => {
         path, process: { env }, runVsCodeGuiTests, runTests,
         resolveVsCodeExecutable: () => "fake-vscode",
         options: { harnessRoot: root, harnessTestsPath: "fake-test", testEnv: env, workspacePath: root, artifactsDir: root },
-        fixture: { env }, extensionTestsEnv: env, harnessRoot: root,
+        fixture: { env, workspaceDir: root }, extensionTestsEnv: env, harnessRoot: root,
         extensionDevelopmentPath: root, extensionTestsPath: "fake-test", harnessTestsPath: "fake-test",
         extensionRoot: root, userDataDir: path.join(root, "profile"), extensionsDir: root,
         workspaceDir: root, screenshotsDir: root, reportPath: path.join(root, "report.json"),
@@ -175,6 +175,10 @@ describe("VS Code GUI launch environment", () => {
       await vm.runInNewContext(code, locals);
       expect(runTests).toHaveBeenCalledOnce();
       expect(runTests.mock.calls[0][0].extensionTestsEnv.TOMCAT_AGENT_ACTIVE).toBe("1");
+      if (name === "devhost") {
+        expect(runTests.mock.calls[0][0].launchArgs).toContain(root);
+        expect(runTests.mock.calls[0][0].launchArgs).not.toContain(path.dirname(root));
+      }
     },
   );
 });

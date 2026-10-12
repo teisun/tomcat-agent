@@ -3031,7 +3031,15 @@ export async function assertWebviewEditDisplayReplayFlow(
     },
     20_000,
   );
-  assert.ok(initial.html.includes("multi-failed.ts"));
+  assert.ok(!initial.html.includes("multi-failed.ts"), "Completed batch edit details start folded");
+  const expandBatch = async () => {
+    await api.__testing.sendWebviewDomAction({ index: 2, kind: "clickTestId", testId: "tool-row-toggle" });
+    const snapshot = await waitForWebviewDomSnapshot(api, snapshot => snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes("multi-failed.ts") && snapshot.html.includes("multi-applied.ts") ? snapshot : undefined);
+    assert.ok(snapshot.html.includes("第 2 段匹配到 3 处"), "Expanded failure keeps the original reason");
+    return snapshot;
+  };
+  await expandBatch();
   assert.ok(
     (initial.html.match(/View diff/gu) ?? []).length >= 2,
     `expected two single-file diff buttons, got html=${initial.html}`,
@@ -3066,7 +3074,8 @@ export async function assertWebviewEditDisplayReplayFlow(
     },
     20_000,
   );
-  assert.ok(reloaded.html.includes("multi-failed.ts"));
+  assert.ok(!reloaded.html.includes("multi-failed.ts"), "Restored batch edit details also start folded");
+  await expandBatch();
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -4498,6 +4507,7 @@ export async function assertWebviewSelectionReferenceFlow(
 
   const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
   const filePath = path.join(workspaceDir, "selection-context.ts");
+  const referencePath = vscode.workspace.asRelativePath(vscode.Uri.file(filePath), false);
   await fs.writeFile(
     filePath,
     [
@@ -4545,7 +4555,7 @@ export async function assertWebviewSelectionReferenceFlow(
       );
       return snapshot.activeSessionId === sessionId &&
         chipCount === 1 &&
-        snapshot.html.includes(`title="${filePath}:2-3"`) &&
+        snapshot.html.includes(`title="${referencePath}:2-3"`) &&
         !sendDisabled
         ? snapshot
         : undefined;
@@ -4599,7 +4609,7 @@ export async function assertWebviewSelectionReferenceFlow(
       return segments?.some(
         (segment: RestoredReferenceSegment) =>
           segment.type === "reference" &&
-          segment.path === filePath &&
+          segment.path === referencePath &&
           segment.lineStart === 2 &&
           segment.lineEnd === 3,
       )
@@ -4612,7 +4622,7 @@ export async function assertWebviewSelectionReferenceFlow(
     restoredMessage.segments?.some(
       (segment: RestoredReferenceSegment) =>
         segment.type === "reference" &&
-        segment.path === filePath &&
+        segment.path === referencePath &&
         segment.lineStart === 2 &&
         segment.lineEnd === 3,
     ),
@@ -4624,7 +4634,7 @@ export async function assertWebviewSelectionReferenceFlow(
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
       snapshot.html.includes('data-testid="history-reference-chip"') &&
-      snapshot.html.includes(`title="${filePath}:2-3"`)
+      snapshot.html.includes(`title="${referencePath}:2-3"`)
         ? snapshot
         : undefined,
     20_000,
@@ -4660,6 +4670,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
     `draft-fork-reference-${Date.now().toString(36)}.md`,
   );
   await fs.writeFile(filePath, "# draft fork reference\n", "utf8");
+  const referencePath = vscode.workspace.asRelativePath(vscode.Uri.file(filePath), false);
 
   try {
     await api.__testing.sendWebviewIntent(
@@ -4677,7 +4688,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
       (state) =>
         state.sessionViews[sourceSessionId]?.composerDraft?.segments.some(
           (segment) =>
-            segment.type === "reference" && segment.path === filePath,
+            segment.type === "reference" && segment.path === referencePath,
         )
           ? state
           : undefined,
@@ -4694,7 +4705,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
       (state) =>
         state.sessionViews[targetSessionId]?.composerDraft?.segments.some(
           (segment) =>
-            segment.type === "reference" && segment.path === filePath,
+            segment.type === "reference" && segment.path === referencePath,
       )
         ? state.sessionViews[targetSessionId].composerDraft
         : undefined,
@@ -4702,7 +4713,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
     );
     assert.ok(
       targetDraft.segments.some(
-        (segment) => segment.type === "reference" && segment.path === filePath,
+        (segment) => segment.type === "reference" && segment.path === referencePath,
       ),
       "expected the new session draft to retain the source reference",
     );
@@ -4768,7 +4779,7 @@ export async function assertWebviewFileDropReferenceFlow(
   );
   assert.deepEqual(
     draft.map((segment) => segment.path).sort(),
-    [filePath, filePath, secondFilePath].sort(),
+    [filePath, filePath, secondFilePath].map(file => vscode.workspace.asRelativePath(vscode.Uri.file(file), false)).sort(),
     "expected both dropped files to be preserved as composer references",
   );
   const rendered = await waitForWebviewDomSnapshot(
@@ -4990,12 +5001,8 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
     workspaceRoot,
     "expected a real workspace folder for @ directory E2E",
   );
-  const scratchDir = path.join(
-    workspaceRoot,
-    `tmp-at-mention-scratch-${Date.now().toString(36)}`,
-  );
-
-  await fs.mkdir(scratchDir, { recursive: true });
+  const scratchDir = await fs.mkdtemp(path.join(workspaceRoot, "tmp-at-mention-scratch-"));
+  try {
   const dirStem = `directory-target-${Date.now().toString(36)}`;
   const dirPath = path.join(scratchDir, dirStem);
   await fs.mkdir(dirPath, { recursive: true });
@@ -5116,12 +5123,12 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
       "expected the no-workspace @ warning to be surfaced once the host reports workspaceAvailable=false",
     );
   } finally {
-    await fs.rm(scratchDir, { force: true, recursive: true });
     Object.defineProperty(vscode.window, "showWarningMessage", {
       configurable: true,
       value: originalShowWarningMessage,
     });
   }
+  } finally { await fs.rm(scratchDir, { force: true, recursive: true }); }
 }
 
 /** 4x4 truecolour PNG — real bytes, small enough to keep inline. */
@@ -5379,7 +5386,10 @@ export async function assertInlineUserMessageEditFlow(api: TomcatExtensionApi): 
   await waitForWebviewState(api, (s) => s.sessionViews[second]?.composerDraft?.text.includes("preserved running bottom draft") ? true : undefined);
   await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-user-message",index:0});
   const runningEdit = await waitForWebviewDomSnapshot(api,(s)=>s.html.includes('data-testid="edit-composer-input"')?s:undefined);
-  assert.ok(/<button[^>]*data-testid="stop-button"(?![^>]*disabled)[^>]*>/.test(runningEdit.html), "Stop must remain enabled while editing");
+  assert.ok(!runningEdit.html.includes('data-testid="stop-button"'), "Populated busy main input uses the single Send/Queue action");
+  assert.ok(/<button[^>]*data-testid="send-button"[^>]*disabled/.test(runningEdit.html), "Historical editing locks main Send without consuming its draft");
+  assert.ok(/<button[^>]*data-testid="edit-send-button"(?![^>]*disabled)[^>]*>/.test(runningEdit.html), "Inline resend remains usable");
+  assert.ok(runningEdit.html.includes("preserved running bottom draft"));
   const bottomDraftBeforeRevert = structuredClone(api.__testing.getWebviewState().sessionViews[second].composerDraft);
   await driver.setViewport(448, 844);
   await capture("03-inline-running-narrow");
@@ -5417,8 +5427,15 @@ export async function assertInlineUserMessageEditFlow(api: TomcatExtensionApi): 
   await waitForWebviewDomSnapshot(api,(s)=>/<button[^>]*data-testid="edit-confirm-revert"[^>]*disabled/.test(s.html)?s:undefined);
   await capture("06-inline-revert-unavailable");
   await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"edit-confirm-cancel"});
+  await api.__testing.sendWebviewDomAction({kind:"setInputValue",testId:"edit-composer-input",value:"Inline draft survives Stop"});
+  const emptyMainEdit = await waitForWebviewDomSnapshot(api, s => s.html.includes("Inline draft survives Stop") ? s : undefined);
+  assert.ok(/<button[^>]*data-testid="stop-button"(?![^>]*disabled)[^>]*>/.test(emptyMainEdit.html), "Busy empty main input keeps Stop during historical editing");
+  await api.__testing.sendWebviewDomAction({kind:"clickTestId",testId:"stop-button"});
+  await waitForWebviewState(api, s => !s.sessionViews[legacy]?.busy ? true : undefined);
+  const stoppedEdit = await waitForWebviewDomSnapshot(api, s => s.html.includes('data-testid="edit-composer-input"') && s.html.includes("Inline draft survives Stop") ? s : undefined);
+  assert.ok(stoppedEdit.html.includes("Inline draft survives Stop"), "Stop cannot discard the independent inline draft");
+  await capture("07-inline-stop-preserved");
   await api.__testing.sendWebviewDomAction({kind:"pressKeyOnTestId",testId:"edit-composer-input",value:"Escape"});
-  await api.__testing.sendWebviewIntent({type:"interrupt",messageId:"cleanup-inline",data:{sessionId:legacy}});
   } finally {
     await driver.setViewport(1200, 900);
     await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
@@ -5482,16 +5499,9 @@ async function capturePlanFindVisual(
     | "plan-find-no-results",
 ): Promise<void> {
   const targetPath = transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`);
-  const driver = await WorkbenchFindDriver.connectFromEnvironment();
-  try {
-    // The Plan webview has already published its asserted state. Let Chromium
-    // composite one frame before taking a CDP screenshot of this Dev Host.
-    await pause(250);
-    const imageBase64 = await driver.captureScreenshot();
-    await fs.writeFile(targetPath, imageBase64, "base64");
-  } finally {
-    driver.close();
-  }
+  // Reuse the already-existing PNG/AX/console capture rather than a PNG-only path.
+  await pause(250);
+  await captureWorkbenchArtifacts(targetPath);
 }
 
 export async function assertTranscriptUiFlow(
@@ -6547,7 +6557,7 @@ export async function assertPlanPreviewCustomEditorFlow(
       assert.equal(
         chipCount(snapshot.html),
         expectedChips,
-        `expected composer chip count to remain ${expectedChips} while duplicate selection settles`,
+        `expected exactly ${expectedChips} composer occurrences after the selection settles`,
       );
       await pause(100);
     } while (Date.now() < deadline);
@@ -7155,14 +7165,9 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected the floating button to add a plan selection chip with source line (${paragraphChip})`,
     );
 
-    // Selection → chat, path 3: two different items in the same Markdown list
-    // must both land with their own exact source line. Re-adding the first item
-    // must leave the chip count stable because path/range/text are identical.
-    for (const [index, isDuplicate] of [
-      [1, false],
-      [2, false],
-      [1, true],
-    ] as const) {
+    // Each user addition is a distinct occurrence, including the same list item twice.
+    // Duplicate delivery of one occurrence must still settle at exactly one new chip.
+    for (const index of [1, 2, 1] as const) {
       await api.__testing.openPlanPreview(planPath);
       await waitForPlanPreviewDom(
         api,
@@ -7180,9 +7185,7 @@ export async function assertPlanPreviewCustomEditorFlow(
       await api.__testing.executeCommand(
         TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
       );
-      const selectionSnapshot = isDuplicate
-        ? await captureStableChipCount(chipsBeforeSelection)
-        : await waitForWebviewDomSnapshot(
+      const selectionSnapshot = await waitForWebviewDomSnapshot(
             api,
             (snapshot) =>
               chipCount(snapshot.html) >= chipsBeforeSelection + 1 &&
@@ -7195,6 +7198,7 @@ export async function assertPlanPreviewCustomEditorFlow(
         selectionSnapshot.html.includes(expectedChip),
         `expected the Markdown list item chip to point to ${expectedChip}`,
       );
+      await captureStableChipCount(chipsBeforeSelection + 1);
     }
 
     // A regression: switching to native hides the in-body strip.

@@ -97,7 +97,8 @@ async function main(): Promise<void> {
       launchArgs: [
         `--remote-debugging-port=${cdpPort}`,
         `--user-data-dir=${userDataDir}`,
-        path.resolve(extensionDevelopmentPath, ".."),
+        // Search/drag/file fixtures belong to the disposable workspace, never the repository.
+        fixture.workspaceDir,
       ],
       vscodeExecutablePath: resolveVsCodeExecutable(),
     });

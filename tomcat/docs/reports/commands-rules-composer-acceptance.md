@@ -1,5 +1,17 @@
 # Commands / Rules / Composer delivery evidence
 
+## 2026-10-12 全分支 review：旧截图脚本契约补正
+
+```text
+09290499 shared Composer surface
+  notices -> attachments (horizontal strip) -> editor (max 30vh) -> toolbar
+             +66px surface growth is expected; editor/toolbar sizes stay stable
+```
+
+原 delivery ledger 保留历史事实；下方的“attachments remain outside”已被后续 `09290499` 的统一输入框替代。现有 `ComposerSurface.tsx:17-22` 把 AttachmentStrip 交给 `Composer.beforeEditor`，`Composer.tsx:1132-1174` 将其放进 surface，`MessageQueueDock.test.tsx:16-36` 明确锁住主输入/队列编辑共用这一契约；不为旧脚本恢复外置条带。
+
+本轮真实浏览器 `1791772403499-6o9nnf` 先通过问答 9 场景，再在旧 surface 等高断言 exit 1。保留 `.agents/shots/review-2bc62520-slash/narrow-dark-long-attachments.{png,aria.txt,console.json,geometry.json}`：editor 253.1875px 不变，surface 由 347.1875px 增至 413.1875px。脚本修正为独立 editor/toolbar 等高，并新增条带在 surface 内、位于 editor 上方不重叠、11 附件保持水平滚动和 surface 确实包含条带的断言。生产 UI 不改；补验 `1791772714848-ucm2zy` exit 0：Node syntax、窄暗完整 19 captures/交互断言及 diff-check 通过（含 long attachments、独立 inset、读取单项/分组/失败、Bash/Edit 控制组）。原失败记录保留。
+
 ```text
 project .cursor / .agents
   commands + existing skills -> session catalog -> slash groups -> invocation chip

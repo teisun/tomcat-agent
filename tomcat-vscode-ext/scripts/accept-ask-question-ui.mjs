@@ -266,6 +266,17 @@ try {
         await page.getByTestId("approval-custom-q2").fill(`  ${customAnswer}  `);
         await page.getByTestId("approval-custom-q2").scrollIntoViewIfNeeded();
         await capture("custom");
+        // At 280px the panel itself scrolls. Prove the user's keyboard path reveals
+        // Continue instead of relying only on Playwright's auto-scroll before click.
+        await page.keyboard.press("Tab");
+        await page.keyboard.press("Tab");
+        assert.ok(await page.getByTestId("approval-continue").evaluate(button => {
+          const r = button.getBoundingClientRect();
+          const panel = button.closest(".tc-pending-question-panel").getBoundingClientRect();
+          return document.activeElement === button && r.top >= Math.max(0, panel.top) - 1
+            && r.bottom <= Math.min(innerHeight, panel.bottom) + 1;
+        }), "Short question panel must reveal Continue when reached by keyboard");
+        await capture("custom-continue-focused");
       }
       if (scenario.overflow) {
         await page.getByTestId("approval-option-q2-__custom__").scrollIntoViewIfNeeded();

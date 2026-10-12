@@ -1,5 +1,24 @@
-import { describe, expect, it } from "vitest";
-import { assertCleanSettingsConsole, settingsConsoleReport } from "./suite/support/workbenchFindDriver";
+import { describe, expect, it, vi } from "vitest";
+import { assertCleanSettingsConsole, probeRenderedContext, settingsConsoleReport } from "./suite/support/workbenchFindDriver";
+
+describe("read-only frame discovery", () => {
+  it("skips a vanished context and probes a replacement without replaying the first request", async () => {
+    const send = vi.fn()
+      .mockRejectedValueOnce(new Error("CDP -32000: Cannot find context with specified id"))
+      .mockResolvedValueOnce({ result: { value: { assets: ["https://owned/image-preview.js"] } } });
+    expect(await probeRenderedContext({ send }, 1, '[data-testid="preview-stage"]')).toBeNull();
+    expect(await probeRenderedContext({ send }, 2, '[data-testid="preview-stage"]')).toEqual({ assets: ["https://owned/image-preview.js"] });
+    expect(send.mock.calls.map(([, params]) => params.contextId)).toEqual([1, 2]);
+    expect(send.mock.calls.every(([method]) => method === "Runtime.evaluate")).toBe(true);
+    expect(send.mock.calls[0][1].expression).not.toContain(".click(");
+  });
+  it("does not swallow or retry unrelated protocol failures", async () => {
+    const error = new Error("CDP -32000: permission denied");
+    const send = vi.fn().mockRejectedValue(error);
+    await expect(probeRenderedContext({ send }, 1, ".tc-shell")).rejects.toBe(error);
+    expect(send).toHaveBeenCalledOnce();
+  });
+});
 
 describe("Settings-scoped browser console acceptance", () => {
   it("fails for a Settings error even when the chat error array is empty", () => {
