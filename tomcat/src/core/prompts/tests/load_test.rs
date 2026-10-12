@@ -531,8 +531,8 @@ fn negative_assertion_prompt_present() {
 fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     let s = load(PromptKey::PlannerReminder);
     const TODO_POLICY: &str = concat!(
-        "6. Decompose thoroughly. For non-trivial work, break the work into one or more milestones, \n",
-        "then precisely break each milestone down into detailed todos so nothing is missed and over-decomposition is avoided. \n",
+        "6. Decompose thoroughly. For non-trivial work, break the work into one or more milestones,\n",
+        "then precisely break each milestone down into detailed todos so nothing is missed and over-decomposition is avoided.\n",
         "However, for a simple, single-surface change, a flat linear todo list is sufficient."
     );
 

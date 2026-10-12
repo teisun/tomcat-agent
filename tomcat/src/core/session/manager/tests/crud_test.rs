@@ -217,22 +217,23 @@ fn managers_sharing_a_store_path_wait_for_the_same_write_lock() {
     let session_key = second.current_session_key().to_string();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        started_tx.send(()).expect("signal worker start");
-        let result = second.update_session(&session_key, |entry| {
-            entry.title = Some("must survive selection cleanup".to_string());
+    // Acquire the real store lock before starting the competitor. Otherwise the
+    // worker may complete before the asserted critical section ever begins.
+    let worker = crate::core::session::store::with_store_write_lock(first.store_path(), || {
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal worker start");
+            let result = second.update_session(&session_key, |entry| {
+                entry.title = Some("must survive selection cleanup".to_string());
+            });
+            done_tx.send(result).expect("send mutation result");
         });
-        done_tx.send(result).expect("send mutation result");
-    });
-
-    crate::core::session::store::with_store_write_lock(first.store_path(), || {
         started_rx.recv().expect("worker starts while lock is held");
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(
             done_rx.try_recv().is_err(),
             "a second manager must not write this sessions.json while its shared lock is held"
         );
-        Ok(())
+        Ok(worker)
     })
     .expect("hold store lock");
 
