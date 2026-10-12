@@ -397,11 +397,34 @@ impl SessionManager {
     pub fn run_incremental_attachment_housekeeping(
         &self,
     ) -> Result<IncrementalHousekeepingMark, AppError> {
+        self.with_housekeeping_ledger(|ledger| {
+            let compacted_displays =
+                self.compact_tool_display_sidecars_with_ledger(Some(ledger))?;
+            let live_blob_references = self.collect_live_blob_shas_with_ledger(Some(ledger))?;
+            Ok(IncrementalHousekeepingMark {
+                compacted_displays,
+                live_blob_references,
+            })
+        })
+    }
+
+    /// Live-reference collection for an orphan sweep outside startup housekeeping.
+    ///
+    /// The sweep holds the store-wide retention lock while this runs, so rescanning only
+    /// transcripts whose fingerprint changed keeps every other attachment operation responsive.
+    pub fn collect_live_blob_shas_incremental(&self) -> Result<LiveBlobReferences, AppError> {
+        self.with_housekeeping_ledger(|ledger| {
+            self.collect_live_blob_shas_with_ledger(Some(ledger))
+        })
+    }
+
+    fn with_housekeeping_ledger<T>(
+        &self,
+        work: impl FnOnce(&mut HousekeepingLedger) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let mut ledger = HousekeepingLedger::load(&self.sessions_dir);
         let original_ledger = ledger.clone();
-        let compacted_displays =
-            self.compact_tool_display_sidecars_with_ledger(Some(&mut ledger))?;
-        let live_blob_references = self.collect_live_blob_shas_with_ledger(Some(&mut ledger))?;
+        let result = work(&mut ledger)?;
         let current_session_ids = self
             .attachment_transcripts()?
             .into_iter()
@@ -411,10 +434,7 @@ impl SessionManager {
         if ledger != original_ledger {
             ledger.save(&self.sessions_dir)?;
         }
-        Ok(IncrementalHousekeepingMark {
-            compacted_displays,
-            live_blob_references,
-        })
+        Ok(result)
     }
 
     fn session_transcript_paths(&self) -> Result<Vec<PathBuf>, AppError> {

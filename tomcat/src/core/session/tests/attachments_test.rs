@@ -69,7 +69,23 @@ fn gc_pending_reports_unlink_failure_instead_of_claiming_a_released_lease() {
     let sha = store.put(&bytes).unwrap();
     // A directory occupying a marker path makes unlink fail on every platform,
     // without permission tests that silently pass when the runner is root.
-    std::fs::create_dir_all(store.session_pending_dir("blocked").join(&sha)).unwrap();
+    // Directory order is filesystem-defined; interleaving several stuck and healthy sessions
+    // keeps an early abort from hiding behind one lucky ordering.
+    for index in 0..4 {
+        std::fs::create_dir_all(
+            store
+                .session_pending_dir(&format!("blocked-{index}"))
+                .join(&sha),
+        )
+        .unwrap();
+    }
+    let healthy = (0..4)
+        .map(|index| format!("healthy-{index}"))
+        .collect::<Vec<_>>();
+    for session_id in &healthy {
+        store.mark_pending(session_id, &sha).unwrap();
+        age_lease(&store, session_id, &sha, Duration::from_secs(60));
+    }
     assert!(
         matches!(
             store.gc_pending(Duration::ZERO),
@@ -77,7 +93,37 @@ fn gc_pending_reports_unlink_failure_instead_of_claiming_a_released_lease() {
         ),
         "failed removal must not be reported as a released lease"
     );
+    assert!(
+        healthy
+            .iter()
+            .all(|session_id| store.list_pending(session_id).unwrap().is_empty()),
+        "one stuck lease must not keep every other expired lease alive"
+    );
     assert_eq!(store.get(&sha).unwrap(), Some(bytes));
+}
+
+#[test]
+fn sweep_reports_a_stuck_thumbnail_but_still_reclaims_other_orphans() {
+    let (_tmp, store) = setup();
+    let stuck = store.put(b"orphan with a stuck thumbnail").unwrap();
+    std::fs::create_dir_all(store.thumb_path(&stuck)).unwrap();
+    // Several healthy orphans make it unlikely that directory order alone hides an early abort.
+    let healthy = (0..4u8)
+        .map(|index| store.put(&[b'h', index]).unwrap())
+        .collect::<Vec<_>>();
+    for sha in healthy.iter().chain([&stuck]) {
+        age_blob(&store, sha, ORPHAN_BLOB_GRACE + Duration::from_secs(60));
+    }
+
+    let result =
+        store.sweep_orphan_blobs(|| Ok(std::collections::HashSet::new()), ORPHAN_BLOB_GRACE);
+
+    assert!(matches!(result, Err(crate::AppError::Io(_))));
+    assert!(
+        healthy.iter().all(|sha| !store.exists(sha)),
+        "one stuck file must not keep every later orphan alive"
+    );
+    assert!(!store.exists(&stuck), "the blob itself was removable");
 }
 
 #[test]

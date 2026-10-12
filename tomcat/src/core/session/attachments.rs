@@ -437,6 +437,7 @@ impl AttachmentBlobStore {
         }
         let now = SystemTime::now();
         let mut report = BlobGcReport::default();
+        let mut first_error = None;
 
         for session_entry in std::fs::read_dir(&pending_root).map_err(AppError::Io)? {
             let session_entry = session_entry.map_err(AppError::Io)?;
@@ -456,13 +457,13 @@ impl AttachmentBlobStore {
                 if !is_lease_expired(&lease_path, now, ttl) {
                     continue;
                 }
-                if remove_file_if_present(&lease_path)? {
+                if remove_file_if_present(&lease_path, &mut first_error) {
                     report.leases_released += 1;
                 }
             }
             let _ = std::fs::remove_dir(&session_dir);
         }
-        Ok(report)
+        first_error.map_or(Ok(report), Err)
     }
 
     /// Apply the budget only to thumbnails. A sent-image blob is its transcript's sole
@@ -499,18 +500,19 @@ impl AttachmentBlobStore {
         // 最久没被用到的排在前面，先删它们。
         entries.sort_by_key(|(used, _, _)| *used);
         let mut freed = 0u64;
+        let mut first_error = None;
         for (_, len, path) in entries {
             if total.saturating_sub(freed) <= max_bytes {
                 break;
             }
-            if remove_file_if_present(&path)? {
+            if remove_file_if_present(&path, &mut first_error) {
                 freed = freed.saturating_add(len);
             }
         }
         if freed > 0 {
             tracing::debug!("attachments: evicted {freed} bytes of rebuildable attachment data");
         }
-        Ok(freed)
+        first_error.map_or(Ok(freed), Err)
     }
 
     /// Delete blobs with neither a transcript reference nor a live draft lease once they
@@ -530,6 +532,7 @@ impl AttachmentBlobStore {
             return Ok(report);
         }
         let now = SystemTime::now();
+        let mut first_error = None;
         for entry in std::fs::read_dir(blobs).map_err(AppError::Io)? {
             let entry = entry.map_err(AppError::Io)?;
             let metadata = entry.metadata().map_err(AppError::Io)?;
@@ -554,21 +557,26 @@ impl AttachmentBlobStore {
             if age < grace {
                 continue;
             }
-            if remove_file_if_present(&entry.path())? {
-                remove_file_if_present(&self.thumb_path(&sha))?;
+            if remove_file_if_present(&entry.path(), &mut first_error) {
+                remove_file_if_present(&self.thumb_path(&sha), &mut first_error);
                 report.blobs_deleted += 1;
             }
         }
-        Ok(report)
+        first_error.map_or(Ok(report), Err)
     }
 }
 
-/// Missing files are harmless; other failures must reach the existing GC warning path.
-fn remove_file_if_present(path: &Path) -> Result<bool, AppError> {
+/// Missing files are harmless. Other failures are recorded instead of aborting the loop:
+/// one stuck file must not keep every later file alive, yet the first failure must still
+/// reach the existing GC warning path.
+fn remove_file_if_present(path: &Path, first_error: &mut Option<AppError>) -> bool {
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(AppError::Io(error)),
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            first_error.get_or_insert(AppError::Io(error));
+            false
+        }
     }
 }
 
