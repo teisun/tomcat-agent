@@ -447,6 +447,13 @@ pub struct BashTaskOutputChunk {
     pub exit_code: Option<i32>,
 }
 
+type CapturedStreams = std::io::Result<(tokio::fs::File, tokio::fs::File)>;
+pub(super) type ForegroundOutput = tokio::sync::oneshot::Receiver<CapturedStreams>;
+type StreamCapture = (
+    tokio::fs::File,
+    Arc<tokio::sync::oneshot::Sender<CapturedStreams>>,
+);
+
 struct BashTask {
     info: RwLock<BashTaskInfo>,
     /// 子进程 PID（spawn 后立即记录）；stop 路径在 Unix 用 `killpg`，在 Windows 用
@@ -466,21 +473,6 @@ struct BashTask {
     preview_flush_required: bool,
     preview_flushed: AtomicBool,
     preview_flush_notify: Arc<Notify>,
-    /// Separate raw stream files preserve stdout/stderr ownership while the user-facing log
-    /// remains one append-only mixed stream for task_output.
-    stream_output_paths: (PathBuf, PathBuf),
-}
-
-impl BashTask {
-    fn cleanup_stream_output_files(&self) {
-        for path in [&self.stream_output_paths.0, &self.stream_output_paths.1] {
-            if let Err(error) = std::fs::remove_file(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::debug!(path = %path.display(), %error, "failed to remove bash stream capture");
-                }
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,8 +651,29 @@ impl BashTaskRegistry {
         cwd: ResolvedCwd,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
-        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, false, false)
-            .await
+        self.spawn_tracked_inner(
+            command,
+            cwd,
+            deliver_completion_on_finish,
+            false,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// The primitive adapter owns the capture receiver. Dropping it on cancellation or
+    /// background handoff closes the anonymous files; tasks never own a second output store.
+    pub(super) async fn spawn_foreground_unchecked(
+        &self,
+        command: String,
+        cwd: ResolvedCwd,
+    ) -> Result<(BashTaskTicket, ForegroundOutput), AppError> {
+        let (sender, output) = tokio::sync::oneshot::channel();
+        let ticket = self
+            .spawn_tracked_inner(command, cwd, false, false, false, Some(sender))
+            .await?;
+        Ok((ticket, output))
     }
 
     /// The single spawn primitive used by foreground and explicit background Bash.
@@ -672,8 +685,15 @@ impl BashTaskRegistry {
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
         let cwd = ResolvedCwd::from_path_buf(cwd)?;
-        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, false)
-            .await
+        self.spawn_tracked_inner(
+            command,
+            cwd,
+            deliver_completion_on_finish,
+            true,
+            false,
+            None,
+        )
+        .await
     }
 
     /// Spawn a tracked task whose terminal state is held until the AgentLoop output bridge
@@ -685,7 +705,7 @@ impl BashTaskRegistry {
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
         let cwd = ResolvedCwd::from_path_buf(cwd)?;
-        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, true)
+        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, true, None)
             .await
     }
 
@@ -696,6 +716,7 @@ impl BashTaskRegistry {
         deliver_completion_on_finish: bool,
         apply_guard: bool,
         preview_flush_required: bool,
+        captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
     ) -> Result<BashTaskTicket, AppError> {
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
@@ -728,24 +749,21 @@ impl BashTaskRegistry {
             .await
             .map_err(AppError::Io)?;
         let log_writer = Arc::new(AsyncMutex::new(log_file));
-        let stdout_path = log_path.with_extension("stdout");
-        let stderr_path = log_path.with_extension("stderr");
-        let stdout_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stdout_path)
-            .await
-            .map_err(AppError::Io)?;
-        let stderr_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stderr_path)
-            .await
-            .map_err(AppError::Io)?;
-        let stdout_writer = Arc::new(AsyncMutex::new(stdout_file));
-        let stderr_writer = Arc::new(AsyncMutex::new(stderr_file));
+        let captured = captured.map(Arc::new);
+        let (stdout_capture, stderr_capture) = if let Some(sender) = &captured {
+            (
+                Some((
+                    tokio::fs::File::from_std(tempfile::tempfile().map_err(AppError::Io)?),
+                    sender.clone(),
+                )),
+                Some((
+                    tokio::fs::File::from_std(tempfile::tempfile().map_err(AppError::Io)?),
+                    sender.clone(),
+                )),
+            )
+        } else {
+            (None, None)
+        };
 
         #[cfg(unix)]
         let (shell, arg) = ("sh", "-c");
@@ -803,7 +821,6 @@ impl BashTaskRegistry {
             preview_flush_required,
             preview_flushed: AtomicBool::new(!preview_flush_required),
             preview_flush_notify: Arc::new(Notify::new()),
-            stream_output_paths: (stdout_path.clone(), stderr_path.clone()),
         });
         self.tasks.write().insert(task_id.clone(), task.clone());
         if let (Some(guard), Some((scope, grant))) =
@@ -829,8 +846,7 @@ impl BashTaskRegistry {
         let stdout_pump = spawn_pump(
             stdout,
             log_writer.clone(),
-            stdout_writer,
-            "",
+            stdout_capture,
             BashOutputStream::Stdout,
             task.clone(),
             self.output_tx.clone(),
@@ -838,8 +854,7 @@ impl BashTaskRegistry {
         let stderr_pump = spawn_pump(
             stderr,
             log_writer.clone(),
-            stderr_writer,
-            "STDERR: ",
+            stderr_capture,
             BashOutputStream::Stderr,
             task.clone(),
             self.output_tx.clone(),
@@ -877,7 +892,20 @@ impl BashTaskRegistry {
                 }
             }
             task_for_wait.notify.notify_waiters();
-            let _ = tokio::join!(stdout_pump, stderr_pump);
+            let (stdout, stderr) = tokio::join!(stdout_pump, stderr_pump);
+            if let Some(captured) = captured {
+                if let Ok(sender) = Arc::try_unwrap(captured) {
+                    let streams = match (stdout, stderr) {
+                        (Ok(Ok(Some(stdout))), Ok(Ok(Some(stderr)))) => Ok((stdout, stderr)),
+                        (Ok(Err(error)), _) | (_, Ok(Err(error))) => Err(error),
+                        (Err(error), _) | (_, Err(error)) => Err(std::io::Error::other(error)),
+                        _ => Err(std::io::Error::other(
+                            "foreground output capture was closed",
+                        )),
+                    };
+                    let _ = sender.send(streams);
+                }
+            }
             let completion_preview = {
                 let preview = task_for_wait.preview.lock();
                 BashTaskOutputEvent {
@@ -933,9 +961,6 @@ impl BashTaskRegistry {
                     command: command_for_wait,
                 });
             }
-            if should_emit {
-                task_for_wait.cleanup_stream_output_files();
-            }
             task_for_wait.notify.notify_waiters();
         });
 
@@ -969,26 +994,7 @@ impl BashTaskRegistry {
 
     /// Remove a foreground-completed task after its final output has been collected.
     pub fn remove_foreground(&self, task_id: &str) {
-        if let Some(task) = self.tasks.write().remove(task_id) {
-            task.cleanup_stream_output_files();
-        }
-    }
-
-    /// Read the exact per-stream captures after the child and both pumps have drained.
-    pub async fn read_stream_outputs(&self, task_id: &str) -> Result<(String, String), AppError> {
-        let task = self
-            .tasks
-            .read()
-            .get(task_id)
-            .cloned()
-            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
-        let (stdout_path, stderr_path) = &task.stream_output_paths;
-        let stdout = tokio::fs::read(stdout_path).await.map_err(AppError::Io)?;
-        let stderr = tokio::fs::read(stderr_path).await.map_err(AppError::Io)?;
-        Ok((
-            String::from_utf8_lossy(&stdout).into_owned(),
-            String::from_utf8_lossy(&stderr).into_owned(),
-        ))
+        self.tasks.write().remove(task_id);
     }
 
     /// 拉日志增量：`since=None` 从头读；返回 `[start_offset, next_offset)` 的字节窗口
@@ -1120,12 +1126,27 @@ impl BashTaskRegistry {
             .get(task_id)
             .cloned()
             .ok_or_else(|| AppError::Primitive(format!("bash task not found: {task_id}")))?;
+        // The waiter cannot publish a terminal state before the platform result is known.
+        // A failed stop must not turn a later natural exit into a successful Stopped receipt.
+        let info = task.info.write();
         if matches!(
-            task.info.read().status,
+            info.status,
             BashTaskStatus::Finished { .. } | BashTaskStatus::Stopped
         ) {
             return Ok(());
         }
+        // Termination is a host operation, not an executable resolved from the workspace.
+        #[cfg(windows)]
+        let taskkill = std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("System32").join("taskkill.exe"))
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| {
+                AppError::Primitive(
+                    "cannot stop bash process tree without an absolute Windows SystemRoot".into(),
+                )
+            })?;
+        #[cfg(windows)]
+        let previous_stop = task.stop_requested.load(Ordering::Acquire);
         task.stop_requested.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(pid) = task.pid {
@@ -1137,7 +1158,7 @@ impl BashTaskRegistry {
         #[cfg(windows)]
         if let Some(pid) = task.pid {
             let pid = pid.to_string();
-            match std::process::Command::new("taskkill")
+            match std::process::Command::new(taskkill)
                 .args(["/PID", pid.as_str(), "/T", "/F"])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -1146,10 +1167,15 @@ impl BashTaskRegistry {
             {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
-                    tracing::warn!(task_id, code = ?status.code(), "taskkill failed for bash process tree")
+                    task.stop_requested.store(previous_stop, Ordering::Release);
+                    return Err(AppError::Primitive(format!(
+                        "taskkill failed for bash process tree {task_id}: exit {:?}",
+                        status.code()
+                    )));
                 }
                 Err(error) => {
-                    tracing::warn!(task_id, %error, "failed to start taskkill for bash process tree")
+                    task.stop_requested.store(previous_stop, Ordering::Release);
+                    return Err(AppError::Io(error));
                 }
             }
         }
@@ -1303,35 +1329,50 @@ impl BashTaskRegistry {
 fn spawn_pump<R>(
     reader: Option<R>,
     writer: Arc<AsyncMutex<tokio::fs::File>>,
-    stream_writer: Arc<AsyncMutex<tokio::fs::File>>,
-    prefix: &'static str,
+    mut capture: Option<StreamCapture>,
     stream: BashOutputStream,
     task: Arc<BashTask>,
     output_tx: broadcast::Sender<BashTaskOutputEvent>,
-) -> tokio::task::JoinHandle<()>
+) -> tokio::task::JoinHandle<std::io::Result<Option<tokio::fs::File>>>
 where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
-    let Some(reader) = reader else {
-        return tokio::spawn(async {});
+    let prefix = match stream {
+        BashOutputStream::Stdout => "",
+        BashOutputStream::Stderr => "STDERR: ",
     };
     tokio::spawn(async move {
+        let mut capture_error = None;
         let mut buf = vec![0u8; 4096];
-        let mut buffered = BufReader::new(reader);
-        loop {
-            match buffered.read(&mut buf).await {
+        let mut buffered = reader.map(BufReader::new);
+        while let Some(reader) = &mut buffered {
+            match reader.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
                     // Serialize log writes so the preview event order matches the durable log order.
+                    if capture
+                        .as_ref()
+                        .is_some_and(|(_, sender)| sender.is_closed())
+                    {
+                        capture = None;
+                    }
+                    if let Some((file, _)) = &mut capture {
+                        let written = async {
+                            file.write_all(&buf[..n]).await?;
+                            file.flush().await
+                        }
+                        .await;
+                        if let Err(error) = written {
+                            capture_error = Some(error);
+                            capture = None;
+                        }
+                    }
                     let mut f = writer.lock().await;
-                    let mut stream_file = stream_writer.lock().await;
                     if !prefix.is_empty() {
                         let _ = f.write_all(prefix.as_bytes()).await;
                     }
                     let _ = f.write_all(&buf[..n]).await;
                     let _ = f.flush().await;
-                    let _ = stream_file.write_all(&buf[..n]).await;
-                    let _ = stream_file.flush().await;
                     let event = {
                         let mut preview = task.preview.lock();
                         let mut durable = Vec::with_capacity(prefix.len() + n);
@@ -1356,8 +1397,16 @@ where
                     let _ = output_tx.send(event);
                     task.notify.notify_waiters();
                 }
-                Err(_) => break,
+                Err(error) => {
+                    capture_error = Some(error);
+                    break;
+                }
             }
+        }
+        if let Some(error) = capture_error {
+            Err(error)
+        } else {
+            Ok(capture.map(|(file, _)| file))
         }
     })
 }
@@ -1376,3 +1425,7 @@ fn simple_rand6() -> String {
     }
     s
 }
+
+#[cfg(test)]
+#[path = "tests/bash_task_capture_test.rs"]
+mod tests;

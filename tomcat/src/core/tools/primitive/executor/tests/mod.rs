@@ -5,5 +5,4 @@
 //! `gate_suite_test` / `read_window_test`；本目录只承载与单个 executor 子文件
 //! 一对一的单元测试（如 `output_accum_test`）。
 
-mod bash_test;
 mod output_accum_test;

@@ -6,6 +6,7 @@
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
 use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{GrantTrace, PermissionScope};
+use crate::core::tools::primitive::bash_task::ForegroundOutput;
 use crate::core::tools::primitive::{
     BashExecutionState, BashNextAction, BashResult, BashTaskRegistry, PrimitiveOperation,
     ResolvedCwd,
@@ -15,6 +16,7 @@ use crate::infra::error::AppError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Until a result is handed back, dropping the caller must stop its process tree.
 /// Background tasks only outlive this guard after a successful ticket handoff.
@@ -149,8 +151,8 @@ pub(super) async fn execute_bash_impl(
                 .with_foreground_wait_ms(executor.bash_foreground_wait_ms),
         )
     });
-    let ticket = registry
-        .spawn_tracked_unchecked(command.to_string(), cwd.clone(), false)
+    let (ticket, captured) = registry
+        .spawn_foreground_unchecked(command.to_string(), cwd.clone())
         .await?;
     let mut stop_guard = ForegroundStopGuard {
         registry: &registry,
@@ -171,6 +173,7 @@ pub(super) async fn execute_bash_impl(
             &ticket.log_path,
             started,
             false,
+            captured,
         )
         .await?
     } else if shared_registry.is_some() {
@@ -211,6 +214,7 @@ pub(super) async fn execute_bash_impl(
                 &ticket.log_path,
                 started,
                 true,
+                captured,
             )
             .await?
         }
@@ -221,6 +225,7 @@ pub(super) async fn execute_bash_impl(
             &ticket.task_id,
             &ticket.log_path,
             started,
+            captured,
         )
         .await?
     };
@@ -248,9 +253,13 @@ async fn finish_expired_foreground(
     task_id: &str,
     log_path: &str,
     started: Instant,
+    captured: ForegroundOutput,
 ) -> Result<BashResult, AppError> {
-    let _ = registry.stop(task_id).await;
-    finalize_foreground_result(executor, registry, task_id, log_path, started, true).await
+    registry.stop(task_id).await?;
+    finalize_foreground_result(
+        executor, registry, task_id, log_path, started, true, captured,
+    )
+    .await
 }
 
 async fn finalize_foreground_result(
@@ -260,18 +269,37 @@ async fn finalize_foreground_result(
     log_path: &str,
     started: Instant,
     foreground_wait_expired: bool,
+    captured: ForegroundOutput,
 ) -> Result<BashResult, AppError> {
     registry.wait_for_finish(task_id).await?;
-    let chunk = registry.read_output(task_id, Some(0)).await?;
-    let (raw_stdout, raw_stderr) = registry.read_stream_outputs(task_id).await?;
-    let final_state = match registry.get_info(task_id).map(|info| info.status) {
-        Some(crate::core::tools::primitive::BashTaskStatus::Stopped) => BashExecutionState::Stopped,
-        Some(crate::core::tools::primitive::BashTaskStatus::Finished { .. })
-        | Some(crate::core::tools::primitive::BashTaskStatus::Running)
-        | Some(crate::core::tools::primitive::BashTaskStatus::DrainingOutput)
-        | None => BashExecutionState::Finished,
+    let (final_state, exit_code) = match registry.get_info(task_id).map(|info| info.status) {
+        Some(crate::core::tools::primitive::BashTaskStatus::Stopped) => {
+            (BashExecutionState::Stopped, -1)
+        }
+        Some(crate::core::tools::primitive::BashTaskStatus::Finished { exit_code }) => {
+            (BashExecutionState::Finished, exit_code)
+        }
+        _ => {
+            return Err(AppError::Primitive(
+                "foreground Bash did not reach a terminal state".into(),
+            ))
+        }
     };
     registry.remove_foreground(task_id);
+    // The process and pumps have drained; the adapter now owns the receipt even
+    // when reading it fails. Do not retain an unowned foreground task on error.
+    let streams = captured
+        .await
+        .map_err(|_| {
+            AppError::Primitive("foreground Bash output owner exited without a result".into())
+        })?
+        .map_err(AppError::Io)?;
+    let raw_stdout = read_captured_stream(streams.0)
+        .await
+        .map_err(AppError::Io)?;
+    let raw_stderr = read_captured_stream(streams.1)
+        .await
+        .map_err(AppError::Io)?;
     let stdout_outcome = super::output_accum::accumulate_with_persist(
         &raw_stdout,
         executor.bash_max_output_chars,
@@ -292,7 +320,7 @@ async fn finalize_foreground_result(
     Ok(BashResult {
         stdout: stdout_outcome.text,
         stderr: stderr_outcome.text,
-        exit_code: chunk.exit_code.unwrap_or(-1),
+        exit_code,
         state: final_state,
         foreground_wait_expired,
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -302,3 +330,14 @@ async fn finalize_foreground_result(
         ..Default::default()
     })
 }
+
+async fn read_captured_stream(mut file: tokio::fs::File) -> std::io::Result<String> {
+    file.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+#[path = "tests/bash_test.rs"]
+mod tests;
