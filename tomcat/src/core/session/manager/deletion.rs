@@ -125,7 +125,11 @@ impl SessionDeletion<'_> {
                 warnings.push(error.to_string());
             }
             if let Err(error) = store.sweep_orphan_blobs(
-                || self.manager.collect_live_blob_shas().map(|live| live.shas),
+                || {
+                    self.manager
+                        .collect_live_blob_shas_incremental()
+                        .map(|live| live.shas)
+                },
                 crate::core::session::attachments::ORPHAN_BLOB_GRACE,
             ) {
                 warnings.push(error.to_string());

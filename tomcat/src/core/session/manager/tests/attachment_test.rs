@@ -515,3 +515,73 @@ fn delete_session_keeps_bytes_another_session_still_references() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn age_blob_past_orphan_grace(mgr: &SessionManager, sha: &str) {
+    std::fs::File::options()
+        .write(true)
+        .open(mgr.attachment_store().blobs_dir().join(sha))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3601))
+        .unwrap();
+}
+
+#[test]
+fn incremental_live_collection_rescans_only_changed_transcripts() {
+    // 删会话时这次收集握着全局附件锁；只重扫变过的 transcript，其它附件操作才不会被拖住。
+    let dir = fresh_dir();
+    let mgr = SessionManager::new(dir.clone());
+    let store = mgr.attachment_store();
+    let shas = [b"one".as_slice(), b"two", b"three"].map(|bytes| store.put(bytes).unwrap());
+    for (index, sha) in shas.iter().enumerate() {
+        write_transcript_references(&dir, &format!("sid_{index}"), std::slice::from_ref(sha));
+    }
+
+    let first = mgr.collect_live_blob_shas_incremental().unwrap();
+    assert_eq!(first.transcripts_scanned, 3);
+
+    let added = store.put(b"four").unwrap();
+    write_transcript_references(&dir, "sid_1", &[shas[1].clone(), added.clone()]);
+    let second = mgr.collect_live_blob_shas_incremental().unwrap();
+
+    assert_eq!(
+        second.transcripts_scanned, 1,
+        "未变化的 transcript 必须直接用缓存，不得重扫"
+    );
+    assert!(
+        second.shas.contains(&added),
+        "变化的 transcript 的新引用必须被收进来"
+    );
+    assert!(
+        shas.iter().all(|sha| second.shas.contains(sha)),
+        "缓存命中的 transcript 引用不得丢失"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_session_with_warm_ledger_reclaims_only_its_own_aged_images() {
+    let dir = fresh_dir();
+    let mgr = SessionManager::new(dir.clone());
+    let doomed = mgr.create_session(mgr.current_session_key(), None).unwrap();
+    let store = mgr.attachment_store();
+    let doomed_sha = store.put(b"doomed image bytes").unwrap();
+    let kept_sha = store.put(b"kept image bytes").unwrap();
+    write_transcript_references(&dir, &doomed.session_id, std::slice::from_ref(&doomed_sha));
+    write_transcript_references(&dir, "sid_keeper", std::slice::from_ref(&kept_sha));
+    mgr.collect_live_blob_shas_incremental().unwrap();
+    age_blob_past_orphan_grace(&mgr, &doomed_sha);
+    age_blob_past_orphan_grace(&mgr, &kept_sha);
+
+    mgr.delete_session(&doomed.session_id).unwrap();
+
+    assert!(
+        !store.exists(&doomed_sha),
+        "被删会话的缓存条目不得让它独占的旧图片继续存活"
+    );
+    assert!(store.exists(&kept_sha), "另一个会话仍引用的图片必须保留");
+    let ledger: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(".housekeeping.json")).unwrap()).unwrap();
+    assert!(ledger["sessions"].get(&doomed.session_id).is_none());
+    assert!(ledger["sessions"].get("sid_keeper").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
