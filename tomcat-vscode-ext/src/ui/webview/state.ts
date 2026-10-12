@@ -2624,6 +2624,7 @@ export type AttachmentUriResolver = (attachment: {
 }) => {
   fullUri: string | null;
   thumbUri: string | null;
+  hasThumb?: boolean;
   unavailable?: boolean;
 };
 

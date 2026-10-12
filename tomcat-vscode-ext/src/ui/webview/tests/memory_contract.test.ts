@@ -354,6 +354,54 @@ describe("history images rebuilt from a transcript", () => {
   });
 });
 
+describe("shared tool thumbnail cache", () => {
+  it.each([false, true])("adopts a shared thumbnail across sessions (stored before second=%s)", async storedFirst => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-shared-thumb-"));
+    const blobSha = sha(9);
+    await fs.mkdir(path.join(root, "blobs"));
+    await fs.mkdir(path.join(root, "thumbs"));
+    await fs.writeFile(path.join(root, "blobs", blobSha), "fixture-original");
+    const request = vi.fn(async () => {
+      await fs.writeFile(path.join(root, "thumbs", blobSha), "fixture-thumbnail");
+      return { success: true };
+    });
+    const provider = new TomcatWebviewViewProvider({
+      draftStorage: { globalStorageUri: vscode.Uri.file(path.join(root, "drafts")), storageUri: undefined },
+      extensionUri: vscode.Uri.file("/ext"), getDefaultCwd: () => "/workspace", ide: {} as never,
+      initialize: async () => ({}) as never,
+      messenger: { onEvent: () => ({ dispose() {} }), request } as never, sessionRouter: {} as never,
+    });
+    const host = provider as unknown as {
+      attachmentRoot: string; view: unknown; stateStore: WebviewStateStore;
+      historyAttachmentResolver(): import("../state").AttachmentUriResolver;
+      storeGeneratedThumbnail(data: { blobSha: string; sessionId: string; thumbBase64: string }): Promise<void>;
+    };
+    host.attachmentRoot = root;
+    host.view = { webview: webviewStub };
+    host.stateStore.setAttachmentUriResolver(host.historyAttachmentResolver());
+    const addTool = (sessionId: string, callId: string) => {
+      host.stateStore.setActiveSession(sessionId);
+      host.stateStore.applyEvent({ type: "tool_execution_end", sessionId, toolCallId: callId, toolName: "read",
+        result: "[Image attached]", isError: false,
+        media: [{ type: "input_image_ref", blobSha, mimeType: "image/png", bytes: 16 }] });
+    };
+    try {
+      addTool("first", "call-first");
+      if (storedFirst) await host.storeGeneratedThumbnail({ blobSha, sessionId: "first", thumbBase64: "AA==" });
+      addTool("second", "call-second");
+      if (!storedFirst) await host.storeGeneratedThumbnail({ blobSha, sessionId: "first", thumbBase64: "AA==" });
+      for (const id of ["first", "second"]) {
+        const tool = provider.currentState().sessionViews[id].timeline.find(item => item.type === "tool");
+        expect(tool).toMatchObject({ attachments: [{ blobSha, hasThumb: true,
+          thumbUri: `https://webview.test${root}/thumbs/${blobSha}` }] });
+      }
+      expect(request).toHaveBeenCalledOnce();
+      expect(provider.currentState().activeSessionId).toBe("second");
+      expect(JSON.stringify(provider.currentState())).not.toContain("fixture-original");
+    } finally { provider.dispose(); await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
 describe("chat webview security headers", () => {
   const tempDirs: string[] = [];
 

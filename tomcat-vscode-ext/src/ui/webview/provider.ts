@@ -3669,10 +3669,16 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    */
   private historyAttachmentResolver(): AttachmentUriResolver {
     return (attachment) => {
+      // Thumbnails share the blob store across sessions; live media does not carry
+      // hasThumb. Reuse an existing cached rendition rather than decoding it again.
+      const hasThumb = attachment.hasThumb === true || Boolean(this.attachmentRoot &&
+        /^[0-9a-f]{64}$/.test(attachment.blobSha) &&
+        fs.existsSync(path.join(this.attachmentRoot, "thumbs", attachment.blobSha)));
       const uris = this.view
-        ? resolveAttachmentUris(this.view.webview, this.attachmentRoot, attachment)
+        ? resolveAttachmentUris(this.view.webview, this.attachmentRoot, { ...attachment, hasThumb })
         : null;
       return {
+        hasThumb,
         fullUri: uris?.fullUri ?? null,
         thumbUri: uris?.thumbUri ?? null,
         ...(this.hasBlobBytes(attachment.blobSha) ? {} : { unavailable: true }),
@@ -3811,7 +3817,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       ),
     }));
     await this.applyDraftToState(data.sessionId, draft);
-    this.adoptHistoryThumbnail(data.sessionId, data.blobSha);
+    // Other sessions may already reference this shared hash while generation was
+    // in flight. Publish the existing thumbnail to them without changing selection.
+    for (const sessionId of Object.keys(this.peekState().sessionViews)) {
+      this.adoptHistoryThumbnail(sessionId, data.blobSha);
+    }
     await this.postState();
   }
 

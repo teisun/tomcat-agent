@@ -183,6 +183,7 @@ Files 不再因 HEAD 移动禁用撤销；rewind 自己的 `git_head_moved` 闸�
 - 工具消息本身不启动新的逻辑轮；replay先按内部历史计算，再拼临时wire媒体。旧ToolMedia仍保留历史语义。压缩与持久化文字重写保留图片引用，摘要仍能读取工具文字。
 - `ToolExecutionEnd.media`是带类型的引用数组，无图片则省略；扩展实时/历史都使用共享附件解析。附件ID用toolCallId和媒体序号，避免实时数组无文字而历史数组含文字造成ID漂移。
 - ToolRow有图默认折叠，标题旁codicon-file-media与数量；展开复用AttachmentStrip。图片不可用显示既有不可用提示；无thumb不拿fullUri顶替。nextThumbnailTarget纳入工具，仍一次一张、按sha去重。
+- 同 SHA 缩略图是该 agent 附件仓库的共享事实，不属单次 tool/session。新 live 引用即使未携带 hasThumb，也采用已经存在的 thumbs/<SHA>；生成完成时更新该 Host 已知会话的匹配历史/工具引用。仍只生成一次一张，不新增缓存/状态权威，不切 activeSession，不使用 fullUri 兜底。
 - 预览纯函数纳入`Tool images · <tool>`分组，普通工具、单工具上下文与ThinkingGroup都透传点击回调；预览filmstrip也不使用原图兜底。
 - 内联大小上限、用户模型配置与file_id兼容能力不扩大；raw探针的上传404如实保留。具体API矩阵见`tomcat/src/core/llm/README.md`。若原生API契约发生变化，先补探针再调整集中策略，不靠重复请求猜能力。
 
