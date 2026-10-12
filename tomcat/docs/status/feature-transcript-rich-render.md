@@ -1,19 +1,22 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-10-11 22:45 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| Nibbles | 2026-10-12 12:36 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
-### CURRENT REVIEW (2026-10-11)
+### CURRENT REVIEW (2026-10-12)
 
 - Full branch review is complete for the frozen `develop..feature/transcript-rich-render` range: 1123/1123 paths, 147 commits. This is review coverage, not acceptance.
-- M3 fixes and test-layout remediation are still being closed. Confirmed focused fixes include permission enforcement, restore/GC/session concurrency, connector lifecycle, plan completion ordering, real-LLM false-green guards, `search_files` context/deny parsing, MCP naming, Clippy cleanups, and relocation of inline/standalone Rust tests without widening production visibility.
-- Latest focused evidence: task `1791753190770-i1eht5` relocated/layout subset had 64/68 tests pass; the four failures were filesystem `ENOSPC`, not behavior. After disk recovery, the same four web-search JS tests passed; task `1791757817219-qhp3x3` passed Rust compile, three Bash stream/foreground cases, Clippy targets, and `git diff --check`. Missing real catalog negative control now fails explicitly with exit 101 in task `1791758514211-aaxony`.
-- Newly closed in this M3 pass: Bash stdout/stderr keeps pipe identity instead of parsing user text prefixes; Windows stop uses `taskkill /PID /T /F` (Windows execution remains untested on this macOS host); selected live/current-tail prerequisites fail instead of silently skipping. The E2E scenario library and review findings record these boundaries.
-- **Not yet delivered:** focused commits, Rust/extension full gates, real provider positive acceptance, UI PNG/ARIA/console acceptance, merge to `develop`, status integration, or remote push. No release/tag has been made.
+- M3 已按根因提交：`793e081e` 总体整改、`89cef7cc` 纯格式、`2bc62520` 原门禁回归、`8abc3831` 前台匿名捕获/失败释放、`b6eca80f` 跨会话共享缩略图、`e9ce18b4` 如实报告索引截断、`5c5d3c80` Host 契约/夹具对齐、`0c089e08` 真实窄窗验收、`c7553636` 退役 crop 名单清理。Bash 不新增后台命名 sidecar，不恢复 argv；既有锁、授权、排空与诊断日志保留。
+- Rust 有效检查集合：原完整库 3234/0/5 ignored、默认并行 378/0、串行 35/0（`1791768685370-yj8d7h` exit 0），后续 Bash 增量 48/48 + all-targets Clippy/fmt（`1791777451267-qwib56`）；该增量整批 exit 2 是文档 EOF 空行，已修并由 diff-check 提交复核，不改写原命令。当前 debug CLI 已构建；格式、版本镜像、19 项版本脚本/audit 有效，保留 bincode/smartstring/yaml-rust 三条 unmaintained 警告。历史 VM 单次失败在完整库未再现，根因仍未确认。
+- 真实专项 `1791769594329-aislpv` exit 0：生产 Serve 长会话、DeepSeek Chat 工具/推理续接、fcodex Anthropic 真实 read-image→视觉判断→write/Files 归属、真实 Skill 加载、Tavily 插件入口，以及浏览器脚本 bootstrap/正常截图/console-error 负控，各实际执行 1 项。真实模型 profile 原报告 29 PASS 中两项额外 opt-in 诊断未发请求；不算真实供应商覆盖。Windows 停止已补 `taskkill /T /F` 和错误传播，本机未实测 Windows。
+- 扩展有效集合：首次 build 前 `check:wire`、完整 core 746/GUI 826、完整真实 Serve integration 的失败三文件补跑4/4（`1791773162429-ubgb60`），新改动 core42/GUI6/跨层88/typecheck；安装态23与 VSIX五启动场景4+1+3+1+1通过（`1791773308474-2bpuri`）。Devhost 原36/6保留，整改后完整39/3/4pending，剩余3路径断言+Plan完整操作补跑4/4（`1791777451153-is5yjb`），全部42活跃场景有有效覆盖，不冒称原full命令退出0。
+- 实屏：Questions 36 triples、Undo 12场景、@截断桌亮/窄暗40 triples、真实 Host Settings/Plan/Image/queue/inline/Files和Plan Find完整操作已采PNG/AX/console并读验。图片专项改为真实390×844窗口，Send完整/可hit-test、33检查/23 triples通过（`1791778757085-22gqoe`），不以旧180px根shim截图凑绿。MCP安装态真实Serve四phase经原checker/normal与untrusted/add补跑闭合（`1791778419644-ilqkke`），28正常场景triples中Settings scoped errors为0；故意Settings error负控单列。旧crop五个不存在文件是无producer旧名单，当前默认五full-frame均在，helper已只用现行名单并拒绝实际缺图的部分成功。
+- Console/边界如实保留：外层VS Code资源ERR_TIMED_OUT不与产品scoped报告混为一谈；图片缺blob404/越界图403为受控负例，不报全程零错误。原图诊断只实测10 PNG，混合SVG失败显式记录；当前11张缩略图位图1,216,512 B不是RSS保证。Native Save As、首次原生project-trust modal、其他平台仍未自动验收。
+- **未交付**：候选验收摘要提交/功能分支推送、合并 `develop`、合并后的两侧 fast、集成状态看板和最终远端推送；不发版、不打 tag。原始失败/补跑与逐项索引见 `.agents/acceptance/review-ebbdacce-findings.md`，产物在 `.agents/shots/`。
 
 ### BLOCKED (当前风险)
 
-- Windows process-tree cancellation remains a required Windows-runner/manual boundary; the implementation is present but this host cannot claim Windows runtime evidence.
-- Paid real-model positive acceptance and visual Host/VS Code acceptance remain unverified until M4; missing credentials, rejected connections, missing catalogs, and stale screenshots are explicit failures, never passes.
+- 本机是 macOS；Windows 进程树停止的运行态保证未验证，不冒称全平台通过。当前发布矩阵仅 macOS/Linux，Windows 一等交付需其平台验证。
+- 当前代码候选未发现尚未补齐的必需门禁目标；M4视觉/失败历史按有效检查集合记录。develop 集成复核与最终推送尚未进行，不提前声称交付 DONE。
 
 
 ### ✅ DONE (历史已完成记录)
