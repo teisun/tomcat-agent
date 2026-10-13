@@ -1,4 +1,4 @@
-# Tomcat for VS Code
+# Tomcat AI Agent for VS Code
 
 <p align="center">
   <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.md">English</a> |

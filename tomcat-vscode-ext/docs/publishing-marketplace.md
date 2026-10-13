@@ -1,6 +1,6 @@
 # Tomcat 发布到 VS Code Marketplace
 
-> 最初调研于 2026-10-12；本文已随首发准备更新。准备工作不等于扩展已经上线。以 Publisher 后台、公开详情页和实际市场安装结果为准。
+> 最初调研于 2026-10-12；2026-10-13 已完成 Tomcat AI Agent 0.1.89 的三个平台网页上传，并在 Intel Mac 的隔离 VS Code 中从市场安装成功。长期 Entra/OIDC 自动发布与自动更新证明仍未完成；上架成功不等于这条自动化链路已接通。
 
 ```text
 确认 tomcat-agent Owner → 补全发布者 Logo/资料
@@ -12,8 +12,8 @@
 ## 1. 身份、账号和公开资料
 
 - Publisher：`tomcat-agent`，已有账号，管理页已确认 Owner。不要再创建另一个发布者。
-- 扩展机器名：`tomcat-vscode-ext`；完整 ID：`tomcat-agent.tomcat-vscode-ext`；展示名称：Tomcat。市场名称可用性以真实提交结果为准。
-- 版本由 `release-versions.json` 管理；本次准备 EXT 0.1.88，CLI/pin 保持 0.1.73。不要手改版本镜像或运行 `npm version` / `vsce publish patch`。
+- 扩展机器名：`tomcat-vscode-ext`；完整 ID：`tomcat-agent.tomcat-vscode-ext`；展示名称：**Tomcat AI Agent**。首次上传的原显示名 Tomcat 被市场以 HTTP 400 拒绝（`This extension display name is taken`）；用户确认的新名称已被市场接受。只改显示名，不改 Publisher/name、命令、设置或 Agent Box 名称。
+- 版本由 `release-versions.json` 管理；本次市场首发为 EXT 0.1.89，CLI/pin 保持 0.1.73。GitHub 的 0.1.88 已公开，保留其资产和标签，不用修改后的包覆盖旧版本。不要手改版本镜像或运行 `npm version` / `vsce publish patch`。
 - 扩展图标是 `tomcat-vscode-ext/media/icon.png`（256×256 PNG）。Publisher 的 Logo 在网页单独上传；使用它的 128×128 副本，不覆盖源图。
 - Publisher 简介：Tomcat is an open-source AI agent runtime and VS Code extension for coding workflows, with configurable models and permission-controlled tools.
 - Company website / Source code repository：<https://github.com/teisun/tomcat-agent>；Support：<https://github.com/teisun/tomcat-agent/issues>。没有提供的社交账号留空，不公布个人邮箱。
@@ -43,7 +43,7 @@
 ```bash
 # 根目录：EXT-only，不改变 pin
 node scripts/release-version.mjs check
-# 本次首发准备已经递增至 0.1.88；不要再递增。
+# 本次显示名修正已递增至 0.1.89；不要重复递增。
 # 仅准备下一正常扩展版本时执行：
 # node scripts/release-version.mjs bump --extension patch
 node scripts/release-version.mjs check
@@ -66,7 +66,7 @@ npm run package:vsix -- --target darwin-x64 --bundle-binary /absolute/path/to/ve
 npm run verify:vsix -- --release-bundle /absolute/path/to/exact-platform-package.vsix
 
 # 仅在真实上架后：按当前仓库的精确扩展版本从市场安装并复用同一验收。
-npm run verify:vsix -- --marketplace tomcat-agent.tomcat-vscode-ext@0.1.88
+npm run verify:vsix -- --marketplace tomcat-agent.tomcat-vscode-ext@0.1.89
 ```
 
 这两种来源互斥，错误文件不能被当作市场 ID 或被旧的 `TOMCAT_PREBUILT_VSIX` 替代。正式模式默认下载清单所声明的最低 VS Code 版本；保留文件、CLI 与原生架构证据。受控模型返回不是外部模型服务的实际调用，配置规则的允许/拒绝也不代替首次市场安装中的人工授权交互验收。
@@ -78,8 +78,16 @@ npm run verify:vsix -- --marketplace tomcat-agent.tomcat-vscode-ext@0.1.88
 2. 在 <https://marketplace.visualstudio.com/manage> 选择 tomcat-agent → New extension → Visual Studio Code。
 3. 上传第一个正式平台 VSIX，再为同一版本添加其余目标。菜单以当时后台为准；不能上传旧 Publisher 的包或通用包。
 4. 等待市场校验，处理明确错误；没有固定完成时限。真实权限或名称冲突按服务端提示处理。
-5. 打开 <https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext>，检查图标、简介、截图和语言/文档链接。该链接是目标地址，不是本文已确认上线的声明。
+5. 打开 <https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext>，检查图标、简介、截图和语言/文档链接。该页面已公开显示 0.1.89 和三个目标；之后发版仍须重新核实。
 6. 在干净 VS Code 从市场按 ID 安装，核对版本、平台和内置 CLI，完成首次配置及主流程。
+
+### 0.1.89 首发实况与验收边界
+
+- 管理页显示绿色勾、`0.1.89`、`Public`、`Works with: 3`；将鼠标移到 `3` 上可看到 Linux x64、macOS Apple Silicon、macOS Intel。同一扩展 ID 的三个目标包合并成一行，VS Code 安装时自动匹配平台。
+- 公开页图标、README 截图、双语入口、版本和支持范围已核实。Marketplace 自身仍报告字体 CSP 和站点资源 404，保留控制台证据，不宣称整页控制台零错误。
+- 本机 Intel macOS / VS Code 1.106.0 已从市场按精确 ID/版本完成隔离安装；实际来源为 gallery、目标为 darwin-x64，内置 CLI 0.1.73 经过真实 Serve、受控模型响应、工具允许/拒绝、停止与重载检查，回执为 `passed_with_known_issues`。这不等于新用户通过 Add Models 配置真实外部服务的人工验收，也不是另外两个平台的市场安装证明。
+- 0.1.89 仅改显示名/版本和说明。按用户明确要求，不再触发 CI；复用已完成的归档检查和本机正式包检查，不把此前 0.1.88 三平台原生证据冒充本版本三平台已重测。
+- 当前网页首发不依赖 Entra，后续联邦身份和自动更新仍暂停。发布记录与完整证据保留在 `.agents/marketplace/0.1.89/`。
 
 ## 5. 后续联邦身份发布（尚需实际配置与验收）
 

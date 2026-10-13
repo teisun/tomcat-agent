@@ -147,6 +147,9 @@ describe("VSIX packaging", () => {
         expect(`${metadata.publisher}.${metadata.name}`).toBe(EXTENSION_ID);
         const sourceMetadata = JSON.parse(await fs.readFile(path.join(extensionRoot, "package.json"), "utf8"));
         expect(metadata.version).toBe(sourceMetadata.version);
+        expect(metadata.displayName).toBe(sourceMetadata.displayName);
+        const vsixManifest = execFileSync("unzip", ["-p", packaged, "extension.vsixmanifest"], { encoding: "utf8" });
+        expect(vsixManifest).toContain(`<DisplayName>${sourceMetadata.displayName}</DisplayName>`);
         for (const localeFile of ["readme.md", "README.zh.md"]) {
           const readme = execFileSync("unzip", ["-p", packaged, `extension/${localeFile}`], { encoding: "utf8" });
           expect(readme).toContain(`code --install-extension ${EXTENSION_ID}`);

@@ -7,6 +7,7 @@ import { EXTENSION_ID } from "../src/constants";
 type Manifest = {
   publisher: string;
   name: string;
+  displayName: string;
   categories: string[];
   engines: { vscode: string };
   activationEvents?: string[];
@@ -38,6 +39,7 @@ describe("extension manifest contract", () => {
     const manifest = await readManifest();
     expect(manifest.publisher).toBe("tomcat-agent");
     expect(manifest.name).toBe("tomcat-vscode-ext");
+    expect(manifest.displayName).toBe("Tomcat AI Agent");
     expect(EXTENSION_ID).toBe(`${manifest.publisher}.${manifest.name}`);
     expect(manifest.categories).toEqual(["Other"]);
   });

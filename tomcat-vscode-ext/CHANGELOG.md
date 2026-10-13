@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.89
+
+- Change the extension display name from Tomcat to Tomcat AI Agent after Marketplace rejected the original display name as taken. Keep the extension ID `tomcat-agent.tomcat-vscode-ext`, commands, settings and Agent Box branding unchanged.
+- Keep CLI 0.1.73 and the previously disclosed denied-write history-label limitation unchanged. Prepare new packages without replacing the published GitHub 0.1.88 assets; Marketplace availability remains subject to upload validation.
+
 ## 0.1.88
 
 - Correct the minimum VS Code version to 1.106.0, where Secondary Side Bar view containers are supported by the stable extension API; older VS Code versions must be upgraded.
