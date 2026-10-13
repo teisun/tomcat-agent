@@ -2,8 +2,8 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "%extension.description%",
-  "version": "0.1.87",
-  "publisher": "tomcat",
+  "version": "0.1.88",
+  "publisher": "tomcat-agent",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -13,8 +13,7 @@
     "bundledCliVersion": "0.1.73"
   },
   "categories": [
-    "AI",
-    "Chat"
+    "Other"
   ],
   "keywords": [
     "tomcat",
@@ -26,7 +25,7 @@
   ],
   "icon": "media/icon.png",
   "engines": {
-    "vscode": "^1.104.0"
+    "vscode": "^1.106.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.88
+
+- Correct the minimum VS Code version to 1.106.0, where Secondary Side Bar view containers are supported by the stable extension API; older VS Code versions must be upgraded.
+- Open the lowercase README shipped by vsce in the existing guide action, while retaining source-checkout support and reporting file-access failures.
+- Prepare the extension's Marketplace identity as `tomcat-agent.tomcat-vscode-ext`; align installed-extension tests with the publisher.
+- Update English and Chinese installation instructions, screenshot/documentation links, and model-service cost/data guidance. Retain GitHub VSIX downloads for offline installation.
+- Keep the bundled Tomcat CLI pinned to 0.1.73. Marketplace targets are darwin-arm64, darwin-x64 and linux-x64; the pure extension remains a GitHub download, not a universal Marketplace fallback.
+- Known issue retained with bundled CLI 0.1.73: permission-refused writes can be incorrectly labelled Created after history reload. The write remains refused and the file is not created. The release owner deferred this presentation repair; native acceptance reports it explicitly rather than claiming it was fixed.
+
 ## 0.1.14
 
 - Fix the newly sent prompt drifting back down instead of staying pinned to the top ("reveal-to-top") in the real webview. The true trigger was a viewport-height change: when `busy` flips true the composer grows, so the stream container's `clientHeight` increases mid-reveal. The reveal spacer was sized for the old (smaller) viewport and never recomputed, so the scroll clamped to the bottom and the resulting scroll event flipped the mode into bottom-follow — abandoning the pin. The reveal now survives `clientHeight` changes: the `ResizeObserver` re-pins (recomputing/growing the spacer) on any viewport resize while revealing, and a resize-induced clamp to the bottom re-pins instead of falling into bottom-follow as long as the latest turn still fits. This path was invisible to jsdom tests, which mock `clientHeight` as a constant; new regression tests drive a changing viewport height.

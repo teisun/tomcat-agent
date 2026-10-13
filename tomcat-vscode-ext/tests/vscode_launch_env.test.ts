@@ -162,7 +162,7 @@ describe("VS Code GUI launch environment", () => {
       const runTests = vi.fn(async (options) => { assertClean(options.extensionTestsEnv); return 0; });
       // Evaluate the real launch expression, not a duplicate of its options.
       const locals = {
-        path, process: { env }, runVsCodeGuiTests, runTests,
+        path, process: { env }, runVsCodeGuiTests, runTests, testEnv: env, workspacePath: root,
         resolveVsCodeExecutable: () => "fake-vscode",
         options: { harnessRoot: root, harnessTestsPath: "fake-test", testEnv: env, workspacePath: root, artifactsDir: root },
         fixture: { env, workspaceDir: root }, extensionTestsEnv: env, harnessRoot: root,

@@ -879,7 +879,7 @@ async function createDraftForkWebviewSession(
   return sessionId;
 }
 
-async function waitForWebviewDomSnapshot<T>(
+export async function waitForWebviewDomSnapshot<T>(
   api: TomcatExtensionApi,
   predicate: Awaited<
     ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>

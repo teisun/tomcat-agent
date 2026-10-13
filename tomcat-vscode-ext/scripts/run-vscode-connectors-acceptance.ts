@@ -7,6 +7,7 @@ import { runTests } from "@vscode/test-electron";
 import { resolveVsCodeCli, resolveVsCodeExecutable, seedChatUserSettings } from "./e2eHostFixture";
 import { packageVsix } from "./package-vsix";
 import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
+import { EXTENSION_ID } from "../src/constants";
 
 const outsideAgentEnv: NodeJS.ProcessEnv = { ...process.env };
 for (const key of Object.keys(outsideAgentEnv)) {
@@ -108,7 +109,7 @@ async function main(): Promise<void> {
     execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot, stdio: "inherit" });
     packageVsix({ extensionRoot, outPath: vsixPath, skipBuild: process.env.TOMCAT_ACCEPT_SKIP_BUILD === "1" });
     execFileSync(resolveVsCodeCli(), ["--user-data-dir", path.join(installRoot, "installer"), "--extensions-dir", extensionsDir, "--install-extension", vsixPath, "--force"], { stdio: "inherit" });
-    const candidates = (await fs.readdir(extensionsDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && entry.name.startsWith("tomcat.tomcat-vscode-ext-"));
+    const candidates = (await fs.readdir(extensionsDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && entry.name.startsWith(`${EXTENSION_ID}-`));
     if (candidates.length !== 1) throw new Error(`Expected one installed Tomcat extension, found ${candidates.length}`);
     const installed = path.join(extensionsDir, candidates[0].name);
     const expectedAssets = await assetHashes(path.join(extensionRoot, "gui/dist"));

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 
-import { runTests } from "@vscode/test-electron";
+import { runTests, downloadAndUnzipVSCode, resolveCliPathFromVSCodeExecutablePath } from "@vscode/test-electron";
 import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 import {
@@ -13,6 +13,11 @@ import {
   seedChatUserSettings,
 } from "./e2eHostFixture";
 import { packageVsixOrReuse } from "./package-vsix";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { EXTENSION_ID } from "../src/constants";
+import { extractVsixLikeCursor } from "./vsix-extractable";
+import { setupRealServeFixture, spawnScriptedOpenAiStreamServer, type ScriptedResponse, sseDelta, sseFinish, sseDone, sseToolCall } from "./realServeFixture";
 
 function currentVsCodeTarget(): string {
   if (process.platform === "darwin" && process.arch === "arm64") {
@@ -27,7 +32,46 @@ function currentVsCodeTarget(): string {
   throw new Error(`Unsupported local verify platform: ${process.platform}/${process.arch}`);
 }
 
+export type ProductionSource = { kind: "bundle" | "marketplace"; value: string };
+export function parseProductionSource(args: string[]): ProductionSource | undefined {
+  if (!args.length) return undefined;
+  if (args.length !== 2 || !["--release-bundle", "--marketplace"].includes(args[0]) || !args[1]) {
+    throw new Error("Use either --release-bundle <existing VSIX> or --marketplace <ID@version>");
+  }
+  if (args[0] === "--marketplace" && !new RegExp(`^${EXTENSION_ID.replace(/\./g, "\\.")}@[0-9]+\\.[0-9]+\\.[0-9]+$`).test(args[1])) {
+    throw new Error(`Marketplace source must be ${EXTENSION_ID}@<exact version>`);
+  }
+  return { kind: args[0] === "--release-bundle" ? "bundle" : "marketplace", value: args[1] };
+}
+type ReleaseMetadata = { publisher: string; name: string; version: string; tomcat: { bundledCliVersion: string }; engines: { vscode: string } };
+function expectedRelease(): ReleaseMetadata {
+  return JSON.parse(readFileSync(path.resolve(__dirname, "../package.json"), "utf8"));
+}
+export function validateReleaseMetadata(metadata: ReleaseMetadata, target: string, actualTarget: string): void {
+  const expected = expectedRelease();
+  if (`${metadata.publisher}.${metadata.name}` !== EXTENSION_ID || metadata.version !== expected.version || metadata.tomcat?.bundledCliVersion !== expected.tomcat.bundledCliVersion) {
+    throw new Error("Release bundle identity/version/CLI pin does not match this release");
+  }
+  if (metadata.engines?.vscode !== expected.engines.vscode) throw new Error("Release bundle VS Code engine does not match this release");
+  if (actualTarget !== target) throw new Error(`Release bundle target mismatch: expected ${target}, got ${actualTarget}`);
+}
+async function inspectReleaseVsix(file: string) {
+  await fs.access(file); // A missing filename must never turn into a gallery ID.
+  await extractVsixLikeCursor(file);
+  const metadata = JSON.parse(execFileSync("unzip", ["-p", file, "extension/package.json"], { encoding: "utf8" })) as ReleaseMetadata;
+  const xml = execFileSync("unzip", ["-p", file, "extension.vsixmanifest"], { encoding: "utf8" });
+  const target = /TargetPlatform="([^"]+)"/.exec(xml)?.[1] ?? "universal";
+  const identity = /<Identity\s+([^>]+)\/>/.exec(xml)?.[1];
+  for (const [key, value] of Object.entries({ Id: metadata.name, Publisher: metadata.publisher, Version: metadata.version })) {
+    if (!identity || new RegExp(`${key}="([^"]+)"`).exec(identity)?.[1] !== value) throw new Error(`VSIX manifest ${key} does not match package metadata`);
+  }
+  validateReleaseMetadata(metadata, currentVsCodeTarget(), target);
+  const binary = execFileSync("unzip", ["-p", file, "extension/bin/tomcat"], { maxBuffer: 128 * 1024 * 1024 });
+  return { metadata, target, vsixSha256: createHash("sha256").update(await fs.readFile(file)).digest("hex"), cliSha256: createHash("sha256").update(binary).digest("hex") };
+}
+
 type InstalledScenarioOptions = {
+  production?: { source: ProductionSource; bundle?: Awaited<ReturnType<typeof inspectReleaseVsix>> };
   artifactsDir: string;
   additionalSettings?: Record<string, unknown>;
   extensionRoot: string;
@@ -42,6 +86,8 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
   const installRoot = await fs.mkdtemp("/tmp/tvsi-verify-");
   const extensionsDir = path.join(installRoot, "extensions");
   const userDataDir = path.join(installRoot, "user-data");
+  let fixture: Awaited<ReturnType<typeof setupRealServeFixture>> | undefined;
+  let server: Awaited<ReturnType<typeof spawnScriptedOpenAiStreamServer>> | undefined;
 
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
@@ -73,27 +119,107 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
       },
     );
 
+    let testEnv = options.testEnv;
+    let workspacePath = options.workspacePath;
+    if (options.production) {
+      const dirs = (await fs.readdir(extensionsDir)).filter(name => name.startsWith(`${EXTENSION_ID}-`));
+      if (dirs.length !== 1) throw new Error(`Expected exactly one installed ${EXTENSION_ID}, found ${dirs.length}`);
+      const installed = path.join(extensionsDir, dirs[0]);
+      const metadata = JSON.parse(await fs.readFile(path.join(installed, "package.json"), "utf8"));
+      const profile: Array<{ identifier: { id: string }; version: string; metadata?: { source?: string; targetPlatform?: string } }> = JSON.parse(await fs.readFile(path.join(extensionsDir, "extensions.json"), "utf8"));
+      const entries = profile.filter(entry => entry.identifier.id === EXTENSION_ID && entry.version === metadata.version);
+      const source = options.production.source.kind === "bundle" ? "vsix" : "gallery";
+      if (entries.length !== 1 || entries[0].metadata?.source !== source) throw new Error(`Installed extension source must be ${source}`);
+      // VS Code records gallery metadata in extensions.json; local VSIX target
+      // comes from the archive already checked before installation.
+      validateReleaseMetadata(metadata, currentVsCodeTarget(), options.production.bundle?.target ?? entries[0].metadata?.targetPlatform ?? "universal");
+      const binary = path.join(installed, "bin/tomcat");
+      const cliSha256 = createHash("sha256").update(await fs.readFile(binary)).digest("hex");
+      if (options.production.bundle && cliSha256 !== options.production.bundle.cliSha256) throw new Error("Installed CLI bytes differ from the validated VSIX");
+      await fs.chmod(binary, 0o755);
+      const binaryArchitecture = execFileSync("file", [binary], { encoding: "utf8" }).trim();
+      const archPattern = process.arch === "arm64" ? /arm64|aarch64/ : /x86_64|x86-64/;
+      const nativeMachine = execFileSync("uname", ["-m"], { encoding: "utf8" }).trim();
+      if (!archPattern.test(binaryArchitecture) || !archPattern.test(nativeMachine)) throw new Error(`Not a native ${currentVsCodeTarget()} binary/host: ${binaryArchitecture}; ${nativeMachine}`);
+      // Real CLI and Host; only upstream model replies are controlled.
+      const responses: ScriptedResponse[] = [];
+      server = await spawnScriptedOpenAiStreamServer(responses);
+      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary });
+      // Tool paths are explicit fixture-owned absolute paths. Missing relative
+      // files cannot be canonicalized into workspace_roots by the real gate.
+      responses.push(
+        { parts: [sseDelta("RELEASE_BUNDLE_READY"), sseFinish("stop"), sseDone()] },
+        { parts: [sseToolCall("release-allow", "write", JSON.stringify({ path: path.join(fixture.workspacePath, "release-allowed.txt"), content: "allowed by workspace policy" })), sseFinish("tool_calls"), sseDone()] },
+        { parts: [sseDelta("RELEASE_ALLOWED"), sseFinish("stop"), sseDone()] },
+        { parts: [sseToolCall("release-deny", "write", JSON.stringify({ path: path.join(fixture.workspacePath, "release-denied.txt"), content: "must not be written" })), sseFinish("tool_calls"), sseDone()] },
+        { parts: [sseDelta("RELEASE_DENIED"), sseFinish("stop"), sseDone()] },
+        { parts: [sseDelta("RELEASE_STOP_STARTED"), { ...sseDelta("must not finish before stop"), delayMs: 60_000 }, sseFinish("stop"), sseDone()] },
+        { parts: [sseDelta("RELEASE_RELOADED"), sseFinish("stop"), sseDone()] },
+      );
+      const configPath = path.join(fixture.homePath, ".tomcat/tomcat.config.toml");
+      const config = await fs.readFile(configPath, "utf8");
+      const roots = /^workspace_roots\s*=.*$/m;
+      const rules = /^path_rules\s*=.*$/m;
+      if (!roots.test(config) || !rules.test(config) || !/^auto_confirm\s*=\s*(true|false)\s*$/m.test(config)) throw new Error("Unexpected isolated fixture permission configuration");
+      await fs.writeFile(configPath, config.replace(roots, `workspace_roots = [${JSON.stringify(fixture.workspacePath)}]`).replace(rules, `path_rules = [{ path = ${JSON.stringify(path.join(fixture.workspacePath, "release-denied.txt"))}, mode = "deny" }]`).replace(/^auto_confirm\s*=.*$/m, "auto_confirm = false"));
+      testEnv = { ...fixture.env };
+      for (const key of Object.keys(testEnv)) if (key.startsWith("TOMCAT_VSCODE_TEST_") || key.startsWith("TOMCAT_E2E_")) testEnv[key] = undefined;
+      Object.assign(testEnv, { TOMCAT_VSCODE_TEST_DEFAULT_CWD: fixture.workspacePath, TOMCAT_EXPECT_RELEASE_BINARY: binary, TOMCAT_EXPECT_RELEASE_HOST_ARCH: process.arch, TOMCAT_EXPECT_RELEASE_CLI_SHA256: cliSha256, TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1" });
+      const cliVersion = execFileSync(binary, ["--version"], { env: testEnv, encoding: "utf8" }).trim();
+      if (cliVersion !== `tomcat ${metadata.tomcat.bundledCliVersion}`) throw new Error(`Bundled CLI version mismatch: ${cliVersion}`);
+      workspacePath = fixture.workspacePath;
+      const settingsPath = path.join(userDataDir, "User/settings.json");
+      const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+      Object.assign(settings, { "security.workspace.trust.enabled": false, "telemetry.telemetryLevel": "off", "extensions.autoUpdate": false, "extensions.autoCheckUpdates": false, "update.mode": "none" });
+      delete settings["tomcat.path"];
+      await fs.writeFile(settingsPath, JSON.stringify(settings));
+      await fs.writeFile(path.join(options.artifactsDir, "release-artifact.json"), JSON.stringify({ source: options.production.source, ...options.production.bundle, installed, cliSha256, cliVersion, binaryArchitecture, nativeMachine, nodeArch: process.arch, platform: process.platform, osRelease: os.release() }, null, 2));
+    }
+
     await fs.access(options.harnessTestsPath);
     await runVsCodeGuiTests(runTests, {
       extensionDevelopmentPath: options.harnessRoot,
-      extensionTestsEnv: { ...options.testEnv, TOMCAT_E2E_SCREENSHOT: "1", TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: options.artifactsDir },
+      extensionTestsEnv: { ...testEnv, TOMCAT_E2E_SCREENSHOT: "1", TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: options.artifactsDir },
       extensionTestsPath: options.harnessTestsPath,
       launchArgs: [
-        options.workspacePath,
+        workspacePath,
         `--extensions-dir=${extensionsDir}`,
         `--user-data-dir=${userDataDir}`,
       ],
       reuseMachineInstall: true,
       vscodeExecutablePath: resolveVsCodeExecutable(),
     });
+    if (server && server.capturedNonTitleRequests().length !== 7) throw new Error(`Expected seven real model requests, got ${server.capturedNonTitleRequests().length}`);
   } finally {
-    await fs.rm(installRoot, { force: true, recursive: true });
+    try { await server?.close(); } finally {
+      try { await fixture?.cleanup(); } finally {
+        await fs.rm(installRoot, { force: true, recursive: true });
+      }
+    }
   }
 }
 
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
+  const productionSource = parseProductionSource(process.argv.slice(2));
+  if (productionSource) {
+    const bundle = productionSource.kind === "bundle" ? await inspectReleaseVsix(path.resolve(productionSource.value)) : undefined;
+    if (productionSource.kind === "marketplace" && productionSource.value.split("@")[1] !== expectedRelease().version) throw new Error("Marketplace version must match this release");
+    if (!process.env.VSCODE_EXECUTABLE_PATH) {
+      const version = expectedRelease().engines.vscode.replace(/^\^/, "");
+      if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) throw new Error(`Cannot resolve minimum VS Code version: ${version}`);
+      const executable = await downloadAndUnzipVSCode({ version });
+      process.env.VSCODE_EXECUTABLE_PATH = executable;
+      process.env.VSCODE_CLI_PATH = resolveCliPathFromVSCodeExecutablePath(executable);
+    }
+    const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(extensionRoot, "../.agents/marketplace", expectedRelease().version, currentVsCodeTarget());
+    await fs.mkdir(artifactsDir, { recursive: true });
+    execFileSync("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot, stdio: "inherit" });
+    await runInstalledScenario({ extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } });
+    console.log(`Production bundle evidence: ${artifactsDir}`);
+    return;
+  }
   const bundledHarnessTestsPath = path.resolve(harnessRoot, "out/test/index.js");
   const promptOnlyHarnessTestsPath = path.resolve(harnessRoot, "out/test/prompt-only.index.js");
   const setupRecoveryHarnessTestsPath = path.resolve(harnessRoot, "out/test/setup-recovery.index.js");
@@ -304,7 +430,9 @@ async function cropScreenshots(extensionRoot: string, artifactsDir: string): Pro
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (path.basename(process.argv[1] ?? "") === "run-vscode-verify-vsix.ts") {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

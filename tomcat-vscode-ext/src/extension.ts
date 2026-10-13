@@ -569,11 +569,18 @@ async function ensureBundledExecutable(
   return fallbackPath;
 }
 
-async function openExtensionGuide(
+export async function openExtensionGuide(
   context: vscode.ExtensionContext,
 ): Promise<void> {
-  const guidePath = path.join(context.extensionPath, "README.md");
-  const document = await vscode.workspace.openTextDocument(guidePath);
+  // vsce normalizes the published README to readme.md; source checkouts keep README.md.
+  let guidePath = path.join(context.extensionPath, "readme.md");
+  try {
+    await fs.access(guidePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    guidePath = path.join(context.extensionPath, "README.md");
+  }
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(guidePath));
   await vscode.window.showTextDocument(document, { preview: true });
 }
 

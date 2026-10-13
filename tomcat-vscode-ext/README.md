@@ -1,49 +1,41 @@
 # Tomcat for VS Code
 
 <p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a>
+  <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.md">English</a> |
+  <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md">简体中文</a>
 </p>
 
 Tomcat Agent Box brings the `tomcat serve --stdio` runtime into a dedicated VS Code sidebar.
 
-![Tomcat Agent Box screenshot](../assets/tomcat-agent-box.png)
+![Tomcat Agent Box screenshot](https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png)
 
 This extension is built for **VS Code only**.
 
-## Choose your download
+## Install from VS Code Marketplace
 
-GitHub Release is the primary install channel for this release.
+Requires **VS Code 1.106.0 or newer**. In Extensions, search for the exact ID **`tomcat-agent.tomcat-vscode-ext`**, check the publisher **tomcat-agent**, then install. You can also run:
 
-| What you want | Download | Best for |
-| --- | --- | --- |
-| Fastest, fewest steps | `tomcat-vscode-ext-0.1.3-darwin-arm64.vsix` / `darwin-x64` / `linux-x64` | New users who want Tomcat Agent Box **and** a matching CLI bundled together |
-| I already installed the CLI | `tomcat-vscode-ext-0.1.3.vsix` | Existing CLI users who only want the VS Code extension |
-| CLI only | `tomcat-cli-v0.1.8-<target>.tar.gz` | Terminal-only usage without the VS Code extension |
-
-If you are unsure, pick the **platform-specific bundled VSIX** for your machine.
-
-## Install in VS Code
-
-1. Download the right `.vsix` file from GitHub Release.
-2. Install it:
-
-   ```bash
-   code --install-extension /path/to/tomcat-vscode-ext-0.1.3-darwin-arm64.vsix --force
-   ```
-
-3. Reload VS Code.
-
-What happens after installation:
-
-```text
-Downloads/tomcat-vscode-ext-0.1.3-*.vsix
-    -> VS Code installs the extension
-    -> VS Code unpacks it into its extensions directory
-    -> the bundled CLI lives inside the installed extension
+```bash
+code --install-extension tomcat-agent.tomcat-vscode-ext
 ```
 
-The bundled CLI does **not** run from your Downloads folder.
+The Marketplace release targets **Apple Silicon macOS (`darwin-arm64`), Intel macOS (`darwin-x64`), and Linux x64 (`linux-x64`)** with a matching CLI bundled inside each package. Linux packages use glibc; Alpine/musl, Windows, Linux ARM64, remote development and vscode.dev are not part of this release's support claim. Native release checks record the actual OS used; they do not establish compatibility with every Linux distribution.
+
+## Offline installation / GitHub downloads
+
+Use [GitHub Releases](https://github.com/teisun/tomcat-agent/releases) for platform-specific VSIX files, the CLI-only archives, or the pure extension package for existing CLI users. Choose the version from that release rather than an older filename in a tutorial. The pure package has **no bundled CLI** and is not published as a universal Marketplace fallback.
+
+```bash
+code --install-extension /absolute/path/to/downloaded-platform-package.vsix
+```
+
+Reload VS Code after installation. VS Code unpacks the bundle into its extension directory; the CLI does not run from the downloaded VSIX or your Downloads folder.
+
+## Model services, costs and data
+
+Configure a model through **Add Models...** and supply the credentials required by your provider. Model/API services may charge separately. Your messages, attached or selected context, and relevant tool results can be sent to that configured service. File changes and command execution are subject to Tomcat's permission gates; review requests before allowing them. This is not a promise that all processing stays local or that all model services are free. For support, use [GitHub Issues](https://github.com/teisun/tomcat-agent/issues).
+
+**Known limitation with bundled CLI 0.1.73:** after reloading chat history, a permission-refused write may incorrectly display **Created** even though the file was not created. Permission denial is still enforced; check the tool result and actual file rather than treating that restored label as proof of success. This presentation fix is deferred to a later release.
 
 ## Open Tomcat Agent Box
 
@@ -131,7 +123,7 @@ The compact **Todos / Files** dock sits above the composer, below any pending qu
 - Only native write/edit/hashline-edit backups are tracked. Shell/MCP-only changes are not discovered. Backups are kept while the session is in use and removed after it has been idle for `retention_days`; chat-only rollback and Retry do not discard them.
 - Legacy file-backup records without the new `at` timestamp and old Keep snapshot directories are not recognized or migrated. Their old Files/backup-based undo history is unavailable; subsequent native AI writes create new records. Chat history and workspace files are not deleted. Use matching CLI and extension versions.
 
-See [session-file-changes](docs/architecture/session-file-changes.md) for scope and implementation details.
+See [session-file-changes](https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/docs/architecture/session-file-changes.md) for scope and implementation details.
 
 ## Optional settings
 
@@ -189,7 +181,7 @@ Terminal → ordinary slash text → local operation
 
 Project `.cursor/commands/**/*.md` and `.agents/commands/**/*.md` appear in Commands; an optional frontmatter `description` is shown on the second line. Same names from different sources remain distinct. Each group shows three entries plus **Show N more** (four entries are shown directly). Invocation chips have no remove button: select them or place the caret adjacent and use Backspace/Delete. History displays the same chip; retry preserves the originally sent body. Ordinary file/selection references can be inserted repeatedly.
 
-Rules under either directory's `rules/` (`.md` or `.mdc`) only apply with boolean `alwaysApply: true`; they enter **User Custom Instructions**, refresh at the next user turn, and do not activate Cursor globs/intelligent/manual triggers. `/reload` reports counts and skip reasons. Project instruction reads respect Deny but need no tool-path confirmation; agent tools still retain their permission gate. An older CLI shows Terminal only and refuses restored invocation chips without deleting the draft. New draft schema migrates older drafts; an older runtime cannot replay new command/skill history kinds. See [CLI usage and compatibility](../tomcat/docs/user-guide.md#project-commands-and-rules).
+Rules under either directory's `rules/` (`.md` or `.mdc`) only apply with boolean `alwaysApply: true`; they enter **User Custom Instructions**, refresh at the next user turn, and do not activate Cursor globs/intelligent/manual triggers. `/reload` reports counts and skip reasons. Project instruction reads respect Deny but need no tool-path confirmation; agent tools still retain their permission gate. An older CLI shows Terminal only and refuses restored invocation chips without deleting the draft. New draft schema migrates older drafts; an older runtime cannot replay new command/skill history kinds. See [CLI usage and compatibility](https://github.com/teisun/tomcat-agent/blob/main/tomcat/docs/user-guide.md#project-commands-and-rules).
 
 ## Troubleshooting
 
@@ -204,8 +196,7 @@ If Tomcat Agent Box does not appear:
 If VS Code says the VSIX is not compatible:
 
 1. Download the platform-specific bundled VSIX that matches your machine.
-2. If your platform is not one of the bundled targets, install
-   `tomcat-vscode-ext-0.1.3.vsix` and bring your own CLI.
+2. Other platforms are not part of this release's support claim. The GitHub pure extension requires a separately available, compatible CLI.
 
 If the extension cannot find Tomcat:
 
@@ -245,8 +236,8 @@ npm run gate:full
 
 `package:vsix` and standalone package smoke tests build by default. The smoke setup runs its build asynchronously with bounded process-group cleanup; `gate:full` owns one build and reuses it for sequential packaging. `--skip-build` validates a content-hash record and rejects missing, stale, or corrupt artifacts. Do not run builds/packages that share `out`/`gui/dist` concurrently.
 
-GUI entry points clean known Electron window-mode variables only for the launch and restore them afterward. They retain unique launch logs under the printed artifact directory. Screenshots must show the **test window**, not the user's desktop; keep the matching accessibility and console records. A successful install is not visual acceptance. See [the remediation evidence ledger](../tomcat/docs/reports/acceptance-remediation.md) for this run's successes, failures, and unfinished checks.
+GUI entry points clean known Electron window-mode variables only for the launch and restore them afterward. They retain unique launch logs under the printed artifact directory. Screenshots must show the **test window**, not the user's desktop; keep the matching accessibility and console records. A successful install is not visual acceptance. See [the remediation evidence ledger](https://github.com/teisun/tomcat-agent/blob/main/tomcat/docs/reports/acceptance-remediation.md) for this run's successes, failures, and unfinished checks.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes.
+See [CHANGELOG.md](https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/CHANGELOG.md) for release notes.

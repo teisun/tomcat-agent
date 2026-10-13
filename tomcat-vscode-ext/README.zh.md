@@ -1,49 +1,41 @@
 # Tomcat for VS Code
 
 <p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a>
+  <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.md">English</a> |
+  <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md">简体中文</a>
 </p>
 
 Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 侧边栏中。
 
-![Tomcat Agent Box screenshot](../assets/tomcat-agent-box.png)
+![Tomcat Agent Box screenshot](https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png)
 
 这个扩展仅适用于 **VS Code**。
 
-## 下载选择
+## 从 VS Code 插件市场安装
 
-本版本的首选安装渠道是 GitHub Release。
+需要 **VS Code 1.106.0 或更新版本**。在扩展面板搜索准确 ID **`tomcat-agent.tomcat-vscode-ext`**，确认发布者为 **tomcat-agent** 后安装；也可运行：
 
-| 你想要什么 | 下载内容 | 适合谁 |
-| --- | --- | --- |
-| 最快上手、步骤最少 | `tomcat-vscode-ext-0.1.3-darwin-arm64.vsix` / `darwin-x64` / `linux-x64` | 想同时获得 Tomcat Agent Box **和** 配套 CLI 的新用户 |
-| 我已经安装 CLI | `tomcat-vscode-ext-0.1.3.vsix` | 只想安装 VS Code 扩展的现有 CLI 用户 |
-| 仅 CLI | `tomcat-cli-v0.1.8-<target>.tar.gz` | 只在终端使用、不需要 VS Code 扩展的用户 |
-
-如果你不确定怎么选，就选适合你机器的 **platform-specific bundled VSIX**。
-
-## 在 VS Code 中安装
-
-1. 从 GitHub Release 下载合适的 `.vsix` 文件。
-2. 安装它：
-
-   ```bash
-   code --install-extension /path/to/tomcat-vscode-ext-0.1.3-darwin-arm64.vsix --force
-   ```
-
-3. Reload VS Code。
-
-安装之后会发生什么：
-
-```text
-Downloads/tomcat-vscode-ext-0.1.3-*.vsix
-    -> VS Code 安装扩展
-    -> VS Code 将其解压到扩展目录
-    -> bundled CLI 位于已安装的扩展内部
+```bash
+code --install-extension tomcat-agent.tomcat-vscode-ext
 ```
 
-bundled CLI **不会** 从你的 Downloads 文件夹直接运行。
+本次市场发布范围是 **Apple Silicon macOS（darwin-arm64）、Intel macOS（darwin-x64）、Linux x64（linux-x64）**，每个平台包都内置对应 CLI。Linux 包使用 glibc；Alpine/musl、Windows、Linux ARM64、远程开发及 vscode.dev 不在本次支持承诺内。原生发布验收记录实际 OS，不代表已经验证所有 Linux 发行版。
+
+## 离线安装与 GitHub 下载
+
+[GitHub Releases](https://github.com/teisun/tomcat-agent/releases) 保留平台 VSIX、仅 CLI 的压缩包，以及给已有 CLI 用户的纯扩展包。以对应 Release 的实际版本/文件为准，不照抄旧教程文件名。纯扩展包**不含 CLI**，不作为 Marketplace 通用回退包发布。
+
+```bash
+code --install-extension /absolute/path/to/downloaded-platform-package.vsix
+```
+
+安装后重新加载 VS Code。VS Code 会将安装包解压到扩展目录；内置 CLI 不是从 VSIX 文件或 Downloads 目录直接运行。
+
+## 模型服务、费用与数据
+
+通过 **Add Models...** 配置模型，并提供服务商要求的凭据。模型/API 服务可能单独收费。发送的消息、附件或选中上下文，以及相关工具结果可能发送到所配置的模型服务。文件改动和命令执行受 Tomcat 权限门控，请阅读授权请求再允许。这不代表所有处理都在本地，或所有模型服务都免费。反馈请使用 [GitHub Issues](https://github.com/teisun/tomcat-agent/issues)。
+
+**内置 CLI 0.1.73 的已知限制：** 重载聊天历史后，被权限拒绝的写入可能错误显示 **Created（已创建）**，但文件实际上没有创建。权限拒绝仍然生效；请核对工具结果和实际文件，不要把恢复后的标签当作成功证明。此展示问题留待后续版本修复。
 
 ## 打开 Tomcat Agent Box
 
@@ -169,7 +161,7 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 
 项目 `.cursor/commands/**/*.md`、`.agents/commands/**/*.md` 出现在 Commands 组；frontmatter 的 `description` 可选，有描述才显示第二行。同名不同来源分别显示。每组默认 3 项加 **Show N more**，4 项时直接全显示。黄色调用标签没有 ×：点击选中或将光标移到相邻位置，用 Backspace/Delete 删除；历史气泡使用同一标签。历史 retry 使用发送时的快照，恢复到输入框再发则读当前文件。普通文件、选区引用可以重复添加。
 
-两目录 `rules/` 下的 `.md`、`.mdc` 都只在布尔 `alwaysApply: true` 时生效，注入 **User Custom Instructions**，修改后下一用户轮次刷新；本期不支持 Cursor 的 globs、模型选择、规则专用手动触发。执行 `/reload` 可查看生效数量和跳过原因。运行时读取项目指令尊重 Deny、不弹工具路径确认，LLM 工具权限门禁保持不变。旧 CLI 仅显示 Terminal，恢复的调用标签会被拒绝发送而保留草稿。新版迁移旧草稿；旧运行时不能回放新 command/skill 类型的历史，需保留匹配版本。CLI 用法与详细边界见 [使用说明](../tomcat/docs/user-guide.md#project-commands-and-rules)。
+两目录 `rules/` 下的 `.md`、`.mdc` 都只在布尔 `alwaysApply: true` 时生效，注入 **User Custom Instructions**，修改后下一用户轮次刷新；本期不支持 Cursor 的 globs、模型选择、规则专用手动触发。执行 `/reload` 可查看生效数量和跳过原因。运行时读取项目指令尊重 Deny、不弹工具路径确认，LLM 工具权限门禁保持不变。旧 CLI 仅显示 Terminal，恢复的调用标签会被拒绝发送而保留草稿。新版迁移旧草稿；旧运行时不能回放新 command/skill 类型的历史，需保留匹配版本。CLI 用法与详细边界见 [使用说明](https://github.com/teisun/tomcat-agent/blob/main/tomcat/docs/user-guide.md#project-commands-and-rules)。
 
 ## 故障排查
 
@@ -184,8 +176,7 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 如果 VS Code 提示 VSIX 不兼容：
 
 1. 下载与你机器匹配的 platform-specific bundled VSIX。
-2. 如果你的平台不在 bundled targets 之内，安装
-   `tomcat-vscode-ext-0.1.3.vsix` 并自行提供 CLI。
+2. 其他平台不在本次支持承诺内；GitHub 纯扩展包需要另行提供可用且兼容的 CLI。
 
 如果扩展找不到 Tomcat：
 
@@ -211,4 +202,4 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 
 ## Changelog
 
-发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+发布说明见 [CHANGELOG.md](https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/CHANGELOG.md)。

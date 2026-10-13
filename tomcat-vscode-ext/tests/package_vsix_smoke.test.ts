@@ -4,6 +4,9 @@ import * as path from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+import { EXTENSION_ID } from "../src/constants";
 import { BUILD_RECORD, recordBuildArtifacts, REQUIRED_OUTPUTS } from "../scripts/buildArtifacts";
 
 import { crc32 } from "node:zlib";
@@ -21,6 +24,7 @@ import {
   preparePublishDirectory,
 } from "../scripts/package-vsix";
 import { extractVsixLikeCursor } from "../scripts/vsix-extractable";
+import { parseProductionSource, validateReleaseMetadata } from "../scripts/run-vscode-verify-vsix";
 
 function writeU16(value: number): Buffer {
   const buffer = Buffer.alloc(2);
@@ -139,6 +143,23 @@ describe("VSIX packaging", () => {
         const stat = await fs.stat(packaged);
         expect(stat.isFile()).toBe(true);
         expect(() => assertVsixExtractable(packaged)).not.toThrow();
+        const metadata = JSON.parse(execFileSync("unzip", ["-p", packaged, "extension/package.json"], { encoding: "utf8" }));
+        expect(`${metadata.publisher}.${metadata.name}`).toBe(EXTENSION_ID);
+        const sourceMetadata = JSON.parse(await fs.readFile(path.join(extensionRoot, "package.json"), "utf8"));
+        expect(metadata.version).toBe(sourceMetadata.version);
+        for (const localeFile of ["readme.md", "README.zh.md"]) {
+          const readme = execFileSync("unzip", ["-p", packaged, `extension/${localeFile}`], { encoding: "utf8" });
+          expect(readme).toContain(`code --install-extension ${EXTENSION_ID}`);
+          expect(readme).toContain("https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png");
+          expect(readme).toContain("https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md");
+          expect(readme).not.toMatch(/HEAD\/\.\.|tomcat-vscode-ext-0\.1\.3/);
+          if (localeFile === "readme.md") expect(readme).toContain("Known limitation with bundled CLI 0.1.73");
+        }
+        const icon = execFileSync("unzip", ["-p", packaged, "extension/media/icon.png"]);
+        expect(icon.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+        expect(icon.readUInt32BE(16)).toBeGreaterThanOrEqual(128);
+        expect(icon.readUInt32BE(20)).toBeGreaterThanOrEqual(128);
+        expect(execFileSync("unzip", ["-p", packaged, "extension/LICENSE.txt"], { encoding: "utf8" })).toContain("MIT");
       } finally {
         if (publishRoot) {
           await fs.rm(publishRoot, { force: true, recursive: true });
@@ -195,6 +216,50 @@ describe("VSIX packaging", () => {
       await fs.rm(tempRoot, { force: true, recursive: true });
     }
   }, 300_000);
+
+  it("requires an explicit mutually exclusive release source and exact market identity/version", () => {
+    expect(parseProductionSource([])).toBeUndefined();
+    expect(parseProductionSource(["--release-bundle", "/missing/file.vsix"])).toEqual({ kind: "bundle", value: "/missing/file.vsix" });
+    expect(parseProductionSource(["--marketplace", `${EXTENSION_ID}@0.1.88`])).toEqual({ kind: "marketplace", value: `${EXTENSION_ID}@0.1.88` });
+    for (const args of [["missing.vsix"], ["--release-bundle"], ["--release-bundle", "x", "--marketplace", "y"], ["--marketplace", "tomcat.tomcat-vscode-ext@0.1.88"], ["--marketplace", EXTENSION_ID]]) {
+      expect(() => parseProductionSource(args)).toThrow();
+    }
+  });
+
+  it("rejects wrong release metadata before installation instead of trusting the filename", async () => {
+    const metadata = JSON.parse(await fs.readFile(path.resolve(__dirname, "../package.json"), "utf8"));
+    expect(() => validateReleaseMetadata(metadata, "linux-x64", "linux-x64")).not.toThrow();
+    for (const fault of [{ ...metadata, publisher: "tomcat" }, { ...metadata, name: "other" }, { ...metadata, version: "0.0.0" }, { ...metadata, tomcat: { bundledCliVersion: "0.0.0" } }]) {
+      expect(() => validateReleaseMetadata(fault, "linux-x64", "linux-x64")).toThrow(/identity\/version\/CLI pin/);
+    }
+    expect(() => validateReleaseMetadata(metadata, "linux-x64", "darwin-arm64")).toThrow(/target mismatch/);
+    expect(() => validateReleaseMetadata(metadata, "linux-x64", "universal")).toThrow(/target mismatch/);
+    expect(() => validateReleaseMetadata({ ...metadata, engines: { vscode: "^1.0.0" } }, "linux-x64", "linux-x64")).toThrow(/VS Code engine/);
+  });
+
+  it("rejects a missing explicit VSIX before launching VS Code despite legacy overrides", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-release-source-"));
+    const missing = path.join(root, "missing.vsix");
+    const stale = path.join(root, "legacy.vsix");
+    const fakeCli = path.join(root, "fake-tomcat");
+    const invoked = path.join(root, "cli-invoked.txt");
+    try {
+      await fs.writeFile(stale, "must not replace the requested production bundle");
+      await fs.writeFile(fakeCli, `#!/bin/sh\nprintf invoked > ${JSON.stringify(invoked)}\nexit 99\n`);
+      await fs.chmod(fakeCli, 0o755);
+      const result = await promisify(execFile)(process.execPath, ["--import", "tsx", "scripts/run-vscode-verify-vsix.ts", "--release-bundle", missing], {
+        cwd: path.resolve(__dirname, ".."),
+        timeout: 15_000,
+        env: { ...process.env, [PREBUILT_VSIX_ENV]: stale, TOMCAT_VSCODE_TEST_PATH: fakeCli },
+      }).then(() => { throw new Error("Missing release bundle unexpectedly succeeded"); }, error => error as { code: number; stderr: string; stdout: string });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("ENOENT");
+      expect(result.stderr).toContain(missing);
+      expect(result.stderr).not.toContain(stale);
+      expect(result.stdout).not.toMatch(/Installing extensions|Resolving version|Downloading/);
+      await expect(fs.stat(invoked)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  }, 20_000);
 
   it("builds target-aware package args and default output paths", () => {
     const extensionRoot = path.resolve(__dirname, "..");

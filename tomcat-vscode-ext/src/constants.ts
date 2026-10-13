@@ -1,4 +1,4 @@
-export const EXTENSION_ID = "tomcat.tomcat-vscode-ext";
+export const EXTENSION_ID = "tomcat-agent.tomcat-vscode-ext";
 
 export const TEST_PATH_ENV = "TOMCAT_VSCODE_TEST_PATH";
 export const TEST_DEFAULT_CWD_ENV = "TOMCAT_VSCODE_TEST_DEFAULT_CWD";

@@ -2,6 +2,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
@@ -80,6 +83,54 @@ async function withFixture(callback: (root: string) => Promise<void>): Promise<v
 }
 
 describe("release guard scripts", () => {
+  it("requires all three native jobs before release and never activates the legacy PAT publisher", async () => {
+    const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
+    expect(workflow).toContain("needs: [build, verify]");
+    expect(workflow).toContain("fail-fast: false");
+    for (const [runner, target] of [["macos-14", "darwin-arm64"], ["macos-15-intel", "darwin-x64"], ["ubuntu-22.04", "linux-x64"]]) {
+      expect(workflow).toMatch(new RegExp(`runner: ${runner}\\s+target: ${target}`));
+    }
+    expect(workflow).toContain('npm run verify:vsix -- --release-bundle "${vsix}"');
+    expect(workflow).not.toMatch(/secrets\.VSCE_PAT|vsce publish|HAS_VSCE_PAT/);
+    expect(workflow.indexOf("sha256sum -c -")).toBeLessThan(workflow.indexOf('tar -xzf "${bundle_dir}/${archive}"'));
+  });
+
+  it("verifies the actual release download before extraction and rejects corruption or missing checksum", async () => {
+    const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
+    const start = workflow.indexOf('            if [ "${USE_CLI_ARTIFACTS}" != "1" ]; then');
+    const endLine = '            tar -xzf "${bundle_dir}/${archive}" -C "${bundle_dir}"';
+    const end = workflow.indexOf(endLine, start);
+    expect(start).toBeGreaterThan(-1); expect(end).toBeGreaterThan(start);
+    const script = workflow.slice(start, end + endLine.length);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-release-checksum-"));
+    const run = promisify(execFile);
+    const archive = "tomcat-cli-test.tar.gz";
+    const bundleDir = "bundles/native";
+    const sums = path.join(root, "bundles/cli-checksums/SHA256SUMS");
+    const binary = path.join(root, bundleDir, "tomcat");
+    try {
+      await fs.mkdir(path.join(root, bundleDir), { recursive: true });
+      await fs.mkdir(path.dirname(sums), { recursive: true });
+      await fs.mkdir(path.join(root, "input"));
+      await fs.writeFile(path.join(root, "input/tomcat"), "fixture executable bytes");
+      await run("tar", ["-czf", path.join(root, bundleDir, archive), "-C", path.join(root, "input"), "tomcat"]);
+      const checksum = createHash("sha256").update(await fs.readFile(path.join(root, bundleDir, archive))).digest("hex");
+      await fs.writeFile(sums, `${checksum}  ${archive}\n`);
+      const options = { cwd: root, timeout: 10_000, env: { ...process.env, USE_CLI_ARTIFACTS: "0", archive, bundle_dir: bundleDir } };
+      // GitHub build is Linux; shasum provides identical -c semantics on macOS.
+      const command = process.platform === "darwin" ? script.replace("sha256sum -c -", "shasum -a 256 -c -") : script;
+      await run("bash", ["-euc", command], options);
+      expect(await fs.readFile(binary, "utf8")).toBe("fixture executable bytes");
+      await fs.rm(binary);
+      await fs.appendFile(path.join(root, bundleDir, archive), "corrupted transport bytes");
+      await expect(run("bash", ["-euc", command], options)).rejects.toMatchObject({ code: 1 });
+      await expect(fs.stat(binary)).rejects.toMatchObject({ code: "ENOENT" });
+      await fs.writeFile(sums, `${checksum}  unrelated.tar.gz\n`);
+      await expect(run("bash", ["-euc", command], options)).rejects.toMatchObject({ code: 1 });
+      await expect(fs.stat(binary)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await fs.rm(root, { force: true, recursive: true }); }
+  });
+
   it("validates CLI release tags against the authoritative CLI version", async () => {
     const guards = await guardsPromise;
     expect(() => guards.validateCliReleaseTag("cli-v0.1.8", "0.1.8")).not.toThrow();

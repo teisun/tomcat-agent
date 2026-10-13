@@ -2,8 +2,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { EXTENSION_ID } from "../src/constants";
 
 type Manifest = {
+  publisher: string;
+  name: string;
+  categories: string[];
+  engines: { vscode: string };
   activationEvents?: string[];
   contributes?: {
     configuration?: {
@@ -29,6 +34,14 @@ async function readManifest(): Promise<Manifest> {
 }
 
 describe("extension manifest contract", () => {
+  it("uses the owned Marketplace publisher consistently in installed lookup", async () => {
+    const manifest = await readManifest();
+    expect(manifest.publisher).toBe("tomcat-agent");
+    expect(manifest.name).toBe("tomcat-vscode-ext");
+    expect(EXTENSION_ID).toBe(`${manifest.publisher}.${manifest.name}`);
+    expect(manifest.categories).toEqual(["Other"]);
+  });
+
   it("resolves every manifest contribution in both static dictionaries", async () => {
     const root = path.resolve(__dirname, "..");
     const manifest = await fs.readFile(path.join(root, "package.json"), "utf8");
@@ -92,6 +105,9 @@ describe("extension manifest contract", () => {
 
   it("declares the Tomcat webview container and view", async () => {
     const manifest = await readManifest();
+    expect(manifest.engines.vscode).toBe("^1.106.0");
+    const lock = JSON.parse(await fs.readFile(path.resolve(__dirname, "../package-lock.json"), "utf8"));
+    expect(lock.packages[""].engines).toEqual(manifest.engines);
     const containers = manifest.contributes?.viewsContainers?.secondarySidebar ?? [];
     const views = manifest.contributes?.views?.["tomcat-sidebar"] ?? [];
 
