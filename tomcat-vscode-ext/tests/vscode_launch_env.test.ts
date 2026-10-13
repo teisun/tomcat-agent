@@ -55,7 +55,7 @@ describe("VS Code GUI launch environment", () => {
   it("shares a private capture port with the harness and preserves an existing devhost port", async () => {
     const root = await temp();
     for (const port of [undefined, 12345]) {
-      const launchArgs = port ? [`--remote-debugging-port=${port}`] : [];
+      const launchArgs = port ? [`--remote-debugging-port=${port}`, "--use-inmemory-secretstorage"] : [];
       const before = [...launchArgs];
       await runVsCodeGuiTests(async (received) => {
         const supplied = Number(received.extensionTestsEnv!.TOMCAT_E2E_CDP_PORT);
@@ -65,6 +65,8 @@ describe("VS Code GUI launch environment", () => {
           .toEqual([`--remote-debugging-port=${supplied}`]);
         expect(received.launchArgs!.filter((arg) => arg === "--password-store=basic"))
           .toEqual(["--password-store=basic"]);
+        expect(received.launchArgs!.filter((arg) => arg === "--use-inmemory-secretstorage"))
+          .toEqual(["--use-inmemory-secretstorage"]);
         if (port) expect(supplied).toBe(port);
         return 0;
       }, { launchArgs, extensionTestsEnv: { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root } });
@@ -175,6 +177,8 @@ describe("VS Code GUI launch environment", () => {
       await vm.runInNewContext(code, locals);
       expect(runTests).toHaveBeenCalledOnce();
       expect(runTests.mock.calls[0][0].extensionTestsEnv.TOMCAT_AGENT_ACTIVE).toBe("1");
+      expect(runTests.mock.calls[0][0].launchArgs.filter((arg: string) => arg === "--use-inmemory-secretstorage"))
+        .toEqual(["--use-inmemory-secretstorage"]);
       if (name === "devhost") {
         expect(runTests.mock.calls[0][0].launchArgs).toContain(root);
         expect(runTests.mock.calls[0][0].launchArgs).not.toContain(path.dirname(root));

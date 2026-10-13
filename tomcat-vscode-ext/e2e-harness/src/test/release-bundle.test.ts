@@ -41,7 +41,9 @@ suite("Native installed release bundle", () => {
     const knownIssues: string[] = [];
     let testing: Api["__testing"] | undefined;
     try {
+      console.log("Release acceptance: activating the installed extension");
       const api = await support.getTomcatExtensionApi();
+      console.log("Release acceptance: activation completed; checking the bundled executable");
       testing = api.__testing;
       const workspace = required("TOMCAT_VSCODE_TEST_DEFAULT_CWD");
       const resolved = api.__testing.getResolvedExecutable();

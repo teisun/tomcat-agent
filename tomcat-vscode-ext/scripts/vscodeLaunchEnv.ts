@@ -66,6 +66,9 @@ export async function runVsCodeGuiTests<T extends GuiOptions>(
   const launchArgs = [...(options.launchArgs ?? [])];
   if (!launchArgs.some(arg => arg === "--locale" || arg.startsWith("--locale="))) launchArgs.push("--locale=en");
   if (!launchArgs.includes("--password-store=basic")) launchArgs.push("--password-store=basic");
+  // These disposable acceptance profiles must not access the OS credential
+  // store. password-store=basic alone does not prevent macOS keychain dialogs.
+  if (!launchArgs.includes("--use-inmemory-secretstorage")) launchArgs.push("--use-inmemory-secretstorage");
   const existingPort = launchArgs.find((arg) => arg.startsWith("--remote-debugging-port="));
   const cdpPort = existingPort ? Number(existingPort.split("=")[1]) : await reserveCapturePort();
   if (!Number.isInteger(cdpPort) || cdpPort <= 0 || cdpPort > 65535) throw new Error("Invalid VS Code capture port");
