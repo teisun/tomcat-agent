@@ -91,9 +91,110 @@ describe("release guard scripts", () => {
       expect(workflow).toMatch(new RegExp(`runner: ${runner}\\s+target: ${target}`));
     }
     expect(workflow).toContain('npm run verify:vsix -- --release-bundle "${vsix}"');
-    expect(workflow).not.toMatch(/secrets\.VSCE_PAT|vsce publish|HAS_VSCE_PAT/);
+    expect(workflow).not.toMatch(/secrets\.VSCE_PAT|HAS_VSCE_PAT/);
     expect(workflow.indexOf("sha256sum -c -")).toBeLessThan(workflow.indexOf('tar -xzf "${bundle_dir}/${archive}"'));
   });
+
+  it("restricts OIDC to accepted formal-tag publishing and installs the tool from that commit's lockfile", async () => {
+    const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
+    const publish = workflow.slice(workflow.indexOf("\n  publish:"));
+    expect(workflow.slice(0, workflow.indexOf("\n  publish:"))).not.toContain("id-token:");
+    expect(publish).toContain("if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ext-v')");
+    expect(publish).toContain("needs: [build, verify]");
+    expect(publish).toContain("environment: marketplace");
+    expect(publish).toContain("id-token: write");
+    expect(publish).toContain("ref: ${{ github.sha }}");
+    expect(publish).toContain("persist-credentials: false");
+    expect(publish).toContain("npm ci --ignore-scripts");
+    expect(publish).toContain("uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906");
+    expect(publish).toContain("client-id: ${{ secrets.AZURE_CLIENT_ID }}");
+    expect(publish).toContain("tenant-id: ${{ secrets.AZURE_TENANT_ID }}");
+    expect(publish).toContain("allow-no-subscriptions: true");
+    expect(publish).not.toMatch(/AZURE_LOGIN_POST_CLEANUP|client-secret|subscription-id|skip-duplicate/);
+    expect(publish.indexOf("Validate Marketplace publishing inputs")).toBeLessThan(publish.indexOf("Create GitHub release"));
+    expect(publish.slice(publish.indexOf("Publish accepted platform packages to Marketplace"), publish.indexOf("Publish VSIX files to OpenVSX"))).not.toContain("continue-on-error");
+  });
+
+  // Execute the workflow's actual run blocks; the substitute only records the CLI
+  // boundary and returns a chosen status, never implements package selection.
+  const publishingCases = [
+    { name: "publishes exactly the three native packages and clears an inherited PAT" },
+    { name: "rejects a missing last package before any upload", missingTarget: "linux-x64" },
+    { name: "rejects a missing client ID before any upload", missingAuth: "AZURE_CLIENT_ID" },
+    { name: "rejects a missing tenant ID before any upload", missingAuth: "AZURE_TENANT_ID" },
+    { name: "stops at the first failed upload", failTarget: "darwin-arm64" },
+    { name: "reports a middle-platform failure without uploading later targets", failTarget: "darwin-x64" },
+  ];
+  for (const scenario of publishingCases) {
+    it(scenario.name, async () => {
+      const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
+      const targets = workflow.match(/^      MARKETPLACE_TARGETS: (.+)$/m)?.[1];
+      expect(targets).toBe("darwin-arm64 darwin-x64 linux-x64");
+      const runBlock = (name: string): string => {
+        const step = workflow.split(`      - name: ${name}\n`)[1]?.split("\n      - ")[0];
+        const script = step?.split("        run: |\n")[1];
+        expect(script, name).toBeTruthy();
+        return script!.split("\n").map((line) => line.replace(/^          /, "")).join("\n");
+      };
+      const preflight = runBlock("Validate Marketplace publishing inputs");
+      const publish = runBlock("Publish accepted platform packages to Marketplace");
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-marketplace-upload-"));
+      const run = promisify(execFile);
+      const version = "0.1.90";
+      const expectedTargets = ["darwin-arm64", "darwin-x64", "linux-x64"];
+      const log = path.join(root, "calls.jsonl");
+      const env = {
+        ...process.env,
+        PATH: `${path.join(root, "bin")}${path.delimiter}${process.env.PATH ?? ""}`,
+        EXT_VERSION: version,
+        MARKETPLACE_TARGETS: targets,
+        AZURE_CLIENT_ID: "fixture-client-id",
+        AZURE_TENANT_ID: "fixture-tenant-id",
+        VSCE_PAT: "must-not-reach-vsce",
+        CALL_LOG: log,
+        FAIL_TARGET: scenario.failTarget ?? "",
+      };
+      if (scenario.missingAuth) env[scenario.missingAuth as "AZURE_CLIENT_ID" | "AZURE_TENANT_ID"] = "";
+      try {
+        await fs.mkdir(path.join(root, "bin"));
+        await fs.mkdir(path.join(root, "dist"));
+        await fs.mkdir(path.join(root, "tomcat-vscode-ext"));
+        for (const target of expectedTargets.filter((target) => target !== scenario.missingTarget)) {
+          await fs.writeFile(path.join(root, `dist/tomcat-vscode-ext-${version}-${target}.vsix`), "accepted fixture bytes");
+        }
+        await fs.writeFile(path.join(root, `dist/tomcat-vscode-ext-${version}.vsix`), "universal must not be uploaded");
+        await fs.writeFile(path.join(root, "bin/npx"), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CALL_LOG, JSON.stringify({ args, hasPat: Boolean(process.env.VSCE_PAT) }) + '\\n');
+if (process.env.FAIL_TARGET && args.at(-1).endsWith('-' + process.env.FAIL_TARGET + '.vsix')) process.exit(7);
+`, { mode: 0o755 });
+        const execute = async (): Promise<void> => {
+          await run("bash", ["-euc", preflight], { cwd: root, env, timeout: 10_000 });
+          await run("bash", ["-euc", publish], { cwd: path.join(root, "tomcat-vscode-ext"), env, timeout: 10_000 });
+        };
+        if (scenario.missingAuth || scenario.missingTarget || scenario.failTarget) {
+          await expect(execute()).rejects.toMatchObject({ code: scenario.failTarget ? 7 : 1 });
+        } else {
+          await execute();
+        }
+        if (scenario.missingAuth || scenario.missingTarget) {
+          await expect(fs.stat(log)).rejects.toMatchObject({ code: "ENOENT" });
+        } else {
+          const attempted = scenario.failTarget
+            ? expectedTargets.slice(0, expectedTargets.indexOf(scenario.failTarget) + 1)
+            : expectedTargets;
+          const calls = (await fs.readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+          expect(calls).toEqual(attempted.map((target) => ({
+            args: ["--no-install", "vsce", "publish", "--azure-credential", "--packagePath", `../dist/tomcat-vscode-ext-${version}-${target}.vsix`],
+            hasPat: false,
+          })));
+        }
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+  }
 
   it("verifies the actual release download before extraction and rejects corruption or missing checksum", async () => {
     const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
