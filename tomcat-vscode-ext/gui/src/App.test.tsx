@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -308,6 +308,66 @@ describe("inline user-message editing in App", () => {
   });
 });
 
+describe("inline model configuration", () => {
+  it("shows an actionable failure without a spinner or a misleading setup card", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({ channel: "state", content: { ...snapshot, ready: false, connectionStatus: "failed", connectionFailure: { kind: "deterministic_startup", detail: "config.toml is invalid" } }, messageId: "connection-failed" });
+    expect(screen.getByRole("alert").textContent).toBe("config.toml is invalid");
+    expect(screen.getByTestId("loading-state").querySelector(".tc-spinner")).toBeNull();
+    expect(screen.queryByTestId("model-setup-card")).toBeNull();
+    fireEvent.click(screen.getByTestId("retry-connection"));
+    fireEvent.click(screen.getByTestId("view-connection-logs"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "retryConnection" }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "viewConnectionLogs" }));
+  });
+
+  it("puts the setup card in the empty state of an unconfigured session and swaps in readiness without losing the draft", async () => {
+    mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.sessionViews.s1.timeline = [];
+    snapshot.sessionViews.s1.composerDraft = { segments: [{ type: "text", text: "Keep this draft" }], text: "Keep this draft" };
+    snapshot.sessionViews.s1.modelReady = false;
+    await emitState({ channel: "state", content: snapshot, messageId: "not-configured" });
+    expect(screen.getAllByTestId("model-setup-card")).toHaveLength(1);
+    expect(within(screen.getByTestId("composer-footer")).queryByTestId("model-setup-card")).toBeNull();
+    expect(screen.queryByText(translate("en", "chat.ready"))).toBeNull();
+    await emitState({ channel: "state", content: { ...snapshot, sessionViews: { ...snapshot.sessionViews, s1: { ...snapshot.sessionViews.s1, modelReady: true } } }, messageId: "configured-empty" });
+    expect(screen.queryByTestId("model-setup-card")).toBeNull();
+    expect(screen.getByText(translate("en", "chat.ready"))).toBeTruthy();
+    expect(screen.getByTestId("composer-input").textContent).toBe("Keep this draft");
+  });
+
+  it("keeps history, editable drafts, attachments, and model selection while blocking send; readiness alone unlocks it", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.modelAdminSupported = true;
+    snapshot.sessionViews.s1.timeline = [{ type: "message", id: "old-message", kind: "user", text: "Existing conversation" }];
+    snapshot.sessionViews.s1.composerDraft = { segments: [{ type: "text", text: "Keep this draft" }], text: "Keep this draft" };
+    snapshot.sessionViews.s1.pendingAttachments = [{ id: "fixture", label: "draft.png", filename: "draft.png", kind: "image", mimeType: "image/png", bytes: 10, blobSha: "a".repeat(64) }];
+    snapshot.sessionViews.s1.modelReady = false;
+    await emitState({ channel: "state", content: snapshot, messageId: "blocked" });
+    expect(screen.getAllByTestId("model-setup-card")).toHaveLength(1);
+    expect(within(screen.getByTestId("composer-footer")).getByTestId("model-setup-card")).toBeTruthy();
+    expect(screen.getByText("Existing conversation")).toBeTruthy();
+    const editor = screen.getByTestId("composer-input");
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+    expect(editor.textContent).toBe("Keep this draft");
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("model-select")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("send-button"));
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+    fireEvent.click(screen.getByTestId("configure-model"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "openSettings", data: { route: "models" } }));
+    await emitState({ channel: "state", content: { ...snapshot, sessionViews: { ...snapshot.sessionViews, s1: { ...snapshot.sessionViews.s1, modelReady: true } } }, messageId: "configured" });
+    expect(screen.queryByTestId("model-setup-card")).toBeNull();
+    expect(editor.textContent).toBe("Keep this draft");
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", false);
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(false);
+  });
+});
+
 describe("shared slash submission and command waiting", () => {
   const commands = ["reload", "install", "uninstall"].map((name) => ({name, usage:`/${name}`, summary:name}));
   const ready = async (session:Partial<WebviewSessionSnapshot> = {}, slashCommands = commands) => {
@@ -379,6 +439,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,
     model: fixture.model,
+    modelReady: fixture.modelReady,
     ownedByThisFrontend: fixture.ownedByThisFrontend ?? true,
     pendingAttachments: fixture.pendingAttachments ?? [],
     planTodos: fixture.planTodos ?? [],

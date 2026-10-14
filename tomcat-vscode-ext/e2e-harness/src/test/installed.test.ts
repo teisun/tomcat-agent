@@ -1,5 +1,6 @@
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
+import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
 
 const repoRoot = path.resolve(__dirname, "../../../");
@@ -77,6 +78,12 @@ function sleep(ms: number): Promise<void> {
 
 const workbenchCapture = require(path.resolve(repoRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
   captureWorkbenchArtifacts(target: string): Promise<void>;
+  SettingsFrameDriver: { connectFromEnvironment(selector: string): Promise<{
+    click(testId: string): Promise<void>;
+    capture(file: string): Promise<unknown>;
+    waitForSnapshot(predicate: (snapshot: { buttons: Array<{ testId: string | null; disabled: boolean }> }) => boolean, description: string): Promise<unknown>;
+    close(): void;
+  }> };
   WorkbenchFindDriver: { connectFromEnvironment(): Promise<{
     waitForVisibleText(text: string): Promise<void>;
     clickVisibleButton(label: string): Promise<void>;
@@ -187,6 +194,10 @@ suite("Installed Tomcat extension", () => {
       .map((value) => value.trim())
       .filter(Boolean);
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    // Startup failures notify only while the chat panel is hidden.
+    if (process.env.TOMCAT_EXPECT_PROMPT_TRIGGER === "restart") {
+      await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+    }
     await maybeTriggerOnboardingBootstrap();
     const prompt = await waitForPrompt(api, expectedSubstring, 15_000);
     const expectedDetail = process.env.TOMCAT_EXPECT_PROMPT_DETAIL;
@@ -205,37 +216,39 @@ suite("Installed Tomcat extension", () => {
     await captureStartupCheckpoint("onboarding-prompt", expectedSubstring);
   });
 
-  test("recovers from a setup-required startup when the test fixture auto-runs init", async function () {
+  test("recovers inline from a repaired startup failure without running init", async function () {
     if (process.env.TOMCAT_EXPECT_SETUP_RECOVERY !== "1") {
       this.skip();
       return;
     }
-
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    await vscode.commands.executeCommand("notifications.clearAll");
+    await (api as unknown as PackagedWebviewApi).__testing.focusWebview();
+    const promptsBefore = api.__testing.getPromptHistory().length;
+    // Fails again because the fixture is not repaired yet, this time with the panel visible.
     await maybeTriggerOnboardingBootstrap();
-    await waitForPrompt(api, "Tomcat could not start after several attempts.", 20_000);
-    await captureStartupCheckpoint("setup-required-before-recovery", "Tomcat could not start after several attempts.");
-    if (process.env.TOMCAT_EXPECT_VISIBLE_SETUP === "1") {
-      const driver = await workbenchCapture.WorkbenchFindDriver.connectFromEnvironment();
-      try { await driver.clickVisibleButton("Start Setup"); } finally { driver.close(); }
-    }
-
-    const deadline = Date.now() + 20_000;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      try {
-        await hostE2e.assertWebviewStreamingFlow(api as unknown);
-        await captureStartupCheckpoint("setup-recovered-stream");
-        return;
-      } catch (error) {
-        lastError = error;
-        await sleep(1_000);
+    const driver = await workbenchCapture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    try {
+      await driver.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "retry-connection" && !button.disabled), "Failure must offer an inline retry");
+      assert.deepEqual(api.__testing.getPromptHistory().slice(promptsBefore), [], "A visible panel must report the failure inline instead of notifying");
+      assert.equal(vscode.window.terminals.length, 0, "Failure must not launch an init terminal");
+      const artifacts = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
+      if (artifacts) await driver.capture(path.join(artifacts, "startup-failed-inline.png"));
+      // Repair only the fake startup precondition, not through the removed init workflow.
+      const marker = process.env.TOMCAT_VSCODE_TEST_SETUP_MARKER;
+      assert.ok(marker);
+      await fs.mkdir(path.dirname(marker), { recursive: true });
+      await fs.writeFile(marker, "fixture repaired\n");
+      await driver.click("retry-connection");
+      await waitForServeReady(api);
+      await hostE2e.assertWebviewStreamingFlow(api as unknown);
+      if (artifacts) {
+        // Successful recovery can replace the webview execution context.
+        const recovered = await workbenchCapture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+        try { await recovered.capture(path.join(artifacts, "startup-recovered-inline.png")); }
+        finally { recovered.close(); }
       }
-    }
-
-    throw lastError instanceof Error
-      ? lastError
-      : new Error("Timed out waiting for setup-required recovery to succeed");
+    } finally { driver.close(); }
   });
 
   test("self-heals one transient serve startup failure without showing setup", async function () {
@@ -253,7 +266,7 @@ suite("Installed Tomcat extension", () => {
     assert.ok(
       !api.__testing
         .getPromptHistory()
-        .some((entry) => entry.message.includes("Tomcat could not start after several attempts.")),
+        .some((entry) => entry.message.includes("Tomcat failed to start")),
       "a transient startup failure must recover silently instead of suggesting setup",
     );
     await captureStartupCheckpoint("transient-startup-recovered");
@@ -265,7 +278,7 @@ suite("Installed Tomcat extension", () => {
       return;
     }
 
-    this.timeout(35_000);
+    this.timeout(60_000);
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
     await (api as unknown as PackagedWebviewApi).__testing.focusWebview();
     await (api as unknown as PackagedWebviewApi).__testing.waitForWebviewReady(25_000);
@@ -275,9 +288,22 @@ suite("Installed Tomcat extension", () => {
     assert.ok(
       !api.__testing
         .getPromptHistory()
-        .some((entry) => entry.message.includes("Tomcat could not start after several attempts.")),
+        .some((entry) => entry.message.includes("Tomcat failed to start")),
       "a slow but healthy handshake must not be treated as a startup crash",
     );
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      // focusWebview above already awaits bootstrap. Capture a genuinely pending
+      // connection, not an already-ready frame named "connecting".
+      const restarting = Promise.resolve(vscode.commands.executeCommand("tomcat.restartServe"));
+      restarting.catch(() => undefined);
+      await waitForPackagedDom(api as unknown as PackagedWebviewApi,
+        snapshot => snapshot.html.includes('data-testid="loading-state"') && snapshot.html.includes("tc-spinner"));
+      const driver = await workbenchCapture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+      try { await driver.capture(path.join(process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR!, "slow-handshake-reconnecting.png")); }
+      finally { driver.close(); }
+      await restarting;
+      await waitForServeReady(api, 25_000);
+    }
     await captureStartupCheckpoint("slow-handshake-ready");
   });
 

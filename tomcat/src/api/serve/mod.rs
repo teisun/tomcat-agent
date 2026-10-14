@@ -70,6 +70,8 @@ pub struct ServeCliArgs {
 
 pub(crate) struct ServeState {
     pub cfg: AppConfig,
+    /// Keep the configuration source explicit; test instances must never read the caller's HOME.
+    pub config_path: std::path::PathBuf,
     pub registry: Arc<ChatContextRegistry>,
     pub writer: WriterHandle,
     pub ask_question: ServeAskQuestionBridge,
@@ -84,6 +86,7 @@ pub(crate) struct ServeState {
 impl ServeState {
     fn new(
         cfg: AppConfig,
+        config_path: std::path::PathBuf,
         writer: WriterHandle,
         shared_model_prefs: Arc<ModelPrefsStore>,
     ) -> Result<Arc<Self>, AppError> {
@@ -95,6 +98,7 @@ impl ServeState {
         let shared_model_catalog = crate::core::llm::SharedModelCatalog::load(&cfg)?;
         Ok(Arc::new(Self {
             cfg,
+            config_path,
             registry,
             writer,
             ask_question,
@@ -148,7 +152,12 @@ async fn run_stdio(cfg: AppConfig) -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     let shared_model_prefs = build_shared_model_prefs(&cfg)?;
     let writer = writer::spawn_stdout_writer(WriterConfig::from(&cfg.serve));
-    let state = ServeState::new(cfg, writer, shared_model_prefs)?;
+    let state = ServeState::new(
+        cfg,
+        crate::api::cli::config_file_path()?,
+        writer,
+        shared_model_prefs,
+    )?;
     let initial_slot =
         create_session_slot(Arc::clone(&state), NewSessionParams::default(), false).await?;
     state.registry.insert(Arc::clone(&initial_slot))?;
@@ -354,7 +363,9 @@ pub(crate) async fn create_session_slot(
                 .provider_for_session(current_entry.session_id.clone()),
         )
         .with_session_cwd_override(cwd_path.clone());
-    let ctx = ChatContext::from_config_with_mode_and_overrides(state.cfg.clone(), mode, overrides)?;
+    let current_config =
+        crate::infra::config::load_model_selection_config(&state.config_path, &state.cfg)?;
+    let ctx = ChatContext::from_config_with_mode_and_overrides(current_config, mode, overrides)?;
     state.shared_event_bus.register_session_bus(
         current_entry.session_id.clone(),
         ctx.global_services.event_bus.clone(),
@@ -370,17 +381,28 @@ pub(crate) async fn create_session_slot(
         ctx.spawn_skill_discovery_if_needed().await;
         let _ = ctx.await_skill_discovery().await;
     }
-    let initial_main_call = ctx.resolve_call(LlmScene::Main, Some(&current_entry))?;
+    let initial_model = match ctx.resolve_metadata(LlmScene::Main, Some(&current_entry)) {
+        Ok(model) => Some(model),
+        Err(AppError::ModelUnavailable { .. }) => None,
+        Err(error) => return Err(error),
+    };
     let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
-        initial_main_call.limits.input_budget_tokens,
+        initial_model
+            .as_ref()
+            .map(|model| model.limits.input_budget_tokens)
+            .unwrap_or_else(|| {
+                crate::infra::config::fallback_input_budget_tokens(&ctx.config.context)
+            }),
     );
     let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
-    let context_state = crate::core::session::manager::init_context_state_with_limits(
+    let mut context_state = crate::core::session::manager::init_context_state(
         &ctx.session_runtime.session,
         &ctx.config.context,
         prompt_snapshot.system_text(),
-        &initial_main_call.limits,
     )?;
+    if let Some(model) = initial_model {
+        context_state.apply_limits(&model.limits);
+    }
     if let Err(err) = ctx
         .session_runtime
         .plan_runtime

@@ -23,7 +23,7 @@ export function SettingsShell({ state, vscodeApi, children }: {
       })}
       <div className="tc-settings-shell__version" data-testid="settings-version-footer">
         <div>{t("settings.extensionVersion", { version: version(state.extensionVersion) })}</div>
-        <div>{t("settings.serveVersion", { version: version(state.serverVersion) })}</div>
+        <div>{t("settings.serveVersion", { version: state.ready ? version(state.serverVersion) : t("settings.waitingForConnection") })}</div>
       </div>
     </aside>
     {children}

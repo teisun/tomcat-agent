@@ -77,6 +77,7 @@ export interface SettingsModelRemovalReceipt {
 }
 
 export interface SettingsCapabilities {
+  setDefaultModel?: boolean;
   setUiLanguage?: boolean;
   listModels: boolean;
   listProviderKeys: boolean;
@@ -128,6 +129,9 @@ export interface SettingsConnectorToolToggleReceipt {
 
 
 export interface SettingsStateSnapshot {
+  /** Effective default model; undefined for CLIs that do not report it. */
+  defaultModelId?: string;
+  modelSaveReceipt?: { requestId: string; success: boolean };
   locale?: import("./i18n").Locale;
   uiPreferences?: import("./i18n").UiPreferences | null;
   languageStatus?: "saving" | "saved" | "failed";
@@ -189,11 +193,19 @@ export type SettingsIntent =
       data: {
         model: SettingsModelInput;
         providerKey?: SettingsProviderKeyInput;
+        setAsDefault?: boolean;
       };
     }
   | {
       messageId: string;
       type: "removeModel";
+      data: {
+        modelId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setDefaultModel";
       data: {
         modelId: string;
       };
@@ -335,9 +347,11 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
       return (
         isRecord(value.data) &&
         isSettingsModelInput(value.data.model) &&
+        (value.data.setAsDefault === undefined || typeof value.data.setAsDefault === "boolean") &&
         (value.data.providerKey === undefined || isSettingsProviderKeyInput(value.data.providerKey))
       );
     case "removeModel":
+    case "setDefaultModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
     case "setProviderKey":
       return (

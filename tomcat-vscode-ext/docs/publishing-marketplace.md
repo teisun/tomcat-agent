@@ -59,6 +59,10 @@ npm run package:vsix -- --target darwin-x64 --bundle-binary /absolute/path/to/ve
 
 现有 `gate:full` / 默认 `verify:vsix` 使用 fake serve，证明安装/UI 回归但不证明正式二进制可用。正式模式需要消费同一批 exact VSIX、不重打包替换 CLI，并在对应原生宿主验证身份/version/target、内置 CLI hash/version、真实握手、模型请求、工具允许/拒绝、停止和重载。模型响应可由本地 HTTP fixture 控制，CLI 和宿主必须真实。记录 PNG、ARIA、console 和相关 webview errors。正式产物验证尚未通过时，不上传。
 
+首配整改的原生验收从**同一个干净 HOME**开始：不 init、不预写模型或 Key、不预设默认/压缩模型覆盖。先断言服务已连接、主配置尚不存在、配置卡可见且没有初始化弹框；通过真实 Settings 控件添加指向本地 HTTP 的模型、Key 并设默认，验证同一 PID 恢复发送，再检查重载后的选择保持。原有工具权限场景需要启动时加载专用测试策略，因此只在首条同进程请求已成功之后，将策略加入该测试 HOME 并重启继续权限/停止回归；不能用这次重启冒充模型配置的生效方式。
+
+本轮源码验收必须打入本次构建的真实 CLI；旧 pin 的已发布包不能证明这次修复。`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR` 指向 `.agents/acceptance/onboarding`（从仓库根目录解析），保留未配置卡、模型表单、配置后、窄屏与失败恢复的 PNG、ARIA、console。读取证据后再登记通过；这里的流程要求不代表已经完成验收，也不验证真实外部供应商认证。
+
 用户已明确选择先跑通发布链路、后续版本再修复 CLI 0.1.73 的历史标签缺陷。本轮唯一接受的已知问题：重载后被拒写入可能显示 Created。验收仍须证明真实拒绝、文件未创建（含重载后）、允许写入、停止/恢复及包身份/架构/载荷正确；缺失历史状态或不同 CLI pin 的错误不得享受此例外。回执使用 `passed_with_known_issues` 并列明问题，双语 README/CHANGELOG 公开说明；不把它记录为已修复或完全视觉通过。此前失败回执保留。
 
 ```bash

@@ -43,7 +43,14 @@ fn load_config_impl(
     // 静默覆盖磁盘配置造成提权。
     sanitize_sensitive_env(config_path);
     warn_removed_ask_question_timeout(config_path);
+    merge_config_sources(config_path, reject_legacy_keys)
+}
 
+/// Read the same layered sources without the startup-only process environment mutation.
+fn merge_config_sources(
+    config_path: Option<&Path>,
+    reject_legacy_keys: bool,
+) -> Result<AppConfig, AppError> {
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
@@ -67,6 +74,20 @@ fn load_config_impl(
         .map_err(|e| AppError::Config(e.to_string()))?;
     validate_config(&merged)?;
     Ok(merged)
+}
+
+/// Model admin operations refresh only these selections, not permissions or process paths.
+pub(crate) fn load_model_selection_config(
+    path: &Path,
+    base: &AppConfig,
+) -> Result<AppConfig, AppError> {
+    let current = merge_config_sources(Some(path), true)?;
+    let mut config = base.clone();
+    config.llm.default_model = current.llm.default_model;
+    config.llm.vision_model = current.llm.vision_model;
+    config.llm.title_model = current.llm.title_model;
+    config.context.compaction_model = current.context.compaction_model;
+    Ok(config)
 }
 
 fn warn_removed_ask_question_timeout(config_path: Option<&Path>) {

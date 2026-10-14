@@ -6,15 +6,12 @@ use crate::infra::platform::write_file_atomic;
 use crate::{validate_config, AppConfig, AppError};
 
 pub fn write_default_model(config_path: &Path, model_id: &str) -> Result<(), AppError> {
-    if !config_path.exists() {
-        return Err(AppError::Config(tr(
-            "config.fileMissing",
-            &[("path", &config_path.display().to_string())],
-        )));
-    }
-
     with_config_lock(config_path, || {
-        let content = std::fs::read_to_string(config_path).map_err(AppError::Io)?;
+        let content = match std::fs::read_to_string(config_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
         let mut value: toml::Value = content
             .parse()
             .map_err(|error: toml::de::Error| AppError::Config(error.to_string()))?;
@@ -22,8 +19,9 @@ pub fn write_default_model(config_path: &Path, model_id: &str) -> Result<(), App
             .as_table_mut()
             .ok_or_else(|| AppError::Config(tr("config.rootTable", &[])))?;
         let llm = root
-            .get_mut("llm")
-            .and_then(toml::Value::as_table_mut)
+            .entry("llm")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
             .ok_or_else(|| AppError::Config(tr("config.llmTableMissing", &[])))?;
         llm.insert(
             "default_model".to_string(),

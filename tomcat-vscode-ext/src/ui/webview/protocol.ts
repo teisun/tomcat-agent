@@ -380,6 +380,7 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  modelReady?: boolean;
   messageQueue?: WebviewMessageQueue;
   sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../serveClient/wire").InstructionCard[];
@@ -462,6 +463,7 @@ export interface WebviewStateSnapshot {
   availableModels: string[];
   buildModel?: string;
   connectionStatus?: WebviewConnectionStatus;
+  connectionFailure?: { kind: string; detail: string };
   mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
   slashCommands?: SharedSlashCommand[];
@@ -838,6 +840,8 @@ export type WebviewIntent =
         sessionId?: string | null;
       };
     }
+  | { messageId: string; type: "retryConnection" }
+  | { messageId: string; type: "viewConnectionLogs" }
   | {
       messageId: string;
       type: "openSettings";
@@ -1315,6 +1319,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
+    case "retryConnection":
+    case "viewConnectionLogs":
+      return true;
     case "openSettings":
       return (
         value.data === undefined ||

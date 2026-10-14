@@ -120,6 +120,23 @@ web_search = false
     .expect("write models override");
 }
 
+/// Persist the injected fixture's selections instead of consulting the developer's configuration.
+pub fn write_test_config(cfg: &AppConfig) -> std::path::PathBuf {
+    let path = Path::new(
+        cfg.storage
+            .work_dir
+            .as_deref()
+            .expect("isolated work directory"),
+    )
+    .join("tomcat.config.toml");
+    std::fs::write(
+        &path,
+        toml::to_string(cfg).expect("serialize fixture config"),
+    )
+    .expect("write fixture config");
+    path
+}
+
 pub fn serve_test_config(work_dir: &Path, base_url: &str) -> AppConfig {
     write_models_override(work_dir, base_url);
     let mut cfg = AppConfig::default();
@@ -150,7 +167,8 @@ pub async fn build_initialized_state(
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
     let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
-    let state = ServeState::new(cfg, writer, shared_model_prefs).expect("serve state");
+    let config_path = write_test_config(&cfg);
+    let state = ServeState::new(cfg, config_path, writer, shared_model_prefs).expect("serve state");
     let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
         .await
         .expect("initial session");
@@ -334,7 +352,9 @@ pub async fn build_initialized_state_with_provider(
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
     let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
-    let state = ServeState::new(cfg.clone(), writer, shared_model_prefs).expect("serve state");
+    let config_path = write_test_config(&cfg);
+    let state =
+        ServeState::new(cfg.clone(), config_path, writer, shared_model_prefs).expect("serve state");
 
     let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions_dir = resolve_sessions_dir(&cfg).expect("sessions dir");
@@ -429,7 +449,8 @@ pub async fn build_initialized_state_with_config(
         cwd: cfg.storage.work_dir.clone(),
         ..NewSessionParams::default()
     };
-    let state = ServeState::new(cfg, writer, shared_model_prefs).expect("serve state");
+    let config_path = write_test_config(&cfg);
+    let state = ServeState::new(cfg, config_path, writer, shared_model_prefs).expect("serve state");
     let slot = create_session_slot(Arc::clone(&state), initial_session, false)
         .await
         .expect("initial session");

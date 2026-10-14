@@ -22,6 +22,7 @@ pub use assets::ensure_embedded_assets;
 pub use default_model::{clear_model_references, write_default_model};
 pub(crate) use env_file::env_file_error;
 pub use env_file::{read_env_entries, write_env_entries};
+pub(crate) use load::load_model_selection_config;
 pub use load::{
     ensure_work_dir_structure, get_work_dir, load_config, load_config_for_init,
     load_config_toml_file, resolve_agent_definition_dir, resolve_agent_dir,

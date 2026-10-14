@@ -1571,7 +1571,9 @@ async fn register_slot_hooks_auto_rearms_pending_ask_question_on_session_attach(
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
     let shared_model_prefs = build_shared_model_prefs(&cfg).expect("shared model preferences");
-    let state = ServeState::new(cfg.clone(), writer, shared_model_prefs).expect("serve state");
+    let config_path = crate::api::serve::test_support::write_test_config(&cfg);
+    let state =
+        ServeState::new(cfg.clone(), config_path, writer, shared_model_prefs).expect("serve state");
     let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions_dir = crate::resolve_sessions_dir(&cfg).expect("sessions dir");
     std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");

@@ -339,6 +339,7 @@ fn tools_bash_rejects_legacy_timeout_field_with_replacement_hint() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn tools_bash_rejects_foreground_wait_outside_8_to_16_seconds() {
     for invalid in [7_999, 16_001] {
         let dir = tempfile::tempdir().unwrap();

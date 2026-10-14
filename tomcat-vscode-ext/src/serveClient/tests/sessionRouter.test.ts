@@ -2,6 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SessionRouter } from "../sessionRouter";
 
+describe("SessionRouter model readiness", () => {
+  it("passes booleans through and leaves legacy or malformed values undefined", async () => {
+    const messenger = { request: vi.fn() };
+    const router = new SessionRouter(messenger as never, () => undefined);
+    for (const [modelReady, expected] of [[true, true], [false, false], [undefined, undefined], ["false", undefined]] as const) {
+      messenger.request.mockResolvedValue({ success: true, payload: { sessionId: "s", modelReady } });
+      expect((await router.getState("s")).modelReady).toBe(expected);
+    }
+  });
+});
+
 describe("SessionRouter session files", () => {
   const payload = {sessionId:"s",sourceTurnId:"u",files:[{path:"/a",status:"modified",added:1,removed:1,restorable:true}]};
   it("validates list identity and entries rather than silently dropping invalid files", async () => {

@@ -31,6 +31,8 @@ export interface SessionListPayload {
 }
 
 export interface SessionStatePayload {
+  /** Undefined for CLIs that predate the field; callers must not block on it. */
+  modelReady?: boolean;
   activePlan?: ActivePlanPayload | null;
   agentMode?: "chat" | "plan" | null;
   busy: boolean;
@@ -320,6 +322,7 @@ export class SessionRouter {
           ? payload.agentMode
           : null,
       model: typeof payload.model === "string" ? payload.model : null,
+      modelReady: typeof payload.modelReady === "boolean" ? payload.modelReady : undefined,
       planTodos: parseTodos(payload.planTodos),
       sessionId: payload.sessionId,
       sessionKey:

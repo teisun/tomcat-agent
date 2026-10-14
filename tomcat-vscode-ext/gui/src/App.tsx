@@ -27,6 +27,7 @@ import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { SessionDock } from "./components/SessionDock";
+import { ModelSetupCard } from "./components/ModelSetupCard";
 import { MessageQueueDock, QueuedMessageEditor } from "./components/MessageQueueDock";
 import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
@@ -1548,9 +1549,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       document.querySelector<HTMLElement>('[data-testid="composer-input"]')?.focus();
     }
   }, [activeSession?.sessionId, queueEditingItem?.userMessageId]);
-  const canPrompt = state.ready && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
+  // Undefined means a CLI that predates readiness reporting; only an explicit false blocks sending.
+  const modelBlocked = activeSession?.modelReady === false;
+  const openModelSettings = () => postIntent(vscodeApi, "openSettings", { route: "models" });
+  const canPromptWhenConfigured = state.ready && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
+  const canPrompt = canPromptWhenConfigured && !modelBlocked;
   const canInterrupt = state.ready;
-  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending;
+  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending && !modelBlocked;
   const modelAdminSupported = state.modelAdminSupported;
   const composerModelId = activeSession?.model;
   const activeModelCapabilities = composerModelId
@@ -2608,11 +2613,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     availableModelReasoningLevels: state.availableModelReasoningLevels,
     availableModels: state.availableModels,
     busy: !!activeSession?.busy,
-    canChangeConfig: !activeSession?.busy,
+    canChangeConfig: canPromptWhenConfigured && !activeSession?.busy,
     canInterrupt,
     allowBusyInput: !!state.messageQueueSupported,
     attachmentsPending: !!activeSession && composerWorkRegistryRef.current.pendingCount(activeSession.sessionId) > 0,
-    canPrompt: canPrompt && !editingMessage,
+    // Missing credentials disable submission, not draft editing.
+    canPrompt: canPromptWhenConfigured && !editingMessage,
+    submitDisabled: modelBlocked,
     slashCommands: state.slashCommands,
     instructionCatalog: activeSession?.instructionCatalog,
     onSlashOpen: () => { if (activeSession) postIntent(vscodeApi, "getInstructionCatalog", {sessionId:activeSession.sessionId}); },
@@ -2761,13 +2768,20 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             <StickyUserPrompt text={stickyUserMessageText} />
           ) : null}
           {!state.ready ? (
-            <div className="tc-empty-state tc-empty-state--loading" data-testid="loading-state">
-              <span className="tc-spinner" aria-hidden="true" />
+            <div className={`tc-empty-state ${state.connectionStatus === "failed" || state.connectionStatus === "degraded" ? "tc-connection-failure" : "tc-empty-state--loading"}`} data-testid="loading-state">
+              {state.connectionStatus !== "failed" && state.connectionStatus !== "degraded" ? <span className="tc-spinner" aria-hidden="true" /> : null}
               <p>
                 {t(state.connectionStatus === "reconnecting" ? "connection.reconnecting"
                   : state.connectionStatus === "degraded" ? "chat.degraded"
                   : state.connectionStatus === "failed" ? "chat.failed" : "connection.connecting")}
               </p>
+              {state.connectionStatus === "failed" || state.connectionStatus === "degraded" ? <>
+                {state.connectionFailure?.detail ? <p role="alert">{state.connectionFailure.detail}</p> : null}
+                <div className="tc-button-row">
+                  <button type="button" className="tc-button tc-button--primary" data-testid="retry-connection" onClick={() => postIntent(vscodeApi, "retryConnection")}>{t("host.action.retry")}</button>
+                  <button type="button" className="tc-button tc-button--secondary" data-testid="view-connection-logs" onClick={() => postIntent(vscodeApi, "viewConnectionLogs")}>{t("host.action.logs")}</button>
+                </div>
+              </> : null}
             </div>
           ) : activeSession ? (
             hasTranscriptContent ? (
@@ -2824,6 +2838,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 transcriptRef={transcriptRef}
                 onZoomImage={handleZoomImage}
               />
+            ) : modelBlocked ? (
+              <ModelSetupCard onConfigure={openModelSettings} />
             ) : (
               <div className="tc-empty-state">
                 <h2>{t("chat.ready")}</h2>
@@ -2891,6 +2907,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
       <div className="tc-footer" data-testid="composer-footer">
+        {state.ready && modelBlocked && hasTranscriptContent ? <ModelSetupCard onConfigure={openModelSettings} /> : null}
         <SessionDock
           key={activeSession?.sessionId ?? "empty"}
           sessionId={activeSession?.sessionId ?? ""}

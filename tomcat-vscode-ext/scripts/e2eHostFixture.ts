@@ -316,7 +316,7 @@ if (process.argv[2] !== "serve") {
 }
 
 if (requireInit && !fs.existsSync(setupMarkerPath)) {
-  process.stderr.write("fake serve requires tomcat init first\\n");
+  process.stderr.write("fake serve startup blocked until fixture repair\\n");
   process.exit(1);
 }
 

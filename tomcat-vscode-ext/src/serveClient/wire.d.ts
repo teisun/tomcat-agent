@@ -464,6 +464,7 @@ export interface ListConnectorToolsPayload {
   tools: ConnectorToolPayload[];
 }
 export interface ListModelsPayload {
+  defaultModelId: string;
   models: ModelView[];
 }
 export interface ListProviderKeysPayload {
@@ -648,6 +649,10 @@ export type ServeCommand = {
   id?: null | string;
   modelId: string;
   type: "remove_model";
+} | {
+  id?: null | string;
+  modelId: string;
+  type: "set_default_model";
 } | {
   id?: null | string;
   params: RetainAttachmentLeasesParams;

@@ -212,7 +212,7 @@
   "model.notCataloged": "模型 `{id}` 未收录，请补 {path} 或切回已收录模型。",
   "model.reserveInvalid": "模型 `{id}` 的 output reserve ({reserve}) 必须小于 context_window ({window})。",
   "model.capabilitiesMissing": "provider/model 不支持 {missing}，建议改用 `{suggested}`。",
-  "model.compactionFallbackFailed": "压缩模型 `{selected}` 不可用，回退默认模型 `{fallback}` 也失败。原始错误：{original}；回退错误：{detail}",
+  "model.compactionFallbackFailed": "压缩模型 `{selected}` 不可用，回退模型 `{fallback}` 也失败。原始错误：{original}；回退错误：{detail}",
   "model.unknownApi": "未知模型 `{id}` 的 api = {api}; 已注册: {registered}",
   "config.invalidLog": "无效的 log.level: {value}",
   "config.fileMissing": "配置文件不存在: {path}。请先运行: tomcat init",

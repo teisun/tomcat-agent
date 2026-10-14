@@ -165,6 +165,8 @@ export interface TomcatWebviewProviderDeps {
   messenger: TomcatMessenger;
   openExternal?(href: string): Promise<void> | void;
   openSettings?(route?: "general" | "models" | "connectors"): void;
+  reconnectServe?(): Promise<void>;
+  showConnectionLogs?(): void;
   /** Surface a post-handshake bootstrap failure in the extension host's Output channel/UI. */
   reportBootstrapFailure?(error: Error): void;
   refreshPlanPreview?(
@@ -781,6 +783,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.postState();
   }
 
+  isViewVisible(): boolean {
+    return this.view?.visible === true;
+  }
+
   /** Retries post-handshake data loading without needlessly restarting a healthy serve process. */
   async retryBootstrap(): Promise<void> {
     if (!this.isReady) {
@@ -887,7 +893,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
    * The webview DOM being ready and the local serve process being ready are
    * separate facts. The extension host owns the latter through the supervisor.
    */
-  async setServeConnectionState(status: ServeConnectionStatus): Promise<void> {
+  async setServeConnectionState(status: ServeConnectionStatus, failure?: WebviewStateSnapshot["connectionFailure"]): Promise<void> {
     this.serveConnectionStatus = status;
     if (status === "reconnecting" || status === "failed") this.messageQueue.reset();
     // `initialize()` can resolve before its supervisor notification has been delivered. If
@@ -897,7 +903,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (status === "ready" && this.stateStore.snapshot().connectionStatus === "degraded") {
       return;
     }
-    this.stateStore.setConnectionStatus(status);
+    this.stateStore.setConnectionStatus(status, failure);
     if (this.isReady) {
       await this.postState();
     }
@@ -1126,6 +1132,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   async refreshModelCatalog(): Promise<void> {
     await this.refreshModels();
+    const sessionId = this.peekState().activeSessionId;
+    if (sessionId) await this.refreshSessionState(sessionId, { strict: true, trustBusy: false });
     if (this.isReady) {
       await this.postState();
     }
@@ -1810,14 +1818,23 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async bootstrapWithConnectionState(): Promise<void> {
     // A handshake failure belongs to the connection supervisor, which owns process restart and
     // its fatal-state notification. Only failures after this point are "connected but degraded".
-    await this.ensureInitialized();
+    try {
+      await this.ensureInitialized();
+    } catch (error) {
+      this.stateStore.setConnectionStatus("failed", this.peekState().connectionFailure ?? {
+        kind: "handshake", detail: error instanceof Error ? error.message : String(error),
+      });
+      // The ready handler still publishes a snapshot when the handshake fails.
+      // Restart ownership and its host notification remain with the supervisor.
+      return;
+    }
     try {
       await this.bootstrap();
       this.stateStore.setConnectionStatus(this.serveConnectionStatus);
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
       console.error("[Tomcat webview] connected, but bootstrap failed", normalized);
-      this.stateStore.setConnectionStatus("degraded");
+      this.stateStore.setConnectionStatus("degraded", { kind: "bootstrap", detail: normalized.message });
       // Never let a failed state publication hide the original bootstrap failure. In
       // particular, users still need the host-level Retry action when a bad history
       // payload prevents the webview from rendering the degraded snapshot.
@@ -2545,6 +2562,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "retryConnection":
+        if (this.peekState().connectionStatus === "degraded") await this.retryBootstrap();
+        // A rejected reconnect returns the supervisor to its fatal state, which this panel renders.
+        else await this.deps.reconnectServe?.().catch(() => undefined);
+        return;
+      case "viewConnectionLogs":
+        this.deps.showConnectionLogs?.();
+        return;
       case "openSettings":
         this.deps.openSettings?.(intent.data?.route ?? "general");
         return;

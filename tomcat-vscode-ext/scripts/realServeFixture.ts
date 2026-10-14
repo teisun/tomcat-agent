@@ -23,7 +23,7 @@ export function sseToolCall(id: string, name: string, argsJson: string): Scripte
   return { body: `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id, function: { name, arguments: argsJson } }] } }] })}\n\n` };
 }
 
-export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.ProcessEnv = process.env, coldStart = false): NodeJS.ProcessEnv {
   const env = { ...inherited };
   // Only the child with a fixture-owned disposable HOME may leave nested-agent mode.
   env.TOMCAT_AGENT_ACTIVE = undefined;
@@ -33,8 +33,9 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
   return {
     ...env, HOME: homePath, USERPROFILE: homePath, TOMCAT_HOST_LOCALE: "en", SHELL: "/bin/zsh",
     TOMCAT__STORAGE__WORK_DIR: path.join(homePath, ".tomcat"),
-    TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4", TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4",
-    OPENAI_API_KEY: "dummy-key",
+    TOMCAT__CONTEXT__COMPACTION_MODEL: coldStart ? undefined : "gpt-5.4",
+    TOMCAT__LLM__DEFAULT_MODEL: coldStart ? undefined : "gpt-5.4",
+    OPENAI_API_KEY: coldStart ? undefined : "dummy-key",
     ALL_PROXY: "", HTTPS_PROXY: "", HTTP_PROXY: "", all_proxy: "", https_proxy: "", http_proxy: "",
     NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
   };
@@ -42,16 +43,18 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
 
 export type FixtureSetup = {
   binary: string;
+  coldStart?: boolean;
   initialize?: (binary: string, env: NodeJS.ProcessEnv, cwd: string) => Promise<void>;
 };
 export async function setupRealServeFixture(baseUrl: string, api: LlmApi, setup: FixtureSetup) {
   const binary = setup.binary;
   const homePath = await mkdtemp(path.join(os.tmpdir(), "tomcat-vscode-ext-"));
   const workspacePath = path.join(homePath, "workspace");
-  const env = serveFixtureEnvironment(homePath);
+  const env = serveFixtureEnvironment(homePath, process.env, setup.coldStart);
   const cleanup = () => rm(homePath, { force: true, recursive: true });
   try {
     await mkdir(workspacePath, { recursive: true });
+    if (setup.coldStart) return { cleanup, env, homePath, workspacePath };
     if (setup.initialize) await setup.initialize(binary, env, workspacePath);
     else await execFileAsync(binary, ["init"], { cwd: workspacePath, env, timeout: 15_000, killSignal: "SIGKILL" });
     await writeFile(path.join(homePath, ".tomcat", "mcp.json"), '{"mcpServers":{}}\n', "utf8");
@@ -85,6 +88,12 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
   });
   server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   async function respond(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    // Read-only observation for the installed cold-start test; does not consume a model response.
+    if (request.method === "GET" && request.url === "/_test/request-count") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ count: captured.length }));
+      return;
+    }
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks).toString("utf8");

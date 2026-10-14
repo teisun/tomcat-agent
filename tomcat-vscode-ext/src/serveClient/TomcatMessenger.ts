@@ -56,6 +56,12 @@ export interface TomcatMessengerOptions {
   spawnFactory?: typeof spawn;
 }
 
+export interface SetDefaultModelResponse {
+  envOverride: boolean;
+  modelId: string;
+  warnings: string[];
+}
+
 export interface SetPlanModeRequest {
   action: SetPlanModeAction;
   planId?: string | null;
@@ -546,6 +552,19 @@ export class TomcatMessenger {
       },
       timeoutMs,
     ) as Promise<TypedResponseFrame<RemoveModelResponse>>;
+  }
+
+  sendSetDefaultModel(
+    modelId: string,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<SetDefaultModelResponse>> {
+    return this.request(
+      {
+        modelId,
+        type: "set_default_model",
+      },
+      timeoutMs,
+    ) as Promise<TypedResponseFrame<SetDefaultModelResponse>>;
   }
 
   sendSetProviderKey(

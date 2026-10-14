@@ -863,6 +863,30 @@
       {
         "type": "object",
         "required": [
+          "modelId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_default_model"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "envName",
           "type",
           "value"
@@ -6630,9 +6654,14 @@
     "title": "ListModelsPayload",
     "type": "object",
     "required": [
+      "defaultModelId",
       "models"
     ],
     "properties": {
+      "defaultModelId": {
+        "description": "Effective default after the config file and environment are merged; empty when unset.",
+        "type": "string"
+      },
       "models": {
         "type": "array",
         "items": {

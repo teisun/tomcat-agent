@@ -106,16 +106,11 @@ pub fn bootstrap_language(host: Option<&str>) {
 
 pub fn write_language(path: &Path, language: UiLanguage) -> Result<(), AppError> {
     with_config_lock(path, || {
-        let content = std::fs::read_to_string(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                AppError::Config(tr(
-                    "ui.config_missing",
-                    &[("path", &path.display().to_string())],
-                ))
-            } else {
-                AppError::Io(error)
-            }
-        })?;
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
         let mut document: toml::Value = content
             .parse()
             .map_err(|e: toml::de::Error| AppError::Config(e.to_string()))?;

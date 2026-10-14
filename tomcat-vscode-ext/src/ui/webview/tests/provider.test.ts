@@ -2725,12 +2725,40 @@ describe("serve connection readiness", () => {
         messageId: "webview-ready-before-handshake",
         type: "ready",
       }),
-    ).rejects.toThrow("serve handshake failed");
+    ).resolves.toBeUndefined();
 
     expect(provider.currentState()).toMatchObject({
-      connectionStatus: "connecting",
+      connectionStatus: "failed",
+      connectionFailure: { detail: "serve handshake failed" },
       ready: false,
     });
+    provider.dispose();
+  });
+
+  it("publishes a first-handshake failure and routes inline retry/log actions to their existing owners", async () => {
+    const provider = createProvider(async () => { throw new Error("invalid config.toml"); });
+    const reconnectServe = vi.fn().mockResolvedValue(undefined);
+    const showConnectionLogs = vi.fn();
+    Object.assign((provider as any).deps, { reconnectServe, showConnectionLogs });
+    const published = vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
+    await provider.dispatchTestIntent({ type: "ready", messageId: "first-failure" });
+    expect(published).toHaveBeenCalled();
+    expect(provider.currentState().connectionFailure?.detail).toBe("invalid config.toml");
+    await provider.dispatchTestIntent({ type: "retryConnection", messageId: "retry" });
+    await provider.dispatchTestIntent({ type: "viewConnectionLogs", messageId: "logs" });
+    expect(reconnectServe).toHaveBeenCalledOnce();
+    expect(showConnectionLogs).toHaveBeenCalledOnce();
+    reconnectServe.mockRejectedValueOnce(new Error("still invalid"));
+    await expect(provider.dispatchTestIntent({ type: "retryConnection", messageId: "retry-rejected" })).resolves.toBeUndefined();
+    expect(provider.currentState().connectionStatus).toBe("failed");
+    // A successful reconnect resets the old projection and loads initial data even
+    // though there was never an earlier successful handshake.
+    (provider as any).deps.initialize = async () => ({ capabilities: [], sessionId: "s1", attachmentRoot: null });
+    const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
+    await provider.setServeConnectionState("ready");
+    await provider.refreshAfterServeRestart();
+    expect(bootstrap).toHaveBeenCalledOnce();
+    expect(provider.currentState().connectionFailure).toBeUndefined();
     provider.dispose();
   });
 

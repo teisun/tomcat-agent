@@ -417,12 +417,47 @@ pub fn validate_capabilities(
     )))
 }
 
+/// Metadata is sufficient for history and context budgets; it never contains credentials.
+#[derive(Debug, Clone)]
+pub struct ResolvedModelMetadata {
+    pub catalog_id: String,
+    pub capabilities: Capabilities,
+    pub limits: EffectiveModelLimits,
+}
+
 pub trait LlmResolver: Send + Sync {
     fn resolve(
         &self,
         scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError>;
+
+    /// Test/custom resolvers may reuse their supplied call; the production resolver overrides
+    /// this with catalog-only resolution, without constructing a provider or reading credentials.
+    fn resolve_metadata(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedModelMetadata, AppError> {
+        self.resolve(scene, session_override)
+            .map(|call| ResolvedModelMetadata {
+                catalog_id: call.catalog_id,
+                capabilities: call.capabilities,
+                limits: call.limits,
+            })
+    }
+
+    fn selected_model_id(&self, session_override: Option<&str>) -> String {
+        self.resolve_metadata(LlmScene::Main, session_override)
+            .map(|model| model.catalog_id)
+            .unwrap_or_else(|_| session_override.unwrap_or_default().to_string())
+    }
+
+    /// Whether the main model can be resolved locally. Compaction falls back to the main model,
+    /// so this is the only precondition. Stateless/custom resolvers supply their own runtime.
+    fn model_ready(&self, _session_override: Option<&str>) -> bool {
+        true
+    }
 
     /// Model deletion updates only the selection-related configuration in a live process.
     /// Stateless/test resolvers intentionally retain their existing behavior.
@@ -468,19 +503,11 @@ impl DefaultLlmResolver {
             LlmScene::Main => session_model
                 .map(str::to_string)
                 .unwrap_or_else(|| default_model.to_string()),
-            LlmScene::Compaction => {
-                let compaction_model = config.context.compaction_model.trim();
-                if !compaction_model.is_empty() {
-                    compaction_model.to_string()
-                } else if !default_model.is_empty() {
-                    default_model.to_string()
-                } else {
-                    // Deleting both configuration references must not make a still-selected
-                    // session model unusable for compaction. The catalog ID is passed through
-                    // from the main selection, not the provider's wire model name.
-                    session_model.unwrap_or_default().to_string()
-                }
-            }
+            LlmScene::Compaction => self
+                .compaction_candidates(session_override)
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
             LlmScene::Vision => config
                 .llm
                 .vision_model
@@ -508,7 +535,12 @@ impl DefaultLlmResolver {
     }
 
     fn lookup_entry(&self, model_id: &str) -> Result<ModelEntry, AppError> {
-        self.catalog.lookup_explicit(model_id)
+        self.catalog
+            .lookup_explicit(model_id)
+            .map_err(|error| AppError::ModelUnavailable {
+                model_id: model_id.to_string(),
+                message: error.to_string(),
+            })
     }
 
     fn guard_scene(&self, scene: LlmScene, entry: &ModelEntry) -> Result<(), AppError> {
@@ -629,6 +661,11 @@ impl DefaultLlmResolver {
             .clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn cached_provider_count(&self) -> usize {
+        self.providers.lock().len()
+    }
+
     fn resolve_cached_provider(
         &self,
         entry: &ModelEntry,
@@ -651,17 +688,12 @@ impl DefaultLlmResolver {
         Ok(provider)
     }
 
-    fn resolve_model_call(
+    fn entry_metadata(
         &self,
         scene: LlmScene,
-        model_id: &str,
-    ) -> Result<ResolvedCall, AppError> {
-        let entry = self.lookup_entry(model_id)?;
-        self.guard_scene(scene, &entry)?;
-        let compatible_fallback_env = self.compatible_fallback_env(scene, &entry);
-        let credential = self.credential_for(&entry, compatible_fallback_env.as_deref())?;
-        let provider_impl = self.resolve_cached_provider(&entry, &credential)?;
-        let base_url = self.effective_base_url(&entry);
+        entry: &ModelEntry,
+    ) -> Result<ResolvedModelMetadata, AppError> {
+        self.guard_scene(scene, entry)?;
         let selected_context_window = if entry.context_window_options.is_empty() {
             None
         } else {
@@ -669,12 +701,30 @@ impl DefaultLlmResolver {
                 .context_window_for(&entry.id)
                 .filter(|value| entry.context_window_options.contains(value))
         };
-        let config = self.config_snapshot();
         let limits = EffectiveModelLimits::resolve_with_context_window(
-            &entry,
-            &config.context,
+            entry,
+            &self.config_snapshot().context,
             selected_context_window,
         )?;
+        Ok(ResolvedModelMetadata {
+            catalog_id: entry.id.clone(),
+            capabilities: entry.capabilities.clone(),
+            limits,
+        })
+    }
+
+    fn resolve_model_call(
+        &self,
+        scene: LlmScene,
+        model_id: &str,
+    ) -> Result<ResolvedCall, AppError> {
+        let entry = self.lookup_entry(model_id)?;
+        let metadata = self.entry_metadata(scene, &entry)?;
+        let compatible_fallback_env = self.compatible_fallback_env(scene, &entry);
+        let credential = self.credential_for(&entry, compatible_fallback_env.as_deref())?;
+        let provider_impl = self.resolve_cached_provider(&entry, &credential)?;
+        let base_url = self.effective_base_url(&entry);
+        let config = self.config_snapshot();
         Ok(ResolvedCall {
             provider_impl,
             model: entry.request_model_name().to_string(),
@@ -686,52 +736,101 @@ impl DefaultLlmResolver {
             thinking_format: self.resolved_thinking_format(&entry),
             thinking_config: config.llm.thinking.clone(),
             capabilities: entry.capabilities.clone(),
-            limits,
+            limits: metadata.limits,
             sealed: Sealed,
         })
     }
 
-    fn resolve_compaction_call(&self, model_id: &str) -> Result<ResolvedCall, AppError> {
+    /// Compaction prefers its configured model, then the default, and finally the session's main
+    /// model, so a usable main model always keeps compaction usable.
+    fn compaction_candidates(&self, session_override: Option<&str>) -> Vec<String> {
         let config = self.config_snapshot();
-        let selected_model = model_id.trim();
-        let default_model = config.llm.default_model.trim();
-        match self.resolve_model_call(LlmScene::Compaction, selected_model) {
-            Ok(resolved) => Ok(resolved),
-            Err(original_err) if !default_model.is_empty() && selected_model != default_model => {
-                warn!(
-                    compaction_model = selected_model,
-                    fallback_model = default_model,
-                    error = %original_err,
-                    "compaction model unavailable, falling back to default model"
-                );
-                match self.resolve_model_call(LlmScene::Compaction, default_model) {
-                    Ok(resolved) => Ok(resolved),
-                    Err(fallback_err) => Err(AppError::Config(tr(
-                        "model.compactionFallbackFailed",
-                        &[
-                            ("selected", selected_model),
-                            ("fallback", default_model),
-                            ("original", &original_err.to_string()),
-                            ("detail", &fallback_err.to_string()),
-                        ],
-                    ))),
-                }
+        let main_model = self.select_model_id(LlmScene::Main, session_override);
+        let mut candidates: Vec<String> = Vec::new();
+        for id in [
+            config.context.compaction_model.trim(),
+            config.llm.default_model.trim(),
+            main_model.as_str(),
+        ] {
+            if !id.is_empty() && !candidates.iter().any(|candidate| candidate == id) {
+                candidates.push(id.to_string());
             }
-            Err(original_err) => Err(original_err),
+        }
+        candidates
+    }
+
+    fn resolve_compaction_call(
+        &self,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let candidates = self.compaction_candidates(session_override);
+        let mut failures: Vec<(&str, AppError)> = Vec::new();
+        for candidate in &candidates {
+            if let Some((failed, error)) = failures.last() {
+                warn!(
+                    compaction_model = *failed,
+                    fallback_model = candidate.as_str(),
+                    error = %error,
+                    "compaction model unavailable, falling back"
+                );
+            }
+            match self.resolve_model_call(LlmScene::Compaction, candidate) {
+                Ok(resolved) => return Ok(resolved),
+                Err(error) => failures.push((candidate.as_str(), error)),
+            }
+        }
+        let mut failures = failures.into_iter();
+        let Some((selected, original_err)) = failures.next() else {
+            return self.resolve_model_call(LlmScene::Compaction, "");
+        };
+        match failures.last() {
+            None => Err(original_err),
+            Some((fallback, fallback_err)) => Err(AppError::Config(tr(
+                "model.compactionFallbackFailed",
+                &[
+                    ("selected", selected),
+                    ("fallback", fallback),
+                    ("original", &original_err.to_string()),
+                    ("detail", &fallback_err.to_string()),
+                ],
+            ))),
         }
     }
 }
 
 impl LlmResolver for DefaultLlmResolver {
+    fn resolve_metadata(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedModelMetadata, AppError> {
+        let id = self.select_model_id(scene, session_override);
+        self.entry_metadata(scene, &self.lookup_entry(&id)?)
+    }
+
+    fn selected_model_id(&self, session_override: Option<&str>) -> String {
+        self.select_model_id(LlmScene::Main, session_override)
+    }
+
+    fn model_ready(&self, session_override: Option<&str>) -> bool {
+        let id = self.select_model_id(LlmScene::Main, session_override);
+        self.lookup_entry(&id)
+            .and_then(|entry| {
+                self.entry_metadata(LlmScene::Main, &entry)?;
+                let fallback_env = self.compatible_fallback_env(LlmScene::Main, &entry);
+                self.credential_for(&entry, fallback_env.as_deref())
+            })
+            .is_ok()
+    }
+
     fn resolve(
         &self,
         scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
-        let model_id = self.select_model_id(scene, session_override);
         match scene {
-            LlmScene::Compaction => self.resolve_compaction_call(&model_id),
-            _ => self.resolve_model_call(scene, &model_id),
+            LlmScene::Compaction => self.resolve_compaction_call(session_override),
+            _ => self.resolve_model_call(scene, &self.select_model_id(scene, session_override)),
         }
     }
 

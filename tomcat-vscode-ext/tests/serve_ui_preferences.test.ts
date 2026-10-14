@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readFile, rename } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { initializeServe } from "../src/serveClient/initialize";
@@ -29,9 +29,19 @@ describe("real Serve language preferences", () => {
       expect(cli.stdout).toContain("global conversation");
       const before = await runtime.messenger.request({ type: "list_sessions", scope: "disk" });
       await rename(config, `${config}.held`);
+      const created = await runtime.messenger.request({ type: "set_ui_language", language: "zh-CN" });
+      expect(created.success).toBe(true);
+      expect(created.payload).toEqual({ language: "zh-CN", effective: "zh-CN", envOverride: false });
+      expect((await readFile(config, "utf8")).trim()).toBe('[ui]\nlanguage = "zh-CN"');
+      expect(runtime.messenger.pid).toBe(pid);
+      expect((await runtime.messenger.request({ type: "set_ui_language", language: "en" })).success).toBe(true);
+      // Missing files are now created; genuinely damaged files must still fail without
+      // replacing their bytes or changing the effective language.
+      const corrupt = "ui = [ broken";
+      await writeFile(config, corrupt);
       const failed = await runtime.messenger.request({ type: "set_ui_language", language: "zh-CN" });
       expect(failed.success).toBe(false);
-      expect(failed.error).toContain("Configuration file not found");
+      expect(await readFile(config, "utf8")).toBe(corrupt);
       await rename(`${config}.held`, config);
       const after = await runtime.messenger.request({ type: "list_sessions", scope: "disk" });
       expect(after.payload).toEqual(before.payload);

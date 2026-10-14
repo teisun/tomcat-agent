@@ -2360,9 +2360,7 @@ export async function assertWebviewBootstrapDegradedFlow(
   const degraded = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.html.includes(
-        "Connected, but initialization failed. Choose Retry in the notification.",
-      )
+      snapshot.html.includes(en["chat.degraded"]) && snapshot.html.includes('data-testid="retry-connection"')
         ? snapshot
         : undefined,
     20_000,
@@ -2371,42 +2369,11 @@ export async function assertWebviewBootstrapDegradedFlow(
     !degraded.html.includes("tc-conn-light--connected"),
     "a degraded bootstrap must not leave the connection indicator green",
   );
-  const failurePrompt = await waitForWebviewState(
-    api,
-    () => {
-      const prompt = api.__testing
-        .getPromptHistory()
-        .find((entry) => entry.message.includes(en["host.failure.bootstrap"]));
-      return prompt?.actions.includes("Retry") && prompt.actions.includes("View Logs")
-        ? prompt
-        : undefined;
-    },
-    20_000,
+  assert.ok(
+    !api.__testing.getPromptHistory().some((entry) => entry.message.includes(en["host.failure.bootstrap"])),
+    "a visible panel reports the bootstrap failure inline instead of notifying",
   );
-  assert.equal(failurePrompt.severity, "warning");
-}
-
-export async function assertWebviewBootstrapRetryRecoveryFlow(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  await api.__testing.focusWebview();
-  await api.__testing.waitForWebviewReady();
-  await waitForWebviewState(
-    api,
-    (state) => state.connectionStatus === "ready" ? state : undefined,
-    20_000,
-  );
-  const prompt = await waitForWebviewState(
-    api,
-    () => {
-      const record = api.__testing
-        .getPromptHistory()
-        .find((entry) => entry.message.includes(en["host.failure.bootstrap"]));
-      return record?.actions.includes("Retry") ? record : undefined;
-    },
-    20_000,
-  );
-  assert.equal(prompt.severity, "warning");
+  await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "retry-connection" });
   const recovered = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
@@ -2414,8 +2381,8 @@ export async function assertWebviewBootstrapRetryRecoveryFlow(
     20_000,
   );
   assert.ok(
-    !recovered.html.includes("Connected, but initialization failed."),
-    "successful Retry must replace the degraded banner",
+    !recovered.html.includes(en["chat.degraded"]),
+    "successful Retry must replace the degraded state",
   );
 }
 

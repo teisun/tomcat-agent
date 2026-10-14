@@ -333,6 +333,7 @@ function formatVersionLabel(version: string | null | undefined): string {
 }
 
 function buildServeVersionWarning(state: SettingsStateSnapshot, t: Translator): string | null {
+  if (!state.ready) return null;
   const expected = fieldText(state.expectedCliVersion);
   const server = fieldText(state.serverVersion);
   if (!server) {
@@ -501,11 +502,10 @@ type SettingsIntentPayload = SettingsIntent extends infer Intent
 function send(
   vscodeApi: VsCodeApiLike<SettingsIntent>,
   message: SettingsIntentPayload,
-): void {
-  vscodeApi.postMessage({
-    ...message,
-    messageId: `${message.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-  } as SettingsIntent);
+): string {
+  const messageId = `${message.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  vscodeApi.postMessage({ ...message, messageId } as SettingsIntent);
+  return messageId;
 }
 
 export function SettingsApp({
@@ -531,6 +531,9 @@ export function SettingsApp({
   const [dialogKind, setDialogKind] = useState<DialogKind>("official");
   const [form, setForm] = useState<FormState>(() => createEmptyForm());
   const [draftApiKey, setDraftApiKey] = useState("");
+  const [setAsDefault, setSetAsDefault] = useState(false);
+  const [lastSaveId, setLastSaveId] = useState<string | null>(null);
+  const saving = lastSaveId !== null && state.modelSaveReceipt?.requestId !== lastSaveId;
   const [isApiKeyFocused, setIsApiKeyFocused] = useState(false);
   const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>(
     {},
@@ -619,6 +622,12 @@ export function SettingsApp({
     }
   }, [deletingModelId, state.modelRemovalReceipt]);
 
+  useEffect(() => {
+    if (lastSaveId && state.modelSaveReceipt?.requestId === lastSaveId && state.modelSaveReceipt.success) {
+      closeForm();
+    }
+  }, [lastSaveId, state.modelSaveReceipt]);
+
   const providerPresets = useMemo(
     () => buildProviderPresets(state.models),
     [state.models],
@@ -673,6 +682,12 @@ export function SettingsApp({
     () => state.models.filter((model) => !model.keyPresent),
     [state.models],
   );
+  const canSetDefault = state.capabilities.setDefaultModel === true;
+  const defaultModelReady = readyModels.some((model) => model.id === state.defaultModelId);
+  const defaultChip = (model: SettingsModelView) =>
+    canSetDefault && model.id === state.defaultModelId ? (
+      <span className="tc-chip" data-testid={`settings-default-${model.id}`}>{t("models.default")}</span>
+    ) : null;
   const selectedModel = useMemo(
     () => state.models.find((model) => model.id === selectedModelId) ?? null,
     [selectedModelId, state.models],
@@ -844,6 +859,8 @@ export function SettingsApp({
     dialogKind === "relay" || selectedPreset !== null;
 
   function resetForm() {
+    setLastSaveId(null);
+    setSetAsDefault(!defaultModelReady);
     const nextDialogKind = defaultDialogKindForPresets(providerPresets);
     setDialogKind(nextDialogKind);
     setDraftApiKey("");
@@ -866,7 +883,7 @@ export function SettingsApp({
   }
 
   function closeForm() {
-    if (deletingModelId) {
+    if (deletingModelId || saving) {
       return;
     }
     setIsFormOpen(false);
@@ -881,6 +898,8 @@ export function SettingsApp({
   }
 
   function openEditForm(model: SettingsModelView) {
+    setLastSaveId(null);
+    setSetAsDefault(false);
     const inferred = inferDialogKind(model, providerPresets);
     const preset =
       inferred.dialogKind === "official"
@@ -1043,8 +1062,10 @@ export function SettingsApp({
   }
 
   function submitModelSave() {
-    send(vscodeApi, {
+    if (saving) return;
+    const requestId = send(vscodeApi, {
       data: {
+        ...(state.capabilities.setDefaultModel && setAsDefault ? { setAsDefault: true } : {}),
         model: effectiveModel,
         providerKey:
           draftApiKey.trim() && effectiveApiKeyEnv
@@ -1056,7 +1077,7 @@ export function SettingsApp({
       },
       type: "upsertModel",
     });
-    closeForm();
+    setLastSaveId(requestId);
   }
 
   function handleSave() {
@@ -1228,7 +1249,9 @@ export function SettingsApp({
         ))}
         {state.status ? <div className="tc-banner">{state.status}</div> : null}
 
-        {!state.capabilities.listModels ? (
+        {!state.ready ? (
+          <section className="tc-empty-state"><p>{t("settings.waitingForConnection")}</p></section>
+        ) : !state.capabilities.listModels ? (
           <section className="tc-empty-state">
             <h2>{t("models.unavailable")}</h2>
             <p>{t("models.unavailableHint")}</p>
@@ -1254,8 +1277,19 @@ export function SettingsApp({
                             role="img"
                           />
                           <strong>{model.id}</strong>
+                          {defaultChip(model)}
                         </div>
                         <div className="tc-settings-model__actions">
+                          {canSetDefault && model.id !== state.defaultModelId ? (
+                            <button
+                              className="tc-button tc-button--secondary"
+                              data-testid={`settings-make-default-${model.id}`}
+                              onClick={() => send(vscodeApi, { data: { modelId: model.id }, type: "setDefaultModel" })}
+                              type="button"
+                            >
+                              {t("models.makeDefault")}
+                            </button>
+                          ) : null}
                           <div className="tc-settings-model__tooltip-anchor">
                             <button
                               aria-label={t("models.details", { name: model.id })}
@@ -1319,6 +1353,7 @@ export function SettingsApp({
                             role="img"
                           />
                           <strong>{model.id}</strong>
+                          {defaultChip(model)}
                         </div>
                         <div className="tc-settings-model__actions">
                           <div className="tc-settings-model__tooltip-anchor">
@@ -1437,7 +1472,7 @@ export function SettingsApp({
                 </div>
               ) : null}
 
-              <div className="tc-settings-form">
+              <fieldset className="tc-settings-form" disabled={saving}>
                 <div
                   aria-label={t("models.mode")}
                   className="tc-settings-tabs"
@@ -1572,6 +1607,7 @@ export function SettingsApp({
                             baseUrl: event.target.value,
                           }))
                         }
+                        data-testid="settings-model-base-url"
                         placeholder="https://api.chatanywhere.tech/v1"
                         value={form.baseUrl ?? ""}
                       />
@@ -1610,6 +1646,7 @@ export function SettingsApp({
                               modelName: event.target.value,
                             }))
                           }
+                          data-testid="settings-model-name"
                           placeholder={t("models.example", { name: "gpt-5.4" })}
                           value={form.modelName ?? ""}
                         />
@@ -1655,6 +1692,7 @@ export function SettingsApp({
                 <label className="tc-field">
                   <span>{t("models.alias")}</span>
                   <input
+                    data-testid="settings-model-alias"
                     aria-label={t("models.alias")}
                     className={`tc-input${formMode === "edit" ? " tc-input--readonly" : ""}`}
                     onChange={(event) => {
@@ -1958,6 +1996,21 @@ export function SettingsApp({
                   </>
                 ) : null}
 
+                {canSetDefault && formMode === "create" ? (
+                  <label className="tc-settings-capabilities__item">
+                    <input type="checkbox" data-testid="settings-set-default-model" checked={setAsDefault}
+                      onChange={(event) => setSetAsDefault(event.target.checked)} />
+                    <span>{t("models.setAsDefault")}</span>
+                  </label>
+                ) : null}
+                {lastSaveId && state.modelSaveReceipt?.requestId === lastSaveId ? (
+                  <div role="status">
+                    {state.status ? <p>{state.status}</p> : null}
+                    {state.error ? <p className="tc-banner tc-banner--warning">{state.error}</p> : null}
+                    {state.warnings?.map((warning) => <p key={warning}>{warning}</p>)}
+                  </div>
+                ) : null}
+
                 <div className="tc-button-row tc-settings-form__actions">
                   <button
                     className="tc-button tc-button--ghost"
@@ -1992,7 +2045,7 @@ export function SettingsApp({
                     {saveDisabledReason}
                   </div>
                 ) : null}
-              </div>
+              </fieldset>
             </section>
           </div>
         ) : null}

@@ -358,6 +358,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  modelReady?: boolean;
   messageQueue?: import("../../src/ui/webview/protocol").WebviewMessageQueue;
   sessionFiles?: SessionFilesView;
   instructionCatalog?: import("../../src/serveClient/wire").InstructionCard[];
@@ -433,6 +434,7 @@ export interface WebviewStateSnapshot {
   availableModels: string[];
   buildModel?: string;
   connectionStatus?: WebviewConnectionStatus;
+  connectionFailure?: import("../../src/ui/webview/protocol").WebviewStateSnapshot["connectionFailure"];
   mediaRoots?: WebviewMediaRoot[];
   modelAdminSupported: boolean;
   slashCommands?: SharedSlashCommand[];
@@ -552,6 +554,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "retryConnection" | "viewConnectionLogs" }>
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
   | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
   | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "queueAction" }>

@@ -145,6 +145,7 @@ export function reconcileSessionSnapshot(
     previous.hasMoreHistory === next.hasMoreHistory &&
     previous.historyLoading === next.historyLoading &&
     previous.model === next.model &&
+    previous.modelReady === next.modelReady &&
     previous.thinkingLevel === next.thinkingLevel &&
     previous.ownedByThisFrontend === next.ownedByThisFrontend &&
     previous.sessionId === next.sessionId &&
@@ -220,6 +221,7 @@ export function reconcileStateSnapshot(
     previous.availableModelReasoningLevels === availableModelReasoningLevels &&
     previous.buildModel === next.buildModel &&
     previous.connectionStatus === next.connectionStatus &&
+    deepEqual(previous.connectionFailure, next.connectionFailure) &&
     previous.mediaRoots === mediaRoots &&
     previous.modelAdminSupported === next.modelAdminSupported &&
     previous.sessionFilesSupported === next.sessionFilesSupported &&

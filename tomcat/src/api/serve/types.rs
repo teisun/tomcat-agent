@@ -215,6 +215,8 @@ pub struct GetMessagesParams {
 #[serde(rename_all = "camelCase")]
 pub struct ListModelsPayload {
     pub models: Vec<ModelView>,
+    /// Effective default after the config file and environment are merged; empty when unset.
+    pub default_model_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -536,6 +538,12 @@ pub enum ServeCommand {
     },
     #[serde(rename_all = "camelCase")]
     RemoveModel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        model_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetDefaultModel {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         model_id: String,
@@ -897,6 +905,7 @@ impl ServeCommand {
             | Self::UpsertModel { id, .. }
             | Self::RemoveModel { id, .. }
             | Self::SetProviderKey { id, .. }
+            | Self::SetDefaultModel { id, .. }
             | Self::ListProviderKeys { id, .. }
             | Self::GetProjectTrust { id, .. }
             | Self::TrustProject { id, .. }
@@ -969,6 +978,7 @@ impl ServeCommand {
             | Self::UpsertModel { .. }
             | Self::RemoveModel { .. }
             | Self::SetProviderKey { .. }
+            | Self::SetDefaultModel { .. }
             | Self::ListProviderKeys { .. }
             | Self::GetProjectTrust { .. }
             | Self::TrustProject { .. }
@@ -1033,6 +1043,7 @@ impl ServeCommand {
             Self::UpsertModel { .. } => "upsert_model",
             Self::RemoveModel { .. } => "remove_model",
             Self::SetProviderKey { .. } => "set_provider_key",
+            Self::SetDefaultModel { .. } => "set_default_model",
             Self::ListProviderKeys { .. } => "list_provider_keys",
             Self::GetProjectTrust { .. } => "get_project_trust",
             Self::TrustProject { .. } => "trust_project",

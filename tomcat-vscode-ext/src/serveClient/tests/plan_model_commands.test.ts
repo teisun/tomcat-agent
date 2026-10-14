@@ -166,6 +166,22 @@ describe("TomcatMessenger plan/model wrappers", () => {
     );
     await expect(pendingListKeys).resolves.toMatchObject({ success: true });
 
+    const pendingDefault = messenger.sendSetDefaultModel("claude-opus-gateway");
+    const setDefault = readSingleCommandLine(child);
+    expect(setDefault).toMatchObject({
+      modelId: "claude-opus-gateway",
+      type: "set_default_model",
+    });
+    child.emitStdout(
+      `${JSON.stringify({
+        id: setDefault.id,
+        payload: { modelId: "claude-opus-gateway", envOverride: false, warnings: [] },
+        success: true,
+        type: "response",
+      })}\n`,
+    );
+    await expect(pendingDefault).resolves.toMatchObject({ success: true, payload: { envOverride: false } });
+
     const pendingRemove = messenger.sendRemoveModel("claude-opus-gateway");
     const remove = readSingleCommandLine(child);
     expect(remove).toMatchObject({

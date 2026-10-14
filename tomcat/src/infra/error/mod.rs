@@ -48,6 +48,9 @@ pub enum AppError {
     /// 配置加载、解析或合法性校验失败。
     #[error("{prefix}: {0}", prefix = crate::infra::i18n::tr("error.prefix.config", &[]))]
     Config(String),
+    /// Model selection is unavailable, rather than a corrupt configuration or an I/O failure.
+    #[error("{message}")]
+    ModelUnavailable { model_id: String, message: String },
     /// 权限校验失败，如路径不在白名单或命令被禁止。
     #[error("{prefix}: {0}", prefix = crate::infra::i18n::tr("error.prefix.permission", &[]))]
     Permission(String),

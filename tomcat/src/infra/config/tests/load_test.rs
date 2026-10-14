@@ -13,6 +13,59 @@ use serial_test::serial;
 use std::io::Write;
 
 #[test]
+fn current_model_selection_reads_latest_values_without_mutating_environment_or_runtime_policy() {
+    // Startup config reads in other tests sanitize process-wide sensitive variables.
+    // A separate process tests the no-mutation contract without racing those readers.
+    const CHILD: &str = "TOMCAT_TEST_MODEL_SELECTION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "infra::config::tests::load_test::current_model_selection_reads_latest_values_without_mutating_environment_or_runtime_policy"])
+            .env_clear()
+            .env("HOME", home.path())
+            .env(CHILD, "1")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[llm]\ndefault_model='disk-model'\nvision_model='vision'\n[context]\ncompaction_model='summary'\n[storage]\nwork_dir='/do-not-adopt'\n").unwrap();
+    let base = AppConfig::default();
+    let old_model = std::env::var_os("TOMCAT__LLM__DEFAULT_MODEL");
+    let old_sensitive = std::env::var_os("TOMCAT__SECURITY__ENABLE_AUDIT_LOG");
+    std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", "env-model");
+    std::env::set_var("TOMCAT__SECURITY__ENABLE_AUDIT_LOG", "false");
+    let result = load_model_selection_config(&path, &base);
+    let retained = std::env::var("TOMCAT__SECURITY__ENABLE_AUDIT_LOG");
+    for (name, previous) in [
+        ("TOMCAT__LLM__DEFAULT_MODEL", old_model),
+        ("TOMCAT__SECURITY__ENABLE_AUDIT_LOG", old_sensitive),
+    ] {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    let current = result.unwrap();
+    assert_eq!(current.llm.default_model, "env-model");
+    assert_eq!(current.llm.vision_model.as_deref(), Some("vision"));
+    assert_eq!(current.context.compaction_model, "summary");
+    assert_eq!(current.storage.work_dir, base.storage.work_dir);
+    assert_eq!(
+        current.security.enable_audit_log,
+        base.security.enable_audit_log
+    );
+    assert_eq!(retained.unwrap(), "false");
+}
+
+#[test]
 #[serial(env_lock)]
 fn mcp_example_defaults_and_explicit_sixty_second_start_are_loadable() {
     let example = std::fs::read_to_string(

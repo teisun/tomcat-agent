@@ -42,6 +42,7 @@ import {
 } from "./serveClient/initialize";
 import {
   ServeConnectionSupervisor,
+  summarizeServeFailure,
   type ServeConnectionFailure,
 } from "./serveClient/ServeConnectionSupervisor";
 import {
@@ -93,14 +94,10 @@ export type { WebviewIntent } from "./ui/webview/protocol";
 
 let disposeRuntime: (() => Promise<void>) | undefined;
 const execFileAsync = promisify(execFile);
-const SETUP_TERMINAL_NAME = "Tomcat Setup";
-const START_SETUP_ACTION: MessageKey = "host.action.startSetup";
-const RETRY_SETUP_ACTION: MessageKey = "host.action.finishSetup";
 const RETRY_CONNECTION_ACTION: MessageKey = "host.action.retry";
 const OPEN_GUIDE_ACTION: MessageKey = "host.action.guide";
 const VIEW_LOGS_ACTION: MessageKey = "host.action.logs";
 const OPEN_SETTINGS_ACTION: MessageKey = "host.action.settings";
-const OPEN_TERMINAL_ACTION: MessageKey = "host.action.terminal";
 
 type PromptRecord = {
   actions: string[];
@@ -231,6 +228,7 @@ export interface TomcatExtensionApi {
     >;
     getPromptHistory(): PromptRecord[];
     getResolvedExecutable(): ResolvedTomcatExecutable;
+    getServeProcessId(): number | undefined;
     getLastContextSearchIntent(): Extract<
       WebviewIntent,
       { type: "searchContext" }
@@ -502,20 +500,6 @@ function bundledExecutableCandidate(extensionPath: string): string {
   return path.join(extensionPath, "bin", bundledExecutableName());
 }
 
-function quoteForTerminal(command: string): string {
-  if (process.platform === "win32") {
-    return `"${command.replace(/"/g, '""')}"`;
-  }
-  return `'${command.replace(/'/g, `'\\''`)}'`;
-}
-
-function buildInitCommand(executable: string): string {
-  if (executable.includes(path.sep) || executable.includes("\\")) {
-    return `${quoteForTerminal(executable)} init`;
-  }
-  return `${executable} init`;
-}
-
 async function clearMacQuarantine(targetPath: string): Promise<void> {
   if (process.platform !== "darwin") {
     return;
@@ -662,9 +646,8 @@ export async function activate(
   const sessionRouter = new SessionRouter(messenger, getDefaultCwd);
 
   let webviewProvider!: TomcatWebviewViewProvider;
-  let firstRunSetupInProgress = false;
   let hasEstablishedConnection = false;
-  let setupTerminal: vscode.Terminal | undefined;
+  let hasFailedConnection = false;
   let supervisor!: ServeConnectionSupervisor;
   let warnedExecutable: string | undefined;
 
@@ -673,59 +656,6 @@ export async function activate(
       "workbench.action.openSettings",
       `${TOMCAT_CONFIG_SECTION}.path`,
     );
-  };
-
-  const ensureSetupTerminal = (): vscode.Terminal => {
-    if (!setupTerminal || setupTerminal.exitStatus) {
-      setupTerminal = vscode.window.createTerminal({
-        cwd: getDefaultCwd(),
-        name: SETUP_TERMINAL_NAME,
-      });
-    }
-    return setupTerminal;
-  };
-
-  const maybeShowSetupRecoveryMessage = async (
-    message: string,
-    severity: "info" | "warning" = "info",
-  ): Promise<void> => {
-    const selection =
-      severity === "warning"
-        ? await showPromptMessage(promptHistory, "warning", message, [
-            RETRY_SETUP_ACTION,
-            OPEN_TERMINAL_ACTION,
-            OPEN_GUIDE_ACTION,
-          ])
-        : await showPromptMessage(promptHistory, "info", message, [
-            RETRY_SETUP_ACTION,
-            OPEN_TERMINAL_ACTION,
-            OPEN_GUIDE_ACTION,
-          ]);
-
-    if (selection === RETRY_SETUP_ACTION) {
-      try {
-        const result = await supervisor.reconnect();
-        stopFirstRunSetup();
-        await showInformationMessage(
-          promptHistory,
-          t("host.setupComplete", { id: result.sessionId ?? "n/a" }),
-        );
-      } catch {
-        // The supervisor owns bounded retry and shows one evidence-based terminal prompt.
-      }
-      return;
-    }
-    if (selection === OPEN_TERMINAL_ACTION) {
-      ensureSetupTerminal().show(true);
-      return;
-    }
-    if (selection === OPEN_GUIDE_ACTION) {
-      void openExtensionGuide(context);
-    }
-  };
-
-  const stopFirstRunSetup = (): void => {
-    firstRunSetupInProgress = false;
   };
 
   const maybeShowExecutableWarning = async (): Promise<void> => {
@@ -753,31 +683,6 @@ export async function activate(
     }
   };
 
-  const startFirstRunSetup = async (): Promise<void> => {
-    firstRunSetupInProgress = true;
-    const terminal = ensureSetupTerminal();
-    const initCommand = buildInitCommand(resolvedExecutable.executable);
-    terminal.show(true);
-    terminal.sendText(initCommand, true);
-    appendOutput(output, "info", `started first-run setup: ${initCommand}`);
-    void supervisor.reconnect("setup").then(
-      async (result) => {
-        if (!firstRunSetupInProgress) {
-          return;
-        }
-        stopFirstRunSetup();
-        await showInformationMessage(
-          promptHistory,
-          t("host.setupComplete", { id: result.sessionId ?? "n/a" }),
-        );
-      },
-      () => undefined,
-    );
-    await maybeShowSetupRecoveryMessage(
-      t("host.setupRunning"),
-    );
-  };
-
   const showConnectionFailure = async (
     failure: ServeConnectionFailure | BootstrapFailure,
   ): Promise<void> => {
@@ -785,42 +690,22 @@ export async function activate(
       await maybeShowExecutableWarning();
       return;
     }
-    const handshakeTimedOut = failure.kind === "handshake_timeout";
+    // A visible chat panel already shows the failure with the same actions.
+    if (webviewProvider?.isViewVisible()) return;
     const bootstrapFailed = failure.kind === "bootstrap";
-    const detail = (failure.stderr || failure.error.message).trim().slice(-1_500);
+    const title = bootstrapFailed
+      ? t("host.failure.bootstrap")
+      : failure.kind === "handshake_timeout"
+      ? t("host.failure.timeout")
+      : t("host.failure.start");
+    const detail = summarizeServeFailure(failure);
     const selection = await showPromptMessage(
       promptHistory,
       "warning",
-      [
-        bootstrapFailed
-          ? t("host.failure.bootstrap")
-          : handshakeTimedOut
-          ? t("host.failure.timeout")
-          : t("host.failure.start"),
-        detail ? t("host.failure.detail", { detail }) : undefined,
-        bootstrapFailed
-          ? t("host.failure.bootstrapHint")
-          : handshakeTimedOut
-          ? t("host.failure.timeoutHint")
-          : t("host.failure.startHint"),
-      ].filter((line): line is string => !!line).join("\n\n"),
-      bootstrapFailed || handshakeTimedOut
-        ? [RETRY_CONNECTION_ACTION, VIEW_LOGS_ACTION]
-        : [
-          START_SETUP_ACTION,
-          OPEN_SETTINGS_ACTION,
-          OPEN_GUIDE_ACTION,
-          RETRY_CONNECTION_ACTION,
-          VIEW_LOGS_ACTION,
-        ],
+      detail ? t("host.failure.detail", { title, detail }) : title,
+      [RETRY_CONNECTION_ACTION, VIEW_LOGS_ACTION],
     );
-    if (selection === START_SETUP_ACTION) {
-      await startFirstRunSetup();
-    } else if (selection === OPEN_SETTINGS_ACTION) {
-      await openTomcatPathSettings();
-    } else if (selection === OPEN_GUIDE_ACTION) {
-      await openExtensionGuide(context);
-    } else if (selection === RETRY_CONNECTION_ACTION) {
+    if (selection === RETRY_CONNECTION_ACTION) {
       if (bootstrapFailed) {
         void webviewProvider.retryBootstrap().catch(() => undefined);
       } else {
@@ -881,18 +766,18 @@ export async function activate(
       sessionRouter.clearBootstrapSessionId();
     }
     if (webviewProvider) {
-      void webviewProvider.setServeConnectionState(state.status);
+      void webviewProvider.setServeConnectionState(state.status, state.failure ? {
+        kind: state.failure.kind,
+        detail: summarizeServeFailure(state.failure),
+      } : undefined);
     }
     if (state.phase === "ready" && state.result) {
       if (state.result.uiPreferences) setLocale(state.result.uiPreferences.effective);
       if (state.result.sessionId) {
         sessionRouter.setBootstrapSessionId(state.result.sessionId);
       }
-      const reconnected = hasEstablishedConnection;
+      const reconnected = hasEstablishedConnection || hasFailedConnection;
       hasEstablishedConnection = true;
-      if (firstRunSetupInProgress) {
-        stopFirstRunSetup();
-      }
       void projectTrustPrompt.onServeReady(state.result);
       if (reconnected && webviewProvider) {
         void webviewProvider.refreshAfterServeRestart();
@@ -900,19 +785,13 @@ export async function activate(
       return;
     }
     if (state.phase === "fatal" && state.failure) {
+      hasFailedConnection = true;
       appendOutput(
         output,
         "error",
         `serve connection failed: ${state.failure.error.message}`,
       );
-      if (firstRunSetupInProgress) {
-        void maybeShowSetupRecoveryMessage(
-          t("host.setupWaiting"),
-          "warning",
-        );
-      } else {
-        void showConnectionFailure(state.failure);
-      }
+      void showConnectionFailure(state.failure);
     }
   });
 
@@ -963,6 +842,8 @@ export async function activate(
       await vscode.env.openExternal(vscode.Uri.parse(href));
     },
     openSettings: (route) => settingsPanel.reveal(route ?? "general"),
+    reconnectServe: async () => { await supervisor.reconnect(); },
+    showConnectionLogs: () => output.show(true),
     refreshPlanPreview: (planId, path, state) =>
       planPreviewProvider.refreshFromServeEvent(planId, path, state),
     sessionRouter,
@@ -1397,14 +1278,12 @@ export async function activate(
         if (selectionCodeLensTimer) {
           clearTimeout(selectionCodeLensTimer);
         }
-        setupTerminal?.dispose();
       },
     },
   );
   scheduleSelectionCodeLensRefresh();
 
   disposeRuntime = () => {
-    setupTerminal?.dispose();
     askQuestionHandler.dispose();
     confirmationHandler.dispose();
     observedEventSubscription.dispose();
@@ -1477,6 +1356,7 @@ export async function activate(
         webviewProvider.getObservedWebviewErrors(),
       getPromptHistory: () => [...promptHistory],
       getResolvedExecutable: () => resolvedExecutable,
+      getServeProcessId: () => messenger.pid,
       getLastContextSearchIntent: () =>
         webviewProvider.getLastContextSearchIntent(),
       getSettingsPanelState: () => settingsPanel.__testingSnapshot(),

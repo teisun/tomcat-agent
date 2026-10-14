@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import * as path from "node:path";
 import { captureWorkbenchArtifacts } from "./support/workbenchFindDriver";
+import { en } from "../../shared/i18n/en";
 
 import {
   assertPlanPreviewCustomEditorFlow,
@@ -17,7 +18,6 @@ import {
   assertWebviewAnswerCardFlow,
   assertWebviewAddModelsFlow,
   assertWebviewBootstrapDegradedFlow,
-  assertWebviewBootstrapRetryRecoveryFlow,
   assertWebviewDiffFlow,
   assertWebviewCompactDiffFlow,
   assertWebviewEditDisplayReplayFlow,
@@ -88,25 +88,11 @@ suite("Tomcat host E2E", () => {
     const api = await getTomcatExtensionApi();
     await assertInlineUserMessageEditFlow(api);
   });
-  const bootstrapFailureScenario =
-    process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES === "1";
-  const bootstrapRetryScenario =
-    bootstrapFailureScenario &&
-    process.env.TOMCAT_VSCODE_TEST_WARNING_ACTION === "host.action.retry";
-
-  (bootstrapFailureScenario && !bootstrapRetryScenario ? test : test.skip)(
-    "shows the connected-but-degraded bootstrap state",
+  (process.env.TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES === "1" ? test : test.skip)(
+    "shows the connected-but-degraded bootstrap state and recovers after inline Retry",
     async () => {
       const api = await getTomcatExtensionApi();
       await assertWebviewBootstrapDegradedFlow(api);
-    },
-  );
-
-  (bootstrapRetryScenario ? test : test.skip)(
-    "recovers a connected-but-degraded bootstrap after Retry",
-    async () => {
-      const api = await getTomcatExtensionApi();
-      await assertWebviewBootstrapRetryRecoveryFlow(api);
     },
   );
 
@@ -317,7 +303,7 @@ suite("Tomcat host E2E", () => {
     assert.ok(
       !api.__testing
         .getPromptHistory()
-        .some((prompt) => prompt.message.includes("Tomcat could not start after several attempts.")),
+        .some((prompt) => prompt.message.includes(en["host.failure.start"])),
       "a transient startup failure must recover silently instead of suggesting setup",
     );
   });
@@ -337,7 +323,7 @@ suite("Tomcat host E2E", () => {
     assert.ok(
       !api.__testing
         .getPromptHistory()
-        .some((prompt) => prompt.message.includes("Tomcat could not start after several attempts.")),
+        .some((prompt) => prompt.message.includes(en["host.failure.start"])),
       "a slow but healthy handshake must not be treated as a startup crash",
     );
   });

@@ -120,6 +120,74 @@ function getPasswordInput(scope: HTMLElement): HTMLInputElement {
 }
 
 describe("SettingsApp", () => {
+  it("does not diagnose an old CLI before connecting and displays the local extension version", async () => {
+    mount();
+    await emitState(readyState({ ready: false, extensionVersion: "0.1.89", serverVersion: null, expectedCliVersion: "0.1.73", error: "broken config" }));
+    expect(screen.getByTestId("settings-version-footer").textContent).toContain("0.1.89");
+    expect(screen.getByTestId("settings-version-footer").textContent).toContain(translate("en", "settings.waitingForConnection"));
+    expect(screen.queryByText(translate("en", "models.versionMissing"))).toBeNull();
+    expect(screen.queryByText(translate("en", "models.unavailableHint"))).toBeNull();
+    expect(screen.getByText("broken config")).toBeTruthy();
+  });
+
+  it.each([
+    { mode: "default missing its key", keyPresent: false, defaultModelId: "gpt-5.4", checked: true },
+    { mode: "default unset", keyPresent: true, defaultModelId: "", checked: true },
+    { mode: "default ready", keyPresent: true, defaultModelId: "gpt-5.4", checked: false },
+    { mode: "legacy CLI", keyPresent: false, defaultModelId: undefined, checked: false },
+  ])("pre-checks Set default when adding with $mode and retains drafts on a failed save", async ({ mode, keyPresent, defaultModelId, checked }) => {
+    const { postMessage } = mount();
+    const legacy = mode === "legacy CLI";
+    const initial = readyState({ models: [builtinModel({ keyPresent })], defaultModelId,
+      capabilities: { ...readyState().capabilities, setDefaultModel: !legacy },
+    });
+    await emitState(initial);
+    const dialog = openAddModelDialog();
+    const checkbox = within(dialog).queryByRole("checkbox", { name: translate("en", "models.setAsDefault") }) as HTMLInputElement | null;
+    if (legacy) expect(checkbox).toBeNull();
+    else expect(checkbox?.checked).toBe(checked);
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), { target: { value: "draft-model" } });
+    fireEvent.change(getPasswordInput(dialog), { target: { value: "fixture-secret" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    const request = postMessage.mock.calls.at(-1)![0];
+    expect(request.data.setAsDefault === true).toBe(checked);
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    await emitState({ ...initial, error: "default denied", modelSaveReceipt: { requestId: request.messageId, success: false } });
+    expect(getPasswordInput(dialog).value).toBe("fixture-secret");
+    expect(within(dialog).getByRole("textbox", { name: /model name/i })).toHaveProperty("value", "draft-model");
+    expect(within(dialog).getByRole("status").textContent).toContain("default denied");
+    // A successful acknowledgement, rather than clicking Save, closes the form.
+    await emitState({ ...initial, modelSaveReceipt: { requestId: request.messageId, success: true } });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("marks the default in either group, offers Set default only on other ready rows, and omits the checkbox when editing", async () => {
+    const { postMessage } = mount();
+    const deepseek = builtinModel({ id: "deepseek-v4-pro", modelName: "deepseek-v4-pro", provider: "deepseek", apiKeyEnv: "DEEPSEEK_API_KEY", keyPresent: true });
+    const state = readyState({ capabilities: { ...readyState().capabilities, setDefaultModel: true }, defaultModelId: "gpt-5.4",
+      models: [builtinModel(), builtinModel({ id: "gpt-5.2", modelName: "gpt-5.2" }), deepseek] });
+    await emitState(state);
+    expect(screen.getByTestId("settings-default-gpt-5.4").textContent).toBe(translate("en", "models.default"));
+    expect(screen.queryAllByTestId(/^settings-default-/u)).toHaveLength(1);
+    expect(screen.queryAllByTestId(/^settings-make-default-/u).map((button) => button.dataset.testid)).toEqual(["settings-make-default-deepseek-v4-pro"]);
+    fireEvent.click(screen.getByTestId("settings-make-default-deepseek-v4-pro"));
+    expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: "setDefaultModel", data: { modelId: "deepseek-v4-pro" } }));
+    expect(postMessage.mock.calls.some(([message]) => message.type === "upsertModel")).toBe(false);
+
+    await emitState({ ...state, defaultModelId: "deepseek-v4-pro" });
+    expect(screen.getByTestId("settings-default-deepseek-v4-pro")).toBeTruthy();
+    expect(screen.queryAllByTestId(/^settings-make-default-/u)).toHaveLength(0);
+    fireEvent.click(screen.getByTestId("settings-edit-deepseek-v4-pro"));
+    expect(within(screen.getByRole("dialog")).queryByRole("checkbox", { name: translate("en", "models.setAsDefault") })).toBeNull();
+  });
+
+  it("shows no default controls for a CLI without set_default_model", async () => {
+    mount();
+    await emitState(readyState({ defaultModelId: "gpt-5.4", models: [builtinModel({ keyPresent: true })] }));
+    expect(screen.queryByTestId("settings-default-gpt-5.4")).toBeNull();
+    expect(screen.queryByTestId("settings-make-default-gpt-5.4")).toBeNull();
+  });
+
   it("changes model labels and validation without replacing or exposing the unsaved key", async () => {
     const api = { postMessage: vi.fn() };
     const view = render(<LocaleProvider locale="en"><SettingsApp vscodeApi={api} /></LocaleProvider>);
@@ -1026,7 +1094,8 @@ describe("SettingsApp", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "upsertModel", data: expect.objectContaining({ model: expect.objectContaining({ supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"] }) }) }));
     const savedModel = { ...model, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"] as const };
-    await emitState(readyState({ ...initial, models: [{ ...savedModel, supportedSpeeds: [...savedModel.supportedSpeeds] }] }));
+    await emitState(readyState({ ...initial, models: [{ ...savedModel, supportedSpeeds: [...savedModel.supportedSpeeds] }],
+      modelSaveReceipt: { requestId: postMessage.mock.calls.at(-1)![0].messageId, success: true } }));
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     dialog = screen.getByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));

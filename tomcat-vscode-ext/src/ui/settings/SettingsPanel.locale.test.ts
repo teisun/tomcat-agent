@@ -13,6 +13,18 @@ function create(ensureInitialized = async () => init()) {
 afterEach(() => setLocale("en"));
 
 describe("Settings language persistence", () => {
+  it("does not mistake a disconnect for a failed language save", async () => {
+    let exit!: () => void;
+    const panel = new SettingsPanel({ ensureInitialized: async () => init(), expectedCliVersion: null, extensionVersion: null,
+      extensionUri: vscode.Uri.file("/tmp/locale-test"), messenger: { onExit: (listener: () => void) => { exit = listener; return { dispose() {} }; } } as never });
+    try {
+      await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-exit", data: { route: "general" } });
+      exit();
+      expect(panel.__testingSnapshot().state.ready).toBe(false);
+      expect(panel.__testingSnapshot().state.languageStatus).toBeUndefined();
+    } finally { panel.dispose(); }
+  });
+
   it("loads General independently of model capability and broadcasts only acknowledged changes", async () => {
     const { panel, request } = create();
     const changed = vi.fn();

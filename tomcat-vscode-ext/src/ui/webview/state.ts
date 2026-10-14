@@ -2694,7 +2694,9 @@ export class WebviewStateStore {
     this.state.connectionStatus = ready ? "ready" : "connecting";
   }
 
-  setConnectionStatus(status: WebviewConnectionStatus): void {
+  setConnectionStatus(status: WebviewConnectionStatus, failure: WebviewStateSnapshot["connectionFailure"] =
+    status === this.state.connectionStatus ? this.state.connectionFailure : undefined): void {
+    this.state.connectionFailure = failure;
     this.state.connectionStatus = status;
     this.state.ready = status === "ready";
   }
@@ -2802,6 +2804,7 @@ export class WebviewStateStore {
       this.syncTabBusy(payload.sessionId, nextBusy);
     }
     session.model = payload.model ?? null;
+    session.modelReady = payload.modelReady;
     session.thinkingLevel = payload.thinkingLevel ?? null;
     session.agentMode = payload.agentMode ?? "chat";
     session.planTodos = payload.planTodos ?? session.planTodos;

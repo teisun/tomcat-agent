@@ -47,12 +47,11 @@ code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 
 ## 首次设置
 
-如果这是你第一次使用 Tomcat，扩展会引导你完成初始化：
+1. 打开 Tomcat Agent Box，无需运行 `tomcat init`。
+2. 面板提示「配置模型后即可开始对话」时，点击「配置模型」。
+3. 填入 API Key，或添加自己的模型并设为默认；保存后即可对话，无需重启。
 
-1. 打开 Tomcat Agent Box。
-2. 如果 Tomcat 还没有完成初始化，点击 `Start Setup`。
-3. VS Code 会打开集成终端并帮你运行 `tomcat init`。
-4. 完成提示后，如果 Tomcat 没有自动重新连接，就点击 `I've Finished Setup`。
+会话里单独选过的模型、以及 `TOMCAT__LLM__DEFAULT_MODEL` 环境变量，优先于默认模型。
 
 示例首条消息：
 
@@ -184,11 +183,10 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 2. 否则，在终端里运行 `tomcat --version`。
 3. 如果失败了，修复你的 `PATH` 或设置 `tomcat.path`。
 
-如果已经找到了 Tomcat，但仍然无法初始化：
+如果已经找到了 Tomcat，但仍然无法连接：
 
-1. 点击 `Start Setup`。
-2. 在集成终端里完成 `tomcat init`。
-3. 如果 VS Code 没有自动重新连接，就点击 `I've Finished Setup`。
+1. 看聊天面板里的失败原因，或点「查看日志」。
+2. 修复后点「重试」。
 
 如果 Tomcat 在对话过程中退出：
 

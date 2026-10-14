@@ -10,7 +10,7 @@ export async function run(): Promise<void> {
   });
 
   mocha.grep(
-    /uses the expected executable source when the host fixture asks for it|shows the expected onboarding prompt when requested by the host fixture|recovers from a setup-required startup when the test fixture auto-runs init/,
+    /uses the expected executable source when the host fixture asks for it|shows the expected onboarding prompt when requested by the host fixture|recovers inline from a repaired startup failure without running init/,
   );
   mocha.addFile(path.resolve(__dirname, "installed.test.js"));
 

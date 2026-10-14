@@ -42,6 +42,111 @@ fn limit_test_entry(
 }
 
 #[test]
+#[serial(env_lock)]
+fn metadata_and_model_ready_do_not_construct_providers() {
+    clear_managed_credentials_for_test();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "setup-model"
+api = "openai"
+provider = "setup-test"
+api_key_env = "TOMCAT_SETUP_TEST_API_KEY"
+base_url = "http://127.0.0.1:1"
+context_window = 100000
+max_output_tokens = 1000
+"#,
+    )
+    .unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "setup-model".into();
+    cfg.context.compaction_model = "missing-compaction-model".into();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, model_prefs(dir.path()));
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("TOMCAT_SETUP_TEST_API_KEY", value) },
+                None => unsafe { std::env::remove_var("TOMCAT_SETUP_TEST_API_KEY") },
+            }
+        }
+    }
+    let _env = RestoreEnv(std::env::var_os("TOMCAT_SETUP_TEST_API_KEY"));
+    unsafe { std::env::remove_var("TOMCAT_SETUP_TEST_API_KEY") };
+    let model = resolver.resolve_metadata(LlmScene::Main, None).unwrap();
+    assert_eq!(model.catalog_id, "setup-model");
+    assert_eq!(model.limits.input_budget_tokens, 99000);
+    assert!(
+        !resolver.model_ready(None),
+        "a missing key blocks the main model"
+    );
+    assert!(resolver.resolve(LlmScene::Main, None).is_err());
+    unsafe { std::env::set_var("TOMCAT_SETUP_TEST_API_KEY", "only-in-environment") };
+    assert!(resolver.model_ready(None), "an environment key is enough");
+    cfg.llm.default_model = "missing-default".into();
+    resolver.reload_config(cfg.clone());
+    assert!(
+        !resolver.model_ready(None),
+        "a default outside the catalog is not ready"
+    );
+    assert!(
+        resolver.model_ready(Some("setup-model")),
+        "an unavailable compaction model or default does not block a usable session model"
+    );
+    assert_eq!(resolver.selected_model_id(None), "missing-default");
+    assert!(matches!(
+        resolver.resolve_metadata(LlmScene::Main, None),
+        Err(crate::AppError::ModelUnavailable { .. })
+    ));
+    cfg.llm.default_model.clear();
+    resolver.reload_config(cfg);
+    assert!(
+        !resolver.model_ready(None),
+        "a cleared default is not ready"
+    );
+    assert_eq!(resolver.cached_provider_count(), 0);
+}
+
+#[test]
+#[serial(env_lock)]
+fn compaction_falls_back_to_the_session_model_after_compaction_and_default() {
+    clear_managed_credentials_for_test();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.context.compaction_model, "gpt-5.2");
+    assert_eq!(cfg.llm.default_model, "gpt-5.4");
+    let catalog =
+        Arc::new(ModelCatalog::load_from_path(&cfg, dir.path().join("models.toml")).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
+    unsafe {
+        std::env::set_var("DEEPSEEK_API_KEY", "stub");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    assert!(!resolver.model_ready(None));
+    assert!(resolver.model_ready(Some("deepseek-v4-pro")));
+    let compaction = resolver
+        .resolve(LlmScene::Compaction, Some("deepseek-v4-pro"))
+        .expect("compaction falls back to the session model");
+    assert_eq!(compaction.catalog_id, "deepseek-v4-pro");
+
+    unsafe { std::env::set_var("OPENAI_API_KEY", "stub") };
+    let compaction = resolver
+        .resolve(LlmScene::Compaction, Some("deepseek-v4-pro"))
+        .expect("an available compaction model still wins");
+    assert_eq!(compaction.catalog_id, "gpt-5.2");
+
+    unsafe {
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+}
+
+#[test]
 fn effective_limits_use_model_capabilities_and_preserve_the_reserve_floor() {
     let known = EffectiveModelLimits::resolve(
         &limit_test_entry("anthropic-messages", Some(1_000_000), Some(128_000)),
@@ -536,6 +641,7 @@ capabilities = {{ vision = true, files = true, reasoning = true, tools = true }}
         std::env::set_var("ROUTE_TEST_KEY", "stub");
         let a = resolver.resolve(LlmScene::Main, None).unwrap();
         let b = resolver.resolve(LlmScene::Main, Some("route-b")).unwrap();
+        assert_eq!(b.base_url.as_deref(), Some(server.base_url.as_str()));
         assert!(!Arc::ptr_eq(&a.provider_impl, &b.provider_impl));
         let mut image_message = ChatMessage::user("look");
         image_message.content = Some(ChatMessageContent::Parts(vec![serde_json::from_value::<
@@ -554,9 +660,13 @@ capabilities = {{ vision = true, files = true, reasoning = true, tools = true }}
             stream: Some(false),
             ..Default::default()
         };
-        assert!(b.provider_impl.chat(request).await.is_err());
+        let error = b
+            .provider_impl
+            .chat(request)
+            .await
+            .expect_err("fixture request must fail");
         let texts = server.request_texts();
-        assert_eq!(texts.len(), 1, "{api}");
+        assert_eq!(texts.len(), 1, "{api}: {error:?}");
         let body: serde_json::Value =
             serde_json::from_str(texts[0].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["model"], "wire-b", "{api}");

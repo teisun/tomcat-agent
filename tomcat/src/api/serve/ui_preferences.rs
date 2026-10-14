@@ -5,9 +5,8 @@ use crate::infra::config::{ui, UiLanguage};
 use crate::infra::i18n::set_locale;
 use crate::AppError;
 
-pub(super) fn snapshot() -> Result<ui::UiPreferences, AppError> {
-    let path = crate::normalize_path(crate::DEFAULT_CONFIG_PATH)?;
-    ui::preferences(&path, std::env::var("TOMCAT_HOST_LOCALE").ok().as_deref())
+pub(super) fn snapshot(path: &std::path::Path) -> Result<ui::UiPreferences, AppError> {
+    ui::preferences(path, std::env::var("TOMCAT_HOST_LOCALE").ok().as_deref())
 }
 
 pub(super) async fn set_language(
@@ -15,10 +14,10 @@ pub(super) async fn set_language(
     id: Option<String>,
     language: UiLanguage,
 ) -> Result<(), AppError> {
+    let path = state.config_path.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let path = crate::normalize_path(crate::DEFAULT_CONFIG_PATH)?;
         ui::write_language(&path, language)?;
-        let preferences = snapshot()?;
+        let preferences = snapshot(&path)?;
         set_locale(preferences.effective);
         Ok::<_, AppError>(preferences)
     })

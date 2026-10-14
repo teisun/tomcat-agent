@@ -47,14 +47,11 @@ You can also open the Secondary Side Bar yourself and click the Tomcat Agent Box
 
 ## First-time setup
 
-If this is your first time using Tomcat, the extension will guide you through
-setup:
+1. Open Tomcat Agent Box. No `tomcat init` is needed.
+2. When the panel says "Set up a model to start chatting", click **Configure model**.
+3. Enter an API key, or add your own model and set it as default. Once saved, you can chat right away without restarting.
 
-1. Open Tomcat Agent Box.
-2. If Tomcat still needs initialization, click `Start Setup`.
-3. VS Code opens an integrated terminal and runs `tomcat init` for you.
-4. Finish the prompts, then click `I've Finished Setup` if Tomcat does not
-   reconnect automatically.
+A model chosen for a single session, and the `TOMCAT__LLM__DEFAULT_MODEL` environment variable, take precedence over the default model.
 
 Example first message:
 
@@ -204,11 +201,10 @@ If the extension cannot find Tomcat:
 2. Otherwise, run `tomcat --version` in a terminal.
 3. If that fails, fix your `PATH` or set `tomcat.path`.
 
-If Tomcat was found but still cannot initialize:
+If Tomcat was found but cannot connect:
 
-1. Click `Start Setup`.
-2. Complete `tomcat init` in the integrated terminal.
-3. Click `I've Finished Setup` if VS Code does not reconnect on its own.
+1. Read the failure reason in the chat panel, or click **View Logs**.
+2. After fixing it, click **Retry**.
 
 If Tomcat exits during a conversation:
 

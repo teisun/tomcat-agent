@@ -27,7 +27,7 @@ pub(crate) fn reload_context_state(
         .session_runtime
         .session
         .get_session(ctx.session_runtime.session.current_session_key())?;
-    let call = ctx.resolve_call(crate::core::llm::LlmScene::Main, entry.as_ref())?;
+    let call = ctx.resolve_metadata(crate::core::llm::LlmScene::Main, entry.as_ref())?;
     crate::core::session::manager::init_context_state_with_limits(
         &ctx.session_runtime.session,
         &ctx.config.context,
@@ -224,7 +224,7 @@ pub(super) fn make_fallback_context_state(
         .ok()
         .flatten()
         .and_then(|entry| {
-            ctx.resolve_call(crate::core::llm::LlmScene::Main, Some(&entry))
+            ctx.resolve_metadata(crate::core::llm::LlmScene::Main, Some(&entry))
                 .ok()
         })
         .map(|call| call.limits.input_budget_tokens)
@@ -255,7 +255,10 @@ pub(super) fn make_fallback_context_state(
 }
 
 pub(crate) fn is_fatal_error(error: &AppError) -> bool {
-    matches!(error, AppError::Config(_))
+    matches!(
+        error,
+        AppError::Config(_) | AppError::ModelUnavailable { .. }
+    )
 }
 
 pub(crate) fn is_append_message_chain_invariant(error: &AppError) -> bool {
@@ -387,7 +390,7 @@ fn error_phase(error: &AppError) -> Option<String> {
         AppError::Plugin(_) => Some("Plugin".to_string()),
         AppError::Primitive(_) => Some("Primitive".to_string()),
         AppError::Event(_) => Some("Event".to_string()),
-        AppError::Config(_) => Some("Config".to_string()),
+        AppError::Config(_) | AppError::ModelUnavailable { .. } => Some("Config".to_string()),
         AppError::Permission(_) => Some("Permission".to_string()),
         AppError::Tool(_) => Some("Tool".to_string()),
         AppError::Io(_) => Some("Io".to_string()),

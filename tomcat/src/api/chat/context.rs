@@ -248,7 +248,7 @@ impl ChatContext {
             .ok()
             .flatten();
         let budget = self
-            .resolve_call(LlmScene::Main, entry.as_ref())
+            .resolve_metadata(LlmScene::Main, entry.as_ref())
             .map(|call| {
                 crate::infra::config::compute_context_budget_chars_from_tokens(
                     call.limits.input_budget_tokens,
@@ -641,7 +641,6 @@ impl ChatContext {
                 model_catalog.clone(),
                 Arc::clone(&model_prefs),
             ));
-        let _ = llm_resolver.resolve(crate::core::llm::LlmScene::Main, None)?;
 
         let audit_store = AuditStore::open_if_enabled(&config)?.map(Arc::new);
         let audit: Arc<dyn AuditRecorder> = match audit_store.as_ref() {
@@ -1095,9 +1094,9 @@ impl ChatContext {
     }
 
     pub(crate) fn effective_model(&self, entry: Option<&SessionEntry>) -> String {
-        self.resolve_call(LlmScene::Main, entry)
-            .map(|call| call.catalog_id)
-            .unwrap_or_default()
+        self.global_services
+            .llm_resolver
+            .selected_model_id(entry.and_then(|entry| entry.model_override.as_deref()))
     }
 
     pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {
@@ -1110,6 +1109,17 @@ impl ChatContext {
         self.global_services
             .model_catalog
             .resolve_speed(self.global_services.model_prefs.as_ref(), model_id)
+    }
+
+    pub(crate) fn resolve_metadata(
+        &self,
+        scene: LlmScene,
+        entry: Option<&SessionEntry>,
+    ) -> Result<crate::core::llm::resolver::ResolvedModelMetadata, AppError> {
+        self.global_services.llm_resolver.resolve_metadata(
+            scene,
+            entry.and_then(|entry| entry.model_override.as_deref()),
+        )
     }
 
     pub(crate) fn resolve_call(

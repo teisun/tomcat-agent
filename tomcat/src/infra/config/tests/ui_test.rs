@@ -49,11 +49,13 @@ fn ui_write_preserves_other_config_and_adds_missing_table() {
 }
 
 #[test]
-fn ui_invalid_or_missing_file_is_not_replaced() {
+fn ui_invalid_file_is_not_replaced() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.toml");
-    assert!(write_language(&path, UiLanguage::En).is_err());
-    assert!(!path.exists());
+    write_language(&path, UiLanguage::En).unwrap();
+    let created: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    assert_eq!(created.as_table().unwrap().len(), 1);
+    assert_eq!(created["ui"]["language"].as_str(), Some("en"));
     for bad in ["not toml!", "ui = 'invalid'"] {
         std::fs::write(&path, bad).unwrap();
         assert!(write_language(&path, UiLanguage::En).is_err());

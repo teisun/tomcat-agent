@@ -36,6 +36,24 @@ describe("serve fixture resource ownership", () => {
     expect(serveFixtureEnvironment("/fixture", {}).TOMCAT_AGENT_ACTIVE).toBeUndefined();
   });
 
+  it("starts cold without init, persisted models, keys, or model overrides", async () => {
+    const initialize = vi.fn();
+    const parent = { TOMCAT__LLM__DEFAULT_MODEL: "live-model", OPENAI_API_KEY: "private" };
+    const env = serveFixtureEnvironment("/fixture", parent, true);
+    expect(parent.OPENAI_API_KEY).toBe("private");
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.TOMCAT__LLM__DEFAULT_MODEL).toBeUndefined();
+    expect(env.TOMCAT__CONTEXT__COMPACTION_MODEL).toBeUndefined();
+    const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
+      binary: "not-executed", coldStart: true, initialize,
+    });
+    try {
+      expect(initialize).not.toHaveBeenCalled();
+      expect(fixture.env.OPENAI_API_KEY).toBeUndefined();
+      await expect(stat(path.join(fixture.homePath, ".tomcat"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await fixture.cleanup(); }
+  });
+
   it("uses the same private home/cwd for initialization and runtime", async () => {
     const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
       binary: "not-executed",
@@ -107,6 +125,8 @@ describe("serve fixture resource ownership", () => {
     request.end(JSON.stringify({ stream: true, messages: [] }));
     try {
       await vi.waitFor(() => expect(server.capturedRequests()).toHaveLength(1));
+      expect(await (await fetch(`${server.baseUrl}/_test/request-count`)).json()).toEqual({ count: 1 });
+      expect(server.capturedRequests()).toHaveLength(1);
       const started = Date.now();
       await server.close();
       expect(Date.now() - started).toBeLessThan(2_000);

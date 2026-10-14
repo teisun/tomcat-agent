@@ -409,6 +409,20 @@ export class SettingsFrameDriver {
     await this.frame.send("Input.dispatchMouseEvent",{type:"mouseReleased",x:target.x,y:target.y,button:"left",clickCount:1});
   }
 
+  async fill(selector: string, value: string): Promise<void> {
+    const focused = await this.evaluate<boolean>(`(() => {
+      const node = document.querySelector(${JSON.stringify(selector)});
+      if (!node || node.disabled || node.readOnly) return false;
+      node.focus();
+      if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) node.select();
+      else if (node.isContentEditable) { const range = document.createRange(); range.selectNodeContents(node); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }
+      else return false;
+      return document.activeElement === node;
+    })()`);
+    if (!focused) throw new Error(`Cannot fill rendered field ${selector}`);
+    await this.frame.send("Input.insertText", { text: value });
+  }
+
   async capture(targetPath: string): Promise<SettingsDomEvidence> {
     const dom = await this.snapshot();
     const tree = await this.frame.send("Accessibility.getFullAXTree", { frameId: this.frameId });

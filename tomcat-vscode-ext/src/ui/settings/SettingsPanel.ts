@@ -341,11 +341,13 @@ export class SettingsPanel implements vscode.Disposable {
   };
 
   constructor(private readonly deps: SettingsPanelDeps) {
+    this.state.extensionVersion = deps.extensionVersion;
+    this.state.expectedCliVersion = deps.expectedCliVersion;
     this.subscriptions.push({ dispose: subscribeLocale(() => this.postState()) });
     const exit = deps.messenger.onExit?.(() => {
       this.state.uiPreferences = null;
       this.state.connectorLogin = null;
-      this.state.languageStatus = "failed";
+      this.state.languageStatus = undefined;
       this.connectorEpoch += 1;
       this.viewEpoch += 1;
       this.connectorToolsReadSequence += 1;
@@ -376,13 +378,13 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   async onServeConnectionChanged(ready: boolean): Promise<void> {
-    if (!ready && this.route === "general") this.viewEpoch += 1;
+    if (!ready) this.viewEpoch += 1;
     this.state.ready = ready;
     if (ready) {
       this.state.uiPreferences = null;
       this.state.languageStatus = undefined;
-      if (this.webviewReady && this.route === "general") {
-        await this.refreshGeneral();
+      if (this.webviewReady) {
+        await this.refreshState();
         return;
       }
     }
@@ -653,10 +655,15 @@ export class SettingsPanel implements vscode.Disposable {
         await this.handleUpsertModel(
           intent.data.model,
           intent.data.providerKey,
+          intent.data.setAsDefault === true,
+          intent.messageId,
         );
         return;
       case "removeModel":
         await this.handleRemoveModel(intent.data.modelId);
+        return;
+      case "setDefaultModel":
+        await this.handleSetDefaultModel(intent.data.modelId);
         return;
       case "setProviderKey":
         await this.handleSetProviderKey(intent.data.envName, intent.data.value);
@@ -972,61 +979,88 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async handleUpsertModel(
     model: SettingsModelInput,
-    providerKey?: SettingsProviderKeyInput,
+    providerKey: SettingsProviderKeyInput | undefined,
+    setAsDefault: boolean,
+    requestId: string,
   ): Promise<void> {
+    const warnings: string[] = [];
+    let modelSaved = false;
+    let defaultSaved = false;
+    let error: string | null = null;
     try {
-      const capabilities = this.buildCapabilities(
-        await this.deps.ensureInitialized(),
-      );
-      if (!capabilities.upsertModel) {
-        await this.refreshState(
-          t("settings.host.modelUnavailable"),
-        );
-        return;
-      }
-      const response = await this.deps.messenger.sendUpsertModel(
-        toWireModelEntryInput(model),
-      );
-      if (!response.success) {
-        await this.refreshState(response.error ?? t("settings.host.modelSaveFailed"));
-        return;
-      }
-      const warnings = response.payload?.warnings ?? null;
+      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      if (!capabilities.upsertModel) throw new Error(t("settings.host.modelUnavailable"));
+      if (setAsDefault && !capabilities.setDefaultModel) throw new Error(t("settings.host.defaultUnsupported"));
+      const response = await this.deps.messenger.sendUpsertModel(toWireModelEntryInput(model));
+      if (!response.success) throw new Error(response.error ?? t("settings.host.modelSaveFailed"));
+      modelSaved = true;
+      warnings.push(...(response.payload?.warnings ?? []));
       if (providerKey) {
-        if (!capabilities.setProviderKey) {
-          await this.refreshState(
-            t("settings.host.keyUnsupported"),
-            null,
-            warnings,
-          );
-          await this.deps.onModelCatalogChanged?.();
-          return;
+        if (!capabilities.setProviderKey) throw new Error(t("settings.host.keyUnsupported"));
+        const key = await this.deps.messenger.sendSetProviderKey(providerKey.envName, providerKey.value);
+        if (!key.success) {
+          throw new Error(t("settings.host.keySaveFailed", { name: model.id, detail: key.error ?? t("error.unknown") }));
         }
-        const keyResponse = await this.deps.messenger.sendSetProviderKey(
-          providerKey.envName,
-          providerKey.value,
-        );
-        if (!keyResponse.success) {
-          await this.refreshState(
-            t("settings.host.keySaveFailed", { detail: keyResponse.error ?? t("error.unknown") }),
-            null,
-            warnings,
-          );
-          await this.deps.onModelCatalogChanged?.();
-          return;
-        }
-        await this.refreshState(
-          null,
-          t("settings.host.savedKey", { name: providerKey.envName }),
-          warnings,
-        );
-        await this.deps.onModelCatalogChanged?.();
-        return;
       }
-      await this.refreshState(null, t("settings.host.modelSaved"), warnings);
-      await this.deps.onModelCatalogChanged?.();
-    } catch (error) {
-      await this.refreshState(String(error), null);
+      if (setAsDefault) {
+        warnings.push(...(await this.sendDefaultModel(model.id)));
+        defaultSaved = true;
+      }
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    const status = error === null
+      ? t(defaultSaved ? "settings.host.modelSavedDefault" : "settings.host.modelSaved", { name: model.id })
+      : null;
+    await this.publishModelWrite(error, status, warnings, modelSaved);
+    this.state.modelSaveReceipt = { requestId, success: error === null };
+    this.postState();
+  }
+
+  private async handleSetDefaultModel(modelId: string): Promise<void> {
+    const warnings: string[] = [];
+    let error: string | null = null;
+    try {
+      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      if (!capabilities.setDefaultModel) throw new Error(t("settings.host.defaultUnsupported"));
+      warnings.push(...(await this.sendDefaultModel(modelId)));
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    const status = error === null ? t("settings.host.defaultSaved", { name: modelId }) : null;
+    await this.publishModelWrite(error, status, warnings, error === null);
+  }
+
+  /** Resolves to the warnings to show; rejects with user-facing text when nothing was saved. */
+  private async sendDefaultModel(modelId: string): Promise<string[]> {
+    const response = await this.deps.messenger.sendSetDefaultModel(modelId);
+    if (!response.success) {
+      throw new Error(t("settings.host.defaultFailed", { detail: response.error ?? t("error.unknown") }));
+    }
+    const payload: Record<string, unknown> = isRecord(response.payload) ? response.payload : {};
+    return [
+      ...parseStringArray(payload.warnings),
+      ...(payload.envOverride === true ? [t("settings.host.defaultEnvOverride")] : []),
+    ];
+  }
+
+  private async publishModelWrite(
+    error: string | null,
+    status: string | null,
+    warnings: string[],
+    wrote: boolean,
+  ): Promise<void> {
+    // Saving and refreshing are different outcomes: never replay or describe an
+    // acknowledged write as failed because its following read was unavailable.
+    if (wrote) {
+      try { await this.deps.onModelCatalogChanged?.(); }
+      catch (cause) { warnings.push(t("settings.host.savedRefreshFailed", { detail: String(cause) })); }
+    }
+    try { await this.refreshState(error, status, warnings.length ? warnings : null); }
+    catch (cause) {
+      this.state = { ...this.state, error, status,
+        warnings: [...warnings, t("settings.host.savedRefreshFailed", { detail: String(cause) })] };
+      this.postState();
     }
   }
 
@@ -1333,8 +1367,10 @@ export class SettingsPanel implements vscode.Disposable {
         await this.refreshState(response.error ?? t("settings.host.keyStoreFailed"));
         return;
       }
-      await this.refreshState(null, t("settings.host.savedKey", { name: envName }));
-      await this.deps.onModelCatalogChanged?.();
+      const warnings: string[] = [];
+      try { await this.deps.onModelCatalogChanged?.(); }
+      catch (error) { warnings.push(t("settings.host.savedRefreshFailed", { detail: String(error) })); }
+      await this.refreshState(null, t("settings.host.savedKey", { name: envName }), warnings);
     } catch (error) {
       await this.refreshState(String(error), null);
     }
@@ -1358,32 +1394,39 @@ export class SettingsPanel implements vscode.Disposable {
       return;
     }
     const viewEpoch = ++this.viewEpoch;
-    const initializeResult = await this.deps.ensureInitialized();
-    const capabilities = this.buildCapabilities(initializeResult);
-    const providerKeysResult = capabilities.listProviderKeys
-      ? await this.fetchProviderKeys(this.state.providerKeys)
-      : { error: null, providerKeys: [] };
-    const modelsResult = capabilities.listModels
-      ? await this.fetchModels(this.state.models)
-      : { error: null, models: [] };
-    if (viewEpoch !== this.viewEpoch) {
-      return;
+    try {
+      const initializeResult = await this.deps.ensureInitialized();
+      const capabilities = this.buildCapabilities(initializeResult);
+      const providerKeysResult = capabilities.listProviderKeys
+        ? await this.fetchProviderKeys(this.state.providerKeys)
+        : { error: null, providerKeys: [] };
+      const modelsResult = capabilities.listModels
+        ? await this.fetchModels(this.state.models, this.state.defaultModelId)
+        : { error: null, models: [], defaultModelId: undefined };
+      if (viewEpoch !== this.viewEpoch) return;
+      this.state = {
+        ...this.state,
+        capabilities,
+        error: error ?? modelsResult.error ?? providerKeysResult.error,
+        expectedCliVersion: this.deps.expectedCliVersion,
+        extensionVersion: this.deps.extensionVersion,
+        models: modelsResult.models,
+        defaultModelId: modelsResult.defaultModelId,
+        modelRemovalReceipt,
+        providerKeys: providerKeysResult.providerKeys,
+        ready: true,
+        route: this.route,
+        serverVersion: initializeResult.serverVersion,
+        status,
+        warnings,
+      };
+    } catch (cause) {
+      if (viewEpoch !== this.viewEpoch) return;
+      const hasOutcome = status !== null || modelRemovalReceipt !== null;
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      this.state = { ...this.state, ready: false, error: hasOutcome ? error : error ?? String(cause), status,
+        warnings: hasOutcome ? [...(warnings ?? []), `${t("settings.host.modelsLoadFailed")} ${detail}`] : warnings, modelRemovalReceipt };
     }
-    this.state = {
-      ...this.state,
-      capabilities,
-      error: error ?? modelsResult.error ?? providerKeysResult.error,
-      expectedCliVersion: this.deps.expectedCliVersion,
-      extensionVersion: this.deps.extensionVersion,
-      models: modelsResult.models,
-      modelRemovalReceipt,
-      providerKeys: providerKeysResult.providerKeys,
-      ready: true,
-      route: this.route,
-      serverVersion: initializeResult.serverVersion,
-      status,
-      warnings,
-    };
     this.postState();
   }
 
@@ -1414,23 +1457,28 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async fetchModels(
     fallback: SettingsModelView[],
-  ): Promise<{ error: string | null; models: SettingsModelView[] }> {
+    fallbackDefault: string | undefined,
+  ): Promise<{ error: string | null; models: SettingsModelView[]; defaultModelId: string | undefined }> {
     try {
       const response = await this.deps.messenger.sendListModels();
       if (!response.success) {
         return {
           error: response.error ?? t("settings.host.modelsLoadFailed"),
           models: fallback,
+          defaultModelId: fallbackDefault,
         };
       }
+      const defaultModelId: unknown = response.payload?.defaultModelId;
       return {
         error: null,
         models: parseModelsPayload(response.payload),
+        defaultModelId: typeof defaultModelId === "string" ? defaultModelId : undefined,
       };
     } catch (error) {
       return {
         error: String(error),
         models: fallback,
+        defaultModelId: fallbackDefault,
       };
     }
   }
@@ -1518,7 +1566,7 @@ export class SettingsPanel implements vscode.Disposable {
     } catch (error) {
       if (epoch !== this.connectorEpoch) return;
       // A failed list is not evidence that recovery failed. Keep its receipt.
-      this.state = { ...this.state, error: String(error), ready: true };
+      this.state = { ...this.state, error: String(error) };
       this.postState();
     }
   }
@@ -1596,6 +1644,7 @@ export class SettingsPanel implements vscode.Disposable {
     initializeResult: InitializeResult,
   ): SettingsCapabilities {
     return {
+      setDefaultModel: hasServeCapability(initializeResult, "set_default_model"),
       listModels: hasServeCapability(
         initializeResult,
         SERVE_CAPABILITY_LIST_MODELS,

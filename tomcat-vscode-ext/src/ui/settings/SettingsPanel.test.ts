@@ -103,6 +103,7 @@ describe("settings panel model management flow", () => {
     expectedCliVersion?: string | null;
     extensionVersion?: string | null;
     messenger?: Partial<{
+      sendSetDefaultModel: (modelId: string) => Promise<unknown>;
       sendListModels: () => Promise<unknown>;
       sendListConnectors: () => Promise<unknown>;
       sendListProviderKeys: () => Promise<unknown>;
@@ -116,6 +117,7 @@ describe("settings panel model management flow", () => {
     selectConnectorWorkspaceRoot?: () => Promise<string | null>;
   }) {
     const messenger = {
+      sendSetDefaultModel: vi.fn().mockResolvedValue({ success: true, payload: { warnings: [], envOverride: false } }),
       sendListModels: vi.fn().mockResolvedValue({
         payload: { models: [] },
         success: true,
@@ -144,6 +146,7 @@ describe("settings panel model management flow", () => {
             "list_provider_keys",
             "remove_model",
             "set_provider_key",
+            "set_default_model",
             "upsert_model",
           ],
           protocolVersion: 1,
@@ -161,6 +164,100 @@ describe("settings panel model management flow", () => {
     return { messenger, panel };
   }
 
+  it.each(["none", "key", "default", "refresh"])("reports sequential model/key/default persistence honestly when %s fails", async (failure) => {
+    const order: string[] = [];
+    const { panel, messenger } = createPanel({
+      messenger: {
+        sendUpsertModel: vi.fn(async () => { order.push("model"); return { success: true }; }),
+        sendSetProviderKey: vi.fn(async () => { order.push("key"); return { success: failure !== "key", error: "key denied" }; }),
+        sendSetDefaultModel: vi.fn(async () => { order.push("default"); return { success: failure !== "default", error: "disk full", payload: { warnings: [], envOverride: true } }; }),
+      },
+      onModelCatalogChanged: () => { order.push("refresh"); if (failure === "refresh") throw new Error("read failed"); },
+    });
+    try {
+      await panel.__testingDispatchIntent({ type: "upsertModel", messageId: "save-setup", data: {
+        model: { id: "local", api: "openai", provider: "deepseek", capabilities: { files: false, vision: false, tools: true, reasoning: false, webSearch: false } },
+        providerKey: { envName: "LOCAL_KEY", value: "only-a-fixture" }, setAsDefault: true,
+      } });
+      expect(order).toEqual(failure === "key" ? ["model", "key", "refresh"] : ["model", "key", "default", "refresh"]);
+      const state = panel.__testingSnapshot().state;
+      const succeeded = failure === "none" || failure === "refresh";
+      expect(state.modelSaveReceipt).toEqual({ requestId: "save-setup", success: succeeded });
+      if (succeeded) {
+        expect(state.status).toBe(translate("en", "settings.host.modelSavedDefault", { name: "local" }));
+        expect(state.error).toBeNull();
+        expect(state.warnings).toContain(translate("en", "settings.host.defaultEnvOverride"));
+      } else {
+        expect(state.status).toBeNull();
+      }
+      if (failure === "key") {
+        expect(state.error).toBe(translate("en", "settings.host.keySaveFailed", { name: "local", detail: "key denied" }));
+      }
+      if (failure === "default") {
+        expect(state.error).toBe(translate("en", "settings.host.defaultFailed", { detail: "disk full" }));
+      }
+      if (failure === "refresh") expect(state.warnings?.join()).toContain("read failed");
+      expect(messenger.sendSetDefaultModel).toHaveBeenCalledTimes(failure === "key" ? 0 : 1);
+    } finally { panel.dispose(); }
+  });
+
+  it("sets a listed model as default without rewriting it, then reports one sentence", async () => {
+    const order: string[] = [];
+    let defaultModelId = "gpt-5.4";
+    const sendSetDefaultModel = vi.fn(async (modelId: string) => {
+      order.push("default");
+      defaultModelId = modelId;
+      return { success: true, payload: { modelId, warnings: [], envOverride: false } };
+    });
+    const { panel, messenger } = createPanel({
+      messenger: {
+        sendListModels: vi.fn(async () => ({ success: true, payload: { models: [], defaultModelId } })),
+        sendSetDefaultModel,
+      },
+      onModelCatalogChanged: () => { order.push("refresh"); },
+    });
+    try {
+      await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-default" });
+      expect(panel.__testingSnapshot().state.defaultModelId).toBe("gpt-5.4");
+      await panel.__testingDispatchIntent({ type: "setDefaultModel", messageId: "set-default", data: { modelId: "deepseek-v4-pro" } });
+      expect(sendSetDefaultModel).toHaveBeenCalledWith("deepseek-v4-pro");
+      expect(messenger.sendUpsertModel).not.toHaveBeenCalled();
+      expect(order).toEqual(["default", "refresh"]);
+      expect(panel.__testingSnapshot().state).toMatchObject({
+        defaultModelId: "deepseek-v4-pro",
+        error: null,
+        status: translate("en", "settings.host.defaultSaved", { name: "deepseek-v4-pro" }),
+        warnings: null,
+      });
+    } finally { panel.dispose(); }
+  });
+
+  it("warns when the environment overrides a saved default, and keeps the list when setting fails", async () => {
+    const model = { id: "local", api: "openai", provider: "deepseek", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: false, web_search: false } };
+    const sendSetDefaultModel = vi.fn()
+      .mockResolvedValueOnce({ success: true, payload: { modelId: "local", warnings: [], envOverride: true } })
+      .mockResolvedValueOnce({ success: false, error: "disk full" });
+    const sendListModels = vi.fn()
+      .mockResolvedValueOnce({ success: true, payload: { models: [model], defaultModelId: "gpt-5.4" } })
+      .mockResolvedValueOnce({ success: true, payload: { models: [model], defaultModelId: "gpt-5.4" } })
+      .mockResolvedValue({ success: false, error: "list unavailable" });
+    const onModelCatalogChanged = vi.fn();
+    const { panel } = createPanel({ messenger: { sendListModels, sendSetDefaultModel }, onModelCatalogChanged });
+    try {
+      await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-env" });
+      await panel.__testingDispatchIntent({ type: "setDefaultModel", messageId: "env-default", data: { modelId: "local" } });
+      expect(panel.__testingSnapshot().state.warnings).toEqual([translate("en", "settings.host.defaultEnvOverride")]);
+      expect(onModelCatalogChanged).toHaveBeenCalledOnce();
+      await panel.__testingDispatchIntent({ type: "setDefaultModel", messageId: "failed-default", data: { modelId: "local" } });
+      const state = panel.__testingSnapshot().state;
+      expect(state.error).toBe(translate("en", "settings.host.defaultFailed", { detail: "disk full" }));
+      expect(state.status).toBeNull();
+      expect(state.models.map((entry) => entry.id)).toEqual(["local"]);
+      expect(state.defaultModelId).toBe("gpt-5.4");
+      expect(onModelCatalogChanged).toHaveBeenCalledOnce();
+    } finally { panel.dispose(); }
+  });
+
   it("preserves supportedSpeeds in host state and a subsequent full model edit", async () => {
     const model = { id: "relay/model", modelName: "model", api: "openai-responses", apiKeyEnv: "STUB_KEY", baseUrl: "https://relay.example.test", provider: "relay", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: true, web_search: false }, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"], contextWindowOptions: [] };
     const sendUpsertModel = vi.fn().mockResolvedValue({ success: true });
@@ -171,6 +268,23 @@ describe("settings panel model management flow", () => {
       expect(view.supportedSpeeds).toEqual(["fast", "ultrafast"]);
       await panel.__testingDispatchIntent({ messageId: "save-speed", type: "upsertModel", data: { model: { ...view, description: "edited only description" } } });
       expect(sendUpsertModel).toHaveBeenCalledWith(expect.objectContaining({ id: "relay/model", description: "edited only description", supportedSpeeds: ["fast", "ultrafast"] }));
+    } finally { panel.dispose(); }
+  });
+
+  it("shows local versions before handshake, keeps failure truthful, and refreshes the open Models page on first recovery", async () => {
+    let fails = true;
+    const { panel, messenger } = createPanel({ ensureInitialized: async () => {
+      if (fails) throw new Error("broken config");
+      return { capabilities: ["list_models", "list_provider_keys"], protocolVersion: 1, sessionId: "first", serverVersion: "0.1.20", attachmentRoot: null };
+    } });
+    try {
+      expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.24");
+      await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "before-handshake" });
+      expect(panel.__testingSnapshot().state).toMatchObject({ ready: false, error: "Error: broken config", serverVersion: null });
+      fails = false;
+      await panel.onServeConnectionChanged(true);
+      expect(messenger.sendListModels).toHaveBeenCalledOnce();
+      expect(panel.__testingSnapshot().state).toMatchObject({ ready: true, error: null, serverVersion: "0.1.20" });
     } finally { panel.dispose(); }
   });
 
@@ -367,7 +481,7 @@ describe("settings panel model management flow", () => {
       type: "upsertModel",
     } satisfies SettingsIntent);
 
-    expect(panel.__testingSnapshot().state.status).toBe("Model saved.");
+    expect(panel.__testingSnapshot().state.status).toBe(translate("en", "settings.host.modelSaved", { name: "relay-openai" }));
     expect(panel.__testingSnapshot().state.warnings).toEqual([
       "API `openai-responses` expects reasoning effort, but thinking_format=`anthropic` will not send it.",
     ]);

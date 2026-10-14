@@ -949,6 +949,9 @@ pub(crate) async fn handle_command(
                     "cwd": slot.cwd,
                     "model": model,
                     "thinkingLevel": thinking_level.as_str(),
+                    "modelReady": slot.ctx.global_services.llm_resolver.model_ready(
+                        entry.as_ref().and_then(|entry| entry.model_override.as_deref()),
+                    ),
                     "agentMode": agent_mode.as_str(),
                     "activePlan": active_plan.map(|plan| serde_json::json!({
                         "id": plan.id,
@@ -1195,7 +1198,7 @@ pub(crate) async fn handle_command(
             }
             if model_changed {
                 let entry = slot.ctx.session_runtime.session.current_session_entry()?;
-                let main_call = slot.ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
+                let main_call = slot.ctx.resolve_metadata(LlmScene::Main, entry.as_ref())?;
                 let updated_runtime_context = {
                     let mut turn_state = slot.turn_state.lock();
                     if let Some(state) = turn_state.as_mut() {
@@ -1378,7 +1381,7 @@ pub(crate) async fn handle_command(
             if context_choice_applies {
                 let main_call = slot
                     .ctx
-                    .resolve_call(LlmScene::Main, current_entry.as_ref())?;
+                    .resolve_metadata(LlmScene::Main, current_entry.as_ref())?;
                 let updated_runtime_context = {
                     let mut turn_state = slot.turn_state.lock();
                     if let Some(state) = turn_state.as_mut() {
@@ -1404,22 +1407,30 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::ListModels { id } => {
-            if let Err(error) = refresh_all_model_catalogs(&state) {
-                send_error(
-                    &state,
-                    id,
-                    state.registry.active_session_id(),
-                    render_error_message(&error),
-                )?;
-                return Ok(());
-            }
+            let config = match refresh_all_model_catalogs(&state) {
+                Ok(config) => config,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
             let catalog = resolve_model_catalog_snapshot(&state)?;
             let models = list_model_views_with_prefs(catalog.as_ref(), &state.shared_model_prefs);
+            let default_model_id = config.llm.default_model.trim().to_string();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
                 Some(
-                    serde_json::to_value(ListModelsPayload { models }).map_err(|error| {
+                    serde_json::to_value(ListModelsPayload {
+                        models,
+                        default_model_id,
+                    })
+                    .map_err(|error| {
                         AppError::Config(crate::infra::i18n::tr(
                             "serve.serializeFailed",
                             &[("name", "list_models"), ("detail", &error.to_string())],
@@ -1460,9 +1471,9 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::RemoveModel { id, model_id } => {
-            let config_path = crate::api::cli::config_file_path()?;
+            let config_path = &state.config_path;
             if let Err(error) =
-                remove_user_model_with_config_path(&state.cfg, Some(&config_path), &model_id)
+                remove_user_model_with_config_path(&state.cfg, Some(config_path), &model_id)
             {
                 send_error(
                     &state,
@@ -1472,11 +1483,8 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            let config_after_delete = crate::load_config_toml_file(&config_path);
-            let warnings = match config_after_delete
-                .and_then(|config| refresh_model_runtime(&state, &config))
-            {
-                Ok(()) => Vec::new(),
+            let warnings = match refresh_all_model_catalogs(&state) {
+                Ok(_) => Vec::new(),
                 Err(error) => vec![crate::infra::i18n::tr(
                     "serve.modelRemovedRefreshFailed",
                     &[("id", &model_id), ("detail", &render_error_message(&error))],
@@ -1495,6 +1503,25 @@ pub(crate) async fn handle_command(
                         },
                     )?,
                 ),
+            )))?;
+        }
+        ServeCommand::SetDefaultModel { id, model_id } => {
+            let config_path = &state.config_path;
+            crate::core::llm::set_default_model(&state.cfg, config_path, &model_id)?;
+            // A failed runtime refresh must not disguise a successful disk write.
+            let warnings: Vec<String> = refresh_all_model_catalogs(&state)
+                .err()
+                .map(|error| render_error_message(&error))
+                .into_iter()
+                .collect();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(serde_json::json!({
+                    "modelId": model_id,
+                    "envOverride": std::env::var_os("TOMCAT__LLM__DEFAULT_MODEL").is_some(),
+                    "warnings": warnings,
+                })),
             )))?;
         }
         ServeCommand::SetProviderKey {
@@ -2525,8 +2552,11 @@ fn resolve_model_catalog_snapshot(
     Ok(state.shared_model_catalog.snapshot())
 }
 
-fn refresh_all_model_catalogs(state: &ServeState) -> Result<(), AppError> {
-    refresh_model_runtime(state, &state.cfg)
+/// Returns the applied selection config so callers report the same default the resolvers use.
+fn refresh_all_model_catalogs(state: &ServeState) -> Result<AppConfig, AppError> {
+    let config = crate::infra::config::load_model_selection_config(&state.config_path, &state.cfg)?;
+    refresh_model_runtime(state, &config)?;
+    Ok(config)
 }
 
 /// Apply a disk-backed config snapshot to every active resolver before the next model decision.

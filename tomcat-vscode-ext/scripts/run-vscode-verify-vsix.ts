@@ -82,7 +82,7 @@ type InstalledScenarioOptions = {
   workspacePath: string;
 };
 
-async function runInstalledScenario(options: InstalledScenarioOptions): Promise<void> {
+export async function runInstalledScenario(options: InstalledScenarioOptions): Promise<void> {
   const installRoot = await fs.mkdtemp("/tmp/tvsi-verify-");
   const extensionsDir = path.join(installRoot, "extensions");
   const userDataDir = path.join(installRoot, "user-data");
@@ -144,7 +144,7 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
       // Real CLI and Host; only upstream model replies are controlled.
       const responses: ScriptedResponse[] = [];
       server = await spawnScriptedOpenAiStreamServer(responses);
-      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary });
+      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true });
       // Tool paths are explicit fixture-owned absolute paths. Missing relative
       // files cannot be canonicalized into workspace_roots by the real gate.
       responses.push(
@@ -156,13 +156,13 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
         { parts: [sseDelta("RELEASE_STOP_STARTED"), { ...sseDelta("must not finish before stop"), delayMs: 60_000 }, sseFinish("stop"), sseDone()] },
         { parts: [sseDelta("RELEASE_RELOADED"), sseFinish("stop"), sseDone()] },
       );
-      const configPath = path.join(fixture.homePath, ".tomcat/tomcat.config.toml");
-      const config = await fs.readFile(configPath, "utf8");
-      const roots = /^workspace_roots\s*=.*$/m;
-      const rules = /^path_rules\s*=.*$/m;
-      if (!roots.test(config) || !rules.test(config) || !/^auto_confirm\s*=\s*(true|false)\s*$/m.test(config)) throw new Error("Unexpected isolated fixture permission configuration");
-      await fs.writeFile(configPath, config.replace(roots, `workspace_roots = [${JSON.stringify(fixture.workspacePath)}]`).replace(rules, `path_rules = [{ path = ${JSON.stringify(path.join(fixture.workspacePath, "release-denied.txt"))}, mode = "deny" }]`).replace(/^auto_confirm\s*=.*$/m, "auto_confirm = false"));
+      for (const name of ["tomcat.config.toml", "models.toml", ".env"]) {
+        try { await fs.access(path.join(fixture.homePath, ".tomcat", name)); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        throw new Error(`Cold-start fixture unexpectedly contains ${name}`);
+      }
       testEnv = { ...fixture.env };
+      testEnv.TOMCAT_ONBOARDING_BASE_URL = server.baseUrl;
       for (const key of Object.keys(testEnv)) if (key.startsWith("TOMCAT_VSCODE_TEST_") || key.startsWith("TOMCAT_E2E_")) testEnv[key] = undefined;
       Object.assign(testEnv, { TOMCAT_VSCODE_TEST_DEFAULT_CWD: fixture.workspacePath, TOMCAT_EXPECT_RELEASE_BINARY: binary, TOMCAT_EXPECT_RELEASE_HOST_ARCH: process.arch, TOMCAT_EXPECT_RELEASE_CLI_SHA256: cliSha256, TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1" });
       const cliVersion = execFileSync(binary, ["--version"], { env: testEnv, encoding: "utf8" }).trim();
@@ -189,7 +189,13 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
       reuseMachineInstall: true,
       vscodeExecutablePath: resolveVsCodeExecutable(),
     });
-    if (server && server.capturedNonTitleRequests().length !== 7) throw new Error(`Expected seven real model requests, got ${server.capturedNonTitleRequests().length}`);
+    if (server) {
+      const requests = server.capturedNonTitleRequests();
+      if (requests.length !== 7) throw new Error(`Expected seven real model requests, got ${requests.length}`);
+      const models = requests.map(request => JSON.parse(request.split("\r\n\r\n")[1]).model);
+      if (models.some(model => model !== "deepseek-v4-flash")) throw new Error(`Unexpected selected models: ${JSON.stringify(models)}`);
+      await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: requests.length, models }, null, 2));
+    }
   } finally {
     try { await server?.close(); } finally {
       try { await fixture?.cleanup(); } finally {
@@ -290,7 +296,7 @@ async function main(): Promise<void> {
     TOMCAT_E2E_GREP: "shows the expected onboarding prompt when requested by the host fixture",
     TOMCAT_EXPECT_PROMPT_ACTIONS: "View Guide|Open Settings",
     TOMCAT_EXPECT_PROMPT_SEVERITY: "warning",
-    TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat CLI was not found automatically.",
+    TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat CLI not found.",
     TOMCAT_VSCODE_TEST_DEFAULT_CWD: pureExtWorkspacePath,
     TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "0",
     TOMCAT_VSCODE_TEST_WARNING_ACTION: "",
@@ -303,16 +309,15 @@ async function main(): Promise<void> {
     TOMCAT_E2E_GREP: [
       "uses the expected executable source when the host fixture asks for it",
       "shows the expected onboarding prompt when requested by the host fixture",
-      "recovers from a setup-required startup when the test fixture auto-runs init",
+      "recovers inline from a repaired startup failure without running init",
     ].join("|"),
-    TOMCAT_EXPECT_PROMPT_ACTIONS: "Start Setup|Open Settings|View Guide|Retry|View Logs",
-    TOMCAT_EXPECT_PROMPT_DETAIL: "fake serve requires tomcat init first",
+    TOMCAT_EXPECT_PROMPT_ACTIONS: "Retry|View Logs",
+    TOMCAT_EXPECT_PROMPT_DETAIL: "fake serve startup blocked until fixture repair",
     TOMCAT_EXPECT_PROMPT_SEVERITY: "warning",
-    TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat could not start after several attempts.",
+    TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat failed to start",
     TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
     TOMCAT_EXPECT_SETUP_RECOVERY: "1",
     TOMCAT_EXPECT_PROMPT_TRIGGER: "restart",
-    TOMCAT_EXPECT_VISIBLE_SETUP: "1",
     TOMCAT_VSCODE_TEST_WARNING_ACTION: "",
     TOMCAT_VSCODE_TEST_INFO_ACTION: "",
     TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "0",

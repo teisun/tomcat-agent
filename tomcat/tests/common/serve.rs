@@ -20,6 +20,7 @@ pub struct ServeFixture {
     _home: tempfile::TempDir,
     pub home_path: PathBuf,
     pub workspace: PathBuf,
+    with_test_keys: bool,
 }
 
 // A standalone test instance owns a disposable HOME and workspace. Do not let
@@ -47,6 +48,32 @@ pub fn isolated_serve_command(home: &Path) -> StdCommand {
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost");
     command
+}
+
+/// Start like a new installation, or like an interactive init whose key was skipped.
+/// Neither mode installs test credentials or model/configuration overrides.
+pub fn setup_cold_serve_fixture(initialized: bool) -> ServeFixture {
+    let home = tempfile::tempdir().expect("temp home");
+    let home_path = home.path().to_path_buf();
+    let workspace = home_path.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    if initialized {
+        let output = isolated_serve_command(&home_path)
+            .arg("init")
+            .current_dir(&workspace)
+            .stdin(Stdio::null())
+            .output()
+            .expect("init without credentials");
+        assert!(output.status.success(), "init: {output:?}");
+        // Do not launch the optional managed MCP server in an offline fixture.
+        fs::write(home_path.join(".tomcat/mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+    }
+    ServeFixture {
+        _home: home,
+        home_path,
+        workspace,
+        with_test_keys: false,
+    }
 }
 
 pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
@@ -110,6 +137,7 @@ capabilities = {{ vision = false, files = false, tools = false, reasoning = fals
         _home: home,
         home_path,
         workspace,
+        with_test_keys: true,
     }
 }
 
@@ -255,10 +283,14 @@ pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
 /// Explicit opt-in credentials/config for a disposable integration-test child.
 /// The default helper still strips every inherited real API key.
 pub fn spawn_serve_child_with_env(fx: &ServeFixture, extra_env: &[(&str, &str)]) -> ServeChild {
-    let mut child = isolated_serve_command(&fx.home_path)
-        .env("OPENAI_API_KEY", "dummy-key")
-        .env("MOONSHOT_API_KEY", "dummy-key")
-        .env("ANTHROPIC_API_KEY", "dummy-key")
+    let mut command = isolated_serve_command(&fx.home_path);
+    if fx.with_test_keys {
+        command
+            .env("OPENAI_API_KEY", "dummy-key")
+            .env("MOONSHOT_API_KEY", "dummy-key")
+            .env("ANTHROPIC_API_KEY", "dummy-key");
+    }
+    let mut child = command
         .envs(extra_env.iter().copied())
         .env("RUST_LOG", "tomcat=debug,info")
         .current_dir(&fx.workspace)
@@ -349,13 +381,24 @@ impl Drop for ScriptedOpenAiServer {
 pub fn spawn_scripted_openai_stream_server(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
-    spawn_scripted_openai_stream_server_internal(responses, false)
+    spawn_scripted_openai_stream_server_internal(responses, false, false)
 }
 
 pub fn spawn_scripted_openai_stream_server_with_auto_title(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
-    spawn_scripted_openai_stream_server_internal(responses, true)
+    spawn_scripted_openai_stream_server_internal(responses, true, false)
+}
+
+pub fn spawn_unauthorized_openai_server() -> ScriptedOpenAiServer {
+    spawn_scripted_openai_stream_server_internal(
+        vec![response(vec![ScriptedPart {
+            delay_ms: 0,
+            body: r#"{"error":{"message":"Invalid API key","type":"authentication_error"}}"#.into(),
+        }])],
+        true,
+        true,
+    )
 }
 
 /// Concurrent content-routed LLM for multi-session tests. Delays belong in the
@@ -425,6 +468,7 @@ where
 fn spawn_scripted_openai_stream_server_internal(
     responses: Vec<ScriptedResponse>,
     auto_title_response: bool,
+    unauthorized: bool,
 ) -> ScriptedOpenAiServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
     listener
@@ -471,6 +515,11 @@ fn spawn_scripted_openai_stream_server_internal(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
                     scripted.parts,
                 )
+            };
+            let headers = if unauthorized && !handled_title {
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+            } else {
+                headers
             };
             stream.write_all(headers.as_bytes()).expect("write headers");
             for part in parts {

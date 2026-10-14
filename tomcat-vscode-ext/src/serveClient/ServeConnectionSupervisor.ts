@@ -12,8 +12,6 @@ export const DEFAULT_HANDSHAKE_TIMEOUT_MS = Math.max(
 );
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_RETRY_WINDOW_MS = 3 * 60_000;
-const DEFAULT_SETUP_MAX_ATTEMPTS = 24;
-const DEFAULT_SETUP_RETRY_DELAY_MS = 5_000;
 const DETERMINISTIC_FAILURE_MAX_ELAPSED_MS = 2_000;
 const RETRY_DELAYS_MS = [300, 800, 2_000, 4_000] as const;
 
@@ -52,8 +50,6 @@ export interface ServeConnectionState {
   result?: InitializeResult;
   status: ServeConnectionStatus;
 }
-
-export type ServeConnectionRecoveryMode = "normal" | "setup";
 
 type SupervisedMessenger = Pick<
   TomcatMessenger,
@@ -94,11 +90,20 @@ export interface ServeConnectionSupervisorOptions {
   now?(): number;
   random?(): number;
   retryWindowMs?: number;
-  setupMaxAttempts?: number;
-  setupRetryDelayMs?: number;
 }
 
 import { t } from "../shared/i18n";
+
+const FAILURE_SUMMARY_MAX_CHARS = 240;
+
+/** One line for the chat panel and notifications; the full stderr stays in the output log. */
+export function summarizeServeFailure(failure: Pick<ServeConnectionFailure, "error" | "stderr">): string {
+  const lines = failure.stderr.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  const summary = lines[lines.length - 1] ?? failure.error.message.replace(/\s+/gu, " ").trim();
+  return summary.length > FAILURE_SUMMARY_MAX_CHARS
+    ? `${summary.slice(0, FAILURE_SUMMARY_MAX_CHARS - 1)}…`
+    : summary;
+}
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -135,8 +140,6 @@ export class ServeConnectionSupervisor {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly retryWindowMs: number;
-  private readonly setupMaxAttempts: number;
-  private readonly setupRetryDelayMs: number;
   private readonly stateListeners = new Set<(state: ServeConnectionState) => void>();
   private readonly waiters = new Set<ReadyWaiter>();
   private activeAttempt: Attempt | undefined;
@@ -147,7 +150,6 @@ export class ServeConnectionSupervisor {
   private exitSubscription: DisposableLike;
   private lastQuickFailure: { stderr: string } | undefined;
   private readyResult: InitializeResult | undefined;
-  private recoveryMode: ServeConnectionRecoveryMode = "normal";
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private state: ServeConnectionState = {
     attempt: 0,
@@ -160,8 +162,6 @@ export class ServeConnectionSupervisor {
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
     this.retryWindowMs = options.retryWindowMs ?? DEFAULT_RETRY_WINDOW_MS;
-    this.setupMaxAttempts = options.setupMaxAttempts ?? DEFAULT_SETUP_MAX_ATTEMPTS;
-    this.setupRetryDelayMs = options.setupRetryDelayMs ?? DEFAULT_SETUP_RETRY_DELAY_MS;
     this.exitSubscription = options.messenger.onExit((event) => this.handleUnexpectedExit(event));
   }
 
@@ -193,23 +193,17 @@ export class ServeConnectionSupervisor {
     const { promise, waiter } = deferredWaiter();
     this.waiters.add(waiter);
     if (this.state.phase === "idle") {
-      this.beginCycle("normal", false);
+      this.beginCycle(false);
     }
     return promise;
   }
 
-  /**
-   * An explicit user/configuration/setup action gets a new bounded retry budget.
-   * Setup mode retains the former 5-second polling behaviour while the user is
-   * answering `tomcat init` prompts; normal crashes use short exponential backoff.
-   */
-  reconnect(
-    recoveryMode: ServeConnectionRecoveryMode = "normal",
-  ): Promise<InitializeResult> {
+  /** An explicit user or configuration action gets a new bounded retry budget. */
+  reconnect(): Promise<InitializeResult> {
     if (this.disposed) {
       return Promise.reject(new Error("Tomcat connection supervisor is disposed"));
     }
-    this.beginCycle(recoveryMode, this.options.messenger.isRunning);
+    this.beginCycle(this.options.messenger.isRunning);
     return this.whenReady();
   }
 
@@ -230,17 +224,13 @@ export class ServeConnectionSupervisor {
     this.stateListeners.clear();
   }
 
-  private beginCycle(
-    recoveryMode: ServeConnectionRecoveryMode,
-    restartRunningProcess: boolean,
-  ): void {
+  private beginCycle(restartRunningProcess: boolean): void {
     this.cancelRetry();
     this.cycle += 1;
     this.activeAttempt = undefined;
     this.attemptTimes = [];
     this.lastQuickFailure = undefined;
     this.readyResult = undefined;
-    this.recoveryMode = recoveryMode;
 
     if (!this.options.isExecutableAvailable()) {
       this.enterFatal({
@@ -364,7 +354,6 @@ export class ServeConnectionSupervisor {
     this.cancelRetry();
     this.cycle += 1;
     this.readyResult = undefined;
-    this.recoveryMode = "normal";
     this.attemptTimes = [];
     this.lastQuickFailure = undefined;
     const attempt: Attempt = {
@@ -397,9 +386,7 @@ export class ServeConnectionSupervisor {
     const now = this.now();
     this.attemptTimes.push(now);
     this.attemptTimes = this.attemptTimes.filter((time) => now - time <= this.retryWindowMs);
-    const maxAttempts =
-      this.recoveryMode === "setup" ? this.setupMaxAttempts : this.maxAttempts;
-    if (this.attemptTimes.length >= maxAttempts) {
+    if (this.attemptTimes.length >= this.maxAttempts) {
       this.enterFatal({
         attempt: attempt.number,
         error,
@@ -446,7 +433,6 @@ export class ServeConnectionSupervisor {
     const quickFailure =
       this.now() - attempt.startedAt <= DETERMINISTIC_FAILURE_MAX_ELAPSED_MS;
     if (
-      this.recoveryMode !== "setup" &&
       quickFailure &&
       stderr.length > 0 &&
       this.lastQuickFailure?.stderr === stderr
@@ -464,9 +450,6 @@ export class ServeConnectionSupervisor {
   }
 
   private retryDelayMs(attempt: number): number {
-    if (this.recoveryMode === "setup") {
-      return this.setupRetryDelayMs;
-    }
     const base = RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
     // ±20% prevents many concurrently activated workspaces from retrying in lockstep.
     return Math.round(base * (0.8 + this.random() * 0.4));

@@ -212,7 +212,7 @@
   "model.notCataloged": "Model `{id}` is not in the catalog. Add it to {path} or switch to a listed model.",
   "model.reserveInvalid": "Model `{id}` output reserve ({reserve}) must be less than context_window ({window}).",
   "model.capabilitiesMissing": "provider/model does not support {missing}; try `{suggested}` instead.",
-  "model.compactionFallbackFailed": "Compaction model `{selected}` is unavailable, and default model `{fallback}` also failed. Original error: {original}; fallback error: {detail}",
+  "model.compactionFallbackFailed": "Compaction model `{selected}` is unavailable, and fallback model `{fallback}` also failed. Original error: {original}; fallback error: {detail}",
   "model.unknownApi": "Unknown api = {api} for model `{id}`; registered: {registered}",
   "config.invalidLog": "Invalid log.level: {value}",
   "config.fileMissing": "Configuration file not found: {path}. Run tomcat init first",

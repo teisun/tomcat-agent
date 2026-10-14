@@ -1143,7 +1143,10 @@ async fn production_path_explicit_openai_uses_env_https_proxy() {
 
     end_current_plugin_session(harness.ctx()).await;
     assert!(err.to_string().contains("web_search backend `openai`"));
-    assert!(proxy.saw_host("api.openai.com"));
+    assert!(
+        proxy.saw_host("api.openai.com"),
+        "hosted request failed before reaching the local proxy: {err:?}"
+    );
 }
 
 #[tokio::test]

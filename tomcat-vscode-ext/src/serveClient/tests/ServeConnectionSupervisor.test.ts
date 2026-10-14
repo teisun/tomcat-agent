@@ -4,6 +4,7 @@ import type { InitializeResult } from "../initialize";
 import {
   DEFAULT_HANDSHAKE_TIMEOUT_MS,
   ServeConnectionSupervisor,
+  summarizeServeFailure,
   type ServeConnectionState,
 } from "../ServeConnectionSupervisor";
 import {
@@ -371,45 +372,20 @@ describe("ServeConnectionSupervisor", () => {
     }
   });
 
+  it("summarizes a failure as one line: the last stderr line, else the error message", () => {
+    const error = new Error("spawn failed\n  at child");
+    expect(summarizeServeFailure({ error, stderr: "warming up\nconfig.toml: expected `=`\n\n  " }))
+      .toBe("config.toml: expected `=`");
+    expect(summarizeServeFailure({ error, stderr: "  \n" })).toBe("spawn failed at child");
+    const long = summarizeServeFailure({ error, stderr: "x".repeat(500) });
+    expect(long).toHaveLength(240);
+    expect(long.endsWith("…")).toBe(true);
+  });
+
   it("keeps the handshake timeout at least as large as a regular request timeout", () => {
     expect(DEFAULT_HANDSHAKE_TIMEOUT_MS).toBeGreaterThanOrEqual(
       DEFAULT_REQUEST_TIMEOUT_MS,
     );
-  });
-
-  it("keeps polling setup without mistaking its expected repeated stderr for a fatal error", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = createMessenger();
-      runtime.messenger.start.mockImplementation(() => {
-        runtime.emitExit(exit({ stderr: "fake serve requires tomcat init first" }));
-      });
-      const supervisor = new ServeConnectionSupervisor({
-        initialize: vi.fn<() => Promise<InitializeResult>>(),
-        isExecutableAvailable: () => true,
-        messenger: runtime.messenger as never,
-        setupMaxAttempts: 3,
-      });
-
-      const ready = supervisor.reconnect("setup");
-      const rejected = expect(ready).rejects.toThrow("tomcat serve exited");
-      await vi.advanceTimersByTimeAsync(5_000);
-
-      expect(supervisor.currentState).toMatchObject({
-        attempt: 2,
-        phase: "backoff",
-        status: "connecting",
-      });
-      await vi.advanceTimersByTimeAsync(5_000);
-      await rejected;
-      expect(supervisor.currentState).toMatchObject({
-        failure: { kind: "retry_exhausted" },
-        phase: "fatal",
-      });
-      supervisor.dispose();
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("reports every transition to interested UI adapters", async () => {

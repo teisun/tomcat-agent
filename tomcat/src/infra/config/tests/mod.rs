@@ -12,6 +12,7 @@
 mod append_test;
 mod assets_test;
 mod context_cfg_test;
+mod default_model_test;
 mod defaults_test;
 mod env_file_test;
 mod load_test;

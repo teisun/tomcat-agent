@@ -1,37 +1,28 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-12 19:25 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-14 10:06 +0800 | ACTIVE | develop | — |
 
-### CURRENT INTEGRATION (2026-10-12)
+### CURRENT INTEGRATION (2026-10-14)
 
 ```text
-develop 4e1a4867 ──┐
-                   ├─ --no-ff fb731ed9：合入 feature/transcript-rich-render（157 个提交全部保留）
-feature 1bb87c1f ──┘
-  ├─ 23946252 / dc70bd70：只修测试
-  ├─ 9423494f / bfbf3bf8：状态文档 ──> 已推送 origin/develop
-  ├─ --no-ff ff6785f4：复核后补修 2 处附件清理问题（45687323 / 88bc4b30）
-  ├─ --no-ff 89c0c8e9：Bash 运行预览只保留 64KB 上限（72ac358f）
-  └─ --no-ff 3170407c：修测试锁死锁（6cfbddcf）──> gate-fast 通过
+缺 Key -> serve / 历史 / Settings 可用 -> 面板内配置模型
+       -> modelReady 控制发送，草稿仍可编辑
+       -> 保存 Key / 默认模型 -> 同进程刷新选择
+压缩模型不可用 -> 默认模型 -> 当前会话主模型
 ```
 
-- **合了什么**：`feature/transcript-rich-render` 的全部内容，功能明细见 [功能分支状态](feature-transcript-rich-render.md)。合并没有文本冲突；之后 develop 上的 `23946252` 把 3 个大读取测试的造数据方式换成直接追加（原来每条都重写一次索引，单个测试跑 20 多分钟），`dc70bd70` 对齐 1 条提示词断言、并让锁竞争测试先拿锁再启动竞争者。这两个提交都只改测试。
-- **合并后验证（fb731ed9 + 两个测试修复）**：
-  - Rust：clippy 无警告；库测试 3242 个注册用例全部有结论，3237 通过、5 个本来就标记忽略、0 失败。第一次整跑有 2 个失败，又被太慢的大测试拖到中止；修好后按测试族补跑并逐个用例名对账，没有把原失败改写成通过。集成测试并行 378 通过 / 27 跳过，串行 35 通过；fmt 通过。
-  - 扩展：两侧 TypeScript 类型检查、core 752 个、GUI 826 个单测通过。功能分支上做过的真实模型、安装态、VSIX 与实屏验收仍然有效，因为合并后只改了 Rust 测试和文档。
-- **复核后补修（ff6785f4）**：复核验收期间的提交，找出 2 处必须改的代码问题：
-  1. 删除会话时，回收图片要把所有会话的 transcript 从头读一遍，而且全程握着全局附件锁；这期间粘贴图片、发送、生成缩略图都会被卡住。现在复用启动清理已有的“指纹缓存账本”，只重读变过的文件（`45687323`）。
-  2. 清理过期租约、缩略图、孤儿图片时，只要有一个文件删不掉，后面的文件就全都不处理了，而且下次还会卡在同一个文件上。现在跳过它继续删，最后仍把第一个错误报出来；但如果“正在使用的图片名单”读不全，仍然整轮放弃，避免误删（`88bc4b30`）。
-  - 验证：短分支上 `core::session` 314 通过 / 2 忽略、Serve 附件测试 22 通过、clippy 与 fmt 通过；新增测试已确认在旧代码上会失败。改动只在 Rust 会话模块，不碰协议和界面，扩展测试未重跑。
-- **门禁里发现并修好的 2 个老问题**（都不是这次附件改动引入的）：
-  1. Bash 测试 `failed_capture_is_reported_after_draining_the_pipe` 偶发超过 5 秒上限（单独重跑 20 次失败 3 次）。根因是运行预览 `RuntimePreview::trim` 超过 1000 行时逐字节删除，每删一个字节都重数一遍整个预览的换行，短行越多越慢。现在只保留 64KB 字节上限，超出时一次性从头部切掉多出的部分（`72ac358f`，合并 `89c0c8e9`）。去掉行数上限不影响用户看到的内容：webview 自己只显示最后 500 行 / 30000 字符，掉队补发也只发最后 8KB；完整输出仍在日志文件里。
-  2. 重跑门禁时 lib 阶段卡死不动。根因是测试里“HOME 锁”和“cwd 锁”两把锁被不同测试按相反顺序拿：`cmd_install` 先拿 cwd 锁、建 `ChatContext` 时再拿 HOME 锁，`cmd_restore` 先拿 HOME 锁再拿 cwd 锁，两者同时跑就互相等（`90132d52` 起就有，概率性出现）。现在两个入口共用同一把可重入锁，不再有“先拿哪把”的问题，并加了断言防止再拆开（`6cfbddcf`，合并 `3170407c`）。
-- **最终门禁（develop `3170407c`）gate-fast 通过（退出码 0）**：clippy 无警告；lib 3241 通过 / 5 忽略 / 0 失败；doctest 通过（该阶段 0 个用例，不算行为验证）；集成测试并行 378 通过 / 27 跳过、串行 35 通过。
-- **版本**：CLI 与内置 CLI 0.1.72、扩展 0.1.86；不发版、不打 tag。
-- **没有验证的**：Windows 上的运行（含进程树停止）和其它平台、原生“另存为”、首次原生项目信任弹窗、远程 OAuth 与全部供应商组合、用户原先那个失败会话的 Retry。console 里外层 VS Code 资源超时、以及故意构造的图片 404/403 负例仍在，不宣称零报错；`cargo audit` 的 3 条 unmaintained 警告（bincode、smartstring、yaml-rust）保留。
-- **看板说明**：`INTEGRATION.md` 里的各 feature 章节由脚本从各自分支末端读取，是合并前的快照（例如 transcript-rich-render 那一节仍写着“未交付”），当前事实以本节为准。验收截图和日志只保存在本机、不入库，需要的结论已写在这里。
+- **本轮范围**：提交无 Key 首次使用整改及 Opus 后续改进；读取当前差异确认最终实现，不把上一版设计中的 `chatConfiguration` 当成当前协议。引导不再展示后端诊断文本；空会话放在主空白区，有历史时放在输入框上方。
+- **模型配置**：Settings 列表标记默认模型，提供“设为默认”快捷操作；创建表单按默认模型是否可用决定默认勾选，不再借聊天面板状态推断。保存使用关联回执，失败保留输入，写盘成功与刷新失败分开反馈。
+- **连接恢复**：失败摘要收敛为一行，完整 stderr 留在日志；面板可见时不再重复弹宿主通知，旧 setup 专用轮询和终端 init 流程删除，正常重连仍复用 supervisor。
+- **提交检查边界**：用户明确要求本次不跑测试。此次只做差异阅读、提交范围与状态文档核对，不运行测试、构建、lint 或覆盖率；不将先前的通过记录和截图表述为 Opus 改进后的复验结果。
+- **历史证据**：上一版在 2026-10-13 做过真实 stdio、Rust/Host/GUI 检查及 darwin-x64 原生 VSIX 验收；本机记录在 `.agents/acceptance/onboarding/acceptance.md`。其 `chatConfiguration`、卡片样式和部分回退语义已被本版替换，因此仅作历史参考。2026-10-12 合并与门禁明细保留于 Git `1d0c48f4` 中本文件的版本，不在顶部继续堆叠历史块。
+- **版本与发布**：本次未修改版本清单；不构建新 VSIX、不打 tag、不发布，也不自动推送远端。Cov% 未测量，保留 `—`，提交信息省略覆盖率字段。
+- **看板说明**：当前事实以本节为准；下方既有条目的日期、测试数和集成结论属于历史记录，不代表本次提交已通过测试。
 
 ### ✅ DONE (已完成/进行中)
+- **[P0，代码已实现，本轮未复测]** 模型元数据与凭证解析拆分；缺 Key 不阻断 serve 建会话，配置文件在用户保存时懒创建，运行期只刷新模型选择字段；压缩模型增加当前主模型兜底。@2026-10-14
+- **[P1，代码已实现，本轮未复测]** 面板内简洁引导、默认模型标记与快捷操作、关联保存回执、单行错误与就地重试已纳入；冷启动、协议、配置、GUI 和安装包测试源码及中英文文档一并提交。@2026-10-14
+- [ ] **[P1]** Opus 最新改进的运行和视觉复验：按用户要求此次不执行，不标为已测试通过。
 - [✓] **[P0/P1]** `tomcat` 多问题优化链路已在 `develop` 侧完成当前轮收口：GUI/webview 的 `max` reasoning 档位、pre-stream loading 指示、全量 shimmer 覆盖与 `Thinking` 文案已修复；`search_files` description 也已瘦身回归。Rust 侧把多模态从“Responses 独占”推进到“三家共用一套 `ChatMessageContentPart`，各 wire 自己翻 JSON”：新增 `FilesApiAdapter` 存储适配层，`OpenAiFilesRuntime` 改持 `Arc<dyn FilesApiAdapter>`，OpenAI Completions 已支持 inline 图片/PDF 与 uploaded `file_id`，Moonshot uploaded 图片走 `ms://...`，Anthropic Messages 已支持 inline / uploaded 图片与 PDF，并在 uploaded 引用时自动补 `anthropic-beta: files-api-2025-04-14`。内置/本地模型配置同步开启 `kimi-k3`、`kimi-k2.7-code` 与 Anthropic 全系 `files=true`。本地验证已补齐：catalog / openai provider / anthropic wire / adapter 单测通过；`serve_stdio_e2e` 新增 Moonshot `ms://` 与 Anthropic `source.type=file + beta header` 断言通过；live 结果为 **Kimi K3 成功**、**fcodex `/v1/files` 返回 404**、**Anthropic 实 key 返回 401 invalid x-api-key**，后两者已按真实结果记录。@2026-07-20
 - [✓] **[P0]** 推理档位 catalog-id / wire-name key 不一致已在 `feature/transcript-rich-render` 修复并待并入：`run_loop` 现与存盘/GetState 一样用 catalog `id` 查 `model-thinking.json`，中转站模型选 `xhigh` 不再被回退成默认 `high`；CLI `0.1.15` / 扩展 `0.1.18`。@2026-07-20
 - [✓] **[P0/P1]** 推理强度（reasoning effort）链路整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：这次不再靠“某家模型名字命中后写死映射/全局降级”硬扛，而是把**模型真正支持哪些档位**上收为 catalog 事实源。现在每个模型都可在 `builtin_models.toml` / `models.toml` 声明 `supported_reasoning_levels`；聊天框下拉按当前模型动态渲染（空列表退化为 `Thinking On/Off`），选中的档位写入 `model-thinking.json`，请求前只做一次 clamp，所以 `gpt-5.x` 的 `xhigh`、`glm/deepseek` 的 `max`、以及只支持 thinking 开关的 `mimo/kimi` 都各走各的真实协议，不再被一把梭硬折叠。与此同时，`ProviderCacheKey` 新增 `catalog_generation`，改 `thinking_format / model_name / capabilities` 后无需重启即可生效；保存模型时空 `thinking_format` 会按 API 自动物化成具体值，不再留下黑盒 `Auto`；现代 Claude `4.6/4.7/4.8` 改走 `anthropic-adaptive`（`thinking.type="adaptive" + output_config.effort`）；若 `openai/openai-responses` 线路被配成不会发 effort 的 format，保存后会回传非致命 warning。Rust focused/unit + serve 集成、GUI 单测与 targeted devhost Add Model E2E 已补齐。@2026-07-19
@@ -57,6 +48,9 @@ feature 1bb87c1f ──┘
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- 本轮新增 `LlmResolver::resolve_metadata`、`selected_model_id`、`model_ready`；`get_state.modelReady` 为可选布尔值，Host/GUI 仅在显式 `false` 时限制发送，兼容未提供该字段的旧 CLI。早期未提交实现的 `chatConfiguration` 已移除。
+- `list_models` 增加 `defaultModelId`；新增 `set_default_model` 命令/能力与 `TomcatMessenger.sendSetDefaultModel`；Settings 新增 `setDefaultModel` intent、创建模型的 `setAsDefault` 标志及关联 `modelSaveReceipt`，wire/schema 夹具随代码提交。
+- `DefaultLlmResolver::compaction_candidates` 依次尝试配置的压缩模型、默认模型、当前主模型并去重；`ServeConnectionSupervisor.reconnect()` 删除旧 setup 模式参数，新增 `summarizeServeFailure`；webview 新增 `connectionFailure` 和重试/查看日志 intent。
 - 推理强度 / 模型配置链路：Rust `ModelEntry` / `UserModelEntry` / `ModelView` / `ModelEntryInput` 现显式携带 `supported_reasoning_levels`，`UpsertModelResponse` 新增 `warnings`；webview state 新增 `availableModelReasoningLevels`，`Composer` 的 thinking 控件改为按模型动态渲染；`ProviderCacheKey` 新增 `catalog_generation` 以支持模型配置热生效；`thinking_format` 空值保存时会按 API 物化；Anthropic 新增 `anthropic-adaptive` 编码路径（`thinking.type=adaptive` + `output_config.effort`）。
 - plan 预览热更新链已从“`onDidChangeTextDocument` + 读旧缓冲”改为 **serve `plan.update` / `plan.todos` → `provider.handleServeEvent()` 桥接 → `PlanPreviewEditorProvider.refreshFromServeEvent(planId, pathHint)` 磁盘重读 → webview `state` 帧重发**；`PlanPreviewDomSnapshot` 新增 `contentScrollTop` / `topVisibleSourceLine`，`PlanPreviewDomAction` 新增 `setContentScrollTop` 供 E2E 锁“刷新不跳顶”。
 - transcript rich rendering 四次整改：前端新增 `splitTopLevelBlocks(markdown)` 与同步 `highlightToHtml(code, language)`；聊天富渲染链改为“父组件切顶层块 + 子块 `React.memo(raw)` + 同步 `hljs` + mermaid 按块异步”，`ChatMarkdown` / `MessageBubble` / `TranscriptView` 不再为 assistant 富渲染透传 `isStreaming`。Vite 产物新增独立 `dist/chunks/highlight.js` 分包以控制首屏成本。
@@ -76,7 +70,13 @@ feature 1bb87c1f ──┘
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
-- 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
+| 阻塞项 | 原因 | 后续处理 |
+| :--- | :--- | :--- |
+| 最新代码未复测 | 用户要求本次只提交、不跑测试；旧验收不是当前版本的通过证明 | 后续需要验收或发版时，另行执行受影响的检查与实屏验证 |
+| 既有历史显示问题 | 上一版原生验收记录了拒绝写入在重载后误标 `Created`；实际文件未创建 | 本次未修复，不把整包宣称为无已知问题 |
+| 既有验证边界 | 跨平台原生行为、远程 OAuth、全部供应商组合等仍未补齐；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不在本次提交中扩大验证范围 |
+
+- 历史 `real_mimo_web_search` slow 标记仅作性能观察，不把其旧 PASS 作为本轮复验。
 - Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
 - 「同会话关内网后反复 403、新会话可恢复」现象已验收可接受（通网后摘要正常），根因未再钉死到 `previous_response_id`；临时诊断日志已移除，后续若复现再开文件日志排障。
 

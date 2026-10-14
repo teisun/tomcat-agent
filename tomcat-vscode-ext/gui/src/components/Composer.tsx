@@ -526,7 +526,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   availableModelReasoningLevels,
   availableModels,
   busy = false,
-  canChangeConfig: configAllowed = !busy,
+  canChangeConfig: configAllowed,
   allowBusyInput = false,
   submitAriaLabel,
   hideDragHint = false,
@@ -572,8 +572,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const tRef = useRef(t);
   tRef.current = t;
   const testId = (name: string) => instanceId ? `${instanceId}-${name}` : name;
-  const canChangeConfig = canPrompt && configAllowed;
-  const configHint = !configAllowed ? t("composer.configBusy") : undefined;
+  const canChangeConfig = configAllowed ?? (canPrompt && !busy);
+  const configHint = !(configAllowed ?? !busy) ? t("composer.configBusy") : undefined;
   const planStatus = formatPlanStatus(planState, t);
   const [capabilityHint, setCapabilityHint] = useState<MessageKey | null>(null);
   const [dropActive, setDropActive] = useState(false);

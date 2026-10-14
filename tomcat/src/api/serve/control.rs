@@ -37,7 +37,7 @@ pub(crate) async fn handle_control_or_interrupt(
                     session_id.or_else(|| state.registry.active_session_id()),
                     serde_json::json!({
                         "protocolVersion": 2,
-                        "uiPreferences": super::ui_preferences::snapshot().ok(),
+                        "uiPreferences": super::ui_preferences::snapshot(&state.config_path).ok(),
                         "serverVersion": env!("CARGO_PKG_VERSION"),
                         "capabilities": [
                             "prompt",
@@ -62,6 +62,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "upsert_model",
                             "remove_model",
                             "set_provider_key",
+                            "set_default_model",
                             "list_provider_keys",
                             "list_connectors",
                             "list_connector_tools",
