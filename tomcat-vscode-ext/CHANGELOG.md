@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.90
+
+- Keep Serve, history and Settings available without model credentials. Guide first-time users in the chat panel and enable sending after configuring a model, without a terminal initialization flow or Serve restart.
+- Add default-model indicators and shortcuts, preserve form input on partial saves, and show concise inline connection errors with retry. Bundle CLI 0.1.74, including compaction fallback to the current main model.
+- Publish this version to GitHub only. Marketplace publishing is independent and requires explicit opt-in after its OIDC configuration is ready; a GitHub release does not imply a Marketplace update.
+- The release owner explicitly retained the known CLI 0.1.74 presentation issue: permission-refused writes may display Created after history reload even though no file was created. Native acceptance must still prove actual denial and file absence; the exception does not cover missing history status or future CLI versions.
+
 ## 0.1.89
 
 - Change the extension display name from Tomcat to Tomcat AI Agent after Marketplace rejected the original display name as taken. Keep the extension ID `tomcat-agent.tomcat-vscode-ext`, commands, settings and Agent Box branding unchanged.

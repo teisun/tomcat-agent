@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-14 10:06 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-14 10:36 +0800 | ACTIVE | develop | — |
 
 ### CURRENT INTEGRATION (2026-10-14)
 
@@ -14,15 +14,17 @@
 - **本轮范围**：提交无 Key 首次使用整改及 Opus 后续改进；读取当前差异确认最终实现，不把上一版设计中的 `chatConfiguration` 当成当前协议。引导不再展示后端诊断文本；空会话放在主空白区，有历史时放在输入框上方。
 - **模型配置**：Settings 列表标记默认模型，提供“设为默认”快捷操作；创建表单按默认模型是否可用决定默认勾选，不再借聊天面板状态推断。保存使用关联回执，失败保留输入，写盘成功与刷新失败分开反馈。
 - **连接恢复**：失败摘要收敛为一行，完整 stderr 留在日志；面板可见时不再重复弹宿主通知，旧 setup 专用轮询和终端 init 流程删除，正常重连仍复用 supervisor。
-- **提交检查边界**：用户明确要求本次不跑测试。此次只做差异阅读、提交范围与状态文档核对，不运行测试、构建、lint 或覆盖率；不将先前的通过记录和截图表述为 Opus 改进后的复验结果。
+- **发布准备**：按 `/release-cli-ext` 用 `bump --all patch` 将 CLI 升为 0.1.74、EXT 升为 0.1.90，并将 pin 同步为 0.1.74。版本镜像和两个 tag guard 已通过，Cargo/npm lock 只有根包版本变化；远端目标 tag 起手检查不存在，三分支可 fast-forward。等待 release commit 推送及 CLI → EXT 的远端流水线，不能把本地准备当作已发布。
+- **用户确认的边界**：本次仅 GitHub Release，不自动上传 Marketplace。`release-ext` 将 GitHub `publish` 与默认关闭的 `marketplace` job 分离；后者仅在仓库变量 `PUBLISH_MARKETPLACE=true` 时运行。用户明确同意 CLI 0.1.74 延续旧版拒绝写入历史标签问题，仅扩展该版本例外；真实拒绝、文件未创建、历史状态必须存在等断言保持。
+- **检查与测试**：此次不额外运行本地测试/覆盖率；已阅读差异并完成工作流 YAML 解析，发布 CI 的版本检查和三平台原生验收仍保留。先前纯插件包构建成功不等于本次 GitHub Release 完成，也不代表最新功能已完成本地行为复验。
 - **历史证据**：上一版在 2026-10-13 做过真实 stdio、Rust/Host/GUI 检查及 darwin-x64 原生 VSIX 验收；本机记录在 `.agents/acceptance/onboarding/acceptance.md`。其 `chatConfiguration`、卡片样式和部分回退语义已被本版替换，因此仅作历史参考。2026-10-12 合并与门禁明细保留于 Git `1d0c48f4` 中本文件的版本，不在顶部继续堆叠历史块。
-- **版本与发布**：本次未修改版本清单；不构建新 VSIX、不打 tag、不发布，也不自动推送远端。Cov% 未测量，保留 `—`，提交信息省略覆盖率字段。
+- **版本与发布**：本次计划按 CLI 资产齐备后才发 EXT 的顺序推送正式 tag；不移动旧 tag、不强推、不覆盖已发布包。Cov% 未测量，保留 `—`，提交信息省略覆盖率字段。GitHub 资产以流水线实际结果为准；市场仍保持原发布版本。
 - **看板说明**：当前事实以本节为准；下方既有条目的日期、测试数和集成结论属于历史记录，不代表本次提交已通过测试。
 
 ### ✅ DONE (已完成/进行中)
 - **[P0，代码已实现，本轮未复测]** 模型元数据与凭证解析拆分；缺 Key 不阻断 serve 建会话，配置文件在用户保存时懒创建，运行期只刷新模型选择字段；压缩模型增加当前主模型兜底。@2026-10-14
 - **[P1，代码已实现，本轮未复测]** 面板内简洁引导、默认模型标记与快捷操作、关联保存回执、单行错误与就地重试已纳入；冷启动、协议、配置、GUI 和安装包测试源码及中英文文档一并提交。@2026-10-14
-- [ ] **[P1]** Opus 最新改进的运行和视觉复验：按用户要求此次不执行，不标为已测试通过。
+- [ ] **[P1]** CLI 0.1.74 / EXT 0.1.90 远端发布及原生包验收待流水线执行；本地不额外跑测试，不能预先标记通过。
 - [✓] **[P0/P1]** `tomcat` 多问题优化链路已在 `develop` 侧完成当前轮收口：GUI/webview 的 `max` reasoning 档位、pre-stream loading 指示、全量 shimmer 覆盖与 `Thinking` 文案已修复；`search_files` description 也已瘦身回归。Rust 侧把多模态从“Responses 独占”推进到“三家共用一套 `ChatMessageContentPart`，各 wire 自己翻 JSON”：新增 `FilesApiAdapter` 存储适配层，`OpenAiFilesRuntime` 改持 `Arc<dyn FilesApiAdapter>`，OpenAI Completions 已支持 inline 图片/PDF 与 uploaded `file_id`，Moonshot uploaded 图片走 `ms://...`，Anthropic Messages 已支持 inline / uploaded 图片与 PDF，并在 uploaded 引用时自动补 `anthropic-beta: files-api-2025-04-14`。内置/本地模型配置同步开启 `kimi-k3`、`kimi-k2.7-code` 与 Anthropic 全系 `files=true`。本地验证已补齐：catalog / openai provider / anthropic wire / adapter 单测通过；`serve_stdio_e2e` 新增 Moonshot `ms://` 与 Anthropic `source.type=file + beta header` 断言通过；live 结果为 **Kimi K3 成功**、**fcodex `/v1/files` 返回 404**、**Anthropic 实 key 返回 401 invalid x-api-key**，后两者已按真实结果记录。@2026-07-20
 - [✓] **[P0]** 推理档位 catalog-id / wire-name key 不一致已在 `feature/transcript-rich-render` 修复并待并入：`run_loop` 现与存盘/GetState 一样用 catalog `id` 查 `model-thinking.json`，中转站模型选 `xhigh` 不再被回退成默认 `high`；CLI `0.1.15` / 扩展 `0.1.18`。@2026-07-20
 - [✓] **[P0/P1]** 推理强度（reasoning effort）链路整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：这次不再靠“某家模型名字命中后写死映射/全局降级”硬扛，而是把**模型真正支持哪些档位**上收为 catalog 事实源。现在每个模型都可在 `builtin_models.toml` / `models.toml` 声明 `supported_reasoning_levels`；聊天框下拉按当前模型动态渲染（空列表退化为 `Thinking On/Off`），选中的档位写入 `model-thinking.json`，请求前只做一次 clamp，所以 `gpt-5.x` 的 `xhigh`、`glm/deepseek` 的 `max`、以及只支持 thinking 开关的 `mimo/kimi` 都各走各的真实协议，不再被一把梭硬折叠。与此同时，`ProviderCacheKey` 新增 `catalog_generation`，改 `thinking_format / model_name / capabilities` 后无需重启即可生效；保存模型时空 `thinking_format` 会按 API 自动物化成具体值，不再留下黑盒 `Auto`；现代 Claude `4.6/4.7/4.8` 改走 `anthropic-adaptive`（`thinking.type="adaptive" + output_config.effort`）；若 `openai/openai-responses` 线路被配成不会发 effort 的 format，保存后会回传非致命 warning。Rust focused/unit + serve 集成、GUI 单测与 targeted devhost Add Model E2E 已补齐。@2026-07-19
@@ -48,6 +50,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- 发版链路新增可选仓库变量 `PUBLISH_MARKETPLACE`（未设置时关闭）；GitHub `publish` 仍依赖完整 `build/verify`，市场 job 仅依赖已验收且已发 GitHub 的相同资产。已知显示问题例外明确限定为 CLI 0.1.73 和 0.1.74，不覆盖后续版本。
 - 本轮新增 `LlmResolver::resolve_metadata`、`selected_model_id`、`model_ready`；`get_state.modelReady` 为可选布尔值，Host/GUI 仅在显式 `false` 时限制发送，兼容未提供该字段的旧 CLI。早期未提交实现的 `chatConfiguration` 已移除。
 - `list_models` 增加 `defaultModelId`；新增 `set_default_model` 命令/能力与 `TomcatMessenger.sendSetDefaultModel`；Settings 新增 `setDefaultModel` intent、创建模型的 `setAsDefault` 标志及关联 `modelSaveReceipt`，wire/schema 夹具随代码提交。
 - `DefaultLlmResolver::compaction_candidates` 依次尝试配置的压缩模型、默认模型、当前主模型并去重；`ServeConnectionSupervisor.reconnect()` 删除旧 setup 模式参数，新增 `summarizeServeFailure`；webview 新增 `connectionFailure` 和重试/查看日志 intent。
@@ -72,8 +75,9 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
-| 最新代码未复测 | 用户要求本次只提交、不跑测试；旧验收不是当前版本的通过证明 | 后续需要验收或发版时，另行执行受影响的检查与实屏验证 |
-| 既有历史显示问题 | 上一版原生验收记录了拒绝写入在重载后误标 `Created`；实际文件未创建 | 本次未修复，不把整包宣称为无已知问题 |
+| 远端发布尚未完成 | 当前为 release commit 准备状态；CLI 资产未齐前不得发 EXT tag | 按序等待 CLI 四项、EXT 五项必需资产并记录 CI 结果 |
+| 既有历史显示问题 | 用户已明确允许 CLI 0.1.74 继续携带同一 `Created` 误标；安全断言保留 | 公开记录并使用 `passed_with_known_issues`，不称为已修复 |
+| Marketplace 自动发布关闭 | 仓库和环境均未配置 Azure 凭据，用户选择本次只发 GitHub | 保持 `PUBLISH_MARKETPLACE` 未设置，后续另行配置并明确启用 |
 | 既有验证边界 | 跨平台原生行为、远程 OAuth、全部供应商组合等仍未补齐；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不在本次提交中扩大验证范围 |
 
 - 历史 `real_mimo_web_search` slow 标记仅作性能观察，不把其旧 PASS 作为本轮复验。

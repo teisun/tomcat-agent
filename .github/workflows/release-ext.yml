@@ -298,16 +298,59 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ext-v')
     needs: [build, verify]
-    environment: marketplace
     env:
       HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged VSIX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-ext-vsix
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.vsix > SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.vsix
+            dist/SHA256SUMS
+          generate_release_notes: true
+
+      - name: Publish VSIX files to OpenVSX
+        if: env.HAS_OVSX_PAT == 'true'
+        continue-on-error: true
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          set -euo pipefail
+          for file in dist/*.vsix; do
+            npx ovsx publish "$file" -p "${OVSX_PAT}"
+          done
+
+  marketplace:
+    name: publish accepted packages to Marketplace
+    runs-on: ubuntu-latest
+    # Explicit opt-in: GitHub releases must not depend on unfinished Marketplace setup.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ext-v') && vars.PUBLISH_MARKETPLACE == 'true'
+    needs: [build, publish]
+    environment: marketplace
+    env:
       EXT_VERSION: ${{ needs.build.outputs.extension_version }}
       MARKETPLACE_TARGETS: darwin-arm64 darwin-x64 linux-x64
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_CORE_OUTPUT: none
     permissions:
-      contents: write
+      contents: read
       id-token: write
 
     steps:
@@ -317,12 +360,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Download packaged VSIX artifacts
+      - name: Download accepted VSIX artifacts
         uses: actions/download-artifact@v4
         with:
+          name: release-ext-vsix
           path: dist
-          pattern: release-ext-vsix
-          merge-multiple: true
 
       - name: Validate Marketplace publishing inputs
         run: |
@@ -355,20 +397,6 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
-      - name: Generate SHA256SUMS
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum *.vsix > SHA256SUMS
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.vsix
-            dist/SHA256SUMS
-          generate_release_notes: true
-
       - name: Publish accepted platform packages to Marketplace
         working-directory: tomcat-vscode-ext
         run: |
@@ -378,15 +406,4 @@ jobs:
           for target in ${MARKETPLACE_TARGETS}; do
             file="../dist/tomcat-vscode-ext-${EXT_VERSION}-${target}.vsix"
             npx --no-install vsce publish --azure-credential --packagePath "${file}"
-          done
-
-      - name: Publish VSIX files to OpenVSX
-        if: env.HAS_OVSX_PAT == 'true'
-        continue-on-error: true
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: |
-          set -euo pipefail
-          for file in dist/*.vsix; do
-            npx ovsx publish "$file" -p "${OVSX_PAT}"
           done

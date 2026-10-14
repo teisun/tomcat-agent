@@ -23,6 +23,8 @@ code --install-extension tomcat-agent.tomcat-vscode-ext
 
 ## 离线安装与 GitHub 下载
 
+**0.1.90 发布渠道：** 本次更新仅发布到 GitHub，自动上传 Marketplace 仍关闭。请安装本版本 VSIX 获取新的首次配置流程，不要把 GitHub 发包当作市场已更新。
+
 [GitHub Releases](https://github.com/teisun/tomcat-agent/releases) 保留平台 VSIX、仅 CLI 的压缩包，以及给已有 CLI 用户的纯扩展包。以对应 Release 的实际版本/文件为准，不照抄旧教程文件名。纯扩展包**不含 CLI**，不作为 Marketplace 通用回退包发布。
 
 ```bash
@@ -35,7 +37,7 @@ code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 
 通过 **Add Models...** 配置模型，并提供服务商要求的凭据。模型/API 服务可能单独收费。发送的消息、附件或选中上下文，以及相关工具结果可能发送到所配置的模型服务。文件改动和命令执行受 Tomcat 权限门控，请阅读授权请求再允许。这不代表所有处理都在本地，或所有模型服务都免费。反馈请使用 [GitHub Issues](https://github.com/teisun/tomcat-agent/issues)。
 
-**内置 CLI 0.1.73 的已知限制：** 重载聊天历史后，被权限拒绝的写入可能错误显示 **Created（已创建）**，但文件实际上没有创建。权限拒绝仍然生效；请核对工具结果和实际文件，不要把恢复后的标签当作成功证明。此展示问题留待后续版本修复。
+**内置 CLI 0.1.73 和 0.1.74 的已知限制：** 重载聊天历史后，被权限拒绝的写入可能错误显示 **Created（已创建）**，但文件实际上没有创建。权限拒绝仍然生效；请核对工具结果和实际文件，不要把恢复后的标签当作成功证明。此展示问题留待后续版本修复。
 
 ## 打开 Tomcat Agent Box
 

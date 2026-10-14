@@ -95,12 +95,18 @@ describe("release guard scripts", () => {
     expect(workflow.indexOf("sha256sum -c -")).toBeLessThan(workflow.indexOf('tar -xzf "${bundle_dir}/${archive}"'));
   });
 
-  it("restricts OIDC to accepted formal-tag publishing and installs the tool from that commit's lockfile", async () => {
+  it("keeps GitHub publishing independent and makes Marketplace OIDC an explicit opt-in", async () => {
     const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
-    const publish = workflow.slice(workflow.indexOf("\n  publish:"));
-    expect(workflow.slice(0, workflow.indexOf("\n  publish:"))).not.toContain("id-token:");
-    expect(publish).toContain("if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ext-v')");
-    expect(publish).toContain("needs: [build, verify]");
+    const marketplaceStart = workflow.indexOf("\n  marketplace:");
+    expect(marketplaceStart).toBeGreaterThan(-1);
+    const github = workflow.slice(workflow.indexOf("\n  publish:"), marketplaceStart);
+    const publish = workflow.slice(marketplaceStart);
+    expect(github).toContain("needs: [build, verify]");
+    expect(github).toContain("Create GitHub release");
+    expect(github).not.toMatch(/AZURE_|azure\/login|environment: marketplace/);
+    expect(workflow.slice(0, marketplaceStart)).not.toContain("id-token:");
+    expect(publish).toContain("if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ext-v') && vars.PUBLISH_MARKETPLACE == 'true'");
+    expect(publish).toContain("needs: [build, publish]");
     expect(publish).toContain("environment: marketplace");
     expect(publish).toContain("id-token: write");
     expect(publish).toContain("ref: ${{ github.sha }}");
@@ -111,8 +117,9 @@ describe("release guard scripts", () => {
     expect(publish).toContain("tenant-id: ${{ secrets.AZURE_TENANT_ID }}");
     expect(publish).toContain("allow-no-subscriptions: true");
     expect(publish).not.toMatch(/AZURE_LOGIN_POST_CLEANUP|client-secret|subscription-id|skip-duplicate/);
-    expect(publish.indexOf("Validate Marketplace publishing inputs")).toBeLessThan(publish.indexOf("Create GitHub release"));
-    expect(publish.slice(publish.indexOf("Publish accepted platform packages to Marketplace"), publish.indexOf("Publish VSIX files to OpenVSX"))).not.toContain("continue-on-error");
+    expect(publish.indexOf("Validate Marketplace publishing inputs")).toBeLessThan(publish.indexOf("Login to Marketplace publisher identity with OIDC"));
+    expect(publish).not.toContain("Create GitHub release");
+    expect(publish).not.toContain("continue-on-error");
   });
 
   // Execute the workflow's actual run blocks; the substitute only records the CLI

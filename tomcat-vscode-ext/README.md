@@ -23,6 +23,8 @@ The Marketplace release targets **Apple Silicon macOS (`darwin-arm64`), Intel ma
 
 ## Offline installation / GitHub downloads
 
+**0.1.90 release channel:** this update is published on GitHub only; automatic Marketplace upload remains disabled. Install its VSIX to receive the new first-time setup flow rather than assuming the Marketplace listing has already updated.
+
 Use [GitHub Releases](https://github.com/teisun/tomcat-agent/releases) for platform-specific VSIX files, the CLI-only archives, or the pure extension package for existing CLI users. Choose the version from that release rather than an older filename in a tutorial. The pure package has **no bundled CLI** and is not published as a universal Marketplace fallback.
 
 ```bash
@@ -35,7 +37,7 @@ Reload VS Code after installation. VS Code unpacks the bundle into its extension
 
 Configure a model through **Add Models...** and supply the credentials required by your provider. Model/API services may charge separately. Your messages, attached or selected context, and relevant tool results can be sent to that configured service. File changes and command execution are subject to Tomcat's permission gates; review requests before allowing them. This is not a promise that all processing stays local or that all model services are free. For support, use [GitHub Issues](https://github.com/teisun/tomcat-agent/issues).
 
-**Known limitation with bundled CLI 0.1.73:** after reloading chat history, a permission-refused write may incorrectly display **Created** even though the file was not created. Permission denial is still enforced; check the tool result and actual file rather than treating that restored label as proof of success. This presentation fix is deferred to a later release.
+**Known limitation with bundled CLI 0.1.73 and 0.1.74:** after reloading chat history, a permission-refused write may incorrectly display **Created** even though the file was not created. Permission denial is still enforced; check the tool result and actual file rather than treating that restored label as proof of success. This presentation fix is deferred to a later release.
 
 ## Open Tomcat Agent Box
 
