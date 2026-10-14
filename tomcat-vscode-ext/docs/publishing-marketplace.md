@@ -1,8 +1,8 @@
 # Tomcat 发布到 VS Code Marketplace
 
-> 最初调研于 2026-10-12；2026-10-13 已完成 Tomcat AI Agent 0.1.89 的三个平台网页上传，并在 Intel Mac 的隔离 VS Code 中从市场安装成功。长期 Entra/OIDC 自动发布与自动更新证明仍未完成；上架成功不等于这条自动化链路已接通。
+> 最初调研于 2026-10-12；2026-10-13 完成 Tomcat AI Agent 0.1.89 的三个平台网页首发和 Intel Mac 隔离市场安装，2026-10-14 已网页更新三个平台至 0.1.90（内置 CLI 0.1.74）。专用 Entra 应用、联邦信任及 GitHub 环境身份参数已配置；Marketplace 身份初始化/授权、实际 OIDC 发布和自动更新证明仍未完成。
 
-> 2026-10-14 发版选择：CLI 0.1.74 / EXT 0.1.90 本次只发布 GitHub Release。`publish` 不再依赖 Azure；独立 `marketplace` job 仅在仓库 Actions 变量 `PUBLISH_MARKETPLACE` 严格等于 `true` 时启用。当前未设置该变量，自动市场上传保持关闭；资产是否发布以实际 Release 为准。
+> 2026-10-14 发版选择：CLI 0.1.74 / EXT 0.1.90 的原工作流只发布 GitHub Release，市场随后人工上传相同已验收包，未重跑 CI。`publish` 不依赖 Azure；独立 `marketplace` job 仅在仓库 Actions 变量 `PUBLISH_MARKETPLACE` 严格等于 `true` 时启用。当前未设置该变量，自动市场上传仍关闭。
 
 ```text
 确认 tomcat-agent Owner → 补全发布者 Logo/资料
@@ -93,7 +93,7 @@ npm run verify:vsix -- --marketplace tomcat-agent.tomcat-vscode-ext@0.1.89
 - 公开页图标、README 截图、双语入口、版本和支持范围已核实。Marketplace 自身仍报告字体 CSP 和站点资源 404，保留控制台证据，不宣称整页控制台零错误。
 - 本机 Intel macOS / VS Code 1.106.0 已从市场按精确 ID/版本完成隔离安装；实际来源为 gallery、目标为 darwin-x64，内置 CLI 0.1.73 经过真实 Serve、受控模型响应、工具允许/拒绝、停止与重载检查，回执为 `passed_with_known_issues`。这不等于新用户通过 Add Models 配置真实外部服务的人工验收，也不是另外两个平台的市场安装证明。
 - 0.1.89 仅改显示名/版本和说明。按用户明确要求，不再触发 CI；复用已完成的归档检查和本机正式包检查，不把此前 0.1.88 三平台原生证据冒充本版本三平台已重测。
-- 当前网页首发不依赖 Entra，后续联邦身份和自动更新仍暂停。发布记录与完整证据保留在 `.agents/marketplace/0.1.89/`。
+- 网页首发不依赖 Entra；首发时暂停的长期配置现已恢复推进，最新状态见第 5 节。首发记录与证据保留在 `.agents/marketplace/0.1.89/`。
 
 ## 5. 后续联邦身份发布（尚需实际配置与验收）
 
@@ -109,14 +109,18 @@ GitHub marketplace environment（仅正式 ext-v* tags）
 - 先确认用户租户和应用注册权限。优先已有租户、无订阅登录，不默认创建付费云资源；必需邮箱、MFA/条款由本人操作，涉及付费先确认。
 - 联邦 issuer 为 GitHub Actions，audience 为 `api://AzureADTokenExchange`，subject 为 `repo:teisun/tomcat-agent:environment:marketplace`；环境部署规则只允许正式 ext-v* 标签，不授权任意 PR/fork。
 - 通过官方 profile API 获取实际身份的 Marketplace profile ID并授予 Publisher Contributor；它不等于 client ID。Azure 登录成功也不证明 Publisher 写权限。
-- 仅发布 job 具有 `id-token: write`，固定受支持 azure/login 的版本/SHA，保持登录 cleanup；令牌与 secrets 不写入源码/命令历史/日志。
+- 在 `release-ext` 中仅市场发布 job 具有 `id-token: write`；另有下述手动身份初始化任务使用同一联邦身份。固定受支持 azure/login 的版本/SHA，保持登录 cleanup；令牌与 secrets 不写入源码/命令历史/日志。
 - 从相同提交按 npm lockfile 安装 vsce，运行 `npx --no-install vsce publish --azure-credential --packagePath <已验收文件>`。仅显式选择三个平台，缺包/认证错误必须失败，不静默跳过。
-- workflow_dispatch 和 dry-run 只打包验收，不执行市场上传。正式标签必须依赖 native gate 的成功；GitHub release 成功不等于市场成功。
+- `release-ext` 的 workflow_dispatch 和 dry-run 只打包验收，不执行市场上传。正式标签必须依赖 native gate 的成功；GitHub release 成功不等于市场成功。
 - 用下一正常 EXT-only patch 实际发布并让首发安装通过正常市场更新接收新版本。未实际配置/运行成功时，长期任务保持未完成，不能把 YAML 作为端到端证据。
 
 ### 工作流实现与启用前提
 
-`release-ext.yml::publish` 负责通过原生验收后的 GitHub Release，不需要 Azure 凭据；`marketplace` 是其后的独立可选 job，保留 OIDC 代码，**尚无真实联邦登录/自动发布成功证据**。此前 Entra 实测返回 `AADSTS16000`（个人账号不属于所访问的 Microsoft Services 目录），需用户提供合适的组织目录访问；能网页上传 Marketplace 不等于已有该权限。本次仅发 GitHub，不修改用户云端身份。
+`release-ext.yml::publish` 负责通过原生验收后的 GitHub Release，不需要 Azure 凭据；`marketplace` 是其后的独立可选 job，**尚无真实联邦登录/自动发布成功证据**。2026-10-14 用户完成组织目录和单租户应用 `tomcat-marketplace-publisher` 注册，随后已保存 `github-marketplace` 联邦凭据及 GitHub 环境中的两个身份参数；门户显示证书 0、客户端密码 0、联邦凭据 1。
+
+当前阻塞是 **Marketplace 自己的 User/profile ID**：Members 页面要求该 ID，不能填写应用 client ID 或 Entra 对象 ID。按微软官方流程，先以发布身份登录并调用 `az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv`，再授予 Contributor。此前用户要求不运行 CI，因此身份初始化任务也须取得明确同意，不能默默触发构建或改用 PAT/client secret。Publisher 授权尚未写入，自动发布仍关闭。
+
+本次还实查 GitHub OIDC 设置：`use_default=true`、`use_immutable_subject=false`，因此信任继续精确匹配 `repo:teisun/tomcat-agent:environment:marketplace`。不要直接套用 Entra 门户新模板中的 `@owner_id/@repository_id` 格式；仓库以后重命名、转移或启用 immutable subjects 时，须同步复核并迁移此信任，不添加通配或旧格式备用信任。配置及浏览器回读证据位于 `.agents/marketplace/entra-tenant-status.json`、`.agents/marketplace/github-environment-status.json`。
 
 - 明确启用后才自动上传：先配齐下面的 OIDC 信任、凭据与 Publisher 授权，再由维护者把**仓库级** Actions 变量 `PUBLISH_MARKETPLACE` 设为 `true`。未设置或其它值均跳过市场 job；该开关不跳过 GitHub 发包前的三平台原生验收。
 - GitHub `marketplace` environment 的 Secrets 存放 `AZURE_CLIENT_ID`、`AZURE_TENANT_ID` 两个身份标识；不是 client secret，不配置 PAT 或订阅 Owner 权限。已有环境标签规则仅允许 `ext-v*`；Entra 的精确 subject 必须保持上文值。
@@ -126,6 +130,12 @@ GitHub marketplace environment（仅正式 ext-v* tags）
 - 上传 shell 的既有用例保留：只替换上传命令边界，覆盖选包、缺第三包/缺认证时零上传、首个/中途失败停止和旧 PAT 不外泄。新增静态边界断言覆盖 GitHub job 无 Azure 依赖及市场显式启用；本轮按用户要求未在本地重跑测试。这些断言不证明微软实际授权，后续仍须真实 OIDC 发布及已有安装更新验收。
 
 创建租户前先读[微软当前前提](https://learn.microsoft.com/en-us/entra/fundamentals/create-new-tenant)：管理中心内新增 Workforce 租户对付费客户有限制，免费/试用用户另有免费账号入口，不保证个人账号符合资格或无需账单验证。优先已有目录；账号、国家/组织信息、条款和费用由用户决定，不用面向客户登录的 External ID 试用目录替代本任务。
+
+### 仅身份初始化（不发版）
+
+用户已明确允许一次仅认证的 GitHub Actions 任务。`.github/workflows/marketplace-identity.yml` 只接受手动触发，复用同一个 `marketplace` 环境、身份参数和锁定的 Azure login；不 checkout、不构建、不跑产品测试、不上传包。它先核对登录类型、client ID 和 tenant ID，再仅输出校验过的 Marketplace profile UUID，不输出访问令牌。
+
+首次运行使用非发布标签 `marketplace-identity-20261014`：它不匹配现有 CLI/EXT 发版触发器；任务提交使用 `[skip ci]` 避免普通分支推送触发 version-sync。该标签只获得一次临时的精确环境放行，任务结束即撤销，保留原 `ext-v*` 标签规则；不要扩大为任意分支或通配检查标签。身份任务成功也不证明 Contributor 授权或实际上传成功，`PUBLISH_MARKETPLACE` 仍保持关闭。
 
 ### 后续发版究竟由什么触发
 
@@ -137,7 +147,7 @@ GitHub marketplace environment（仅正式 ext-v* tags）
   → 市场校验/公开 → VS Code 从市场检查并更新
 ```
 
-`release-ext.yml` 监听 `push.tags: ext-v*`；**手动把 VSIX 附到 GitHub Release、普通分支 push、单独发 CLI 标签，都不会自动更新 Marketplace**。首发已网页上传；工作流的 OIDC 代码已准备，但 Entra 信任、Publisher 授权和环境身份配置尚未完成，不能把目标链路写成已接通。配置完成且显式启用 `PUBLISH_MARKETPLACE` 后，工作流直接上传这一轮验收过的相同包，不由市场从 GitHub 抓文件。
+`release-ext.yml` 监听 `push.tags: ext-v*`；**手动把 VSIX 附到 GitHub Release、普通分支 push、单独发 CLI 标签，都不会自动更新 Marketplace**。首发及 0.1.90 更新已网页上传；工作流、Entra 应用/信任和 GitHub 身份参数已准备，但 Publisher 授权和实际 OIDC 登录/发布尚未验证，不能把目标链路写成已接通。授权完成且显式启用 `PUBLISH_MARKETPLACE` 后，工作流直接上传这一轮验收过的相同包，不由市场从 GitHub 抓文件。
 
 后续 EXT-only 使用既有 `node scripts/release-version.mjs bump --extension patch`，按仓库规范提交、推送、FF 同步，再推送对应正式 `ext-v<版本>` 标签。要更换内置 CLI，还要用版本脚本明确设置新 pin 和新 EXT 版本，并先确认 CLI Release 三份资产已就绪。保持同一 Publisher/name，不能覆盖已发布版本。市场公开后，已有安装只有在自动更新开启、VS Code 版本和目标平台兼容时才会自动更新；校验、检查和应用更新不是瞬间完成，也不承诺固定等待时长。
 

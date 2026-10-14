@@ -1,0 +1,59 @@
+name: marketplace-identity
+
+# Explicitly dispatched only; no checkout, build, tests, package upload or release.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  inspect:
+    name: Inspect Marketplace publishing identity
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: marketplace
+    permissions:
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - name: Validate identity configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${AZURE_CLIENT_ID:?Configure AZURE_CLIENT_ID in the marketplace environment}"
+          : "${AZURE_TENANT_ID:?Configure AZURE_TENANT_ID in the marketplace environment}"
+
+      - name: Sign in with the existing GitHub federation
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3, same pin as release-ext
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Read the publishing identity's Marketplace profile ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(az account show --query user.type --output tsv)" = servicePrincipal
+          test "$(az account show --query user.name --output tsv)" = "${AZURE_CLIENT_ID}"
+          test "$(az account show --query tenantId --output tsv)" = "${AZURE_TENANT_ID}"
+          profile_id="$(az rest \
+            --url https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+            --query id --output tsv)"
+          PROFILE_ID="${profile_id}" python3 - <<'PY'
+          import os
+          import uuid
+
+          profile_id = str(uuid.UUID(os.environ['PROFILE_ID']))
+          if profile_id == str(uuid.UUID(int=0)):
+              raise ValueError('Marketplace returned an empty profile ID')
+          print(f'Marketplace profile ID: {profile_id}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(f'Marketplace profile ID: `{profile_id}`\n\n')
+              summary.write('Identity bootstrap only; no extension was built or published.\n')
+          PY
