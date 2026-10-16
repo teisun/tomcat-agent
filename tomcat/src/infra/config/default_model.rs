@@ -5,7 +5,16 @@ use crate::infra::config::with_config_lock;
 use crate::infra::platform::write_file_atomic;
 use crate::{validate_config, AppConfig, AppError};
 
-pub fn write_default_model(config_path: &Path, model_id: &str) -> Result<(), AppError> {
+/// Writes one `[llm]` model selection (`default_model`, `title_model`). With
+/// `only_if_unset` the write happens only when the file has no non-blank value, and
+/// the check runs under the same config lock, so concurrent first saves cannot
+/// overwrite each other. Returns whether the file was written.
+pub fn write_llm_model_key(
+    config_path: &Path,
+    key: &str,
+    model_id: &str,
+    only_if_unset: bool,
+) -> Result<bool, AppError> {
     with_config_lock(config_path, || {
         let content = match std::fs::read_to_string(config_path) {
             Ok(content) => content,
@@ -23,17 +32,23 @@ pub fn write_default_model(config_path: &Path, model_id: &str) -> Result<(), App
             .or_insert_with(|| toml::Value::Table(Default::default()))
             .as_table_mut()
             .ok_or_else(|| AppError::Config(tr("config.llmTableMissing", &[])))?;
-        llm.insert(
-            "default_model".to_string(),
-            toml::Value::String(model_id.to_string()),
-        );
+        if only_if_unset
+            && llm
+                .get(key)
+                .and_then(toml::Value::as_str)
+                .is_some_and(|current| !current.trim().is_empty())
+        {
+            return Ok(false);
+        }
+        llm.insert(key.to_string(), toml::Value::String(model_id.to_string()));
 
         let rendered =
             toml::to_string_pretty(&value).map_err(|error| AppError::Config(error.to_string()))?;
         let check: AppConfig =
             toml::from_str(&rendered).map_err(|error| AppError::Config(error.to_string()))?;
         validate_config(&check)?;
-        write_file_atomic(config_path, rendered.as_bytes())
+        write_file_atomic(config_path, rendered.as_bytes())?;
+        Ok(true)
     })
 }
 
@@ -108,7 +123,7 @@ fn clear_model_value(
     if current.trim() != model_id {
         return Ok(false);
     }
-    // String 和 Option<String> 的 resolver 都把空串视作“未选择”，并会走场景自身的回退。
-    table.insert(key.to_string(), toml::Value::String(String::new()));
+    // 删键而不是写空串：缺省时回到字段默认（title_model 回到默认辅助模型），其余键缺省即“未选择”。
+    table.remove(key);
     Ok(true)
 }

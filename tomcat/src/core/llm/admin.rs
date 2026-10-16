@@ -7,21 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use crate::core::llm::auth::{
-    env_name_for_provider, key_present_for_env, refresh_managed_credentials,
+    env_name_for_provider, key_present_for_env, key_source_for_env, refresh_managed_credentials,
+    KeySource,
 };
 use crate::core::session::{
     clear_model_overrides_in_store, precheck_model_override_store, ModelPrefsStore,
 };
 use crate::infra::config::{
-    clear_model_references, get_work_dir, read_env_entries, write_default_model, write_env_entries,
+    clear_model_references, get_work_dir, read_env_entries, write_env_entries, write_llm_model_key,
     ThinkingConfig,
 };
 use crate::infra::platform::write_file_atomic;
 use crate::{AppConfig, AppError};
 
 use super::catalog::{
-    load_user_models_file, render_user_models_file, validate_context_window_options,
-    validate_supported_speeds, Capabilities, ModelCatalog, ModelEntry, PartialCapabilities,
+    load_user_models_file, normalize_supported_speeds, render_user_models_file,
+    validate_context_window_options, Capabilities, ModelCatalog, ModelEntry, PartialCapabilities,
     UserModelEntry, UserModelsFile,
 };
 use super::thinking_policy::{
@@ -71,6 +72,8 @@ pub struct ModelView {
     pub source: ModelSource,
     pub api_key_env: String,
     pub key_present: bool,
+    /// `null` when no key is available.
+    pub key_source: Option<KeySource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +110,20 @@ pub struct ModelEntryInput {
 pub struct UpsertModelResult {
     pub model: ModelView,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpsertModelsResult {
+    pub models: Vec<ModelView>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveProviderResult {
+    pub removed_model_ids: Vec<String>,
+    pub key_removed: bool,
+    /// Source of the key that still applies after removal, e.g. an environment variable.
+    pub key_source: Option<KeySource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -162,6 +179,7 @@ impl ModelView {
                 ModelSource::User
             },
             key_present: key_present_for_env(&api_key_env),
+            key_source: key_source_for_env(&api_key_env),
             api_key_env,
         }
     }
@@ -215,11 +233,8 @@ impl ModelEntryInput {
             }
             None => safe_supported_reasoning_levels_for(api.as_str(), thinking_format.as_deref()),
         };
-        let supported_speeds = validate_supported_speeds(
-            &id,
-            &api,
-            self.supported_speeds.as_deref().unwrap_or_default(),
-        )?;
+        let supported_speeds =
+            normalize_supported_speeds(self.supported_speeds.as_deref().unwrap_or_default());
         Ok(ModelEntry {
             id,
             model_name,
@@ -346,6 +361,54 @@ pub fn upsert_user_model(
     })
 }
 
+/// Writes a batch with one validation and one file write: either every entry is
+/// saved or the file stays unchanged, so the dialog never leaves a partial selection.
+pub fn upsert_user_models(
+    cfg: &AppConfig,
+    inputs: Vec<ModelEntryInput>,
+) -> Result<UpsertModelsResult, AppError> {
+    let mut entries = Vec::with_capacity(inputs.len());
+    let mut warnings = Vec::new();
+    for input in inputs {
+        let entry = input.into_model_entry()?;
+        validate_mutable_model_entry(&entry)?;
+        warnings.extend(collect_model_warnings(&entry));
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        return Ok(UpsertModelsResult {
+            models: Vec::new(),
+            warnings,
+        });
+    }
+    let path = ModelCatalog::default_user_path(cfg)?;
+    with_file_lock(&models_lock_path(&path), || {
+        let mut file = load_user_models_file(&path)?;
+        for entry in &entries {
+            upsert_user_model_entry(&mut file, model_entry_to_user_model(entry));
+        }
+        let rendered = render_user_models_file(&file)?;
+        validate_and_write_models(cfg, &path, rendered.as_bytes())?;
+        let reloaded = ModelCatalog::load_from_path(cfg, path.clone())?;
+        let models = entries
+            .iter()
+            .map(|entry| {
+                reloaded
+                    .lookup(&entry.id)
+                    .cloned()
+                    .map(|resolved| ModelView::from_entry(&reloaded, resolved))
+                    .ok_or_else(|| {
+                        AppError::Config(tr("model.reloadFailed", &[("id", &entry.id)]))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(UpsertModelsResult {
+            models,
+            warnings: warnings.clone(),
+        })
+    })
+}
+
 /// 在 models.toml 锁内从磁盘加载当前目录，并在同一临界区完成依赖该目录的写入。
 ///
 /// 删除和选择模型都通过此入口，以免一个请求已基于旧缓存验证模型、另一个请求
@@ -390,46 +453,111 @@ pub fn remove_user_model_with_config_path(
             }
             return Err(AppError::Config(tr("model.notFound", &[("id", trimmed)])));
         }
-
-        let keeps_builtin_entry = current.is_builtin_seed(trimmed);
-        let session_stores = session_store_paths(cfg)?;
-        if !keeps_builtin_entry {
-            for store_path in &session_stores {
-                precheck_model_override_store(store_path)?;
-            }
-        }
-
-        let mut cleared = Vec::new();
-        if !keeps_builtin_entry {
-            if let Some(config_path) = config_path {
-                let references = clear_model_references(config_path, trimmed)?;
-                cleared.extend(references.into_iter().map(str::to_string));
-            }
-            for store_path in &session_stores {
-                match clear_model_overrides_in_store(store_path, trimmed) {
-                    Ok(0) => {}
-                    Ok(count) => cleared.push(tr(
-                        "model.selectionsCleared",
-                        &[
-                            ("count", &count.to_string()),
-                            ("path", &store_path.display().to_string()),
-                        ],
-                    )),
-                    Err(error) => return Err(removal_partial_error(trimmed, &cleared, error)),
-                }
-            }
-        }
-
-        let mut file = load_user_models_file(&path)?;
-        let before = file.models.len();
-        file.models.retain(|entry| entry.id.trim() != trimmed);
-        if file.models.len() == before {
-            return Err(AppError::Config(tr("model.notInFile", &[("id", trimmed)])));
-        }
-        let rendered = render_user_models_file(&file)?;
-        validate_and_write_models(cfg, &path, rendered.as_bytes())?;
-        Ok(())
+        remove_user_models_locked(cfg, config_path, &path, &current, &[trimmed.to_string()])
     })
+}
+
+/// Removes the user entries of one key slot, clears the selections that point at
+/// them like `remove_model`, then deletes the key Tomcat saved for that slot. A key
+/// supplied by the environment cannot be deleted and is reported instead.
+pub fn remove_provider(
+    cfg: &AppConfig,
+    config_path: &Path,
+    key_env: &str,
+) -> Result<RemoveProviderResult, AppError> {
+    let key_env = key_env.trim().to_string();
+    validate_api_key_env_name(&key_env)?;
+    let path = ModelCatalog::default_user_path(cfg)?;
+    let (removed_model_ids, slot_in_use) = with_file_lock(&models_lock_path(&path), || {
+        let current = ModelCatalog::load_from_path(cfg, path.clone())?;
+        let slot_entries = current
+            .entries_in_merge_order()
+            .into_iter()
+            .filter(|entry| inferred_api_key_env(entry) == key_env)
+            .collect::<Vec<_>>();
+        let ids = slot_entries
+            .iter()
+            .filter(|entry| current.is_user_model(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            remove_user_models_locked(cfg, Some(config_path), &path, &current, &ids)?;
+        }
+        Ok((ids, !slot_entries.is_empty()))
+    })?;
+    let env_path = runtime_env_path(cfg)?;
+    let key_removed = with_file_lock(&env_lock_path(&env_path), || {
+        let mut vars = read_env_entries(&env_path)?;
+        let removed = vars.remove(&key_env).is_some();
+        if removed {
+            write_env_entries(&env_path, &vars)?;
+        }
+        refresh_managed_credentials(&env_path)?;
+        Ok(removed)
+    })?;
+    if !slot_in_use && !key_removed {
+        return Err(AppError::Config(tr(
+            "model.providerNotFound",
+            &[("name", &key_env)],
+        )));
+    }
+    Ok(RemoveProviderResult {
+        removed_model_ids,
+        key_removed,
+        key_source: key_source_for_env(&key_env),
+    })
+}
+
+/// Caller holds the models.toml lock and has checked that every id is a user entry.
+fn remove_user_models_locked(
+    cfg: &AppConfig,
+    config_path: Option<&Path>,
+    path: &Path,
+    current: &ModelCatalog,
+    ids: &[String],
+) -> Result<(), AppError> {
+    let session_stores = session_store_paths(cfg)?;
+    let releases = ids
+        .iter()
+        .filter(|id| !current.is_builtin_seed(id))
+        .collect::<Vec<_>>();
+    if !releases.is_empty() {
+        for store_path in &session_stores {
+            precheck_model_override_store(store_path)?;
+        }
+    }
+
+    for id in &releases {
+        let mut cleared = Vec::new();
+        if let Some(config_path) = config_path {
+            let references = clear_model_references(config_path, id)?;
+            cleared.extend(references.into_iter().map(str::to_string));
+        }
+        for store_path in &session_stores {
+            match clear_model_overrides_in_store(store_path, id) {
+                Ok(0) => {}
+                Ok(count) => cleared.push(tr(
+                    "model.selectionsCleared",
+                    &[
+                        ("count", &count.to_string()),
+                        ("path", &store_path.display().to_string()),
+                    ],
+                )),
+                Err(error) => return Err(removal_partial_error(id, &cleared, error)),
+            }
+        }
+    }
+
+    let mut file = load_user_models_file(path)?;
+    for id in ids {
+        let before = file.models.len();
+        file.models.retain(|entry| entry.id.trim() != id);
+        if file.models.len() == before {
+            return Err(AppError::Config(tr("model.notInFile", &[("id", id)])));
+        }
+    }
+    let rendered = render_user_models_file(&file)?;
+    validate_and_write_models(cfg, path, rendered.as_bytes())
 }
 
 fn session_store_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
@@ -470,18 +598,39 @@ fn removal_partial_error(model_id: &str, cleared: &[String], error: AppError) ->
     ))
 }
 
+/// Returns whether the file was written; `only_if_unset` skips an existing default.
 pub fn set_default_model(
     cfg: &AppConfig,
     config_path: &Path,
     model_id: &str,
+    only_if_unset: bool,
+) -> Result<bool, AppError> {
+    write_model_selection(cfg, config_path, "default_model", model_id, only_if_unset)
+}
+
+/// Points the utility role (`llm.title_model`) at a catalog model.
+pub fn set_utility_model(
+    cfg: &AppConfig,
+    config_path: &Path,
+    model_id: &str,
 ) -> Result<(), AppError> {
+    write_model_selection(cfg, config_path, "title_model", model_id, false).map(|_| ())
+}
+
+fn write_model_selection(
+    cfg: &AppConfig,
+    config_path: &Path,
+    key: &str,
+    model_id: &str,
+    only_if_unset: bool,
+) -> Result<bool, AppError> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
         return Err(AppError::Config(tr("model.defaultRequired", &[])));
     }
     with_current_model_catalog(cfg, |catalog| {
         catalog.lookup_explicit(trimmed)?;
-        write_default_model(config_path, trimmed)
+        write_llm_model_key(config_path, key, trimmed, only_if_unset)
     })
 }
 

@@ -106,8 +106,9 @@ async fn web_search_build_http_client_prefers_proxy_override_over_config_and_env
         ("HTTP_PROXY", Some(env_proxy.url.as_str())),
         ("HTTPS_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Concurrent tests talk to loopback mock servers; only example.test may reach this proxy.
+        ("NO_PROXY", Some("127.0.0.1,localhost")),
+        ("no_proxy", Some("127.0.0.1,localhost")),
     ]);
     let cfg = LlmConfig {
         proxy: Some(cfg_proxy.url.clone()),
@@ -136,8 +137,9 @@ async fn web_search_build_http_client_uses_env_proxy_when_config_is_absent() {
         ("HTTP_PROXY", Some(env_proxy.url.as_str())),
         ("HTTPS_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Concurrent tests talk to loopback mock servers; only example.test may reach this proxy.
+        ("NO_PROXY", Some("127.0.0.1,localhost")),
+        ("no_proxy", Some("127.0.0.1,localhost")),
     ]);
     let runtime = LlmConfig::default().runtime();
     let client = build_http_client(&runtime, None).expect("build http client");

@@ -941,7 +941,6 @@ async fn speed_responses_http_stream_and_non_stream_keep_max_independent() {
         (None, None),
         (Some(Speed::Standard), Some("default")),
         (Some(Speed::Fast), Some("priority")),
-        (Some(Speed::Ultrafast), Some("ultrafast")),
     ];
     for stream in [false, true] {
         let payload = if stream {
@@ -981,7 +980,7 @@ async fn speed_responses_http_stream_and_non_stream_keep_max_independent() {
             assert_eq!(body["stream"], stream);
             assert_eq!(body["model"], "gpt-5.6-sol");
         }
-        assert_eq!(server.request_count(), 4);
+        assert_eq!(server.request_count(), speeds.len());
         server.shutdown().await;
     }
 }
@@ -1081,7 +1080,7 @@ fn responses_build_request_body_without_model_name_uses_id() {
 }
 
 #[test]
-fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
+fn responses_build_request_body_disabled_thinking_sends_lowest_declared_effort() {
     let cfg = LlmConfig {
         thinking: crate::infra::config::ThinkingConfig {
             enabled: false,
@@ -1106,10 +1105,9 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         tools: None,
     };
     let body = p.build_request_body(&req, true);
-    assert!(
-        body.get("reasoning").is_none(),
-        "thinking.enabled=false 不应写 reasoning: {}",
-        body
+    assert_eq!(
+        body["reasoning"]["effort"], "low",
+        "thinking.enabled=false 发该型号声明的最低档: {body}"
     );
     assert!(body.get("thinking").is_none());
     assert!(

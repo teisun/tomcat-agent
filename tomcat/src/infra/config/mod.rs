@@ -19,7 +19,7 @@ mod tests;
 pub use append::append_workspace_entry_to_disk;
 pub use append::{append_path_rule_to_disk, append_workspace_root_to_disk};
 pub use assets::ensure_embedded_assets;
-pub use default_model::{clear_model_references, write_default_model};
+pub use default_model::{clear_model_references, write_llm_model_key};
 pub(crate) use env_file::env_file_error;
 pub use env_file::{read_env_entries, write_env_entries};
 pub use load::{
@@ -45,8 +45,8 @@ pub use types::{
     OpenAiResponsesConfig, PreflightConfig, PrimitiveConfig, ReasoningContinuityConfig,
     ResumeHydrationMode, SecurityConfig, SessionConfig, SkillsConfig, SplashConfig, ThinkingConfig,
     ThinkingDisplay, ToolCliVerbosity, WorkspaceConfig, DEFAULT_AGENT_MAX_ATTEMPTS,
-    DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL, DEFAULT_MCP_CALL_TIMEOUT_MS,
-    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DEFAULT_MCP_STARTUP_TIMEOUT_MS,
+    DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_MCP_CALL_TIMEOUT_MS,
+    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DEFAULT_MCP_STARTUP_TIMEOUT_MS, DEFAULT_TITLE_MODEL,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），
 // 这里先 re-export 保证 `tomcat::infra::config::PlanConfig` 可用而不污染默认 import。

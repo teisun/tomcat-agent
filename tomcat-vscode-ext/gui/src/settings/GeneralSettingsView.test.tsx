@@ -48,8 +48,8 @@ describe("General language settings", () => {
   it("keeps model forms mounted when the surrounding locale changes", async () => {
     const api = { postMessage: vi.fn() };
     const { rerender } = render(<LocaleProvider locale="en"><SettingsApp vscodeApi={api} /></LocaleProvider>);
-    await emit(ready({ route: "models", capabilities: { listModels: true, listProviderKeys: false, removeModel: false, setProviderKey: false, upsertModel: true } }));
-    fireEvent.click(screen.getByTestId("settings-add-model"));
+    await emit(ready({ route: "models", capabilities: { listModels: true, listProviderKeys: false, listRemoteModels: true, removeModel: false, removeProvider: true, setDefaultModelIfUnset: true, setProviderKey: false, upsertModel: true, upsertModels: true } }));
+    fireEvent.click(screen.getByTestId("settings-connect-provider"));
     const dialog = screen.getByRole("dialog");
     rerender(<LocaleProvider locale="zh-CN"><SettingsApp vscodeApi={api} /></LocaleProvider>);
     expect(screen.getByRole("dialog")).toBe(dialog);

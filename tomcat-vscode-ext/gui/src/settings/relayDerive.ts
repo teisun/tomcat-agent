@@ -47,7 +47,7 @@ function slugifyBrand(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function extractHost(baseUrl: string): string {
+export function extractHost(baseUrl: string): string {
   const trimmed = baseUrl.trim();
   if (!trimmed) {
     return "";
@@ -97,13 +97,18 @@ function pickBrand(host: string): string {
   return sanitizeBrand(label);
 }
 
-export function envNameForRelaySlug(slug: string, api = "openai"): string {
-  const normalized = slug.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+/** One slot per key, never per protocol; taken names get `_2_`, `_3_`, ... */
+export function envNameForRelaySlug(slug: string, occupied: Iterable<string> = []): string {
+  const normalized = slug.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (!normalized) {
     return "";
   }
-  const family = api.trim() === "anthropic-messages" ? "ANTHROPIC" : "OPENAI";
-  return `${normalized}_${family}_API_KEY`;
+  const taken = new Set(occupied);
+  let candidate = `${normalized}_API_KEY`;
+  for (let ordinal = 2; taken.has(candidate); ordinal += 1) {
+    candidate = `${normalized}_${ordinal}_API_KEY`;
+  }
+  return candidate;
 }
 
 /**
@@ -126,30 +131,29 @@ export function normalizeRelayEndpoint(baseUrl: string): string | null {
 }
 
 /**
- * Reuses credentials metadata only from an explicitly configured user relay.
- * Exact endpoint matching is deterministic and always takes precedence over
- * brand/host heuristics.
+ * Every key slot already serving this exact endpoint, in catalog order. Whether
+ * a second protocol shares one of these keys is the user's call, never inferred.
  */
 export function findConfiguredRelayByBaseUrl(
   models: readonly SettingsModelView[],
   baseUrl: string,
-): SettingsModelView | null {
+): string[] {
   const target = normalizeRelayEndpoint(baseUrl);
-  if (!target) return null;
-  return (
-    models.find(
-      (model) =>
-        model.source === "user" &&
-        typeof model.baseUrl === "string" &&
-        normalizeRelayEndpoint(model.baseUrl) === target,
-    ) ?? null
-  );
+  if (!target) return [];
+  const slots: string[] = [];
+  for (const model of models) {
+    const slot = model.apiKeyEnv.trim();
+    if (slot && typeof model.baseUrl === "string" && normalizeRelayEndpoint(model.baseUrl) === target && !slots.includes(slot)) {
+      slots.push(slot);
+    }
+  }
+  return slots;
 }
 
 export function deriveRelayFields(
   baseUrl: string,
   modelName: string,
-  api = "openai",
+  occupiedKeyEnvs: Iterable<string> = [],
   separator = RELAY_ID_SEPARATOR,
 ): RelayDerivedFields {
   const trimmedBaseUrl = baseUrl.trim();
@@ -169,7 +173,7 @@ export function deriveRelayFields(
   const trimmedModelName = modelName.trim();
 
   return {
-    apiKeyEnv: envNameForRelaySlug(slug, api),
+    apiKeyEnv: envNameForRelaySlug(slug, occupiedKeyEnvs),
     host,
     id: trimmedModelName ? `${slug}${separator}${trimmedModelName}` : "",
     provider: slug,

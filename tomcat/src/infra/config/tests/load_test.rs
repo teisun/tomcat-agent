@@ -357,6 +357,18 @@ fn load_config_toml_overrides_scene_models() {
 }
 
 #[test]
+fn llm_table_without_title_model_keeps_the_default_utility_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[llm]\ndefault_model = \"deepseek-v4-pro\"\n").unwrap();
+
+    let cfg = load_config(Some(path.as_path())).unwrap();
+    assert_eq!(cfg.llm.default_model, "deepseek-v4-pro");
+    assert_eq!(cfg.llm.title_model.as_deref(), Some(DEFAULT_TITLE_MODEL));
+    assert_eq!(cfg.context.compaction_model, "");
+}
+
+#[test]
 fn resolve_model_thinking_path_uses_work_dir_root() {
     let temp = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();

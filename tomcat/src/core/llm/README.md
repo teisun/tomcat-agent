@@ -47,7 +47,7 @@
 
 ### 1.3 `models.toml` 与内置模型
 
-- **常用预置的运行时事实源只有一份内嵌 `builtin_models.toml`**：OpenAI（`gpt-5.2` / `gpt-5.4` / `gpt-5.5` / `gpt-5.6`）、DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash` / `utility-flash`）、MiMo（`mimo-v2.5-pro`）、GLM（`glm-5.2`）、Kimi（`kimi-k2.7-code`）、Anthropic Messages（`claude-opus-4-8` / `4-7` / `4-6`）
+- **常用预置的运行时事实源只有一份内嵌 `builtin_models.toml`**：OpenAI（`gpt-5.6` / `openai/gpt-6-astra` / `openai/gpt-6.1-sol`）、DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash`）、MiMo（`mimo/mimo-v2.6-pro`）、GLM（`glm-5.2`）、Kimi（`kimi-k2.7-code` / `kimi-k3`）、Anthropic Messages（`claude-fable-5` / `claude-opus-5` / `claude-sonnet-5` / `anthropic/claude-opus-5-5`）。从目录撤下的型号在用户 `models.toml` 里原样可用，只是不再随升级刷新
 - **`tomcat init` 会把这份内嵌预置原样 seed 到 `models.toml`**：这样用户能直接看 / 改 / 删，但不会再维护第二份手写模型清单
 - **同 id 覆盖内置，新 id 直接新增**
 - **新增用户条目必须显式写 `api` 和 `provider`**；不再按模型家族猜协议/厂商/能力
@@ -56,20 +56,21 @@
 
 ```toml
 [[models]]
-id = "gpt-5.4_gateway"
-model_name = "gpt-5.4"
+id = "gpt-5.6_gateway"
+model_name = "gpt-5.6"
 api = "openai-responses"
 provider = "openai-gateway"
 base_url = "https://gateway.example.com"
 ```
 
-这样本地可以同时保留 `gpt-5.4` 与 `gpt-5.4_gateway` 两条模型，但真正发给上游的 `model` 仍然是 `gpt-5.4`。
+这样本地可以同时保留 `gpt-5.6` 与 `gpt-5.6_gateway` 两条模型，但真正发给上游的 `model` 仍然是 `gpt-5.6`。
 
 ### 1.4 模型管理入口
 
 - **共享后端**：`core/llm/admin.rs` 是唯一写盘入口，统一负责 `models.toml` / `.env`、文件锁、原子写、权限与热刷新。
 - **CLI 门面**：`tomcat model add/list/remove/key/default` 全部复用这套共享逻辑。
-- **serve 门面**：`list_models` / `upsert_model` / `remove_model` / `set_provider_key` / `list_provider_keys` 走同一个中枢。
+- **serve 门面**：`list_models` / `upsert_model` / `upsert_models` / `remove_model` / `remove_provider` / `set_provider_key` / `list_provider_keys` / `set_default_model`（可带 `onlyIfUnset`）/ `set_utility_model` 走同一个中枢；`list_remote_models` 只读上游 `GET {base}/v1/models`，不写盘。
+- **供应商 = Key 槽**：设置页按 `api_key_env` 分卡；`remove_provider` 先在 `models.toml` 锁内删掉该槽下的用户型号并像 `remove_model` 一样清掉指向它们的选择，再在 `.env` 锁内删 Tomcat 保存的 Key（环境变量来源只报告、不删）。`ModelView.keySource` 区分 `saved` / `environment`。
 - **安全边界**：协议与状态里只暴露 `envName` / `keyPresent`，从不回显明文 key。
 
 ### 1.5 能力、默认值与个人选择
@@ -125,11 +126,10 @@ supported_reasoning_levels                    └─ 按 catalog model id 存储
   - `credential: &Credential` 提供已经解析好的 key 值；provider 自己不再读 env
 - **Files 上传配置**：`[llm.files] expires_after_seconds` 控制上传时 `expires_after.seconds`（默认 `86400`，`0` 表示不传该字段）；环境变量覆盖键为 `TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS`。
 - **Continuity 默认值**：`[llm.reasoning_continuity] enabled` 默认就是 `true`；只有想显式退回“只带可见历史、不做 opaque replay”的旧行为时才需要关。
-- **chat-completions `reasoning_content` continuity 语义（数据驱动）**：`reasoning_content` 的 **capture** 与 **replay** 明确解耦，且**不再按厂商名硬编码**。「哪个模型走 `reasoning_content` 续传」由 `replay_policy.rs` 的数据表 `CHAT_COMPLETIONS_CONTINUITY_RULES` 决定（当前含 `deepseek-v4`、`mimo-v2.5-pro`、`kimi-k3`，共用同一条逻辑）；新增同类模型 = 加一行数据，`maybe_snapshot` / `is_compatible` / `transport_messages` 等 continuity 各道门只读 `ProviderCompatProfile` 字段（`capture_mode` / `api_family` / `provider`+`model_family`），无需修改。只要响应里抓到 snapshot 就照常写进 transcript；后续**同 profile**（provider + model_family 一致）请求会优先回放兼容的 `reasoning_content`，`same_profile` 比对保证 DeepSeek / MiMo 互不串档。`had_tool_call` / `replay_requirement` 仍保留在 transcript metadata 里，用于审计和表达 tool turn 的 replay 强约束。
-  > 架构约束说明：provider 由 `LlmConfig` 装配（registry §6.5.2「稳定 schema」），运行期只拿到 model 字符串、拿不到 catalog 条目，故 continuity 的运行期事实源是上面这张按 model family 索引的数据表；`models.toml` 是面向用户的声明层。两者对内置厂商（deepseek/mimo）保持一致。
+- **chat-completions `reasoning_content` continuity 语义（一条通用规则）**：`reasoning_content` 的 **capture** 与 **replay** 明确解耦，且**不按厂商或型号名单**。`ProviderCompatProfile::chat_completions(model)` 对所有 Chat Completions 型号一视同仁：响应里带了 `reasoning_content` 就写进 transcript；只在**当前回合内、同一型号**（provider + model_family 一致）的后续请求里回放，更早的回合一律不带。中转、自建或新型号无需登记即可续传；`same_profile` 比对保证换型号不串档。`had_tool_call` / `replay_requirement` 仍保留在 transcript metadata 里，用于审计和表达 tool turn 的 replay 强约束。
 - **账本全量 vs 出站精简**：transcript 是 continuity 的**全量账本**——hydrate（`chat_message_from_entry` 整条反序列化）与 `/model` 切换（`switch_current_model` 只改 `model_override` + 落 `model_change` 事件）都**不会**清洗历史里的 `reasoning_continuation` / `continuity`。真正的“精简”只发生在**出站 wire 克隆**上，绝不回写主账本。
 - **可 replay 窗口（出站收敛）**：wire builder 出站时按 `ReplayWindow` 收敛——只有**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque replay；包括上一轮最后一条 assistant 在内的更早历史一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**绝不转成正文**、**不告警**）。这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
-  - Kimi K3 例外由同一策略表的 `preserve_history` 标记决定：按[官方 Preserved Thinking 契约](https://platform.kimi.ai/docs/guide/use-thinking-models)，同 profile 的历史 `reasoning_content` 也需保留；仍严格禁止跨模型串用。DeepSeek/MiMo 的当前轮窗口规则不变。临时拆分图片 user 不参与内部窗口和逻辑轮计算。
+  - 不再有保留历史回合的例外型号（原 Kimi K3 的 `preserve_history` 已删）：老回合的思考对续答价值低、却按输入计费。临时拆分图片 user 不参与内部窗口和逻辑轮计算。
 - **Replay warning 语义**：逐消息 warn 已改为**每请求至多一条汇总告警**（`ReplayDowngradeReport::emit`），且只在窗口内出现同 profile 却没能 `KeepOpaque` 时触发（`SameProfileIncompatible`）。跨 profile 的 opaque reasoning 无法安全重放，一律静默 `StripOpaque`；窗口外老历史的静默 strip 仅计数、从不告警。不再使用进程内“问题指纹”缓存压重复 warning。
 - **结构化错误模型**：provider 不再把 `503/429/400` 等语义只塞进一段字符串；统一构造 `LlmError { provider, stage, http_status, summary, source }`，并由 `infra/error/llm.rs` 作为 `is_retryable_llm_error` / `llm_connect_or_network` / `is_context_overflow` 的单一事实来源。
 - **非流式调用**：`provider.chat(request).await`

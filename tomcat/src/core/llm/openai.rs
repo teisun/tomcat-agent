@@ -462,7 +462,7 @@ fn transport_messages(
         if original.role != ChatMessageRole::Tool {
             flush_tool_media(&mut out, &mut deferred_media);
         }
-        let in_window = window.contains(idx) || target.preserves_thinking_history();
+        let in_window = window.contains(idx);
         let action = if continuity_enabled {
             plan_scoped(&target, original, in_window)
         } else {
@@ -699,6 +699,7 @@ pub struct OpenAiProvider {
     files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
     thinking_cfg: crate::infra::config::ThinkingConfig,
+    lowest_reasoning_level: Option<crate::core::llm::ThinkingLevel>,
     /// 用户显式配置的 thinking format；`Auto` 时按当前 wire(`openai`) 决定。
     configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
@@ -789,6 +790,10 @@ impl OpenAiProvider {
             files_adapter: std::sync::OnceLock::new(),
             files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
+            lowest_reasoning_level:
+                crate::core::llm::thinking_policy::lowest_supported_reasoning_level(
+                    &entry.supported_reasoning_levels,
+                ),
             configured_thinking_format,
             continuity_enabled: runtime.reasoning_continuity.enabled,
             capabilities: entry.capabilities.clone(),
@@ -820,14 +825,11 @@ impl OpenAiProvider {
         &'a self,
         request: &ChatRequest,
     ) -> Cow<'a, crate::infra::config::ThinkingConfig> {
-        match request.thinking_level {
-            Some(level) => {
-                let mut cfg = self.thinking_cfg.clone();
-                cfg.level = level.as_str().to_string();
-                Cow::Owned(cfg)
-            }
-            None => Cow::Borrowed(&self.thinking_cfg),
-        }
+        crate::core::llm::thinking_policy::thinking_config_for_request(
+            &self.thinking_cfg,
+            request.thinking_level,
+            self.lowest_reasoning_level,
+        )
     }
 
     fn auth_header(&self) -> (&str, String) {

@@ -7,14 +7,16 @@ use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::replay_policy::{
     plan, replay_requirement_for_profile, ProviderCompatProfile, ReplayAction,
 };
-use crate::core::llm::thinking_policy::{resolve_anthropic_request, ThinkingFormat};
+use crate::core::llm::thinking_policy::{
+    resolve_anthropic_request, AnthropicThinkingRequest, ThinkingFormat,
+};
 use crate::core::llm::types::{
     ephemeral_tail_texts, is_ephemeral_tail, ChatMessage, ChatMessageContent,
     ChatMessageContentPart, ChatMessageRole, ChatRequest, ChatResponse, ChatResponseChoice,
     ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
     StreamEvent, TokenUsage,
 };
-use crate::core::llm::Capabilities;
+use crate::core::llm::{Capabilities, Speed};
 use crate::infra::config::ThinkingConfig;
 
 /// Anthropic rejects requests with more than four explicit cache breakpoints.
@@ -103,16 +105,7 @@ pub(super) fn build_request_body(
     // in this connection-scoped provider. Direct provider tests/calls without
     // that resolved value conservatively use the unknown-Anthropic fallback in
     // `resolve_anthropic_request`.
-    let (request_max_tokens, model_max_output_tokens) = match request.resolved_output_limit {
-        Some(limit) => (Some(limit), Some(limit)),
-        None => (request.max_tokens, None),
-    };
-    let thinking_request = resolve_anthropic_request(
-        thinking_cfg,
-        thinking_format,
-        request_max_tokens,
-        model_max_output_tokens,
-    );
+    let thinking_request = thinking_request_for(request, thinking_cfg, thinking_format);
 
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(model.to_string()));
@@ -146,7 +139,27 @@ pub(super) fn build_request_body(
             }),
         );
     }
+    if request.speed == Some(Speed::Fast) {
+        body.insert("speed".to_string(), Value::String("fast".to_string()));
+    }
     Value::Object(body)
+}
+
+pub(super) fn thinking_request_for(
+    request: &ChatRequest,
+    thinking_cfg: &ThinkingConfig,
+    thinking_format: ThinkingFormat,
+) -> AnthropicThinkingRequest {
+    let (request_max_tokens, model_max_output_tokens) = match request.resolved_output_limit {
+        Some(limit) => (Some(limit), Some(limit)),
+        None => (request.max_tokens, None),
+    };
+    resolve_anthropic_request(
+        thinking_cfg,
+        thinking_format,
+        request_max_tokens,
+        model_max_output_tokens,
+    )
 }
 
 /// Emit hashes, never prompt text, so adjacent requests can be compared without

@@ -100,3 +100,67 @@ fn mimo_provider_uses_mimo_api_key_env() {
         std::env::remove_var("MIMO_API_KEY");
     }
 }
+
+#[test]
+#[serial(env_lock)]
+fn key_source_distinguishes_saved_keys_from_shell_environment() {
+    use crate::core::llm::auth::{
+        key_present_for_env, key_source_for_env, refresh_managed_credentials_from_entries,
+        KeySource,
+    };
+    use std::collections::BTreeMap;
+
+    clear_managed_credentials_for_test();
+    unsafe {
+        std::env::set_var("KEY_SOURCE_TEST_ENV_KEY", "from-shell");
+        std::env::remove_var("KEY_SOURCE_TEST_SAVED_KEY");
+    }
+    refresh_managed_credentials_from_entries(&BTreeMap::from([(
+        "KEY_SOURCE_TEST_SAVED_KEY".to_string(),
+        "saved".to_string(),
+    )]));
+
+    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_SAVED_KEY"), Some(KeySource::Saved));
+    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_ENV_KEY"), Some(KeySource::Environment));
+    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_MISSING_KEY"), None);
+
+    refresh_managed_credentials_from_entries(&BTreeMap::new());
+    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_SAVED_KEY"), None);
+    assert!(!key_present_for_env("KEY_SOURCE_TEST_SAVED_KEY"));
+
+    unsafe {
+        std::env::remove_var("KEY_SOURCE_TEST_ENV_KEY");
+    }
+    clear_managed_credentials_for_test();
+}
+
+#[test]
+#[serial(env_lock)]
+fn removing_a_saved_key_revokes_its_startup_preloaded_copy() {
+    use crate::core::llm::auth::{
+        key_present_for_env, key_source_for_env, record_preloaded_env_names,
+        refresh_managed_credentials_from_entries, KeySource,
+    };
+    use std::collections::BTreeMap;
+
+    clear_managed_credentials_for_test();
+    // Startup preload copies `.env` into the process environment.
+    unsafe {
+        std::env::set_var("KEY_SOURCE_TEST_PRELOADED_KEY", "copied-from-dotenv");
+    }
+    record_preloaded_env_names(["KEY_SOURCE_TEST_PRELOADED_KEY".to_string()]);
+    refresh_managed_credentials_from_entries(&BTreeMap::from([(
+        "KEY_SOURCE_TEST_PRELOADED_KEY".to_string(),
+        "copied-from-dotenv".to_string(),
+    )]));
+    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_PRELOADED_KEY"), Some(KeySource::Saved));
+
+    refresh_managed_credentials_from_entries(&BTreeMap::new());
+
+    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_PRELOADED_KEY"), None);
+    assert!(!key_present_for_env("KEY_SOURCE_TEST_PRELOADED_KEY"));
+    unsafe {
+        std::env::remove_var("KEY_SOURCE_TEST_PRELOADED_KEY");
+    }
+    clear_managed_credentials_for_test();
+}

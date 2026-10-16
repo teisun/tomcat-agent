@@ -101,7 +101,7 @@ pub struct ModelEntry {
     pub description: Option<String>,
     pub thinking_format: Option<String>,
     pub supported_reasoning_levels: Vec<String>,
-    pub supported_speeds: Vec<Speed>,      // 只列 fast / ultrafast，Standard 隐含
+    pub supported_speeds: Vec<Speed>,      // 只列 fast，Standard 隐含
 }
 ```
 
@@ -393,27 +393,29 @@ top  = clamp(centeredTop, 8, innerHeight - configHeight - 8)
 ### 7.9 Speed：第三个兄弟，不是 Effort 的别名
 
 ```text
-models.toml：supported_speeds = ["fast", "ultrafast"]  （只列加速档）
+models.toml：supported_speeds = ["fast"]  （只列加速档）
                               │
-ModelPicker：Speed → Standard / Fast / Ultrafast
+ModelPicker：Speed → Standard / Fast
              ────────────────────────────────
              Context / Effort（含声明的 Max）
                               │ setSpeed(modelId, speed)
 宿主：sendSetSpeed → serve set_speed → ModelPrefsStore.set_speed
                               │ 按 catalog ID 保存，成功后刷新目录
 下次运行：resolve_speed → AgentLoopConfig.speed → ChatRequest.speed
-                              │ 只在 OpenAI 适配器转换
-Standard → service_tier="default"  Fast → "priority"  Ultrafast → "ultrafast"
+                              │ 各协议适配器转换
+OpenAI 两协议：Standard → service_tier="default"   Fast → "priority"
+Anthropic：    Standard → 不发                     Fast → speed="fast" + beta fast-mode-2026-02-01
 ```
 
 - Standard 默认、隐含；空声明隐藏整个 Speed 区且不发速度字段。曾存的付费档被撤掉后回落 Standard，不自动改成另一个收费档。
-- 对声明了速度控制的模型显式发 `default`，防止省略字段时使用上游项目的默认 Fast。选中 Fast 只是请求意图，不证明上游没有降档。
-- Fast / Ultrafast 复用 `ConfigSection` / `ConfigOption`、分隔线与两层关闭机制，title 提示“更快输出、费用更高、需上游权限”。不新增 pending 锁或 busy 禁用。
-- Speed 与 Effort 独立；`max` 仍是现有字符串档位。Ultrafast 逐模型开放，不按版本继承资格；Ultra 多代理不属于本期，也不是合法 effort。
+- 对声明了速度控制的 OpenAI 协议模型显式发 `default`，防止省略字段时使用上游项目的默认 Fast。选中 Fast 只是请求意图，不证明上游没有降档。
+- Ultrafast 已删除：旧值 `"ultrafast"` 是 `Speed::Standard` 的 serde 别名，models.toml、偏好文件、Serve `set_speed` 三处入口共用，读入为 Standard、不改写文件；其它未知值仍严格报错。
+- Fast 复用 `ConfigSection` / `ConfigOption`、分隔线与两层关闭机制，title 提示“更快输出、费用更高、需上游权限”。不新增 pending 锁或 busy 禁用。
+- Speed 与 Effort 独立；`max` 仍是现有字符串档位。Ultra 多代理不属于本期，也不是合法 effort。
 - ModelPrefsStore 持锁复制 → 原子写盘 → 成功才提交内存，失败时 Effort / Context / Speed 全部保持原值。
-- Settings 使用 nullable 原始 `reasoningLevelsText` / `speedsText`：null 保留未声明/继承，空串保存为空数组表示显式清空；输入只改文字，生成保存 payload 时用共享 `parseCommaList` 按 `/[,，]/` 拆分、trim、去空、去重。取消、切换模型与重开重新初始化草稿。
+- Settings 的思考档位仍用 nullable 原始 `reasoningLevelsText`（null 保留未声明/继承，空串保存为空数组表示显式清空；保存时用共享 `parseCommaList` 按 `/[,，]/` 拆分、trim、去空、去重）。加速档只剩一个取值，改为复选框“支持 Fast”（testId `settings-supported-speeds`），保存为 `["fast"]` 或 `null`。新建型号名以 `gpt-`/`claude-` 开头或参照型号声明了 fast 时默认勾选（`defaultSupportsFast`），已有条目只按其声明回显。
 - `ModelView` / `ModelEntryInput` 增 `supportedSpeeds`；目录视图增 `selectedSpeed`；聊天与计划预览两条宿主链都透传。Rust 是协议源，三份 wire 产物自动重生。
-- 新测试分层：Rust mock HTTP 覆盖流式/非流式三档 + Max；GUI 覆盖三表面、逐字符逗号与保存往返；既有 Add Models E2E 覆盖真实 VS Code 渲染与重启偏好，并采集普通/窄宽 PNG、ARIA、console。真实网关档位由单独的限量 smoke 报告核实。
+- 测试分层：Rust mock HTTP 覆盖 OpenAI 两协议与 Anthropic 的 Standard / Fast 编码及旧值兼容；GUI 覆盖复选框与保存往返；既有 Add Models E2E 在真实 VS Code 里勾掉再勾回“支持 Fast”并核对菜单只剩 Standard / Fast。真实网关档位由单独的限量 smoke 报告核实。
 
 ---
 

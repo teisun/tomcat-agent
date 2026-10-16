@@ -19,7 +19,7 @@ fn context_config_default_values() {
     assert_eq!(cfg.context_window_fallback, 400_000);
     assert_eq!(cfg.output_reserve_tokens, None);
     assert_eq!(cfg.keep_recent_turns, 5);
-    assert_eq!(cfg.compaction_model, "gpt-5.2");
+    assert_eq!(cfg.compaction_model, "");
     assert_eq!(cfg.layer0_single_result_max_chars, 50_000);
     assert_eq!(cfg.layer0_placeholder_threshold_chars, 10_000);
     assert_eq!(cfg.current_tail_compactable_min_chars, 1);

@@ -51,7 +51,7 @@ You can also open the Secondary Side Bar yourself and click the Tomcat Agent Box
 
 1. Open Tomcat Agent Box. No `tomcat init` is needed.
 2. When the panel says "Set up a model to start chatting", click **Configure model**.
-3. Enter an API key, or add your own model and set it as default. Once saved, you can chat right away without restarting.
+3. Click **+ Connect provider**, choose a provider (or **Other address…** for a relay), enter its API key and check the models you want. The first model you save becomes the default, and you can chat right away without restarting. One card per key: a relay whose single key serves several protocols needs one connection, and a second key on the same address gets its own card. See the [user guide](https://github.com/teisun/tomcat-agent/blob/main/tomcat/docs/user-guide.md#tomcat-model---manage-models-and-keys-without-hand-editing-files) for details.
 
 A model chosen for a single session, and the `TOMCAT__LLM__DEFAULT_MODEL` environment variable, take precedence over the default model.
 

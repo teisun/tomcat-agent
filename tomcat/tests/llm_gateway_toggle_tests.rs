@@ -104,17 +104,17 @@ fn openai_target_env_override_switches_back_to_builtin_openai() {
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
 
     unsafe {
-        std::env::set_var(common::OPENAI_TEST_MODEL_ENV, "gpt-5.4");
+        std::env::set_var(common::OPENAI_TEST_MODEL_ENV, "gpt-5.6");
         std::env::set_var("OPENAI_API_KEY", "openai-stub");
     }
 
     common::apply_openai_app_config(&mut cfg);
     let resolved = resolve_main_call(&cfg);
 
-    assert_eq!(cfg.llm.default_model, "gpt-5.4");
+    assert_eq!(cfg.llm.default_model, "gpt-5.6");
     assert_eq!(resolved.provider, "openai");
     assert_eq!(resolved.api, "openai-responses");
-    assert_eq!(resolved.model, "gpt-5.4");
+    assert_eq!(resolved.model, "gpt-5.6");
     assert_eq!(resolved.key_source, "OPENAI_API_KEY");
 
     unsafe {
@@ -125,8 +125,11 @@ fn openai_target_env_override_switches_back_to_builtin_openai() {
 
 #[test]
 #[serial(env_lock)]
-fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
-    for model_id in ["gpt-5.5", "gpt-5.6"] {
+fn openai_target_env_override_treats_prefixed_gpt_ids_as_builtin_openai() {
+    for (model_id, wire_model) in [
+        ("openai/gpt-6-astra", "gpt-6-astra"),
+        ("openai/gpt-6.1-sol", "gpt-6.1-sol"),
+    ] {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
@@ -142,7 +145,7 @@ fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
         assert_eq!(cfg.llm.default_model, model_id);
         assert_eq!(resolved.provider, "openai");
         assert_eq!(resolved.api, "openai-responses");
-        assert_eq!(resolved.model, model_id);
+        assert_eq!(resolved.model, wire_model);
         assert_eq!(resolved.key_source, "OPENAI_API_KEY");
 
         unsafe {

@@ -73,8 +73,9 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true, 
   }
 }
 
-export async function spawnScriptedOpenAiStreamServer(responses: ScriptedResponse[]) {
+export async function spawnScriptedOpenAiStreamServer(responses: ScriptedResponse[], listedModels: string[] = []) {
   const captured: string[] = [];
+  const modelListAuthorizations: string[] = [];
   let responseIndex = 0;
   const abort = new AbortController();
   const sockets = new Set<Socket>();
@@ -92,7 +93,14 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     // Read-only observation for the installed cold-start test; does not consume a model response.
     if (request.method === "GET" && request.url === "/_test/request-count") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ count: captured.length }));
+      response.end(JSON.stringify({ count: captured.length, modelListAuthorizations, utilityRequests: captured.filter(isTitleRequest).map(utilityRequestSummary) }));
+      return;
+    }
+    // The Settings model list is not inference: it never consumes a scripted reply.
+    if (request.method === "GET" && request.url?.endsWith("/models")) {
+      modelListAuthorizations.push(request.headers.authorization ?? "");
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: listedModels.map(id => ({ id, object: "model" })) }));
       return;
     }
     const chunks: Buffer[] = [];
@@ -150,13 +158,23 @@ function isTitleRequest(rawRequest: string): boolean {
   if (!body) return false;
   let value: unknown;
   try { value = JSON.parse(body); } catch { return false; }
-  return isRecord(value) && value.stream !== true && containsTitlePrompt(value);
+  // Utility calls never send tools; Responses-API utility calls still stream.
+  const hasTools = isRecord(value) && Array.isArray(value.tools) && value.tools.length > 0;
+  return isRecord(value) && !hasTools && containsTitlePrompt(value);
+}
+const SESSION_TITLE_PROMPT = "Generate a short chat title from the user's first message.";
+const TURN_SUMMARY_PROMPT = "Generate a short title summarizing this AI assistant thinking block and its tool usage.";
+function containsText(value: unknown, text: string): boolean {
+  if (typeof value === "string") return value.includes(text);
+  if (Array.isArray(value)) return value.some(item => containsText(item, text));
+  return isRecord(value) && Object.values(value).some(item => containsText(item, text));
 }
 function containsTitlePrompt(value: unknown): boolean {
-  if (typeof value === "string") return value.includes("Generate a short chat title from the user's first message.")
-    || value.includes("Generate a short title summarizing this AI assistant thinking block and its tool usage.");
-  if (Array.isArray(value)) return value.some(containsTitlePrompt);
-  return isRecord(value) && Object.values(value).some(containsTitlePrompt);
+  return containsText(value, SESSION_TITLE_PROMPT) || containsText(value, TURN_SUMMARY_PROMPT);
+}
+function utilityRequestSummary(rawRequest: string): { model: unknown; turnSummary: boolean } {
+  const body: unknown = JSON.parse(rawRequest.split("\r\n\r\n")[1]);
+  return { model: isRecord(body) ? body.model : undefined, turnSummary: containsText(body, TURN_SUMMARY_PROMPT) };
 }
 function sessionTitleResponseJson(rawRequest: string, title: string): string {
   if (rawRequest.startsWith("POST /v1/responses ")) return JSON.stringify({

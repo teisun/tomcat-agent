@@ -12,10 +12,13 @@ use crate::{resolve_agent_trail_dir, AppConfig, AppError};
 
 use super::types::{
     ConnectorRecoveryProgress, ConnectorReloadReceipt, ControlFrame, IngestAttachmentResponse,
-    ListConnectorToolsPayload, ListModelsPayload, ListProviderKeysPayload, OutFrame,
-    ProjectTrustPayload, RemoveModelResponse, ResponseFrame, RetainAttachmentLeasesResponse,
-    ServeCommand, SetConnectorToolEnabledResponse, SetProviderKeyResponse, UpsertModelResponse,
+    ListConnectorToolsPayload, ListModelsPayload, ListProviderKeysPayload,
+    ListRemoteModelsPayload, OutFrame, ProjectTrustPayload, RemoveModelResponse,
+    RemoveProviderResponse, ResponseFrame, RetainAttachmentLeasesResponse, ServeCommand,
+    SetConnectorToolEnabledResponse, SetProviderKeyResponse, UpsertModelResponse,
+    UpsertModelsResponse,
 };
+use crate::core::llm::remote_models::RemoteModelsFailure;
 use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
 
 #[derive(Serialize)]
@@ -32,6 +35,10 @@ pub(crate) struct ServeSchemaBundle {
     provider_key_view: schemars::schema::RootSchema,
     list_models_payload: schemars::schema::RootSchema,
     upsert_model_response: schemars::schema::RootSchema,
+    upsert_models_response: schemars::schema::RootSchema,
+    list_remote_models_payload: schemars::schema::RootSchema,
+    remote_models_failure: schemars::schema::RootSchema,
+    remove_provider_response: schemars::schema::RootSchema,
     remove_model_response: schemars::schema::RootSchema,
     set_provider_key_response: schemars::schema::RootSchema,
     list_provider_keys_payload: schemars::schema::RootSchema,
@@ -75,6 +82,10 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         provider_key_view: schema_for!(ProviderKeyView),
         list_models_payload: schema_for!(ListModelsPayload),
         upsert_model_response: schema_for!(UpsertModelResponse),
+        upsert_models_response: schema_for!(UpsertModelsResponse),
+        list_remote_models_payload: schema_for!(ListRemoteModelsPayload),
+        remote_models_failure: schema_for!(RemoteModelsFailure),
+        remove_provider_response: schema_for!(RemoveProviderResponse),
         remove_model_response: schema_for!(RemoveModelResponse),
         set_provider_key_response: schema_for!(SetProviderKeyResponse),
         list_provider_keys_payload: schema_for!(ListProviderKeysPayload),
@@ -162,6 +173,10 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("ProviderKeyView", &bundle.provider_key_view),
         ("ListModelsPayload", &bundle.list_models_payload),
         ("UpsertModelResponse", &bundle.upsert_model_response),
+        ("UpsertModelsResponse", &bundle.upsert_models_response),
+        ("ListRemoteModelsPayload", &bundle.list_remote_models_payload),
+        ("RemoteModelsFailure", &bundle.remote_models_failure),
+        ("RemoveProviderResponse", &bundle.remove_provider_response),
         ("RemoveModelResponse", &bundle.remove_model_response),
         ("SetProviderKeyResponse", &bundle.set_provider_key_response),
         ("ConnectorReloadReceipt", &bundle.connector_reload_receipt),

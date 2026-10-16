@@ -39,14 +39,23 @@ fn parse_command_line_rejects_explicit_null_session_id() {
 
 #[test]
 fn speed_ndjson_parses_speeds_and_rejects_unknown_values_and_legacy_key() {
-    for speed in ["standard", "fast", "ultrafast"] {
+    use crate::core::llm::Speed;
+    for (wire, expected) in [
+        ("standard", Speed::Standard),
+        ("fast", Speed::Fast),
+        ("ultrafast", Speed::Standard),
+    ] {
         let raw = format!(
-            r#"{{"type":"set_speed","id":"s1","sessionId":"sid","model":"relay","speed":"{speed}"}}"#
+            r#"{{"type":"set_speed","id":"s1","sessionId":"sid","model":"relay","speed":"{wire}"}}"#
         );
         let command = parse_command_line(&raw).unwrap();
         assert_eq!(command.wire_type(), "set_speed");
         assert_eq!(command.command_id(), Some("s1"));
         assert_eq!(command.session_id(), Some("sid"));
+        assert!(
+            matches!(command, ServeCommand::SetSpeed { speed, .. } if speed == expected),
+            "{wire}"
+        );
     }
     assert!(parse_command_line(r#"{"type":"set_speed","model":"relay","speed":"warp"}"#).is_err());
     assert!(parse_command_line(r#"{"type":"set_speed","model":"relay","tier":"fast"}"#).is_err());

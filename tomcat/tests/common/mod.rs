@@ -141,7 +141,7 @@ pub fn anthropic_test_base_url() -> String {
 }
 
 pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
-    matches!(target, "gpt-5.2" | "gpt-5.4" | "gpt-5.5" | "gpt-5.6")
+    matches!(target, "gpt-5.6" | "openai/gpt-6-astra" | "openai/gpt-6.1-sol")
 }
 
 pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {

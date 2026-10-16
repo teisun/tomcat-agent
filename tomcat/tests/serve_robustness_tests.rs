@@ -28,7 +28,10 @@ fn serve_with_removed_single_model_config_stays_available_without_rewriting_it()
         "old connection fields are not migrated into a model"
     );
     let models = request(&mut child, json!({"type":"list_models"}));
-    assert_eq!(models["defaultModelId"], "gpt-5.4");
+    assert_eq!(
+        models["defaultModelId"], "",
+        "a config without llm.default_model has no default to display"
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
     let output = child.wait_for_exit(SERVE_TIMEOUT);
     assert!(output.status.success());
@@ -87,9 +90,16 @@ fn assert_cold_start_management(initialized: bool) {
     child.send_value(&json!({"type": "list_models", "id": "cold-models"}));
     let models = child.recv_until(SERVE_TIMEOUT, |v| v["id"] == "cold-models");
     assert_eq!(models.last().unwrap()["success"], true);
+    // `tomcat init` writes the wizard's explicit choice; without init there is none.
+    let written_default = before
+        .as_deref()
+        .map(|bytes| toml::from_str::<toml::Value>(std::str::from_utf8(bytes).unwrap()).unwrap())
+        .and_then(|config| config["llm"].get("default_model")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    assert_eq!(initialized, !written_default.is_empty());
     assert_eq!(
         models.last().unwrap()["payload"]["defaultModelId"],
-        "gpt-5.4"
+        written_default.as_str()
     );
     assert_eq!(
         std::fs::read(&config_path).ok(),
@@ -365,6 +375,217 @@ fn assert_selected_model_ready(initialized: bool) {
     assert_eq!(requests.len(), 1);
     assert_eq!(extract_json_body(&requests[0])["model"], "fixture-model");
     assert!(child.wait_for_exit(SERVE_TIMEOUT).status.success());
+}
+
+fn anthropic_text_response(text: &str) -> common::serve::ScriptedResponse {
+    let events = [
+        ("message_start", json!({"message":{"usage":{"input_tokens":1}}})),
+        ("content_block_start", json!({"index":0, "content_block":{"type":"text", "text":""}})),
+        ("content_block_delta", json!({"index":0, "delta":{"type":"text_delta", "text":text}})),
+        ("content_block_stop", json!({"index":0})),
+        ("message_delta", json!({"delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":1}})),
+        ("message_stop", json!({"type":"message_stop"})),
+    ];
+    common::serve::response(
+        events
+            .into_iter()
+            .map(|(event, data)| common::serve::ScriptedPart {
+                delay_ms: 0,
+                body: format!("event: {event}\ndata: {data}\n\n"),
+            })
+            .collect(),
+    )
+}
+
+fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+fn prompt_until_reply(child: &mut common::serve::ServeChild, session: &str, reply: &str) {
+    child.send_value(&json!({"type":"prompt", "sessionId":session, "text":"hello relay", "params":{}}));
+    let frames = child.recv_until(SERVE_TIMEOUT, |v| v["type"] == "agent_idle");
+    assert!(
+        frames
+            .iter()
+            .any(|v| v["assistantMessageEvent"]["delta"] == reply),
+        "{frames:?}"
+    );
+}
+
+// Mirrors the settings connect dialog: one batch, then the key, then an only-if-unset default.
+#[test]
+#[serial]
+fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
+    use common::serve::*;
+    let server = spawn_routed_openai_stream_server(|body| {
+        if body["model"] == "relay-claude" {
+            anthropic_text_response("anthropic-relay-ok")
+        } else {
+            response(vec![sse_delta("openai-relay-ok"), sse_finish("stop"), sse_done()])
+        }
+    });
+    let entry = |id: &str, name: &str, api: &str, key_env: &str| {
+        json!({
+            "id":id, "modelName":name, "api":api, "provider":"relay", "apiKeyEnv":key_env, "baseUrl":server.base_url,
+            "capabilities":{"vision":false, "files":false, "tools":true, "reasoning":false, "web_search":false}
+        })
+    };
+    let fx = setup_cold_serve_fixture(false);
+    let mut child = spawn_serve_child(&fx);
+    let pid = child.pid();
+    let session = initialize_cold(&mut child);
+    request(
+        &mut child,
+        json!({"type":"upsert_models", "models":[
+            entry("relay/relay-gpt", "relay-gpt", "openai", "RELAY_API_KEY"),
+            entry("relay/relay-claude", "relay-claude", "anthropic-messages", "RELAY_API_KEY"),
+        ]}),
+    );
+    request(
+        &mut child,
+        json!({"type":"set_provider_key", "envName":"RELAY_API_KEY", "value":"shared-fixture-key"}),
+    );
+    let first = request(
+        &mut child,
+        json!({"type":"set_default_model", "modelId":"relay/relay-gpt", "onlyIfUnset":true}),
+    );
+    assert_eq!(first["written"], true);
+    let retried = request(
+        &mut child,
+        json!({"type":"set_default_model", "modelId":"relay/relay-claude", "onlyIfUnset":true}),
+    );
+    assert_eq!(retried["written"], false, "a configured default is never replaced");
+    request(
+        &mut child,
+        json!({"type":"set_utility_model", "modelId":"relay/relay-claude"}),
+    );
+    let listed = request(&mut child, json!({"type":"list_models"}));
+    assert_eq!(listed["defaultModelId"], "relay/relay-gpt");
+    assert_eq!(listed["utilityModelId"], "relay/relay-claude");
+    let relay_rows = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["apiKeyEnv"] == "RELAY_API_KEY")
+        .map(|model| (model["api"].as_str().unwrap(), model["keySource"].as_str().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(relay_rows, [("openai", "saved"), ("anthropic-messages", "saved")]);
+
+    prompt_until_reply(&mut child, &session, "openai-relay-ok");
+    let deadline = std::time::Instant::now() + SERVE_TIMEOUT;
+    let title = loop {
+        if let Some(title) = captured_title_requests(&server).into_iter().next() {
+            break title;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the utility model never received the session title request"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(title.starts_with("POST /v1/messages "), "{title}");
+    assert_eq!(request_header(&title, "x-api-key"), Some("shared-fixture-key"));
+    assert_eq!(extract_json_body(&title)["model"], "relay-claude");
+    request(
+        &mut child,
+        json!({"type":"set_model", "model":"relay/relay-claude", "sessionId":session}),
+    );
+    prompt_until_reply(&mut child, &session, "anthropic-relay-ok");
+
+    request(
+        &mut child,
+        json!({"type":"upsert_models", "models":[entry("relay-2/relay-gpt", "relay-gpt", "openai", "RELAY_2_API_KEY")]}),
+    );
+    request(
+        &mut child,
+        json!({"type":"set_provider_key", "envName":"RELAY_2_API_KEY", "value":"second-fixture-key"}),
+    );
+    let second = request(&mut child, json!({"type":"new_session", "params":{}}))["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    request(
+        &mut child,
+        json!({"type":"set_model", "model":"relay-2/relay-gpt", "sessionId":second}),
+    );
+    prompt_until_reply(&mut child, &second, "openai-relay-ok");
+    assert_eq!(child.pid(), pid);
+
+    let sent = captured_non_title_requests(&server)
+        .iter()
+        .map(|request| {
+            let auth = request_header(request, "authorization")
+                .map(str::to_string)
+                .or_else(|| request_header(request, "x-api-key").map(|key| format!("x-api-key {key}")));
+            (request.lines().next().unwrap().to_string(), auth.unwrap_or_default())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent,
+        [
+            ("POST /v1/chat/completions HTTP/1.1".to_string(), "Bearer shared-fixture-key".to_string()),
+            ("POST /v1/messages HTTP/1.1".to_string(), "x-api-key shared-fixture-key".to_string()),
+            ("POST /v1/chat/completions HTTP/1.1".to_string(), "Bearer second-fixture-key".to_string()),
+        ]
+    );
+    assert!(child.wait_for_exit(SERVE_TIMEOUT).status.success());
+    for name in ["tomcat.config.toml", "models.toml"] {
+        let saved = std::fs::read_to_string(fx.home_path.join(".tomcat").join(name)).unwrap();
+        assert!(!saved.contains("fixture-key"), "{name} must not contain keys");
+    }
+
+    let mut restarted = spawn_serve_child(&fx);
+    let session = initialize_cold(&mut restarted);
+    assert_eq!(
+        request(&mut restarted, json!({"type":"get_state", "sessionId":session}))["modelReady"],
+        true
+    );
+    assert_eq!(
+        request(&mut restarted, json!({"type":"list_models"}))["utilityModelId"],
+        "relay/relay-claude"
+    );
+    let removed = request(
+        &mut restarted,
+        json!({"type":"remove_provider", "keyEnv":"RELAY_API_KEY"}),
+    );
+    assert_eq!(
+        removed["removedModelIds"],
+        json!(["relay/relay-gpt", "relay/relay-claude"])
+    );
+    assert_eq!(removed["keyRemoved"], true);
+    let listed = request(&mut restarted, json!({"type":"list_models"}));
+    assert_eq!(listed["defaultModelId"], "", "the GUI asks the user to choose again");
+    assert_eq!(
+        listed["utilityModelId"], "deepseek-v4-flash",
+        "a cleared utility role falls back to its compiled default"
+    );
+    let remaining = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["provider"] == "relay")
+        .map(|model| (model["id"].as_str().unwrap(), model["keyPresent"].as_bool().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, [("relay-2/relay-gpt", true)]);
+    let resumed = request(&mut restarted, json!({"type":"get_state", "sessionId":session}));
+    assert_eq!(
+        (resumed["model"].as_str(), resumed["modelReady"].as_bool()),
+        (Some("relay-2/relay-gpt"), Some(true)),
+        "the second key's card is untouched"
+    );
+    let fresh = request(&mut restarted, json!({"type":"new_session", "params":{}}))["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fresh = request(&mut restarted, json!({"type":"get_state", "sessionId":fresh}));
+    assert_eq!(
+        (fresh["model"].as_str(), fresh["modelReady"].as_bool()),
+        (Some(""), Some(false))
+    );
+    assert!(restarted.wait_for_exit(SERVE_TIMEOUT).status.success());
 }
 
 #[test]

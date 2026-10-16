@@ -1033,7 +1033,7 @@ span.tc-attachment-strip__file-chip {
 
 .tc-settings-combobox {
   /* Stretch (not center) so the inner input's top edge sits at the container
-     top, matching the bare `.tc-input` in the API-key field. Centering inside
+     top, matching the bare `.tc-input` in the neighbouring field. Centering inside
      the taller 38px combobox otherwise offsets the input ~3.5px lower and
      breaks the two label rows' input alignment. */
   align-items: stretch;
@@ -1134,7 +1134,7 @@ span.tc-attachment-strip__file-chip {
   );
 }
 
-.tc-settings-api-key-input {
+.tc-settings-keyslot-peer {
   min-height: var(--tc-field-control-height);
 }
 
@@ -1298,14 +1298,6 @@ span.tc-attachment-strip__file-chip {
   color: var(--vscode-foreground);
 }
 
-.tc-settings-card {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-width: 0;
-  padding: 16px;
-}
-
 .tc-settings-form {
   border: 0;
   display: flex;
@@ -1316,164 +1308,17 @@ span.tc-attachment-strip__file-chip {
   padding: 0;
 }
 
-.tc-settings-tabs {
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.tc-settings-tabs__tab {
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--vscode-descriptionForeground);
-  cursor: pointer;
-  margin-bottom: -1px;
-  min-height: 36px;
-  padding: 8px 4px 10px;
-  text-align: left;
-  transition:
-    color 120ms ease,
-    border-color 120ms ease;
-}
-
-.tc-settings-tabs__tab:hover {
-  color: var(--vscode-foreground);
-}
-
-.tc-settings-tabs__tab--active {
-  border-bottom-color: var(
-    --vscode-focusBorder,
-    var(--vscode-textLink-foreground)
-  );
-  color: var(--vscode-foreground);
-  font-weight: 600;
-}
-
-.tc-settings-tabs__tab:focus-visible {
-  border-radius: 6px 6px 0 0;
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: 2px;
-}
-
-.tc-settings-tabpanel {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 .tc-settings-form__row {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.tc-settings-preset-summary,
-.tc-settings-preview,
 .tc-settings-advanced {
   background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.08));
   border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
   border-radius: 12px;
   padding: 12px;
-}
-
-.tc-settings-preset-summary {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.tc-settings-preset-summary__line {
-  color: var(--vscode-descriptionForeground);
-  line-height: 1.4;
-}
-
-.tc-settings-mode-empty {
-  align-items: flex-start;
-  background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.08));
-  border: 1px dashed var(--vscode-panel-border, rgba(127, 127, 127, 0.28));
-  border-radius: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-}
-
-.tc-settings-mode-empty p,
-.tc-settings-form__disabled-reason {
-  color: var(--vscode-descriptionForeground);
-  line-height: 1.4;
-  margin: 0;
-}
-
-.tc-settings-preview {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.tc-settings-preview__title {
-  color: var(--vscode-descriptionForeground);
-  font-size: 12px;
-}
-
-.tc-settings-preview__row {
-  align-items: baseline;
-  display: grid;
-  gap: 8px;
-  grid-template-columns: 72px minmax(0, 1fr);
-}
-
-.tc-settings-preview__row span {
-  color: var(--vscode-descriptionForeground);
-  font-size: 12px;
-  text-transform: lowercase;
-}
-
-.tc-settings-preview__row strong {
-  overflow-wrap: anywhere;
-}
-
-.tc-settings-derived-model,
-.tc-settings-auto-field {
-  background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.08));
-  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 10px 12px;
-}
-
-.tc-settings-derived-model span,
-.tc-settings-auto-field small {
-  color: var(--vscode-descriptionForeground);
-  line-height: 1.4;
-}
-
-.tc-settings-auto-field > span {
-  color: var(--vscode-descriptionForeground);
-  font-size: 12px;
-}
-
-.tc-settings-auto-field > strong {
-  font-size: 16px;
-}
-
-.tc-settings-auto-field__override {
-  align-self: flex-start;
-  background: transparent;
-  border: 0;
-  color: var(--vscode-textLink-foreground);
-  cursor: pointer;
-  padding: 2px 0;
-  text-align: left;
-}
-
-.tc-settings-auto-field__override:hover {
-  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
-  text-decoration: underline;
 }
 
 .tc-settings-advanced__toggle {
@@ -1554,65 +1399,238 @@ span.tc-attachment-strip__file-chip {
   overflow-wrap: anywhere;
 }
 
-.tc-settings-model {
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 2px 14px;
-}
-
-.tc-settings-group > .tc-settings-model:last-child {
-  border-bottom: none;
-  padding-bottom: 4px;
-}
-
-.tc-settings-model__header {
+.tc-settings-providers__header {
   align-items: center;
   display: flex;
-  gap: 16px;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.tc-settings-card {
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  min-width: 0;
+  padding: 12px 14px;
+}
+
+.tc-settings-card__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
   justify-content: space-between;
   min-width: 0;
 }
 
-.tc-settings-model__identity {
-  align-items: center;
+.tc-settings-card__identity {
   display: flex;
-  flex: 1 1 auto;
-  gap: 10px;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 
-.tc-settings-model__identity .tc-chip {
-  flex: 0 0 auto;
+.tc-settings-card__hosts,
+.tc-settings-card__protocol,
+.tc-settings-card__key {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tc-settings-card__key--missing {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+}
+
+.tc-settings-card__status {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.tc-settings-card__menu-anchor {
+  position: relative;
+}
+
+.tc-settings-card__menu {
+  left: auto;
+  min-width: 200px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 24;
+}
+
+.tc-settings-card__menu-hint {
+  color: var(--vscode-descriptionForeground);
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
+  max-width: 260px;
+  padding: 4px 10px 6px;
+}
+
+.tc-settings-card__rows {
+  display: flex;
+  flex-direction: column;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tc-settings-card__row {
+  align-items: center;
+  border-top: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.16));
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 8px 0;
+}
+
+.tc-settings-card__model {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.tc-settings-card__model strong {
+  overflow-wrap: anywhere;
+}
+
+.tc-settings-card__model .tc-chip {
   font-size: 11px;
 }
 
-.tc-settings-model__identity strong {
-  display: block;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.tc-settings-card__add,
+.tc-link-button {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  padding: 2px 0;
 }
 
-.tc-settings-model__status-dot {
-  border-radius: 999px;
+.tc-settings-card__add:hover,
+.tc-link-button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.tc-link-button:disabled {
+  color: var(--vscode-descriptionForeground);
+  cursor: not-allowed;
+}
+
+.tc-settings-connectable {
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.6;
+  margin: 8px 0 0;
+}
+
+.tc-settings-utility {
+  align-items: start;
+  display: grid;
+  gap: 6px 12px;
+  grid-template-columns: max-content minmax(0, 1fr);
+}
+
+.tc-settings-utility__label {
+  font-weight: 600;
+  padding-top: 9px;
+}
+
+.tc-settings-utility__control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 560px;
+  min-width: 0;
+}
+
+.tc-settings-connect__same {
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+.tc-settings-connect__same legend {
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 4px;
+  padding: 0;
+}
+
+.tc-settings-connect__models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tc-settings-connect__models-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  justify-content: space-between;
+}
+
+.tc-settings-connect__tools {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.tc-settings-connect__tools .tc-input {
+  width: 180px;
+}
+
+.tc-settings-connect__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.tc-settings-connect__row {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 32px;
+}
+
+.tc-settings-connect__row .tc-settings-capabilities__item {
+  color: var(--vscode-foreground);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tc-settings-connect__row select {
   flex: 0 0 auto;
-  height: 8px;
-  width: 8px;
+  padding: 4px 8px;
+  width: 200px;
 }
 
-.tc-settings-model__status-dot--ready {
-  background: var(--vscode-charts-green, #3fb950);
-  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.12);
-}
-
-.tc-settings-model__status-dot--missing {
-  border: 1px solid var(--vscode-descriptionForeground);
-  height: 8px;
-  opacity: 0.65;
-  width: 8px;
+.tc-settings-connect__manual {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .tc-settings-model__actions {
@@ -1710,15 +1728,10 @@ span.tc-attachment-strip__file-chip {
   justify-content: flex-end;
 }
 
-.tc-settings-form__disabled-reason {
-  font-size: 12px;
-}
-
 .tc-settings-inline-key {
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding-left: 18px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .tc-settings-modal {
@@ -1807,9 +1820,10 @@ span.tc-attachment-strip__file-chip {
   .tc-settings-shell__header { flex-wrap: wrap; }
   .tc-settings-shell__content { min-width: 0; padding-right: 0; }
 
-  .tc-settings-model__header {
-    align-items: center;
-    gap: 12px;
+  .tc-settings-card__header,
+  .tc-settings-card__row {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .tc-settings-model__actions {
@@ -1817,8 +1831,12 @@ span.tc-attachment-strip__file-chip {
     justify-content: flex-end;
   }
 
-  .tc-settings-tabs {
-    gap: 8px 14px;
+  .tc-settings-utility {
+    grid-template-columns: 1fr;
+  }
+
+  .tc-settings-utility__label {
+    padding-top: 0;
   }
 
   .tc-settings-form__row {
@@ -1829,14 +1847,31 @@ span.tc-attachment-strip__file-chip {
     grid-template-columns: 1fr;
   }
 
+  .tc-settings-connect__tools {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .tc-settings-connect__tools .tc-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+  }
+
+  .tc-settings-connect__row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0;
+  }
+
+  .tc-settings-connect__row select {
+    margin-left: 22px;
+    width: calc(100% - 22px);
+  }
+
   .tc-settings-modal {
     padding: 16px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tc-settings-tabs__tab {
-    transition: none;
   }
 }
 
@@ -3022,8 +3057,10 @@ span.tc-attachment-strip__file-chip {
   background: color-mix(in srgb, var(--vscode-foreground, #ccc) 6%, transparent);
 }
 
-.tc-approval-card--pending .tc-approval-option--selected {
-  background: color-mix(in srgb, var(--vscode-foreground, #ccc) 10%, transparent);
+/* Selection differs from hover in hue and in the badge's shape, not just in shade. */
+.tc-approval-card--pending .tc-approval-option--selected,
+.tc-approval-card--pending .tc-approval-option--selected:hover {
+  background: color-mix(in srgb, var(--tc-question-accent) 16%, transparent);
 }
 
 .tc-approval-card--pending .tc-approval-option__code {
@@ -3031,6 +3068,12 @@ span.tc-attachment-strip__file-chip {
   font-size: 0.9em;
   block-size: 1.5em;
   inline-size: 1.5em;
+}
+
+.tc-approval-card--pending .tc-approval-option__code--selected {
+  background: var(--tc-question-accent);
+  border-color: var(--tc-question-accent);
+  color: #171717;
 }
 
 .tc-approval-card--pending .tc-approval-option__content {
@@ -5230,7 +5273,17 @@ span.tc-attachment-strip__file-chip {
     stroke: HighlightText;
   }
 
+  .tc-approval-card--pending .tc-approval-option--selected {
+    outline: 1px solid Highlight;
+    outline-offset: -1px;
+  }
 
+  .tc-approval-card--pending .tc-approval-option__code--selected {
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
 }
 
 .tc-connector-list {

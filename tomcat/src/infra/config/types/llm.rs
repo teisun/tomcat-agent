@@ -114,13 +114,15 @@ impl<'de> Deserialize<'de> for ThinkingDisplay {
 /// 全部收敛到 `models.toml` 的 [`crate::core::llm::ModelEntry`]。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
-    #[serde(default = "default_llm_model")]
+    /// 主模型；空串表示用户尚未选择（不编译任何型号为默认）。
+    #[serde(default)]
     pub default_model: String,
     /// Vision 场景模型；未设置时回落主模型，由 resolver 负责 capability guard。
     #[serde(default)]
     pub vision_model: Option<String>,
-    /// 标题生成场景模型；未设置时回落 compaction_model / default_model。
-    #[serde(default)]
+    /// 辅助模型（设置页“辅助模型”）：会话标题、回合折叠标题、命令卡片“目的”短句。
+    /// 不可用时会话标题回落对话模型，回合标题与命令说明不生成。
+    #[serde(default = "default_title_model")]
     pub title_model: Option<String>,
     /// 仅供 `#[cfg(test)]` 单测维持最小迁移成本的隐藏覆写字段：
     /// - 不参与真实配置反序列化；
@@ -363,12 +365,11 @@ impl Default for ReasoningContinuityConfig {
     }
 }
 
-/// 全局默认 LLM 模型 id（`LlmConfig` 默认值、`tomcat init` 首次写入与文档一致）。
-/// 可通过 `tomcat.config.toml` 中 `[llm] default_model` 或环境变量 `TOMCAT__LLM__DEFAULT_MODEL` 覆盖（后者优先级更高，见 [`load_config`]）。
-pub const DEFAULT_LLM_MODEL: &str = "gpt-5.4";
+/// 辅助模型（`llm.title_model`）的默认指向。
+pub const DEFAULT_TITLE_MODEL: &str = "deepseek-v4-flash";
 
-fn default_llm_model() -> String {
-    DEFAULT_LLM_MODEL.to_string()
+fn default_title_model() -> Option<String> {
+    Some(DEFAULT_TITLE_MODEL.to_string())
 }
 
 fn default_max_concurrent_requests() -> u32 {
@@ -422,9 +423,9 @@ impl Default for LlmFilesConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            default_model: default_llm_model(),
+            default_model: String::new(),
             vision_model: None,
-            title_model: Some("utility-flash".to_string()),
+            title_model: default_title_model(),
             #[cfg(test)]
             provider: "openai-responses".to_string(),
             #[cfg(test)]

@@ -23,5 +23,33 @@ export function findReusableModelByName(
   );
 }
 
-/** @deprecated Use findReusableModelByName. */
-export const findBuiltinModelByName = findReusableModelByName;
+/** Aggregating relays prefix names (`anthropic/claude-…`); only the last segment names the family. */
+function upstreamFamilyName(modelName: string): string {
+  const lowered = modelName.trim().toLowerCase();
+  return lowered.slice(lowered.lastIndexOf("/") + 1);
+}
+
+/**
+ * Default protocol for a new model; always one of `candidates`, whose first
+ * entry is the connection's primary protocol.
+ */
+export function defaultProtocolFor(
+  modelName: string,
+  reference: Pick<SettingsModelView, "api"> | null,
+  candidates: readonly string[],
+): string {
+  if (reference && candidates.includes(reference.api)) return reference.api;
+  if (upstreamFamilyName(modelName).startsWith("claude-") && candidates.includes("anthropic-messages")) {
+    return "anthropic-messages";
+  }
+  return candidates[0] ?? "openai";
+}
+
+/** Computed once for a new draft only; existing entries are never re-defaulted. */
+export function defaultSupportsFast(
+  modelName: string,
+  reference: Pick<SettingsModelView, "supportedSpeeds"> | null,
+): boolean {
+  const family = upstreamFamilyName(modelName);
+  return family.startsWith("gpt-") || family.startsWith("claude-") || reference?.supportedSpeeds?.includes("fast") === true;
+}

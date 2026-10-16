@@ -182,14 +182,27 @@ fn speed_defaults_roundtrips_and_preserves_other_preferences() {
     let store = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
     assert_eq!(store.speed_for("relay"), Speed::Standard);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    store.set_speed("relay", Speed::Ultrafast).unwrap();
+    store.set_speed("relay", Speed::Fast).unwrap();
     let loaded = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
-    assert_eq!(loaded.speed_for("relay"), Speed::Ultrafast);
+    assert_eq!(loaded.speed_for("relay"), Speed::Fast);
     assert_eq!(loaded.reasoning_for("relay"), ThinkingLevel::High);
     assert_eq!(loaded.context_window_for("relay"), Some(400_000));
     loaded.set_reasoning("relay", ThinkingLevel::Max).unwrap();
     loaded.set_context_window("relay", Some(1_000_000)).unwrap();
-    assert_eq!(loaded.speed_for("relay"), Speed::Ultrafast);
+    assert_eq!(loaded.speed_for("relay"), Speed::Fast);
+}
+
+#[test]
+fn legacy_ultrafast_preference_reads_as_standard_without_rewriting_file() {
+    use crate::core::llm::Speed;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model-thinking.json");
+    let original = r#"{"models":{"relay":{"reasoning":"high","speed":"ultrafast"}}}"#;
+    std::fs::write(&path, original).unwrap();
+    let store = ModelPrefsStore::load(&path, ThinkingLevel::Medium).unwrap();
+    assert_eq!(store.speed_for("relay"), Speed::Standard);
+    assert_eq!(store.reasoning_for("relay"), ThinkingLevel::High);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 }
 
 #[test]

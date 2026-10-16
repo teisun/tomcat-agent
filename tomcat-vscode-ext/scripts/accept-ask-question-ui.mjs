@@ -308,6 +308,29 @@ try {
       assert.equal(await page.getByTestId("approval-option-q1-b").getAttribute("aria-checked"), "true");
       assert.equal(await page.getByTestId("approval-continue").isEnabled(), true);
       await capture("selected");
+      // The user must tell the chosen option apart from the one under the pointer.
+      await page.getByTestId("approval-option-q1-a").hover();
+      const optionColors = () => page.evaluate(() => {
+        const background = (selector) => getComputedStyle(document.querySelector(selector)).backgroundColor;
+        return {
+          selectedRow: background('[data-testid="approval-option-q1-b"]'),
+          hoveredRow: background('[data-testid="approval-option-q1-a"]'),
+          selectedCode: background('[data-testid="approval-option-q1-b"] .tc-approval-option__code'),
+          hoveredCode: background('[data-testid="approval-option-q1-a"] .tc-approval-option__code'),
+        };
+      });
+      const colors = await optionColors();
+      assert.equal(colors.selectedCode, "rgb(173, 137, 84)", `Selected letter must be filled: ${JSON.stringify(colors)}`);
+      assert.equal(colors.hoveredCode, "rgba(0, 0, 0, 0)", `Only the selected letter is filled: ${JSON.stringify(colors)}`);
+      assert.notEqual(colors.selectedRow, colors.hoveredRow, "Selected row must not look like a hovered row");
+      await capture("selected-hover");
+      if (scenario.name === "narrow-dark") {
+        await page.emulateMedia({ forcedColors: "active" });
+        const forced = await optionColors();
+        assert.notEqual(forced.selectedCode, forced.hoveredCode, `Forced colors must keep the selected letter: ${JSON.stringify(forced)}`);
+        await capture("selected-forced-colors");
+        await page.emulateMedia({ forcedColors: "none" });
+      }
       if (scenario.name === "narrow-dark") await page.getByTestId("approval-continue").press("Enter");
       else await page.getByTestId("approval-continue").click();
       const answers = await page.evaluate(() => window.__answers);

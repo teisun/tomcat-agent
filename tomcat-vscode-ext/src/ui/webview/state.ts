@@ -2284,7 +2284,7 @@ function upsertTool(
   return next;
 }
 
-/** 把 utility-flash 异步生成的命令"目的"短句写到对应工具卡片（按 toolCallId 定位）。 */
+/** 把辅助模型（llm.title_model）异步生成的命令"目的"短句写到对应工具卡片（按 toolCallId 定位）。 */
 function applyToolSummaryTitle(
   session: WebviewSessionSnapshot,
   toolCallId: string,

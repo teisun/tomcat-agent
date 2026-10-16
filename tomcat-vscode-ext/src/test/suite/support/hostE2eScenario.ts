@@ -1165,16 +1165,16 @@ export async function assertWebviewCompletedPlanStaysInChat(
 }
 
 /**
- * Regression guard for the settings key-slot / API-key alignment fix. Measure
- * the visible bordered boxes the user actually sees: the key-slot combobox
- * wrapper and the API-key input. The refresh button must keep the label rows
- * aligned, and the API-key input must share the combobox's 38px control height.
- * Real layout geometry only exists in the host webview, so this assertion runs
- * here rather than in jsdom unit tests. Relay mode is used because it always
- * renders the shared key fields row (`showSharedFormFields`).
+ * Regression guard for the settings key-slot alignment fix. Measure the visible
+ * bordered boxes the user actually sees in a model's advanced fields: the
+ * key-slot combobox wrapper and its read-only model-ID peer. The refresh button
+ * must keep the label rows aligned, and the peer must share the combobox's 38px
+ * control height. Real layout geometry only exists in the host webview, so this
+ * assertion runs here rather than in jsdom unit tests.
  */
 async function assertSettingsKeyFieldsAligned(
   api: TomcatExtensionApi,
+  modelId: string,
 ): Promise<void> {
   const deadline = Date.now() + 15_000;
   let dom:
@@ -1183,12 +1183,12 @@ async function assertSettingsKeyFieldsAligned(
   while (Date.now() < deadline) {
     await api.__testing.sendSettingsDomAction({
       kind: "clickTestId",
-      testId: "settings-add-model",
+      testId: `settings-edit-${modelId}`,
     });
     await pause(150);
     await api.__testing.sendSettingsDomAction({
       kind: "clickTestId",
-      testId: "settings-mode-relay",
+      testId: "settings-model-advanced",
     });
     await pause(150);
     try {
@@ -1198,34 +1198,38 @@ async function assertSettingsKeyFieldsAligned(
       await pause(150);
       continue;
     }
-    if (dom.rects?.keySlotBox && dom.rects?.apiKeyInput) {
+    if (dom.rects?.keySlotBox && dom.rects?.aliasInput) {
       break;
     }
   }
 
   const keySlot = dom?.rects?.keySlotBox;
-  const apiKey = dom?.rects?.apiKeyInput;
+  const peer = dom?.rects?.aliasInput;
   assert.ok(
     keySlot,
     "expected the settings DOM snapshot to expose the key-slot box rect",
   );
   assert.ok(
-    apiKey,
-    "expected the settings DOM snapshot to expose the API-key input rect",
+    peer,
+    "expected the settings DOM snapshot to expose the model-ID input rect",
   );
 
-  const topDelta = Math.abs(keySlot.top - apiKey.top);
+  const topDelta = Math.abs(keySlot.top - peer.top);
   assert.ok(
     topDelta <= 1,
-    `expected key-slot and API-key inputs to align within 1px, got ${topDelta.toFixed(2)}px ` +
-      `(keySlot.top=${keySlot.top.toFixed(2)}, apiKey.top=${apiKey.top.toFixed(2)})`,
+    `expected key-slot and model-ID inputs to align within 1px, got ${topDelta.toFixed(2)}px ` +
+      `(keySlot.top=${keySlot.top.toFixed(2)}, modelId.top=${peer.top.toFixed(2)})`,
   );
-  const heightDelta = Math.abs(keySlot.height - apiKey.height);
+  const heightDelta = Math.abs(keySlot.height - peer.height);
   assert.ok(
     heightDelta <= 1,
-    `expected key-slot and API-key controls to share height within 1px, got ${heightDelta.toFixed(2)}px ` +
-      `(keySlot.height=${keySlot.height.toFixed(2)}, apiKey.height=${apiKey.height.toFixed(2)})`,
+    `expected key-slot and model-ID controls to share height within 1px, got ${heightDelta.toFixed(2)}px ` +
+      `(keySlot.height=${keySlot.height.toFixed(2)}, modelId.height=${peer.height.toFixed(2)})`,
   );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await pause(400);
+    await captureTranscriptVisual("settings-alignment", "window", "Tomcat Settings");
+  }
 
   await api.__testing.sendSettingsDomAction({
     kind: "clickTestId",
@@ -1301,47 +1305,6 @@ export async function assertWebviewAddModelsFlow(
     20_000,
   );
 
-  // This assertion owns the two-column desktop form, not the intentional narrow stack.
-  await api.__testing.executeCommand("workbench.action.closeSidebar");
-  await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
-  const settingsLayout = await SettingsFrameDriver.connectFromEnvironment();
-  try {
-    await settingsLayout.setViewport(1440, 900);
-    await settingsLayout.waitForSnapshot(snapshot => snapshot.viewport.width > 720,
-      "Key-field alignment requires the desktop Settings layout");
-    await assertSettingsKeyFieldsAligned(api);
-  } finally { settingsLayout.close(); }
-
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    const openAddModelForm = async (): Promise<void> => {
-      const startedAt = Date.now();
-      while (Date.now() - startedAt < 10_000) {
-        await api.__testing.sendSettingsDomAction({
-          kind: "clickTestId",
-          testId: "settings-add-model",
-        });
-        await pause(200);
-        const dom = await api.__testing.captureSettingsDom();
-        if (dom.html.includes('data-testid="settings-model-form"')) {
-          return;
-        }
-      }
-      throw new Error(
-        "Timed out waiting for the add-model form to open in the settings panel",
-      );
-    };
-    await openAddModelForm();
-    await pause(400);
-    await captureTranscriptVisual("settings-alignment", "window", "Tomcat Settings");
-    await api.__testing.sendSettingsDomAction({
-      kind: "clickTestId",
-      testId: "settings-close-model-form",
-    });
-    await pause(250);
-    await api.__testing.focusWebview();
-    await api.__testing.waitForWebviewReady();
-  }
-
   await api.__testing.sendSettingsIntent(
     buildSettingsIntent({
       data: {
@@ -1403,6 +1366,18 @@ export async function assertWebviewAddModelsFlow(
     materializedModel.contextWindowOptions?.includes(32_768),
     "expected the materialized relay model to expose the second Context tier",
   );
+
+  // This assertion owns the two-column desktop form, not the intentional narrow stack.
+  await api.__testing.executeCommand("workbench.action.closeSidebar");
+  await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
+  const settingsLayout = await SettingsFrameDriver.connectFromEnvironment();
+  try {
+    await settingsLayout.setViewport(1440, 900);
+    await settingsLayout.waitForSnapshot(snapshot => snapshot.viewport.width > 720,
+      "Key-field alignment requires the desktop Settings layout");
+    await assertSettingsKeyFieldsAligned(api, modelId);
+  } finally { settingsLayout.close(); }
+
   await api.__testing.sendSettingsIntent(
     buildSettingsIntent({
       data: {
@@ -1472,7 +1447,7 @@ export async function assertWebviewAddModelsFlow(
           modelName,
           provider: relayProvider,
           thinkingFormat: null,
-          supportedSpeeds: ["fast", "ultrafast"],
+          supportedSpeeds: ["fast"],
         },
       },
       messageId: "settings-upsert-model-restored",
@@ -1507,53 +1482,24 @@ export async function assertWebviewAddModelsFlow(
     await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-effort-levels", value: levelsText });
     await waitForSettingsPanelDom(api, (dom) => dom.html.includes(`value="${levelsText}"`) ? dom : undefined);
   }
-  let speedsText = "";
-  for (const character of "fast，ultrafast,") {
-    speedsText += character;
-    await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-speeds", value: speedsText });
-    await waitForSettingsPanelDom(api, (dom) => dom.html.includes(`value="${speedsText}"`) ? dom : undefined);
-  }
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    const driver = await SettingsFrameDriver.connectFromEnvironment();
-    try {
-      // Capture the real empty state; restore the unsaved draft before the comma check.
-      await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-speeds", value: "" });
-      await waitForSettingsPanelDom(api, (dom) => /data-testid="settings-supported-speeds"[^>]*placeholder="e\.g\. fast, ultrafast"[^>]*value=""/.test(dom.html) ? dom : undefined);
-      await api.__testing.executeCommand("workbench.action.closeSidebar");
-      await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
-      for (const [width, height, suffix] of [[1440, 900, ""], [390, 844, "-narrow"]] as const) {
-        await driver.setViewport(width, height);
-        await driver.waitForSnapshot((dom) => dom.viewport.width > 0 && (suffix ? dom.viewport.width <= 400 : dom.viewport.width > 400), "empty Settings frame reflow");
-        await driver.evaluate(`document.querySelector('[data-testid="settings-supported-speeds"]').scrollIntoView({block: "center"})`);
-        await driver.capture(transcriptVisualArtifactPath(`settings-speed-empty${suffix}.png`));
-      }
-      await driver.setViewport(1440, 900);
-      await api.__testing.sendSettingsDomAction({ kind: "setInputValue", testId: "settings-supported-speeds", value: speedsText });
-      await waitForSettingsPanelDom(api, (dom) => dom.html.includes(`value="${speedsText}"`) ? dom : undefined);
-      await driver.evaluate(`document.querySelector('[data-testid="settings-supported-speeds"]').scrollIntoView({block: "center"})`);
-      await driver.capture(transcriptVisualArtifactPath("settings-speed-comma.png"));
-      await api.__testing.executeCommand("workbench.action.closeSidebar");
-      await api.__testing.executeCommand("workbench.action.closeAuxiliaryBar");
-      await driver.setViewport(390, 844);
-      await driver.waitForSnapshot((dom) => dom.viewport.width > 0 && dom.viewport.width <= 400, "narrow Settings frame reflow");
-      await driver.evaluate(`document.querySelector('[data-testid="settings-supported-speeds"]').scrollIntoView({block: "center"})`);
-      await driver.capture(transcriptVisualArtifactPath("settings-speed-comma-narrow.png"));
-    } finally {
-      await driver.setViewport(1440, 900);
-      driver.close();
-    }
-  }
+  // The checkbox opens checked from the saved declaration; clearing it saves Standard only.
+  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-supported-speeds" });
   await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-save-model" });
   await waitForSettingsPanelState(api, (snapshot) => {
     const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
-    return model?.supportedReasoningLevels?.includes("max") && model.supportedSpeeds?.length === 2 ? model : undefined;
+    return model?.supportedReasoningLevels?.includes("max") && !model.supportedSpeeds?.length ? model : undefined;
   });
   await waitForSettingsPanelDom(api, (dom) => !dom.html.includes('data-testid="settings-model-form"') ? dom : undefined);
   await openListInputs();
   const reopened = await api.__testing.captureSettingsDom();
-  assert.ok(reopened.html.includes('value="fast, ultrafast"'), "saved Speed declarations must reopen intact");
   assert.ok(reopened.html.includes(`value="${materializedModel.supportedReasoningLevels?.join(", ")}, max"`), "typed Max must survive save and reopen");
-  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-close-model-form" });
+  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-supported-speeds" });
+  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-save-model" });
+  await waitForSettingsPanelState(api, (snapshot) => {
+    const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+    return model?.supportedSpeeds?.join() === "fast" ? model : undefined;
+  });
+  await waitForSettingsPanelDom(api, (dom) => !dom.html.includes('data-testid="settings-model-form"') ? dom : undefined);
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
 
@@ -1662,7 +1608,7 @@ export async function assertWebviewAddModelsFlow(
         : undefined,
     10_000,
   );
-  assert.ok(configPopover.html.includes("Speed") && configPopover.html.includes("Ultrafast"));
+  assert.ok(configPopover.html.includes("Speed") && !configPopover.html.includes("Ultrafast"));
   await api.__testing.sendWebviewDomAction({ index: 1, kind: "clickTestId", testId: "speed-option" });
   await waitForWebviewState(api, (state) => state.availableModelDetails?.[modelId]?.selectedSpeed === "fast" ? state : undefined);
   const speedState = await api.__testing.getSessionState();
@@ -1789,20 +1735,6 @@ export async function assertWebviewAddModelsFlow(
         await openConfigForCapture("fake-model");
         await captureWorkbenchArtifacts(transcriptVisualArtifactPath(`no-speed-picker${suffix}.png`));
       }
-      // Reuse the same isolated model to verify the Fast-only capability boundary.
-      const savedModel = await waitForSettingsPanelState(api, (snapshot) => snapshot.state.models.find((model) => model.id === modelId));
-      await api.__testing.sendSettingsIntent(buildSettingsIntent({
-        type: "upsertModel", messageId: "visual-fast-only", data: { model: { ...savedModel, supportedSpeeds: ["fast"] } },
-      }));
-      await waitForWebviewState(api, (state) => state.availableModelDetails?.[modelId]?.supportedSpeeds?.length === 1 ? state : undefined);
-      for (const [width, height, suffix] of [[1440, 900, ""], [448, 844, "-narrow"]] as const) {
-        await driver.setViewport(width, height);
-        const dom = await openConfigForCapture(modelId);
-        assert.ok(dom.html.includes("Fast") && !dom.html.includes(">Ultrafast<"), "Fast-only model must not expose Ultrafast");
-        await captureWorkbenchArtifacts(transcriptVisualArtifactPath(`fast-only-speed-picker${suffix}.png`));
-      }
-      await api.__testing.sendSettingsIntent(buildSettingsIntent({ type: "upsertModel", messageId: "visual-restore-speeds", data: { model: savedModel } }));
-      await waitForWebviewState(api, (state) => state.availableModelDetails?.[modelId]?.supportedSpeeds?.length === 2 ? state : undefined);
     } finally {
       await driver.setViewport(1440, 900);
       if (auxiliaryMaximized) await api.__testing.executeCommand(maximizeAuxiliaryBar);

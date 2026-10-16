@@ -741,16 +741,17 @@ impl DefaultLlmResolver {
         })
     }
 
-    /// Compaction prefers its configured model, then the default, and finally the session's main
-    /// model, so a usable main model always keeps compaction usable.
+    /// Compaction prefers its configured model, then the session's main model, and finally the
+    /// default. The input was trimmed to the session model's window, so it is the least likely
+    /// to overflow.
     fn compaction_candidates(&self, session_override: Option<&str>) -> Vec<String> {
         let config = self.config_snapshot();
         let main_model = self.select_model_id(LlmScene::Main, session_override);
         let mut candidates: Vec<String> = Vec::new();
         for id in [
             config.context.compaction_model.trim(),
-            config.llm.default_model.trim(),
             main_model.as_str(),
+            config.llm.default_model.trim(),
         ] {
             if !id.is_empty() && !candidates.iter().any(|candidate| candidate == id) {
                 candidates.push(id.to_string());

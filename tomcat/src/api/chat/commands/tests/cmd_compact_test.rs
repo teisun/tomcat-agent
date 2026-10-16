@@ -71,7 +71,7 @@ impl LlmResolver for FixedResolver {
     ) -> Result<ResolvedCall, AppError> {
         let model = self
             .catalog
-            .lookup_explicit(session_override.unwrap_or("gpt-5.4"))?;
+            .lookup_explicit(session_override.unwrap_or("gpt-5.6"))?;
         Ok(ResolvedCall::from_parts_unchecked(
             Arc::clone(&self.provider),
             model.id.clone(),
@@ -91,6 +91,7 @@ async fn compact_command_persists_boundary_and_rehydrates_cli_context() {
     let mut config = AppConfig::default();
     config.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     config.llm.api_key_env = Some(API_KEY_ENV.to_string());
+    config.llm.default_model = "gpt-5.6".to_string();
     let mut ctx = ChatContext::from_config(config).expect("chat context");
     let provider: Arc<dyn LlmProvider> = Arc::new(CompactOnlyProvider);
     ctx.global_services.llm_resolver = Arc::new(FixedResolver {

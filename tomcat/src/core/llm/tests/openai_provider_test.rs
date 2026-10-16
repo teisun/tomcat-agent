@@ -887,7 +887,6 @@ async fn speed_completions_http_stream_and_non_stream_keep_max_independent() {
         (None, None),
         (Some(Speed::Standard), Some("default")),
         (Some(Speed::Fast), Some("priority")),
-        (Some(Speed::Ultrafast), Some("ultrafast")),
     ];
     for stream in [false, true] {
         let payload = if stream {
@@ -936,7 +935,7 @@ async fn speed_completions_http_stream_and_non_stream_keep_max_independent() {
             assert_eq!(body["stream"], stream);
             assert_eq!(body["model"], "gpt-5.6-sol");
         }
-        assert_eq!(server.request_count(), 4);
+        assert_eq!(server.request_count(), speeds.len());
         server.shutdown().await;
     }
 }

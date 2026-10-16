@@ -5954,10 +5954,9 @@ async fn speed_serve_persists_lists_rejects_and_keeps_failed_save_unchanged() {
     let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![]).await;
     for (id, model, speed, success) in [
         ("speed-fast", "gpt-5.6", Speed::Fast, true),
-        ("speed-unsupported", "gpt-5.4", Speed::Fast, false),
-        ("speed-ultra", "gpt-5.6", Speed::Ultrafast, false),
+        ("speed-unsupported", "deepseek-v4-pro", Speed::Fast, false),
         ("speed-missing", "missing-model", Speed::Standard, false),
-        ("speed-standard", "gpt-5.4", Speed::Standard, true),
+        ("speed-standard", "deepseek-v4-pro", Speed::Standard, true),
     ] {
         handle_command(
             state.clone(),
@@ -7916,10 +7915,14 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
                 && request.contains("\"output_config\":{\"effort\":\"xhigh\"}")
         })
         .expect("expected a streamed claude request with adaptive effort");
-    assert!(
-        claude_request.contains("\"thinking\":{\"type\":\"adaptive\"}"),
-        "claude adaptive request should enable adaptive thinking: {}",
-        claude_request
+    let body: serde_json::Value = serde_json::from_str(
+        claude_request.split("\r\n\r\n").nth(1).unwrap_or_default(),
+    )
+    .expect("claude request body is JSON");
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({ "type": "adaptive", "display": "summarized" }),
+        "claude adaptive request should enable summarized adaptive thinking: {claude_request}"
     );
     assert!(
         claude_request.contains("\"output_config\":{\"effort\":\"xhigh\"}"),
@@ -8623,4 +8626,246 @@ async fn serve_restore_checkpoint_rejects_foreign_session_checkpoint() {
             &[]
         )
     );
+}
+
+async fn serve_one_models_response(status: u16, body: &'static str) -> (String, oneshot::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut buf).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        let _ = tx.send(String::from_utf8_lossy(&request).into_owned());
+        let response = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+    });
+    (base_url, rx)
+}
+
+async fn run_and_read(
+    state: &Arc<ServeState>,
+    buffer: &crate::api::serve::test_support::SharedWriterBuffer,
+    command: ServeCommand,
+    id: &str,
+) -> serde_json::Value {
+    handle_command(Arc::clone(state), command).await.unwrap();
+    let lines = wait_for_line(buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some(id)
+    })
+    .await;
+    lines
+        .into_iter()
+        .rev()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("response {id}"))
+}
+
+fn relay_model(id: &str, api: &str) -> ModelEntryInput {
+    ModelEntryInput {
+        id: id.to_string(),
+        model_name: Some(id.rsplit('/').next().unwrap().to_string()),
+        api: api.to_string(),
+        provider: "fcodex".to_string(),
+        api_key_env: Some("SERVE_TEST_FCODEX_API_KEY".to_string()),
+        base_url: Some("https://fcodex.example.test".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        context_window_options: None,
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: None,
+        supported_reasoning_levels: None,
+        thinking_format: Some(
+            if api == "anthropic-messages" { "anthropic" } else { "openai" }.to_string(),
+        ),
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_remote_model_list_returns_names_and_classified_failures_without_the_key() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+    let secret = "sk-dialog-only-secret-0001";
+
+    let (ok_url, ok_request) =
+        serve_one_models_response(200, r#"{"data":[{"id":"deepseek-v4-pro"},{"id":"deepseek-chat"}]}"#).await;
+    let listed = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::ListRemoteModels {
+            id: Some("remote-ok".to_string()),
+            base_url: ok_url,
+            api: "openai".to_string(),
+            api_key: Some(secret.to_string()),
+            api_key_env: None,
+        },
+        "remote-ok",
+    )
+    .await;
+    assert_eq!(listed["success"].as_bool(), Some(true));
+    assert_eq!(listed["payload"]["models"][1]["id"].as_str(), Some("deepseek-chat"));
+    assert!(ok_request.await.unwrap().contains(&format!("Bearer {secret}")));
+
+    let (denied_url, _denied_request) = serve_one_models_response(401, r#"{"error":"bad key"}"#).await;
+    let denied = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::ListRemoteModels {
+            id: Some("remote-denied".to_string()),
+            base_url: denied_url,
+            api: "openai".to_string(),
+            api_key: Some(secret.to_string()),
+            api_key_env: None,
+        },
+        "remote-denied",
+    )
+    .await;
+    assert_eq!(denied["success"].as_bool(), Some(false));
+    assert_eq!(denied["payload"]["reason"].as_str(), Some("auth"));
+    assert_eq!(denied["payload"]["status"].as_u64(), Some(401));
+    let all_output = read_ndjson_lines(&buffer)
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<String>();
+    assert!(!all_output.contains(secret), "serve output leaked the dialog key");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+
+    let saved = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::UpsertModels {
+            id: Some("upsert-models".to_string()),
+            models: vec![
+                relay_model("fcodex/gpt-6.1-sol", "openai-responses"),
+                relay_model("fcodex/claude-opus-5-5", "anthropic-messages"),
+            ],
+        },
+        "upsert-models",
+    )
+    .await;
+    assert_eq!(saved["success"].as_bool(), Some(true));
+    assert_eq!(saved["payload"]["models"].as_array().map(Vec::len), Some(2));
+
+    let key = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::SetProviderKey {
+            id: Some("set-key".to_string()),
+            env_name: "SERVE_TEST_FCODEX_API_KEY".to_string(),
+            value: "relay-secret".to_string(),
+        },
+        "set-key",
+    )
+    .await;
+    assert_eq!(key["success"].as_bool(), Some(true));
+
+    let skipped = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::SetDefaultModel {
+            id: Some("default-if-unset".to_string()),
+            model_id: "fcodex/gpt-6.1-sol".to_string(),
+            only_if_unset: true,
+        },
+        "default-if-unset",
+    )
+    .await;
+    assert_eq!(skipped["success"].as_bool(), Some(true));
+    assert_eq!(skipped["payload"]["written"].as_bool(), Some(false));
+
+    let utility = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::SetUtilityModel {
+            id: Some("set-utility".to_string()),
+            model_id: "fcodex/claude-opus-5-5".to_string(),
+        },
+        "set-utility",
+    )
+    .await;
+    assert_eq!(utility["success"].as_bool(), Some(true));
+    assert_eq!(utility["payload"]["envOverride"].as_bool(), Some(false));
+
+    let listed = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::ListModels { id: Some("list-after-save".to_string()) },
+        "list-after-save",
+    )
+    .await;
+    assert_eq!(listed["payload"]["defaultModelId"].as_str(), Some("gpt-5.4"));
+    assert_eq!(listed["payload"]["utilityModelId"].as_str(), Some("fcodex/claude-opus-5-5"));
+    let relay = listed["payload"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "fcodex/claude-opus-5-5")
+        .expect("relay model listed");
+    assert_eq!(relay["keySource"].as_str(), Some("saved"));
+    assert_eq!(relay["api"].as_str(), Some("anthropic-messages"));
+
+    let removed = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::RemoveProvider {
+            id: Some("remove-provider".to_string()),
+            key_env: "SERVE_TEST_FCODEX_API_KEY".to_string(),
+        },
+        "remove-provider",
+    )
+    .await;
+    assert_eq!(removed["success"].as_bool(), Some(true));
+    assert_eq!(removed["payload"]["keyRemoved"].as_bool(), Some(true));
+    assert_eq!(
+        removed["payload"]["removedModelIds"],
+        serde_json::json!(["fcodex/gpt-6.1-sol", "fcodex/claude-opus-5-5"])
+    );
+
+    let after = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::ListModels { id: Some("list-after-remove".to_string()) },
+        "list-after-remove",
+    )
+    .await;
+    assert_eq!(
+        after["payload"]["utilityModelId"].as_str(),
+        Some(crate::infra::config::DEFAULT_TITLE_MODEL)
+    );
+    assert!(after["payload"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|model| !model["id"].as_str().unwrap_or_default().starts_with("fcodex/")));
+
+    let unknown = run_and_read(
+        &state,
+        &buffer,
+        ServeCommand::RemoveProvider {
+            id: Some("remove-unknown".to_string()),
+            key_env: "SERVE_TEST_NOBODY_API_KEY".to_string(),
+        },
+        "remove-unknown",
+    )
+    .await;
+    assert_eq!(unknown["success"].as_bool(), Some(false));
 }

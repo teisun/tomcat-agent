@@ -1,11 +1,20 @@
-use super::{
-    materialize_builtin_skills, CONNECTORS_SKILL_ASSETS, PLUGIN_CREATOR_ASSETS,
-    SKILL_CREATOR_ASSETS, VERIFY_SKILL_ASSETS,
-};
+use super::{materialize_builtin_skills, BUILTIN_SKILL_FILES};
 use crate::core::skill::{discover, load_skill_payload, skill_roots, SkillSource};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::error::AppError;
 use crate::AppConfig;
+
+fn embedded(path: &str) -> Option<&'static [u8]> {
+    BUILTIN_SKILL_FILES
+        .iter()
+        .find(|(relative, _)| *relative == path)
+        .map(|(_, contents)| *contents)
+}
+
+fn embedded_text(path: &str) -> &'static str {
+    std::str::from_utf8(embedded(path).unwrap_or_else(|| panic!("embedded {path}")))
+        .unwrap_or_else(|_| panic!("embedded {path} is UTF-8"))
+}
 
 struct SkillFilePrimitive;
 
@@ -64,13 +73,7 @@ impl PrimitiveExecutor for SkillFilePrimitive {
 
 #[test]
 fn verify_skill_materialized_content_declares_review_and_acceptance_flow() {
-    let skill = std::str::from_utf8(
-        VERIFY_SKILL_ASSETS
-            .get_file("SKILL.md")
-            .expect("embedded verify SKILL.md")
-            .contents(),
-    )
-    .expect("embedded verify SKILL.md is UTF-8");
+    let skill = embedded_text("verify/SKILL.md");
     assert!(skill.contains("name: verify"));
     assert!(skill.contains("run_in_background=true"));
     assert!(skill.contains("## Review against the plan"));
@@ -79,48 +82,41 @@ fn verify_skill_materialized_content_declares_review_and_acceptance_flow() {
     assert!(!skill.contains("green_build_pass"));
     assert!(skill.contains("## UI acceptance"));
     assert!(
-        VERIFY_SKILL_ASSETS
-            .get_file("references/ui-checklist.md")
-            .is_some(),
+        embedded("verify/references/ui-checklist.md").is_some(),
         "the UI checklist must be available for progressive disclosure"
     );
-    let connectors = std::str::from_utf8(
-        CONNECTORS_SKILL_ASSETS
-            .get_file("SKILL.md")
-            .expect("embedded connectors SKILL.md")
-            .contents(),
-    )
-    .expect("embedded connectors SKILL.md is UTF-8");
+    let connectors = embedded_text("connectors/SKILL.md");
     assert!(connectors.contains("name: connectors"));
     assert!(connectors.contains("tool_search"));
     assert!(connectors.contains("tool_describe"));
     assert!(connectors.contains("tool_call"));
-    let skill_creator = std::str::from_utf8(
-        SKILL_CREATOR_ASSETS
-            .get_file("SKILL.md")
-            .expect("embedded skill-creator SKILL.md")
-            .contents(),
-    )
-    .expect("embedded skill-creator SKILL.md is UTF-8");
+    let skill_creator = embedded_text("skill-creator/SKILL.md");
     assert!(skill_creator.contains("name: skill-creator"));
-    assert!(SKILL_CREATOR_ASSETS
-        .get_file("scripts/init_skill.py")
-        .is_some());
-    assert!(SKILL_CREATOR_ASSETS
-        .get_file("scripts/quick_validate.py")
-        .is_some());
-    let plugin_creator = std::str::from_utf8(
-        PLUGIN_CREATOR_ASSETS
-            .get_file("SKILL.md")
-            .expect("embedded plugin-creator SKILL.md")
-            .contents(),
-    )
-    .expect("embedded plugin-creator SKILL.md is UTF-8");
+    assert!(embedded("skill-creator/scripts/init_skill.py").is_some());
+    assert!(embedded("skill-creator/scripts/quick_validate.py").is_some());
+    let plugin_creator = embedded_text("plugin-creator/SKILL.md");
     assert!(plugin_creator.contains("name: plugin-creator"));
     assert!(plugin_creator.contains("package_install"));
-    assert!(PLUGIN_CREATOR_ASSETS
-        .get_file("scripts/init_plugin.mjs")
-        .is_some());
+    assert!(embedded("plugin-creator/scripts/init_plugin.mjs").is_some());
+}
+
+#[test]
+fn embedded_skill_files_skip_installed_dependencies_and_dotfiles() {
+    for (relative, _) in BUILTIN_SKILL_FILES {
+        assert!(
+            relative
+                .split('/')
+                .all(|segment| segment != "node_modules" && !segment.starts_with('.')),
+            "{relative} must not be embedded"
+        );
+    }
+    for required in [
+        "verify/SKILL.md",
+        "verify/scripts/bootstrap.mjs",
+        "verify/scripts/package-lock.json",
+    ] {
+        assert!(embedded(required).is_some(), "{required} must be embedded");
+    }
 }
 
 #[test]
@@ -307,12 +303,9 @@ fn materialized_verify_skill_writes_all_script_files_without_touching_dependenci
         "scripts/package-lock.json",
     ] {
         let materialized = skill_root.join(relative_path);
-        let embedded = VERIFY_SKILL_ASSETS
-            .get_file(relative_path)
-            .expect("embedded verify asset");
         assert_eq!(
             std::fs::read(&materialized).expect("read materialized asset"),
-            embedded.contents(),
+            embedded(&format!("verify/{relative_path}")).expect("embedded verify asset"),
             "asset {relative_path} must be written byte-for-byte"
         );
     }

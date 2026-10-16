@@ -157,7 +157,7 @@ fn replay_policy_deepseek_v4_tool_turn_keeps_reasoning_content() {
     .with_reasoning_state(
         Some("tool summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -179,7 +179,7 @@ fn replay_policy_deepseek_v4_non_tool_turn_keeps_reasoning_content() {
     let msg = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -201,7 +201,7 @@ fn cross_provider_replay_strips_opaque_reasoning_without_rewriting_visible_text(
     let msg = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -252,7 +252,7 @@ fn replay_policy_deepseek_v4_cross_model_reuses_same_profile() {
     .with_reasoning_state(
         Some("tool summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -266,7 +266,7 @@ fn replay_policy_deepseek_v4_cross_model_reuses_same_profile() {
         }),
     );
     let profile = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
-    assert_eq!(profile.provider, "deepseek");
+    assert_eq!(profile.profile_id, "openai.chat_completions.default");
     assert_eq!(profile.model_family, "deepseek-v4");
     assert!(profile.requires_tool_turn_replay);
     assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
@@ -276,7 +276,7 @@ fn mimo_reasoning_message() -> ChatMessage {
     ChatMessage::assistant("answer").with_reasoning_state(
         Some("mimo summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "mimo".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "mimo-v2.5-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -292,10 +292,10 @@ fn mimo_reasoning_message() -> ChatMessage {
 }
 
 #[test]
-fn chat_completions_profile_is_data_driven_for_mimo() {
-    // MiMo 仅靠 catalog/数据表一条数据即得到 ReasoningContent profile（与 deepseek 同一条逻辑）。
+fn chat_completions_profile_is_shared_by_every_model_and_keyed_by_model_family() {
     let profile = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
-    assert_eq!(profile.provider, "mimo");
+    assert_eq!(profile.profile_id, "openai.chat_completions.default");
+    assert_eq!(profile.provider, "openai");
     assert_eq!(profile.model_family, "mimo-v2.5-pro");
     assert!(profile.requires_tool_turn_replay);
     assert_eq!(profile.api_family, "chat_completions");
@@ -325,7 +325,7 @@ fn classify_replay_downgrade_reports_same_profile_shape_mismatch() {
     let msg = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::OpenaiResponsesReasoningItems,
@@ -356,7 +356,7 @@ fn deepseek_v4_compatible_message() -> ChatMessage {
     ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -519,7 +519,7 @@ fn cross_profile_strip_is_silent_but_same_profile_incompatibility_is_not() {
     let no_text = ChatMessage::assistant("answer").with_reasoning_state(
         None,
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -566,7 +566,7 @@ fn warn_worthy_flags_same_profile_incompatible_but_not_keep() {
     let mismatched = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::OpenaiResponsesReasoningItems,

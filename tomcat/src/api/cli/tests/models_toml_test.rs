@@ -131,13 +131,13 @@ fn initialized_builtin_descriptions_use_catalog_unless_user_explicitly_overrides
     let path = ModelCatalog::default_user_path(&cfg).unwrap();
     std::fs::write(
         &path,
-        format!("[[models]]\nid = \"gpt-5.4\"\ndescription = \"{description}\"\n"),
+        format!("[[models]]\nid = \"gpt-5.6\"\ndescription = \"{description}\"\n"),
     )
     .unwrap();
     let catalog = ModelCatalog::load(&cfg).unwrap();
     let view = list_model_views(&catalog)
         .into_iter()
-        .find(|view| view.id == "gpt-5.4")
+        .find(|view| view.id == "gpt-5.6")
         .unwrap();
     assert_eq!(view.description.as_deref(), Some(description));
 }
@@ -227,7 +227,7 @@ base_url = \"https://api.acme.example\"
 
 {}
 ",
-        strip_model_name(&seed_block_text("gpt-5.2"))
+        strip_model_name(&seed_block_text("gpt-5.6"))
     );
     std::fs::write(&path, user_content).unwrap();
 
@@ -235,8 +235,8 @@ base_url = \"https://api.acme.example\"
     assert_eq!(
         status,
         ModelsTomlStatus::UpdatedExisting {
-            added_model_ids: seed_ids_except(&["gpt-5.2"]),
-            updated_model_name_ids: vec!["gpt-5.2".to_string()]
+            added_model_ids: seed_ids_except(&["gpt-5.6"]),
+            updated_model_name_ids: vec!["gpt-5.6".to_string()]
         }
     );
 
@@ -249,15 +249,15 @@ base_url = \"https://api.acme.example\"
         text.contains("id = \"my-custom-model\""),
         "user entry lost:\n{text}"
     );
-    for model_id in seed_ids_except(&["gpt-5.2"]) {
+    for model_id in seed_ids_except(&["gpt-5.6"]) {
         assert!(
             text.contains(&format!("id = \"{model_id}\"")),
             "{model_id} not appended:\n{text}"
         );
     }
     assert!(
-        text.contains("model_name = \"gpt-5.2\""),
-        "gpt-5.2 model_name not backfilled:\n{text}"
+        text.contains("model_name = \"gpt-5.6\""),
+        "gpt-5.6 model_name not backfilled:\n{text}"
     );
 
     let catalog = ModelCatalog::load(&cfg).expect("catalog load");
@@ -302,7 +302,7 @@ fn backfills_missing_model_name_for_existing_seed_entries() {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    let missing_model_name_ids = ["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash"];
+    let missing_model_name_ids = ["mimo/mimo-v2.6-pro", "gpt-5.6", "deepseek-v4-flash"];
     let expected_updated_model_name_ids = seed_ids()
         .into_iter()
         .filter(|model_id| missing_model_name_ids.contains(&model_id.as_str()))
@@ -339,13 +339,63 @@ fn backfills_missing_model_name_for_existing_seed_entries() {
                 &text,
                 &format!("model_name = \"{}\"", entry.request_model_name())
             ),
-            if model_id == "deepseek-v4-flash" {
-                2
-            } else {
-                1
-            }
+            1
         );
     }
+}
+
+#[test]
+fn rerun_keeps_retired_seed_copies_and_appends_only_new_seeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_with_work_dir(dir.path());
+    let path = ModelCatalog::default_user_path(&cfg).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let existing = format!(
+        "\
+# notes from 0.1.90
+[[models]]
+id = \"gpt-5.4\"
+model_name = \"gpt-5.4\"
+api = \"openai-responses\"
+provider = \"openai\"
+api_key_env = \"OPENAI_API_KEY\"
+base_url = \"https://api.openai.com\"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+
+[[models]]
+id = \"my-custom-model\"
+api = \"openai\"
+provider = \"acme\"
+
+{}
+",
+        seed_block_text("gpt-5.6")
+    );
+    std::fs::write(&path, &existing).unwrap();
+
+    let status = ensure_default_models_toml(&cfg).expect("ensure");
+    assert_eq!(
+        status,
+        ModelsTomlStatus::UpdatedExisting {
+            added_model_ids: seed_ids_except(&["gpt-5.6"]),
+            updated_model_name_ids: vec![]
+        }
+    );
+    let text = models_toml_text(&cfg);
+    assert!(
+        text.starts_with(&existing),
+        "existing entries must stay byte-identical:\n{text}"
+    );
+    let catalog = ModelCatalog::load(&cfg).expect("catalog load");
+    assert_eq!(catalog.lookup("gpt-5.4").unwrap().api, "openai-responses");
+    assert!(catalog.lookup("my-custom-model").is_some());
+    assert_eq!(count_occurrences(&text, "id = \"gpt-5.6\""), 1);
+
+    assert_eq!(
+        ensure_default_models_toml(&cfg).unwrap(),
+        ModelsTomlStatus::AlreadyPresent
+    );
+    assert_eq!(models_toml_text(&cfg), text);
 }
 
 #[test]

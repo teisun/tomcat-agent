@@ -71,53 +71,7 @@ impl ReplayDowngradeKind {
     }
 }
 
-/// chat-completions `reasoning_content` continuity 的**数据表（单一事实源）**。
-///
-/// 设计目标：把「哪个模型走 reasoning_content 续传」从代码里的 `match "deepseek"`
-/// 改成一张数据表。新增同类模型 = 加一行；continuity 链路的各道门只读
-/// [`ProviderCompatProfile`] 字段（`capture_mode` / `api_family` / `provider`+`model_family`），
-/// 不再按厂商名硬编码。DeepSeek 与 MiMo 现在都只是表里的一行，共用同一条逻辑。
-struct ChatCompletionsContinuityRule {
-    /// [`model_family`] 归一后的家族名。
-    family: &'static str,
-    /// 逻辑厂商（用于 same-profile 比对与日志）。
-    provider: &'static str,
-    profile_id: &'static str,
-    preserve_history: bool,
-}
-
-/// 走 `reasoning_content` 续传的模型家族；不在表内的 chat-completions 模型默认不续传。
-const CHAT_COMPLETIONS_CONTINUITY_RULES: &[ChatCompletionsContinuityRule] = &[
-    ChatCompletionsContinuityRule {
-        family: "deepseek-v4",
-        provider: "deepseek",
-        profile_id: "deepseek.v4.reasoning_content",
-        preserve_history: false,
-    },
-    ChatCompletionsContinuityRule {
-        family: "mimo-v2.5-pro",
-        provider: "mimo",
-        profile_id: "mimo.v2_5_pro.reasoning_content",
-        preserve_history: false,
-    },
-    ChatCompletionsContinuityRule {
-        family: "kimi-k3",
-        provider: "moonshot",
-        profile_id: "moonshot.k3.reasoning_content",
-        preserve_history: true,
-    },
-];
-
 impl ProviderCompatProfile {
-    /// K3 requires preserved thinking across real user turns as well as tool loops.
-    /// https://platform.kimi.ai/docs/guide/use-thinking-models
-    pub fn preserves_thinking_history(&self) -> bool {
-        self.api_family == "chat_completions"
-            && CHAT_COMPLETIONS_CONTINUITY_RULES
-                .iter()
-                .any(|rule| rule.family == self.model_family && rule.preserve_history)
-    }
-
     pub fn openai_responses(model: &str) -> Self {
         Self {
             profile_id: "openai.responses.default".to_string(),
@@ -156,32 +110,18 @@ impl ProviderCompatProfile {
         }
     }
 
+    /// Every Chat Completions model captures `reasoning_content` and replays it only
+    /// within the current turn of the same model; no model keeps older turns.
     pub fn chat_completions(model: &str) -> Self {
-        let family = model_family(model);
-        match CHAT_COMPLETIONS_CONTINUITY_RULES
-            .iter()
-            .find(|rule| rule.family == family)
-        {
-            Some(rule) => Self {
-                profile_id: rule.profile_id.to_string(),
-                provider: rule.provider.to_string(),
-                api_family: "chat_completions".to_string(),
-                model_family: family,
-                capture_mode: CaptureMode::ReasoningContent,
-                replay_acceptance: ReplayAcceptance::SameProfileOnly,
-                requires_tool_turn_replay: true,
-                supports_response_id_hint: false,
-            },
-            None => Self {
-                profile_id: "openai.chat_completions.default".to_string(),
-                provider: "openai".to_string(),
-                api_family: "chat_completions".to_string(),
-                model_family: family,
-                capture_mode: CaptureMode::None,
-                replay_acceptance: ReplayAcceptance::Never,
-                requires_tool_turn_replay: false,
-                supports_response_id_hint: false,
-            },
+        Self {
+            profile_id: "openai.chat_completions.default".to_string(),
+            provider: "openai".to_string(),
+            api_family: "chat_completions".to_string(),
+            model_family: model_family(model),
+            capture_mode: CaptureMode::ReasoningContent,
+            replay_acceptance: ReplayAcceptance::SameProfileOnly,
+            requires_tool_turn_replay: true,
+            supports_response_id_hint: false,
         }
     }
 
@@ -217,7 +157,7 @@ pub fn plan_scoped(
     message: &ChatMessage,
     in_window: bool,
 ) -> ReplayAction {
-    if !in_window && !target.preserves_thinking_history() {
+    if !in_window {
         return ReplayAction::StripOpaque;
     }
     plan(target, message)

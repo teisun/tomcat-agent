@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::infra::config::read_env_entries;
 use crate::infra::error::AppError;
@@ -23,6 +25,17 @@ pub struct AuthStore;
 struct ManagedCredentialState {
     values: BTreeMap<String, String>,
     generations: BTreeMap<String, u64>,
+    /// Names the startup `.env` preload copied into the process environment. Those
+    /// copies are not an independent source: a key deleted from `.env` must stop working.
+    preloaded: BTreeSet<String>,
+}
+
+/// Where a provider key comes from. Tomcat can delete only keys it saved itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KeySource {
+    Saved,
+    Environment,
 }
 
 fn managed_credential_state() -> &'static RwLock<ManagedCredentialState> {
@@ -166,6 +179,19 @@ pub fn key_present_for_env(env_name: &str) -> bool {
     read_env_value(env_name).is_some()
 }
 
+pub fn key_source_for_env(env_name: &str) -> Option<KeySource> {
+    if managed_credential_state().read().values.contains_key(env_name) {
+        return Some(KeySource::Saved);
+    }
+    process_env_value(env_name).map(|_| KeySource::Environment)
+}
+
+/// Records which `.env` names were absent from the process environment before the
+/// startup preload copied them in.
+pub fn record_preloaded_env_names(names: impl IntoIterator<Item = String>) {
+    managed_credential_state().write().preloaded.extend(names);
+}
+
 #[cfg(test)]
 pub fn clear_managed_credentials_for_test() {
     let mut state = managed_credential_state().write();
@@ -173,7 +199,7 @@ pub fn clear_managed_credentials_for_test() {
     state.generations.clear();
 }
 
-fn read_env_value(env_name: &str) -> Option<String> {
+pub(crate) fn read_env_value(env_name: &str) -> Option<String> {
     if let Some(value) = managed_credential_state()
         .read()
         .values
@@ -181,6 +207,13 @@ fn read_env_value(env_name: &str) -> Option<String> {
         .cloned()
     {
         return Some(value);
+    }
+    process_env_value(env_name)
+}
+
+fn process_env_value(env_name: &str) -> Option<String> {
+    if managed_credential_state().read().preloaded.contains(env_name) {
+        return None;
     }
     std::env::var(env_name)
         .ok()

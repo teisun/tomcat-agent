@@ -580,7 +580,7 @@ fn tool_owned_media_split_keeps_deepseek_reasoning_before_wire_user() {
     use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
     let assistant=ChatMessage::assistant_with_tool_calls(None,vec![serde_json::json!({"id":"one","type":"function","function":{"name":"read","arguments":"{}"}})])
         .with_reasoning_state(None,Some(ReasoningContinuation {
-            source_provider:"deepseek".into(),source_api:"chat_completions".into(),source_model:"deepseek-v4-pro".into(),
+            source_provider:"openai".into(),source_api:"chat_completions".into(),source_model:"deepseek-v4-pro".into(),
             format:ReasoningFormat::DeepseekReasoningContent,opaque_payload:serde_json::json!({"reasoning_content":"inspect pixels"}),fallback_text:None,provider_refs:None,
         }),Some(ContinuityMetadata {had_tool_call:true,replay_requirement:ReplayRequirement::SameProfileRequired}));
     let mut tool = ChatMessage::tool("one", "");
@@ -600,7 +600,7 @@ fn tool_owned_media_split_keeps_deepseek_reasoning_before_wire_user() {
 }
 
 #[test]
-fn tool_owned_media_kimi_preserves_same_profile_thinking_across_real_and_wire_users() {
+fn tool_owned_media_kimi_keeps_thinking_across_wire_user_but_strips_it_after_a_real_user() {
     use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
     let mut assistant = ChatMessage::assistant_with_tool_calls(
         None,
@@ -609,7 +609,7 @@ fn tool_owned_media_kimi_preserves_same_profile_thinking_across_real_and_wire_us
         ],
     );
     assistant.reasoning_continuation = Some(ReasoningContinuation {
-        source_provider: "moonshot".into(),
+        source_provider: "openai".into(),
         source_api: "chat_completions".into(),
         source_model: "kimi-k3".into(),
         format: ReasoningFormat::DeepseekReasoningContent,
@@ -621,21 +621,150 @@ fn tool_owned_media_kimi_preserves_same_profile_thinking_across_real_and_wire_us
     tool.content = Some(ChatMessageContent::Parts(vec![
         ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
     ]));
-    let messages = vec![
-        ChatMessage::user("look"),
-        assistant,
-        tool,
-        ChatMessage::user("continue"),
-    ];
-    let wire = transport_messages(&messages, "kimi-k3", true, None);
-    assert_eq!(wire[1]["reasoning_content"], "inspect pixels");
-    assert_eq!(wire[3]["content"][1]["type"], "image_url");
-    assert_eq!(wire[4]["content"], "continue");
+    let mut messages = vec![ChatMessage::user("look"), assistant, tool];
+
+    let current = transport_messages(&messages, "kimi-k3", true, None);
+    assert_eq!(current[1]["reasoning_content"], "inspect pixels");
+    assert_eq!(current[3]["content"][1]["type"], "image_url");
     let other = transport_messages(&messages, "deepseek-v4-pro", true, None);
     assert!(
         other[1].get("reasoning_content").is_none(),
-        "never replay Kimi thinking into another model profile"
+        "never replay Kimi thinking into another model"
     );
+
+    messages.push(ChatMessage::user("continue"));
+    let next_turn = transport_messages(&messages, "kimi-k3", true, None);
+    assert!(
+        next_turn[1].get("reasoning_content").is_none(),
+        "a new real user turn strips older thinking, Kimi included"
+    );
+    assert_eq!(next_turn[1]["tool_calls"][0]["id"], "one");
+    assert_eq!(next_turn[4]["content"], "continue");
+}
+
+fn chat_reasoning_tool_turn(model: &str, reasoning: &str) -> ChatMessage {
+    ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id":"call_1",
+            "type":"function",
+            "function":{"name":"read","arguments":"{}"}
+        })],
+    )
+    .with_reasoning_state(
+        None,
+        Some(ReasoningContinuation {
+            source_provider: "openai".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: model.to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({ "reasoning_content": reasoning }),
+            fallback_text: None,
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    )
+}
+
+#[test]
+fn models_outside_the_old_replay_table_capture_and_replay_current_turn_reasoning() {
+    for model in ["glm-5.2", "mimo-v2.6-pro", "my-relay-model"] {
+        let mut state = OpenAiReasoningState {
+            source_profile: ProviderCompatProfile::chat_completions(model),
+            continuity_enabled: true,
+            ..OpenAiReasoningState::default()
+        };
+        let chunk: OpenAiStreamChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"reasoning_content":"step","tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+        let events = openai_chunk_to_stream_events_with_state(chunk, &mut state);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ReasoningSnapshot {
+                    reasoning_continuation: Some(continuation),
+                    ..
+                } if continuation.source_model == model
+                    && continuation.opaque_payload["reasoning_content"] == "step"
+            )),
+            "{model} must record reasoning_content"
+        );
+
+        let messages = [
+            ChatMessage::user("look"),
+            chat_reasoning_tool_turn(model, "step"),
+            ChatMessage::tool("call_1", "ok"),
+        ];
+        let wire = transport_messages(&messages, model, true, None);
+        assert_eq!(wire[1]["reasoning_content"], "step", "{model}");
+        let disabled = transport_messages(&messages, model, false, None);
+        assert!(disabled[1].get("reasoning_content").is_none(), "{model}");
+    }
+}
+
+#[test]
+fn three_turn_sessions_replay_only_the_current_turn_for_every_model() {
+    for model in ["deepseek-v4-flash", "kimi-k3", "kimi-k2.7-code"] {
+        let messages = [
+            ChatMessage::user("one"),
+            chat_reasoning_tool_turn(model, "first"),
+            ChatMessage::tool("call_1", "ok"),
+            ChatMessage::user("two"),
+            chat_reasoning_tool_turn(model, "second"),
+            ChatMessage::tool("call_1", "ok"),
+            ChatMessage::user("three"),
+            chat_reasoning_tool_turn(model, "third"),
+            ChatMessage::tool("call_1", "ok"),
+        ];
+        let wire = transport_messages(&messages, model, true, None);
+        assert!(wire[1].get("reasoning_content").is_none(), "{model}");
+        assert!(wire[4].get("reasoning_content").is_none(), "{model}");
+        assert_eq!(wire[7]["reasoning_content"], "third", "{model}");
+        for index in [1, 4, 7] {
+            assert_eq!(wire[index]["tool_calls"][0]["id"], "call_1", "{model}");
+        }
+    }
+}
+
+#[test]
+fn switching_models_or_legacy_vendor_sources_strip_reasoning_without_empty_fields() {
+    let deepseek = [
+        ChatMessage::user("look"),
+        chat_reasoning_tool_turn("deepseek-v4-pro", "deepseek step"),
+        ChatMessage::tool("call_1", "ok"),
+    ];
+    let to_mimo = transport_messages(&deepseek, "mimo-v2.6-pro", true, None);
+    assert!(to_mimo[1].get("reasoning_content").is_none());
+
+    let mut legacy = chat_reasoning_tool_turn("deepseek-v4-pro", "legacy step");
+    legacy
+        .reasoning_continuation
+        .as_mut()
+        .unwrap()
+        .source_provider = "deepseek".to_string();
+    let legacy_wire = transport_messages(
+        &[ChatMessage::user("look"), legacy, ChatMessage::tool("call_1", "ok")],
+        "deepseek-v4-pro",
+        true,
+        None,
+    );
+    assert!(legacy_wire[1].get("reasoning_content").is_none());
+
+    let plain = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}})],
+    );
+    let plain_wire = transport_messages(
+        &[ChatMessage::user("look"), plain, ChatMessage::tool("call_1", "ok")],
+        "glm-5.2",
+        true,
+        None,
+    );
+    assert!(plain_wire[1].get("reasoning_content").is_none());
 }
 
 #[test]
@@ -651,7 +780,7 @@ fn deepseek_tool_turn_replays_reasoning_content() {
     .with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -673,7 +802,7 @@ fn test_transport_messages_deepseek_non_tool_turn_replays_reasoning_content() {
     let message = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -719,7 +848,7 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
     .with_reasoning_state(
         Some("tool summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -735,7 +864,7 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
     let final_assistant = ChatMessage::assistant("done").with_reasoning_state(
         Some("final summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
@@ -773,8 +902,6 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
 
 #[test]
 fn test_openai_chunk_mimo_finish_emits_reasoning_snapshot() {
-    // MiMo 复用同一条 reasoning_content 抓取路径：profile 标了 ReasoningContent 即抓 snapshot，
-    // 不再按厂商名硬编码（snapshot 的 source_provider 来自 profile = mimo）。
     let mut state = OpenAiReasoningState {
         source_profile: ProviderCompatProfile::chat_completions("mimo-v2.5-pro"),
         continuity_enabled: true,
@@ -793,7 +920,7 @@ fn test_openai_chunk_mimo_finish_emits_reasoning_snapshot() {
             continuity: Some(continuity)
         } if text == "mimo step"
             && continuity.had_tool_call
-            && continuation.source_provider == "mimo"
+            && continuation.source_provider == "openai"
             && continuation.opaque_payload["reasoning_content"] == serde_json::json!("mimo step")
     )));
 }
@@ -811,7 +938,7 @@ fn mimo_tool_turn_replays_reasoning_content() {
     .with_reasoning_state(
         Some("mimo summary".to_string()),
         Some(ReasoningContinuation {
-            source_provider: "mimo".to_string(),
+            source_provider: "openai".to_string(),
             source_api: "chat_completions".to_string(),
             source_model: "mimo-v2.5-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,

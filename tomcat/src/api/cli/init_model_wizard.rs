@@ -56,7 +56,6 @@ pub(crate) fn run_model_wizard(
 pub(crate) fn apply_model_choice(cfg: &mut AppConfig, entry: &ModelEntry) -> InitModelChoice {
     let env_name = provider_env_name(entry);
     cfg.llm.default_model = entry.id.clone();
-    cfg.context.compaction_model = entry.id.clone();
     InitModelChoice {
         entry: entry.clone(),
         env_name,

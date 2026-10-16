@@ -186,7 +186,7 @@ tomcat init
 
 三步流程如下：
 
-1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 含由内嵌 `builtin_models.toml` 预置源释放出的受管预置条目（OpenAI `gpt-5.2/5.4/5.5/5.6`、DeepSeek `deepseek-v4-pro/-flash`、`utility-flash`、MiMo `mimo-v2.5-pro`、GLM `glm-5.2`、Kimi `kimi-k2.7-code`、Anthropic `claude-opus-4-8/4-7/4-6`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、在当前二进制来自本地构建时创建稳定的 `~/.local/bin/tomcat` 命令入口、清理旧的 tomcat 注入过的 `target/*` PATH 垃圾，然后把稳定行 `export PATH="$HOME/.local/bin:$PATH"` 追加到正确的启动文件（zsh 写 `~/.zprofile` + `~/.zshrc`；bash 写 `~/.bashrc`，并保持 `~/.bash_profile` 同时 source `.profile` 与 `.bashrc`；其它 shell 写 `~/.profile`）
+1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 含由内嵌 `builtin_models.toml` 预置源释放出的受管预置条目（共 13 项，见下文 [models.toml](#modelstoml--增删模型与-mimo-token-plan)），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、在当前二进制来自本地构建时创建稳定的 `~/.local/bin/tomcat` 命令入口、清理旧的 tomcat 注入过的 `target/*` PATH 垃圾，然后把稳定行 `export PATH="$HOME/.local/bin:$PATH"` 追加到正确的启动文件（zsh 写 `~/.zprofile` + `~/.zshrc`；bash 写 `~/.bashrc`，并保持 `~/.bash_profile` 同时 source `.profile` 与 `.bashrc`；其它 shell 写 `~/.profile`）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
 3. **[3/3] API Key 配置**：先按你在向导里选中的默认模型提示对应的凭证变量（例如 `OPENAI_API_KEY` / `OPENAI_GATEWAY_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` / `ANTHROPIC_API_KEY`），再可选顺手补其它 provider 的 key。可回车跳过；**跳过不会写入空 Key**。后续可再次运行 `tomcat init`、自行编辑 `~/.tomcat/assets/.env`，或直接执行 `tomcat model key set`
 
@@ -195,7 +195,7 @@ tomcat init
 ```
 [1/3] 环境初始化
   ✓ 配置文件已写入: ~/.tomcat/tomcat.config.toml
-  ✓ 默认模型: gpt-5.4
+  ✓ 默认模型: gpt-5.6
   ✓ 默认模型协议线: openai-responses
   ✓ 模型逻辑厂商: openai
   ✓ 目录结构就绪
@@ -228,8 +228,9 @@ tomcat init
 `tomcat init` 会生成 `~/.tomcat/models.toml`（**模型清单**）。这是「增删模型」的唯一入口：
 
 - **启动自动加载**：`tomcat code` / `tomcat claw` 等启动路径会合并「内置模型表 + `models.toml`」，**同 id 覆盖内置、新 id 新增**，无需改代码、无需重新编译。
-- **运行时单源、文件里可见可改**：常用预置的运行时事实源只有一份内嵌 `builtin_models.toml`：OpenAI（`gpt-5.2` / `gpt-5.4` / `gpt-5.5` / `gpt-5.6`）、DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash` / `utility-flash`）、MiMo（`mimo-v2.5-pro`）、GLM（`glm-5.2`）、Kimi（`kimi-k2.7-code`）以及 Anthropic Messages（`claude-opus-4-8` / `4-7` / `4-6`）。`tomcat init` 会把这份内嵌预置原样释放到 `models.toml`，所以你既能直接看到 / 编辑 / 删除这些 seed 条目，也不会再维护第二份手写真相。
+- **运行时单源、文件里可见可改**：常用预置的运行时事实源只有一份内嵌 `builtin_models.toml`：OpenAI Responses（`gpt-5.6` / `openai/gpt-6-astra` / `openai/gpt-6.1-sol`）、DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash`）、MiMo（`mimo/mimo-v2.6-pro`）、GLM（`glm-5.2`）、Kimi（`kimi-k2.7-code` / `kimi-k3`）以及 Anthropic Messages（`claude-fable-5` / `claude-opus-5` / `claude-sonnet-5` / `anthropic/claude-opus-5-5`）。`tomcat init` 会把这份内嵌预置原样释放到 `models.toml`，所以你既能直接看到 / 编辑 / 删除这些 seed 条目，也不会再维护第二份手写真相。
 - **幂等生成**：`models.toml` 不存在则按受管预置清单创建；已存在但缺受管预置条目则**仅追加缺失项**；已齐全则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
+- **下架的预置照常用你的副本**：`gpt-5.2/5.4/5.5`、`utility-flash`、`mimo-v2.5-pro`、`claude-opus-4-8/4-7/4-6` 与 `claude-sonnet-4-6` 不再内置。升级从不改写已存在的 `models.toml`，所以早先 `init` 写下的副本继续可用，在设置页里和你自己加的型号一样显示。没有副本时（例如只装了 VS Code 插件），仍指向已下架预置的默认模型或会话会提示你重选。内置已删、只剩部分字段的旧覆盖条目会被跳过，并逐条给出诊断，不会让整个目录加载失败。
 - **再加一个模型**：复制现有 `[[models]]` 段，显式填写 `api` / `provider` / `base_url`；`api_key_env` 可选，不写时默认推断成 `<PROVIDER>_API_KEY`。
 
 字段语义：
@@ -246,7 +247,7 @@ tomcat init
 
 ```text
 模型菜单 → 点某一行 Edit
-              Speed   Standard / Fast / Ultrafast
+              Speed   Standard / Fast
               ──────────────────────────────────
               Context 400K / 1M
               Effort  Low … Xhigh / Max
@@ -254,20 +255,22 @@ tomcat init
 
 Speed 是服务加速，Effort 是思考强度，两者互不替代：模型同时支持时，可以 Fast + Max。改某一行的 Speed 不会切换当前模型，也不会改 Context/Effort；选择按模型记住，下次运行生效。
 
-- 默认 **Standard**。声明了速度控制的模型会明确发送 `service_tier = "default"`，防止上游项目默认启用收费加速档。
-- **Fast** 发 `service_tier = "priority"`，**Ultrafast** 发 `service_tier = "ultrafast"`。加速可能更贵，上游也可能拒绝或降档；菜单选中 Fast 不等于服务端真的按 Fast 执行。
-- 模型声明了加速档才出现 Speed 区。`supported_speeds` 只列 `fast`、`ultrafast`，Standard 永远隐含。空列表隐藏 Speed 区，也不发速度字段。
+- 默认 **Standard**。OpenAI 协议的模型只要声明了速度控制，就会明确发送 `service_tier = "default"`，防止上游项目默认启用收费加速档；Anthropic 模型在 Standard 下不发速度字段。
+- **Fast** 在 OpenAI 协议下发 `service_tier = "priority"`；在 Anthropic Messages 下发 `speed: "fast"`，并带 beta 头 `fast-mode-2026-02-01`。加速可能更贵，上游也可能拒绝或降档；菜单选中 Fast 不等于服务端真的按 Fast 执行。
+- Anthropic 的 Fast 是研究预览，需要 Anthropic 为你的账号开通；只能直连 Claude API 使用，支持 Opus 5.5、Opus 5、Opus 4.8；价格约为标准的 2 倍，有单独的限流（超限返回 429），在快慢之间切换会让提示缓存失效。没开通、超限或型号不支持时，按上游错误原样提示，Tomcat 不会悄悄降回 Standard。
+- 模型声明了 `supported_speeds = ["fast"]` 才出现 Speed 区，Standard 永远隐含；空列表或不写都隐藏 Speed 区，也不发速度字段。内置声明 Fast 的有 `gpt-5.6`、`openai/gpt-6-astra`、`openai/gpt-6.1-sol` 与 `anthropic/claude-opus-5-5`。
+- Ultrafast 已删除。`models.toml` 或已保存的模型偏好里残留的 `"ultrafast"` 按 Standard 读入，文件不改写；所以 `["fast", "ultrafast"]` 现在只声明 Fast。
+- 在设置页新建的型号，名字以 `gpt-` 或 `claude-` 开头、或参照的内置型号声明了 Fast 时，默认勾选 **支持 Fast**；已有条目一律不改。若中转不认 `service_tier` 或 Anthropic 的 fast beta，到该型号 **编辑 → 高级设置** 取消 **支持 Fast**（或在 `models.toml` 里删掉它的 `supported_speeds`）。
 - 只有上游支持时才在 `supported_reasoning_levels` 里补 `max`；不会自动把已有 Xhigh 偏好改为 Max。
-- Ultrafast 按模型、账号开放：GPT-6 Astra 支持，GPT-5.6 Sol 需要预览权限；GPT-6 Sol 与 GPT-6.1 Sol 不声明支持。**本期不接 Ultra 多代理**，也没有 `reasoning.effort = "ultra"`。
 
-对于确实支持两档加速的 OpenAI Responses 模型，在已有 `[[models]]` 条目中写：
+在 `models.toml` 里同时声明两者时，在已有 `[[models]]` 条目中写：
 
 ```toml
-supported_speeds = ["fast", "ultrafast"]
+supported_speeds = ["fast"]
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 ```
 
-**Tomcat Settings → Models → Edit → Advanced** 里的 **Supported effort levels** 与 **Supported speeds** 都支持英文、中文逗号。输入时原样保留文字，点保存才 trim、去空、去重。中转站配置是用户对能力的声明，不会自动探测网关是否透传。
+**Tomcat 设置 → 模型 → 编辑 → 高级设置** 里的 **支持的思考强度** 支持英文、中文逗号，输入时原样保留文字，点保存才 trim、去空、去重；**支持 Fast** 是一个复选框，保存为 `["fast"]` 或不写。中转站配置是用户对能力的声明，不会自动探测网关是否透传。
 
 ### tomcat model —— 不手改文件也能管模型与 Key
 
@@ -278,10 +281,10 @@ tomcat model list
 tomcat model add claude-opus-gateway \
   --api anthropic-messages \
   --provider anthropic \
-  --model-name claude-opus-4-6 \
+  --model-name claude-opus-5 \
   --base-url https://api.anthropic.com/v1 \
   --reasoning --tools \
-  --thinking-format anthropic
+  --thinking-format anthropic-adaptive
 
 tomcat model key set anthropic
 # 或：tomcat model key set anthropic sk-ant-xxxxx
@@ -297,44 +300,56 @@ tomcat model remove claude-opus-gateway
 - `tomcat model list` 会显示模型来自内置表还是用户目录，以及对应 API Key 是否已就绪。
 - `tomcat model default` 用来切换 `tomcat.config.toml` 中的 `[llm].default_model`。
 
-VS Code 的 **Tomcat Settings → Models** 使用同一套凭证规则：
-
-- Key slot 列表只来自 `~/.tomcat/assets/.env` 中名称合法、值非空的 `*_API_KEY`；点击 **Refresh** 会先重读 `.env`，再刷新模型的 `Configured` / `Missing` 状态，无需重启 serve。
-- Key slot 是唯一的变量名编辑入口，可搜索已有槽或直接输入新名称；Relay 会按站点和 API 家族建议名称，例如 `FCODEX_OPENAI_API_KEY` 与 `FCODEX_ANTHROPIC_API_KEY`。旧模型保留原有 `api_key_env`，不会自动迁移。
-- 新 Key 聚焦输入时显示密码圆点，失焦后只对当前尚未保存的输入做本地前后脱敏；保存后清空。已保存 Key 永远只显示状态，后端不会把完整值或部分字符返回 Webview。
-- 向已配置且被其他模型共享的槽写新值时，界面会列出受影响模型并要求确认；API Key 留空表示复用，不会改写 `.env`。
+VS Code 的 **Tomcat 设置 → 模型** 写的是同一批文件，按供应商分卡管理：
 
 ```text
-.env 中合法 *_API_KEY ──> Key slot 组合框 ──> model.api_key_env
-        Refresh ─────────> Configured / Missing
+Tomcat 设置 → 模型
+  辅助模型 [deepseek-v4-flash · DeepSeek          v]   ← llm.title_model
+  供应商                                [+ 连接供应商]
+  ┌ Fcodex · api.fcodex.com · Key 已保存          [⋯] ┐   ⋯ = 更换 Key / 删除
+  │  fcodex/gpt-6.1-sol      OpenAI Responses  默认    │
+  │  fcodex/claude-opus-5-5  Anthropic         [编辑]  │
+  │  + 添加模型                                        │
+  └────────────────────────────────────────────────────┘
+  还可以连接：DeepSeek · OpenAI · Anthropic · … · 其它地址...
 ```
+
+- **一个 Key 槽（`api_key_env`）一张卡片。** 某家有了 Key 或你加过型号才出现卡片，每行各自显示协议。**更换 Key** 往同一个槽写新值。**删除** 会删掉你在该槽下加的型号，清掉指向它们的默认模型、辅助模型和会话选择，再删除 Tomcat 保存的 Key；系统环境变量提供的 Key 删不掉，界面会如实说明。内置预置仍留在“还可以连接”里。
+- **+ 连接供应商** 可选 7 个预置（DeepSeek、OpenAI、Anthropic、Kimi、智谱、Moonshot、MiMo，地址与协议固定）或 **其它地址...**，再填 API Key。型号清单合并三处来源：该家的内置推荐、用你刚填的 Key 向它的 `/models` 拉回的名字（这把 Key 只用于这次请求），以及你手填的名字；同名型号只留一个。卡片里的 **+ 添加模型** 复用同一个对话框并沿用该卡的 Key。点取消不写任何数据。
+- **一把 Key 通用多协议**（中转的同一把 Key 在它的 OpenAI 兼容端点和 Anthropic 端点都能用）：用 **其它地址...** 连接一次，给每个勾选的型号各选协议。默认协议依次取同名内置型号的协议、`claude-*` 用 Anthropic、其余用 OpenAI Completions。这些型号共用一张卡片、一个 Key 槽，槽名为 `{SLUG}_API_KEY`，例如 `FCODEX_API_KEY`。
+- **同一地址两把 Key**（例如中转把 OpenAI 和 Anthropic 分成两个分组）：再连接一次这个地址，界面会问你是加到已有卡片（沿用已保存的 Key），还是用另一把 Key 新建卡片；新卡片的槽名加序号，例如 `FCODEX_2_API_KEY`。已有槽不改名、不迁移。
+- **第一个配置成功的型号就是默认模型。** 还没有默认模型时，连接成功保存的第一个型号、或刚补上 Key 的卡片的第一行，会写入 `llm.default_model`；已有默认一律不覆盖，两个窗口同时保存也一样。当前默认不可用时，对话框会预勾 **设为默认**。你在某个会话里明确选过的型号保持不变。
+- **辅助模型** 就是 `llm.title_model`：负责会话标题、回合标题和命令说明，默认 `deepseek-v4-flash`，可改指任意已配置型号。辅助模型缺 Key、不存在或未设置时，会话标题暂用对话模型生成，回合标题和命令说明暂不生成；设置页会如实提示，不会自动改选。上下文压缩默认跟随对话模型，除非你设置了 `context.compaction_model`。
+- **编辑** 打开单个型号：地址（必填）、模型名，以及 **高级设置**（协议、Key 槽、思考格式、思考强度、Context、最大输出 token、**支持 Fast**、能力）。Tomcat 没有内置数据的型号，能力旁标注“默认声明，未探测”。
+- Key 存在 `~/.tomcat/assets/.env`（`0600`）。后端从不把完整或部分 Key 字符返回 Webview，界面只显示 Key 已保存或来自系统环境变量。
 
 **MiMo Token Plan 最小配置**（init 默认就帮你写好一条）：
 
 ```toml
 [[models]]
-id = "mimo-v2.5-pro"
+id = "mimo/mimo-v2.6-pro"
+model_name = "mimo-v2.6-pro"
 api = "openai"                                  # 走 OpenAI-compatible /v1/chat/completions
 provider = "mimo"                               # 决定取 MIMO_API_KEY
 base_url = "https://token-plan-cn.xiaomimimo.com"  # 只填 host，后缀程序拼接
 thinking_format = "doubao"
 context_window = 1000000
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
+capabilities = { vision = true, files = false, tools = true, reasoning = true }
 ```
 
 - **Key**：设置环境变量 `MIMO_API_KEY=tp-xxxxx`（写入 `~/.tomcat/assets/.env` 或当前 shell）。`tp-xxxxx`（Token Plan）不能与按量 `sk-xxxxx` 混用。
 - **base_url**：只填 **host**，`/v1/chat/completions` 由程序拼接，**不要**写成完整 endpoint。host 以你订阅页显示的为准（CN / SGP / AMS 区域代号对应中国 / 新加坡 / 欧洲）。
-- **使用**：在 `tomcat code` / `tomcat claw` 里用 `/model mimo-v2.5-pro` 切换，或把 `[llm] default_model` 设成它。
-- **能力边界**：`mimo-v2.5-pro` 官方仅文本（无图片/文件），故 `vision/files=false`；thinking 服务端默认开，本集成走豆包系 `thinking` 线格式。
+- **使用**：在 `tomcat code` / `tomcat claw` 里用 `/model mimo/mimo-v2.6-pro` 切换，或把 `[llm] default_model` 设成它。
+- **能力边界**：`mimo-v2.6-pro` 能理解图片，但官方未写明支持 PDF 输入，故 `vision=true、files=false`；thinking 服务端默认开，本集成走豆包系 `thinking` 线格式。它替代 MiMo 将于 2026-10-21 停用的 `mimo-v2.5-pro`。
 
 ### OpenAI 与网关并存
 
-如果你既想保留官方 `gpt-5.4`，又想加一条走公司网关的 `gpt-5.4`，不要复用同一个 `id`。推荐在 `models.toml` 新增一条：
+如果你既想保留官方 `gpt-5.6`，又想加一条走公司网关的 `gpt-5.6`，不要复用同一个 `id`。推荐在 `models.toml` 新增一条：
 
 ```toml
 [[models]]
-id = "gpt-5.4_gateway"
-model_name = "gpt-5.4"
+id = "gpt-5.6_gateway"
+model_name = "gpt-5.6"
 api = "openai-responses"
 provider = "openai-gateway"
 base_url = "https://gateway.example.com"
@@ -342,8 +357,8 @@ thinking_format = "openai"
 capabilities = { vision = true, files = true, tools = true, reasoning = true }
 ```
 
-- 切到网关：把 `[llm].default_model` 改成 `gpt-5.4_gateway`
-- 切回官方：改回 `gpt-5.4`
+- 切到网关：把 `[llm].default_model` 改成 `gpt-5.6_gateway`
+- 切回官方：改回 `gpt-5.6`
 - `provider = "openai-gateway"` 默认会把 key 推断成 `OPENAI_GATEWAY_API_KEY`
 
 ### 旧配置迁移
@@ -414,10 +429,11 @@ level = "warn"
 file_enabled = true
 
 [llm]
-default_model = "gpt-5.4"
+default_model = "gpt-5.6"
+title_model = "deepseek-v4-flash"   # 辅助模型，这是它的默认值
 
 [context]
-compaction_model = "gpt-5.4"
+compaction_model = ""   # 留空：压缩跟随对话模型
 ...
 ```
 
@@ -453,7 +469,7 @@ tomcat config get log.level
 # warn
 
 tomcat config get llm.default_model
-# gpt-5.4
+# gpt-5.6
 
 tomcat config get llm.proxy
 # （空或当前代理地址）
@@ -730,7 +746,7 @@ tomcat claw
 banner 输出样例：
 
 ```
-tomcat 对话模式 (模型: gpt-5.4)
+tomcat 对话模式 (模型: gpt-5.6)
 输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。
 输入 /help 查看命令列表。
 
@@ -954,7 +970,7 @@ jq '.[0]' /tmp/audit_backup.json
 | `ALL_PROXY` | 可选 | 兜底代理；当前更推荐配 `HTTPS_PROXY=http://...`，`socks5://` 不作为 `web_search` 官方支持路径 |
 | `TOMCAT__LLM__PROXY` | 可选 | 仅 LLM 请求使用的代理，覆盖 config |
 | `TOMCAT__LLM__API_BASE_FALLBACK` | 可选 | 主 API 不通时的备用 base URL |
-| `TOMCAT__LLM__DEFAULT_MODEL` | 可选 | 覆盖 `[llm] default_model`；未设置时以配置文件 / 代码默认 `gpt-5.4` 为准 |
+| `TOMCAT__LLM__DEFAULT_MODEL` | 可选 | 覆盖 `[llm] default_model`；未设置时以配置文件为准。代码里没有编译默认值：配置之前，新会话会提示你选择模型 |
 
 > LLM 相关的 `TOMCAT__LLM__*` 变量可覆盖 `tomcat.config.toml` 中对应字段，`__` 作为嵌套分隔符。仓库与安装包**不会**默认注入这些变量；若本机 shell 里长期设置了旧模型 id，会导致与 `tomcat init` 新写入的 toml 不一致。
 >

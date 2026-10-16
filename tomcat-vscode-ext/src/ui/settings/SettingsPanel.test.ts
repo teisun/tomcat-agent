@@ -103,7 +103,11 @@ describe("settings panel model management flow", () => {
     expectedCliVersion?: string | null;
     extensionVersion?: string | null;
     messenger?: Partial<{
-      sendSetDefaultModel: (modelId: string) => Promise<unknown>;
+      sendListRemoteModels: (input: unknown) => Promise<unknown>;
+      sendRemoveProvider: (keyEnv: string) => Promise<unknown>;
+      sendSetUtilityModel: (modelId: string) => Promise<unknown>;
+      sendUpsertModels: (models: unknown[]) => Promise<unknown>;
+      sendSetDefaultModel: (modelId: string, options?: { onlyIfUnset?: boolean }) => Promise<unknown>;
       sendListModels: () => Promise<unknown>;
       sendListConnectors: () => Promise<unknown>;
       sendListProviderKeys: () => Promise<unknown>;
@@ -220,7 +224,7 @@ describe("settings panel model management flow", () => {
       await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-default" });
       expect(panel.__testingSnapshot().state.defaultModelId).toBe("gpt-5.4");
       await panel.__testingDispatchIntent({ type: "setDefaultModel", messageId: "set-default", data: { modelId: "deepseek-v4-pro" } });
-      expect(sendSetDefaultModel).toHaveBeenCalledWith("deepseek-v4-pro");
+      expect(sendSetDefaultModel).toHaveBeenCalledWith("deepseek-v4-pro", { onlyIfUnset: false });
       expect(messenger.sendUpsertModel).not.toHaveBeenCalled();
       expect(order).toEqual(["default", "refresh"]);
       expect(panel.__testingSnapshot().state).toMatchObject({
@@ -230,6 +234,214 @@ describe("settings panel model management flow", () => {
         warnings: null,
       });
     } finally { panel.dispose(); }
+  });
+
+  describe("provider connections", () => {
+    const CONNECT_CAPABILITIES = [
+      "list_models", "list_provider_keys", "remove_model", "set_provider_key", "set_default_model",
+      "set_default_model_if_unset", "upsert_model", "upsert_models", "list_remote_models", "remove_provider", "set_utility_model",
+    ];
+    const initializeWith = (capabilities: string[]) => async () => ({
+      attachmentRoot: null, capabilities, protocolVersion: 1, serverVersion: "0.1.20", sessionId: null,
+    });
+    const relayInput = (id: string, api: string) => ({
+      api, apiKeyEnv: "FCODEX_API_KEY", baseUrl: "https://api.fcodex.com", id, modelName: id.split("/")[1], provider: "fcodex",
+      capabilities: { files: true, vision: true, tools: true, reasoning: true, webSearch: false },
+    });
+    const connectModels = [relayInput("fcodex/gpt-6.1-sol", "openai-responses"), relayInput("fcodex/claude-opus-5-5", "anthropic-messages")];
+
+    it.each(["none", "models", "key", "default"])("saves models, then the key, then the first default, and reports %s failures honestly", async (failure) => {
+      const order: string[] = [];
+      const { panel, messenger } = createPanel({
+        ensureInitialized: initializeWith(CONNECT_CAPABILITIES),
+        messenger: {
+          sendUpsertModels: vi.fn(async () => { order.push("models"); return failure === "models" ? { success: false, error: "invalid entry" } : { success: true, payload: { models: [], warnings: [] } }; }),
+          sendSetProviderKey: vi.fn(async () => { order.push("key"); return { success: failure !== "key", error: "key denied" }; }),
+          sendSetDefaultModel: vi.fn(async () => { order.push("default"); return failure === "default" ? { success: false, error: "disk full" } : { success: true, payload: { written: true, warnings: [], envOverride: false } }; }),
+        },
+        onModelCatalogChanged: () => { order.push("refresh"); },
+      });
+      try {
+        await panel.__testingDispatchIntent({ type: "upsertModels", messageId: "connect", data: {
+          defaultModelId: "fcodex/gpt-6.1-sol", models: connectModels, providerKey: { envName: "FCODEX_API_KEY", value: "only-a-fixture" },
+        } });
+        expect(order).toEqual({
+          default: ["models", "key", "default", "refresh"],
+          key: ["models", "key", "refresh"],
+          models: ["models"],
+          none: ["models", "key", "default", "refresh"],
+        }[failure]);
+        expect(messenger.sendUpsertModels).toHaveBeenCalledWith([
+          expect.objectContaining({ api: "openai-responses", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/gpt-6.1-sol" }),
+          expect.objectContaining({ api: "anthropic-messages", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/claude-opus-5-5" }),
+        ]);
+        const state = panel.__testingSnapshot().state;
+        expect(state.modelSaveReceipt).toEqual({ requestId: "connect", success: failure === "none" });
+        if (failure !== "models" && failure !== "key") {
+          expect(messenger.sendSetDefaultModel).toHaveBeenCalledWith("fcodex/gpt-6.1-sol", { onlyIfUnset: true });
+        }
+        expect(state.error).toBe({
+          default: translate("en", "settings.host.defaultFailed", { detail: "disk full" }),
+          key: translate("en", "settings.host.keySaveFailed", { name: "fcodex/gpt-6.1-sol, fcodex/claude-opus-5-5", detail: "key denied" }),
+          models: "invalid entry",
+          none: null,
+        }[failure]);
+        expect(state.status).toBe(failure === "none" ? translate("en", "settings.host.connectSavedDefault", { name: "fcodex/gpt-6.1-sol" }) : null);
+        expect(JSON.stringify(panel.__testingSnapshot())).not.toContain("only-a-fixture");
+      } finally { panel.dispose(); }
+    });
+
+    it("never claims a skipped default, sets an explicit default only on request, and never guesses on an old CLI", async () => {
+      const sendSetDefaultModel = vi.fn()
+        .mockResolvedValueOnce({ success: true, payload: { written: false, warnings: [], envOverride: true } })
+        .mockResolvedValueOnce({ success: true, payload: { written: true, warnings: [], envOverride: false } });
+      const { panel } = createPanel({ ensureInitialized: initializeWith(CONNECT_CAPABILITIES), messenger: { sendSetDefaultModel, sendUpsertModels: vi.fn().mockResolvedValue({ success: true, payload: { models: [] } }) } });
+      try {
+        await panel.__testingDispatchIntent({ type: "upsertModels", messageId: "skip", data: { defaultModelId: "fcodex/gpt-6.1-sol", models: connectModels } });
+        expect(panel.__testingSnapshot().state).toMatchObject({ status: translate("en", "settings.host.connectSaved"), warnings: null });
+        await panel.__testingDispatchIntent({ type: "upsertModels", messageId: "explicit", data: { defaultModelId: "fcodex/gpt-6.1-sol", models: connectModels, setAsDefault: true } });
+        expect(sendSetDefaultModel).toHaveBeenLastCalledWith("fcodex/gpt-6.1-sol", { onlyIfUnset: false });
+      } finally { panel.dispose(); }
+
+      const legacyDefault = vi.fn();
+      const legacy = createPanel({
+        ensureInitialized: initializeWith(CONNECT_CAPABILITIES.filter((name) => name !== "set_default_model_if_unset")),
+        messenger: { sendSetDefaultModel: legacyDefault, sendUpsertModels: vi.fn().mockResolvedValue({ success: true, payload: { models: [] } }) },
+      });
+      try {
+        await legacy.panel.__testingDispatchIntent({ type: "upsertModels", messageId: "legacy", data: { defaultModelId: "fcodex/gpt-6.1-sol", models: connectModels } });
+        expect(legacyDefault).not.toHaveBeenCalled();
+        expect(legacy.panel.__testingSnapshot().state.modelSaveReceipt).toEqual({ requestId: "legacy", success: true });
+      } finally { legacy.panel.dispose(); }
+
+      const sendUpsertModels = vi.fn();
+      const old = createPanel({ ensureInitialized: initializeWith(["list_models", "upsert_model"]), messenger: { sendUpsertModels } });
+      try {
+        await old.panel.__testingDispatchIntent({ type: "upsertModels", messageId: "old", data: { models: connectModels } });
+        expect(sendUpsertModels).not.toHaveBeenCalled();
+        expect(old.panel.__testingSnapshot().state).toMatchObject({ error: translate("en", "settings.host.modelUnavailable"), modelSaveReceipt: { requestId: "old", success: false } });
+      } finally { old.panel.dispose(); }
+    });
+
+    it("returns remote model names or a failure class and keeps the temporary key out of state", async () => {
+      const sendListRemoteModels = vi.fn()
+        .mockResolvedValueOnce({ success: true, payload: { models: [{ id: "gpt-6.1-sol" }, { id: "deepseek-chat" }] } })
+        .mockResolvedValueOnce({ success: false, error: "denied", payload: { reason: "auth", status: 401 } })
+        .mockResolvedValueOnce({ success: false, error: "odd", payload: { reason: "mystery" } });
+      const { panel } = createPanel({ ensureInitialized: initializeWith(CONNECT_CAPABILITIES), messenger: { sendListRemoteModels } });
+      try {
+        await panel.__testingDispatchIntent({ type: "listRemoteModels", messageId: "fetch-1", data: { api: "openai", apiKey: "temporary-fixture", baseUrl: "https://api.fcodex.com" } });
+        expect(sendListRemoteModels).toHaveBeenLastCalledWith({ api: "openai", apiKey: "temporary-fixture", baseUrl: "https://api.fcodex.com" });
+        expect(panel.__testingSnapshot().state.remoteModelsReceipt).toEqual({ models: ["gpt-6.1-sol", "deepseek-chat"], requestId: "fetch-1" });
+        expect(JSON.stringify(panel.__testingSnapshot())).not.toContain("temporary-fixture");
+
+        await panel.__testingDispatchIntent({ type: "listRemoteModels", messageId: "fetch-2", data: { api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com" } });
+        expect(sendListRemoteModels).toHaveBeenLastCalledWith({ api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com" });
+        expect(panel.__testingSnapshot().state.remoteModelsReceipt).toEqual({ failure: "auth", requestId: "fetch-2" });
+
+        await panel.__testingDispatchIntent({ type: "listRemoteModels", messageId: "fetch-3", data: { api: "openai", baseUrl: "http://localhost:11434/v1" } });
+        expect(panel.__testingSnapshot().state.remoteModelsReceipt).toEqual({ failure: "unknown", requestId: "fetch-3" });
+      } finally { panel.dispose(); }
+    });
+
+    it("removes a provider after clearing Build choices for its user models and reports a key it could not delete", async () => {
+      const order: string[] = [];
+      const listed = [
+        { id: "fcodex/gpt-6.1-sol", api: "openai-responses", apiKeyEnv: "FCODEX_API_KEY", provider: "fcodex", source: "user", keyPresent: true, capabilities: {} },
+        { id: "gpt-5.6", api: "openai-responses", apiKeyEnv: "FCODEX_API_KEY", provider: "openai", source: "builtin", keyPresent: true, capabilities: {} },
+        { id: "other/model", api: "openai", apiKeyEnv: "OTHER_API_KEY", provider: "other", source: "user", keyPresent: true, capabilities: {} },
+      ];
+      const clearBuildModelPreference = vi.fn(async (modelId: string) => { order.push(`clear:${modelId}`); return true; });
+      const sendRemoveProvider = vi.fn(async () => {
+        order.push("remove");
+        return { success: true, payload: { keyEnv: "FCODEX_API_KEY", keyRemoved: false, keySource: "environment", removedModelIds: ["fcodex/gpt-6.1-sol"] } };
+      });
+      const { panel } = createPanel({
+        clearBuildModelPreference,
+        ensureInitialized: initializeWith(CONNECT_CAPABILITIES),
+        messenger: { sendListModels: vi.fn().mockResolvedValue({ success: true, payload: { models: listed } }), sendRemoveProvider },
+      });
+      try {
+        await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-remove" });
+        await panel.__testingDispatchIntent({ type: "removeProvider", messageId: "remove", data: { keyEnv: "FCODEX_API_KEY" } });
+        expect(order).toEqual(["clear:fcodex/gpt-6.1-sol", "remove"]);
+        expect(panel.__testingSnapshot().state).toMatchObject({
+          error: null,
+          status: translate("en", "settings.host.providerRemoved"),
+          warnings: [translate("en", "settings.host.prefCleared"), translate("en", "models.removeProvider.envKey", { name: "FCODEX_API_KEY" })],
+        });
+      } finally { panel.dispose(); }
+
+      const blockedRemove = vi.fn();
+      const old = createPanel({ ensureInitialized: initializeWith(["list_models"]), messenger: { sendRemoveProvider: blockedRemove } });
+      try {
+        await old.panel.__testingDispatchIntent({ type: "removeProvider", messageId: "old-remove", data: { keyEnv: "FCODEX_API_KEY" } });
+        expect(blockedRemove).not.toHaveBeenCalled();
+        expect(old.panel.__testingSnapshot().state.error).toBe(translate("en", "models.removeProvider.unsupported"));
+      } finally { old.panel.dispose(); }
+    });
+
+    it("sets the utility model and reports environment overrides, failures, and an old CLI", async () => {
+      const sendSetUtilityModel = vi.fn()
+        .mockResolvedValueOnce({ success: true, payload: { modelId: "deepseek-v4-flash", envOverride: true, warnings: [] } })
+        .mockResolvedValueOnce({ success: false, error: "unknown model" });
+      const { panel } = createPanel({ ensureInitialized: initializeWith(CONNECT_CAPABILITIES), messenger: { sendSetUtilityModel } });
+      try {
+        await panel.__testingDispatchIntent({ type: "setUtilityModel", messageId: "utility", data: { modelId: "deepseek-v4-flash" } });
+        expect(panel.__testingSnapshot().state).toMatchObject({
+          status: translate("en", "settings.host.utilitySaved", { name: "deepseek-v4-flash" }),
+          warnings: [translate("en", "settings.host.utilityEnvOverride")],
+        });
+        await panel.__testingDispatchIntent({ type: "setUtilityModel", messageId: "utility-fail", data: { modelId: "gone" } });
+        expect(panel.__testingSnapshot().state).toMatchObject({ error: translate("en", "settings.host.utilityFailed", { detail: "unknown model" }), status: null });
+      } finally { panel.dispose(); }
+
+      const blocked = vi.fn();
+      const old = createPanel({ ensureInitialized: initializeWith(["list_models"]), messenger: { sendSetUtilityModel: blocked } });
+      try {
+        await old.panel.__testingDispatchIntent({ type: "setUtilityModel", messageId: "old-utility", data: { modelId: "deepseek-v4-flash" } });
+        expect(blocked).not.toHaveBeenCalled();
+        expect(old.panel.__testingSnapshot().state.error).toBe(translate("en", "models.utility.readOnly"));
+      } finally { old.panel.dispose(); }
+    });
+
+    it("asks for a card's first default only after its key is saved, and only when serve can decide atomically", async () => {
+      const order: string[] = [];
+      const sendSetProviderKey = vi.fn(async () => { order.push("key"); return order.length > 2 ? { success: false, error: "denied" } : { success: true }; });
+      const sendSetDefaultModel = vi.fn(async () => { order.push("default"); return { success: true, payload: { written: true, warnings: [] } }; });
+      const { panel } = createPanel({ ensureInitialized: initializeWith(CONNECT_CAPABILITIES), messenger: { sendSetDefaultModel, sendSetProviderKey } });
+      try {
+        await panel.__testingDispatchIntent({ type: "setProviderKey", messageId: "fill", data: { defaultModelId: "fcodex/gpt-5.5", envName: "FCODEX_API_KEY", value: "fixture" } });
+        expect(sendSetDefaultModel).toHaveBeenCalledWith("fcodex/gpt-5.5", { onlyIfUnset: true });
+        expect(panel.__testingSnapshot().state.status).toBe(translate("en", "settings.host.savedKey"));
+        await panel.__testingDispatchIntent({ type: "setProviderKey", messageId: "fill-fail", data: { defaultModelId: "fcodex/gpt-5.5", envName: "FCODEX_API_KEY", value: "fixture" } });
+        expect(order).toEqual(["key", "default", "key"]);
+        expect(panel.__testingSnapshot().state.error).toBe("denied");
+      } finally { panel.dispose(); }
+
+      const legacyDefault = vi.fn();
+      const legacy = createPanel({ ensureInitialized: initializeWith(["list_models", "set_provider_key", "set_default_model"]), messenger: { sendSetDefaultModel: legacyDefault } });
+      try {
+        await legacy.panel.__testingDispatchIntent({ type: "setProviderKey", messageId: "legacy-fill", data: { defaultModelId: "fcodex/gpt-5.5", envName: "FCODEX_API_KEY", value: "fixture" } });
+        expect(legacyDefault).not.toHaveBeenCalled();
+      } finally { legacy.panel.dispose(); }
+    });
+
+    it("publishes the utility role and per-entry catalog diagnostics from list_models", async () => {
+      const { panel } = createPanel({
+        ensureInitialized: initializeWith(CONNECT_CAPABILITIES),
+        messenger: { sendListModels: vi.fn().mockResolvedValue({ success: true, payload: { defaultModelId: "", models: [], utilityModelId: "utility-flash", warnings: ["Skipped partial override `gpt-5.4`."] } }) },
+      });
+      try {
+        await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-utility" });
+        expect(panel.__testingSnapshot().state).toMatchObject({
+          capabilities: { listRemoteModels: true, removeProvider: true, setDefaultModelIfUnset: true, setUtilityModel: true, upsertModels: true },
+          defaultModelId: "",
+          utilityModelId: "utility-flash",
+          warnings: ["Skipped partial override `gpt-5.4`."],
+        });
+      } finally { panel.dispose(); }
+    });
   });
 
   it("warns when the environment overrides a saved default, and keeps the list when setting fails", async () => {
@@ -259,15 +471,15 @@ describe("settings panel model management flow", () => {
   });
 
   it("preserves supportedSpeeds in host state and a subsequent full model edit", async () => {
-    const model = { id: "relay/model", modelName: "model", api: "openai-responses", apiKeyEnv: "STUB_KEY", baseUrl: "https://relay.example.test", provider: "relay", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: true, web_search: false }, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"], contextWindowOptions: [] };
+    const model = { id: "relay/model", modelName: "model", api: "openai-responses", apiKeyEnv: "STUB_KEY", baseUrl: "https://relay.example.test", provider: "relay", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: true, web_search: false }, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast"], contextWindowOptions: [] };
     const sendUpsertModel = vi.fn().mockResolvedValue({ success: true });
     const { panel } = createPanel({ messenger: { sendListModels: vi.fn().mockResolvedValue({ success: true, payload: { models: [model] } }), sendUpsertModel } });
     try {
       await panel.__testingDispatchIntent({ messageId: "ready-speed", type: "settings.ready" });
       const view = panel.__testingSnapshot().state.models[0];
-      expect(view.supportedSpeeds).toEqual(["fast", "ultrafast"]);
+      expect(view.supportedSpeeds).toEqual(["fast"]);
       await panel.__testingDispatchIntent({ messageId: "save-speed", type: "upsertModel", data: { model: { ...view, description: "edited only description" } } });
-      expect(sendUpsertModel).toHaveBeenCalledWith(expect.objectContaining({ id: "relay/model", description: "edited only description", supportedSpeeds: ["fast", "ultrafast"] }));
+      expect(sendUpsertModel).toHaveBeenCalledWith(expect.objectContaining({ id: "relay/model", description: "edited only description", supportedSpeeds: ["fast"] }));
     } finally { panel.dispose(); }
   });
 

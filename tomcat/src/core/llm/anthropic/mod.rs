@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use serde_json::Value;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
@@ -20,8 +22,8 @@ use crate::core::llm::types::{
 };
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
-    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error,
-    llm_retry_after_ms, AppError, LlmErrorStage,
+    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status,
+    llm_http_status_error, llm_retry_after_ms, AppError, LlmErrorStage,
 };
 
 use super::super::auth::Credential;
@@ -35,6 +37,8 @@ mod wire;
 use crate::infra::i18n::tr;
 
 const PROVIDER_NAME: &str = "anthropic";
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let raw = headers
@@ -65,12 +69,16 @@ pub(super) struct AnthropicProvider {
     files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
     files_expires_after_seconds: u64,
     thinking_cfg: crate::infra::config::ThinkingConfig,
+    lowest_reasoning_level: Option<crate::core::llm::ThinkingLevel>,
     configured_thinking_format: ThinkingFormat,
     /// Session-scoped compatibility result. A successful adaptive↔budget
     /// fallback is reused by this cached provider instead of causing a 400 on
     /// every subsequent request. It deliberately is not persisted to models.toml:
     /// one transient upstream failure must not rewrite user configuration.
     learned_thinking_format: RwLock<Option<ThinkingFormat>>,
+    /// Session-scoped like `learned_thinking_format`: once the upstream rejects a
+    /// replayed thinking prefix, later requests drop mismatched blocks up front.
+    drop_mismatched_thinking_prefix: AtomicBool,
     continuity_enabled: bool,
     capabilities: Capabilities,
 }
@@ -120,8 +128,13 @@ impl AnthropicProvider {
             files_adapter: std::sync::OnceLock::new(),
             files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
+            lowest_reasoning_level:
+                crate::core::llm::thinking_policy::lowest_supported_reasoning_level(
+                    &entry.supported_reasoning_levels,
+                ),
             configured_thinking_format,
             learned_thinking_format: RwLock::new(None),
+            drop_mismatched_thinking_prefix: AtomicBool::new(false),
             continuity_enabled: runtime.reasoning_continuity.enabled,
             capabilities: entry.capabilities.clone(),
         })
@@ -140,14 +153,11 @@ impl AnthropicProvider {
         &'a self,
         request: &ChatRequest,
     ) -> Cow<'a, crate::infra::config::ThinkingConfig> {
-        match request.thinking_level {
-            Some(level) => {
-                let mut cfg = self.thinking_cfg.clone();
-                cfg.level = level.as_str().to_string();
-                Cow::Owned(cfg)
-            }
-            None => Cow::Borrowed(&self.thinking_cfg),
-        }
+        crate::core::llm::thinking_policy::thinking_config_for_request(
+            &self.thinking_cfg,
+            request.thinking_level,
+            self.lowest_reasoning_level,
+        )
     }
 
     fn source_profile(&self, model: &str) -> ProviderCompatProfile {
@@ -217,16 +227,26 @@ impl AnthropicProvider {
     fn auth_headers(
         &self,
         builder: reqwest::RequestBuilder,
-        include_files_beta: bool,
+        betas: &[&str],
     ) -> reqwest::RequestBuilder {
         let builder = builder
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01");
-        if include_files_beta {
-            builder.header("anthropic-beta", ANTHROPIC_FILES_BETA)
-        } else {
+        if betas.is_empty() {
             builder
+        } else {
+            builder.header("anthropic-beta", betas.join(","))
         }
+    }
+
+    fn request_sends_thinking(&self, request: &ChatRequest) -> bool {
+        wire::thinking_request_for(
+            request,
+            &self.thinking_cfg_for_request(request),
+            self.thinking_format_for_wire(),
+        )
+        .thinking
+        .is_some()
     }
 
     fn request_uses_uploaded_files(messages: &[ChatMessage]) -> bool {
@@ -253,8 +273,13 @@ impl AnthropicProvider {
         request: &ChatRequest,
         stream: bool,
     ) -> Result<reqwest::Response, AppError> {
-        self.chat_once_with_thinking_format(request, stream, self.thinking_format_for_wire())
-            .await
+        self.chat_once_with_thinking_format(
+            request,
+            stream,
+            self.thinking_format_for_wire(),
+            self.drop_mismatched_thinking_prefix.load(Ordering::Relaxed),
+        )
+        .await
     }
 
     async fn chat_once_with_thinking_format(
@@ -262,6 +287,7 @@ impl AnthropicProvider {
         request: &ChatRequest,
         stream: bool,
         thinking_format: ThinkingFormat,
+        drop_mismatched_thinking_prefix: bool,
     ) -> Result<reqwest::Response, AppError> {
         let model = self.effective_model(request);
         let thinking_cfg = self.thinking_cfg_for_request(request);
@@ -269,7 +295,7 @@ impl AnthropicProvider {
             expires_after_seconds: self.files_expires_after_seconds,
         };
         let files_adapter = self.cached_files_adapter(&files_cfg);
-        let body = wire::build_request_body(
+        let mut body = wire::build_request_body(
             request,
             &model,
             &thinking_cfg,
@@ -279,11 +305,25 @@ impl AnthropicProvider {
             &self.capabilities,
             files_adapter.as_deref(),
         );
+        let mut betas = Vec::new();
+        if self.capabilities.files && Self::request_uses_uploaded_files(&request.messages) {
+            betas.push(ANTHROPIC_FILES_BETA);
+        }
+        if drop_mismatched_thinking_prefix {
+            if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) {
+                thinking.insert(
+                    "block_binding".to_string(),
+                    serde_json::json!({ "prefix_mismatch_behavior": "drop_block" }),
+                );
+                betas.push(THINKING_BINDING_BETA);
+            }
+        }
+        if body.get("speed").is_some() {
+            betas.push(FAST_MODE_BETA);
+        }
         let url = build_path_aware_endpoint(&self.base_url, "messages");
-        let include_files_beta =
-            self.capabilities.files && Self::request_uses_uploaded_files(&request.messages);
         let response = self
-            .auth_headers(self.client.post(url), include_files_beta)
+            .auth_headers(self.client.post(url), &betas)
             .json(&body)
             .send()
             .await
@@ -335,6 +375,31 @@ impl AnthropicProvider {
             match self.chat_once(request, stream).await {
                 Ok(response) => return Ok(response),
                 Err(error)
+                    if is_thinking_prefix_rejection(&error)
+                        && !self.drop_mismatched_thinking_prefix.load(Ordering::Relaxed)
+                        && self.request_sends_thinking(request) =>
+                {
+                    warn!(
+                        "Anthropic rejected the replayed thinking prefix; retrying once with drop_block binding"
+                    );
+                    match self
+                        .chat_once_with_thinking_format(
+                            request,
+                            stream,
+                            self.thinking_format_for_wire(),
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(response) => {
+                            self.drop_mismatched_thinking_prefix
+                                .store(true, Ordering::Relaxed);
+                            return Ok(response);
+                        }
+                        Err(_) => return Err(error),
+                    }
+                }
+                Err(error)
                     if !thinking_format_fallback_used
                         && is_thinking_format_rejection(&error)
                         && alternative_thinking_format(self.thinking_format_for_wire())
@@ -348,7 +413,12 @@ impl AnthropicProvider {
                         "Anthropic rejected the configured thinking format; retrying once with its compatible counterpart"
                     );
                     match self
-                        .chat_once_with_thinking_format(request, stream, fallback)
+                        .chat_once_with_thinking_format(
+                            request,
+                            stream,
+                            fallback,
+                            self.drop_mismatched_thinking_prefix.load(Ordering::Relaxed),
+                        )
                         .await
                     {
                         Ok(response) => {
@@ -396,6 +466,10 @@ fn learned_or_configured_thinking_format(
     configured: ThinkingFormat,
 ) -> ThinkingFormat {
     (*learned.read()).unwrap_or(configured)
+}
+
+fn is_thinking_prefix_rejection(error: &AppError) -> bool {
+    llm_http_status(error) == Some(400) && error.to_string().contains("prefix_mismatch_behavior")
 }
 
 fn is_thinking_format_rejection(error: &AppError) -> bool {

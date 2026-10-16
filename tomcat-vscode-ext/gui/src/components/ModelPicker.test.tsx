@@ -73,7 +73,8 @@ describe("ModelPicker", () => {
     );
   }
 
-  it.each([{ supportedSpeeds: ["fast"] as const }, { supportedSpeeds: ["fast", "ultrafast"] as const }])("shows declared Speed above Context and edits another model without switching", ({ supportedSpeeds }) => {
+  it("shows declared Speed above Context and edits another model without switching", () => {
+    const supportedSpeeds = ["fast"] as const;
     const onSelectSpeed = vi.fn();
     const { onSelectModel, onSelectContextWindow, onSelectThinkingLevel } = renderPicker({
       models: [{ ...MODELS[0], supportedSpeeds, selectedSpeed: "fast" }, MODELS[1]],
@@ -84,7 +85,7 @@ describe("ModelPicker", () => {
     const config = screen.getByTestId("thinking-level-dropdown");
     expect([...config.querySelectorAll("h3")].map((heading) => heading.textContent)).toEqual(["Speed", "Context", "Effort"]);
     const options = within(config).getAllByTestId("speed-option");
-    expect(options.map((option) => option.textContent)).toEqual(["Standard", "Fast", ...(supportedSpeeds.length === 2 ? ["Ultrafast"] : [])]);
+    expect(options.map((option) => option.textContent)).toEqual(["Standard", "Fast"]);
     const fast = within(config).getByRole("button", { name: "Fast", pressed: true });
     expect(fast.title).toContain("higher cost");
     fireEvent.mouseDown(fast);

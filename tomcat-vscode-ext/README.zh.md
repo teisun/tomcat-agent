@@ -51,7 +51,7 @@ code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 
 1. 打开 Tomcat Agent Box，无需运行 `tomcat init`。
 2. 面板提示「配置模型后即可开始对话」时，点击「配置模型」。
-3. 填入 API Key，或添加自己的模型并设为默认；保存后即可对话，无需重启。
+3. 点 **+ 连接供应商**，选一家供应商（中转选 **其它地址...**），填它的 API Key 并勾选要用的型号。第一个保存的型号自动成为默认模型，保存后即可对话，无需重启。一把 Key 一张卡片：同一把 Key 通用多种协议的中转只需连接一次，同一地址的第二把 Key 会单独成卡。详见[用户指南](https://github.com/teisun/tomcat-agent/blob/main/tomcat/docs/user-guide.zh.md#tomcat-model--不手改文件也能管模型与-key)。
 
 会话里单独选过的模型、以及 `TOMCAT__LLM__DEFAULT_MODEL` 环境变量，优先于默认模型。
 

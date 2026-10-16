@@ -323,14 +323,14 @@ describe("PlanPreviewApp", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
     pushState(makeState({
-      availableModelDetails: { "gpt-5.6": { capabilities: [], contextWindowOptions: [], supportedReasoningLevels: [], id: "gpt-5.6", supportedSpeeds: ["fast", "ultrafast"], selectedSpeed: "standard" } },
+      availableModelDetails: { "gpt-5.6": { capabilities: [], contextWindowOptions: [], supportedReasoningLevels: [], id: "gpt-5.6", supportedSpeeds: ["fast"], selectedSpeed: "standard" } },
       toolbarStyle: "hybrid",
     }));
     fireEvent.click(screen.getByTestId("plan-build-model-select"));
     fireEvent.mouseEnter(document.querySelector('[data-model-id="gpt-5.6"]')!);
     fireEvent.click(screen.getByTestId("model-edit-gpt-5.6"));
-    fireEvent.click(screen.getByRole("button", { name: "Ultrafast" }));
-    expect(intentsOfType(api, "setSpeed")).toEqual([expect.objectContaining({ data: { modelId: "gpt-5.6", speed: "ultrafast" } })]);
+    fireEvent.click(screen.getByRole("button", { name: "Fast" }));
+    expect(intentsOfType(api, "setSpeed")).toEqual([expect.objectContaining({ data: { modelId: "gpt-5.6", speed: "fast" } })]);
     expect(intentsOfType(api, "setBuildModel")).toHaveLength(0);
   });
 

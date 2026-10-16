@@ -186,7 +186,7 @@ Connection details for models (`api`, `provider`, `base_url`, `api_key_env`) hav
 
 The three steps are:
 
-1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains the managed preset entries released from the embedded `builtin_models.toml` preset source (OpenAI `gpt-5.2/5.4/5.5/5.6`, DeepSeek `deepseek-v4-pro/-flash`, `utility-flash`, MiMo `mimo-v2.5-pro`, GLM `glm-5.2`, Kimi `kimi-k2.7-code`, and Anthropic `claude-opus-4-8/4-7/4-6`), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), create a stable `~/.local/bin/tomcat` command entry when the current binary comes from a local build, prune old tomcat-injected `target/*` PATH exports, and append the stable line `export PATH="$HOME/.local/bin:$PATH"` to the right startup files (`~/.zprofile` + `~/.zshrc` for zsh, `~/.bashrc` for bash while keeping `~/.bash_profile` sourcing both `.profile` and `.bashrc`, or `~/.profile` for other shells)
+1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains the managed preset entries released from the embedded `builtin_models.toml` preset source (13 presets, listed under [models.toml](#modelstoml---addremove-models-and-mimo-token-plan) below), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), create a stable `~/.local/bin/tomcat` command entry when the current binary comes from a local build, prune old tomcat-injected `target/*` PATH exports, and append the stable line `export PATH="$HOME/.local/bin:$PATH"` to the right startup files (`~/.zprofile` + `~/.zshrc` for zsh, `~/.bashrc` for bash while keeping `~/.bash_profile` sourcing both `.profile` and `.bashrc`, or `~/.profile` for other shells)
 2. **[2/3] Asset checks**: the same checks as `tomcat doctor` (config validity, embedded assets, asset versions, and so on), **excluding** `.env` permissions and `OPENAI_API_KEY` environment variable reminders
 3. **[3/3] API key setup**: first prompt for the credential variable that matches the default model you selected in the wizard (for example `OPENAI_API_KEY`, `OPENAI_GATEWAY_API_KEY`, `DEEPSEEK_API_KEY`, `MIMO_API_KEY`, `ANTHROPIC_API_KEY`), then optionally let you add keys for other providers. You can press Enter to skip; **skipping does not write an empty key**. Later you can run `tomcat init` again, edit `~/.tomcat/assets/.env` yourself, or use `tomcat model key set`
 
@@ -195,7 +195,7 @@ Expected output (excerpt):
 ```
 [1/3] 环境初始化
   ✓ 配置文件已写入: ~/.tomcat/tomcat.config.toml
-  ✓ 默认模型: gpt-5.4
+  ✓ 默认模型: gpt-5.6
   ✓ 默认模型协议线: openai-responses
   ✓ 模型逻辑厂商: openai
   ✓ 目录结构就绪
@@ -228,8 +228,9 @@ If tomcat cannot update your shell config automatically, it prints `⚠ 无法�
 `tomcat init` generates `~/.tomcat/models.toml` (the **model catalog**). This is the only entry point for adding or removing models:
 
 - **Auto-loaded on startup**: startup paths such as `tomcat code` and `tomcat claw` merge the built-in model table with `models.toml`. **The same id overrides the built-in entry, and a new id adds a new model**. No code changes or recompilation are required.
-- **Single runtime source, user-visible seed file**: the embedded `builtin_models.toml` is the single runtime source of truth for common presets: OpenAI (`gpt-5.2` / `gpt-5.4` / `gpt-5.5` / `gpt-5.6`), DeepSeek (`deepseek-v4-pro` / `deepseek-v4-flash` / `utility-flash`), MiMo (`mimo-v2.5-pro`), GLM (`glm-5.2`), Kimi (`kimi-k2.7-code`), and Anthropic Messages (`claude-opus-4-8` / `4-7` / `4-6`). `tomcat init` releases that same embedded preset list into `models.toml`, so you can inspect, edit, or delete the seeded entries without creating a second hand-maintained source of truth.
+- **Single runtime source, user-visible seed file**: the embedded `builtin_models.toml` is the single runtime source of truth for common presets: OpenAI Responses (`gpt-5.6` / `openai/gpt-6-astra` / `openai/gpt-6.1-sol`), DeepSeek (`deepseek-v4-pro` / `deepseek-v4-flash`), MiMo (`mimo/mimo-v2.6-pro`), GLM (`glm-5.2`), Kimi (`kimi-k2.7-code` / `kimi-k3`), and Anthropic Messages (`claude-fable-5` / `claude-opus-5` / `claude-sonnet-5` / `anthropic/claude-opus-5-5`). `tomcat init` releases that same embedded preset list into `models.toml`, so you can inspect, edit, or delete the seeded entries without creating a second hand-maintained source of truth.
 - **Idempotent generation**: if `models.toml` does not exist, tomcat creates it with the managed preset list. If it exists but is missing managed preset entries, tomcat **only appends the missing entries**. If it is already complete, tomcat leaves it untouched. It **never overwrites your existing entries or comments**. Running `tomcat init` repeatedly is safe.
+- **Retired presets keep working from your copy**: `gpt-5.2/5.4/5.5`, `utility-flash`, `mimo-v2.5-pro`, `claude-opus-4-8/4-7/4-6` and `claude-sonnet-4-6` are no longer built in. Upgrading never edits an existing `models.toml`, so a copy written by an earlier `init` stays usable and appears in Settings like any model you added. Without such a copy (for example a VS Code-only install), a default or session that still names a retired preset asks you to choose another model. A leftover partial override whose built-in is gone is skipped with one diagnostic per entry instead of breaking the catalog.
 - **Add one more model**: copy an existing `[[models]]` block and explicitly fill in `api`, `provider`, and `base_url`. `api_key_env` is optional; when omitted it defaults to `<PROVIDER>_API_KEY`.
 
 Field meanings:
@@ -246,7 +247,7 @@ Field meanings:
 
 ```text
 Model menu → Edit a row
-              Speed   Standard / Fast / Ultrafast
+              Speed   Standard / Fast
               ──────────────────────────────────
               Context 400K / 1M
               Effort  Low … Xhigh / Max
@@ -254,20 +255,22 @@ Model menu → Edit a row
 
 Speed controls service acceleration; Effort controls how much the model reasons. They are independent: Fast + Max is valid when both are supported. Editing a row's Speed does not switch the selected model or change Context/Effort. Choices are remembered per model and take effect on the next run.
 
-- Standard is the default. For models declaring speed control, Tomcat explicitly sends `service_tier = "default"` so an upstream project's paid default cannot enable Fast implicitly.
-- Fast sends `service_tier = "priority"`; Ultrafast sends `service_tier = "ultrafast"`. Acceleration may cost more and the upstream may reject or downgrade a request. A selected option is not proof of the tier actually served.
-- The Speed section appears only for a model with declared accelerated speeds. `supported_speeds` lists only `fast` and/or `ultrafast`; Standard is implicit. An empty list hides the section and omits the request field.
+- Standard is the default. For OpenAI-protocol models declaring speed control, Tomcat explicitly sends `service_tier = "default"` so an upstream project's paid default cannot enable Fast implicitly. Anthropic models send no speed field in Standard.
+- Fast sends `service_tier = "priority"` on the OpenAI protocols. On Anthropic Messages it sends `speed: "fast"` together with the `fast-mode-2026-02-01` beta header. Acceleration may cost more and the upstream may reject or downgrade a request. A selected option is not proof of the tier actually served.
+- Anthropic Fast is a research preview that Anthropic must enable for your account. It works only on the Claude API itself, for Opus 5.5, Opus 5 and Opus 4.8, costs about twice the standard price, has separate rate limits (429 when exceeded), and switching speed invalidates the prompt cache. A missing grant, an exceeded limit or an unsupported model returns the upstream error as-is; Tomcat does not silently fall back to Standard.
+- The Speed section appears only for a model declaring `supported_speeds = ["fast"]`; Standard is implicit. An empty or missing list hides the section and omits the request field. Built-in Fast declarations: `gpt-5.6`, `openai/gpt-6-astra`, `openai/gpt-6.1-sol` and `anthropic/claude-opus-5-5`.
+- Ultrafast has been removed. An old `"ultrafast"` in `models.toml` or in saved model preferences is read as Standard and the file is not rewritten, so `["fast", "ultrafast"]` now declares Fast only.
+- A model you add in Settings starts with **Supports Fast** checked when its name begins with `gpt-` or `claude-`, or when the built-in it is based on declares Fast; existing entries are never changed. If a relay rejects `service_tier` or the Anthropic fast beta, clear **Supports Fast** under the model's **Edit → Advanced** (or delete `supported_speeds` from its `models.toml` entry).
 - Add `max` only to a model's declared `supported_reasoning_levels` when its upstream supports it. This does not automatically change an existing Xhigh preference to Max.
-- Ultrafast availability is model- and account-specific: GPT-6 Astra supports it, GPT-5.6 Sol requires preview access. GPT-6 Sol and GPT-6.1 Sol are not declared as Ultrafast-capable. **Ultra multi-agent mode is not included**, and `ultra` is not a reasoning-effort value.
 
-For an OpenAI Responses model that supports both acceleration tiers, add these fields to its existing `[[models]]` entry:
+To declare both for a model in `models.toml`, add these fields to its existing `[[models]]` entry:
 
 ```toml
-supported_speeds = ["fast", "ultrafast"]
+supported_speeds = ["fast"]
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 ```
 
-In **Tomcat Settings → Models → Edit → Advanced**, **Supported effort levels** and **Supported speeds** accept English or Chinese commas. Typing preserves the raw text; Save trims, removes empty items and duplicates. A gateway declaration is an assertion of support, not an automatic gateway capability probe.
+In **Tomcat Settings → Models → Edit → Advanced**, **Supported effort levels** accepts English or Chinese commas; typing preserves the raw text and Save trims, removes empty items and duplicates. **Supports Fast** is a checkbox that saves `["fast"]` or nothing. A gateway declaration is an assertion of support, not an automatic gateway capability probe.
 
 ### tomcat model - Manage models and keys without hand-editing files
 
@@ -278,10 +281,10 @@ tomcat model list
 tomcat model add claude-opus-gateway \
   --api anthropic-messages \
   --provider anthropic \
-  --model-name claude-opus-4-6 \
+  --model-name claude-opus-5 \
   --base-url https://api.anthropic.com/v1 \
   --reasoning --tools \
-  --thinking-format anthropic
+  --thinking-format anthropic-adaptive
 
 tomcat model key set anthropic
 # or: tomcat model key set anthropic sk-ant-xxxxx
@@ -297,44 +300,56 @@ What these commands do:
 - `tomcat model list` shows whether each model comes from the built-in table or the user catalog, plus whether its API key is already present.
 - `tomcat model default` switches `[llm].default_model` in `tomcat.config.toml`.
 
-**Tomcat Settings → Models** in VS Code uses the same credential rules:
-
-- The key-slot inventory comes only from non-empty, valid `*_API_KEY` entries in `~/.tomcat/assets/.env`. **Refresh** reloads `.env` first and then refreshes each model's `Configured` / `Missing` state; restarting serve is unnecessary.
-- Key slot is the only place to edit the environment-variable name. You can search saved slots or type a new one. Relay suggestions combine the site and API family, for example `FCODEX_OPENAI_API_KEY` and `FCODEX_ANTHROPIC_API_KEY`. Existing models keep their saved `api_key_env` and are not migrated automatically.
-- While entering a new key, the focused field uses password dots; on blur, only that unsaved in-memory draft gets a local prefix/suffix preview. Saving clears the draft. Saved keys expose status only: the backend never returns complete or partial key characters to the Webview.
-- Writing a new value into a configured slot shared by other models requires confirmation with the affected model list. Leaving the API-key field blank safely reuses the slot without rewriting `.env`.
+**Tomcat Settings → Models** in VS Code writes the same files and organizes models by provider:
 
 ```text
-valid *_API_KEY entries in .env ──> Key slot combobox ──> model.api_key_env
-                   Refresh ───────> Configured / Missing
+Tomcat Settings → Models
+  Utility model [deepseek-v4-flash · DeepSeek       v]   ← llm.title_model
+  Providers                          [+ Connect provider]
+  ┌ Fcodex · api.fcodex.com · Key saved           [⋯] ┐   ⋯ = Replace key / Delete
+  │  fcodex/gpt-6.1-sol      OpenAI Responses  Default │
+  │  fcodex/claude-opus-5-5  Anthropic         [Edit]  │
+  │  + Add model                                       │
+  └────────────────────────────────────────────────────┘
+  Also available: DeepSeek · OpenAI · Anthropic · … · Other address…
 ```
+
+- **One card per key slot** (`api_key_env`). A provider gets a card once it has a key or a model you added; each row shows its own protocol. **Replace key** writes a new value into the same slot. **Delete** removes the models you added under that slot, clears a default, utility role or session choice that pointed at them, and deletes the key Tomcat saved; a key supplied by a system environment variable is not deleted and Settings tells you so. Built-in presets remain under "Also available".
+- **+ Connect provider** offers 7 presets (DeepSeek, OpenAI, Anthropic, Kimi, Zhipu, Moonshot, MiMo; address and protocol fixed) or **Other address…**, plus the API key. The model list merges the provider's built-in recommendations, the names returned by its `/models` endpoint (fetched with the key you typed, which is used only for that request), and names you type yourself; entries with the same model name are merged. **+ Add model** on a card reuses the same dialog with the card's key. Cancel writes nothing.
+- **One key for several protocols** (a relay whose single key works on both its OpenAI-compatible and Anthropic endpoints): connect once with **Other address…** and pick a protocol on each checked model. The default is the protocol of the built-in model with the same name, else Anthropic for `claude-*`, else OpenAI Completions. All rows share one card and one key slot named `{SLUG}_API_KEY`, for example `FCODEX_API_KEY`.
+- **Two keys on one address** (for example separate OpenAI and Anthropic groups at the same relay): connect the address again. Settings asks whether to add to the existing card with its saved key, or create another card with a new key, which gets a numbered slot such as `FCODEX_2_API_KEY`. Existing slots are never renamed or migrated.
+- **The first configured model becomes the default.** When no default exists, the first model of a successful connection, or the first row of a card whose key you just filled, is written as `llm.default_model`; an existing default is never replaced, even if two windows save at once. If the current default cannot be used, the dialog pre-checks **Set as default**. A session where you explicitly picked a model keeps it.
+- **Utility model** is `llm.title_model`. It writes session titles, turn titles and command descriptions, defaults to `deepseek-v4-flash`, and can point to any configured model. If it has no key, no longer exists, or is unset, session titles fall back to the conversation model while turn titles and command descriptions are skipped; Settings says so and never picks a replacement for you. Context compaction follows the conversation model unless you set `context.compaction_model`.
+- **Edit** opens a single model: Base URL (required), model name, and **Advanced** (protocol, key slot, thinking format, effort levels, Context, max output tokens, **Supports Fast**, capabilities). For a model Tomcat has no built-in data for, capabilities show "Declared by default, not probed".
+- Keys are stored in `~/.tomcat/assets/.env` (`0600`). The backend never returns complete or partial key characters to the Webview; Settings only shows whether a key is saved or comes from a system environment variable.
 
 **Minimal MiMo Token Plan config** (written by `init` by default):
 
 ```toml
 [[models]]
-id = "mimo-v2.5-pro"
+id = "mimo/mimo-v2.6-pro"
+model_name = "mimo-v2.6-pro"
 api = "openai"                                  # uses OpenAI-compatible /v1/chat/completions
 provider = "mimo"                               # determines MIMO_API_KEY
 base_url = "https://token-plan-cn.xiaomimimo.com"  # host only; the program appends the suffix
 thinking_format = "doubao"
 context_window = 1000000
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
+capabilities = { vision = true, files = false, tools = true, reasoning = true }
 ```
 
 - **Key**: set `MIMO_API_KEY=tp-xxxxx` either in `~/.tomcat/assets/.env` or in the current shell. `tp-xxxxx` (Token Plan) cannot be mixed with usage-based `sk-xxxxx`.
 - **base_url**: enter the **host only**. The program appends `/v1/chat/completions` for you, so **do not** write the full endpoint. Use the host shown on your subscription page (CN / SGP / AMS map to China / Singapore / Europe).
-- **Usage**: switch to it with `/model mimo-v2.5-pro` inside `tomcat code` or `tomcat claw`, or set `[llm].default_model` to it.
-- **Capability boundary**: `mimo-v2.5-pro` is text-only officially (no images or files), so `vision/files=false`; server-side thinking is enabled by default, and this integration uses the Doubao-style `thinking` wire format.
+- **Usage**: switch to it with `/model mimo/mimo-v2.6-pro` inside `tomcat code` or `tomcat claw`, or set `[llm].default_model` to it.
+- **Capability boundary**: `mimo-v2.6-pro` understands images but has no documented PDF input, so `vision=true, files=false`; server-side thinking is enabled by default, and this integration uses the Doubao-style `thinking` wire format. It replaces `mimo-v2.5-pro`, which MiMo retires on 2026-10-21.
 
 ### OpenAI and Gateway Side by Side
 
-If you want to keep the official `gpt-5.4` and also add a gateway-backed `gpt-5.4`, do not reuse the same `id`. The recommended approach is to add another entry in `models.toml`:
+If you want to keep the official `gpt-5.6` and also add a gateway-backed `gpt-5.6`, do not reuse the same `id`. The recommended approach is to add another entry in `models.toml`:
 
 ```toml
 [[models]]
-id = "gpt-5.4_gateway"
-model_name = "gpt-5.4"
+id = "gpt-5.6_gateway"
+model_name = "gpt-5.6"
 api = "openai-responses"
 provider = "openai-gateway"
 base_url = "https://gateway.example.com"
@@ -342,8 +357,8 @@ thinking_format = "openai"
 capabilities = { vision = true, files = true, tools = true, reasoning = true }
 ```
 
-- Switch to the gateway: set `[llm].default_model` to `gpt-5.4_gateway`
-- Switch back to the official endpoint: change it back to `gpt-5.4`
+- Switch to the gateway: set `[llm].default_model` to `gpt-5.6_gateway`
+- Switch back to the official endpoint: change it back to `gpt-5.6`
 - `provider = "openai-gateway"` defaults to the key name `OPENAI_GATEWAY_API_KEY`
 
 ### Legacy Config Migration
@@ -414,10 +429,11 @@ level = "warn"
 file_enabled = true
 
 [llm]
-default_model = "gpt-5.4"
+default_model = "gpt-5.6"
+title_model = "deepseek-v4-flash"   # the utility model; this is its default
 
 [context]
-compaction_model = "gpt-5.4"
+compaction_model = ""   # empty: compaction follows the conversation model
 ...
 ```
 
@@ -453,7 +469,7 @@ tomcat config get log.level
 # warn
 
 tomcat config get llm.default_model
-# gpt-5.4
+# gpt-5.6
 
 tomcat config get llm.proxy
 # (empty or the current proxy address)
@@ -730,7 +746,7 @@ tomcat claw
 Sample banner output:
 
 ```
-tomcat 对话模式 (模型: gpt-5.4)
+tomcat 对话模式 (模型: gpt-5.6)
 输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。
 输入 /help 查看命令列表。
 
@@ -981,7 +997,7 @@ jq '.[0]' /tmp/audit_backup.json
 | `ALL_PROXY` | Optional | Fallback proxy. `HTTPS_PROXY=http://...` is currently preferred; `socks5://` is not the official path for `web_search` |
 | `TOMCAT__LLM__PROXY` | Optional | Proxy used only for LLM requests; overrides config |
 | `TOMCAT__LLM__API_BASE_FALLBACK` | Optional | Backup base URL when the primary API is unreachable |
-| `TOMCAT__LLM__DEFAULT_MODEL` | Optional | Overrides `[llm].default_model`; if unset, tomcat uses the config file or code default `gpt-5.4` |
+| `TOMCAT__LLM__DEFAULT_MODEL` | Optional | Overrides `[llm].default_model`; if unset, tomcat uses the config file. There is no compiled default: until one is configured, new sessions ask you to choose a model |
 
 > `TOMCAT__LLM__*` variables override the matching fields in `tomcat.config.toml`, with `__` used as the nesting separator. The repository and installation packages do **not** inject these variables by default. If your local shell still exports an old model id for a long time, it can diverge from the TOML newly written by `tomcat init`.
 >

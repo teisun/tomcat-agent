@@ -293,3 +293,192 @@ async fn keepalive_bytes_still_trigger_idle_timeout_when_no_events_arrive() {
         other => panic!("expected timeout AppError, got {:?}", other),
     }
 }
+
+const ANTHROPIC_OK: &str = r#"{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+const PREFIX_REJECTION: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"thinking block prefix mismatch; set thinking.block_binding.prefix_mismatch_behavior"}}"#;
+
+fn binding_test_provider(
+    base_url: &str,
+    supported_reasoning_levels: Vec<String>,
+    supported_speeds: Vec<crate::core::llm::Speed>,
+    thinking_enabled: bool,
+) -> AnthropicProvider {
+    let entry = ModelEntry {
+        id: "binding-test".to_string(),
+        model_name: Some("binding-test".to_string()),
+        api: "anthropic-messages".to_string(),
+        provider: "anthropic".to_string(),
+        api_key_env: None,
+        base_url: Some(base_url.to_string()),
+        capabilities: Capabilities {
+            reasoning: true,
+            ..Capabilities::default()
+        },
+        context_window: Some(200_000),
+        context_window_options: Vec::new(),
+        max_output_tokens: Some(32_000),
+        description: None,
+        supported_speeds,
+        thinking_format: Some("anthropic-adaptive".to_string()),
+        supported_reasoning_levels,
+    };
+    let mut config = LlmConfig::default();
+    config.thinking.enabled = thinking_enabled;
+    let runtime = config.runtime();
+    let credential = Credential {
+        provider: "anthropic".to_string(),
+        env_name: "TEST_KEY".to_string(),
+        value: "stub".to_string(),
+    };
+    let mut provider = AnthropicProvider::new(&entry, &runtime, &credential).expect("provider");
+    provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+    provider
+}
+
+fn binding_test_request(speed: Option<crate::core::llm::Speed>) -> ChatRequest {
+    ChatRequest {
+        messages: vec![ChatMessage::user("hello")],
+        model: "binding-test".to_string(),
+        stream: Some(false),
+        speed,
+        thinking_level: Some(crate::core::llm::ThinkingLevel::High),
+        ..Default::default()
+    }
+}
+
+fn beta_header(request: &str) -> Option<&str> {
+    request
+        .lines()
+        .find_map(|line| line.strip_prefix("anthropic-beta: "))
+        .map(str::trim)
+}
+
+#[tokio::test]
+async fn rejected_thinking_prefix_retries_once_with_drop_block_and_is_remembered() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse::json(400, PREFIX_REJECTION),
+        ScriptedHttpResponse::json(200, ANTHROPIC_OK),
+        ScriptedHttpResponse::json(200, ANTHROPIC_OK),
+    ])
+    .await;
+    let provider =
+        binding_test_provider(&server.base_url, vec!["high".to_string()], Vec::new(), true);
+    provider
+        .chat(binding_test_request(None))
+        .await
+        .expect("fallback");
+    provider
+        .chat(binding_test_request(None))
+        .await
+        .expect("remembered");
+
+    let requests = server.request_texts();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].contains("block_binding"));
+    assert_eq!(beta_header(&requests[0]), None);
+    for request in &requests[1..] {
+        assert!(request.contains(r#""block_binding":{"prefix_mismatch_behavior":"drop_block"}"#));
+        assert!(request.contains(r#""display":"summarized""#));
+        assert_eq!(beta_header(request), Some(THINKING_BINDING_BETA));
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_prefix_fallback_returns_original_error_after_one_retry() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse::json(400, PREFIX_REJECTION),
+        ScriptedHttpResponse::json(400, r#"{"error":{"message":"another failure"}}"#),
+    ])
+    .await;
+    let provider =
+        binding_test_provider(&server.base_url, vec!["high".to_string()], Vec::new(), true);
+    let error = provider
+        .chat(binding_test_request(None))
+        .await
+        .expect_err("fallback failure");
+    assert!(
+        error.to_string().contains("prefix_mismatch_behavior"),
+        "{error}"
+    );
+    assert_eq!(server.request_count(), 2);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn prefix_rejection_without_thinking_is_not_retried() {
+    let server =
+        MockHttpServer::start(vec![ScriptedHttpResponse::json(400, PREFIX_REJECTION)]).await;
+    let provider = binding_test_provider(&server.base_url, Vec::new(), Vec::new(), false);
+    provider
+        .chat(binding_test_request(None))
+        .await
+        .expect_err("no thinking means no binding retry");
+    let requests = server.request_texts();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].contains(r#""thinking""#));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn fast_speed_adds_body_field_and_beta_merged_with_binding_beta() {
+    use crate::core::llm::Speed;
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse::json(200, ANTHROPIC_OK),
+        ScriptedHttpResponse::json(400, PREFIX_REJECTION),
+        ScriptedHttpResponse::json(200, ANTHROPIC_OK),
+        ScriptedHttpResponse::json(200, ANTHROPIC_OK),
+    ])
+    .await;
+    let provider = binding_test_provider(
+        &server.base_url,
+        vec!["low".to_string(), "high".to_string()],
+        vec![Speed::Fast],
+        true,
+    );
+    provider
+        .chat(binding_test_request(Some(Speed::Standard)))
+        .await
+        .expect("standard");
+    provider
+        .chat(binding_test_request(Some(Speed::Fast)))
+        .await
+        .expect("fast after binding fallback");
+    provider
+        .chat(binding_test_request(Some(Speed::Fast)))
+        .await
+        .expect("fast remembered binding");
+
+    let requests = server.request_texts();
+    assert!(!requests[0].contains(r#""speed""#));
+    assert_eq!(beta_header(&requests[0]), None);
+    assert!(requests[1].contains(r#""speed":"fast""#));
+    assert_eq!(beta_header(&requests[1]), Some(FAST_MODE_BETA));
+    for request in &requests[2..] {
+        assert!(request.contains(r#""speed":"fast""#));
+        assert_eq!(
+            beta_header(request),
+            Some(format!("{THINKING_BINDING_BETA},{FAST_MODE_BETA}").as_str())
+        );
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn configured_off_sends_lowest_declared_effort() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(200, ANTHROPIC_OK)]).await;
+    let provider = binding_test_provider(
+        &server.base_url,
+        vec!["low".to_string(), "high".to_string(), "max".to_string()],
+        Vec::new(),
+        false,
+    );
+    provider
+        .chat(binding_test_request(None))
+        .await
+        .expect("request");
+    let request = &server.request_texts()[0];
+    assert!(request.contains(r#""effort":"low""#), "{request}");
+    assert!(request.contains(r#""type":"adaptive""#));
+    server.shutdown().await;
+}

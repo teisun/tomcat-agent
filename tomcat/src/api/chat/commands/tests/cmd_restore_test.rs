@@ -294,6 +294,7 @@ fn effective_restore_paths_defaults_to_current_session_changed_paths() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     let session_id = ctx
         .session_runtime
@@ -373,6 +374,7 @@ fn effective_restore_paths_falls_back_to_checkpoint_diff() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     ctx.scope_services.checkpoint_store = Arc::new(DiffSpyStore {
         diff: DiffSpyResult::Paths(vec![PathBuf::from("fallback.txt")]),
@@ -412,6 +414,7 @@ fn effective_restore_paths_warns_when_auto_narrowing_fails() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     ctx.scope_services.checkpoint_store = Arc::new(DiffSpyStore {
         diff: DiffSpyResult::Empty,
@@ -462,6 +465,7 @@ fn other_session_restore_conflicts_detect_overlapping_paths() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
     let first_session_id = ctx
@@ -536,6 +540,7 @@ fn other_session_restore_conflicts_include_other_scopes() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
     let current_session_id = ctx
@@ -622,6 +627,7 @@ fn restore_keeps_other_session_owned_paths_untouched() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
     let session_a = ctx
@@ -717,6 +723,7 @@ fn restore_core_discards_keeps_only_when_reverting_files() {
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
         cfg.llm.api_key_env = Some("TOMCAT_KEEP_CHECKPOINT_KEY".into());
+        cfg.llm.default_model = "gpt-5.6".to_string();
         let ctx = ChatContext::from_config(cfg).unwrap();
         let session = &ctx.session_runtime.session;
         let sid = session.current_session_id().unwrap().unwrap();
@@ -807,6 +814,7 @@ fn restore_core_without_reverting_files_truncates_transcript_only() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     let session = ctx
         .session_runtime
@@ -939,6 +947,7 @@ fn restore_core_without_reverting_files_skips_cross_session_conflict_warnings() 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     let session_a = ctx
         .session_runtime

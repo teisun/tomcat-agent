@@ -621,9 +621,14 @@ pub(crate) fn preload_runtime_env(cfg: &AppConfig) -> Result<(), AppError> {
         return Ok(());
     }
 
+    let preloaded = crate::infra::config::read_env_entries(&env_path)?
+        .into_keys()
+        .filter(|name| std::env::var_os(name).is_none())
+        .collect::<Vec<_>>();
     // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
     dotenvy::from_path(&env_path)
         .map_err(|error| crate::infra::config::env_file_error(&env_path, error))?;
+    crate::core::llm::auth::record_preloaded_env_names(preloaded);
     crate::core::llm::auth::refresh_managed_credentials(&env_path)?;
     Ok(())
 }

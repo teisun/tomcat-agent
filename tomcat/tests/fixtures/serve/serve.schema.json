@@ -837,6 +837,100 @@
         }
       },
       {
+        "description": "Writes every entry or none.",
+        "type": "object",
+        "required": [
+          "models",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ModelEntryInput"
+            }
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "upsert_models"
+            ]
+          }
+        }
+      },
+      {
+        "description": "Lists upstream model names; `apiKey` is used only for this request.",
+        "type": "object",
+        "required": [
+          "api",
+          "baseUrl",
+          "type"
+        ],
+        "properties": {
+          "api": {
+            "type": "string"
+          },
+          "apiKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "apiKeyEnv": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_remote_models"
+            ]
+          }
+        }
+      },
+      {
+        "description": "Deletes the user models of one key slot and the key Tomcat saved for it.",
+        "type": "object",
+        "required": [
+          "keyEnv",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keyEnv": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "remove_provider"
+            ]
+          }
+        }
+      },
+      {
         "type": "object",
         "required": [
           "modelId",
@@ -876,10 +970,38 @@
           "modelId": {
             "type": "string"
           },
+          "onlyIfUnset": {
+            "description": "Write only when no default is configured yet (`set_default_model_if_unset`).",
+            "type": "boolean"
+          },
           "type": {
             "type": "string",
             "enum": [
               "set_default_model"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "modelId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_utility_model"
             ]
           }
         }
@@ -2318,8 +2440,7 @@
         "type": "string",
         "enum": [
           "standard",
-          "fast",
-          "ultrafast"
+          "fast"
         ]
       },
       "UiLanguage": {
@@ -6496,6 +6617,17 @@
       "keyPresent": {
         "type": "boolean"
       },
+      "keySource": {
+        "description": "`null` when no key is available.",
+        "anyOf": [
+          {
+            "$ref": "#/definitions/KeySource"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "maxOutputTokens": {
         "type": [
           "integer",
@@ -6587,6 +6719,14 @@
           }
         }
       },
+      "KeySource": {
+        "description": "Where a provider key comes from. Tomcat can delete only keys it saved itself.",
+        "type": "string",
+        "enum": [
+          "saved",
+          "environment"
+        ]
+      },
       "ModelSource": {
         "type": "string",
         "enum": [
@@ -6598,8 +6738,7 @@
         "type": "string",
         "enum": [
           "standard",
-          "fast",
-          "ultrafast"
+          "fast"
         ]
       }
     }
@@ -6655,7 +6794,8 @@
     "type": "object",
     "required": [
       "defaultModelId",
-      "models"
+      "models",
+      "utilityModelId"
     ],
     "properties": {
       "defaultModelId": {
@@ -6666,6 +6806,17 @@
         "type": "array",
         "items": {
           "$ref": "#/definitions/ModelView"
+        }
+      },
+      "utilityModelId": {
+        "description": "Effective `llm.title_model` (the settings page's utility model); empty when unset.",
+        "type": "string"
+      },
+      "warnings": {
+        "description": "Per-entry catalog diagnostics, such as skipped incomplete user entries.",
+        "type": "array",
+        "items": {
+          "type": "string"
         }
       }
     },
@@ -6694,6 +6845,14 @@
             "type": "boolean"
           }
         }
+      },
+      "KeySource": {
+        "description": "Where a provider key comes from. Tomcat can delete only keys it saved itself.",
+        "type": "string",
+        "enum": [
+          "saved",
+          "environment"
+        ]
       },
       "ModelSource": {
         "type": "string",
@@ -6757,6 +6916,17 @@
           },
           "keyPresent": {
             "type": "boolean"
+          },
+          "keySource": {
+            "description": "`null` when no key is available.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/KeySource"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "maxOutputTokens": {
             "type": [
@@ -6828,8 +6998,7 @@
         "type": "string",
         "enum": [
           "standard",
-          "fast",
-          "ultrafast"
+          "fast"
         ]
       }
     }
@@ -6878,6 +7047,14 @@
           }
         }
       },
+      "KeySource": {
+        "description": "Where a provider key comes from. Tomcat can delete only keys it saved itself.",
+        "type": "string",
+        "enum": [
+          "saved",
+          "environment"
+        ]
+      },
       "ModelSource": {
         "type": "string",
         "enum": [
@@ -6940,6 +7117,17 @@
           },
           "keyPresent": {
             "type": "boolean"
+          },
+          "keySource": {
+            "description": "`null` when no key is available.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/KeySource"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "maxOutputTokens": {
             "type": [
@@ -7011,8 +7199,353 @@
         "type": "string",
         "enum": [
           "standard",
-          "fast",
-          "ultrafast"
+          "fast"
+        ]
+      }
+    }
+  },
+  "upsert_models_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "UpsertModelsResponse",
+    "type": "object",
+    "required": [
+      "models"
+    ],
+    "properties": {
+      "models": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/ModelView"
+        }
+      },
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "definitions": {
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reasoning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tools": {
+            "default": true,
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      },
+      "KeySource": {
+        "description": "Where a provider key comes from. Tomcat can delete only keys it saved itself.",
+        "type": "string",
+        "enum": [
+          "saved",
+          "environment"
+        ]
+      },
+      "ModelSource": {
+        "type": "string",
+        "enum": [
+          "builtin",
+          "user"
+        ]
+      },
+      "ModelView": {
+        "type": "object",
+        "required": [
+          "api",
+          "apiKeyEnv",
+          "capabilities",
+          "id",
+          "keyPresent",
+          "provider",
+          "source"
+        ],
+        "properties": {
+          "api": {
+            "type": "string"
+          },
+          "apiKeyEnv": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "$ref": "#/definitions/Capabilities"
+          },
+          "contextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "contextWindowOptions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "keyPresent": {
+            "type": "boolean"
+          },
+          "keySource": {
+            "description": "`null` when no key is available.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/KeySource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "modelName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "selectedContextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "selectedReasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selectedSpeed": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Speed"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "$ref": "#/definitions/ModelSource"
+          },
+          "supportedReasoningLevels": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supportedSpeeds": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Speed"
+            }
+          },
+          "thinkingFormat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Speed": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast"
+        ]
+      }
+    }
+  },
+  "list_remote_models_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ListRemoteModelsPayload",
+    "type": "object",
+    "required": [
+      "models"
+    ],
+    "properties": {
+      "models": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/RemoteModelView"
+        }
+      }
+    },
+    "definitions": {
+      "RemoteModelView": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "remote_models_failure": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RemoteModelsFailure",
+    "type": "object",
+    "required": [
+      "reason"
+    ],
+    "properties": {
+      "reason": {
+        "$ref": "#/definitions/RemoteModelsFailureReason"
+      },
+      "status": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint16",
+        "minimum": 0.0
+      }
+    },
+    "definitions": {
+      "RemoteModelsFailureReason": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "timeout"
+            ]
+          },
+          {
+            "description": "401/403: the key is wrong or lacks permission.",
+            "type": "string",
+            "enum": [
+              "auth"
+            ]
+          },
+          {
+            "description": "The endpoint does not offer a model list (404/405 and other client errors).",
+            "type": "string",
+            "enum": [
+              "unsupported"
+            ]
+          },
+          {
+            "description": "The address cannot be reached, or the server failed.",
+            "type": "string",
+            "enum": [
+              "network"
+            ]
+          },
+          {
+            "description": "The response is not a `{ data: [{ id }] }` model list.",
+            "type": "string",
+            "enum": [
+              "format"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "remove_provider_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RemoveProviderResponse",
+    "type": "object",
+    "required": [
+      "keyEnv",
+      "keyRemoved",
+      "removedModelIds"
+    ],
+    "properties": {
+      "keyEnv": {
+        "type": "string"
+      },
+      "keyRemoved": {
+        "description": "Whether a key saved by Tomcat was deleted.",
+        "type": "boolean"
+      },
+      "keySource": {
+        "description": "Source of a key that still applies afterwards (an environment variable), else `null`.",
+        "anyOf": [
+          {
+            "$ref": "#/definitions/KeySource"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "removedModelIds": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "definitions": {
+      "KeySource": {
+        "description": "Where a provider key comes from. Tomcat can delete only keys it saved itself.",
+        "type": "string",
+        "enum": [
+          "saved",
+          "environment"
         ]
       }
     }

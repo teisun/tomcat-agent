@@ -12,7 +12,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::llm::{ModelEntryInput, ModelKeyStatus, ModelView, ProviderKeyView};
+use crate::core::llm::remote_models::RemoteModelView;
+use crate::core::llm::{KeySource, ModelEntryInput, ModelKeyStatus, ModelView, ProviderKeyView};
 use crate::infra::events::WireEvent as AgentWireEvent;
 
 /// `prompt` / `follow_up` 附件的逻辑类型。
@@ -217,12 +218,44 @@ pub struct ListModelsPayload {
     pub models: Vec<ModelView>,
     /// Effective default after the config file and environment are merged; empty when unset.
     pub default_model_id: String,
+    /// Effective `llm.title_model` (the settings page's utility model); empty when unset.
+    pub utility_model_id: String,
+    /// Per-entry catalog diagnostics, such as skipped incomplete user entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertModelResponse {
     pub model: ModelView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertModelsResponse {
+    pub models: Vec<ModelView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRemoteModelsPayload {
+    pub models: Vec<RemoteModelView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProviderResponse {
+    pub key_env: String,
+    pub removed_model_ids: Vec<String>,
+    /// Whether a key saved by Tomcat was deleted.
+    pub key_removed: bool,
+    /// Source of a key that still applies afterwards (an environment variable), else `null`.
+    pub key_source: Option<KeySource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -536,6 +569,32 @@ pub enum ServeCommand {
         id: Option<String>,
         model: ModelEntryInput,
     },
+    /// Writes every entry or none.
+    #[serde(rename_all = "camelCase")]
+    UpsertModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        models: Vec<ModelEntryInput>,
+    },
+    /// Lists upstream model names; `apiKey` is used only for this request.
+    #[serde(rename_all = "camelCase")]
+    ListRemoteModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        base_url: String,
+        api: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_key_env: Option<String>,
+    },
+    /// Deletes the user models of one key slot and the key Tomcat saved for it.
+    #[serde(rename_all = "camelCase")]
+    RemoveProvider {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        key_env: String,
+    },
     #[serde(rename_all = "camelCase")]
     RemoveModel {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,6 +603,15 @@ pub enum ServeCommand {
     },
     #[serde(rename_all = "camelCase")]
     SetDefaultModel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        model_id: String,
+        /// Write only when no default is configured yet (`set_default_model_if_unset`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        only_if_unset: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetUtilityModel {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         model_id: String,
@@ -903,9 +971,13 @@ impl ServeCommand {
             | Self::SetContextWindow { id, .. }
             | Self::ListModels { id, .. }
             | Self::UpsertModel { id, .. }
+            | Self::UpsertModels { id, .. }
+            | Self::ListRemoteModels { id, .. }
+            | Self::RemoveProvider { id, .. }
             | Self::RemoveModel { id, .. }
             | Self::SetProviderKey { id, .. }
             | Self::SetDefaultModel { id, .. }
+            | Self::SetUtilityModel { id, .. }
             | Self::ListProviderKeys { id, .. }
             | Self::GetProjectTrust { id, .. }
             | Self::TrustProject { id, .. }
@@ -976,9 +1048,13 @@ impl ServeCommand {
             | Self::SetUiLanguage { .. }
             | Self::ListModels { .. }
             | Self::UpsertModel { .. }
+            | Self::UpsertModels { .. }
+            | Self::ListRemoteModels { .. }
+            | Self::RemoveProvider { .. }
             | Self::RemoveModel { .. }
             | Self::SetProviderKey { .. }
             | Self::SetDefaultModel { .. }
+            | Self::SetUtilityModel { .. }
             | Self::ListProviderKeys { .. }
             | Self::GetProjectTrust { .. }
             | Self::TrustProject { .. }
@@ -1041,9 +1117,13 @@ impl ServeCommand {
             Self::SetContextWindow { .. } => "set_context_window",
             Self::ListModels { .. } => "list_models",
             Self::UpsertModel { .. } => "upsert_model",
+            Self::UpsertModels { .. } => "upsert_models",
+            Self::ListRemoteModels { .. } => "list_remote_models",
+            Self::RemoveProvider { .. } => "remove_provider",
             Self::RemoveModel { .. } => "remove_model",
             Self::SetProviderKey { .. } => "set_provider_key",
             Self::SetDefaultModel { .. } => "set_default_model",
+            Self::SetUtilityModel { .. } => "set_utility_model",
             Self::ListProviderKeys { .. } => "list_provider_keys",
             Self::GetProjectTrust { .. } => "get_project_trust",
             Self::TrustProject { .. } => "trust_project",

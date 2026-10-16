@@ -308,6 +308,47 @@ pub fn clamp_reasoning_level(
     level.clamp_to_supported(&supported)
 }
 
+/// The lowest effort a model declares. Several models cannot disable thinking, so a
+/// configuration that turns thinking off sends this tier instead of omitting it.
+pub fn lowest_supported_reasoning_level(
+    supported_reasoning_levels: &[String],
+) -> Option<ThinkingLevel> {
+    normalize_supported_reasoning_levels(supported_reasoning_levels)
+        .iter()
+        .filter_map(|token| ThinkingLevel::parse(token))
+        .filter(|level| *level != ThinkingLevel::Off)
+        .min()
+}
+
+/// Applies the per-request effort to the configured thinking policy. When the
+/// configuration turns thinking off (`enabled=false` or `level=off`), a model
+/// with declared tiers receives its lowest tier; a model without tiers stays off.
+pub fn thinking_config_for_request(
+    cfg: &ThinkingConfig,
+    requested: Option<ThinkingLevel>,
+    lowest_supported: Option<ThinkingLevel>,
+) -> std::borrow::Cow<'_, ThinkingConfig> {
+    let configured_off =
+        !cfg.enabled || ThinkingLevel::parse(&cfg.level) == Some(ThinkingLevel::Off);
+    if configured_off {
+        if let Some(lowest) = lowest_supported {
+            let mut adjusted = cfg.clone();
+            adjusted.enabled = true;
+            adjusted.level = lowest.as_str().to_string();
+            return std::borrow::Cow::Owned(adjusted);
+        }
+        return std::borrow::Cow::Borrowed(cfg);
+    }
+    match requested {
+        Some(level) => {
+            let mut adjusted = cfg.clone();
+            adjusted.level = level.as_str().to_string();
+            std::borrow::Cow::Owned(adjusted)
+        }
+        None => std::borrow::Cow::Borrowed(cfg),
+    }
+}
+
 /// 把 `ThinkingConfig` + provider 推断出的 `ThinkingFormat` 翻译为具体请求字段。
 ///
 /// 行为：
@@ -390,10 +431,13 @@ pub fn resolve_anthropic_request(
             max_tokens,
         };
     }
+    // Newer Claude models default `display` to omitted, which also hides the progress
+    // text between tool calls; both thinking modes therefore request summaries.
     if matches!(fmt, ThinkingFormat::AnthropicAdaptive) {
         return AnthropicThinkingRequest {
             thinking: Some(serde_json::json!({
                 "type": "adaptive",
+                "display": "summarized",
             })),
             effort: Some(level.as_str().to_string()),
             max_tokens,
@@ -418,6 +462,7 @@ pub fn resolve_anthropic_request(
         thinking: Some(serde_json::json!({
             "type": "enabled",
             "budget_tokens": budget_tokens,
+            "display": "summarized",
         })),
         effort: None,
         max_tokens,

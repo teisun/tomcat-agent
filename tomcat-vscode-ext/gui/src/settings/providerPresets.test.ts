@@ -1,139 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import type { SettingsModelView } from "../../../src/shared/settingsProtocol";
+import { translate } from "../../../src/shared/i18n";
 import {
-  buildProviderPresets,
   findMatchingProviderPreset,
+  findPresetByKeyEnv,
+  humanizeProviderLabel,
+  PROVIDER_PRESETS,
 } from "./providerPresets";
 
-function builtinModel(overrides: Partial<SettingsModelView> = {}): SettingsModelView {
-  return {
-    api: "openai-responses",
-    apiKeyEnv: "OPENAI_API_KEY",
-    baseUrl: "https://api.openai.com",
-    capabilities: {
-      files: true,
-      reasoning: true,
-      tools: true,
-      vision: true,
-      webSearch: false,
-    },
-    contextWindow: 400000,
-    id: "gpt-5.4",
-    keyPresent: false,
-    modelName: "gpt-5.4",
-    provider: "openai",
-    source: "builtin",
-    thinkingFormat: "openai",
-    ...overrides,
-  };
-}
-
 describe("providerPresets", () => {
-  it("groups builtin models by provider and keeps authoritative preset fields", () => {
-    const presets = buildProviderPresets([
-      builtinModel({
-        id: "gpt-5.4",
-        keyPresent: true,
-      }),
-      builtinModel({
-        api: "openai",
-        apiKeyEnv: "DEEPSEEK_API_KEY",
-        baseUrl: "https://api.deepseek.com",
-        capabilities: {
-          files: false,
-          reasoning: true,
-          tools: true,
-          vision: false,
-          webSearch: false,
-        },
-        id: "deepseek-v4-pro",
-        keyPresent: false,
-        modelName: "deepseek-v4-pro",
-        provider: "deepseek",
-        thinkingFormat: "deepseek",
-      }),
-      builtinModel({
-        id: "gpt-5.6",
-        keyPresent: false,
-        modelName: "gpt-5.6",
-      }),
-      {
-        ...builtinModel(),
-        api: "openai",
-        apiKeyEnv: "CHATANYWHERE_API_KEY",
-        baseUrl: "https://api.chatanywhere.tech/v1",
-        id: "chatanywhere/gpt-5.4",
-        keyPresent: false,
-        modelName: "gpt-5.4",
-        provider: "chatanywhere",
-        source: "user",
-      },
+  it("is a static table of seven presets that never depends on the built-in catalog", () => {
+    expect(PROVIDER_PRESETS.map((preset) => [translate("en", preset.labelKey), preset.baseUrl, preset.api, preset.apiKeyEnv])).toEqual([
+      ["DeepSeek", "https://api.deepseek.com", "openai", "DEEPSEEK_API_KEY"],
+      ["OpenAI", "https://api.openai.com/v1", "openai-responses", "OPENAI_API_KEY"],
+      ["Anthropic", "https://api.anthropic.com", "anthropic-messages", "ANTHROPIC_API_KEY"],
+      ["Kimi Code", "https://api.kimi.com/coding/v1", "openai", "KIMI_API_KEY"],
+      ["Zhipu AI", "https://open.bigmodel.cn/api/paas/v4", "openai", "ZHIPU_API_KEY"],
+      ["Moonshot", "https://api.moonshot.cn/v1", "openai", "MOONSHOT_API_KEY"],
+      ["MiMo", "https://token-plan-cn.xiaomimimo.com", "openai", "MIMO_API_KEY"],
     ]);
-
-    expect(presets).toHaveLength(2);
-    expect(presets[0]).toMatchObject({
-      api: "openai-responses",
-      apiKeyEnv: "OPENAI_API_KEY",
-      baseUrl: "https://api.openai.com",
-      keyPresent: true,
-      modelIds: ["gpt-5.4", "gpt-5.6"],
-      provider: "openai",
-      thinkingFormat: "openai",
-    });
-    expect(presets[1]).toMatchObject({
-      api: "openai",
-      apiKeyEnv: "DEEPSEEK_API_KEY",
-      baseUrl: "https://api.deepseek.com",
-      keyPresent: false,
-      modelIds: ["deepseek-v4-pro"],
-      provider: "deepseek",
-      thinkingFormat: "deepseek",
-    });
+    expect(translate("zh-CN", "models.preset.zhipu")).toBe("智谱");
+    expect(findPresetByKeyEnv(" KIMI_API_KEY ")?.provider).toBe("kimi");
+    expect(findPresetByKeyEnv("FCODEX_API_KEY")).toBeNull();
   });
 
-  it("returns an empty list for empty input and matches presets by provider plus route", () => {
-    expect(buildProviderPresets([])).toEqual([]);
-    expect(
-      buildProviderPresets([
-        {
-          ...builtinModel(),
-          id: "openai/gpt-5.4",
-          source: "user",
-        },
-      ]),
-    ).toEqual([]);
+  it("matches a model to a preset by provider plus protocol, tolerating a different literal URL", () => {
+    expect(findMatchingProviderPreset({ api: "openai-responses", baseUrl: "https://api.openai.com", provider: "openai" })?.provider).toBe("openai");
+    expect(findMatchingProviderPreset({ api: "anthropic-messages", baseUrl: "https://api.anthropic.com", provider: "anthropic" })?.provider).toBe("anthropic");
+    expect(findMatchingProviderPreset({ api: "openai", baseUrl: "https://api.chatanywhere.tech/v1", provider: "openai" })).toBeNull();
+  });
 
-    const presets = buildProviderPresets([builtinModel()]);
-    expect(
-      findMatchingProviderPreset(
-        {
-          api: "openai-responses",
-          baseUrl: "https://api.openai.com",
-          provider: "openai",
-        },
-        presets,
-      )?.provider,
-    ).toBe("openai");
-    expect(
-      findMatchingProviderPreset(
-        {
-          api: "openai-responses",
-          baseUrl: "https://gateway.example.test/v1",
-          provider: "openai",
-        },
-        presets,
-      )?.provider,
-    ).toBe("openai");
-    expect(
-      findMatchingProviderPreset(
-        {
-          api: "openai",
-          baseUrl: "https://api.chatanywhere.tech/v1",
-          provider: "openai",
-        },
-        presets,
-      ),
-    ).toBeNull();
+  it("humanizes non-preset provider names for card titles", () => {
+    expect(humanizeProviderLabel("fcodex")).toBe("Fcodex");
+    expect(humanizeProviderLabel("team-gateway")).toBe("Team Gateway");
+    expect(humanizeProviderLabel(" ")).toBe("Custom");
   });
 });

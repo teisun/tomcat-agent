@@ -165,7 +165,7 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       if (!archPattern.test(binaryArchitecture) || !archPattern.test(nativeMachine)) throw new Error(`Not a native ${currentVsCodeTarget()} binary/host: ${binaryArchitecture}; ${nativeMachine}`);
       // Real CLI and Host; only upstream model replies are controlled.
       const responses: ScriptedResponse[] = [];
-      server = await spawnScriptedOpenAiStreamServer(responses);
+      server = await spawnScriptedOpenAiStreamServer(responses, ["deepseek-v4-flash", "deepseek-v4-pro", "claude-opus-5"]);
       fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true });
       const upgrade = options.upgradeFixture ? await seedUpgradeData(options.upgradeFixture, fixture.homePath, server.baseUrl) : undefined;
       if (upgrade) {

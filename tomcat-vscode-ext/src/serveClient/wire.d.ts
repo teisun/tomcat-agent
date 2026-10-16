@@ -56,6 +56,8 @@ export interface IngestAttachmentInput {
 }
 export type InstructionKind = "command" | "skill";
 
+export type KeySource = "saved" | "environment";
+
 export type ListSessionsScope = "live" | "disk";
 
 export type Locale = "en" | "zh-CN";
@@ -90,6 +92,7 @@ export interface ModelView {
   description?: null | string;
   id: string;
   keyPresent: boolean;
+  keySource?: KeySource | null;
   maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;
@@ -106,6 +109,11 @@ export interface NewSessionParams {
   detached?: boolean;
   mode?: ServeSessionMode | null;
 }
+export interface RemoteModelView {
+  id: string;
+}
+export type RemoteModelsFailureReason = "auth" | "format" | "network" | "timeout" | "unsupported";
+
 export interface RetainAttachmentLeaseRef {
   blobSha: string;
   providerSha?: null | string;
@@ -362,7 +370,7 @@ export type SessionFileStatus = "added" | "modified" | "deleted";
 
 export type SetPlanModeAction = "enter" | "exit" | "build";
 
-export type Speed = "standard" | "fast" | "ultrafast";
+export type Speed = "standard" | "fast";
 
 export type ToolDisplay = {
   added?: null | number;
@@ -466,9 +474,14 @@ export interface ListConnectorToolsPayload {
 export interface ListModelsPayload {
   defaultModelId: string;
   models: ModelView[];
+  utilityModelId: string;
+  warnings?: string[];
 }
 export interface ListProviderKeysPayload {
   keys: ProviderKeyView[];
+}
+export interface ListRemoteModelsPayload {
+  models: RemoteModelView[];
 }
 export interface ModelKeyStatus {
   envName: string;
@@ -492,8 +505,19 @@ export interface ProviderKeyView {
   modelIds: string[];
   provider: string;
 }
+export interface RemoteModelsFailure {
+  reason: RemoteModelsFailureReason;
+  status?: null | number;
+}
 export interface RemoveModelResponse {
   modelId: string;
+  warnings?: string[];
+}
+export interface RemoveProviderResponse {
+  keyEnv: string;
+  keyRemoved: boolean;
+  keySource?: KeySource | null;
+  removedModelIds: string[];
   warnings?: string[];
 }
 export interface ResponseFrame {
@@ -513,6 +537,13 @@ export type ServeCommand = {
   planId?: null | string;
   sessionId?: null | string;
   type: "set_plan_mode";
+} | {
+  api: string;
+  apiKey?: null | string;
+  apiKeyEnv?: null | string;
+  baseUrl: string;
+  id?: null | string;
+  type: "list_remote_models";
 } | {
   args: string[];
   auth?: null | string;
@@ -612,6 +643,10 @@ export type ServeCommand = {
   type: "rewind_and_resend";
 } | {
   id?: null | string;
+  keyEnv: string;
+  type: "remove_provider";
+} | {
+  id?: null | string;
   language: UiLanguage;
   type: "set_ui_language";
 } | {
@@ -648,11 +683,20 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   modelId: string;
+  onlyIfUnset?: boolean;
+  type: "set_default_model";
+} | {
+  id?: null | string;
+  modelId: string;
   type: "remove_model";
 } | {
   id?: null | string;
   modelId: string;
-  type: "set_default_model";
+  type: "set_utility_model";
+} | {
+  id?: null | string;
+  models: ModelEntryInput[];
+  type: "upsert_models";
 } | {
   id?: null | string;
   params: RetainAttachmentLeasesParams;
@@ -842,6 +886,10 @@ export interface UpsertModelResponse {
   model: ModelView;
   warnings?: string[];
 }
+export interface UpsertModelsResponse {
+  models: ModelView[];
+  warnings?: string[];
+}
 export type WireEvent = ({
   args: any;
   partialResult: ToolOutput;
@@ -1027,6 +1075,7 @@ export interface WireModelView {
   description?: null | string;
   id: string;
   keyPresent: boolean;
+  keySource?: KeySource | null;
   maxOutputTokens?: null | number;
   modelName?: null | string;
   provider: string;

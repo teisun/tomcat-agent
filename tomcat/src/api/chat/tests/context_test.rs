@@ -219,7 +219,7 @@ fn child_agent_dispatch_runtime_uses_child_main_when_configured_models_are_unkno
         &cfg.llm.files,
         dir.path(),
         "parent-session",
-        "gpt-5.4",
+        "gpt-5.6",
     )
     .expect("main model should still resolve");
 
@@ -228,7 +228,7 @@ fn child_agent_dispatch_runtime_uses_child_main_when_configured_models_are_unkno
         "unknown configured models must fall back to the resolved child main provider"
     );
     assert_eq!(
-        runtime.context_config.compaction_model, "gpt-5.4",
+        runtime.context_config.compaction_model, "gpt-5.6",
         "the compaction model must match its fallback provider, not the unknown global default"
     );
 
@@ -307,7 +307,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
     );
     ctx.global_services
         .model_prefs
-        .set_speed("relay/gpt-sol", crate::core::llm::Speed::Ultrafast)
+        .set_speed("relay/gpt-sol", crate::core::llm::Speed::Standard)
         .unwrap();
     std::fs::write(
         &path,

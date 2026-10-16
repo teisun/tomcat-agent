@@ -63,11 +63,37 @@
 // 3) 列模型（出参带 source/keyPresent，不含明文）
 → { "type": "list_models", "id": "l1" }
 ← { "type": "response", "id": "l1", "payload": { "models": [
-      { "id": "gpt-5.4", "api": "openai-responses", "provider": "openai",
+      { "id": "gpt-5.6", "api": "openai-responses", "provider": "openai",
         "source": "builtin", "apiKeyEnv": "OPENAI_API_KEY", "keyPresent": false },
-      { "id": "my-glm", "source": "user", "apiKeyEnv": "ZHIPU_API_KEY", "keyPresent": true }
+      { "id": "my-glm", "source": "user", "apiKeyEnv": "ZHIPU_API_KEY", "keyPresent": true,
+        "keySource": "saved" }
     ] } }
 ```
+
+### 4.5 按供应商连接（2026-10 增补）
+
+设置页改为「一把 Key 一张卡片」后新增的命令。每条都有对应的 `initialize.capabilities` 名，旧 CLI 没有时宿主隐藏或禁用对应入口，不猜测行为。
+
+```text
+连接对话框                                宿主 SettingsPanel                serve
+填地址 + 临时 Key ──拉取型号──> list_remote_models ──> GET {base}/v1/models（不写盘）
+勾选型号 + 保存 ──────────────> upsert_models（全写或全不写）
+                               set_provider_key（Key 只入不出）
+                               set_default_model { onlyIfUnset:true }（还没有默认时才写）
+                               list_models 刷新卡片
+```
+
+| 命令 `type` / capability | 字段 | 响应 payload | 说人话 |
+| --- | --- | --- | --- |
+| `list_remote_models` | `baseUrl`, `api`, `apiKey?`, `apiKeyEnv?` | `{ models:[{id}] }`；失败为 error 帧并带 `{ reason, status? }`，`reason` ∈ `auth` / `unsupported` / `network` / `timeout` / `format` | 用这把 Key 问上游有哪些型号；`apiKey` 只用于本次请求，不落盘、不进日志。OpenAI 两协议发 Bearer，Anthropic 发 `x-api-key` + `anthropic-version`。在 FIFO 之外执行，慢上游不堵后续命令。 |
+| `upsert_models` | `models: ModelEntryInput[]` | `{ models: ModelView[], warnings? }` | 一次存多条型号，任一条校验失败则一条都不写。 |
+| `remove_provider` | `keyEnv` | `{ keyEnv, removedModelIds, keyRemoved, keySource, warnings? }` | 删除一张卡片：该 Key 槽下的用户型号、指向它们的默认/实用/会话选择，以及 Tomcat 保存的 Key。来自环境变量的 Key 删不掉，`keySource:"environment"` 报告给界面。 |
+| `set_default_model` + `set_default_model_if_unset` | 既有 `modelId`，新增 `onlyIfUnset?` | `{ modelId, written, envOverride, warnings }` | `onlyIfUnset:true` 时只在 `llm.default_model` 为空时写入，`written` 告诉宿主是否真的写了。 |
+| `set_utility_model` | `modelId` | `{ modelId, envOverride, warnings }` | 写 `llm.title_model`（标题、摘要等辅助任务用的实用模型）。 |
+
+`list_models` 同步增加 `utilityModelId`（当前生效的 `llm.title_model`）与 `warnings`（被跳过的不完整用户条目等诊断）；`ModelView` 增加 `keySource: "saved" | "environment" | null`，卡片据此决定「删除」能否删掉 Key。`llm.default_model` 不再有编译期默认值：从未配置时 `defaultModelId` 为空串，第一个保存的型号经 `onlyIfUnset` 成为默认。
+
+> 跨层回归：`tomcat/tests/serve_robustness_tests.rs` 的 `serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart` 用真实 serve 覆盖一把 Key 走两种协议、同地址第二把 Key 单独成卡、首个默认只写一次、重启后删除卡片清理引用。
 
 ---
 

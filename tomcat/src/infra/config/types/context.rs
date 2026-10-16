@@ -25,7 +25,7 @@ pub struct ContextConfig {
     /// 受保护的最近 user turn 数（不参与 Layer 1 placeholder 压缩），默认 5。
     #[serde(default = "default_keep_recent_turns")]
     pub keep_recent_turns: usize,
-    /// Compaction 摘要使用的 LLM 模型（可配低成本模型），默认 `gpt-5.2`。
+    /// Compaction 摘要使用的 LLM 模型；默认空串 = 跟随会话当前模型，再回落默认模型。
     #[serde(default = "default_compaction_model")]
     pub compaction_model: String,
     /// Layer 0 落盘阈值：单条 tool_result 字符数上限，默认 50,000。
@@ -61,7 +61,7 @@ fn default_keep_recent_turns() -> usize {
 }
 
 fn default_compaction_model() -> String {
-    "gpt-5.2".to_string()
+    String::new()
 }
 
 fn default_layer0_single_result_max_chars() -> usize {

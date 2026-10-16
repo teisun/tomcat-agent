@@ -568,6 +568,14 @@ pub fn captured_non_title_requests(server: &ScriptedOpenAiServer) -> Vec<String>
         .collect()
 }
 
+pub fn captured_title_requests(server: &ScriptedOpenAiServer) -> Vec<String> {
+    server
+        .captured_requests()
+        .into_iter()
+        .filter(|request| request_is_session_title_request(request))
+        .collect()
+}
+
 fn request_is_session_title_request(request: &str) -> bool {
     let Some((_, body)) = request.split_once("\r\n\r\n") else {
         return false;

@@ -65,9 +65,11 @@ fn run_init_writes_default_model_without_legacy_llm_connection_fields() {
             config_text.contains("[context]"),
             "generated config should persist context overrides, got:\n{config_text}"
         );
-        assert!(
-            config_text.contains("compaction_model = \"gpt-5.4\""),
-            "generated config should align compaction model with init default model, got:\n{config_text}"
+        let written: AppConfig = toml::from_str(&config_text).expect("parse generated config");
+        assert!(!written.llm.default_model.is_empty(), "init records the chosen default model");
+        assert_eq!(
+            written.context.compaction_model, "",
+            "init must not pin compaction to the chosen default, got:\n{config_text}"
         );
     });
 }
@@ -95,7 +97,7 @@ fn run_init_migrates_legacy_llm_connection_fields_in_existing_config() {
         let models_path = crate::core::llm::ModelCatalog::default_user_path(&AppConfig::default())
             .expect("models path");
         let models_text = std::fs::read_to_string(models_path).expect("models.toml text");
-        assert!(models_text.contains("id = \"gpt-5.2\""));
+        assert!(models_text.contains("id = \"gpt-5.6\""));
     });
 }
 
@@ -662,7 +664,10 @@ fn apply_model_choice_updates_provider_and_key_env() {
 
     let choice = apply_model_choice(&mut cfg, &entry);
     assert_eq!(cfg.llm.default_model, "deepseek-v4-pro");
-    assert_eq!(cfg.context.compaction_model, "deepseek-v4-pro");
+    assert_eq!(
+        cfg.context.compaction_model, "",
+        "compaction follows the session model instead of pinning the init choice"
+    );
     assert_eq!(choice.env_name, "DEEPSEEK_API_KEY");
 }
 
@@ -766,7 +771,7 @@ fn apply_model_choice_skips_default_openai_base_url() {
     };
 
     apply_model_choice(&mut cfg, &entry);
-    assert_eq!(cfg.context.compaction_model, "gpt-5.4");
+    assert_eq!(cfg.context.compaction_model, "");
     assert_eq!(cfg.llm.default_model, "gpt-5.4");
 }
 

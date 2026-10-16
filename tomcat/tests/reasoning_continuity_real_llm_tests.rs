@@ -413,7 +413,7 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
             continuity.had_tool_call,
             "DeepSeek tool turn continuity 应标记 had_tool_call=true"
         );
-        assert_eq!(reasoning_continuation.source_provider, "deepseek");
+        assert_eq!(reasoning_continuation.source_provider, "openai");
         assert_eq!(reasoning_continuation.source_api, "chat_completions");
         assert!(
             reasoning_continuation.opaque_payload["reasoning_content"]
@@ -519,7 +519,7 @@ async fn mimo_chat_roundtrip_replays_reasoning_content() -> Result<(), Box<dyn s
             !continuity.had_tool_call,
             "MiMo reasoning-only turn without tools must not claim a tool call"
         );
-        assert_eq!(reasoning_continuation.source_provider, "mimo");
+        assert_eq!(reasoning_continuation.source_provider, "openai");
         assert_eq!(reasoning_continuation.source_api, "chat_completions");
         assert!(
             reasoning_continuation.opaque_payload["reasoning_content"]

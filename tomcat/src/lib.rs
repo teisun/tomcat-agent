@@ -58,6 +58,6 @@ pub use infra::{
     LlmConfig, LlmError, LlmErrorStage, LogConfig, PluginLifecycleAuditEntry, PreflightConfig,
     PrimitiveAuditEntry, PrimitiveConfig, ResumeHydrationMode, SecurityConfig, ServeConfig,
     ServeTransport, SessionConfig, ToolAuditEntry, TracingAuditRecorder, WorkspaceConfig, BRAND_ID,
-    CLI_NAME, DEFAULT_CONFIG_FILENAME, DEFAULT_CONFIG_PATH, DEFAULT_LLM_MODEL, DEFAULT_WORK_DIR,
+    CLI_NAME, DEFAULT_CONFIG_FILENAME, DEFAULT_CONFIG_PATH, DEFAULT_TITLE_MODEL, DEFAULT_WORK_DIR,
     ENV_PREFIX, INTERNAL_STABLE_ID, PRODUCT_NAME, QUICKJS_MODULES_PATH_ENV,
 };

@@ -1,10 +1,11 @@
 //! `thinking_policy` 单测：覆盖 ThinkingLevel/Format 解析与 resolve_request_fields 映射表。
 
 use super::super::thinking_policy::{
-    clamp_reasoning_level, default_thinking_format_for_api, resolve_anthropic_request,
-    resolve_request_fields, should_persist_thinking, should_strip_on_resend,
-    strip_anthropic_thinking_blocks, thinking_format_for_api, thinking_format_for_model,
-    ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+    clamp_reasoning_level, default_thinking_format_for_api, lowest_supported_reasoning_level,
+    resolve_anthropic_request, resolve_request_fields, should_persist_thinking,
+    should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_config_for_request,
+    thinking_format_for_api, thinking_format_for_model, ThinkingFormat, ThinkingLevel,
+    ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -240,6 +241,7 @@ fn anthropic_request_maps_to_enabled_budget_tokens() {
     assert_eq!(r.max_tokens, 128_000);
     assert_eq!(r.thinking.as_ref().unwrap()["type"], "enabled");
     assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 4096);
+    assert_eq!(r.thinking.as_ref().unwrap()["display"], "summarized");
     assert!(r.effort.is_none());
 }
 
@@ -291,7 +293,70 @@ fn anthropic_adaptive_request_emits_effort() {
     );
     assert_eq!(r.max_tokens, 4096);
     assert_eq!(r.thinking.as_ref().unwrap()["type"], "adaptive");
+    assert_eq!(r.thinking.as_ref().unwrap()["display"], "summarized");
     assert_eq!(r.effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn configured_off_sends_lowest_declared_level_and_stays_off_without_levels() {
+    let levels = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lowest_supported_reasoning_level(&levels(&["max", "low", "high"])),
+        Some(ThinkingLevel::Low)
+    );
+    assert_eq!(
+        lowest_supported_reasoning_level(&levels(&["off", "high"])),
+        Some(ThinkingLevel::High)
+    );
+    assert_eq!(lowest_supported_reasoning_level(&[]), None);
+
+    for cfg in [cfg_with(false, "high"), cfg_with(true, "off")] {
+        let lowest =
+            thinking_config_for_request(&cfg, Some(ThinkingLevel::Max), Some(ThinkingLevel::Low));
+        assert!(lowest.enabled);
+        assert_eq!(lowest.level, "low");
+        assert_eq!(
+            resolve_request_fields(&lowest, ThinkingFormat::Openai)
+                .reasoning_effort
+                .as_deref(),
+            Some("low")
+        );
+        let anthropic = resolve_anthropic_request(
+            &lowest,
+            ThinkingFormat::AnthropicAdaptive,
+            None,
+            Some(128_000),
+        );
+        assert_eq!(anthropic.effort.as_deref(), Some("low"));
+        assert_eq!(
+            anthropic.thinking.as_ref().unwrap()["display"],
+            "summarized"
+        );
+
+        let undeclared = thinking_config_for_request(&cfg, Some(ThinkingLevel::Max), None);
+        assert_eq!(
+            resolve_request_fields(&undeclared, ThinkingFormat::Openai),
+            ThinkingRequestFields::default()
+        );
+        assert!(resolve_anthropic_request(
+            &undeclared,
+            ThinkingFormat::AnthropicAdaptive,
+            None,
+            Some(128_000),
+        )
+        .thinking
+        .is_none());
+    }
+
+    let medium = cfg_with(true, "medium");
+    let requested =
+        thinking_config_for_request(&medium, Some(ThinkingLevel::Max), Some(ThinkingLevel::Low));
+    assert_eq!(requested.level, "max");
 }
 
 #[test]

@@ -7,10 +7,25 @@ import {
   findConfiguredRelayByBaseUrl,
 } from "./relayDerive";
 
+function relayModel(overrides: Partial<SettingsModelView>): SettingsModelView {
+  return {
+    api: "openai",
+    apiKeyEnv: "FCODEX_API_KEY",
+    baseUrl: "https://fcodex.example.com/v1",
+    capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
+    id: "fcodex/gpt-6.1-sol",
+    keyPresent: true,
+    modelName: "gpt-6.1-sol",
+    provider: "fcodex",
+    source: "user",
+    ...overrides,
+  };
+}
+
 describe("relayDerive", () => {
   it("derives stable slugs from common relay hosts", () => {
     expect(deriveRelayFields("api.chatanywhere.tech/v1", "gpt-5.4")).toMatchObject({
-      apiKeyEnv: "CHATANYWHERE_OPENAI_API_KEY",
+      apiKeyEnv: "CHATANYWHERE_API_KEY",
       host: "api.chatanywhere.tech",
       id: "chatanywhere/gpt-5.4",
       provider: "chatanywhere",
@@ -20,13 +35,13 @@ describe("relayDerive", () => {
     expect(
       deriveRelayFields("https://open.bigmodel.cn/api/paas/v4", "glm-5.2"),
     ).toMatchObject({
-      apiKeyEnv: "BIGMODEL_OPENAI_API_KEY",
+      apiKeyEnv: "BIGMODEL_API_KEY",
       id: "bigmodel/glm-5.2",
       provider: "bigmodel",
     });
 
     expect(deriveRelayFields("https://foo.com.cn/v1", "kimi-k2")).toMatchObject({
-      apiKeyEnv: "FOO_OPENAI_API_KEY",
+      apiKeyEnv: "FOO_API_KEY",
       id: "foo/kimi-k2",
       provider: "foo",
     });
@@ -34,13 +49,13 @@ describe("relayDerive", () => {
 
   it("handles ports, IPs, localhost, IDNs, and parse failures without throwing", () => {
     expect(deriveRelayFields("http://localhost:11434/v1", "qwen3")).toMatchObject({
-      apiKeyEnv: "LOCALHOST_OPENAI_API_KEY",
+      apiKeyEnv: "LOCALHOST_API_KEY",
       id: "localhost/qwen3",
       provider: "localhost",
     });
 
     expect(deriveRelayFields("http://127.0.0.1:4000/v1", "gpt-oss")).toMatchObject({
-      apiKeyEnv: "127001_OPENAI_API_KEY",
+      apiKeyEnv: "127001_API_KEY",
       id: "127001/gpt-oss",
       provider: "127001",
     });
@@ -51,7 +66,7 @@ describe("relayDerive", () => {
     expect(idn.id.endsWith("/glm")).toBe(true);
 
     expect(deriveRelayFields("::::", "gpt-5.4")).toMatchObject({
-      apiKeyEnv: "CUSTOM_OPENAI_API_KEY",
+      apiKeyEnv: "CUSTOM_API_KEY",
       id: "custom/gpt-5.4",
       provider: "custom",
     });
@@ -64,35 +79,32 @@ describe("relayDerive", () => {
     });
   });
 
-  it("builds protocol-aware env names directly from relay slugs", () => {
-    expect(envNameForRelaySlug("chatanywhere")).toBe("CHATANYWHERE_OPENAI_API_KEY");
-    expect(envNameForRelaySlug("local_llm")).toBe("LOCAL_LLM_OPENAI_API_KEY");
-    expect(envNameForRelaySlug("fcodex", "openai-responses")).toBe(
-      "FCODEX_OPENAI_API_KEY",
-    );
-    expect(envNameForRelaySlug("fcodex", "anthropic-messages")).toBe(
-      "FCODEX_ANTHROPIC_API_KEY",
-    );
+  it("names one slot per key, independent of protocol, and numbers taken names", () => {
+    expect(envNameForRelaySlug("chatanywhere")).toBe("CHATANYWHERE_API_KEY");
+    expect(envNameForRelaySlug("local_llm")).toBe("LOCAL_LLM_API_KEY");
+    expect(envNameForRelaySlug("fcodex", ["FCODEX_API_KEY"])).toBe("FCODEX_2_API_KEY");
+    expect(envNameForRelaySlug("fcodex", ["FCODEX_API_KEY", "FCODEX_2_API_KEY"])).toBe("FCODEX_3_API_KEY");
+    expect(envNameForRelaySlug("openai", ["OPENAI_API_KEY"])).toBe("OPENAI_2_API_KEY");
+    // Legacy per-protocol slots are left alone and do not block the new name.
+    expect(envNameForRelaySlug("fcodex", ["FCODEX_OPENAI_API_KEY", "FCODEX_ANTHROPIC_API_KEY"])).toBe("FCODEX_API_KEY");
+    expect(deriveRelayFields("https://api.openai.com/v1", "gpt-x", ["OPENAI_API_KEY"]).apiKeyEnv).toBe("OPENAI_2_API_KEY");
   });
 
-  it("reuses explicitly configured relay credentials by exact normalized endpoint", () => {
-    const configured: SettingsModelView = {
-      api: "openai",
-      apiKeyEnv: "TEAM_GATEWAY_KEY",
-      baseUrl: "https://gateway.example.test/v1",
-      capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
-      id: "team/gpt-5.6",
-      keyPresent: true,
-      modelName: "gpt-5.6",
-      provider: "team-gateway",
-      source: "user",
-    };
+  it("returns every key slot at the same endpoint instead of silently inheriting the first", () => {
+    const models = [
+      relayModel({ apiKeyEnv: "FCODEX_OPENAI_API_KEY" }),
+      relayModel({ api: "anthropic-messages", apiKeyEnv: "FCODEX_ANTHROPIC_API_KEY", baseUrl: "https://FCODEX.example.com/v1/", id: "fcodex/claude-opus-5-5" }),
+      relayModel({ apiKeyEnv: "FCODEX_OPENAI_API_KEY", id: "fcodex/gpt-5.5" }),
+      relayModel({ apiKeyEnv: "OTHER_API_KEY", baseUrl: "https://other.example.com/v1", id: "other/gpt" }),
+      relayModel({ apiKeyEnv: "DEEPSEEK_API_KEY", baseUrl: "https://api.deepseek.com", id: "deepseek-v4-pro", source: "builtin" }),
+    ];
 
-    expect(
-      findConfiguredRelayByBaseUrl([configured], "https://gateway.example.test/v1/"),
-    ).toBe(configured);
-    expect(
-      findConfiguredRelayByBaseUrl([configured], "https://other.example.test/v1"),
-    ).toBeNull();
+    expect(findConfiguredRelayByBaseUrl(models, "https://fcodex.example.com/v1")).toEqual([
+      "FCODEX_OPENAI_API_KEY",
+      "FCODEX_ANTHROPIC_API_KEY",
+    ]);
+    expect(findConfiguredRelayByBaseUrl(models, "https://api.deepseek.com/")).toEqual(["DEEPSEEK_API_KEY"]);
+    expect(findConfiguredRelayByBaseUrl(models, "https://nowhere.example.com")).toEqual([]);
+    expect(findConfiguredRelayByBaseUrl(models, "")).toEqual([]);
   });
 });

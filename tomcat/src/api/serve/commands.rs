@@ -50,11 +50,12 @@ use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 use super::control;
 use super::types::{
     AttachmentMode, CacheThumbnailInput, ConnectorScope, IngestAttachmentInput,
-    IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, ListSessionsScope,
-    OutFrame, RemoveModelResponse, ResponseFrame, ServeAttachment, ServeAttachmentKind,
-    ServeCommand, ServeContentSegment, ServeContextRefKind, ServeContextReference,
-    ServeMessageParams, ServeSessionMode, SetConnectorToolEnabledResponse, SetPlanModeAction,
-    SetProviderKeyResponse, UpsertModelResponse,
+    IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload,
+    ListRemoteModelsPayload, ListSessionsScope, OutFrame, RemoveModelResponse,
+    RemoveProviderResponse, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
+    ServeContentSegment, ServeContextRefKind, ServeContextReference, ServeMessageParams,
+    ServeSessionMode, SetConnectorToolEnabledResponse, SetPlanModeAction, SetProviderKeyResponse,
+    UpsertModelResponse, UpsertModelsResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -1422,6 +1423,13 @@ pub(crate) async fn handle_command(
             let catalog = resolve_model_catalog_snapshot(&state)?;
             let models = list_model_views_with_prefs(catalog.as_ref(), &state.shared_model_prefs);
             let default_model_id = config.llm.default_model.trim().to_string();
+            let utility_model_id = config
+                .llm
+                .title_model
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
@@ -1429,6 +1437,8 @@ pub(crate) async fn handle_command(
                     serde_json::to_value(ListModelsPayload {
                         models,
                         default_model_id,
+                        utility_model_id,
+                        warnings: catalog.diagnostics().to_vec(),
                     })
                     .map_err(|error| {
                         AppError::Config(crate::infra::i18n::tr(
@@ -1470,6 +1480,119 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
+        ServeCommand::UpsertModels { id, models } => {
+            let result = match crate::core::llm::upsert_user_models(&state.cfg, models) {
+                Ok(result) => result,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let mut warnings = result.warnings;
+            if let Err(error) = refresh_all_model_catalogs(&state) {
+                warnings.push(render_error_message(&error));
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(
+                    serde_json::to_value(UpsertModelsResponse {
+                        models: result.models,
+                        warnings,
+                    })
+                    .map_err(|error| {
+                        AppError::Config(crate::infra::i18n::tr(
+                            "serve.serializeFailed",
+                            &[("name", "upsert_models"), ("detail", &error.to_string())],
+                        ))
+                    })?,
+                ),
+            )))?;
+        }
+        ServeCommand::ListRemoteModels {
+            id,
+            base_url,
+            api,
+            api_key,
+            api_key_env,
+        } => {
+            // Runs off the FIFO worker: an upstream that takes the full timeout must not
+            // hold back prompts and other commands queued behind it.
+            let runtime = state.cfg.llm.runtime();
+            let session_id = state.registry.active_session_id();
+            tokio::spawn(async move {
+                let request = crate::core::llm::remote_models::RemoteModelsRequest {
+                    base_url,
+                    api,
+                    api_key,
+                    api_key_env,
+                };
+                let frame = match crate::core::llm::remote_models::list_remote_models(
+                    &runtime, request,
+                )
+                .await
+                {
+                    Ok(models) => ResponseFrame::ok(
+                        id,
+                        session_id,
+                        serde_json::to_value(ListRemoteModelsPayload { models }).ok(),
+                    ),
+                    Err(failure) => ResponseFrame::error_with_payload(
+                        id,
+                        session_id,
+                        failure.message(),
+                        serde_json::to_value(&failure).unwrap_or_default(),
+                    ),
+                };
+                if let Err(error) = state.writer.send(OutFrame::Response(frame)) {
+                    tracing::warn!(error = %error, "list_remote_models response could not be sent");
+                }
+            });
+        }
+        ServeCommand::RemoveProvider { id, key_env } => {
+            let result =
+                match crate::core::llm::remove_provider(&state.cfg, &state.config_path, &key_env) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        send_error(
+                            &state,
+                            id,
+                            state.registry.active_session_id(),
+                            render_error_message(&error),
+                        )?;
+                        return Ok(());
+                    }
+                };
+            let warnings: Vec<String> = refresh_all_model_catalogs(&state)
+                .err()
+                .map(|error| render_error_message(&error))
+                .into_iter()
+                .collect();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(
+                    serde_json::to_value(RemoveProviderResponse {
+                        key_env: key_env.trim().to_string(),
+                        removed_model_ids: result.removed_model_ids,
+                        key_removed: result.key_removed,
+                        key_source: result.key_source,
+                        warnings,
+                    })
+                    .map_err(|error| {
+                        AppError::Config(crate::infra::i18n::tr(
+                            "serve.serializeFailed",
+                            &[("name", "remove_provider"), ("detail", &error.to_string())],
+                        ))
+                    })?,
+                ),
+            )))?;
+        }
         ServeCommand::RemoveModel { id, model_id } => {
             let config_path = &state.config_path;
             if let Err(error) =
@@ -1505,9 +1628,18 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
-        ServeCommand::SetDefaultModel { id, model_id } => {
+        ServeCommand::SetDefaultModel {
+            id,
+            model_id,
+            only_if_unset,
+        } => {
             let config_path = &state.config_path;
-            crate::core::llm::set_default_model(&state.cfg, config_path, &model_id)?;
+            let written = crate::core::llm::set_default_model(
+                &state.cfg,
+                config_path,
+                &model_id,
+                only_if_unset,
+            )?;
             // A failed runtime refresh must not disguise a successful disk write.
             let warnings: Vec<String> = refresh_all_model_catalogs(&state)
                 .err()
@@ -1519,7 +1651,25 @@ pub(crate) async fn handle_command(
                 state.registry.active_session_id(),
                 Some(serde_json::json!({
                     "modelId": model_id,
+                    "written": written,
                     "envOverride": std::env::var_os("TOMCAT__LLM__DEFAULT_MODEL").is_some(),
+                    "warnings": warnings,
+                })),
+            )))?;
+        }
+        ServeCommand::SetUtilityModel { id, model_id } => {
+            crate::core::llm::set_utility_model(&state.cfg, &state.config_path, &model_id)?;
+            let warnings: Vec<String> = refresh_all_model_catalogs(&state)
+                .err()
+                .map(|error| render_error_message(&error))
+                .into_iter()
+                .collect();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(serde_json::json!({
+                    "modelId": model_id,
+                    "envOverride": std::env::var_os("TOMCAT__LLM__TITLE_MODEL").is_some(),
                     "warnings": warnings,
                 })),
             )))?;

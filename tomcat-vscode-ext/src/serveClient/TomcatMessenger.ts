@@ -27,13 +27,16 @@ import type {
   ListConnectorToolsPayload,
   ListModelsPayload,
   ListProviderKeysPayload,
+  ListRemoteModelsPayload,
   ProjectTrustPayload,
   ModelEntryInput,
   RemoveModelResponse,
+  RemoveProviderResponse,
   SetConnectorToolEnabledResponse,
   SetProviderKeyResponse,
   SetPlanModeAction,
   UpsertModelResponse,
+  UpsertModelsResponse,
 } from "./wire";
 
 import type { Speed } from "../shared/modelSpeed";
@@ -57,6 +60,14 @@ export interface TomcatMessengerOptions {
 }
 
 export interface SetDefaultModelResponse {
+  envOverride: boolean;
+  modelId: string;
+  warnings: string[];
+  /** False when `onlyIfUnset` found a default already on disk. */
+  written?: boolean;
+}
+
+export interface SetUtilityModelResponse {
   envOverride: boolean;
   modelId: string;
   warnings: string[];
@@ -458,6 +469,35 @@ export class TomcatMessenger {
     ) as Promise<TypedResponseFrame<UpsertModelResponse>>;
   }
 
+  sendUpsertModels(
+    models: ModelEntryInput[],
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<UpsertModelsResponse>> {
+    return this.request({ models, type: "upsert_models" }, timeoutMs) as Promise<TypedResponseFrame<UpsertModelsResponse>>;
+  }
+
+  /** A failed fetch resolves with `success: false` and a `RemoteModelsFailure` payload. */
+  sendListRemoteModels(
+    input: { api: string; apiKey?: string; apiKeyEnv?: string; baseUrl: string },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<ListRemoteModelsPayload>> {
+    return this.request({ ...input, type: "list_remote_models" }, timeoutMs) as Promise<TypedResponseFrame<ListRemoteModelsPayload>>;
+  }
+
+  sendRemoveProvider(
+    keyEnv: string,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<RemoveProviderResponse>> {
+    return this.request({ keyEnv, type: "remove_provider" }, timeoutMs) as Promise<TypedResponseFrame<RemoveProviderResponse>>;
+  }
+
+  sendSetUtilityModel(
+    modelId: string,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<SetUtilityModelResponse>> {
+    return this.request({ modelId, type: "set_utility_model" }, timeoutMs) as Promise<TypedResponseFrame<SetUtilityModelResponse>>;
+  }
+
   sendListConnectors(
     context: { workspaceRoot?: string | null },
     timeoutMs = this.timeoutMs(),
@@ -556,11 +596,13 @@ export class TomcatMessenger {
 
   sendSetDefaultModel(
     modelId: string,
+    options: { onlyIfUnset?: boolean } = {},
     timeoutMs = this.timeoutMs(),
   ): Promise<TypedResponseFrame<SetDefaultModelResponse>> {
     return this.request(
       {
         modelId,
+        ...(options.onlyIfUnset ? { onlyIfUnset: true } : {}),
         type: "set_default_model",
       },
       timeoutMs,

@@ -103,17 +103,19 @@ describe("serve fixture resource ownership", () => {
     const server = await spawnScriptedOpenAiStreamServer([{ parts: [sseDone()] }]);
     const prompts = ["Generate a short chat title from the user's first message.", "Generate a short title summarizing this AI assistant thinking block and its tool usage."];
     try {
-      for (const prompt of prompts) {
-        const response = await fetch(`${server.baseUrl}${endpoint}`, { method: "POST", body: JSON.stringify({ stream: false, messages: [{ role: "user", content: prompt }] }) });
+      for (const [prompt, stream] of prompts.flatMap(prompt => [[prompt, false], [prompt, true]] as const)) {
+        const response = await fetch(`${server.baseUrl}${endpoint}`, { method: "POST", body: JSON.stringify({ model: "utility", stream, messages: [{ role: "user", content: prompt }] }) });
         expect(response.status).toBe(200);
         const body = await response.json();
         expect(endpoint === "/v1/responses" ? body.output[0].content[0].text : body.choices[0].message.content).toBe("Generated title");
       }
-      // The same text in an ordinary streamed turn must not be mistaken for a utility call.
-      const agent = await fetch(`${server.baseUrl}${endpoint}`, { method: "POST", body: JSON.stringify({ stream: true, messages: [{ role: "user", content: prompts[1] }] }) });
+      // The same text in an ordinary agent turn (which always carries tools) must not be mistaken for a utility call.
+      const agent = await fetch(`${server.baseUrl}${endpoint}`, { method: "POST", body: JSON.stringify({ stream: true, tools: [{ type: "function", name: "read" }], messages: [{ role: "user", content: prompts[1] }] }) });
       expect(await agent.text()).toBe(sseDone().body);
-      expect(server.capturedRequests()).toHaveLength(3);
+      expect(server.capturedRequests()).toHaveLength(5);
       expect(server.capturedNonTitleRequests()).toHaveLength(1);
+      const { utilityRequests } = await (await fetch(`${server.baseUrl}/_test/request-count`)).json();
+      expect(utilityRequests).toEqual([false, false, true, true].map(turnSummary => ({ model: "utility", turnSummary })));
     } finally { await server.close(); }
   });
 
@@ -143,7 +145,7 @@ describe("serve fixture resource ownership", () => {
     request.end(JSON.stringify({ stream: true, messages: [] }));
     try {
       await vi.waitFor(() => expect(server.capturedRequests()).toHaveLength(1));
-      expect(await (await fetch(`${server.baseUrl}/_test/request-count`)).json()).toEqual({ count: 1 });
+      expect(await (await fetch(`${server.baseUrl}/_test/request-count`)).json()).toEqual({ count: 1, modelListAuthorizations: [], utilityRequests: [] });
       expect(server.capturedRequests()).toHaveLength(1);
       const started = Date.now();
       await server.close();

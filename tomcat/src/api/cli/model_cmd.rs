@@ -159,7 +159,7 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
         },
         ModelSub::Default { model } => {
             let path = config_file_path()?;
-            set_default_model(cfg, &path, &model)?;
+            set_default_model(cfg, &path, &model, false)?;
             println!("{}", tr("cli.model.default", &[("id", model.trim())]));
         }
     }

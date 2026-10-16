@@ -2,16 +2,18 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  SettingsCapabilities,
   SettingsHostFrame,
   SettingsIntent,
   SettingsModelView,
-  SettingsProviderKeyView,
   SettingsStateSnapshot,
   VsCodeApiLike,
 } from "../../../src/shared/settingsProtocol";
 import { SettingsApp } from "./SettingsApp";
 import { LocaleProvider } from "../i18n/LocaleProvider";
 import { translate } from "../../../src/shared/i18n";
+
+const en = (key: Parameters<typeof translate>[1], args?: Record<string, string | number>) => translate("en", key, args);
 
 function builtinModel(
   overrides: Partial<SettingsModelView> = {},
@@ -38,17 +40,41 @@ function builtinModel(
   };
 }
 
-function providerKey(
-  overrides: Partial<SettingsProviderKeyView>,
-): SettingsProviderKeyView {
-  return {
-    envName: "OPENAI_API_KEY",
-    keyPresent: false,
-    modelIds: ["gpt-5.4"],
-    provider: "openai",
+function deepseek(id: string, overrides: Partial<SettingsModelView> = {}): SettingsModelView {
+  return builtinModel({
+    api: "openai",
+    apiKeyEnv: "DEEPSEEK_API_KEY",
+    baseUrl: "https://api.deepseek.com",
+    id,
+    modelName: id,
+    provider: "deepseek",
+    thinkingFormat: "deepseek",
     ...overrides,
-  };
+  });
 }
+
+function relayModel(name: string, overrides: Partial<SettingsModelView> = {}): SettingsModelView {
+  return builtinModel({
+    apiKeyEnv: "FCODEX_API_KEY",
+    baseUrl: "https://api.fcodex.com",
+    id: `fcodex/${name}`,
+    keyPresent: true,
+    keySource: "saved",
+    modelName: name,
+    provider: "fcodex",
+    source: "user",
+    ...overrides,
+  });
+}
+
+const CONNECT_CAPABILITIES: Partial<SettingsCapabilities> = {
+  listRemoteModels: true,
+  removeProvider: true,
+  setDefaultModel: true,
+  setDefaultModelIfUnset: true,
+  setUtilityModel: true,
+  upsertModels: true,
+};
 
 function mount() {
   const postMessage = vi.fn();
@@ -106,17 +132,25 @@ function readyState(
   };
 }
 
-function openAddModelDialog() {
-  fireEvent.click(screen.getByRole("button", { name: /add model/i }));
-  return screen.getByRole("dialog");
+function connectState(overrides: Partial<SettingsStateSnapshot> = {}): SettingsStateSnapshot {
+  return readyState({
+    ...overrides,
+    capabilities: { ...readyState().capabilities, ...CONNECT_CAPABILITIES, ...overrides.capabilities },
+  });
 }
 
-function getPasswordInput(scope: HTMLElement): HTMLInputElement {
-  const input = scope.querySelector('input[type="password"]');
-  if (!(input instanceof HTMLInputElement)) {
-    throw new Error("Expected one password input in scope.");
-  }
-  return input;
+function sent<T extends SettingsIntent["type"]>(postMessage: ReturnType<typeof vi.fn>, type: T): Array<SettingsIntent & { type: T }> {
+  return postMessage.mock.calls
+    .map(([message]) => message as SettingsIntent)
+    .filter((message): message is SettingsIntent & { type: T } => message.type === type);
+}
+
+function input(testId: string): HTMLInputElement {
+  return screen.getByTestId(testId) as HTMLInputElement;
+}
+
+function protocolOf(modelId: string): string | null | undefined {
+  return screen.getByTestId(`settings-model-row-${modelId}`).querySelector(".tc-settings-card__protocol")?.textContent;
 }
 
 describe("SettingsApp", () => {
@@ -124,97 +158,597 @@ describe("SettingsApp", () => {
     mount();
     await emitState(readyState({ ready: false, extensionVersion: "0.1.89", serverVersion: null, expectedCliVersion: "0.1.73", error: "broken config" }));
     expect(screen.getByTestId("settings-version-footer").textContent).toContain("0.1.89");
-    expect(screen.getByTestId("settings-version-footer").textContent).toContain(translate("en", "settings.waitingForConnection"));
-    expect(screen.queryByText(translate("en", "models.versionMissing"))).toBeNull();
-    expect(screen.queryByText(translate("en", "models.unavailableHint"))).toBeNull();
+    expect(screen.getByTestId("settings-version-footer").textContent).toContain(en("settings.waitingForConnection"));
+    expect(screen.queryByText(en("models.versionMissing"))).toBeNull();
+    expect(screen.queryByText(en("models.unavailableHint"))).toBeNull();
     expect(screen.getByText("broken config")).toBeTruthy();
   });
 
-  it.each([
-    { mode: "default missing its key", keyPresent: false, defaultModelId: "gpt-5.4", checked: true },
-    { mode: "default unset", keyPresent: true, defaultModelId: "", checked: true },
-    { mode: "default ready", keyPresent: true, defaultModelId: "gpt-5.4", checked: false },
-    { mode: "legacy CLI", keyPresent: false, defaultModelId: undefined, checked: false },
-  ])("pre-checks Set default when adding with $mode and retains drafts on a failed save", async ({ mode, keyPresent, defaultModelId, checked }) => {
+  it("posts one ready handshake for the requested route", () => {
     const { postMessage } = mount();
-    const legacy = mode === "legacy CLI";
-    const initial = readyState({ models: [builtinModel({ keyPresent })], defaultModelId,
-      capabilities: { ...readyState().capabilities, setDefaultModel: !legacy },
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage.mock.calls[0][0]).toMatchObject({ data: { route: "models" }, type: "settings.ready" });
+  });
+
+  describe("provider cards", () => {
+    it("shows only the connected provider and folds key-less built-ins into the connectable list", async () => {
+      mount();
+      await emitState(connectState({
+        defaultModelId: "deepseek-v4-pro",
+        models: [
+          deepseek("deepseek-v4-pro", { keyPresent: true, keySource: "saved" }),
+          deepseek("deepseek-v4-flash", { keyPresent: true, keySource: "saved" }),
+          builtinModel(),
+          builtinModel({ api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", id: "claude-opus-5", modelName: "claude-opus-5", provider: "anthropic" }),
+        ],
+        utilityModelId: "deepseek-v4-flash",
+      }));
+
+      expect(screen.queryAllByTestId(/^settings-card-[A-Z0-9_]+$/u).map((card) => card.dataset.testid)).toEqual(["settings-card-DEEPSEEK_API_KEY"]);
+      expect(screen.queryByText("claude-opus-5")).toBeNull();
+      const card = screen.getByTestId("settings-card-DEEPSEEK_API_KEY");
+      expect(within(card).getByText("DeepSeek")).toBeTruthy();
+      expect(within(card).getByText("api.deepseek.com")).toBeTruthy();
+      expect(screen.getByTestId("settings-card-key-DEEPSEEK_API_KEY").textContent).toBe(en("models.card.keySaved"));
+      const pro = screen.getByTestId("settings-model-row-deepseek-v4-pro");
+      expect(protocolOf("deepseek-v4-pro")).toBe(en("term.api.openai"));
+      expect(within(pro).getByTestId("settings-default-deepseek-v4-pro")).toBeTruthy();
+      expect(within(screen.getByTestId("settings-model-row-deepseek-v4-flash")).getByTestId("settings-utility-deepseek-v4-flash")).toBeTruthy();
+      expect(within(pro).queryByTestId("settings-delete-deepseek-v4-pro")).toBeNull();
+
+      const connectable = screen.getByTestId("settings-connectable");
+      expect(within(connectable).queryAllByRole("button").map((button) => button.dataset.testid)).toEqual([
+        "settings-connectable-openai",
+        "settings-connectable-anthropic",
+        "settings-connectable-kimi",
+        "settings-connectable-zhipu",
+        "settings-connectable-moonshot",
+        "settings-connectable-mimo",
+        "settings-connectable-other",
+      ]);
     });
-    await emitState(initial);
-    const dialog = openAddModelDialog();
-    const checkbox = within(dialog).queryByRole("checkbox", { name: translate("en", "models.setAsDefault") }) as HTMLInputElement | null;
-    if (legacy) expect(checkbox).toBeNull();
-    else expect(checkbox?.checked).toBe(checked);
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), { target: { value: "draft-model" } });
-    fireEvent.change(getPasswordInput(dialog), { target: { value: "fixture-secret" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    const request = postMessage.mock.calls.at(-1)![0];
-    expect(request.data.setAsDefault === true).toBe(checked);
-    expect(screen.getByRole("dialog")).toBe(dialog);
-    await emitState({ ...initial, error: "default denied", modelSaveReceipt: { requestId: request.messageId, success: false } });
-    expect(getPasswordInput(dialog).value).toBe("fixture-secret");
-    expect(within(dialog).getByRole("textbox", { name: /model name/i })).toHaveProperty("value", "draft-model");
-    expect(within(dialog).getByRole("status").textContent).toContain("default denied");
-    // A successful acknowledgement, rather than clicking Save, closes the form.
-    await emitState({ ...initial, modelSaveReceipt: { requestId: request.messageId, success: true } });
-    expect(screen.queryByRole("dialog")).toBeNull();
+
+    it("keeps one card for a single-key relay and shows each row's own protocol", async () => {
+      mount();
+      await emitState(connectState({
+        models: [
+          relayModel("gpt-6.1-sol"),
+          relayModel("claude-opus-5-5", { api: "anthropic-messages" }),
+        ],
+      }));
+      const card = screen.getByTestId("settings-card-FCODEX_API_KEY");
+      expect(within(card).getByText("Fcodex")).toBeTruthy();
+      expect(protocolOf("fcodex/gpt-6.1-sol")).toBe(en("term.api.responses"));
+      expect(protocolOf("fcodex/claude-opus-5-5")).toBe(en("term.api.anthropic"));
+      expect(screen.getByTestId("settings-delete-fcodex/gpt-6.1-sol")).toBeTruthy();
+    });
+
+    it("marks the default, offers Set default only on other connected rows, and hides default controls on a legacy CLI", async () => {
+      const { postMessage } = mount();
+      const state = connectState({
+        defaultModelId: "gpt-5.4",
+        models: [
+          builtinModel({ keyPresent: true }),
+          builtinModel({ id: "gpt-5.2", keyPresent: true, modelName: "gpt-5.2" }),
+          relayModel("gpt-5.5", { keyPresent: false }),
+        ],
+      });
+      await emitState(state);
+      expect(screen.queryAllByTestId(/^settings-default-/u).map((chip) => chip.dataset.testid)).toEqual(["settings-default-gpt-5.4"]);
+      expect(screen.queryAllByTestId(/^settings-make-default-/u).map((button) => button.dataset.testid)).toEqual(["settings-make-default-gpt-5.2"]);
+      fireEvent.click(screen.getByTestId("settings-make-default-gpt-5.2"));
+      expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ data: { modelId: "gpt-5.2" }, type: "setDefaultModel" }));
+
+      await emitState(readyState({ defaultModelId: "gpt-5.4", models: [builtinModel({ keyPresent: true })] }));
+      expect(screen.queryByTestId("settings-default-gpt-5.4")).toBeNull();
+      expect(screen.queryByTestId("settings-make-default-gpt-5.4")).toBeNull();
+    });
+
+    it("fills a missing key inline and asks for the card's first model as the first default", async () => {
+      const { postMessage } = mount();
+      await emitState(connectState({
+        defaultModelId: "",
+        models: [relayModel("gpt-5.5", { keyPresent: false, keySource: null }), relayModel("gpt-5.4", { keyPresent: false, keySource: null })],
+      }));
+      expect(screen.getByTestId("settings-card-key-FCODEX_API_KEY").textContent).toBe(en("models.card.keyMissing"));
+      expect(screen.queryByTestId("settings-make-default-fcodex/gpt-5.5")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("settings-card-fill-key-FCODEX_API_KEY"));
+      fireEvent.click(screen.getByRole("button", { name: en("common.cancel") }));
+      expect(sent(postMessage, "setProviderKey")).toHaveLength(0);
+
+      fireEvent.click(screen.getByTestId("settings-card-fill-key-FCODEX_API_KEY"));
+      const keyInput = input("settings-card-key-input-FCODEX_API_KEY");
+      expect(keyInput.type).toBe("password");
+      fireEvent.change(keyInput, { target: { value: "relay-secret" } });
+      fireEvent.click(screen.getByTestId("settings-card-key-save-FCODEX_API_KEY"));
+      expect(sent(postMessage, "setProviderKey").map((message) => message.data)).toEqual([
+        { defaultModelId: "fcodex/gpt-5.5", envName: "FCODEX_API_KEY", value: "relay-secret" },
+      ]);
+      expect(screen.queryByTestId("settings-card-key-input-FCODEX_API_KEY")).toBeNull();
+    });
+
+    it("replaces a card's key and removes a card only after confirming the listed models", async () => {
+      const { postMessage } = mount();
+      await emitState(connectState({
+        models: [
+          relayModel("gpt-6.1-sol"),
+          relayModel("claude-opus-5-5", { api: "anthropic-messages" }),
+          builtinModel({ api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", id: "claude-opus-5", keyPresent: true, keySource: "environment", modelName: "claude-opus-5", provider: "anthropic" }),
+        ],
+      }));
+
+      fireEvent.click(screen.getByTestId("settings-card-menu-FCODEX_API_KEY"));
+      fireEvent.click(screen.getByTestId("settings-card-replace-key-FCODEX_API_KEY"));
+      const replace = screen.getByTestId("settings-replace-key-dialog");
+      expect(within(replace).getByText("fcodex/gpt-6.1-sol")).toBeTruthy();
+      expect(within(replace).getByText("fcodex/claude-opus-5-5")).toBeTruthy();
+      fireEvent.change(input("settings-replace-key-input"), { target: { value: "new-relay-secret" } });
+      fireEvent.click(screen.getByTestId("settings-replace-key-save"));
+      expect(sent(postMessage, "setProviderKey").map((message) => message.data)).toEqual([
+        { envName: "FCODEX_API_KEY", value: "new-relay-secret" },
+      ]);
+
+      fireEvent.click(screen.getByTestId("settings-card-menu-FCODEX_API_KEY"));
+      fireEvent.click(screen.getByTestId("settings-card-remove-FCODEX_API_KEY"));
+      let confirmation = screen.getByTestId("settings-remove-provider-confirmation");
+      expect(within(confirmation).getByText(en("models.removeProvider.title", { name: "Fcodex" }))).toBeTruthy();
+      expect(within(confirmation).getByText("fcodex/gpt-6.1-sol")).toBeTruthy();
+      expect(within(confirmation).getByText("fcodex/claude-opus-5-5")).toBeTruthy();
+      fireEvent.click(within(confirmation).getByRole("button", { name: en("common.cancel") }));
+      expect(sent(postMessage, "removeProvider")).toHaveLength(0);
+
+      fireEvent.click(screen.getByTestId("settings-card-menu-FCODEX_API_KEY"));
+      fireEvent.click(screen.getByTestId("settings-card-remove-FCODEX_API_KEY"));
+      confirmation = screen.getByTestId("settings-remove-provider-confirmation");
+      fireEvent.click(screen.getByTestId("settings-remove-provider-confirm"));
+      expect(sent(postMessage, "removeProvider").map((message) => message.data)).toEqual([{ keyEnv: "FCODEX_API_KEY" }]);
+      expect(screen.queryByTestId("settings-remove-provider-confirmation")).toBeNull();
+
+      expect(screen.getByTestId("settings-card-key-ANTHROPIC_API_KEY").textContent)
+        .toBe(en("models.card.keyEnv", { name: "ANTHROPIC_API_KEY" }));
+      fireEvent.click(screen.getByTestId("settings-card-menu-ANTHROPIC_API_KEY"));
+      expect(input("settings-card-remove-ANTHROPIC_API_KEY").disabled).toBe(true);
+      expect(screen.getByText(en("models.removeProvider.envKey", { name: "ANTHROPIC_API_KEY" }))).toBeTruthy();
+    });
+
+    it("disables provider removal and connection on a CLI without the new commands", async () => {
+      mount();
+      await emitState(readyState({ models: [relayModel("gpt-6.1-sol")] }));
+      expect((screen.getByTestId("settings-connect-provider") as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId("settings-connect-unsupported").textContent).toBe(en("models.connect.unsupported"));
+      expect(screen.queryByTestId("settings-card-add-model-FCODEX_API_KEY")).toBeNull();
+      fireEvent.click(screen.getByTestId("settings-card-menu-FCODEX_API_KEY"));
+      expect(input("settings-card-remove-FCODEX_API_KEY").disabled).toBe(true);
+      expect(screen.getByText(en("models.removeProvider.unsupported"))).toBeTruthy();
+    });
+
+    it("confirms a single model deletion, ignores a delayed receipt, and shows the real outcome", async () => {
+      const { postMessage } = mount();
+      const userModel = relayModel("remove-me");
+      const state = connectState({ models: [relayModel("keep-me"), userModel] });
+      await emitState(state);
+      postMessage.mockClear();
+
+      fireEvent.click(screen.getByTestId("settings-delete-fcodex/remove-me"));
+      const confirmation = screen.getByRole("alertdialog");
+      expect(within(confirmation).getByText(en("models.deleteQuestion", { name: "fcodex/remove-me" }))).toBeTruthy();
+      expect(postMessage).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("settings-delete-model-confirm"));
+      expect(sent(postMessage, "removeModel").map((message) => message.data)).toEqual([{ modelId: "fcodex/remove-me" }]);
+      expect(screen.getByTestId("settings-delete-fcodex/remove-me").textContent).toContain(en("models.deleting", { name: "fcodex/remove-me" }));
+
+      await emitState({ ...state, modelRemovalReceipt: { modelId: "fcodex/other", success: true, warnings: [] } });
+      expect(screen.getByTestId("settings-delete-fcodex/remove-me").textContent).toContain(en("models.deleting", { name: "fcodex/remove-me" }));
+
+      await emitState({
+        ...state,
+        modelRemovalReceipt: { modelId: "fcodex/remove-me", success: true, warnings: ["A later catalog refresh is still required."] },
+        models: [relayModel("keep-me")],
+        status: "Model removed with warnings.",
+        warnings: ["A later catalog refresh is still required."],
+      });
+      expect(screen.queryByTestId("settings-model-row-fcodex/remove-me")).toBeNull();
+      expect(screen.getByText("Model removed with warnings.")).toBeTruthy();
+      expect(screen.getByText("A later catalog refresh is still required.")).toBeTruthy();
+    });
   });
 
-  it("marks the default in either group, offers Set default only on other ready rows, and omits the checkbox when editing", async () => {
-    const { postMessage } = mount();
-    const deepseek = builtinModel({ id: "deepseek-v4-pro", modelName: "deepseek-v4-pro", provider: "deepseek", apiKeyEnv: "DEEPSEEK_API_KEY", keyPresent: true });
-    const state = readyState({ capabilities: { ...readyState().capabilities, setDefaultModel: true }, defaultModelId: "gpt-5.4",
-      models: [builtinModel(), builtinModel({ id: "gpt-5.2", modelName: "gpt-5.2" }), deepseek] });
-    await emitState(state);
-    expect(screen.getByTestId("settings-default-gpt-5.4").textContent).toBe(translate("en", "models.default"));
-    expect(screen.queryAllByTestId(/^settings-default-/u)).toHaveLength(1);
-    expect(screen.queryAllByTestId(/^settings-make-default-/u).map((button) => button.dataset.testid)).toEqual(["settings-make-default-deepseek-v4-pro"]);
-    fireEvent.click(screen.getByTestId("settings-make-default-deepseek-v4-pro"));
-    expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: "setDefaultModel", data: { modelId: "deepseek-v4-pro" } }));
-    expect(postMessage.mock.calls.some(([message]) => message.type === "upsertModel")).toBe(false);
+  describe("connect provider dialog", () => {
+    it("connects a preset with its bundled models locked in and names the first default", async () => {
+      const { postMessage } = mount();
+      const state = connectState({
+        defaultModelId: "",
+        models: [deepseek("deepseek-v4-pro"), deepseek("deepseek-v4-flash")],
+      });
+      await emitState(state);
+      fireEvent.click(screen.getByTestId("settings-connectable-deepseek"));
+      const dialog = screen.getByTestId("settings-connect-dialog");
+      expect((within(dialog).getByTestId("settings-connect-preset") as HTMLSelectElement).value).toBe("deepseek");
+      expect(input("settings-connect-address").readOnly).toBe(true);
+      expect(input("settings-connect-address").value).toBe("https://api.deepseek.com");
+      const bundled = input("settings-connect-model-deepseek-v4-pro");
+      expect(bundled.checked).toBe(true);
+      expect(bundled.disabled).toBe(true);
+      expect(bundled.closest("label")?.title).toBe(en("models.connect.included"));
+      expect(within(dialog).queryAllByTestId(/^settings-connect-protocol-/u)).toHaveLength(0);
+      expect(within(dialog).queryByTestId("settings-connect-default-hint")).toBeNull();
 
-    await emitState({ ...state, defaultModelId: "deepseek-v4-pro" });
-    expect(screen.getByTestId("settings-default-deepseek-v4-pro")).toBeTruthy();
-    expect(screen.queryAllByTestId(/^settings-make-default-/u)).toHaveLength(0);
-    fireEvent.click(screen.getByTestId("settings-edit-deepseek-v4-pro"));
-    expect(within(screen.getByRole("dialog")).queryByRole("checkbox", { name: translate("en", "models.setAsDefault") })).toBeNull();
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+      expect(within(dialog).getByText(en("models.connect.validate.keyRequired"))).toBeTruthy();
+      expect(sent(postMessage, "upsertModels")).toHaveLength(0);
+
+      fireEvent.change(input("settings-connect-api-key"), { target: { value: "deepseek-secret" } });
+      expect(screen.getByTestId("settings-connect-default-hint").textContent)
+        .toBe(en("models.connect.defaultAfterSave", { name: "deepseek-v4-pro" }));
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "claude-x" } });
+      fireEvent.click(screen.getByTestId("settings-connect-manual-add"));
+      expect(input("settings-connect-model-claude-x").checked).toBe(true);
+      expect(within(dialog).queryByTestId("settings-connect-protocol-claude-x")).toBeNull();
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+
+      const [request] = sent(postMessage, "upsertModels");
+      expect(request.data.providerKey).toEqual({ envName: "DEEPSEEK_API_KEY", value: "deepseek-secret" });
+      expect(request.data.defaultModelId).toBe("deepseek-v4-pro");
+      expect(request.data.setAsDefault).toBeUndefined();
+      expect(request.data.models).toEqual([expect.objectContaining({
+        api: "openai",
+        apiKeyEnv: "DEEPSEEK_API_KEY",
+        baseUrl: "https://api.deepseek.com",
+        contextWindow: null,
+        id: "deepseek/claude-x",
+        maxOutputTokens: null,
+        modelName: "claude-x",
+        provider: "deepseek",
+        supportedSpeeds: ["fast"],
+        thinkingFormat: "deepseek",
+      })]);
+      expect(sent(postMessage, "setProviderKey")).toHaveLength(0);
+
+      await emitState({ ...state, error: "key denied", modelSaveReceipt: { requestId: request.messageId, success: false } });
+      expect(screen.getByTestId("settings-connect-dialog")).toBe(dialog);
+      expect(input("settings-connect-api-key").value).toBe("deepseek-secret");
+      expect(within(dialog).getByRole("status").textContent).toContain("key denied");
+      await emitState({ ...state, modelSaveReceipt: { requestId: request.messageId, success: true } });
+      expect(screen.queryByTestId("settings-connect-dialog")).toBeNull();
+    });
+
+    it("lets a single-key relay mix protocols per model in one connection", async () => {
+      const { postMessage } = mount();
+      const state = connectState({
+        defaultModelId: "",
+        models: [
+          builtinModel({ id: "openai/gpt-6.1-sol", modelName: "gpt-6.1-sol", supportedSpeeds: ["fast"] }),
+          builtinModel({ api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", id: "anthropic/claude-opus-5-5", modelName: "claude-opus-5-5", provider: "anthropic", thinkingFormat: "anthropic-adaptive" }),
+        ],
+      });
+      await emitState(state);
+      fireEvent.click(screen.getByTestId("settings-connectable-other"));
+      fireEvent.change(input("settings-connect-address"), { target: { value: "api.fcodex.com" } });
+      fireEvent.change(input("settings-connect-api-key"), { target: { value: "relay-secret" } });
+      fireEvent.click(screen.getByTestId("settings-connect-fetch"));
+
+      const [fetch] = sent(postMessage, "listRemoteModels");
+      expect(fetch.data).toEqual({ api: "openai", apiKey: "relay-secret", baseUrl: "https://api.fcodex.com" });
+      expect(screen.getByTestId("settings-connect-fetch").textContent).toBe(en("models.connect.fetching"));
+      await emitState({ ...state, remoteModelsReceipt: { models: ["gpt-6.1-sol", "claude-opus-5-5", "my-relay-model", "deepseek-chat"], requestId: fetch.messageId } });
+
+      for (const name of ["gpt-6.1-sol", "claude-opus-5-5", "my-relay-model", "deepseek-chat"]) {
+        expect(input(`settings-connect-model-${name}`).checked).toBe(false);
+      }
+      expect(screen.queryAllByTestId(/^settings-connect-protocol-/u)).toHaveLength(0);
+      for (const name of ["gpt-6.1-sol", "claude-opus-5-5", "my-relay-model"]) {
+        fireEvent.click(input(`settings-connect-model-${name}`));
+      }
+      expect((screen.getByTestId("settings-connect-protocol-gpt-6.1-sol") as HTMLSelectElement).value).toBe("openai-responses");
+      expect((screen.getByTestId("settings-connect-protocol-claude-opus-5-5") as HTMLSelectElement).value).toBe("anthropic-messages");
+      expect((screen.getByTestId("settings-connect-protocol-my-relay-model") as HTMLSelectElement).value).toBe("openai");
+      expect(screen.getByTestId("settings-connect-default-hint").textContent)
+        .toBe(en("models.connect.defaultAfterSave", { name: "fcodex/gpt-6.1-sol" }));
+
+      fireEvent.change(screen.getByTestId("settings-connect-search"), { target: { value: "claude" } });
+      expect(screen.queryByTestId("settings-connect-model-gpt-6.1-sol")).toBeNull();
+      fireEvent.change(screen.getByTestId("settings-connect-search"), { target: { value: "" } });
+
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+      const [request] = sent(postMessage, "upsertModels");
+      expect(request.data.providerKey).toEqual({ envName: "FCODEX_API_KEY", value: "relay-secret" });
+      expect(request.data.models.map(({ api, apiKeyEnv, id, supportedSpeeds }) => ({ api, apiKeyEnv, id, supportedSpeeds }))).toEqual([
+        { api: "openai-responses", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/gpt-6.1-sol", supportedSpeeds: ["fast"] },
+        { api: "anthropic-messages", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/claude-opus-5-5", supportedSpeeds: ["fast"] },
+        { api: "openai", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/my-relay-model", supportedSpeeds: null },
+      ]);
+      expect(request.data.models[1]).toMatchObject({ capabilities: { files: true }, thinkingFormat: "anthropic-adaptive" });
+      expect(request.data.models[2]).toMatchObject({
+        capabilities: { files: true, reasoning: true, tools: true, vision: true, webSearch: false },
+        contextWindow: null,
+        maxOutputTokens: null,
+        thinkingFormat: "openai",
+      });
+    });
+
+    it("asks whether a known address reuses the saved key or creates a second card", async () => {
+      const { postMessage } = mount();
+      const state = connectState({ defaultModelId: "fcodex/gpt-6.1-sol", models: [relayModel("gpt-6.1-sol")] });
+      await emitState(state);
+      fireEvent.click(screen.getByTestId("settings-connectable-other"));
+      fireEvent.change(input("settings-connect-address"), { target: { value: "https://api.fcodex.com/" } });
+      expect(input("settings-connect-same-FCODEX_API_KEY").checked).toBe(true);
+      expect(screen.queryByTestId("settings-connect-api-key")).toBeNull();
+      expect(input("settings-connect-model-gpt-6.1-sol").disabled).toBe(true);
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "claude-opus-5-5" } });
+      fireEvent.click(screen.getByTestId("settings-connect-manual-add"));
+      expect((screen.getByTestId("settings-connect-protocol-claude-opus-5-5") as HTMLSelectElement).value).toBe("anthropic-messages");
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+
+      const [reuse] = sent(postMessage, "upsertModels");
+      expect(reuse.data.providerKey).toBeUndefined();
+      expect(reuse.data.defaultModelId).toBeUndefined();
+      expect(reuse.data.models.map((model) => [model.id, model.apiKeyEnv])).toEqual([["fcodex/claude-opus-5-5", "FCODEX_API_KEY"]]);
+      await emitState({ ...state, error: "write failed", modelSaveReceipt: { requestId: reuse.messageId, success: false } });
+
+      fireEvent.click(screen.getByTestId("settings-connect-same-new"));
+      expect(screen.getByTestId("settings-connect-same-new").closest("label")?.textContent)
+        .toBe(en("models.connect.useNewKey", { name: "Fcodex 2" }));
+      fireEvent.change(input("settings-connect-api-key"), { target: { value: "second-secret" } });
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+      const [, second] = sent(postMessage, "upsertModels");
+      expect(second.data.providerKey).toEqual({ envName: "FCODEX_2_API_KEY", value: "second-secret" });
+      expect(second.data.models.map((model) => model.apiKeyEnv)).toEqual(["FCODEX_2_API_KEY"]);
+    });
+
+    it("keeps manual entry usable after a failed fetch and rejects duplicate names", async () => {
+      const { postMessage } = mount();
+      const state = connectState({ models: [] });
+      await emitState(state);
+      fireEvent.click(screen.getByTestId("settings-connectable-other"));
+      fireEvent.click(screen.getByTestId("settings-connect-fetch"));
+      expect(screen.getByText(en("models.validate.baseRequired"))).toBeTruthy();
+      expect(sent(postMessage, "listRemoteModels")).toHaveLength(0);
+
+      fireEvent.change(input("settings-connect-address"), { target: { value: "https://user:pw@relay.example.com" } });
+      fireEvent.click(screen.getByTestId("settings-connect-fetch"));
+      expect(screen.getByText(en("models.validate.baseCredentials"))).toBeTruthy();
+
+      fireEvent.change(input("settings-connect-address"), { target: { value: "http://localhost:11434/v1" } });
+      fireEvent.click(screen.getByTestId("settings-connect-fetch"));
+      const [fetch] = sent(postMessage, "listRemoteModels");
+      expect(fetch.data).toEqual({ api: "openai", baseUrl: "http://localhost:11434/v1" });
+      await emitState({ ...state, remoteModelsReceipt: { failure: "unsupported", requestId: fetch.messageId } });
+      expect(screen.getByTestId("settings-connect-fetch-failed").textContent).toBe(en("models.connect.failed.unsupported"));
+
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "qwen3-coder" } });
+      fireEvent.keyDown(input("settings-connect-manual-input"), { key: "Enter" });
+      expect(input("settings-connect-model-qwen3-coder").checked).toBe(true);
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "qwen3-coder" } });
+      fireEvent.click(screen.getByTestId("settings-connect-manual-add"));
+      expect(screen.getByText(en("models.connect.validate.duplicate", { name: "qwen3-coder" }))).toBeTruthy();
+      expect(screen.getAllByTestId("settings-connect-model-qwen3-coder")).toHaveLength(1);
+    });
+
+    it("pre-checks an explicit default when the existing default is unusable", async () => {
+      const { postMessage } = mount();
+      await emitState(connectState({ defaultModelId: "gpt-5.4", models: [builtinModel()] }));
+      fireEvent.click(screen.getByTestId("settings-connectable-other"));
+      fireEvent.change(input("settings-connect-address"), { target: { value: "https://relay.example.com" } });
+      fireEvent.change(input("settings-connect-api-key"), { target: { value: "relay-secret" } });
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "relay-model" } });
+      fireEvent.click(screen.getByTestId("settings-connect-manual-add"));
+      expect(screen.queryByTestId("settings-connect-default-hint")).toBeNull();
+      expect(input("settings-connect-set-default").checked).toBe(true);
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+      const [request] = sent(postMessage, "upsertModels");
+      expect(request.data).toMatchObject({ defaultModelId: "example/relay-model", setAsDefault: true });
+    });
+
+    it("adds models to an existing card without asking for its key, and cancel writes nothing", async () => {
+      const { postMessage } = mount();
+      await emitState(connectState({ models: [relayModel("gpt-6.1-sol")] }));
+      fireEvent.click(screen.getByTestId("settings-card-add-model-FCODEX_API_KEY"));
+      const dialog = screen.getByTestId("settings-connect-dialog");
+      expect(within(dialog).getByRole("heading").textContent).toBe(en("models.connect.addTitle", { name: "Fcodex" }));
+      expect(within(dialog).getByText(`api.fcodex.com · ${en("models.card.keySaved")}`)).toBeTruthy();
+      expect(within(dialog).queryByTestId("settings-connect-api-key")).toBeNull();
+      expect(within(dialog).queryByTestId("settings-connect-preset")).toBeNull();
+      expect(input("settings-connect-model-gpt-6.1-sol").closest("label")?.title).toBe(en("models.connect.existing"));
+
+      fireEvent.click(screen.getByTestId("settings-connect-fetch"));
+      expect(sent(postMessage, "listRemoteModels")[0].data).toEqual({ api: "openai", apiKeyEnv: "FCODEX_API_KEY", baseUrl: "https://api.fcodex.com" });
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "draft" } });
+      fireEvent.click(screen.getByTestId("settings-connect-manual-add"));
+      fireEvent.click(screen.getByTestId("settings-connect-cancel"));
+      expect(screen.queryByTestId("settings-connect-dialog")).toBeNull();
+      expect(sent(postMessage, "upsertModels")).toHaveLength(0);
+      expect(sent(postMessage, "setProviderKey")).toHaveLength(0);
+    });
+
+    it("adds models to a relay card at the relay address even when a moved built-in is listed first", async () => {
+      const { postMessage } = mount();
+      const moved = builtinModel({ apiKeyEnv: "FCODEX_API_KEY", id: "gpt-5.6", keyPresent: true, keySource: "saved", modelName: "gpt-5.6" });
+      await emitState(connectState({ models: [moved, relayModel("gpt-6.1-sol")] }));
+      fireEvent.click(screen.getByTestId("settings-card-add-model-FCODEX_API_KEY"));
+      const dialog = screen.getByTestId("settings-connect-dialog");
+      expect(within(dialog).getByRole("heading").textContent).toBe(en("models.connect.addTitle", { name: "Fcodex" }));
+      fireEvent.change(input("settings-connect-manual-input"), { target: { value: "relay-model" } });
+      fireEvent.click(screen.getByTestId("settings-connect-manual-add"));
+      fireEvent.click(screen.getByTestId("settings-connect-save"));
+      const [request] = sent(postMessage, "upsertModels");
+      expect(request.data.models.map(({ apiKeyEnv, baseUrl, id, provider }) => ({ apiKeyEnv, baseUrl, id, provider }))).toEqual([
+        { apiKeyEnv: "FCODEX_API_KEY", baseUrl: "https://api.fcodex.com", id: "fcodex/relay-model", provider: "fcodex" },
+      ]);
+    });
+
+    it("keeps the dialog draft and hidden key across a locale switch", async () => {
+      const api = { postMessage: vi.fn() };
+      const view = render(<LocaleProvider locale="en"><SettingsApp vscodeApi={api} /></LocaleProvider>);
+      await emitState(connectState({ models: [deepseek("deepseek-v4-pro")] }));
+      fireEvent.click(screen.getByTestId("settings-connect-provider"));
+      const dialog = screen.getByTestId("settings-connect-dialog");
+      const keyInput = input("settings-connect-api-key");
+      fireEvent.change(keyInput, { target: { value: "private-secret" } });
+      view.rerender(<LocaleProvider locale="zh-CN"><SettingsApp vscodeApi={api} /></LocaleProvider>);
+      expect(screen.getByTestId("settings-connect-dialog")).toBe(dialog);
+      expect(input("settings-connect-api-key")).toBe(keyInput);
+      expect(keyInput.value).toBe("private-secret");
+      expect(keyInput.type).toBe("password");
+      expect(screen.getByText(translate("zh-CN", "models.connect.title"))).toBeTruthy();
+      expect(api.postMessage.mock.calls.filter(([message]) => message.type === "settings.ready")).toHaveLength(1);
+    });
   });
 
-  it("shows no default controls for a CLI without set_default_model", async () => {
-    mount();
-    await emitState(readyState({ defaultModelId: "gpt-5.4", models: [builtinModel({ keyPresent: true })] }));
-    expect(screen.queryByTestId("settings-default-gpt-5.4")).toBeNull();
-    expect(screen.queryByTestId("settings-make-default-gpt-5.4")).toBeNull();
+  describe("model edit form", () => {
+    it("edits a built-in at its real address with no key field and saves the full entry", async () => {
+      const { postMessage } = mount();
+      await emitState(connectState({ models: [builtinModel({ id: "gpt-5.6", keyPresent: true, maxOutputTokens: 128000, modelName: "gpt-5.6" })] }));
+      fireEvent.click(screen.getByTestId("settings-edit-gpt-5.6"));
+      const form = screen.getByTestId("settings-model-form");
+      expect(input("settings-model-base-url").value).toBe("https://api.openai.com");
+      expect(screen.getByTestId("settings-model-address-preset").textContent).toBe(en("models.addressPreset", { name: "OpenAI" }));
+      expect(form.querySelector('input[type="password"]')).toBeNull();
+      expect(within(form).queryByRole("button", { name: en("models.delete") })).toBeNull();
+      expect(within(form).queryByRole("tab")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("settings-model-advanced"));
+      expect(input("settings-model-alias").readOnly).toBe(true);
+      expect(input("settings-context-window").value).toBe("400000");
+      expect(screen.queryByTestId("settings-capability-unprobed")).toBeNull();
+      fireEvent.click(screen.getByTestId("settings-save-model"));
+      expect(sent(postMessage, "setProviderKey")).toHaveLength(0);
+      expect(sent(postMessage, "upsertModel").map((message) => message.data)).toEqual([{
+        model: expect.objectContaining({
+          api: "openai-responses",
+          apiKeyEnv: "OPENAI_API_KEY",
+          baseUrl: "https://api.openai.com",
+          contextWindow: 400000,
+          id: "gpt-5.6",
+          maxOutputTokens: 128000,
+          modelName: "gpt-5.6",
+          provider: "openai",
+          supportedSpeeds: null,
+        }),
+      }]);
+    });
+
+    it("labels unknown models honestly, keeps runtime-default limits empty, and saves Fast only when ticked", async () => {
+      const { postMessage } = mount();
+      const state = connectState({
+        models: [
+          relayModel("my-relay-model", { api: "anthropic-messages", contextWindow: null, maxOutputTokens: null }),
+          relayModel("gpt-5.5", { contextWindow: null }),
+          builtinModel({ id: "gpt-5.5", modelName: "gpt-5.5" }),
+        ],
+      });
+      await emitState(state);
+      fireEvent.click(screen.getByTestId("settings-edit-fcodex/my-relay-model"));
+      fireEvent.click(screen.getByTestId("settings-model-advanced"));
+      expect(screen.getByTestId("settings-capability-unprobed").textContent).toBe(en("models.capabilityUnprobed"));
+      expect(input("settings-context-window").placeholder).toBe(en("models.contextAuto"));
+      expect(input("settings-max-output-tokens").value).toBe("");
+      expect(input("settings-supported-speeds").checked).toBe(false);
+
+      fireEvent.change(input("settings-max-output-tokens"), { target: { value: "lots" } });
+      fireEvent.click(screen.getByTestId("settings-save-model"));
+      expect(screen.getByText(en("models.validate.tokens"))).toBeTruthy();
+      expect(sent(postMessage, "upsertModel")).toHaveLength(0);
+
+      fireEvent.change(input("settings-max-output-tokens"), { target: { value: "" } });
+      fireEvent.click(input("settings-supported-speeds"));
+      fireEvent.click(screen.getByTestId("settings-save-model"));
+      const [saved] = sent(postMessage, "upsertModel");
+      expect(saved.data.model).toMatchObject({
+        api: "anthropic-messages",
+        capabilities: { files: true },
+        contextWindow: null,
+        maxOutputTokens: null,
+        supportedSpeeds: ["fast"],
+      });
+      await emitState({ ...state, modelSaveReceipt: { requestId: saved.messageId, success: true } });
+      expect(screen.queryByTestId("settings-model-form")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("settings-edit-fcodex/gpt-5.5"));
+      fireEvent.click(screen.getByTestId("settings-model-advanced"));
+      expect(screen.queryByTestId("settings-capability-unprobed")).toBeNull();
+      fireEvent.click(screen.getByTestId("settings-save-model"));
+      expect(sent(postMessage, "upsertModel")[1].data.model.supportedSpeeds).toBeNull();
+    });
+
+    it("deletes a user model from its edit form after confirmation", async () => {
+      const { postMessage } = mount();
+      const state = connectState({ models: [relayModel("remove-me")] });
+      await emitState(state);
+      fireEvent.click(screen.getByTestId("settings-edit-fcodex/remove-me"));
+      fireEvent.click(within(screen.getByTestId("settings-model-form")).getByRole("button", { name: en("models.delete") }));
+      fireEvent.click(screen.getByTestId("settings-delete-model-confirm"));
+      expect(sent(postMessage, "removeModel").map((message) => message.data)).toEqual([{ modelId: "fcodex/remove-me" }]);
+      await emitState({ ...state, modelRemovalReceipt: { modelId: "fcodex/remove-me", success: true, warnings: [] }, models: [] });
+      expect(screen.queryByTestId("settings-model-form")).toBeNull();
+    });
   });
 
-  it("changes model labels and validation without replacing or exposing the unsaved key", async () => {
-    const api = { postMessage: vi.fn() };
-    const view = render(<LocaleProvider locale="en"><SettingsApp vscodeApi={api} /></LocaleProvider>);
-    await emitState(readyState({ models: [builtinModel({ keyPresent: true })], providerKeys: [providerKey({ keyPresent: true })] }));
-    fireEvent.click(screen.getByTestId("settings-add-model"));
-    const dialog = screen.getByTestId("settings-model-form");
-    fireEvent.change(dialog.querySelector('input[placeholder="For example: gpt-5.6"]')!, { target: { value: "gpt-5.6" } });
-    const keyInput = screen.getByTestId("settings-api-key-input") as HTMLInputElement;
-    fireEvent.change(keyInput, { target: { value: "private-secret" } });
-    fireEvent.click(screen.getByTestId("settings-model-advanced"));
-    fireEvent.change(screen.getByTestId("settings-supported-speeds"), { target: { value: "bogus" } });
-    expect((screen.getByTestId("settings-supported-speeds") as HTMLInputElement).value).toBe("bogus");
-    expect((screen.getByTestId("settings-save-model") as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(screen.getByTestId("settings-save-model"));
-    const validation = screen.getByText(translate("en", "models.validate.speeds"));
-    const title = screen.getByRole("heading", { name: translate("en", "models.addTitle") });
-    const save = screen.getByRole("button", { name: translate("en", "models.saveModel") });
-    view.rerender(<LocaleProvider locale="zh-CN"><SettingsApp vscodeApi={api} /></LocaleProvider>);
-    expect(screen.getByTestId("settings-model-form")).toBe(dialog);
-    expect(screen.getByTestId("settings-api-key-input")).toBe(keyInput);
-    expect(keyInput.value).toBe("private-secret");
-    expect(keyInput.type).toBe("password");
-    expect(title.isConnected).toBe(true);
-    expect(screen.getByTestId("settings-save-model")).toBe(save);
-    expect(validation.isConnected).toBe(true);
-    expect((screen.getByTestId("settings-supported-speeds") as HTMLInputElement).value).toBe("bogus");
-    expect(api.postMessage.mock.calls.filter(([m]) => m.type === "settings.ready")).toHaveLength(1);
+  describe("utility model picker", () => {
+    const models = [
+      deepseek("deepseek-v4-pro", { keyPresent: true, keySource: "saved" }),
+      deepseek("deepseek-v4-flash", { keyPresent: true, keySource: "saved" }),
+      builtinModel(),
+    ];
+
+    it("shows the current role and switches it to another connected model", async () => {
+      const { postMessage } = mount();
+      await emitState(connectState({ models, utilityModelId: "deepseek-v4-flash" }));
+      const picker = input("settings-utility-model-input");
+      expect(picker.value).toBe("deepseek-v4-flash · DeepSeek");
+      fireEvent.focus(picker);
+      expect(screen.queryByTestId("settings-utility-option-gpt-5.4")).toBeNull();
+      fireEvent.click(screen.getByTestId("settings-utility-option-deepseek-v4-pro"));
+      expect(sent(postMessage, "setUtilityModel").map((message) => message.data)).toEqual([{ modelId: "deepseek-v4-pro" }]);
+    });
+
+    it("searches across cards, commits with the keyboard, and marks only the pointed row", async () => {
+      const { postMessage } = mount();
+      const withRelay = [...models, relayModel("gpt-6.1-sol"), relayModel("claude-opus-5-5", { api: "anthropic-messages" })];
+      await emitState(connectState({ models: withRelay, utilityModelId: "deepseek-v4-flash" }));
+      expect(screen.getByTestId("settings-utility-deepseek-v4-flash")).toBeTruthy();
+      expect(screen.queryByTestId("settings-utility-deepseek-v4-pro")).toBeNull();
+      expect(screen.queryByTestId("settings-utility-fcodex/claude-opus-5-5")).toBeNull();
+
+      const picker = input("settings-utility-model-input");
+      fireEvent.focus(picker);
+      fireEvent.change(picker, { target: { value: "opus" } });
+      expect(screen.getAllByRole("option").map((option) => option.getAttribute("data-testid"))).toEqual(["settings-utility-option-fcodex/claude-opus-5-5"]);
+      fireEvent.keyDown(picker, { key: "Escape" });
+      expect(screen.queryByRole("listbox")).toBeNull();
+      expect(sent(postMessage, "setUtilityModel")).toEqual([]);
+
+      fireEvent.change(picker, { target: { value: "fcodex" } });
+      fireEvent.keyDown(picker, { key: "ArrowDown" });
+      fireEvent.keyDown(picker, { key: "Enter" });
+      expect(sent(postMessage, "setUtilityModel").map((message) => message.data)).toEqual([{ modelId: "fcodex/claude-opus-5-5" }]);
+      expect(picker.value).toBe("deepseek-v4-flash · DeepSeek");
+
+      await emitState(connectState({ models: withRelay, utilityModelId: "fcodex/claude-opus-5-5" }));
+      expect(screen.getByTestId("settings-utility-fcodex/claude-opus-5-5")).toBeTruthy();
+      expect(screen.queryByTestId("settings-utility-deepseek-v4-flash")).toBeNull();
+      expect(input("settings-utility-model-input").value).toBe("fcodex/claude-opus-5-5 · Fcodex");
+    });
+
+    it("explains an unset, missing, or disconnected utility model and stays read-only on an old CLI", async () => {
+      mount();
+      await emitState(connectState({ models, utilityModelId: "" }));
+      expect(input("settings-utility-model-input").value).toBe(en("models.utility.unset"));
+      expect(screen.queryByTestId("settings-utility-model-problem")).toBeNull();
+
+      await emitState(connectState({ models, utilityModelId: "utility-flash" }));
+      expect(screen.getByTestId("settings-utility-model-problem").textContent).toBe(en("models.utility.missing", { name: "utility-flash" }));
+
+      await emitState(connectState({ models, utilityModelId: "gpt-5.4" }));
+      expect(screen.getByTestId("settings-utility-model-problem").textContent).toBe(en("models.utility.notConnected", { name: "OpenAI" }));
+
+      await emitState(connectState({ capabilities: { ...readyState().capabilities, setUtilityModel: false }, models, utilityModelId: "deepseek-v4-flash" }));
+      expect(input("settings-utility-model-input").disabled).toBe(true);
+
+      await emitState(connectState({ models }));
+      expect(screen.queryByTestId("settings-utility-model")).toBeNull();
+    });
   });
 
   it("carries a correlated Reload receipt through actual Settings state frames", async () => {
@@ -292,1258 +826,6 @@ describe("SettingsApp", () => {
     expect(screen.queryByText("Unable to add connector.")).toBeNull();
   });
 
-  it("posts a ready handshake, defaults to the official tab, and supports keyboard tab switching", async () => {
-    const { postMessage } = mount();
-
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: { route: "models" },
-      type: "settings.ready",
-    });
-
-    await emitState(
-      readyState({
-        models: [
-          builtinModel(),
-          builtinModel({
-            api: "anthropic-messages",
-            apiKeyEnv: "ANTHROPIC_API_KEY",
-            baseUrl: "https://api.anthropic.com",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: true,
-              webSearch: false,
-            },
-            id: "claude-opus-4-8",
-            keyPresent: true,
-            modelName: "claude-opus-4-8",
-            provider: "anthropic",
-            thinkingFormat: "anthropic",
-          }),
-        ],
-      }),
-    );
-
-    const dialog = openAddModelDialog();
-    expect(
-      within(dialog).getByRole("tablist", { name: /add model mode/i }),
-    ).toBeTruthy();
-    const officialTab = within(dialog).getByRole("tab", {
-      name: /official new model/i,
-    });
-    const relayTab = within(dialog).getByRole("tab", {
-      name: /relay \/ custom endpoint/i,
-    });
-
-    expect(officialTab.getAttribute("aria-selected")).toBe("true");
-    expect(officialTab.tabIndex).toBe(0);
-    expect(relayTab.tabIndex).toBe(-1);
-    expect(within(dialog).getByLabelText("Provider")).toBeTruthy();
-    expect(
-      within(dialog).queryByRole("textbox", { name: /base url/i }),
-    ).toBeNull();
-
-    fireEvent.keyDown(officialTab, { key: "ArrowRight" });
-    expect(relayTab.getAttribute("aria-selected")).toBe("true");
-    expect(relayTab.tabIndex).toBe(0);
-    expect(officialTab.tabIndex).toBe(-1);
-    expect(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-    ).toBeTruthy();
-    expect(within(dialog).queryByLabelText("Provider")).toBeNull();
-
-    fireEvent.keyDown(relayTab, { key: "Home" });
-    expect(officialTab.getAttribute("aria-selected")).toBe("true");
-    expect(
-      within(dialog).queryByRole("textbox", { name: /base url/i }),
-    ).toBeNull();
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("dialog")).toBeNull();
-  }, 15000);
-
-  it("falls back to the relay tab when no official presets are available and explains the empty state", async () => {
-    mount();
-    await emitState(
-      readyState({
-        models: [
-          {
-            ...builtinModel(),
-            baseUrl: "https://gateway.example.test/v1",
-            id: "openai/gpt-5.4",
-            provider: "openai-gateway",
-            source: "user",
-          },
-        ],
-      }),
-    );
-
-    const dialog = openAddModelDialog();
-    const officialTab = within(dialog).getByRole("tab", {
-      name: /official new model/i,
-    });
-    const relayTab = within(dialog).getByRole("tab", {
-      name: /relay \/ custom endpoint/i,
-    });
-
-    expect(relayTab.getAttribute("aria-selected")).toBe("true");
-    expect(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-    ).toBeTruthy();
-
-    fireEvent.click(officialTab);
-    expect(officialTab.getAttribute("aria-selected")).toBe("true");
-    expect(within(dialog).getByRole("status").textContent).toContain(
-      "No official provider presets are available",
-    );
-    expect(
-      within(dialog).getByText(/switch to relay \/ custom endpoint/i),
-    ).toBeTruthy();
-    expect(
-      (
-        within(dialog).getByRole("button", {
-          name: "Save Model",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
-  });
-
-  it("mode A saves a preset-backed model and stores a new key when the slot is missing", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel(),
-          builtinModel({
-            api: "anthropic-messages",
-            apiKeyEnv: "ANTHROPIC_API_KEY",
-            baseUrl: "https://api.anthropic.com",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: true,
-              webSearch: false,
-            },
-            id: "claude-opus-4-8",
-            keyPresent: true,
-            modelName: "claude-opus-4-8",
-            provider: "anthropic",
-            thinkingFormat: "anthropic",
-          }),
-        ],
-        providerKeys: [
-          providerKey({ envName: "ANTHROPIC_API_KEY", keyPresent: true }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.6" },
-      },
-    );
-    fireEvent.change(getPasswordInput(dialog), {
-      target: { value: "openai-secret" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: {
-        model: {
-          api: "openai-responses",
-          apiKeyEnv: "OPENAI_API_KEY",
-          baseUrl: "https://api.openai.com",
-          capabilities: {
-            files: true,
-            reasoning: true,
-            tools: true,
-            vision: true,
-            webSearch: false,
-          },
-          contextWindow: 400000,
-          id: "gpt-5.6",
-          modelName: "gpt-5.6",
-          provider: "openai",
-          thinkingFormat: "openai",
-        },
-        providerKey: {
-          envName: "OPENAI_API_KEY",
-          value: "openai-secret",
-        },
-      },
-      type: "upsertModel",
-    });
-  });
-
-  it("mode B derives provider env and id, and advanced overrides are saved", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [builtinModel()],
-        providerKeys: [providerKey({ keyPresent: true })],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-      {
-        target: { value: "https://api.chatanywhere.tech/v1" },
-      },
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.4" },
-      },
-    );
-
-    expect(within(dialog).getByText("chatanywhere")).toBeTruthy();
-    expect(
-      within(dialog).getByText("CHATANYWHERE_OPENAI_API_KEY"),
-    ).toBeTruthy();
-    expect(within(dialog).getByText("chatanywhere/gpt-5.4")).toBeTruthy();
-
-    fireEvent.change(getPasswordInput(dialog), {
-      target: { value: "relay-secret" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    fireEvent.change(
-      within(dialog).getByLabelText("Model ID (alias)"),
-      {
-        target: { value: "custom-relay-id" },
-      },
-    );
-    fireEvent.change(within(dialog).getByLabelText(/thinking format/i), {
-      target: { value: "deepseek" },
-    });
-    fireEvent.click(within(dialog).getByLabelText("Vision"));
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: {
-        model: {
-          api: "openai-responses",
-          apiKeyEnv: "CHATANYWHERE_OPENAI_API_KEY",
-          baseUrl: "https://api.chatanywhere.tech/v1",
-          capabilities: {
-            files: true,
-            reasoning: true,
-            tools: true,
-            vision: false,
-            webSearch: false,
-          },
-          contextWindow: 400000,
-          id: "custom-relay-id",
-          modelName: "gpt-5.4",
-          provider: "chatanywhere",
-          thinkingFormat: "deepseek",
-        },
-        providerKey: {
-          envName: "CHATANYWHERE_OPENAI_API_KEY",
-          value: "relay-secret",
-        },
-      },
-      type: "upsertModel",
-    });
-  });
-
-  it("editing existing models falls back into the matching official or relay layout", async () => {
-    mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({ keyPresent: true }),
-          {
-            ...builtinModel({
-              baseUrl: "https://gateway.example.test/v1",
-              id: "openai/gpt-5.4",
-              keyPresent: true,
-              source: "user",
-            }),
-          },
-          {
-            api: "openai",
-            apiKeyEnv: "CHATANYWHERE_API_KEY",
-            baseUrl: "https://api.chatanywhere.tech/v1",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: false,
-              webSearch: false,
-            },
-            contextWindow: null,
-            id: "chatanywhere/gpt-5.4",
-            keyPresent: false,
-            modelName: "gpt-5.4",
-            provider: "chatanywhere",
-            source: "user",
-            thinkingFormat: null,
-          },
-        ],
-      }),
-    );
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-    let dialog = screen.getByRole("dialog");
-    expect(
-      within(dialog)
-        .getByRole("tab", { name: /official new model/i })
-        .getAttribute("aria-selected"),
-    ).toBe("true");
-    expect(within(dialog).getByLabelText("Provider")).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
-    dialog = screen.getByRole("dialog");
-    expect(
-      within(dialog)
-        .getByRole("tab", { name: /official new model/i })
-        .getAttribute("aria-selected"),
-    ).toBe("true");
-    expect(within(dialog).getByLabelText("Provider")).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[2]);
-    dialog = screen.getByRole("dialog");
-    expect(
-      within(dialog)
-        .getByRole("tab", { name: /relay \/ custom endpoint/i })
-        .getAttribute("aria-selected"),
-    ).toBe("true");
-    expect(
-      (
-        within(dialog).getByRole("textbox", {
-          name: /base url/i,
-        }) as HTMLInputElement
-      ).value,
-    ).toBe("https://api.chatanywhere.tech/v1");
-    expect(within(dialog).queryByLabelText("Provider")).toBeNull();
-  }, 15_000);
-
-  it("warns on built-in id collisions, validates bad relay URLs, and can reuse configured key slots", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({ keyPresent: true }),
-          builtinModel({
-            api: "anthropic-messages",
-            apiKeyEnv: "ANTHROPIC_API_KEY",
-            baseUrl: "https://api.anthropic.com",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: true,
-              webSearch: false,
-            },
-            id: "claude-opus-4-8",
-            keyPresent: true,
-            modelName: "claude-opus-4-8",
-            provider: "anthropic",
-            thinkingFormat: "anthropic",
-          }),
-        ],
-        providerKeys: [providerKey({ keyPresent: true })],
-      }),
-    );
-    postMessage.mockClear();
-
-    let dialog = openAddModelDialog();
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.4" },
-      },
-    );
-    expect(
-      within(dialog).getByText(/override the built-in model `gpt-5\.4`/i),
-    ).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-      {
-        target: { value: "https://" },
-      },
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.4" },
-      },
-    );
-    fireEvent.change(getPasswordInput(dialog), {
-      target: { value: "relay-secret" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(
-      within(dialog).getByText(
-        "Base URL could not be parsed. Use a value like https://host/v1.",
-      ),
-    ).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-      {
-        target: { value: "https://api.chatanywhere.tech/v1" },
-      },
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.4" },
-      },
-    );
-    fireEvent.change(within(dialog).getByLabelText("Key slot"), {
-      target: { value: "OPENAI_API_KEY" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: {
-        model: {
-          api: "openai-responses",
-          apiKeyEnv: "OPENAI_API_KEY",
-          baseUrl: "https://api.chatanywhere.tech/v1",
-          id: "chatanywhere/gpt-5.4",
-          modelName: "gpt-5.4",
-          provider: "chatanywhere",
-          thinkingFormat: "openai",
-        },
-        providerKey: undefined,
-      },
-      type: "upsertModel",
-    });
-  }, 15_000);
-
-  it("sends inline key saves, keeps key fields masked, and shows the backend capability warning", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({ keyPresent: false }),
-          {
-            api: "openai",
-            apiKeyEnv: "CHATANYWHERE_API_KEY",
-            baseUrl: "https://api.chatanywhere.tech/v1",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: false,
-              webSearch: false,
-            },
-            contextWindow: null,
-            id: "chatanywhere/gpt-5.4",
-            keyPresent: false,
-            modelName: "gpt-5.4",
-            provider: "chatanywhere",
-            source: "user",
-            thinkingFormat: null,
-          },
-        ],
-        providerKeys: [
-          providerKey({ envName: "CHATANYWHERE_API_KEY", keyPresent: false }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const inlineInput = screen.getByPlaceholderText(
-      "Save CHATANYWHERE_API_KEY",
-    ) as HTMLInputElement;
-    expect(inlineInput.type).toBe("password");
-    expect(inlineInput.autocomplete).toBe("off");
-
-    fireEvent.change(inlineInput, {
-      target: { value: "relay-secret" },
-    });
-    fireEvent.click(
-      within(inlineInput.parentElement as HTMLElement).getByRole("button", {
-        name: "Save",
-      }),
-    );
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: {
-        envName: "CHATANYWHERE_API_KEY",
-        value: "relay-secret",
-      },
-      type: "setProviderKey",
-    });
-
-    postMessage.mockClear();
-    await emitState(
-      readyState({
-        capabilities: {
-          listModels: true,
-          listProviderKeys: true,
-          removeModel: true,
-          setProviderKey: false,
-          upsertModel: true,
-        },
-        models: [
-          builtinModel({ keyPresent: false }),
-          {
-            api: "openai",
-            apiKeyEnv: "CHATANYWHERE_API_KEY",
-            baseUrl: "https://api.chatanywhere.tech/v1",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: false,
-              webSearch: false,
-            },
-            contextWindow: null,
-            id: "chatanywhere/gpt-5.4",
-            keyPresent: false,
-            modelName: "gpt-5.4",
-            provider: "chatanywhere",
-            source: "user",
-            thinkingFormat: null,
-          },
-        ],
-        providerKeys: [
-          providerKey({ envName: "CHATANYWHERE_API_KEY", keyPresent: false }),
-        ],
-      }),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
-    const dialog = screen.getByRole("dialog");
-    const modalKeyInput = getPasswordInput(dialog);
-    expect(modalKeyInput.type).toBe("password");
-    expect(modalKeyInput.autocomplete).toBe("off");
-
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.6" },
-      },
-    );
-    fireEvent.change(modalKeyInput, {
-      target: { value: "secret-value" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(
-      within(dialog).getByText(
-        "The current backend cannot save an API key; please upgrade `tomcat serve`.",
-      ),
-    ).toBeTruthy();
-  });
-
-  it("refreshes key slots, validates custom key slots, removes the advanced duplicate, and masks drafts on blur", async () => {
-    const { postMessage } = mount();
-    await emitState(readyState({ models: [builtinModel()] }));
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: /refresh key slots/i }),
-    );
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      type: "listProviderKeys",
-    });
-    postMessage.mockClear();
-
-    await emitState(
-      readyState({
-        models: [builtinModel()],
-        providerKeys: [
-          providerKey({ envName: "FCODEX_OPENAI_API_KEY", keyPresent: true }),
-        ],
-      }),
-    );
-    expect(within(dialog).getByText("Key slots refreshed.")).toBeTruthy();
-
-    const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
-    fireEvent.focus(keySlot);
-    expect(
-      within(dialog).getByRole("option", { name: /FCODEX_OPENAI_API_KEY/i }),
-    ).toBeTruthy();
-
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.6" },
-      },
-    );
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    expect(within(dialog).queryByText("API key env override")).toBeNull();
-
-    fireEvent.change(keySlot, { target: { value: "bad-key-slot" } });
-    expect(
-      within(dialog).getByText("Key slot must match ^[A-Z_][A-Z0-9_]*$."),
-    ).toBeTruthy();
-    fireEvent.change(keySlot, { target: { value: "FCODEX_OPENAI_API_KEY" } });
-
-    const keyInput = within(dialog).getByLabelText(
-      "API key",
-    ) as HTMLInputElement;
-    fireEvent.focus(keyInput);
-    fireEvent.change(keyInput, { target: { value: "sk-1234567890abcdef" } });
-    expect(keyInput.type).toBe("password");
-    fireEvent.blur(keyInput);
-    expect(keyInput.type).toBe("text");
-    expect(keyInput.value).toMatch(/^sk-12345•+cdef$/);
-    expect(keyInput.value).not.toContain("67890ab");
-  });
-
-  it("uses the same label-row structure for the key slot and api key fields", async () => {
-    mount();
-    await emitState(readyState({ models: [builtinModel()] }));
-
-    const dialog = openAddModelDialog();
-    const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
-    const sharedRow = keySlot.closest(".tc-settings-form__row");
-    expect(sharedRow).toBeTruthy();
-
-    const fieldChildren = Array.from(sharedRow?.children ?? []).filter(
-      (node): node is HTMLElement =>
-        node instanceof HTMLElement && node.classList.contains("tc-field"),
-    );
-    expect(fieldChildren).toHaveLength(2);
-
-    for (const field of fieldChildren) {
-      expect(
-        field.firstElementChild?.classList.contains("tc-field__label-row"),
-      ).toBe(true);
-    }
-  });
-
-  it("exposes stable visible-control hooks for key-slot alignment checks", async () => {
-    mount();
-    await emitState(readyState({ models: [builtinModel()] }));
-
-    const dialog = openAddModelDialog();
-    const keySlotBox = within(dialog).getByTestId("settings-key-slot-box");
-    const apiKeyInput = within(dialog).getByTestId("settings-api-key-input");
-
-    expect(keySlotBox.classList.contains("tc-settings-combobox")).toBe(true);
-    expect(apiKeyInput.classList.contains("tc-settings-api-key-input")).toBe(
-      true,
-    );
-  });
-
-  it("requires confirmation before replacing a configured key shared by other models", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({ keyPresent: true }),
-          builtinModel({
-            id: "gpt-4.1",
-            keyPresent: true,
-            modelName: "gpt-4.1",
-          }),
-        ],
-        providerKeys: [providerKey({ keyPresent: true })],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.6" },
-      },
-    );
-    const keyInput = within(dialog).getByLabelText("API key");
-    fireEvent.focus(keyInput);
-    fireEvent.change(keyInput, { target: { value: "rotated-secret" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).not.toHaveBeenCalled();
-    const confirmation = screen.getByRole("alertdialog");
-    expect(within(confirmation).getByText("gpt-5.4")).toBeTruthy();
-    expect(within(confirmation).getByText("gpt-4.1")).toBeTruthy();
-    fireEvent.click(
-      within(confirmation).getByRole("button", { name: /replace shared key/i }),
-    );
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: {
-        model: { apiKeyEnv: "OPENAI_API_KEY", id: "gpt-5.6" },
-        providerKey: { envName: "OPENAI_API_KEY", value: "rotated-secret" },
-      },
-      type: "upsertModel",
-    });
-  });
-
-  it("confirms model deletion, ignores a delayed receipt, and shows the real warning outcome", async () => {
-    const { postMessage } = mount();
-    const userModel = builtinModel({
-      id: "relay/remove-me",
-      keyPresent: true,
-      modelName: "remove-me",
-      source: "user",
-    });
-    await emitState(readyState({
-      models: [builtinModel({ keyPresent: true }), userModel],
-      providerKeys: [providerKey({ keyPresent: true })],
-    }));
-    postMessage.mockClear();
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
-    const form = screen.getByRole("dialog");
-    fireEvent.click(within(form).getByRole("button", { name: "Delete" }));
-    const confirmation = screen.getByRole("alertdialog");
-    expect(within(confirmation).getByText("Delete relay/remove-me?")).toBeTruthy();
-    expect(postMessage).not.toHaveBeenCalled();
-
-    fireEvent.click(
-      within(confirmation).getByRole("button", { name: "Delete model" }),
-    );
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      data: { modelId: "relay/remove-me" },
-      type: "removeModel",
-    }));
-    expect(screen.getByRole("status").textContent).toContain("Deleting relay/remove-me");
-
-    await emitState(readyState({
-      modelRemovalReceipt: { modelId: "relay/other", success: true, warnings: [] },
-      models: [builtinModel({ keyPresent: true }), userModel],
-      providerKeys: [providerKey({ keyPresent: true })],
-    }));
-    expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toContain("Deleting relay/remove-me");
-
-    await emitState(readyState({
-      modelRemovalReceipt: {
-        modelId: "relay/remove-me",
-        success: true,
-        warnings: ["A later catalog refresh is still required."],
-      },
-      models: [builtinModel({ keyPresent: true })],
-      providerKeys: [providerKey({ keyPresent: true })],
-      status: "Model removed with warnings.",
-      warnings: ["A later catalog refresh is still required."],
-    }));
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.getByText("Model removed with warnings.")).toBeTruthy();
-    expect(screen.getByText("A later catalog refresh is still required.")).toBeTruthy();
-  });
-
-  it("shows an empty speed declaration without saving the placeholder example", async () => {
-    const { postMessage } = mount();
-    await emitState(readyState({
-      models: [builtinModel({ id: "relay/model", modelName: "model", source: "user", keyPresent: true, supportedSpeeds: [] })],
-      providerKeys: [providerKey({ keyPresent: true })],
-    }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    const dialog = screen.getByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    const input = within(dialog).getByRole("textbox", { name: "Supported speeds" }) as HTMLInputElement;
-    expect(input.value).toBe("");
-    expect(input.placeholder).toBe("e.g. fast, ultrafast");
-    expect(within(dialog).getByText("Enter fast or ultrafast only if supported. Leave empty to hide Speed options. Acceleration may cost more.")).toBeTruthy();
-    postMessage.mockClear();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: "upsertModel", data: expect.objectContaining({ model: expect.objectContaining({ supportedSpeeds: [] }) }),
-    }));
-  });
-
-  it("preserves each typed comma, parses only the payload, and reopens saved speeds", async () => {
-    const { postMessage } = mount();
-    const model = builtinModel({ id: "relay/model", modelName: "model", source: "user", keyPresent: true, supportedReasoningLevels: ["high"], supportedSpeeds: ["fast"] });
-    const initial = readyState({ models: [model], providerKeys: [providerKey({ keyPresent: true })] });
-    await emitState(initial);
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    let dialog = screen.getByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    const effort = within(dialog).getByRole("textbox", { name: "Supported effort levels" }) as HTMLInputElement;
-    for (const value of ["high,", "high,m", "high,ma", "high,max", " high，max, high, "]) {
-      fireEvent.change(effort, { target: { value } });
-      expect(effort.value).toBe(value);
-    }
-    const speeds = within(dialog).getByRole("textbox", { name: "Supported speeds" }) as HTMLInputElement;
-    for (const value of ["fast,", "fast,u", "fast,ultrafast", " fast，ultrafast, fast, "]) {
-      fireEvent.change(speeds, { target: { value } });
-      expect(speeds.value).toBe(value);
-    }
-    postMessage.mockClear();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "upsertModel", data: expect.objectContaining({ model: expect.objectContaining({ supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"] }) }) }));
-    const savedModel = { ...model, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast", "ultrafast"] as const };
-    await emitState(readyState({ ...initial, models: [{ ...savedModel, supportedSpeeds: [...savedModel.supportedSpeeds] }],
-      modelSaveReceipt: { requestId: postMessage.mock.calls.at(-1)![0].messageId, success: true } }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    dialog = screen.getByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    expect(within(dialog).getByRole("textbox", { name: "Supported effort levels" })).toHaveProperty("value", "high, max");
-    expect(within(dialog).getByRole("textbox", { name: "Supported speeds" })).toHaveProperty("value", "fast, ultrafast");
-    fireEvent.change(within(dialog).getByRole("textbox", { name: "Description" }), { target: { value: "edited only description" } });
-    postMessage.mockClear();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: expect.objectContaining({ supportedSpeeds: ["fast", "ultrafast"] }) }) }));
-  });
-
-  it("clears lists explicitly, rejects unknown speed, and does not leak cancelled drafts", async () => {
-    const { postMessage } = mount();
-    await emitState(readyState({ models: [builtinModel({ keyPresent: true, supportedReasoningLevels: ["high"], supportedSpeeds: ["fast"] })], providerKeys: [providerKey({ keyPresent: true })] }));
-    const open = () => {
-      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-      const dialog = screen.getByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-      return dialog;
-    };
-    let dialog = open();
-    fireEvent.change(within(dialog).getByRole("textbox", { name: "Supported speeds" }), { target: { value: "warp" } });
-    postMessage.mockClear();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(postMessage).not.toHaveBeenCalled();
-    expect(screen.getByText(/Supported speeds accepts/)).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    dialog = open();
-    expect(within(dialog).getByRole("textbox", { name: "Supported speeds" })).toHaveProperty("value", "fast");
-    for (const name of ["Supported effort levels", "Supported speeds"]) fireEvent.change(within(dialog).getByRole("textbox", { name }), { target: { value: "" } });
-    postMessage.mockClear();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: expect.objectContaining({ supportedReasoningLevels: [], supportedSpeeds: [] }) }) }));
-  });
-
-  it("copies matching built-in metadata, but keeps only catalog limits read-only", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({
-            contextWindow: 400000,
-            contextWindowOptions: [400000, 1000000],
-            id: "gpt-5.6",
-            keyPresent: true,
-            maxOutputTokens: 32768,
-            modelName: "gpt-5.6",
-            supportedReasoningLevels: ["high", "xhigh"],
-            supportedSpeeds: ["fast"],
-          }),
-        ],
-        providerKeys: [
-          providerKey({
-            envName: "CHATANYWHERE_OPENAI_API_KEY",
-            keyPresent: true,
-          }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-      {
-        target: { value: "https://api.chatanywhere.tech/v1" },
-      },
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "gpt-5.6" },
-      },
-    );
-    await act(async () => {});
-
-    expect(
-      within(dialog).getByTestId("settings-builtin-capability-source")
-        .textContent,
-    ).toContain("built-in gpt-5.6");
-
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    expect(
-      within(dialog).getByTestId("settings-context-window-auto").textContent,
-    ).toBe("400000");
-    expect(
-      within(dialog).queryByTestId("settings-context-window-input"),
-    ).toBeNull();
-    expect(
-      within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
-    ).toBe("32768");
-    expect(
-      within(dialog).queryByTestId("settings-max-output-tokens-input"),
-    ).toBeNull();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledTimes(1);
-    expect(postMessage.mock.calls[0][0]).toMatchObject({
-      data: {
-        model: {
-          contextWindow: 400000,
-          contextWindowOptions: [400000, 1000000],
-          id: "chatanywhere/gpt-5.6",
-          maxOutputTokens: 32768,
-          supportedReasoningLevels: ["high", "xhigh"],
-          supportedSpeeds: ["fast"],
-        },
-      },
-      type: "upsertModel",
-    });
-  });
-
-  it("copies a matched 1M Claude tier into a new relay without manual configuration", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({
-            api: "anthropic-messages",
-            apiKeyEnv: "ANTHROPIC_API_KEY",
-            contextWindow: 1_000_000,
-            contextWindowOptions: [400_000, 1_000_000],
-            id: "claude-opus-5",
-            keyPresent: true,
-            maxOutputTokens: 128_000,
-            modelName: "claude-opus-5",
-            provider: "anthropic",
-            supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
-            thinkingFormat: "anthropic-adaptive",
-          }),
-        ],
-        providerKeys: [
-          providerKey({
-            envName: "FCODEX_ANTHROPIC_API_KEY",
-            keyPresent: true,
-          }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-      {
-        target: { value: "https://fcodex.top" },
-      },
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "claude-opus-5" },
-      },
-    );
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-
-    expect(
-      within(dialog).getByTestId("settings-context-window-auto").textContent,
-    ).toBe("1000000");
-    expect(
-      within(dialog).queryByTestId("settings-context-window-input"),
-    ).toBeNull();
-
-    fireEvent.change(within(dialog).getByLabelText("API key"), {
-      target: { value: "new-relay-key" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          model: expect.objectContaining({
-            api: "anthropic-messages",
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: true,
-              webSearch: false,
-            },
-            contextWindow: 1_000_000,
-            contextWindowOptions: [400_000, 1_000_000],
-            maxOutputTokens: 128_000,
-            supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
-            thinkingFormat: "anthropic-adaptive",
-          }),
-        }),
-        type: "upsertModel",
-      }),
-    );
-  });
-
-  it("prefers a same-name models.toml entry over built-in metadata", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({
-            contextWindow: 400_000,
-            id: "gpt-5.6",
-            keyPresent: true,
-            maxOutputTokens: 128_000,
-            modelName: "gpt-5.6",
-          }),
-          builtinModel({
-            capabilities: {
-              files: false,
-              reasoning: true,
-              tools: true,
-              vision: false,
-              webSearch: true,
-            },
-            contextWindow: 1_000_000,
-            contextWindowOptions: [400_000, 1_000_000],
-            description: "Local gpt-5.6 relay profile",
-            id: "local/gpt-5.6",
-            keyPresent: true,
-            maxOutputTokens: 64_000,
-            modelName: "gpt-5.6",
-            source: "user",
-            supportedReasoningLevels: ["high"],
-            thinkingFormat: "deepseek",
-          }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
-      target: { value: "https://new-relay.example.test/v1" },
-    });
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      { target: { value: "gpt-5.6" } },
-    );
-    await act(async () => {});
-
-    expect(
-      within(dialog).getByTestId("settings-builtin-capability-source").textContent,
-    ).toContain("configured local/gpt-5.6");
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    expect(
-      within(dialog).getByTestId("settings-context-window-auto").textContent,
-    ).toBe("1000000");
-    expect(
-      within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
-    ).toBe("64000");
-    const description = within(dialog).getByRole("textbox", { name: translate("en", "models.descriptionField") }) as HTMLInputElement;
-    fireEvent.change(description, { target: { value: "" } });
-    // Append each character to the controlled value, as real typing does. Whole-value
-    // fireEvent.change would miss a trim that eats the space before the next word.
-    let typed = "";
-    for (const character of "Edited local profile ") {
-      typed += character;
-      fireEvent.change(description, { target: { value: description.value + character } });
-      expect(description.value).toBe(typed);
-    }
-    fireEvent.change(
-      within(dialog).getByRole("textbox", {
-        name: /supported effort levels/i,
-      }),
-      { target: { value: "low, high" } },
-    );
-    fireEvent.change(within(dialog).getByLabelText("API key"), {
-      target: { value: "new-relay-key" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          model: expect.objectContaining({
-            capabilities: expect.objectContaining({
-              vision: false,
-              webSearch: true,
-            }),
-            contextWindow: 1_000_000,
-            contextWindowOptions: [400_000, 1_000_000],
-            description: "Edited local profile",
-            maxOutputTokens: 64_000,
-            supportedReasoningLevels: ["low", "high"],
-            thinkingFormat: "deepseek",
-          }),
-        }),
-        type: "upsertModel",
-      }),
-    );
-  });
-
-  it("allows editing a reused relay's provider and capabilities before saving", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({
-            id: "gpt-5.6",
-            keyPresent: true,
-            modelName: "gpt-5.6",
-            provider: "openai",
-          }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
-      target: { value: "https://relay.example.test/v1" },
-    });
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      { target: { value: "gpt-5.6" } },
-    );
-    await act(async () => {});
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /provider override/i }),
-      { target: { value: "my-relay" } },
-    );
-    fireEvent.click(within(dialog).getByLabelText("Vision"));
-    fireEvent.change(within(dialog).getByLabelText("API key"), {
-      target: { value: "test-relay-key" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          model: expect.objectContaining({
-            capabilities: expect.objectContaining({ vision: false }),
-            provider: "my-relay",
-          }),
-        }),
-        type: "upsertModel",
-      }),
-    );
-  });
-
-  it("reuses an exact configured relay endpoint before host heuristics", async () => {
-    const { postMessage } = mount();
-    await emitState(
-      readyState({
-        models: [
-          builtinModel({
-            apiKeyEnv: "MY_RELAY_KEY",
-            baseUrl: "https://api.chatanywhere.tech/v1",
-            id: "my-relay/existing",
-            keyPresent: true,
-            modelName: "existing",
-            provider: "my-relay",
-            source: "user",
-          }),
-        ],
-        providerKeys: [
-          providerKey({ envName: "MY_RELAY_KEY", keyPresent: true }),
-        ],
-      }),
-    );
-    postMessage.mockClear();
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(within(dialog).getByRole("textbox", { name: /base url/i }), {
-      target: { value: "https://api.chatanywhere.tech/v1/" },
-    });
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      { target: { value: "new-upstream" } },
-    );
-
-    expect(within(dialog).getByText("my-relay")).toBeTruthy();
-    expect(within(dialog).getByText("MY_RELAY_KEY")).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-
-    expect(postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          model: expect.objectContaining({
-            apiKeyEnv: "MY_RELAY_KEY",
-            provider: "my-relay",
-          }),
-        }),
-        type: "upsertModel",
-      }),
-    );
-  });
-
-  it("uses the 400K default and never exposes a manual context field for an unmatched relay", async () => {
-    mount();
-    await emitState(
-      readyState({
-        models: [builtinModel({ keyPresent: true })],
-        providerKeys: [
-          providerKey({
-            envName: "CHATANYWHERE_OPENAI_API_KEY",
-            keyPresent: true,
-          }),
-        ],
-      }),
-    );
-
-    const dialog = openAddModelDialog();
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /base url/i }),
-      {
-        target: { value: "https://api.chatanywhere.tech/v1" },
-      },
-    );
-    fireEvent.change(
-      within(dialog).getByRole("textbox", { name: /model name/i }),
-      {
-        target: { value: "custom-upstream" },
-      },
-    );
-    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
-
-    expect(
-      within(dialog).queryByTestId("settings-builtin-capability-source"),
-    ).toBeNull();
-    expect(
-      within(dialog).getByTestId("settings-context-window-auto").textContent,
-    ).toBe("400000");
-    expect(
-      within(dialog).queryByTestId("settings-context-window-input"),
-    ).toBeNull();
-    expect(
-      within(dialog).getByTestId("settings-max-output-tokens-auto").textContent,
-    ).toBe("128000");
-  });
-
   it("renders warning banners pushed from the settings host", async () => {
     mount();
 
@@ -1562,62 +844,6 @@ describe("SettingsApp", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByText("Model saved.")).toBeTruthy();
-  });
-
-  it("keeps an Add ID override including a deliberate clear, and locks the ID opened for Edit", async () => {
-    const { postMessage } = mount();
-    const editable = builtinModel({
-      id: "relay/original-id",
-      keyPresent: true,
-      modelName: "original-model",
-      source: "user",
-    });
-    await emitState(
-      readyState({
-        models: [builtinModel({ keyPresent: true }), editable],
-        providerKeys: [providerKey({ keyPresent: true })],
-      }),
-    );
-    postMessage.mockClear();
-
-    let dialog = openAddModelDialog();
-    const modelName = within(dialog).getByRole("textbox", { name: /model name/i });
-    const id = within(dialog).getByLabelText("Model ID (alias)") as HTMLInputElement;
-    fireEvent.change(modelName, { target: { value: "suggested-id" } });
-    expect(id.value).toBe("suggested-id");
-    fireEvent.change(id, { target: { value: "chosen-id" } });
-    fireEvent.change(modelName, { target: { value: "another-suggestion" } });
-    expect(id.value).toBe("chosen-id");
-
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
-    );
-    fireEvent.click(
-      within(dialog).getByRole("tab", { name: /official new model/i }),
-    );
-    expect(id.value).toBe("chosen-id");
-    fireEvent.change(id, { target: { value: "" } });
-    fireEvent.change(modelName, { target: { value: "third-suggestion" } });
-    expect(id.value).toBe("");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
-    expect(within(dialog).getByText("Model ID, provider, and API are all required.")).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
-    dialog = screen.getByRole("dialog");
-    const editId = within(dialog).getByLabelText("Model ID (alias)") as HTMLInputElement;
-    expect(editId.value).toBe("relay/original-id");
-    expect(editId.readOnly).toBe(true);
-    fireEvent.change(editId, { target: { value: "must-not-change" } });
-    expect(editId.value).toBe("relay/original-id");
-
-    await emitState(
-      readyState({
-        models: [builtinModel({ keyPresent: true })],
-        providerKeys: [providerKey({ keyPresent: true })],
-      }),
-    );
-    expect(editId.value).toBe("relay/original-id");
   });
 
   it("shows extension and serve versions, and warns on missing or mismatched serve versions", async () => {

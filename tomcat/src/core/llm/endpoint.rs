@@ -18,7 +18,6 @@ pub(crate) fn openai_service_tier(speed: super::Speed) -> &'static str {
     match speed {
         super::Speed::Standard => "default",
         super::Speed::Fast => "priority",
-        super::Speed::Ultrafast => "ultrafast",
     }
 }
 

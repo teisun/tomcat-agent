@@ -8,6 +8,10 @@ import { assertDeniedHistoryStatus } from "./release-bundle-findings";
 const extensionRoot = path.resolve(__dirname, "../../..");
 const { translate } = require(path.join(extensionRoot, "out/shared/i18n")) as { translate(locale: string, key: string): string };
 type Event = { type: string; isError?: boolean; toolCallId?: string; outcome?: string };
+const onboardingModelName = "deepseek-v4-flash";
+// The connect dialog derives `{slug}/{model}` and LOCALHOST_API_KEY from the fixture's localhost address.
+const onboardingModelId = `localhost/${onboardingModelName}`;
+const utilityModelName = "deepseek-v4-pro";
 type Api = { __testing: {
   getResolvedExecutable(): { executable: string; found: boolean; source: string };
   getServeProcessId(): number | undefined;
@@ -182,29 +186,43 @@ suite("Native installed release bundle", () => {
         const settings = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-settings-shell");
         try {
           await settings.setViewport(1440, 900);
-          await settings.click("settings-add-model");
-          await settings.click("settings-mode-relay");
-          await settings.fill('[data-testid="settings-model-base-url"]', required("TOMCAT_ONBOARDING_BASE_URL").replace("127.0.0.1", "localhost"));
-          await settings.fill('[data-testid="settings-model-name"]', "deepseek-v4-flash");
-          await settings.fill('[data-testid="settings-model-alias"]', "release-onboarding");
-          await settings.fill('[data-testid="settings-api-key-input"]', "local-onboarding-dummy-key");
-          assert.equal(await settings.evaluate<boolean>('document.querySelector(\'[data-testid="settings-set-default-model"]\').checked'), true);
-          await settings.capture(path.join(artifacts, "onboarding-model-form-desktop.png"));
-          await settings.evaluate('document.querySelector(\'[data-testid="settings-set-default-model"]\').scrollIntoView({ block: "center" })');
+          await settings.click("settings-connectable-other");
+          await settings.fill('[data-testid="settings-connect-address"]', required("TOMCAT_ONBOARDING_BASE_URL").replace("127.0.0.1", "localhost"));
+          await settings.fill('[data-testid="settings-connect-api-key"]', "local-onboarding-dummy-key");
+          await settings.click("settings-connect-fetch");
+          await settings.waitForSnapshot(snapshot => snapshot.text.includes("deepseek-v4-pro"), "Fetched model names must be listed");
+          const listed = await (await fetch(`${required("TOMCAT_ONBOARDING_BASE_URL")}/_test/request-count`)).json() as { modelListAuthorizations: string[] };
+          assert.deepEqual(listed.modelListAuthorizations, ["Bearer local-onboarding-dummy-key"], "The typed key is used for the list request only");
+          await settings.click(`settings-connect-model-${onboardingModelName}`);
+          assert.equal(await settings.evaluate<string>(`document.querySelector('[data-testid="settings-connect-protocol-${onboardingModelName}"]').value`), "openai");
+          await settings.click(`settings-connect-model-${utilityModelName}`);
+          // One key, two protocols: the relay keeps a single card.
+          await settings.click("settings-connect-model-claude-opus-5");
+          assert.equal(await settings.evaluate<string>('document.querySelector(\'[data-testid="settings-connect-protocol-claude-opus-5"]\').value'), "anthropic-messages");
+          assert.equal(await settings.evaluate<boolean>('!!document.querySelector(\'[data-testid="settings-connect-default-hint"]\')'), true, "The first saved model becomes the default");
+          await settings.capture(path.join(artifacts, "onboarding-connect-desktop.png"));
+          await settings.evaluate('document.querySelector(\'[data-testid="settings-connect-default-hint"]\').scrollIntoView({ block: "center" })');
           await settings.capture(path.join(artifacts, "onboarding-default-desktop.png"));
           await settings.setViewport(800, 900);
-          await settings.capture(path.join(artifacts, "onboarding-model-form-narrow.png"));
-          await settings.evaluate('document.querySelector(\'[data-testid="settings-set-default-model"]\').scrollIntoView({ block: "center" })');
+          await settings.capture(path.join(artifacts, "onboarding-connect-narrow.png"));
+          await settings.evaluate('document.querySelector(\'[data-testid="settings-connect-default-hint"]\').scrollIntoView({ block: "center" })');
           await settings.capture(path.join(artifacts, "onboarding-default-narrow.png"));
-          await settings.click("settings-save-model");
-          await settings.waitForSnapshot(snapshot => snapshot.text.includes("release-onboarding") && !snapshot.buttons.some(button => button.testId === "settings-save-model"), "Save must finish before the form closes");
+          await settings.click("settings-connect-save");
+          await settings.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === `settings-edit-${onboardingModelId}`) && !snapshot.buttons.some(button => button.testId === "settings-connect-save"), "Save must finish before the dialog closes");
           await settings.setViewport(1440, 900);
-          assert.equal(await settings.evaluate<boolean>('!!document.querySelector(\'[data-testid="settings-default-release-onboarding"]\')'), true, "The saved model must carry the Default chip");
+          assert.equal(await settings.evaluate<boolean>(`!!document.querySelector('[data-testid="settings-card-LOCALHOST_API_KEY"] [data-testid="settings-default-${onboardingModelId}"]')`), true, "The saved model must carry the Default chip in its provider card");
+          assert.deepEqual(await settings.evaluate<string[]>('[...document.querySelectorAll("article.tc-settings-card")].map(card => card.dataset.testid)'), ["settings-card-LOCALHOST_API_KEY"]);
+          const rowText = (id: string) => settings.evaluate<string>(`document.querySelector('[data-testid="settings-card-LOCALHOST_API_KEY"] [data-testid="settings-model-row-${id}"]')?.textContent ?? ""`);
+          assert.match(await rowText(onboardingModelId), /OpenAI Completions/);
+          assert.match(await rowText("localhost/claude-opus-5"), /Anthropic Messages/);
+          await settings.fill('[data-testid="settings-utility-model-input"]', utilityModelName);
+          await settings.click(`settings-utility-option-localhost/${utilityModelName}`);
+          const utilityChip = `[data-testid="settings-card-LOCALHOST_API_KEY"] [data-testid="settings-utility-localhost/${utilityModelName}"]`;
+          for (const deadline = Date.now() + 15_000; !await settings.evaluate<boolean>(`!!document.querySelector(${JSON.stringify(utilityChip)})`);) {
+            assert.ok(Date.now() < deadline, "The utility chip must move to the picked row");
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
           await settings.capture(path.join(artifacts, "onboarding-model-saved.png"));
-          await settings.click("settings-edit-release-onboarding");
-          await settings.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "settings-save-model"), "Edit form must open");
-          assert.equal(await settings.evaluate<boolean>('!document.querySelector(\'[data-testid="settings-set-default-model"]\')'), true, "Edit must not offer Set as default model");
-          await settings.click("settings-close-model-form");
         } finally { settings.close(); }
         await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
         await api.__testing.focusWebview();
@@ -216,7 +234,7 @@ suite("Native installed release bundle", () => {
         assert.equal(await requestCount(), 0, "Saving configuration must not automatically submit the draft");
         await chat.capture(path.join(artifacts, "onboarding-ready.png"));
       } finally { chat.close(); }
-      assert.equal((await api.__testing.getSessionState(sessionId)).model, "release-onboarding");
+      assert.equal((await api.__testing.getSessionState(sessionId)).model, onboardingModelId);
       async function prompt(text: string, expected: string, fromComposer = false) {
         api.__testing.clearObservedEvents();
         const completed = api.__testing.waitForEvent({ type: "agent_idle", sessionId, timeoutMs: 30_000 });
@@ -282,7 +300,7 @@ suite("Native installed release bundle", () => {
       await api.__testing.waitForWebviewReady();
       await api.__testing.restartServe();
       await api.__testing.waitForWebviewReady();
-      assert.equal((await api.__testing.getSessionState(sessionId)).model, "release-onboarding", "Saved selection must survive restart");
+      assert.equal((await api.__testing.getSessionState(sessionId)).model, onboardingModelId, "Saved selection must survive restart");
       await prompt("after reload", "RELEASE_RELOADED");
       assertDeniedHistoryStatus(
         api.__testing.getWebviewState().sessionViews[sessionId]?.timeline.find(event => event.toolCallId === "release-deny")?.isError,
@@ -294,7 +312,12 @@ suite("Native installed release bundle", () => {
       try { await driver.capture(path.join(artifacts, "release-agent-box.png")); } finally { driver.close(); }
       await capture.captureWorkbenchArtifacts(path.join(artifacts, "release-workbench.png"));
       assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-      await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ onboarding: { firstPid, model: "release-onboarding", sameProcessFirstRequest: true }, architecture: process.arch, platform: process.platform, vscode: vscode.version, resolved, events, webviewErrors: api.__testing.getObservedWebviewErrors(), knownIssues: [], deniedHistoryScreenshots, status: "passed" }, null, 2));
+      // Turn summaries only come from the tool turns, which run after the first restart.
+      const { utilityRequests } = await (await fetch(`${required("TOMCAT_ONBOARDING_BASE_URL")}/_test/request-count`)).json() as { utilityRequests: Array<{ model: string; turnSummary: boolean }> };
+      assert.ok(utilityRequests.some(request => !request.turnSummary), "The first prompt must request a session title");
+      assert.ok(utilityRequests.some(request => request.turnSummary), "Tool turns must request turn summaries");
+      assert.deepEqual([...new Set(utilityRequests.map(request => request.model))], [utilityModelName], "Title calls must use the picked utility model before and after restart");
+      await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ onboarding: { firstPid, model: onboardingModelId, sameProcessFirstRequest: true }, architecture: process.arch, platform: process.platform, vscode: vscode.version, resolved, events, webviewErrors: api.__testing.getObservedWebviewErrors(), knownIssues: [], deniedHistoryScreenshots, status: "passed" }, null, 2));
     } catch (error) {
       await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "failed", error: String(error), events: [...events, ...(testing?.getObservedEvents() ?? [])], webviewErrors: testing?.getObservedWebviewErrors() ?? [] }, null, 2));
       await capture.captureWorkbenchArtifacts(path.join(artifacts, "release-failure.png")).catch(captureError => console.warn(captureError));

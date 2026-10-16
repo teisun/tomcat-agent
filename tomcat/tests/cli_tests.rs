@@ -912,11 +912,21 @@ fn test_init_creates_config_file_in_temp_dir() {
         content.contains("[log]"),
         "config should contain [log] section"
     );
-    assert!(
-        content.contains("default_model = \"gpt-5.4\""),
-        "config should persist the selected default model"
-    );
     assert!(models_path.exists(), "models.toml should be created");
+    assert_init_default_is_a_written_model(&config_path, &models_path);
+}
+
+/// Non-interactive init keeps the wizard's first choice; there is no compile-time default model.
+fn assert_init_default_is_a_written_model(config_path: &Path, models_path: &Path) {
+    let default_model = tomcat::load_config_toml_file(config_path)
+        .expect("load init config")
+        .llm
+        .default_model;
+    let models = fs::read_to_string(models_path).unwrap();
+    assert!(
+        !default_model.is_empty() && models.contains(&format!("id = \"{default_model}\"")),
+        "config should persist the selected default model, got {default_model:?}"
+    );
 }
 
 // ────────────────────── doctor ──────────────────────
@@ -2216,10 +2226,7 @@ fn test_user_doctor_detects_environment() {
         .assert()
         .success();
     info!("Act: tomcat doctor");
-    let assert = cmd()
-        .args(["doctor"])
-        .env("HOME", home.path())
-        .assert();
+    let assert = cmd().args(["doctor"]).env("HOME", home.path()).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
         "Assert: exit 0 + stdout 含 rquickjs / 配置 / 内嵌资源 / .env 检查项；actual: {}",
@@ -2269,11 +2276,8 @@ fn test_init_creates_env_file() {
         cfg_content.contains("[llm]"),
         "config should contain LLM section"
     );
-    assert!(
-        cfg_content.contains("default_model = \"gpt-5.4\""),
-        "config should persist the selected default model"
-    );
     assert!(models_path.exists(), "models.toml should be created");
+    assert_init_default_is_a_written_model(&config_path, &models_path);
     let models_content = fs::read_to_string(&models_path).unwrap();
     assert!(
         models_content.contains("api_key_env = \"OPENAI_API_KEY\""),

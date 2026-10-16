@@ -166,11 +166,7 @@ pub(crate) fn validate_context_window_options(
 }
 
 /// Accept Standard in input, but store only the accelerated capabilities.
-pub(crate) fn validate_supported_speeds(
-    model_id: &str,
-    api: &str,
-    speeds: &[Speed],
-) -> Result<Vec<Speed>, AppError> {
+pub(crate) fn normalize_supported_speeds(speeds: &[Speed]) -> Vec<Speed> {
     let mut normalized: Vec<_> = speeds
         .iter()
         .copied()
@@ -178,10 +174,7 @@ pub(crate) fn validate_supported_speeds(
         .collect();
     normalized.sort_unstable();
     normalized.dedup();
-    if !normalized.is_empty() && !matches!(api, "openai" | "openai-responses") {
-        return Err(AppError::Config(tr("model.speedApi", &[("id", model_id)])));
-    }
-    Ok(normalized)
+    normalized
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +184,9 @@ pub struct ModelCatalog {
     ordered_ids: Vec<String>,
     user_ids: HashSet<String>,
     builtin_ids: HashSet<String>,
+    /// User entries skipped because they lack `api`/`provider` and no builtin supplies them
+    /// (e.g. a partial override of a retired builtin). One stale entry must not stop the catalog.
+    diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +206,7 @@ impl ModelCatalog {
         let mut ordered_ids = Vec::new();
         let mut user_ids = HashSet::new();
         let mut builtin_ids = HashSet::new();
+        let mut diagnostics = Vec::new();
         for entry in builtin_seed_entries_result(&config.context)? {
             builtin_ids.insert(entry.id.clone());
             ordered_ids.push(entry.id.clone());
@@ -219,8 +216,22 @@ impl ModelCatalog {
             let file = load_user_models_file(&user_path)?;
             for raw in file.models {
                 let model_id = raw.id.clone();
+                let existing = by_id.remove(&model_id);
+                if existing.is_none() {
+                    if let Some(field) = missing_definition_field(&raw) {
+                        diagnostics.push(tr(
+                            "model.orphanEntry",
+                            &[
+                                ("id", raw.id.trim()),
+                                ("field", field),
+                                ("path", &user_path.display().to_string()),
+                            ],
+                        ));
+                        continue;
+                    }
+                }
                 user_ids.insert(model_id.clone());
-                let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context, true)?;
+                let merged = merge_user_model(raw, existing, &config.context, true)?;
                 if !ordered_ids.iter().any(|existing| existing == &merged.id) {
                     ordered_ids.push(merged.id.clone());
                 }
@@ -233,7 +244,12 @@ impl ModelCatalog {
             ordered_ids,
             user_ids,
             builtin_ids,
+            diagnostics,
         })
+    }
+
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
     }
 
     pub fn default_user_path(config: &AppConfig) -> Result<PathBuf, AppError> {
@@ -493,6 +509,17 @@ pub(crate) fn builtin_seed_entries_result(
         .collect()
 }
 
+fn missing_definition_field(raw: &UserModelEntry) -> Option<&'static str> {
+    let blank = |value: &Option<String>| value.as_deref().is_none_or(|value| value.trim().is_empty());
+    if blank(&raw.api) {
+        Some("api")
+    } else if blank(&raw.provider) {
+        Some("provider")
+    } else {
+        None
+    }
+}
+
 fn merge_user_model(
     raw: UserModelEntry,
     existing: Option<ModelEntry>,
@@ -586,18 +613,7 @@ fn merge_user_model(
     if let Some(speeds) = raw.supported_speeds {
         merged.supported_speeds = speeds;
     }
-    match validate_supported_speeds(&merged.id, &merged.api, &merged.supported_speeds) {
-        Ok(speeds) => merged.supported_speeds = speeds,
-        Err(error) if degrade_invalid_user_options => {
-            tracing::warn!(
-                model_id = %merged.id,
-                error = %error,
-                "discarding invalid user supported_speeds; model remains without accelerated speeds"
-            );
-            merged.supported_speeds.clear();
-        }
-        Err(error) => return Err(error),
-    }
+    merged.supported_speeds = normalize_supported_speeds(&merged.supported_speeds);
     match validate_context_window_options(
         &merged.id,
         merged.context_window,

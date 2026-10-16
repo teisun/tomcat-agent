@@ -171,7 +171,7 @@ fn every_integration_binary_has_one_explicit_classification() {
 fn missing_live_credentials_is_not_a_successful_skip() {
     for target in [
         "",
-        "gpt-5.4",
+        "openai/gpt-6.1-sol",
         "gpt-5.4_litellm-sunmi",
         common::FCODEX_TEST_DEFAULT_MODEL,
     ] {
@@ -227,7 +227,7 @@ fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
             .env("NO_PROXY", "existing.example")
             .env("no_proxy", "other.example")
             .env("HTTP_PROXY", "http://proxy.invalid:9000")
-            .env("TOMCAT_E2E_OPENAI_TARGET", "gpt-5.4")
+            .env("TOMCAT_E2E_OPENAI_TARGET", "gpt-5.6")
             .env_remove("OPENAI_API_KEY")
             .env_remove("IDATATLAS_OPENAI_API_KEY");
         if target_key {

@@ -123,7 +123,7 @@ fn run_model_default_persists_selected_model_to_config() {
         let cfg = test_config(work_dir.path());
         run_model(
             ModelSub::Default {
-                model: "gpt-5.4".to_string(),
+                model: "gpt-5.6".to_string(),
             },
             &cfg,
         )
@@ -136,7 +136,7 @@ fn run_model_default_persists_selected_model_to_config() {
                 .join("tomcat.config.toml"),
         )
         .expect("read config");
-        assert!(config_text.contains("default_model = \"gpt-5.4\""));
+        assert!(config_text.contains("default_model = \"gpt-5.6\""));
     });
 }
 
@@ -174,8 +174,8 @@ fn run_model_list_marks_seeded_builtin_models_as_builtin() {
         let catalog = ModelCatalog::load(&cfg).expect("load catalog");
         let gpt = list_model_views(&catalog)
             .into_iter()
-            .find(|entry| entry.id == "gpt-5.4")
-            .expect("seeded builtin gpt-5.4");
+            .find(|entry| entry.id == "gpt-5.6")
+            .expect("seeded builtin gpt-5.6");
         assert_eq!(gpt.source, ModelSource::Builtin);
     });
 }

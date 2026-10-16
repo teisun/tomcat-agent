@@ -104,23 +104,11 @@ fn upsert_list_and_remove_user_model_roundtrip() {
 }
 
 #[test]
-fn speed_admin_roundtrip_keeps_all_eight_synthetic_declarations() {
+fn speed_admin_roundtrip_keeps_fast_declaration_and_preference() {
     use crate::core::llm::Speed;
     let (work, cfg) = temp_cfg();
     let prefs = model_prefs(work.path());
-    for (i, speeds) in [
-        vec![Speed::Fast, Speed::Ultrafast],
-        vec![Speed::Fast],
-        vec![Speed::Fast],
-        vec![Speed::Fast],
-        vec![Speed::Fast, Speed::Ultrafast],
-        vec![Speed::Fast],
-        vec![Speed::Fast],
-        vec![Speed::Fast],
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (i, speeds) in [vec![Speed::Fast], vec![]].into_iter().enumerate() {
         let id = format!("relay/synthetic-{i}");
         let mut input = custom_claude_input();
         input.id = id.clone();
@@ -139,7 +127,7 @@ fn speed_admin_roundtrip_keeps_all_eight_synthetic_declarations() {
             },
         )
         .unwrap();
-        prefs.set_speed(&id, Speed::Ultrafast).unwrap();
+        prefs.set_speed(&id, Speed::Fast).unwrap();
         let catalog = ModelCatalog::load(&cfg).unwrap();
         let reloaded = list_model_views_with_prefs(&catalog, &prefs)
             .into_iter()
@@ -148,32 +136,30 @@ fn speed_admin_roundtrip_keeps_all_eight_synthetic_declarations() {
         assert_eq!(reloaded.supported_speeds, speeds);
         assert_eq!(
             reloaded.selected_speed,
-            Some(if speeds.contains(&Speed::Ultrafast) {
-                Speed::Ultrafast
-            } else {
-                Speed::Standard
-            })
+            (!speeds.is_empty()).then_some(Speed::Fast)
         );
         assert!(reloaded.supported_reasoning_levels.contains(&"max".into()));
     }
 }
 
 #[test]
-fn upsert_user_model_rejects_speeds_on_non_openai_api() {
-    let (work, cfg) = temp_cfg();
-    upsert_user_model(&cfg, custom_claude_input()).unwrap();
-    let path = work.path().join("models.toml");
-    let original = fs::read(&path).unwrap();
-    let error = upsert_user_model(
+fn upsert_user_model_keeps_fast_on_anthropic_api() {
+    let (_work, cfg) = temp_cfg();
+    let view = upsert_user_model(
         &cfg,
         ModelEntryInput {
             supported_speeds: Some(vec![crate::core::llm::Speed::Fast]),
             ..custom_claude_input()
         },
     )
-    .expect_err("non-OpenAI speed declaration must be rejected before writing");
-    assert!(error.to_string().contains("supported_speeds"));
-    assert_eq!(fs::read(&path).unwrap(), original);
+    .unwrap()
+    .model;
+    assert_eq!(view.supported_speeds, vec![crate::core::llm::Speed::Fast]);
+    let catalog = ModelCatalog::load(&cfg).unwrap();
+    assert_eq!(
+        catalog.lookup(&view.id).unwrap().supported_speeds,
+        vec![crate::core::llm::Speed::Fast]
+    );
 }
 
 #[test]
@@ -278,7 +264,7 @@ fn model_views_resolve_defaults_for_unselected_preferences() {
 
     let model = list_model_views_with_prefs(&catalog, &prefs)
         .into_iter()
-        .find(|model| model.id == "gpt-5.4")
+        .find(|model| model.id == "gpt-5.6")
         .expect("builtin model");
 
     assert_eq!(model.selected_reasoning_level.as_deref(), Some("medium"));
@@ -295,19 +281,19 @@ fn model_views_clamp_invalid_persisted_preferences_to_supported_defaults() {
     )
     .expect("model preferences");
     prefs
-        .set_reasoning("gpt-5.4", ThinkingLevel::Max)
+        .set_reasoning("kimi-k2.7-code", ThinkingLevel::Max)
         .expect("persist reasoning");
     prefs
-        .set_context_window("gpt-5.4", Some(123_456))
+        .set_context_window("kimi-k2.7-code", Some(123_456))
         .expect("persist context window");
 
     let model = list_model_views_with_prefs(&catalog, &prefs)
         .into_iter()
-        .find(|model| model.id == "gpt-5.4")
+        .find(|model| model.id == "kimi-k2.7-code")
         .expect("builtin model");
 
-    assert_eq!(model.selected_reasoning_level.as_deref(), Some("xhigh"));
-    assert_eq!(model.selected_context_window, Some(400_000));
+    assert_eq!(model.selected_reasoning_level.as_deref(), Some("high"));
+    assert_eq!(model.selected_context_window, Some(256_000));
 }
 
 #[test]
@@ -320,7 +306,7 @@ fn list_model_views_keep_seeded_builtin_entries_as_builtin_sources() {
         &path,
         r#"
 [[models]]
-id = "gpt-5.4"
+id = "gpt-5.6"
 base_url = "https://gateway.example.test/v1"
 
 [[models]]
@@ -335,7 +321,7 @@ provider = "relay"
     let views = list_model_views(&catalog);
     let seeded_builtin = views
         .iter()
-        .find(|entry| entry.id == "gpt-5.4")
+        .find(|entry| entry.id == "gpt-5.6")
         .expect("seeded builtin view");
     let custom = views
         .iter()
@@ -351,35 +337,35 @@ provider = "relay"
 fn remove_user_model_can_drop_seeded_builtin_override_then_fall_back_to_builtin() {
     clear_managed_credentials_for_test();
     let (_work_dir, mut cfg) = temp_cfg();
-    cfg.llm.default_model = "gpt-5.2".to_string();
+    cfg.llm.default_model = "deepseek-v4-pro".to_string();
     let path = ModelCatalog::default_user_path(&cfg).expect("models.toml path");
     std::fs::write(
         &path,
         r#"
 [[models]]
-id = "gpt-5.4"
+id = "gpt-5.6"
 base_url = "https://gateway.example.test/v1"
 "#,
     )
     .expect("seed builtin override");
 
-    remove_user_model(&cfg, "gpt-5.4").expect("remove seeded builtin override");
+    remove_user_model(&cfg, "gpt-5.6").expect("remove seeded builtin override");
 
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog after remove");
     let seeded_builtin = list_model_views(&catalog)
         .into_iter()
-        .find(|entry| entry.id == "gpt-5.4")
-        .expect("builtin gpt-5.4 remains available");
+        .find(|entry| entry.id == "gpt-5.6")
+        .expect("builtin gpt-5.6 remains available");
     assert_eq!(seeded_builtin.source, ModelSource::Builtin);
-    assert!(!catalog.is_user_model("gpt-5.4"));
-    assert!(catalog.is_builtin_seed("gpt-5.4"));
+    assert!(!catalog.is_user_model("gpt-5.6"));
+    assert!(catalog.is_builtin_seed("gpt-5.6"));
 
-    let error = remove_user_model(&cfg, "gpt-5.4").expect_err("pure builtin remove must fail");
+    let error = remove_user_model(&cfg, "gpt-5.6").expect_err("pure builtin remove must fail");
     assert!(
         error.to_string().contains(&crate::infra::i18n::tr_in(
             crate::infra::i18n::Locale::En,
             "model.builtinDelete",
-            &[("id", "gpt-5.4")]
+            &[("id", "gpt-5.6")]
         )),
         "unexpected error: {error}"
     );
@@ -739,8 +725,12 @@ fn remove_user_model_forgets_config_and_all_session_overrides() {
     let persisted = crate::load_config_toml_file(&config_path).expect("read cleaned config");
     assert_eq!(persisted.llm.default_model, "");
     assert_eq!(persisted.context.compaction_model, "");
-    assert_eq!(persisted.llm.vision_model.as_deref(), Some(""));
-    assert_eq!(persisted.llm.title_model.as_deref(), Some(""));
+    assert_eq!(persisted.llm.vision_model, None);
+    assert_eq!(
+        persisted.llm.title_model.as_deref(),
+        Some(crate::infra::config::DEFAULT_TITLE_MODEL),
+        "a cleared utility model falls back to the default utility model"
+    );
     for path in [&main_store, &reviewer_store] {
         let cleaned: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).expect("read cleaned store"))
@@ -1014,4 +1004,241 @@ fn model_config_reload_rebuilds_provider_without_restart() {
         !Arc::ptr_eq(&first.provider_impl, &second.provider_impl),
         "provider cache should rebuild after model config reload"
     );
+}
+
+fn relay_input(id: &str, api: &str, key_env: &str) -> ModelEntryInput {
+    ModelEntryInput {
+        id: id.to_string(),
+        model_name: Some(id.rsplit('/').next().unwrap_or(id).to_string()),
+        api: api.to_string(),
+        provider: "fcodex".to_string(),
+        api_key_env: Some(key_env.to_string()),
+        base_url: Some("https://fcodex.example.test".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        context_window_options: None,
+        max_output_tokens: None,
+        description: None,
+        supported_speeds: None,
+        supported_reasoning_levels: None,
+        thinking_format: Some(
+            if api == "anthropic-messages" { "anthropic" } else { "openai" }.to_string(),
+        ),
+    }
+}
+
+fn write_env_file(work_dir: &std::path::Path, text: &str) -> std::path::PathBuf {
+    let env_path = work_dir.join("assets").join(".env");
+    fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
+    fs::write(&env_path, text).expect("write .env");
+    crate::core::llm::auth::refresh_managed_credentials(&env_path).expect("refresh credentials");
+    env_path
+}
+
+#[test]
+#[serial(env_lock)]
+fn upsert_user_models_writes_a_mixed_protocol_batch_with_one_key_slot() {
+    use crate::core::llm::upsert_user_models;
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+
+    let result = upsert_user_models(
+        &cfg,
+        vec![
+            relay_input("fcodex/gpt-6.1-sol", "openai-responses", "FCODEX_API_KEY"),
+            relay_input("fcodex/claude-opus-5-5", "anthropic-messages", "FCODEX_API_KEY"),
+            relay_input("fcodex/my-relay-model", "openai", "FCODEX_API_KEY"),
+        ],
+    )
+    .expect("batch upsert");
+
+    let returned: Vec<_> = result.models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(
+        returned,
+        ["fcodex/gpt-6.1-sol", "fcodex/claude-opus-5-5", "fcodex/my-relay-model"]
+    );
+    let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
+    for (id, api) in [
+        ("fcodex/gpt-6.1-sol", "openai-responses"),
+        ("fcodex/claude-opus-5-5", "anthropic-messages"),
+        ("fcodex/my-relay-model", "openai"),
+    ] {
+        let entry = catalog.lookup(id).expect("batch entry persisted");
+        assert_eq!(entry.api, api);
+        assert_eq!(entry.api_key_env.as_deref(), Some("FCODEX_API_KEY"));
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn upsert_user_models_rejects_the_whole_batch_when_one_entry_is_invalid() {
+    use crate::core::llm::upsert_user_models;
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    upsert_user_model(&cfg, custom_claude_input()).expect("seed existing entry");
+    let models_path = ModelCatalog::default_user_path(&cfg).expect("models path");
+    let before = fs::read(&models_path).expect("read models.toml");
+
+    let error = upsert_user_models(
+        &cfg,
+        vec![
+            relay_input("fcodex/gpt-6.1-sol", "openai-responses", "FCODEX_API_KEY"),
+            relay_input("fcodex/broken", "not-a-protocol", "FCODEX_API_KEY"),
+        ],
+    )
+    .expect_err("invalid entry rejects the batch");
+
+    assert!(error.to_string().contains("not-a-protocol"), "{error}");
+    assert_eq!(fs::read(&models_path).expect("reread models.toml"), before);
+    assert!(upsert_user_models(&cfg, Vec::new()).expect("empty batch").models.is_empty());
+    assert_eq!(fs::read(&models_path).expect("reread models.toml"), before);
+}
+
+#[test]
+#[serial(env_lock)]
+fn remove_provider_deletes_slot_models_saved_key_and_their_selections() {
+    use crate::core::llm::{remove_provider, upsert_user_models};
+    clear_managed_credentials_for_test();
+    let (work_dir, mut cfg) = temp_cfg();
+    upsert_user_models(
+        &cfg,
+        vec![
+            relay_input("fcodex/gpt-6.1-sol", "openai-responses", "FCODEX_API_KEY"),
+            relay_input("fcodex/claude-opus-5-5", "anthropic-messages", "FCODEX_API_KEY"),
+            relay_input("fcodex2/claude-fable-5", "anthropic-messages", "FCODEX_2_API_KEY"),
+        ],
+    )
+    .expect("seed relay models");
+    let env_path = write_env_file(
+        work_dir.path(),
+        "FCODEX_API_KEY=key-a\nFCODEX_2_API_KEY=key-b\nOTHER_KEEP=keep\n",
+    );
+    cfg.llm.default_model = "fcodex/gpt-6.1-sol".to_string();
+    cfg.llm.title_model = Some("fcodex2/claude-fable-5".to_string());
+    let config_path = work_dir.path().join("tomcat.config.toml");
+    fs::write(&config_path, toml::to_string_pretty(&cfg).expect("serialize config"))
+        .expect("write config");
+
+    let result = remove_provider(&cfg, &config_path, "FCODEX_API_KEY").expect("remove provider");
+
+    assert_eq!(
+        result.removed_model_ids,
+        ["fcodex/gpt-6.1-sol", "fcodex/claude-opus-5-5"]
+    );
+    assert!(result.key_removed);
+    assert_eq!(result.key_source, None);
+    let env_text = fs::read_to_string(&env_path).expect("read .env");
+    assert!(!env_text.contains("FCODEX_API_KEY="));
+    assert!(env_text.contains("FCODEX_2_API_KEY=key-b"));
+    assert!(env_text.contains("OTHER_KEEP=keep"));
+    let persisted = crate::load_config_toml_file(&config_path).expect("read config");
+    assert_eq!(persisted.llm.default_model, "");
+    assert_eq!(persisted.llm.title_model.as_deref(), Some("fcodex2/claude-fable-5"));
+    let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
+    let views = list_model_views(&catalog);
+    assert!(views.iter().all(|view| !view.id.starts_with("fcodex/")));
+    let survivor = views
+        .iter()
+        .find(|view| view.id == "fcodex2/claude-fable-5")
+        .expect("other slot untouched");
+    assert!(survivor.key_present);
+    clear_managed_credentials_for_test();
+}
+
+#[test]
+#[serial(env_lock)]
+fn remove_provider_keeps_an_environment_key_and_reports_its_source() {
+    use crate::core::llm::{remove_provider, upsert_user_models, KeySource};
+    clear_managed_credentials_for_test();
+    let (work_dir, cfg) = temp_cfg();
+    unsafe {
+        std::env::set_var("ADMIN_TEST_SHELL_API_KEY", "from-shell");
+    }
+    upsert_user_models(
+        &cfg,
+        vec![relay_input("shell/model", "openai", "ADMIN_TEST_SHELL_API_KEY")],
+    )
+    .expect("seed model");
+    let catalog = ModelCatalog::load(&cfg).expect("catalog");
+    let view = list_model_views(&catalog)
+        .into_iter()
+        .find(|view| view.id == "shell/model")
+        .expect("model view");
+    assert_eq!(view.key_source, Some(KeySource::Environment));
+
+    let result = remove_provider(&cfg, &work_dir.path().join("tomcat.config.toml"), "ADMIN_TEST_SHELL_API_KEY")
+        .expect("remove provider");
+
+    unsafe {
+        std::env::remove_var("ADMIN_TEST_SHELL_API_KEY");
+    }
+    assert_eq!(result.removed_model_ids, ["shell/model"]);
+    assert!(!result.key_removed);
+    assert_eq!(result.key_source, Some(KeySource::Environment));
+}
+
+#[test]
+#[serial(env_lock)]
+fn remove_provider_on_a_builtin_slot_removes_the_key_and_restores_overrides() {
+    use crate::core::llm::{remove_provider, KeySource};
+    clear_managed_credentials_for_test();
+    let (work_dir, cfg) = temp_cfg();
+    let builtin = ModelCatalog::load(&cfg)
+        .expect("catalog")
+        .lookup("gpt-5.6")
+        .cloned()
+        .expect("builtin gpt-5.6");
+    let mut moved = relay_input("gpt-5.6", "openai-responses", "FCODEX_API_KEY");
+    moved.model_name = builtin.model_name.clone();
+    upsert_user_model(&cfg, moved).expect("move builtin under relay key");
+    write_env_file(work_dir.path(), "DEEPSEEK_API_KEY=ds\nFCODEX_API_KEY=relay\n");
+    let config_path = work_dir.path().join("tomcat.config.toml");
+
+    let deepseek = remove_provider(&cfg, &config_path, "DEEPSEEK_API_KEY").expect("remove deepseek");
+    assert!(deepseek.removed_model_ids.is_empty());
+    assert!(deepseek.key_removed);
+    let relay = remove_provider(&cfg, &config_path, "FCODEX_API_KEY").expect("remove relay");
+    assert_eq!(relay.removed_model_ids, ["gpt-5.6"]);
+
+    let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
+    let views = list_model_views(&catalog);
+    let flash = views.iter().find(|view| view.id == "deepseek-v4-flash").expect("builtin stays");
+    assert!(!flash.key_present);
+    assert_eq!(flash.key_source, None::<KeySource>);
+    let restored = views.iter().find(|view| view.id == "gpt-5.6").expect("builtin restored");
+    assert_eq!(restored.source, ModelSource::Builtin);
+    assert_eq!(restored.api_key_env, "OPENAI_API_KEY");
+    let error = remove_provider(&cfg, &config_path, "NOBODY_USES_THIS_API_KEY")
+        .expect_err("unknown slot");
+    assert!(error.to_string().contains("NOBODY_USES_THIS_API_KEY"));
+    clear_managed_credentials_for_test();
+}
+
+#[test]
+#[serial(env_lock)]
+fn set_utility_model_writes_title_model_and_rejects_unknown_ids() {
+    use crate::core::llm::{set_default_model, set_utility_model, upsert_user_models};
+    clear_managed_credentials_for_test();
+    let (work_dir, cfg) = temp_cfg();
+    upsert_user_models(
+        &cfg,
+        vec![relay_input("fcodex/claude-opus-5-5", "anthropic-messages", "FCODEX_API_KEY")],
+    )
+    .expect("seed relay model");
+    let config_path = work_dir.path().join("tomcat.config.toml");
+    fs::write(&config_path, "[llm]\ndefault_model = \"deepseek-v4-pro\"\nretry_count = 7\n")
+        .expect("write config");
+
+    set_utility_model(&cfg, &config_path, "fcodex/claude-opus-5-5").expect("set utility model");
+    assert!(set_default_model(&cfg, &config_path, "deepseek-v4-flash", false).expect("set default"));
+
+    let persisted = crate::load_config_toml_file(&config_path).expect("read config");
+    assert_eq!(persisted.llm.title_model.as_deref(), Some("fcodex/claude-opus-5-5"));
+    assert_eq!(persisted.llm.default_model, "deepseek-v4-flash");
+    assert_eq!(persisted.llm.retry_count, 7);
+    let before = fs::read(&config_path).expect("read config bytes");
+    for bad in ["", "   ", "missing/model"] {
+        set_utility_model(&cfg, &config_path, bad).expect_err("rejected utility model");
+    }
+    assert_eq!(fs::read(&config_path).expect("reread config bytes"), before);
 }

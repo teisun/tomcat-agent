@@ -27,6 +27,7 @@ pub(crate) mod mocks;
 mod multimodal_test;
 mod prompt_cache_key_test;
 mod registry_test;
+mod remote_models_test;
 mod replay_policy_test;
 mod resolver_test;
 mod retry_delay_test;

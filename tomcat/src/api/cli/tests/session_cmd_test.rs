@@ -281,7 +281,8 @@ fn run_session_archive_returns_ok() {
 fn run_session_delete_triggers_openai_files_cleanup_registry() {
     let (base_url, hits, handle) = spawn_delete_404_server();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = test_config(dir.path());
+    let mut cfg = test_config(dir.path());
+    cfg.llm.default_model = "gpt-5.4".to_string();
     crate::test_support::write_models_override(
         dir.path(),
         &[
@@ -371,6 +372,7 @@ fn assert_session_subcommand_cleans_plugin_vm(build_sub: impl FnOnce(String) -> 
     write_session_plugin_fixture(workspace.path(), PLUGIN_ID, "session");
 
     let mut cfg = test_config(work_dir.path());
+    cfg.llm.default_model = "gpt-5.4".to_string();
     crate::test_support::write_models_override(
         work_dir.path(),
         &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],

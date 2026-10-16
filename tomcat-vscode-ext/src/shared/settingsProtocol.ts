@@ -21,6 +21,8 @@ export interface SettingsModelCapabilities {
 }
 
 export type SettingsModelSource = "builtin" | "user";
+export type SettingsKeySource = "saved" | "environment";
+export type SettingsRemoteModelsFailure = "auth" | "format" | "network" | "timeout" | "unsupported" | "unknown";
 
 export interface SettingsModelView {
   api: string;
@@ -32,6 +34,7 @@ export interface SettingsModelView {
   description?: string | null;
   id: string;
   keyPresent: boolean;
+  keySource?: SettingsKeySource | null;
   maxOutputTokens?: number | null;
   modelName?: string | null;
   provider: string;
@@ -76,14 +79,25 @@ export interface SettingsModelRemovalReceipt {
   warnings: string[];
 }
 
+export interface SettingsRemoteModelsReceipt {
+  requestId: string;
+  models?: string[];
+  failure?: SettingsRemoteModelsFailure;
+}
+
 export interface SettingsCapabilities {
   setDefaultModel?: boolean;
+  setDefaultModelIfUnset?: boolean;
+  setUtilityModel?: boolean;
   setUiLanguage?: boolean;
   listModels: boolean;
   listProviderKeys: boolean;
+  listRemoteModels?: boolean;
   removeModel: boolean;
+  removeProvider?: boolean;
   setProviderKey: boolean;
   upsertModel: boolean;
+  upsertModels?: boolean;
   connectorCapabilities?: SettingsConnectorCapabilities;
 }
 
@@ -131,7 +145,10 @@ export interface SettingsConnectorToolToggleReceipt {
 export interface SettingsStateSnapshot {
   /** Effective default model; undefined for CLIs that do not report it. */
   defaultModelId?: string;
+  /** Configured utility model; undefined for CLIs that do not report it. */
+  utilityModelId?: string;
   modelSaveReceipt?: { requestId: string; success: boolean };
+  remoteModelsReceipt?: SettingsRemoteModelsReceipt | null;
   locale?: import("./i18n").Locale;
   uiPreferences?: import("./i18n").UiPreferences | null;
   languageStatus?: "saving" | "saved" | "failed";
@@ -198,6 +215,27 @@ export type SettingsIntent =
     }
   | {
       messageId: string;
+      type: "upsertModels";
+      data: {
+        models: SettingsModelInput[];
+        providerKey?: SettingsProviderKeyInput;
+        /** First model of this save; set only while no default exists unless `setAsDefault`. */
+        defaultModelId?: string;
+        setAsDefault?: boolean;
+      };
+    }
+  | {
+      messageId: string;
+      type: "listRemoteModels";
+      data: {
+        api: string;
+        apiKey?: string;
+        apiKeyEnv?: string;
+        baseUrl: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "removeModel";
       data: {
         modelId: string;
@@ -205,7 +243,14 @@ export type SettingsIntent =
     }
   | {
       messageId: string;
-      type: "setDefaultModel";
+      type: "removeProvider";
+      data: {
+        keyEnv: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setDefaultModel" | "setUtilityModel";
       data: {
         modelId: string;
       };
@@ -216,6 +261,7 @@ export type SettingsIntent =
       data: {
         envName: string;
         value: string;
+        defaultModelId?: string;
       };
     }
   | {
@@ -323,6 +369,10 @@ function isSettingsModelInput(value: unknown): value is SettingsModelInput {
   );
 }
 
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
+}
+
 function isSettingsProviderKeyInput(value: unknown): value is SettingsProviderKeyInput {
   return isRecord(value) && typeof value.envName === "string" && typeof value.value === "string";
 }
@@ -350,14 +400,35 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
         (value.data.setAsDefault === undefined || typeof value.data.setAsDefault === "boolean") &&
         (value.data.providerKey === undefined || isSettingsProviderKeyInput(value.data.providerKey))
       );
+    case "upsertModels":
+      return (
+        isRecord(value.data) &&
+        Array.isArray(value.data.models) &&
+        value.data.models.every(isSettingsModelInput) &&
+        isOptionalString(value.data.defaultModelId) &&
+        (value.data.setAsDefault === undefined || typeof value.data.setAsDefault === "boolean") &&
+        (value.data.providerKey === undefined || isSettingsProviderKeyInput(value.data.providerKey))
+      );
+    case "listRemoteModels":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.api === "string" &&
+        typeof value.data.baseUrl === "string" &&
+        isOptionalString(value.data.apiKey) &&
+        isOptionalString(value.data.apiKeyEnv)
+      );
+    case "removeProvider":
+      return isRecord(value.data) && typeof value.data.keyEnv === "string" && value.data.keyEnv.length > 0;
     case "removeModel":
     case "setDefaultModel":
+    case "setUtilityModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
     case "setProviderKey":
       return (
         isRecord(value.data) &&
         typeof value.data.envName === "string" &&
-        typeof value.data.value === "string"
+        typeof value.data.value === "string" &&
+        isOptionalString(value.data.defaultModelId)
       );
     case "listConnectors":
     case "reloadConnectors":

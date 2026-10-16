@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Speed {
     #[default]
+    // Legacy configs and preferences may still contain the removed "ultrafast" tier.
+    #[serde(alias = "ultrafast")]
     Standard,
     Fast,
-    Ultrafast,
 }

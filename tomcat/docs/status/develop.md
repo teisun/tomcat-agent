@@ -1,6 +1,22 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-16 10:45 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-16 21:43 +0800 | DONE | develop | — |
+
+### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
+
+- **提交边界**：本次将已检查的 121 个修改文件与 8 个新增源码/测试文件全部纳入，包含下方供应商分卡改动及两处 status。按用户明确要求，不运行测试、构建、打包或视觉验收；下方结果均为此前验收记录，不冒称本次重新通过。Cov% 未测量，提交信息省略覆盖率；未升级版本、未推送、未打标签或发布。
+
+- **范围**：按 `三项整改计划_6d1637f0` 实施。① 内置技能改由 `build.rs` 生成嵌入表，跳过 `node_modules` 与点文件，删除 `include_dir` 依赖；② 复核供应商分卡实现，修 4 处：混合主机卡以首个用户行为代表（标题、主机顺序、卡内添加地址），编辑表单中文"地址"，用户指南补辅助模型回落说明，续传文档 §4.2.3 去掉旧规则；③ 待答提问面板的选中项改为金色字母块加暖色行底，与悬停明显区分，并补高对比模式样式。验收完成时未提交，现随本次本地提交纳入；未升版本、未推送或发布。
+- **验收结论**：本机保留 18M 的 verify `node_modules` 时，嵌入表 19 项（等于 git 跟踪数），release 产物 16,490,436 字节（基线 16,490,556），二进制中无 Playwright 包字符串。Rust lib 3301 / 0 失败、integration（parallel 378 + serial 49）、严格 Clippy、release 构建通过。扩展侧 lint、GUI 854、core 774 通过；提问面板视觉脚本 9 场景通过，新增计算样式断言，且已反向验证（去掉新规则后断言失败）。改前/改后截图与日志见 `.agents/acceptance/remediation-20261016/acceptance.md`。
+- **计划外修复**：全量 lib 中，分卡计划新增的 `remote_models_test` 连续两次失败。原因是 `http_client_test` / `web_fetch` 的 4 条代理用例运行期间清空 `NO_PROXY`，把并发的本机 mock 请求截进 mock 代理；两模块同跑可 10/10 复现。现改为这 4 条用例只豁免 `127.0.0.1,localhost`，同跑 10 次 0 失败，生产代码未改。
+- **未验证**：提问面板截图来自模拟宿主，未在真实 VS Code 打包安装后复拍；未打包 VSIX；Windows/Linux 未验证。
+
+### CURRENT INTEGRATION：模型设置按供应商管理（2026-10-16 下午，本次本地提交）
+
+- **范围**：按 `供应商分卡模型设置_daf616fb` 实施，五项需求为：供应商卡片（一把 Key 一张卡，每行显示实际协议）、连接供应商对话框与首个配置成功即默认、内置目录刷新为 13 项、删除 Ultrafast（旧值按 Standard 读入，不改写文件）、`llm.title_model` 作为可指向任意已配型号的辅助模型。另含 Anthropic fast、思考请求通用规则、前缀绑定回退与 Chat Completions 只回传当前回合。老用户 models.toml 不迁移。验收完成时未提交，现随本次本地提交纳入；未升版本、未推送或发布。
+- **验收结论**：Rust 门禁全绿：严格 Clippy、lib 3300 项（0 失败，5 项 ignored）、doctest、integration（parallel 378 + serial 49）及 release 构建。扩展侧 lint、harness 类型检查、GUI 853、core 774、integration 218 + 打包烟测 13 通过。fake 安装 E2E 23 项、`verify:vsix` 10 项通过。真实 release 包在 macOS x64 / VS Code 1.106.0 下冷启动与 0.1.90 升级各 1 项通过，其中冷启动会在设置页改辅助模型，并断言标题请求只命中所选型号。宽 1440 / 窄 390 视觉 42 张：无禁用词、无越界变量名、无溢出、无 console error。用本机已有 Key 实拉型号列表：DeepSeek 2、MiMo 8、Moonshot 4 个，均 2xx，Key 未打印。完整记录见 `.agents/acceptance/vendor-model-settings/acceptance.md`。
+- **本轮回归已修**：删除内置 `utility-flash` 后，执行流夹具的回合标题请求抢占了脚本响应，现只把主模型指向夹具；门禁脚本中 Responses Key 映射仍是旧型号，已同步；设置页窄屏有三处问题已修：连接列表行被压扁、搜索框溢出、卡片菜单右侧被裁。视觉脚本的溢出检查改为同时覆盖对话框内部的横向滚动容器。
+- **既有风险**：`include_dir!` 会嵌入本地 gitignored 的 verify 技能 `node_modules`，本地 release 构建会因此膨胀，也会拖慢新工作目录的首次落盘。本轮构建期间暂时移开，之后已恢复，未在本计划内修；已由上方"三项整改"解决（改为 `build.rs` 生成嵌入表）。Windows/Linux 原生安装与真实付费对话未验证。
 
 ### CURRENT INTEGRATION (2026-10-16)
 
@@ -22,9 +38,11 @@
 - **中途证据**：计划开工首批 192 项、恢复取消 1 项、配置/提示/技能批次、SessionBar/App 93 项通过；两份旧目录升级回归、Serve robustness 14 项、门禁配置 6 项、工具目录 2 项通过。真实 Serve 同回合开工→写文件→提问→回答继续、普通/恢复 Stop，以及 Host 新旧四条用例均已通过；Host 原失败来自夹具答案遗漏 pickedRecommended，未放宽协议校验。
 - **最终验收进度**：Host 单测 762、GUI 844、wire 和版本一致性通过；分批有效 Rust lib 3266、剩余 integration 367+3 定向修复复验、serial 33，以及严格 Clippy、doc（0 项）、release 构建通过。macOS x64 / VS Code 1.106.0 的真实包冷启动和预置 0.1.90 数据升级行为通过，后者验证同 PID 开工→写文件→执行提问→继续及菜单连续管理。安装 E2E 复用 22 项成功结果，修正菜单持久展开后的测试交互并定向复验 1 项通过；完整 fake `verify:vsix` 10 项通过。20 张最终 PNG 及 ARIA/console 已逐一读取：19 份 console 无错误，完整 workbench 保留 E2E harness 查询 Marketplace 的 404。本机许可数据副本烟测亦通过：36 个模型、3 个近期非当前会话（含空会话与两份真实历史）、35 个引用图片 blob、203 份计划；握手/模型列表/会话切换与读取成功，源模型和抽样历史哈希不变，副本清理完成。受保护原始配置及凭证未读取，使用新隔离配置，不冒称验证了它们或所有历史。详见 `.agents/acceptance/agent-workflow-upgrade/acceptance.md`；不把拆跑记录冒充聚合 gate 退出 0。
 - **请求断言校正**：现有 OpenAI/Anthropic 适配器把 runtime tail 合入 wire system；本轮不移动 tail，也不承诺整个 wire 缓存前缀恒定。验证稳定 system 正文、tools、历史字节不变，仅 planner→executor 提醒变化，workspace 权限提醒不变（`core/llm/openai.rs::transport_messages` 及既有 provider 测试）。
-- **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产，Marketplace 仍关闭。下方旧日期记录仅属历史。
+- **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-10-16]** 三项整改：内置技能不再嵌入本地 `node_modules`，供应商分卡复核修 4 处，提问选中项与悬停明显区分；另修全量 lib 中代理用例截流本机 mock 请求的竞态。Rust/扩展门禁与 9 场景视觉脚本通过；本次纳入本地提交，尚未推送或发布，详见 `.agents/acceptance/remediation-20261016/acceptance.md`。
+- [✓] **[P0/P1，2026-10-16]** 模型设置按供应商管理与内置目录更新：已完成实施、跨层门禁、真实包冷启动/升级验收与 42 张宽窄视觉截图验收，并实拉 3 家型号列表；本次纳入本地提交，尚未推送或发布，详见 `.agents/acceptance/vendor-model-settings/acceptance.md`。
 - **[P1，2026-10-16]** 五项整改与拒写历史补充修复收口，CLI/EXT/内置 CLI 版本统一递增并纳入本次本地提交；版本校验通过，按用户要求未重跑测试或构建。
 - [✓] **[P0/P1，2026-10-15]** 五项整改、分批门禁补缺、本机真实包安装、许可的个人数据读取烟测与 20 张视觉截图交付完成；已知问题与未验证边界保留如下。当时尚未提交或发布。
 - **[P0，代码已实现，原生首配链路已验收]** 模型元数据与凭证解析拆分；缺 Key 不阻断 serve 建会话，配置文件在用户保存时懒创建，运行期只刷新模型选择字段；压缩模型增加当前主模型兜底。@2026-10-14
@@ -55,6 +73,9 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- Serve 新增 `list_remote_models`、`upsert_models`、`remove_provider` 与 `set_utility_model` 四个命令，各有对应 capability。`set_default_model` 增加 `onlyIfUnset`，返回 written/skipped，并声明 `set_default_model_if_unset`。`list_models` 增加 `utilityModelId`；模型视图增加 `keySource`，取值 saved / environment / null。wire 镜像与 schema 已同步。
+- `Speed` 只剩 Standard/Fast，`"ultrafast"` 作为 Standard 的 serde 别名读入，`model.speedApi` 已删除。Anthropic 选 Fast 时发 `speed: "fast"` 与 `fast-mode-2026-02-01` beta。Chat Completions 的续传名单与 `preserve_history` 已删除，统一只回传当前回合。
+- `llm.title_model` 改为字段级默认 `deepseek-v4-flash`；`context.compaction_model` 默认改为空，候选顺序为显式配置 → 会话当前模型 → 默认模型；init 不再写入压缩模型。
 - 历史 message 新增可选本地 `is_error`，映射到 Host/GUI 可缺省的 `isError`；缺省代表未知而非成功。发送到模型前剥离，Serve 命令/事件顶层结构不变。
 - 新增 `start_plan({plan_id?})`；`ask_question` 支持 executing，描述提示执行期仅必要时提问。`update_plan` 仍只改 todo，权限与 build 状态闸门不变。
 - 配置加载忽略未知/已删键并在日志就绪后告警，`load_config_for_init` 删除；旧连接字段不自动迁移。新增 `serde_ignored` 0.1.14。
@@ -86,9 +107,9 @@
 | 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
-| 本次 Rust 广域检查未全绿 | 全量 lib 3265 passed / 2 failed / 5 ignored；两项 QuickJS 20ms 超时。该模块串行复验 5 passed / 2 failed，fanout 超时仍在，另有 unawaited-child 清理断言失败；相关实现/测试相对 HEAD 未修改 | 归因未证实，不把它们拼为通过；拒写链路、三家 wire、目录兼容与原生安装结果单独有效，详情与日志见 denied-history 验收记录 |
+| 历史 QuickJS 偶发失败 | 五项整改/拒写验收期间全量 lib 3265 passed / 2 failed / 5 ignored；模块复验仍有超时和清理断言失败。后续供应商分卡与三项整改的全量 lib 已通过，但不证明该问题已修 | 保留原失败记录与后续通过记录；本次按用户要求未复跑，不宣称根因已消除 |
 | 历史安装包仍携带旧显示缺陷 | 拒写历史修复仅在当前源码及隔离验收包完成；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 新失败保存真实状态，旧无状态记录中性展示；源码修复随本次提交纳入，新版二进制与安装包待后续明确构建/发布；不再将缺陷作为当前门禁可接受例外 |
-| Marketplace 自动发布关闭 | 仓库和环境均未配置 Azure 凭据，用户选择本次只发 GitHub | 保持 `PUBLISH_MARKETPLACE` 未设置，后续另行配置并明确启用 |
+| Marketplace 自动上传待实际验证 | 专用联邦身份、真实 OIDC 登录与 Publisher Contributor 已就绪；2026-10-16 经用户授权设置并回读仓库变量 `PUBLISH_MARKETPLACE=true` | 本次不开启发布；下一次正常发版核实三平台上传与已有安装更新，不把登录成功当作上传成功 |
 | 既有验证边界 | 历史发布覆盖三目标原生受控模型链路，本轮仅 macOS x64；未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |
 
 - 历史 `real_mimo_web_search` slow 标记仅作性能观察，不把其旧 PASS 作为本轮复验。

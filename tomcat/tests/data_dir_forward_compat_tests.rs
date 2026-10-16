@@ -25,6 +25,33 @@ use sha2::{Digest, Sha256};
 const WAIT: Duration = Duration::from_secs(20);
 const MODEL: &str = "gpt-5.4";
 const LEGACY_REPLY: &str = "legacy fixture conversation";
+const RETIRED_BUILTINS: [&str; 9] = [
+    "gpt-5.2",
+    "gpt-5.4",
+    "gpt-5.5",
+    "utility-flash",
+    "mimo-v2.5-pro",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+];
+const NEW_BUILTINS: [&str; 4] = [
+    "openai/gpt-6-astra",
+    "openai/gpt-6.1-sol",
+    "mimo/mimo-v2.6-pro",
+    "anthropic/claude-opus-5-5",
+];
+const ORPHAN_OVERRIDE: &str = "claude-opus-4-1";
+
+fn model_ids(models: &Value) -> Vec<String> {
+    models["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model["id"].as_str().unwrap().to_string())
+        .collect()
+}
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/data-dir-v0.1.90")
@@ -266,6 +293,13 @@ fn legacy_data_directories_remain_usable_after_upgrade() {
             &info,
             &server.base_url,
         );
+        if variant == "cli-init" {
+            let mut models = fs::read_to_string(data.join("models.toml")).unwrap();
+            models.push_str(&format!(
+                "\n[[models]]\nid = \"{ORPHAN_OVERRIDE}\"\nbase_url = \"https://gateway.example.test\"\n"
+            ));
+            fs::write(data.join("models.toml"), models).unwrap();
+        }
         let config_before = fs::read(data.join("tomcat.config.toml")).unwrap();
         let models_before = fs::read(data.join("models.toml")).ok();
         let mut command = isolated_command(&fx.home_path, &fx.workspace, &cargo_bin_path());
@@ -288,7 +322,17 @@ fn legacy_data_directories_remain_usable_after_upgrade() {
                 .unwrap()
                 .parse()
                 .unwrap();
-            assert_eq!(persisted["models"].as_array().unwrap().len(), 18);
+            assert_eq!(persisted["models"].as_array().unwrap().len(), 19);
+            let ids = model_ids(&models);
+            assert!(ids.iter().any(|id| id == MODEL), "{ids:?}");
+            assert_eq!(ids.iter().filter(|id| *id == "gpt-5.6").count(), 1);
+            for id in NEW_BUILTINS {
+                assert!(ids.iter().any(|known| known == id), "{id} missing: {ids:?}");
+            }
+            assert!(!ids.iter().any(|id| id == ORPHAN_OVERRIDE));
+            let warnings = models["warnings"].as_array().expect("orphan diagnostics");
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].as_str().unwrap().contains(ORPHAN_OVERRIDE));
             let messages = request(
                 &mut child,
                 json!({"type":"get_messages", "sessionId":session}),
@@ -300,9 +344,25 @@ fn legacy_data_directories_remain_usable_after_upgrade() {
                 "{plans}"
             );
         } else {
+            let ids = model_ids(&models);
+            assert_eq!(ids.len(), 13, "{ids:?}");
+            for retired in RETIRED_BUILTINS {
+                assert!(!ids.iter().any(|id| id == retired), "{retired}: {ids:?}");
+            }
+            let saved = models["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["id"] == "gpt-5.6")
+                .unwrap();
+            assert_eq!(saved["keySource"], "saved", "{saved}");
+            let state = request(&mut child, json!({"type":"get_state", "sessionId":session}));
+            assert_eq!(state["modelReady"], false, "a retired default asks to reselect: {state}");
             // Only after proving unmodified cold loading, route the builtin through the local
             // mock using the same Settings command; never send the stored fake key off-host.
             local_model(&mut child, &server.base_url);
+            let state = request(&mut child, json!({"type":"get_state", "sessionId":session}));
+            assert_eq!(state["modelReady"], true, "{state}");
         }
         let models_before_chat = fs::read(data.join("models.toml")).unwrap();
         prompt(&mut child, &session, "Continue locally after upgrading.");

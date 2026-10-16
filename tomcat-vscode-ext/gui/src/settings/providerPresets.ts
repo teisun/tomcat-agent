@@ -1,19 +1,30 @@
-import type {
-  SettingsModelCapabilities,
-  SettingsModelView,
-} from "../../../src/shared/settingsProtocol";
+import type { MessageKey } from "../../../src/shared/i18n";
+import type { SettingsModelView } from "../../../src/shared/settingsProtocol";
 
 export interface ProviderPreset {
   api: string;
   apiKeyEnv: string;
   baseUrl: string;
-  capabilities: SettingsModelCapabilities;
-  keyPresent: boolean;
-  label: string;
-  modelIds: string[];
+  labelKey: MessageKey;
+  /** Also the prefix of new model IDs (`{provider}/{model_name}`). */
   provider: string;
-  thinkingFormat: string;
+  /** Absent means "follow the protocol default". */
+  thinkingFormat?: string;
 }
+
+/**
+ * Static on purpose: presets must not drift when the built-in catalog changes.
+ * Recommended models are the built-ins whose key slot equals `apiKeyEnv`.
+ */
+export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
+  { api: "openai", apiKeyEnv: "DEEPSEEK_API_KEY", baseUrl: "https://api.deepseek.com", labelKey: "models.preset.deepseek", provider: "deepseek", thinkingFormat: "deepseek" },
+  { api: "openai-responses", apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", labelKey: "models.preset.openai", provider: "openai", thinkingFormat: "openai" },
+  { api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", labelKey: "models.preset.anthropic", provider: "anthropic", thinkingFormat: "anthropic-adaptive" },
+  { api: "openai", apiKeyEnv: "KIMI_API_KEY", baseUrl: "https://api.kimi.com/coding/v1", labelKey: "models.preset.kimi", provider: "kimi" },
+  { api: "openai", apiKeyEnv: "ZHIPU_API_KEY", baseUrl: "https://open.bigmodel.cn/api/paas/v4", labelKey: "models.preset.zhipu", provider: "zhipu", thinkingFormat: "zai" },
+  { api: "openai", apiKeyEnv: "MOONSHOT_API_KEY", baseUrl: "https://api.moonshot.cn/v1", labelKey: "models.preset.moonshot", provider: "moonshot", thinkingFormat: "doubao" },
+  { api: "openai", apiKeyEnv: "MIMO_API_KEY", baseUrl: "https://token-plan-cn.xiaomimimo.com", labelKey: "models.preset.mimo", provider: "mimo", thinkingFormat: "doubao" },
+];
 
 const LABEL_OVERRIDES: Record<string, string> = {
   anthropic: "Anthropic",
@@ -23,12 +34,6 @@ const LABEL_OVERRIDES: Record<string, string> = {
   openai: "OpenAI",
   zhipu: "Zhipu AI",
 };
-
-function cloneCapabilities(
-  capabilities: SettingsModelCapabilities,
-): SettingsModelCapabilities {
-  return { ...capabilities };
-}
 
 function titleCaseToken(token: string): string {
   if (!token) {
@@ -52,56 +57,13 @@ export function humanizeProviderLabel(provider: string): string {
     .join(" ");
 }
 
-export function buildProviderPresets(
-  models: SettingsModelView[],
-): ProviderPreset[] {
-  const grouped = new Map<string, ProviderPreset>();
-
-  for (const model of models) {
-    if (model.source !== "builtin") {
-      continue;
-    }
-
-    const provider = model.provider.trim();
-    if (!provider) {
-      continue;
-    }
-
-    const existing = grouped.get(provider);
-    if (!existing) {
-      grouped.set(provider, {
-        api: model.api,
-        apiKeyEnv: model.apiKeyEnv?.trim() ?? "",
-        baseUrl: model.baseUrl?.trim() ?? "",
-        capabilities: cloneCapabilities(model.capabilities),
-        keyPresent: model.keyPresent,
-        label: humanizeProviderLabel(provider),
-        modelIds: [model.id],
-        provider,
-        thinkingFormat: model.thinkingFormat?.trim() ?? "",
-      });
-      continue;
-    }
-
-    existing.keyPresent ||= model.keyPresent;
-    existing.modelIds.push(model.id);
-    if (!existing.apiKeyEnv && model.apiKeyEnv?.trim()) {
-      existing.apiKeyEnv = model.apiKeyEnv.trim();
-    }
-    if (!existing.baseUrl && model.baseUrl?.trim()) {
-      existing.baseUrl = model.baseUrl.trim();
-    }
-    if (!existing.thinkingFormat && model.thinkingFormat?.trim()) {
-      existing.thinkingFormat = model.thinkingFormat.trim();
-    }
-  }
-
-  return Array.from(grouped.values());
+export function findPresetByKeyEnv(keyEnv: string): ProviderPreset | null {
+  return PROVIDER_PRESETS.find((preset) => preset.apiKeyEnv === keyEnv.trim()) ?? null;
 }
 
 export function findMatchingProviderPreset(
   model: Pick<SettingsModelView, "api" | "baseUrl" | "provider">,
-  presets: ProviderPreset[],
+  presets: readonly ProviderPreset[] = PROVIDER_PRESETS,
 ): ProviderPreset | null {
   const normalizedProvider = model.provider.trim();
   const normalizedApi = model.api.trim();

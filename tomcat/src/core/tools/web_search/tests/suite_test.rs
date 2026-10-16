@@ -455,7 +455,7 @@ provider = "openai"
 web_search = true
 
 [[models]]
-id = "gpt-5.4"
+id = "gpt-5.6"
 
 [models.capabilities]
 web_search = true
@@ -466,7 +466,7 @@ web_search = true
     let cfg = AppConfig::default();
     let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load catalog");
     let candidate = discover_hosted_candidate(&catalog).expect("hosted candidate");
-    assert_eq!(candidate.id, "gpt-5.4");
+    assert_eq!(candidate.id, "gpt-5.6");
 }
 
 #[test]

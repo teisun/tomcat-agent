@@ -3,34 +3,29 @@ use crate::core::llm::ModelCatalog;
 use crate::infra::config::AppConfig;
 
 #[test]
-fn speed_declarations_inherit_clear_normalize_and_reject_invalid_apis() {
+fn speed_declarations_inherit_clear_normalize_and_read_legacy_ultrafast_as_standard() {
     use crate::core::llm::{SharedModelCatalog, Speed, ThinkingLevel};
     use crate::core::session::ModelPrefsStore;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     let prefs = ModelPrefsStore::load(dir.path().join("prefs.json"), ThinkingLevel::High).unwrap();
-    prefs.set_speed("gpt-5.6", Speed::Ultrafast).unwrap();
+    prefs.set_speed("gpt-5.6", Speed::Fast).unwrap();
     for (declaration, expected) in [
         ("", vec![Speed::Fast]),
         ("supported_speeds = []", vec![]),
         (
             "supported_speeds = [\"standard\", \"fast\", \"fast\", \"ultrafast\"]",
-            vec![Speed::Fast, Speed::Ultrafast],
+            vec![Speed::Fast],
         ),
         ("supported_speeds = [\"standard\"]", vec![]),
+        ("supported_speeds = [\"ultrafast\"]", vec![]),
     ] {
         std::fs::write(&path, format!("[[models]]\nid = \"gpt-5.6\"\nsupported_reasoning_levels = [\"high\", \"xhigh\"]\n{declaration}\n")).unwrap();
         let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path.clone()).unwrap();
         let entry = catalog.lookup("gpt-5.6").unwrap();
-        assert_eq!(entry.supported_speeds, expected);
+        assert_eq!(entry.supported_speeds, expected, "{declaration}");
         assert_eq!(entry.supported_reasoning_levels, vec!["high", "xhigh"]);
-        let selected = if expected.is_empty() {
-            None
-        } else if expected.contains(&Speed::Ultrafast) {
-            Some(Speed::Ultrafast)
-        } else {
-            Some(Speed::Standard)
-        };
+        let selected = (!expected.is_empty()).then_some(Speed::Fast);
         assert_eq!(
             SharedModelCatalog::from(catalog).resolve_speed(&prefs, "gpt-5.6"),
             selected
@@ -45,21 +40,17 @@ fn speed_declarations_inherit_clear_normalize_and_reject_invalid_apis() {
 
     std::fs::write(
         &path,
-        "[[models]]\nid = \"claude\"\napi = \"anthropic-messages\"\nprovider = \"anthropic\"\nsupported_speeds = [\"fast\"]\n\n[[models]]\nid = \"gpt-5.6\"\nsupported_speeds = [\"fast\", \"ultrafast\"]\n",
+        "[[models]]\nid = \"claude\"\napi = \"anthropic-messages\"\nprovider = \"anthropic\"\nsupported_speeds = [\"fast\"]\n",
     )
     .unwrap();
     let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path).unwrap();
     let claude = catalog.lookup("claude").unwrap();
-    assert!(claude.supported_speeds.is_empty());
-    assert_eq!(claude.resolve_speed(Speed::Fast), None);
-    assert_eq!(
-        catalog.lookup("gpt-5.6").unwrap().supported_speeds,
-        vec![Speed::Fast, Speed::Ultrafast]
-    );
+    assert_eq!(claude.supported_speeds, vec![Speed::Fast]);
+    assert_eq!(claude.resolve_speed(Speed::Fast), Some(Speed::Fast));
 }
 
 #[test]
-fn inherited_speeds_degrade_when_user_changes_builtin_to_non_openai_api() {
+fn inherited_speeds_survive_when_user_changes_builtin_protocol() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     std::fs::write(
@@ -70,8 +61,7 @@ fn inherited_speeds_degrade_when_user_changes_builtin_to_non_openai_api() {
     let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path).unwrap();
     let entry = catalog.lookup("gpt-5.6").unwrap();
     assert_eq!(entry.api, "anthropic-messages");
-    assert!(entry.supported_speeds.is_empty());
-    assert_eq!(entry.resolve_speed(crate::core::llm::Speed::Fast), None);
+    assert_eq!(entry.supported_speeds, vec![crate::core::llm::Speed::Fast]);
 }
 
 #[test]
@@ -83,13 +73,24 @@ fn resolve_known_model() {
     )
     .expect("load default catalog");
 
-    let gpt = catalog.lookup("gpt-5.4").expect("builtin gpt-5.4");
+    let gpt = catalog.lookup("gpt-5.6").expect("builtin gpt-5.6");
     assert_eq!(gpt.api, "openai-responses");
     assert_eq!(gpt.provider, "openai");
-    assert!(catalog.is_builtin_seed("gpt-5.4"));
-    assert!(!catalog.is_user_model("gpt-5.4"));
-    assert!(catalog.lookup("gpt-5.2").is_some());
-    assert!(catalog.lookup("gpt-5.6").is_some());
+    assert!(catalog.is_builtin_seed("gpt-5.6"));
+    assert!(!catalog.is_user_model("gpt-5.6"));
+    for retired in [
+        "gpt-5.2",
+        "gpt-5.4",
+        "gpt-5.5",
+        "utility-flash",
+        "mimo-v2.5-pro",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    ] {
+        assert!(catalog.lookup(retired).is_none(), "{retired}");
+    }
 
     let deepseek = catalog
         .lookup("deepseek-v4-pro")
@@ -97,12 +98,12 @@ fn resolve_known_model() {
     assert_eq!(deepseek.api, "openai");
     assert_eq!(deepseek.provider, "deepseek");
     assert!(catalog.lookup("deepseek-v4-flash").is_some());
-    assert!(catalog.lookup("utility-flash").is_some());
     let claude = catalog
-        .lookup("claude-opus-4-6")
-        .expect("builtin claude-opus-4-6");
+        .lookup("anthropic/claude-opus-5-5")
+        .expect("builtin anthropic/claude-opus-5-5");
     assert_eq!(claude.api, "anthropic-messages");
     assert_eq!(claude.provider, "anthropic");
+    assert_eq!(claude.request_model_name(), "claude-opus-5-5");
     let kimi = catalog
         .lookup("kimi-k2.7-code")
         .expect("builtin kimi-k2.7-code");
@@ -119,11 +120,12 @@ fn resolve_known_model() {
 fn builtin_models_toml_parses() {
     let parsed =
         toml::from_str::<UserModelsFile>(builtin_seed_toml_text()).expect("parse embedded seed");
-    assert_eq!(parsed.models.len(), 18);
+    assert_eq!(parsed.models.len(), 13);
 }
 
 #[test]
 fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
+    use crate::core::llm::Speed;
     let cfg = AppConfig::default();
     let entries = builtin_seed_entries(&cfg.context);
     let ids = entries
@@ -133,64 +135,75 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
     assert_eq!(
         ids,
         vec![
-            "gpt-5.2",
-            "gpt-5.4",
-            "gpt-5.5",
             "gpt-5.6",
+            "openai/gpt-6-astra",
+            "openai/gpt-6.1-sol",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
-            "utility-flash",
-            "mimo-v2.5-pro",
+            "mimo/mimo-v2.6-pro",
             "glm-5.2",
             "kimi-k2.7-code",
             "kimi-k3",
-            "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
             "claude-fable-5",
             "claude-opus-5",
             "claude-sonnet-5",
-            "claude-sonnet-4-6",
+            "anthropic/claude-opus-5-5",
         ]
     );
+    let find = |id: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .unwrap_or_else(|| panic!("{id} preset"))
+    };
+    let all_levels = ["low", "medium", "high", "xhigh", "max"]
+        .map(String::from)
+        .to_vec();
 
-    for id in [
-        "claude-fable-5",
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-sonnet-4-6",
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-    ] {
-        let entry = entries.iter().find(|entry| entry.id == id).unwrap();
-        assert_eq!(entry.context_window, Some(1_000_000), "{id}");
-        assert_eq!(
-            entry.context_window_options,
-            vec![400_000, 1_000_000],
-            "{id}"
-        );
-        assert_eq!(entry.max_output_tokens, Some(128_000), "{id}");
+    for id in ["openai/gpt-6-astra", "openai/gpt-6.1-sol"] {
+        let gpt = find(id);
+        assert_eq!(gpt.request_model_name(), id.trim_start_matches("openai/"));
+        assert_eq!(gpt.api, "openai-responses", "{id}");
+        assert_eq!(gpt.base_url.as_deref(), Some("https://api.openai.com"));
+        assert_eq!(gpt.context_window, Some(400_000), "{id}");
+        assert_eq!(gpt.context_window_options, vec![400_000, 1_050_000], "{id}");
+        assert_eq!(gpt.max_output_tokens, Some(128_000), "{id}");
+        assert_eq!(gpt.supported_reasoning_levels, all_levels, "{id}");
+        assert_eq!(gpt.supported_speeds, vec![Speed::Fast], "{id}");
+        assert!(gpt.capabilities.vision && gpt.capabilities.files, "{id}");
     }
 
-    let utility = entries
-        .iter()
-        .find(|entry| entry.id == "utility-flash")
-        .expect("utility-flash preset");
-    assert_eq!(utility.request_model_name(), "deepseek-v4-flash");
-    assert_eq!(utility.context_window, Some(1_000_000));
-    assert_eq!(utility.context_window_options, vec![400_000, 1_000_000]);
-    assert_eq!(utility.max_output_tokens, Some(384_000));
-    assert!(!utility.capabilities.web_search);
-    assert_eq!(
-        utility.supported_reasoning_levels,
-        vec!["high".to_string(), "max".to_string()]
-    );
+    let gpt = find("gpt-5.6");
+    assert_eq!(gpt.supported_reasoning_levels, all_levels);
+    assert_eq!(gpt.supported_speeds, vec![Speed::Fast]);
+    assert_eq!(gpt.context_window_options, vec![400_000, 1_000_000]);
+    assert_eq!(gpt.max_output_tokens, Some(128_000));
 
-    let kimi = entries
-        .iter()
-        .find(|entry| entry.id == "kimi-k2.7-code")
-        .expect("kimi preset");
+    for (id, vision) in [("deepseek-v4-pro", false), ("deepseek-v4-flash", true)] {
+        let deepseek = find(id);
+        assert_eq!(deepseek.context_window, Some(1_000_000), "{id}");
+        assert_eq!(deepseek.max_output_tokens, Some(384_000), "{id}");
+        assert_eq!(
+            deepseek.supported_reasoning_levels,
+            ["low", "high", "max"].map(String::from).to_vec(),
+            "{id}"
+        );
+        assert_eq!(deepseek.capabilities.vision, vision, "{id}");
+        assert!(!deepseek.capabilities.files, "{id}");
+        assert!(deepseek.supported_speeds.is_empty(), "{id}");
+    }
+
+    let mimo = find("mimo/mimo-v2.6-pro");
+    assert_eq!(mimo.request_model_name(), "mimo-v2.6-pro");
+    assert_eq!(mimo.provider, "mimo");
+    assert_eq!(mimo.context_window, Some(1_000_000));
+    assert_eq!(mimo.context_window_options, vec![400_000, 1_000_000]);
+    assert_eq!(mimo.max_output_tokens, Some(128_000));
+    assert_eq!(mimo.supported_reasoning_levels, vec!["high".to_string()]);
+    assert!(mimo.capabilities.vision);
+    assert!(!mimo.capabilities.files);
+
+    let kimi = find("kimi-k2.7-code");
     assert_eq!(kimi.base_url.as_deref(), Some("https://api.moonshot.cn"));
     assert_eq!(kimi.provider, "moonshot");
     assert_eq!(kimi.context_window, Some(256_000));
@@ -201,89 +214,43 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
     assert!(kimi.capabilities.vision);
     assert!(kimi.capabilities.files);
 
-    let kimi_k3 = entries
-        .iter()
-        .find(|entry| entry.id == "kimi-k3")
-        .expect("kimi-k3 preset");
-    assert_eq!(kimi_k3.base_url.as_deref(), Some("https://api.moonshot.cn"));
-    assert_eq!(kimi_k3.provider, "moonshot");
+    let kimi_k3 = find("kimi-k3");
     assert_eq!(kimi_k3.context_window, Some(1_000_000));
-    assert_eq!(kimi_k3.context_window_options, vec![400_000, 1_000_000]);
     assert_eq!(kimi_k3.max_output_tokens, Some(131_072));
-    assert_eq!(
-        kimi_k3.supported_reasoning_levels,
-        vec!["low".to_string(), "high".to_string(), "max".to_string()]
-    );
     assert_eq!(kimi_k3.thinking_format.as_deref(), Some("openai"));
-    assert!(kimi_k3.capabilities.vision);
-    assert!(kimi_k3.capabilities.files);
 
-    let mimo = entries
-        .iter()
-        .find(|entry| entry.id == "mimo-v2.5-pro")
-        .expect("mimo preset");
-    assert_eq!(mimo.context_window, Some(1_000_000));
-    assert_eq!(mimo.context_window_options, vec![400_000, 1_000_000]);
-    assert_eq!(mimo.max_output_tokens, Some(128_000));
-    assert_eq!(mimo.supported_reasoning_levels, vec!["high".to_string()]);
-
-    let gpt = entries
-        .iter()
-        .find(|entry| entry.id == "gpt-5.6")
-        .expect("gpt-5.6 preset");
-    assert_eq!(
-        gpt.supported_reasoning_levels,
-        vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-            "max".to_string(),
-        ]
-    );
-    assert_eq!(gpt.supported_speeds, vec![crate::core::llm::Speed::Fast]);
-    assert_eq!(gpt.context_window_options, vec![400_000, 1_000_000]);
-    assert_eq!(gpt.max_output_tokens, Some(128_000));
-
-    let glm = entries
-        .iter()
-        .find(|entry| entry.id == "glm-5.2")
-        .expect("glm-5.2 preset");
+    let glm = find("glm-5.2");
     assert_eq!(glm.context_window, Some(1_000_000));
-    assert_eq!(glm.context_window_options, vec![400_000, 1_000_000]);
     assert_eq!(glm.max_output_tokens, Some(128_000));
 
-    let claude = entries
-        .iter()
-        .find(|entry| entry.id == "claude-opus-4-8")
-        .expect("claude-opus-4-8 preset");
+    for id in [
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "anthropic/claude-opus-5-5",
+    ] {
+        let claude = find(id);
+        assert_eq!(claude.api, "anthropic-messages", "{id}");
+        assert_eq!(
+            claude.thinking_format.as_deref(),
+            Some("anthropic-adaptive"),
+            "{id}"
+        );
+        assert_eq!(claude.supported_reasoning_levels, all_levels, "{id}");
+        assert_eq!(claude.context_window, Some(1_000_000), "{id}");
+        assert_eq!(
+            claude.context_window_options,
+            vec![400_000, 1_000_000],
+            "{id}"
+        );
+        assert_eq!(claude.max_output_tokens, Some(128_000), "{id}");
+        assert!(claude.capabilities.files, "{id}");
+    }
     assert_eq!(
-        claude.thinking_format.as_deref(),
-        Some("anthropic-adaptive")
+        find("anthropic/claude-opus-5-5").supported_speeds,
+        vec![Speed::Fast]
     );
-    assert_eq!(
-        claude.supported_reasoning_levels,
-        vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-            "max".to_string(),
-        ]
-    );
-    assert_eq!(claude.context_window, Some(1_000_000));
-    assert_eq!(claude.max_output_tokens, Some(128_000));
-    assert!(claude.capabilities.files);
-
-    let embedded = builtin_seed_toml_text();
-    assert!(embedded.contains("id = \"utility-flash\""));
-    assert!(embedded.contains("model_name = \"deepseek-v4-flash\""));
-    assert!(embedded.contains("base_url = \"https://api.moonshot.cn\""));
-    assert!(embedded.contains("id = \"kimi-k3\""));
-    assert!(embedded.contains("context_window = 1000000"));
-    assert!(embedded.contains("supported_reasoning_levels = [\"low\", \"high\", \"max\"]"));
-    assert!(embedded.contains("supported_reasoning_levels = [\"high\", \"max\"]"));
-    assert!(embedded.contains("thinking_format = \"anthropic-adaptive\""));
+    assert!(find("claude-opus-5").supported_speeds.is_empty());
 }
 
 #[test]
@@ -291,37 +258,17 @@ fn builtin_seed_entries_keep_embedded_context_window_when_runtime_default_change
     let mut cfg = AppConfig::default();
     cfg.context.context_window_fallback = 200_000;
     let entries = builtin_seed_entries(&cfg.context);
-
-    let gpt = entries
-        .iter()
-        .find(|entry| entry.id == "gpt-5.4")
-        .expect("gpt-5.4 preset");
-    assert_eq!(gpt.context_window, Some(400_000));
-
-    let kimi = entries
-        .iter()
-        .find(|entry| entry.id == "kimi-k2.7-code")
-        .expect("kimi preset");
-    assert_eq!(kimi.context_window, Some(256_000));
-
-    let kimi_k3 = entries
-        .iter()
-        .find(|entry| entry.id == "kimi-k3")
-        .expect("kimi-k3 preset");
-    assert_eq!(kimi_k3.context_window, Some(1_000_000));
-
-    let mimo = entries
-        .iter()
-        .find(|entry| entry.id == "mimo-v2.5-pro")
-        .expect("mimo preset");
-    assert_eq!(mimo.context_window, Some(1_000_000));
-
-    let claude = entries
-        .iter()
-        .find(|entry| entry.id == "claude-opus-4-8")
-        .expect("claude-opus-4-8 preset");
-    assert_eq!(claude.context_window, Some(1_000_000));
-    assert_eq!(claude.max_output_tokens, Some(128_000));
+    for (id, window) in [
+        ("gpt-5.6", 400_000),
+        ("openai/gpt-6-astra", 400_000),
+        ("kimi-k2.7-code", 256_000),
+        ("kimi-k3", 1_000_000),
+        ("mimo/mimo-v2.6-pro", 1_000_000),
+        ("anthropic/claude-opus-5-5", 1_000_000),
+    ] {
+        let entry = entries.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry.context_window, Some(window), "{id}");
+    }
 }
 
 #[test]
@@ -401,7 +348,7 @@ fn merge_user_override() {
         &path,
         r#"
 [[models]]
-id = "gpt-5.4"
+id = "gpt-5.6"
 base_url = "https://example.override"
 
 [models.capabilities]
@@ -412,12 +359,12 @@ vision = false
 
     let cfg = AppConfig::default();
     let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load merged catalog");
-    let entry = catalog.lookup("gpt-5.4").expect("overridden model");
+    let entry = catalog.lookup("gpt-5.6").expect("overridden model");
     assert_eq!(entry.base_url.as_deref(), Some("https://example.override"));
     assert!(!entry.capabilities.vision);
     assert_eq!(entry.provider, "openai");
-    assert!(catalog.is_builtin_seed("gpt-5.4"));
-    assert!(catalog.is_user_model("gpt-5.4"));
+    assert!(catalog.is_builtin_seed("gpt-5.6"));
+    assert!(catalog.is_user_model("gpt-5.6"));
 }
 
 #[test]
@@ -428,7 +375,7 @@ fn builtin_seed_and_user_model_flags_are_tracked_independently() {
         &path,
         r#"
 [[models]]
-id = "gpt-5.4"
+id = "gpt-5.6"
 base_url = "https://seeded.override"
 
 [[models]]
@@ -442,31 +389,54 @@ provider = "relay"
     let cfg = AppConfig::default();
     let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load merged catalog");
 
-    assert!(catalog.is_builtin_seed("gpt-5.4"));
-    assert!(catalog.is_user_model("gpt-5.4"));
+    assert!(catalog.is_builtin_seed("gpt-5.6"));
+    assert!(catalog.is_user_model("gpt-5.6"));
     assert!(!catalog.is_builtin_seed("custom-hosted"));
     assert!(catalog.is_user_model("custom-hosted"));
 }
 
 #[test]
-fn new_user_entry_requires_explicit_api_and_provider() {
+fn orphan_user_entry_is_skipped_with_a_diagnostic_instead_of_failing_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     std::fs::write(
         &path,
         r#"
 [[models]]
+id = "gpt-5.4"
+base_url = "https://gateway.example.test/v1"
+
+[[models]]
 id = "my-new-mimo-preset"
+api = "openai"
+
+[[models]]
+id = "my-relay"
+api = "openai"
+provider = "relay"
 "#,
     )
     .unwrap();
 
-    let cfg = AppConfig::default();
-    let err =
-        ModelCatalog::load_from_path(&cfg, path).expect_err("missing api/provider should fail");
-    let msg = err.to_string();
-    assert!(msg.contains("my-new-mimo-preset"));
-    assert!(msg.contains("api") || msg.contains("provider"));
+    let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path)
+        .expect("orphan entries must not block the catalog");
+    assert!(catalog.lookup("gpt-5.4").is_none());
+    assert!(catalog.lookup("my-new-mimo-preset").is_none());
+    assert!(catalog.lookup("my-relay").is_some());
+    assert!(catalog.lookup("gpt-5.6").is_some());
+    let diagnostics = catalog.diagnostics();
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    assert!(diagnostics[0].contains("gpt-5.4") && diagnostics[0].contains("`api`"));
+    assert!(diagnostics[1].contains("my-new-mimo-preset") && diagnostics[1].contains("`provider`"));
+}
+
+#[test]
+fn corrupt_models_toml_still_fails_the_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(&path, "[[models]]\nid = \"broken\n").unwrap();
+    ModelCatalog::load_from_path(&AppConfig::default(), path)
+        .expect_err("unparseable models.toml must still be reported as an error");
 }
 
 #[test]
@@ -511,7 +481,7 @@ provider = "openai"
 web_search = true
 
 [[models]]
-id = "gpt-5.4"
+id = "gpt-5.6"
 
 [models.capabilities]
 web_search = true
@@ -524,7 +494,7 @@ web_search = true
     let ordered = catalog.entries_in_merge_order();
     let builtin_override_index = ordered
         .iter()
-        .position(|entry| entry.id == "gpt-5.4")
+        .position(|entry| entry.id == "gpt-5.6")
         .expect("builtin override should stay in ordered slots");
     let custom_index = ordered
         .iter()
@@ -543,7 +513,7 @@ web_search = true
     );
     assert!(
         catalog
-            .lookup("gpt-5.4")
+            .lookup("gpt-5.6")
             .expect("builtin override")
             .capabilities
             .web_search
@@ -558,8 +528,8 @@ fn user_entry_can_define_model_name_and_api_key_env_alongside_builtin_gpt() {
         &path,
         r#"
 [[models]]
-id = "gpt-5.4_litellm-sunmi"
-model_name = "gpt-5.4"
+id = "gpt-5.6_litellm-sunmi"
+model_name = "gpt-5.6"
 api = "openai-responses"
 provider = "litellm-sunmi"
 api_key_env = "LITELLM_SUNMI_API_KEY"
@@ -576,12 +546,12 @@ reasoning = true
 
     let cfg = AppConfig::default();
     let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load catalog");
-    let builtin = catalog.lookup("gpt-5.4").expect("builtin gpt entry");
+    let builtin = catalog.lookup("gpt-5.6").expect("builtin gpt entry");
     let gateway = catalog
-        .lookup("gpt-5.4_litellm-sunmi")
+        .lookup("gpt-5.6_litellm-sunmi")
         .expect("gateway entry");
-    assert_eq!(builtin.request_model_name(), "gpt-5.4");
-    assert_eq!(gateway.request_model_name(), "gpt-5.4");
+    assert_eq!(builtin.request_model_name(), "gpt-5.6");
+    assert_eq!(gateway.request_model_name(), "gpt-5.6");
     assert_eq!(
         gateway.api_key_env.as_deref(),
         Some("LITELLM_SUNMI_API_KEY")

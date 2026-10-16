@@ -447,7 +447,7 @@ function normalizeModelEntry(entry, source) {
     thinkingFormat,
   );
   const supportedSpeeds = Array.isArray(entry?.supportedSpeeds)
-    ? entry.supportedSpeeds.filter((speed) => speed === "fast" || speed === "ultrafast")
+    ? entry.supportedSpeeds.filter((speed) => speed === "fast")
     : [];
   const id = typeof entry?.id === "string" ? entry.id : "fake-model";
   const preference = modelPreferences.get(id) || {};

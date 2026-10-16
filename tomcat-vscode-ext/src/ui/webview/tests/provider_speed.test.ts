@@ -29,8 +29,8 @@ describe("speed intent handling", () => {
     const refreshSession = vi.spyOn(bridge, "refreshSessionState").mockResolvedValue(undefined);
     const post = vi.spyOn(bridge, "postState").mockResolvedValue(undefined);
     const error = vi.spyOn(bridge.stateStore, "appendMessage");
-    await bridge.handleWebviewMessage({ messageId: "speed", type: "setSpeed", data: { modelId: "relay/model", speed: "ultrafast", sessionId: "s1" } });
-    expect(sendSetSpeed).toHaveBeenCalledWith("s1", "relay/model", "ultrafast");
+    await bridge.handleWebviewMessage({ messageId: "speed", type: "setSpeed", data: { modelId: "relay/model", speed: "fast", sessionId: "s1" } });
+    expect(sendSetSpeed).toHaveBeenCalledWith("s1", "relay/model", "fast");
     expect(refresh).toHaveBeenCalledTimes(outcome === "success" ? 1 : 0);
     expect(refreshSession).toHaveBeenCalledWith("s1", { trustBusy: true });
     expect(post).toHaveBeenCalled();
@@ -41,9 +41,11 @@ describe("speed intent handling", () => {
   it("keeps declared and selected speeds in the catalog whitelist", () => {
     const catalog = parseModelCatalog({ models: [
       { id: "relay", keyPresent: true, supportedSpeeds: ["fast", "ultrafast", "warp", 1], selectedSpeed: "fast" },
+      { id: "legacy", keyPresent: true, supportedSpeeds: ["ultrafast"], selectedSpeed: "ultrafast" },
       { id: "old", keyPresent: true },
     ] });
-    expect(catalog.modelDetails.relay).toMatchObject({ supportedSpeeds: ["fast", "ultrafast"], selectedSpeed: "fast" });
+    expect(catalog.modelDetails.relay).toMatchObject({ supportedSpeeds: ["fast"], selectedSpeed: "fast" });
+    expect(catalog.modelDetails.legacy).toMatchObject({ supportedSpeeds: [], selectedSpeed: null });
     expect(catalog.modelDetails.old).toMatchObject({ supportedSpeeds: [], selectedSpeed: null });
   });
 });

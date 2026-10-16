@@ -21,6 +21,7 @@ pub mod openai_files;
 mod prompt_cache_key;
 mod provider;
 mod registry;
+pub mod remote_models;
 pub mod replay_policy;
 pub mod resolver;
 pub(crate) mod retry_delay;
@@ -33,12 +34,13 @@ mod types;
 pub(crate) use types::IMAGE_PROVIDER_RENDITION_MIME;
 
 pub use admin::{
-    list_model_views, list_model_views_with_prefs, list_provider_keys, remove_user_model,
-    remove_user_model_with_config_path, resolve_provider_key_env_name, set_default_model,
-    set_provider_key, upsert_user_model, with_current_model_catalog, ModelEntryInput,
-    ModelKeyStatus, ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
+    list_model_views, list_model_views_with_prefs, list_provider_keys, remove_provider,
+    remove_user_model, remove_user_model_with_config_path, resolve_provider_key_env_name,
+    set_default_model, set_provider_key, set_utility_model, upsert_user_model,
+    upsert_user_models, with_current_model_catalog, ModelEntryInput, ModelKeyStatus, ModelSource,
+    ModelView, ProviderKeyInput, ProviderKeyView, RemoveProviderResult, UpsertModelsResult,
 };
-pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
+pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential, KeySource};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};
 pub use files_api::{
     build_openai_compatible_files_adapter, AnthropicFilesAdapter, FilesApiAdapter, ImageRefSlot,

@@ -116,16 +116,28 @@ max_output_tokens = 1000
 fn compaction_falls_back_to_the_session_model_after_compaction_and_default() {
     clear_managed_credentials_for_test();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = AppConfig::default();
-    assert_eq!(cfg.context.compaction_model, "gpt-5.2");
-    assert_eq!(cfg.llm.default_model, "gpt-5.4");
+    let mut cfg = AppConfig::default();
+    assert_eq!(cfg.context.compaction_model, "");
+    cfg.llm.default_model = "openai/gpt-6-astra".to_string();
     let catalog =
         Arc::new(ModelCatalog::load_from_path(&cfg, dir.path().join("models.toml")).unwrap());
-    let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, model_prefs(dir.path()));
     unsafe {
         std::env::set_var("DEEPSEEK_API_KEY", "stub");
-        std::env::remove_var("OPENAI_API_KEY");
+        std::env::set_var("OPENAI_API_KEY", "stub");
     }
+    let compaction = resolver
+        .resolve(LlmScene::Compaction, Some("deepseek-v4-pro"))
+        .expect("without a compaction model the session model comes before the default");
+    assert_eq!(compaction.catalog_id, "deepseek-v4-pro");
+    let compaction = resolver
+        .resolve(LlmScene::Compaction, None)
+        .expect("without a session model compaction uses the default");
+    assert_eq!(compaction.catalog_id, "openai/gpt-6-astra");
+
+    cfg.context.compaction_model = "gpt-5.6".to_string();
+    resolver.reload_config(cfg);
+    unsafe { std::env::remove_var("OPENAI_API_KEY") };
 
     assert!(!resolver.model_ready(None));
     assert!(resolver.model_ready(Some("deepseek-v4-pro")));
@@ -138,7 +150,7 @@ fn compaction_falls_back_to_the_session_model_after_compaction_and_default() {
     let compaction = resolver
         .resolve(LlmScene::Compaction, Some("deepseek-v4-pro"))
         .expect("an available compaction model still wins");
-    assert_eq!(compaction.catalog_id, "gpt-5.2");
+    assert_eq!(compaction.catalog_id, "gpt-5.6");
 
     unsafe {
         std::env::remove_var("DEEPSEEK_API_KEY");
@@ -345,7 +357,8 @@ max_output_tokens = 64000
 fn scene_fallback_to_main() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
-    let cfg = AppConfig::default();
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
@@ -356,7 +369,7 @@ fn scene_fallback_to_main() {
     let resolved = resolver
         .resolve(LlmScene::Vision, None)
         .expect("vision fallback");
-    assert_eq!(resolved.model, "gpt-5.4");
+    assert_eq!(resolved.model, "gpt-5.6");
     assert_eq!(resolved.key_source, "OPENAI_API_KEY");
 
     unsafe {
@@ -547,7 +560,8 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
 "#,
     )
     .unwrap();
-    let cfg = AppConfig::default();
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "gpt-5.6".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
@@ -704,7 +718,8 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
 "#,
     )
     .unwrap();
-    let cfg = AppConfig::default();
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "gpt-5.4".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
@@ -834,7 +849,7 @@ fn compaction_falls_back_to_default_model_when_selected_provider_key_is_missing(
     let path = dir.path().join("models.toml");
     let mut cfg = AppConfig::default();
     cfg.llm.default_model = "deepseek-v4-pro".to_string();
-    cfg.context.compaction_model = "gpt-5.4".to_string();
+    cfg.context.compaction_model = "gpt-5.6".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
 
@@ -1000,6 +1015,7 @@ fn main_scene_is_unchanged_by_compaction_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "gpt-5.6".to_string();
     cfg.context.compaction_model = "deepseek-v4-pro".to_string();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
@@ -1012,7 +1028,7 @@ fn main_scene_is_unchanged_by_compaction_fallback() {
     let resolved = resolver
         .resolve(LlmScene::Main, None)
         .expect("main scene should keep using the configured default model");
-    assert_eq!(resolved.model, "gpt-5.4");
+    assert_eq!(resolved.model, "gpt-5.6");
     assert_eq!(resolved.provider, "openai");
     assert_eq!(resolved.key_source, "OPENAI_API_KEY");
 

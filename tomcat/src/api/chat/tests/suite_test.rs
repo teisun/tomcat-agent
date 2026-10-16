@@ -1562,6 +1562,7 @@ fn chat_turn_test_context(
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.default_model = entries.first().map_or("gpt-5.6", |entry| entry.id).to_string();
     crate::test_support::write_models_override(dir.path(), entries);
 
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
@@ -2807,6 +2808,7 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
             .with_base_url(&base_url),
         ],
     );
+    cfg.llm.default_model = "gpt-5.4".to_string();
     // SAFETY: 测试内部临时设置 env，结束后立即清理。
     unsafe { std::env::set_var("TOMCAT_CHAT_CLEANUP_TEST_KEY", "stub") };
 

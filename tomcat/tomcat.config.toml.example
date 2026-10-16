@@ -30,7 +30,10 @@ retention_days = 7
 [llm]
 # 这里只负责“选哪个模型”和全局运行时旋钮；
 # 模型怎么连（api/provider/base_url/api_key_env）请写到 `models.toml`。
-default_model = "gpt-5.4"
+# 主模型：不写时为“未选择”，首次在设置页连接供应商后自动设为第一个配置成功的模型。
+default_model = "gpt-5.6"
+# 辅助模型：会话标题、回合标题与命令说明；默认 deepseek-v4-flash。
+# title_model = "deepseek-v4-flash"
 max_concurrent_requests = 4
 retry_count = 3
 stream_timeout_sec = 60

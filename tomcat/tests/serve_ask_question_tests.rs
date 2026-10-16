@@ -172,9 +172,11 @@ fn execution_workflow(stop: bool, restart: bool) {
     ]);
     let models_path = fx.home_path.join(".tomcat/models.toml");
     let models = std::fs::read_to_string(&models_path).unwrap();
+    // Only the main model: the fixture's utility model must stay unreachable so
+    // fire-and-forget turn summaries cannot consume scripted turns.
     std::fs::write(
         &models_path,
-        models.replace("http://127.0.0.1:1", &server.base_url),
+        models.replacen("http://127.0.0.1:1", &server.base_url, 1),
     )
     .unwrap();
     let config_path = fx.home_path.join(".tomcat/tomcat.config.toml");

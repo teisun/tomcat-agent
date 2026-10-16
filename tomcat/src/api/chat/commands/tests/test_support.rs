@@ -52,6 +52,7 @@ impl Fixture {
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(self.work.path().to_string_lossy().into_owned());
         cfg.llm.api_key_env = Some("TOMCAT_SHARED_SLASH_TEST_KEY".into());
+        cfg.llm.default_model = "gpt-5.4".into();
         crate::test_support::write_models_override(
             self.work.path(),
             &[

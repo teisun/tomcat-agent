@@ -91,7 +91,7 @@ openai_responses_key_env() {
     fcodex/*)
     printf '%s' "FCODEX_OPENAI_API_KEY"
     ;;
-    gpt-5.2|gpt-5.4|gpt-5.5|gpt-5.6)
+    gpt-5.6|openai/gpt-6-astra|openai/gpt-6.1-sol)
     printf '%s' "OPENAI_API_KEY"
     ;;
     *)

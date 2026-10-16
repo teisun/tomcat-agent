@@ -112,8 +112,9 @@ async fn web_search_build_web_fetch_http_client_prefers_trimmed_llm_proxy_over_e
         ("HTTP_PROXY", Some(env_proxy.url.as_str())),
         ("HTTPS_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Concurrent tests talk to loopback mock servers; only example.test may reach this proxy.
+        ("NO_PROXY", Some("127.0.0.1,localhost")),
+        ("no_proxy", Some("127.0.0.1,localhost")),
     ]);
 
     let mut cfg = test_config();
@@ -140,8 +141,9 @@ async fn web_search_build_web_fetch_http_client_uses_env_proxy_when_llm_proxy_mi
         ("HTTP_PROXY", Some(env_proxy.url.as_str())),
         ("HTTPS_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Concurrent tests talk to loopback mock servers; only example.test may reach this proxy.
+        ("NO_PROXY", Some("127.0.0.1,localhost")),
+        ("no_proxy", Some("127.0.0.1,localhost")),
     ]);
 
     let cfg = test_config();

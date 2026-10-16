@@ -32,6 +32,8 @@ import type {
   SettingsModelView,
   SettingsProviderKeyInput,
   SettingsProviderKeyView,
+  SettingsRemoteModelsFailure,
+  SettingsRemoteModelsReceipt,
   SettingsRoute,
   SettingsStateSnapshot,
 } from "../../shared/settingsProtocol";
@@ -135,6 +137,7 @@ function parseModelView(value: WireModelView): SettingsModelView {
     keyPresent: value.keyPresent === true,
     maxOutputTokens:
       typeof value.maxOutputTokens === "number" ? value.maxOutputTokens : null,
+    keySource: value.keySource === "saved" || value.keySource === "environment" ? value.keySource : null,
     modelName: value.modelName ?? null,
     provider: value.provider,
     source: value.source === "user" ? "user" : "builtin",
@@ -142,6 +145,13 @@ function parseModelView(value: WireModelView): SettingsModelView {
     supportedSpeeds: value.supportedSpeeds ?? [],
     thinkingFormat: value.thinkingFormat ?? null,
   };
+}
+
+function parseRemoteModelsFailure(payload: unknown): SettingsRemoteModelsFailure {
+  const reason = isRecord(payload) ? payload.reason : undefined;
+  return reason === "auth" || reason === "format" || reason === "network" || reason === "timeout" || reason === "unsupported"
+    ? reason
+    : "unknown";
 }
 
 function parseProviderKeyView(
@@ -250,7 +260,7 @@ export type SettingsDomRect = {
 export type SettingsDomSnapshot = {
   html: string;
   rects?: {
-    apiKeyInput?: SettingsDomRect;
+    aliasInput?: SettingsDomRect;
     keySlotBox?: SettingsDomRect;
     keySlotInput?: SettingsDomRect;
   };
@@ -276,13 +286,13 @@ function parseSettingsDomRects(value: unknown): SettingsDomSnapshot["rects"] {
   if (!isRecord(value)) {
     return undefined;
   }
-  const apiKeyInput = parseSettingsDomRect(value.apiKeyInput);
+  const aliasInput = parseSettingsDomRect(value.aliasInput);
   const keySlotBox = parseSettingsDomRect(value.keySlotBox);
   const keySlotInput = parseSettingsDomRect(value.keySlotInput);
-  if (!apiKeyInput && !keySlotBox && !keySlotInput) {
+  if (!aliasInput && !keySlotBox && !keySlotInput) {
     return undefined;
   }
-  return { apiKeyInput, keySlotBox, keySlotInput };
+  return { aliasInput, keySlotBox, keySlotInput };
 }
 
 type ConnectorToolToggleLock = {
@@ -659,14 +669,26 @@ export class SettingsPanel implements vscode.Disposable {
           intent.messageId,
         );
         return;
+      case "upsertModels":
+        await this.handleUpsertModels(intent.data, intent.messageId);
+        return;
+      case "listRemoteModels":
+        await this.handleListRemoteModels(intent.data, intent.messageId);
+        return;
       case "removeModel":
         await this.handleRemoveModel(intent.data.modelId);
+        return;
+      case "removeProvider":
+        await this.handleRemoveProvider(intent.data.keyEnv);
         return;
       case "setDefaultModel":
         await this.handleSetDefaultModel(intent.data.modelId);
         return;
+      case "setUtilityModel":
+        await this.handleSetUtilityModel(intent.data.modelId);
+        return;
       case "setProviderKey":
-        await this.handleSetProviderKey(intent.data.envName, intent.data.value);
+        await this.handleSetProviderKey(intent.data.envName, intent.data.value, intent.data.defaultModelId);
         return;
       case "listConnectors":
       case "reloadConnectors":
@@ -1003,7 +1025,7 @@ export class SettingsPanel implements vscode.Disposable {
         }
       }
       if (setAsDefault) {
-        warnings.push(...(await this.sendDefaultModel(model.id)));
+        warnings.push(...(await this.sendDefaultModel(model.id)).warnings);
         defaultSaved = true;
       }
     } catch (cause) {
@@ -1017,13 +1039,140 @@ export class SettingsPanel implements vscode.Disposable {
     this.postState();
   }
 
+  /** Models, then key, then default: each step runs only after the previous one is on disk. */
+  private async handleUpsertModels(
+    data: Extract<SettingsIntent, { type: "upsertModels" }>["data"],
+    requestId: string,
+  ): Promise<void> {
+    const warnings: string[] = [];
+    let wrote = false;
+    let defaultSaved = false;
+    let error: string | null = null;
+    try {
+      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      if (!capabilities.upsertModels) throw new Error(t("settings.host.modelUnavailable"));
+      if (data.models.length > 0) {
+        const response = await this.deps.messenger.sendUpsertModels(data.models.map(toWireModelEntryInput));
+        if (!response.success) throw new Error(response.error ?? t("settings.host.modelSaveFailed"));
+        wrote = true;
+        warnings.push(...(response.payload?.warnings ?? []));
+      }
+      if (data.providerKey) {
+        if (!capabilities.setProviderKey) throw new Error(t("settings.host.keyUnsupported"));
+        const key = await this.deps.messenger.sendSetProviderKey(data.providerKey.envName, data.providerKey.value);
+        if (!key.success) {
+          const detail = key.error ?? t("error.unknown");
+          throw new Error(wrote
+            ? t("settings.host.keySaveFailed", { name: data.models.map((model) => model.id).join(", "), detail })
+            : detail);
+        }
+        wrote = true;
+      }
+      if (data.defaultModelId) {
+        if (data.setAsDefault) {
+          if (!capabilities.setDefaultModel) throw new Error(t("settings.host.defaultUnsupported"));
+          warnings.push(...(await this.sendDefaultModel(data.defaultModelId)).warnings);
+          defaultSaved = true;
+        } else if (capabilities.setDefaultModelIfUnset) {
+          const result = await this.sendDefaultModel(data.defaultModelId, true);
+          warnings.push(...result.warnings);
+          defaultSaved = result.written;
+        }
+      }
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    const status = error === null
+      ? defaultSaved
+        ? t("settings.host.connectSavedDefault", { name: data.defaultModelId ?? "" })
+        : t("settings.host.connectSaved")
+      : null;
+    await this.publishModelWrite(error, status, warnings, wrote);
+    this.state.modelSaveReceipt = { requestId, success: error === null };
+    this.postState();
+  }
+
+  /** The temporary key lives only in this request; it is never stored, logged, or echoed. */
+  private async handleListRemoteModels(
+    data: Extract<SettingsIntent, { type: "listRemoteModels" }>["data"],
+    requestId: string,
+  ): Promise<void> {
+    let receipt: SettingsRemoteModelsReceipt;
+    try {
+      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      if (!capabilities.listRemoteModels) {
+        receipt = { failure: "unknown", requestId };
+      } else {
+        const response = await this.deps.messenger.sendListRemoteModels({
+          api: data.api,
+          baseUrl: data.baseUrl,
+          ...(data.apiKey ? { apiKey: data.apiKey } : {}),
+          ...(data.apiKeyEnv ? { apiKeyEnv: data.apiKeyEnv } : {}),
+        });
+        receipt = response.success
+          ? { models: (response.payload?.models ?? []).map((model) => model.id).filter((id) => typeof id === "string"), requestId }
+          : { failure: parseRemoteModelsFailure(response.payload), requestId };
+      }
+    } catch {
+      receipt = { failure: "unknown", requestId };
+    }
+    this.state = { ...this.state, remoteModelsReceipt: receipt };
+    this.postState();
+  }
+
+  private async handleRemoveProvider(keyEnv: string): Promise<void> {
+    const warnings: string[] = [];
+    let error: string | null = null;
+    try {
+      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      if (!capabilities.removeProvider) throw new Error(t("models.removeProvider.unsupported"));
+      // Same ordering as removeModel: a remembered Build choice must never outlive its model.
+      let preferenceCleared = false;
+      for (const model of this.state.models) {
+        if (model.source === "user" && model.apiKeyEnv === keyEnv) {
+          preferenceCleared = (await this.deps.clearBuildModelPreference?.(model.id)) === true || preferenceCleared;
+        }
+      }
+      if (preferenceCleared) warnings.push(t("settings.host.prefCleared"));
+      const response = await this.deps.messenger.sendRemoveProvider(keyEnv);
+      if (!response.success) throw new Error(response.error ?? t("settings.host.removeProviderFailed"));
+      warnings.push(...(response.payload?.warnings ?? []));
+      if (response.payload?.keySource === "environment" && response.payload.keyRemoved !== true) {
+        warnings.push(t("models.removeProvider.envKey", { name: keyEnv }));
+      }
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    await this.publishModelWrite(error, error === null ? t("settings.host.providerRemoved") : null, warnings, error === null);
+  }
+
+  private async handleSetUtilityModel(modelId: string): Promise<void> {
+    const warnings: string[] = [];
+    let error: string | null = null;
+    try {
+      const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
+      if (!capabilities.setUtilityModel) throw new Error(t("models.utility.readOnly"));
+      const response = await this.deps.messenger.sendSetUtilityModel(modelId);
+      if (!response.success) {
+        throw new Error(t("settings.host.utilityFailed", { detail: response.error ?? t("error.unknown") }));
+      }
+      const payload: Record<string, unknown> = isRecord(response.payload) ? response.payload : {};
+      warnings.push(...parseStringArray(payload.warnings));
+      if (payload.envOverride === true) warnings.push(t("settings.host.utilityEnvOverride"));
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    const status = error === null ? t("settings.host.utilitySaved", { name: modelId }) : null;
+    await this.publishModelWrite(error, status, warnings, error === null);
+  }
+
   private async handleSetDefaultModel(modelId: string): Promise<void> {
     const warnings: string[] = [];
     let error: string | null = null;
     try {
       const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
       if (!capabilities.setDefaultModel) throw new Error(t("settings.host.defaultUnsupported"));
-      warnings.push(...(await this.sendDefaultModel(modelId)));
+      warnings.push(...(await this.sendDefaultModel(modelId)).warnings);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     }
@@ -1031,17 +1180,27 @@ export class SettingsPanel implements vscode.Disposable {
     await this.publishModelWrite(error, status, warnings, error === null);
   }
 
-  /** Resolves to the warnings to show; rejects with user-facing text when nothing was saved. */
-  private async sendDefaultModel(modelId: string): Promise<string[]> {
-    const response = await this.deps.messenger.sendSetDefaultModel(modelId);
+  /**
+   * Rejects with user-facing text when nothing was saved. `onlyIfUnset` is
+   * decided by serve under its config lock, so two windows cannot both win.
+   */
+  private async sendDefaultModel(
+    modelId: string,
+    onlyIfUnset = false,
+  ): Promise<{ warnings: string[]; written: boolean }> {
+    const response = await this.deps.messenger.sendSetDefaultModel(modelId, { onlyIfUnset });
     if (!response.success) {
       throw new Error(t("settings.host.defaultFailed", { detail: response.error ?? t("error.unknown") }));
     }
     const payload: Record<string, unknown> = isRecord(response.payload) ? response.payload : {};
-    return [
-      ...parseStringArray(payload.warnings),
-      ...(payload.envOverride === true ? [t("settings.host.defaultEnvOverride")] : []),
-    ];
+    const written = payload.written !== false;
+    return {
+      warnings: [
+        ...parseStringArray(payload.warnings),
+        ...(written && payload.envOverride === true ? [t("settings.host.defaultEnvOverride")] : []),
+      ],
+      written,
+    };
   }
 
   private async publishModelWrite(
@@ -1348,6 +1507,7 @@ export class SettingsPanel implements vscode.Disposable {
   private async handleSetProviderKey(
     envName: string,
     value: string,
+    defaultModelId?: string,
   ): Promise<void> {
     try {
       const capabilities = this.buildCapabilities(
@@ -1368,9 +1528,14 @@ export class SettingsPanel implements vscode.Disposable {
         return;
       }
       const warnings: string[] = [];
+      let defaultError: string | null = null;
+      if (defaultModelId && capabilities.setDefaultModelIfUnset) {
+        try { warnings.push(...(await this.sendDefaultModel(defaultModelId, true)).warnings); }
+        catch (error) { defaultError = error instanceof Error ? error.message : String(error); }
+      }
       try { await this.deps.onModelCatalogChanged?.(); }
       catch (error) { warnings.push(t("settings.host.savedRefreshFailed", { detail: String(error) })); }
-      await this.refreshState(null, t("settings.host.savedKey", { name: envName }), warnings);
+      await this.refreshState(defaultError, t("settings.host.savedKey"), warnings);
     } catch (error) {
       await this.refreshState(String(error), null);
     }
@@ -1401,8 +1566,8 @@ export class SettingsPanel implements vscode.Disposable {
         ? await this.fetchProviderKeys(this.state.providerKeys)
         : { error: null, providerKeys: [] };
       const modelsResult = capabilities.listModels
-        ? await this.fetchModels(this.state.models, this.state.defaultModelId)
-        : { error: null, models: [], defaultModelId: undefined };
+        ? await this.fetchModels(this.state.models, this.state.defaultModelId, this.state.utilityModelId)
+        : { catalogWarnings: [], error: null, models: [], defaultModelId: undefined, utilityModelId: undefined };
       if (viewEpoch !== this.viewEpoch) return;
       this.state = {
         ...this.state,
@@ -1412,13 +1577,14 @@ export class SettingsPanel implements vscode.Disposable {
         extensionVersion: this.deps.extensionVersion,
         models: modelsResult.models,
         defaultModelId: modelsResult.defaultModelId,
+        utilityModelId: modelsResult.utilityModelId,
         modelRemovalReceipt,
         providerKeys: providerKeysResult.providerKeys,
         ready: true,
         route: this.route,
         serverVersion: initializeResult.serverVersion,
         status,
-        warnings,
+        warnings: modelsResult.catalogWarnings.length > 0 ? [...(warnings ?? []), ...modelsResult.catalogWarnings] : warnings,
       };
     } catch (cause) {
       if (viewEpoch !== this.viewEpoch) return;
@@ -1458,28 +1624,38 @@ export class SettingsPanel implements vscode.Disposable {
   private async fetchModels(
     fallback: SettingsModelView[],
     fallbackDefault: string | undefined,
-  ): Promise<{ error: string | null; models: SettingsModelView[]; defaultModelId: string | undefined }> {
+    fallbackUtility: string | undefined,
+  ): Promise<{
+    /** Per-entry catalog diagnostics, e.g. an orphaned partial override that was skipped. */
+    catalogWarnings: string[];
+    error: string | null;
+    models: SettingsModelView[];
+    defaultModelId: string | undefined;
+    utilityModelId: string | undefined;
+  }> {
+    const failed = (error: string) => ({
+      catalogWarnings: [],
+      error,
+      models: fallback,
+      defaultModelId: fallbackDefault,
+      utilityModelId: fallbackUtility,
+    });
     try {
       const response = await this.deps.messenger.sendListModels();
       if (!response.success) {
-        return {
-          error: response.error ?? t("settings.host.modelsLoadFailed"),
-          models: fallback,
-          defaultModelId: fallbackDefault,
-        };
+        return failed(response.error ?? t("settings.host.modelsLoadFailed"));
       }
       const defaultModelId: unknown = response.payload?.defaultModelId;
+      const utilityModelId: unknown = response.payload?.utilityModelId;
       return {
+        catalogWarnings: parseStringArray(response.payload?.warnings),
         error: null,
         models: parseModelsPayload(response.payload),
         defaultModelId: typeof defaultModelId === "string" ? defaultModelId : undefined,
+        utilityModelId: typeof utilityModelId === "string" ? utilityModelId : undefined,
       };
     } catch (error) {
-      return {
-        error: String(error),
-        models: fallback,
-        defaultModelId: fallbackDefault,
-      };
+      return failed(String(error));
     }
   }
 
@@ -1645,6 +1821,11 @@ export class SettingsPanel implements vscode.Disposable {
   ): SettingsCapabilities {
     return {
       setDefaultModel: hasServeCapability(initializeResult, "set_default_model"),
+      setDefaultModelIfUnset: hasServeCapability(initializeResult, "set_default_model_if_unset"),
+      setUtilityModel: hasServeCapability(initializeResult, "set_utility_model"),
+      listRemoteModels: hasServeCapability(initializeResult, "list_remote_models"),
+      removeProvider: hasServeCapability(initializeResult, "remove_provider"),
+      upsertModels: hasServeCapability(initializeResult, "upsert_models"),
       listModels: hasServeCapability(
         initializeResult,
         SERVE_CAPABILITY_LIST_MODELS,
