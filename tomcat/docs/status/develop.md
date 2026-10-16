@@ -1,12 +1,14 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-16 21:50 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-16 22:18 +0800 | DONE | develop | — |
 
 ### CURRENT RELEASE：CLI 0.1.76 / EXT 0.1.92
 
 - **准备状态**：用户执行标准 `/release-cli-ext`，在已提交的 `5d5546e8` 上由版本脚本统一递增 CLI/EXT patch，并 pin CLI `0.1.76`。五个版本文件只改必要版本镜像，无依赖变化；版本一致性及 CLI/EXT tag guard 已通过。目标标签起手时本地/远端均未占用，三个分支均可快进同步。
 - **执行边界**：先提交并推送 develop、FF 同步 main/master；CLI 三平台归档和 SHA256SUMS 就绪后才推 EXT 标签。原有 GitHub 构建/原生安装验收与发布门禁保留，不因前次“仅提交不跑测试”而跳过本轮发版门禁；本地不额外重跑产品测试。Cov% 未测量。
-- **市场与结果**：`PUBLISH_MARKETPLACE=true`、两个环境身份参数与仅 `ext-v*` 放行规则已回读；真实 OIDC 上传尚未验证。当前仅完成发版准备，GitHub/Marketplace 发布和已有安装更新都不能提前标为成功；最终证据保存在 `.agents/acceptance/release-0.1.76-0.1.92/`。
+- **发布结果**：发布提交 `cd959b55fdc4d46db41b01ccf460289b30581ef8` 已推送三个分支，两个正式标签均指向它。CLI run `38911202584` 与 EXT run `38912460284` 全部成功；GitHub 已公开 CLI 三平台归档、EXT 四份 VSIX 及各自 SHA256SUMS。EXT 原生门禁覆盖三平台冷启动和 0.1.90 数据升级，下载包/内置 CLI hash 与六份原生回执一致；不额外重跑本地产品测试。
+- **市场与更新**：保留 `PUBLISH_MARKETPLACE=true` 和仅 `ext-v*` 放行。真实 OIDC 上传三平台成功；市场校验先后完成，14:16 UTC 公开 API 已确认全部 0.1.92，且三份 VSIX hash 与 GitHub/CI 完全一致。原保留 Intel Mac profile 使用 VS Code 1.106.0 `--update-extensions` 从 0.1.89 正常更新到 0.1.92，未重装、未 `--force`、未指定 VSIX/版本 pin；内置 CLI 0.1.76 hash 一致。
+- **证据边界**：`.agents/acceptance/release-0.1.76-0.1.92/` 保留工作流、公开查询、校验、更新前后回执及市场 PNG/ARIA/console。既有 CI 截图归档不等于本次已逐张人工复阅；未验证无人值守定时更新或该 profile 的真人首配/真实付费对话。市场页面有字体 CSP/资源 404，Linux CI 保留 DBus/GPU、`/bin/zsh` 缺失和 weak GLIBC_2.39 告警；不称全宿主零告警。以下较早日期条目是历史时点，发布结果以上述为准。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 
@@ -114,8 +116,8 @@
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
 | 历史 QuickJS 偶发失败 | 五项整改/拒写验收期间全量 lib 3265 passed / 2 failed / 5 ignored；模块复验仍有超时和清理断言失败。后续供应商分卡与三项整改的全量 lib 已通过，但不证明该问题已修 | 保留原失败记录与后续通过记录；本次按用户要求未复跑，不宣称根因已消除 |
-| 历史安装包仍携带旧显示缺陷 | 拒写历史修复仅在当前源码及隔离验收包完成；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 新失败保存真实状态，旧无状态记录中性展示；源码修复随本次提交纳入，新版二进制与安装包待后续明确构建/发布；不再将缺陷作为当前门禁可接受例外 |
-| Marketplace 自动上传待实际验证 | 专用联邦身份、真实 OIDC 登录与 Publisher Contributor 已就绪；2026-10-16 经用户授权设置并回读仓库变量 `PUBLISH_MARKETPLACE=true` | 本次不开启发布；下一次正常发版核实三平台上传与已有安装更新，不把登录成功当作上传成功 |
+| 历史安装包仍携带旧显示缺陷 | CLI 0.1.76 / EXT 0.1.92 正式三平台原生验收已通过拒写与重载后的状态断言；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 使用新版本接收修复；旧无状态记录中性展示，不改写历史，不再使用旧版本已知问题豁免 |
+| 市场更新验收边界 | 0.1.92 真实 OIDC 三平台上传、公开 hash 和保留 profile 的 0.1.89 → 0.1.92 正常市场更新已验证 | 不把 `--update-extensions` 当作无人值守定时更新，也不把 CI 受控模型当作真人首配/付费模型验证；长期总验收边界保留 |
 | 既有验证边界 | 历史发布覆盖三目标原生受控模型链路，本轮仅 macOS x64；未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |
 
 - 历史 `real_mimo_web_search` slow 标记仅作性能观察，不把其旧 PASS 作为本轮复验。
