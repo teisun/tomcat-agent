@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-16 21:43 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-16 21:50 +0800 | ACTIVE | develop | — |
+
+### CURRENT RELEASE：CLI 0.1.76 / EXT 0.1.92
+
+- **准备状态**：用户执行标准 `/release-cli-ext`，在已提交的 `5d5546e8` 上由版本脚本统一递增 CLI/EXT patch，并 pin CLI `0.1.76`。五个版本文件只改必要版本镜像，无依赖变化；版本一致性及 CLI/EXT tag guard 已通过。目标标签起手时本地/远端均未占用，三个分支均可快进同步。
+- **执行边界**：先提交并推送 develop、FF 同步 main/master；CLI 三平台归档和 SHA256SUMS 就绪后才推 EXT 标签。原有 GitHub 构建/原生安装验收与发布门禁保留，不因前次“仅提交不跑测试”而跳过本轮发版门禁；本地不额外重跑产品测试。Cov% 未测量。
+- **市场与结果**：`PUBLISH_MARKETPLACE=true`、两个环境身份参数与仅 `ext-v*` 放行规则已回读；真实 OIDC 上传尚未验证。当前仅完成发版准备，GitHub/Marketplace 发布和已有安装更新都不能提前标为成功；最终证据保存在 `.agents/acceptance/release-0.1.76-0.1.92/`。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 
