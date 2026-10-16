@@ -1,7 +1,7 @@
 //! `ask_question` 工具实现（plan-runtime.md §AQ-A/B/C/E, [ask-question.md]）。
 //!
 //! 语义：
-//! - 计划执行时不可用；其它会话阶段均可调用。
+//! - 所有会话阶段均可调用，包括计划执行中。
 //! - 入参校验：
 //!   - `questions.len() ∈ [1, 4]`
 //!   - 每题 `options.len() ∈ [2, 4]`、`option.id` 唯一、保留 `__custom__` 拒
@@ -40,15 +40,6 @@ pub async fn execute_for_tool(
     termination: AskQuestionTermination,
     tool_call_id: Option<&str>,
 ) -> Result<serde_json::Value, ToolError> {
-    let mode = runtime.mode();
-    // Executing plans reject questions to avoid blocking the agent loop.
-    if runtime.executing_plan_id().is_some() {
-        return Err(ToolError::RejectedInMode {
-            tool: "ask_question",
-            mode: mode.as_str().to_string(),
-            guidance: "The plan is executing; record any clarification needed as an open question in the plan".into(),
-        });
-    }
     let questions = parse_and_validate_questions(raw_args)?;
     let result = panel
         .ask_with_identity(

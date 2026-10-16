@@ -20,6 +20,7 @@ fn normal_msg(id: &str) -> ChatMessage {
         usage: None,
         summary_title: None,
         tool_display: None,
+        is_error: None,
         msg_id: Some(id.to_string()),
         kind: MessageKind::Normal,
         timestamp: Some("ts".into()),

@@ -292,7 +292,7 @@ pub async fn execute_for_tool(
             let summary = PlanReviewSummary::interrupted();
             runtime.record_plan_review(&plan_id, &summary, 0);
             summary
-        } else if review_choice(&result, "review") {
+        } else if result.is_single_choice("plan-review", "review") {
             runtime.dispatch_reviewer(&plan_id, allow_review_edit).await
         } else {
             let summary = PlanReviewSummary::skipped();
@@ -310,18 +310,6 @@ pub async fn execute_for_tool(
     }
     out["review"] = summary.to_json();
     Ok(out)
-}
-
-fn review_choice(
-    result: &crate::core::plan_runtime::panels::AskQuestionResult,
-    choice: &str,
-) -> bool {
-    result.outcome == crate::core::plan_runtime::panels::AskQuestionOutcome::Answered
-        && result.answers.len() == 1
-        && result.answers[0].question_id == "plan-review"
-        && !result.answers[0].skipped
-        && result.answers[0].custom_text.is_none()
-        && result.answers[0].option_ids == [choice]
 }
 
 fn reload_after_review(runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {

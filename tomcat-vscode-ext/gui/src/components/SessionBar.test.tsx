@@ -6,10 +6,11 @@ import { en } from "../../../src/shared/i18n/en";
 
 afterEach(cleanup);
 describe("SessionBar settings entry", () => {
-  it("renders sibling icon actions, preserves selection and restores focus to the trigger", () => {
+  it("keeps pinning and deletion open and recovers focus when an action removes its row", () => {
     const pin = vi.fn(); const remove = vi.fn(); const choose = vi.fn();
     const session = { sessionId: "s", title: "A session", updatedAt: Date.now(), busy: false, isCurrent: true, ownedByThisFrontend: true };
-    render(<SessionBar activeSessionId="s" sessions={[session]} ready onOpenSettings={vi.fn()} onNewSession={vi.fn()} onSwitchSession={choose} onSetPinned={pin} onDeleteSession={remove} deleteSupported />);
+    const props = { activeSessionId: "s", ready: true, onOpenSettings: vi.fn(), onNewSession: vi.fn(), onSwitchSession: choose, onSetPinned: pin, onDeleteSession: remove, deleteSupported: true };
+    const view = render(<SessionBar {...props} sessions={[session]} />);
     const trigger = screen.getByTestId("session-select");
     fireEvent.click(trigger);
     const row = screen.getByRole("listitem");
@@ -18,27 +19,81 @@ describe("SessionBar settings entry", () => {
     const pinButton = screen.getByRole("button", { name: en["session.pin"] });
     expect(pinButton.getAttribute("title")).toBe(en["session.pin"]);
     expect(pinButton.querySelector(".codicon-pin")).toBeTruthy();
+    pinButton.focus();
     fireEvent.click(pinButton);
     expect(pin).toHaveBeenCalledWith("s", true);
     expect(choose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("session-dropdown")).toBeTruthy();
+    view.rerender(<SessionBar {...props} sessions={[{ ...session, isPinned: true }]} />);
     expect(document.activeElement).toBe(trigger);
-    fireEvent.click(trigger);
     const trash = screen.getByRole("button", { name: en["session.delete"] });
     expect(trash.querySelector(".codicon-trash")).toBeTruthy();
+    trash.focus();
     fireEvent.click(trash);
     expect(remove).not.toHaveBeenCalled();
     const cancel = screen.getByTestId("delete-session-cancel");
     expect(document.activeElement).toBe(cancel);
     fireEvent.keyDown(cancel, { key: "Escape" });
     expect(remove).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(trigger);
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("button", { name: en["session.delete"] }));
+    expect(document.activeElement).toBe(trash);
+    expect(screen.getByTestId("session-dropdown")).toBeTruthy();
+    fireEvent.click(trash);
+    fireEvent.mouseDown(screen.getByTestId("delete-session-overlay"));
+    expect(screen.queryByTestId("delete-session-dialog")).toBeNull();
+    expect(screen.getByTestId("session-dropdown")).toBeTruthy();
+    fireEvent.click(trash);
     const confirm = screen.getByTestId("delete-session-delete");
+    fireEvent.mouseDown(confirm);
     fireEvent.click(confirm);
     fireEvent.click(confirm);
     expect(remove).toHaveBeenCalledExactlyOnceWith("s");
+    view.rerender(<SessionBar {...props} sessions={[]} />);
+    expect(screen.getByTestId("session-dropdown")).toBeTruthy();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("keeps selection, unpin, expansion and scrolling inside the open panel", () => {
+    const choose = vi.fn(); const pin = vi.fn();
+    const sessions = Array.from({ length: 7 }, (_, i) => ({ sessionId: `s${i}`, title: `Session ${i}`, updatedAt: Date.now(), busy: false, isCurrent: i === 0, ownedByThisFrontend: true }));
+    const props = { sessions, ready: true, onOpenSettings: vi.fn(), onNewSession: vi.fn(), onSwitchSession: choose, onSetPinned: pin };
+    const view = render(<SessionBar {...props} activeSessionId="s0" />);
+    fireEvent.click(screen.getByTestId("session-select"));
+    expect(screen.getAllByTestId("session-option")).toHaveLength(6);
+    fireEvent.click(screen.getAllByTestId("session-option")[1]);
+    expect(choose).toHaveBeenLastCalledWith("s1");
+    view.rerender(<SessionBar {...props} activeSessionId="s1" />);
+    expect(screen.getAllByTestId("session-option")[1].getAttribute("aria-current")).toBe("true");
+    fireEvent.click(screen.getByTestId("session-more"));
+    fireEvent.scroll(screen.getByTestId("session-dropdown"));
+    expect(screen.getAllByTestId("session-option")).toHaveLength(7);
+    view.rerender(<SessionBar {...props} sessions={[{ ...sessions[0], isPinned: true }, ...sessions.slice(1)]} activeSessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: en["session.unpin"] }));
+    expect(pin).toHaveBeenLastCalledWith("s0", false);
+    expect(screen.getByTestId("session-dropdown")).toBeTruthy();
+  });
+
+  it.each(["new-session-button", "settings-button", "outside", "escape", "trigger"])("closes for %s", (action) => {
+    render(<><SessionBar activeSessionId={null} sessions={[]} ready onOpenSettings={vi.fn()} onNewSession={vi.fn()} onSwitchSession={vi.fn()} /><button data-testid="outside">Outside</button></>);
+    const trigger = screen.getByTestId("session-select");
+    fireEvent.click(trigger);
+    if (action === "escape") {
+      fireEvent.keyDown(screen.getByTestId("session-dropdown"), { key: "Escape" });
+      expect(document.activeElement).toBe(trigger);
+    } else {
+      const target = action === "trigger" ? trigger : screen.getByTestId(action);
+      fireEvent.mouseDown(target);
+      fireEvent.click(target);
+    }
+    expect(screen.queryByTestId("session-dropdown")).toBeNull();
+  });
+
+  it("also closes when an external command starts creating a session", () => {
+    const props = { activeSessionId: null, sessions: [], ready: true, onOpenSettings: vi.fn(), onNewSession: vi.fn(), onSwitchSession: vi.fn() };
+    const view = render(<SessionBar {...props} />);
+    fireEvent.click(screen.getByTestId("session-select"));
+    view.rerender(<SessionBar {...props} creating />);
+    expect(screen.queryByTestId("session-dropdown")).toBeNull();
+    expect((screen.getByTestId("session-select") as HTMLButtonElement).disabled).toBe(true);
   });
   it("offers unpin but explains why a busy session cannot be deleted", () => {
     const session = { sessionId: "s", title: "A", updatedAt: 1, busy: true, isPinned: true, isCurrent: true, ownedByThisFrontend: true };

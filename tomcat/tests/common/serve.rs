@@ -27,10 +27,17 @@ pub struct ServeFixture {
 // parent-agent markers, configuration overrides, proxies or real keys escape
 // into it; this never mutates the parent process environment or real config.
 pub fn isolated_serve_command(home: &Path) -> StdCommand {
-    let mut command = StdCommand::new(cargo_bin_path());
+    isolated_serve_command_with_binary(home, &cargo_bin_path())
+}
+
+/// Historical-binary fixture generation shares the same isolation as current Serve tests.
+pub fn isolated_serve_command_with_binary(home: &Path, binary: &Path) -> StdCommand {
+    let mut command = StdCommand::new(binary);
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy();
         if name == "TOMCAT_AGENT_ACTIVE"
+            || name == "TOMCAT_SESSION_MODE"
+            || name == "TOMCAT_QUICKJS_MODULES_PATH"
             || name.starts_with("TOMCAT__")
             || name.ends_with("_API_KEY")
             || matches!(
@@ -45,8 +52,8 @@ pub fn isolated_serve_command(home: &Path) -> StdCommand {
         .env("HOME", home)
         .env("TOMCAT__UI__LANGUAGE", "en")
         .env("SHELL", "/bin/zsh")
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost");
+        .env("NO_PROXY", "127.0.0.1,localhost,::1")
+        .env("no_proxy", "127.0.0.1,localhost,::1");
     command
 }
 
@@ -290,11 +297,17 @@ pub fn spawn_serve_child_with_env(fx: &ServeFixture, extra_env: &[(&str, &str)])
             .env("MOONSHOT_API_KEY", "dummy-key")
             .env("ANTHROPIC_API_KEY", "dummy-key");
     }
-    let mut child = command
+    command
         .envs(extra_env.iter().copied())
         .env("RUST_LOG", "tomcat=debug,info")
         .current_dir(&fx.workspace)
-        .args(["serve", "--stdio"])
+        .args(["serve", "--stdio"]);
+    spawn_serve_command(command)
+}
+
+/// Run an already isolated/configured command through the existing NDJSON harness.
+pub fn spawn_serve_command(mut command: StdCommand) -> ServeChild {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

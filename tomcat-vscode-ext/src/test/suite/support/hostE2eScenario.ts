@@ -89,7 +89,7 @@ export async function assertSessionSettingsLanguageFlow(api: TomcatExtensionApi)
     await driver.capture(targetPath);
   };
   const rowAction = async (icon: "pin" | "pinned" | "trash") => {
-    await chat.click("session-select");
+    if (!await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]')")) await chat.click("session-select");
     assert.equal(await chat.evaluate<boolean>(`(() => { const row = [...document.querySelectorAll('.tc-session-row')].find(row => row.querySelector('[data-testid="session-option"]')?.getAttribute('title') === ${JSON.stringify(target)}); const button = row?.querySelector('.codicon-${icon}')?.closest('button'); if (!button || button.disabled) return false; button.click(); return true; })()`), true);
   };
   let failed = false;
@@ -143,18 +143,18 @@ export async function assertSessionSettingsLanguageFlow(api: TomcatExtensionApi)
       await rowAction("pin");
       await waitFor(() => api.__testing.getWebviewState().sessions.some(session => session.sessionId === target && session.isPinned));
       assert.equal(api.__testing.getWebviewState().activeSessionId, active, "Pinning must not switch the active session");
-      await chat.click("session-select");
-      assert.equal(await chat.evaluate<boolean>(`(() => { const button = document.querySelector('.codicon-pinned')?.closest('button'); return button?.getAttribute('aria-pressed') === 'true' && button.hasAttribute('title') && !button.textContent.trim(); })()`), true);
+      assert.equal(await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]')"), true, "Pinning must leave the menu open");
+      await waitFor(() => chat.evaluate<boolean>(`(() => { const button = document.querySelector('.codicon-pinned')?.closest('button'); return button?.getAttribute('aria-pressed') === 'true' && button.hasAttribute('title') && !button.textContent.trim(); })()`));
       if (language === "en") assert.equal(await chat.evaluate<string>(`document.querySelector('.codicon-pinned')?.closest('button')?.getAttribute('title')`), en["session.unpin"]);
       await chat.hover("session-option");
       await capture(chat, `pinned-${language}`);
-      await chat.click("session-select");
       await rowAction("trash");
       await chat.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "delete-session-cancel"), "Delete confirmation must render");
       assert.equal(await chat.evaluate<string>("document.activeElement?.getAttribute('data-testid')"), "delete-session-cancel");
       await capture(chat, `delete-confirm-${language}`);
       await chat.click("delete-session-cancel");
       assert.ok(api.__testing.getWebviewState().sessions.some(session => session.sessionId === target));
+      assert.equal(await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]') && document.activeElement !== document.body"), true, "Cancelling deletion must preserve the menu and focus");
       await rowAction("pinned");
       await waitFor(() => api.__testing.getWebviewState().sessions.some(session => session.sessionId === target && !session.isPinned));
     }
@@ -163,6 +163,8 @@ export async function assertSessionSettingsLanguageFlow(api: TomcatExtensionApi)
     await waitFor(() => !api.__testing.getWebviewState().sessions.some(session => session.sessionId === target));
     assert.equal(api.__testing.getWebviewState().activeSessionId, active);
     assert.equal(await chat.evaluate<string>("document.querySelector('[data-testid=\"composer-input\"]').textContent"), draft);
+    await chat.focusAndPress("session-select", "Escape");
+    await waitFor(() => chat.evaluate<boolean>("!document.querySelector('[data-testid=\"session-dropdown\"]')"));
     await chat.evaluate("window.dispatchEvent(new CustomEvent('tomcat:test:set-composer-value', {detail:{testId:'composer-input',value:''}}))");
     for (const language of ["zh-CN", "en"] as const) {
       await setLanguage(language);
@@ -266,6 +268,9 @@ export async function assertSessionSettingsLanguageFlow(api: TomcatExtensionApi)
     await capture(settings, "settings-after-restart");
   } catch (error) {
     failed = true;
+    if (process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR) {
+      await chat.capture(path.join(process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR, "session-language-failure.png")).catch(captureError => console.warn("Failure capture", captureError));
+    }
     throw error;
   } finally {
     try { await setLanguage("en"); await chat.setViewport(1440, 900); }

@@ -348,7 +348,7 @@ fn enforce_state_matrix(plan_state: PlanFileState, ops_list: &[UpdateOp]) -> Res
     });
     if plan_state != PlanFileState::Executing && starts_work {
         return Err(ToolError::BadArgs(format!(
-            "in_progress is allowed only while executing; current plan.state = {}",
+            "in_progress is allowed only while executing; current plan.state = {}. If the user asked to implement or resume, call start_plan first",
             plan_state.as_str()
         )));
     }

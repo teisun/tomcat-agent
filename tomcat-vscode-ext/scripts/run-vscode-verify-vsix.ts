@@ -70,7 +70,29 @@ async function inspectReleaseVsix(file: string) {
   return { metadata, target, vsixSha256: createHash("sha256").update(await fs.readFile(file)).digest("hex"), cliSha256: createHash("sha256").update(binary).digest("hex") };
 }
 
+// Relocate only a disposable copy of the immutable, real 0.1.90 capture.
+async function seedUpgradeData(source: string, home: string, baseUrl: string) {
+  const info = JSON.parse(await fs.readFile(path.join(source, "fixture-info.json"), "utf8")) as { home: string; baseUrl: string; sessionId: string; planId: string };
+  async function copy(from: string, to: string): Promise<void> {
+    await fs.mkdir(to, { recursive: true });
+    for (const entry of await fs.readdir(from, { withFileTypes: true })) {
+      if (entry.name === "fixture-info.json") continue;
+      const input = path.join(from, entry.name); const output = path.join(to, entry.name);
+      if (entry.isDirectory()) await copy(input, output);
+      else await fs.writeFile(output, (await fs.readFile(input, "utf8")).split(info.home).join(home).split(info.baseUrl).join(baseUrl));
+    }
+  }
+  await copy(source, path.join(home, ".tomcat"));
+  // Also reproduce the older screenshot's removed connection fields. Originals stay untouched.
+  const config = path.join(home, ".tomcat/tomcat.config.toml");
+  const text = await fs.readFile(config, "utf8");
+  if (!text.includes("[llm]")) throw new Error("Legacy capture has no llm table");
+  await fs.writeFile(config, text.replace("[llm]", '[llm]\nprovider = "old-provider"\napi_base = "https://legacy.invalid"\napi_key_env = "LEGACY_UNUSED_KEY"'));
+  return info;
+}
+
 type InstalledScenarioOptions = {
+  upgradeFixture?: string;
   production?: { source: ProductionSource; bundle?: Awaited<ReturnType<typeof inspectReleaseVsix>> };
   artifactsDir: string;
   additionalSettings?: Record<string, unknown>;
@@ -145,6 +167,16 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       const responses: ScriptedResponse[] = [];
       server = await spawnScriptedOpenAiStreamServer(responses);
       fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true });
+      const upgrade = options.upgradeFixture ? await seedUpgradeData(options.upgradeFixture, fixture.homePath, server.baseUrl) : undefined;
+      if (upgrade) {
+        responses.push(
+          { parts: [sseToolCall("upgrade-start", "start_plan", JSON.stringify({ plan_id: upgrade.planId })), sseFinish("tool_calls"), sseDone()] },
+          { parts: [sseToolCall("upgrade-write", "write", JSON.stringify({ path: path.join(fixture.homePath, ".tomcat/temp/upgrade-execution.txt"), content: "upgraded execution" })), sseFinish("tool_calls"), sseDone()] },
+          { parts: [sseToolCall("upgrade-ask", "ask_question", JSON.stringify({ questions: [{ id: "upgrade-question", prompt: "How should I summarize the completed change?", options: [{ id: "brief", label: "Brief summary", recommended: true }, { id: "details", label: "Detailed summary", recommended: false }] }] })), sseFinish("tool_calls"), sseDone()] },
+          { parts: [sseToolCall("upgrade-complete", "update_plan", JSON.stringify({ ops: [{ kind: "set_status", id: "check-old-data", status: "completed", evidence: ["Legacy data loaded and user answered during execution"] }] })), sseFinish("tool_calls"), sseDone()] },
+          { parts: [sseDelta("UPGRADE_EXECUTION_COMPLETE"), sseFinish("stop"), sseDone()] },
+        );
+      } else {
       // Tool paths are explicit fixture-owned absolute paths. Missing relative
       // files cannot be canonicalized into workspace_roots by the real gate.
       responses.push(
@@ -161,8 +193,10 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
         throw new Error(`Cold-start fixture unexpectedly contains ${name}`);
       }
+      }
       testEnv = { ...fixture.env };
       testEnv.TOMCAT_ONBOARDING_BASE_URL = server.baseUrl;
+      if (upgrade) Object.assign(testEnv, { TOMCAT_RELEASE_UPGRADE_SESSION: upgrade.sessionId, TOMCAT_RELEASE_UPGRADE_PLAN: upgrade.planId, TOMCAT_SESSION_MODE: "claw", TOMCAT__LLM__TITLE_MODEL: "gpt-5.4", TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4" });
       for (const key of Object.keys(testEnv)) if (key.startsWith("TOMCAT_VSCODE_TEST_") || key.startsWith("TOMCAT_E2E_")) testEnv[key] = undefined;
       Object.assign(testEnv, { TOMCAT_VSCODE_TEST_DEFAULT_CWD: fixture.workspacePath, TOMCAT_EXPECT_RELEASE_BINARY: binary, TOMCAT_EXPECT_RELEASE_HOST_ARCH: process.arch, TOMCAT_EXPECT_RELEASE_CLI_SHA256: cliSha256, TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1" });
       const cliVersion = execFileSync(binary, ["--version"], { env: testEnv, encoding: "utf8" }).trim();
@@ -191,9 +225,10 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     });
     if (server) {
       const requests = server.capturedNonTitleRequests();
-      if (requests.length !== 7) throw new Error(`Expected seven real model requests, got ${requests.length}`);
+      const expectedCount = options.upgradeFixture ? 5 : 7;
+      if (requests.length !== expectedCount) throw new Error(`Expected ${expectedCount} real model requests, got ${requests.length}`);
       const models = requests.map(request => JSON.parse(request.split("\r\n\r\n")[1]).model);
-      if (models.some(model => model !== "deepseek-v4-flash")) throw new Error(`Unexpected selected models: ${JSON.stringify(models)}`);
+      if (models.some(model => model !== (options.upgradeFixture ? "gpt-5.4" : "deepseek-v4-flash"))) throw new Error(`Unexpected selected models: ${JSON.stringify(models)}`);
       await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: requests.length, models }, null, 2));
     }
   } finally {
@@ -222,7 +257,11 @@ async function main(): Promise<void> {
     const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(extensionRoot, "../.agents/marketplace", expectedRelease().version, currentVsCodeTarget());
     await fs.mkdir(artifactsDir, { recursive: true });
     execFileSync("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot, stdio: "inherit" });
-    await runInstalledScenario({ extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } });
+    const options = { extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
+    await runInstalledScenario(options);
+    const upgradeArtifacts = path.join(artifactsDir, "upgrade-v0.1.90");
+    await fs.mkdir(upgradeArtifacts, { recursive: true });
+    await runInstalledScenario({ ...options, artifactsDir: upgradeArtifacts, upgradeFixture: path.resolve(extensionRoot, "../tomcat/tests/fixtures/data-dir-v0.1.90/cli-init") });
     console.log(`Production bundle evidence: ${artifactsDir}`);
     return;
   }

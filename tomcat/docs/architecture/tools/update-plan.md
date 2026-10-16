@@ -24,7 +24,7 @@ plan_id / path / active plan
 - 操作语义复用 `shared_todo_ops.rs::apply_shared_todo_ops`，没有独立的 PlanTodoStore/SessionTodoStore 框架。
 - 调用者只能提交 todo 操作，不能通过本工具传 `goal`、`draft`、会话身份或其他机器字段；未知顶层参数拒绝。
 - 运行时按提交结果派生文件 `state`，并重建正文 `## Todos Board` 的自动标记区间；正文其余部分不由此工具重写。
-- 工具不改变 `AgentMode`，也不代替 `/plan build` 建立执行资格。文件完成与会话模式是两件事。
+- 工具不改变 `AgentMode`，也不代替 `start_plan`、Build 或 `/plan build` 建立执行资格。文件完成与会话模式是两件事。
 
 ## 2. 入参与操作
 
@@ -63,6 +63,7 @@ plan_id / path / active plan
 LLM 入口在读计划和创建锁文件前，通过原有 PrimitiveExecutor 路径授权流程检查 Write；显式 deny/readonly 不可绕过，未知目录复用已有确认/SessionGrants。默认 plans 目录沿用 AgentPlansDir 的授权，不重复询问。批准后的规范化路径直接进入事务，不在审批等待后重新选取 active plan。内嵌的自定义 executor 若不实现 `authorize_write_path`，该原生更新入口默认拒绝；内部可信 Rust 调用 `execute` 仍共用同一个事务实现。
 
 成功返回的是**本次提交**的完整快照，不是跨会话实时同步承诺。工具可更新已完成计划，但不能跳过 build 把它直接重新开工。
+执行中修改另一份计划只返回那份计划的提交结果，不替换当前执行绑定；同一保护也覆盖 PLAN 中新建计划和评审回读。
 
 ## 4. 状态规则
 

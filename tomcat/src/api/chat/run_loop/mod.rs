@@ -779,7 +779,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         .plan_runtime
         .attach_cancel_hook(turn_token.clone());
     let recovered_pending_question = if input_message.is_none() {
-        rehydrate::resume_tail_ask_questions(ctx).await?
+        rehydrate::resume_tail_ask_questions(ctx, &turn_token).await?
     } else {
         rehydrate::skip_tail_ask_questions_for_new_input(ctx)?
     };

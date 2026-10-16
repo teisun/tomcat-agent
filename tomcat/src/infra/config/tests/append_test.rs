@@ -21,6 +21,25 @@ fn empty_config_file(dir: &TempDir) -> PathBuf {
 }
 
 #[test]
+fn append_workspace_preserves_known_fields_and_drops_unsupported_keys() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path().join("tomcat.config.toml");
+    std::fs::write(&p, "[llm]\ndefault_model='gpt-5.4'\nprovider='old'\napi_base='https://example.test'\napi_key_env='OLD_API_KEY'\n[primitive]\npath_whitelist=[]\n[tools.bash]\nforeground_wait_ms=9000\ntimeout_ms=1\n").unwrap();
+    let root = dir.path().to_string_lossy().into_owned();
+    append_workspace_root_to_disk(&p, root.clone()).unwrap();
+    let cfg = load_config_toml_file(&p).unwrap();
+    assert_eq!(cfg.llm.default_model, "gpt-5.4");
+    assert_eq!(cfg.tools.bash.foreground_wait_ms, 9000);
+    assert_eq!(cfg.workspace.workspace_roots, [root]);
+    let saved: toml::Value = std::fs::read_to_string(&p).unwrap().parse().unwrap();
+    for key in ["provider", "api_base", "api_key_env"] {
+        assert!(saved["llm"].get(key).is_none());
+    }
+    assert!(saved["primitive"].get("path_whitelist").is_none());
+    assert!(saved["tools"]["bash"].get("timeout_ms").is_none());
+}
+
+#[test]
 fn append_extra_root_appends_once() {
     let dir = TempDir::new().unwrap();
     let p = empty_config_file(&dir);

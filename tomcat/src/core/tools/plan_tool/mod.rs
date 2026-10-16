@@ -1,14 +1,15 @@
 //! Plan 模式 LLM 工具实现（plan-runtime.md §5.3 / P2 PR-PLB）。
 //!
 //! 工具表（与 [`crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG`] 中
-//! 四个 `plan_only` 条目一一对应）：
+//! 五个 `plan_only` 条目一一对应）：
 //!
 //! | 工具 | 可见模式 | 写入对象 | 说人话 |
 //! |------|----------|----------|--------|
 //! | [`create_plan`] | Planning | 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md` | 第一稿计划 |
+//! | [`start_plan`] | 任何模式（PLAN 先确认） | 复用 build_plan 开工并绑定会话 | 开始/恢复执行 |
 //! | [`update_plan`] | 任何模式 | 增量改 PlanFile.frontmatter.todos[] | 推进/编辑 |
 //! | [`todos`] | 任何模式 | **仅** session TodoFile（与 PlanFile 无关；推进 plan 用 `update_plan`） | 我的待办 |
-//! | `ask_question` | Planning + Chat/Pending/Completed（EXEC 隐藏） | 透传 UI | 结构化提问 |
+//! | `ask_question` | 任何模式（含 EXEC） | 透传 UI | 结构化提问 |
 //!
 //! 每个函数都接 `&PlanRuntime + serde_json::Value (args) -> Result<serde_json::Value, ToolError>`，
 //! 调用方（`tool_exec.rs` 在 P6 接入）负责把 OpenAI tool_call 参数透传。
@@ -16,6 +17,7 @@
 pub mod ask_question;
 pub mod create_plan;
 pub(crate) mod shared_todo_ops;
+pub mod start_plan;
 pub mod todos;
 pub mod update_plan;
 

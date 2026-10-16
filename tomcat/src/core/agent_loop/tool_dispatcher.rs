@@ -567,6 +567,10 @@ pub(super) async fn run_tool_calls_with_usage(
             tool_messages_with_media(agent, &tc.id, &model_text, follow_up_parts, display.clone())
                 .map_err(LoopError::Fatal)?;
 
+        // The live event and the durable row must retain the same outcome.
+        tool_message.is_error = Some(is_error);
+        archival_message.is_error = Some(is_error);
+
         agent.emit_extension_event(ExtensionEvent::ToolResult {
             tool_name: tc.name.clone(),
             tool_call_id: tc.id.clone(),

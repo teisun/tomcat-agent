@@ -1932,7 +1932,7 @@ function applyHistoryEntry(
         args,
         assistantMessageId: toolCallToAssistant.get(toolCallId),
         id,
-        isError: false,
+        isError: typeof entry.message.is_error === "boolean" ? entry.message.is_error : undefined,
         planActivity,
         planId: planReference.planId,
         planPath: planReference.planPath,

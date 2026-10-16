@@ -328,14 +328,12 @@ fn tools_bash_env_override_uses_nested_config_mapping() {
 }
 
 #[test]
-fn tools_bash_rejects_legacy_timeout_field_with_replacement_hint() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "[tools.bash]\ntimeout_ms = 120000\n").unwrap();
-
-    let message = load_config(Some(&path)).unwrap_err().to_string();
-    assert!(message.contains("timeout_ms"), "{message}");
-    assert!(message.contains("foreground_wait_ms"), "{message}");
+fn tools_bash_ignores_unknown_fields() {
+    let cfg: ToolsBashConfig =
+        toml::from_str("timeout_ms = 120000\nfuture_option = true\nforeground_wait_ms = 9000\n")
+            .unwrap();
+    assert_eq!(cfg.foreground_wait_ms, 9000);
+    assert_eq!(cfg.max_output_chars, DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS);
 }
 
 #[test]

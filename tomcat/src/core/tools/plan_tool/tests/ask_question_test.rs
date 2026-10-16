@@ -118,28 +118,56 @@ async fn ask_question_emits_transcript_event_on_cancelled() {
 }
 
 #[tokio::test]
-async fn ask_question_rejected_in_exec_returns_actionable_error() {
+async fn ask_question_answers_skips_and_custom_answers_preserve_execution() {
     let rt = PlanRuntime::new("s1");
     rt.seed_active_plan_for_test("plan_x".into(), PlanFileState::Executing);
-    let panel = MockAskQuestionPanel::new(vec![]);
-    let err = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
-        .await
-        .unwrap_err();
-    match err {
-        ToolError::RejectedInMode {
-            tool,
-            mode,
-            guidance,
-        } => {
-            assert_eq!(tool, "ask_question");
-            assert_eq!(mode, "chat");
-            assert_eq!(
-                guidance,
-                "The plan is executing; record any clarification needed as an open question in the plan"
-            );
-        }
-        other => panic!("expected RejectedInMode, got {other:?}"),
+    for answer in [
+        Answer {
+            question_id: "q1".into(),
+            option_ids: vec!["a".into()],
+            custom_text: None,
+            skipped: false,
+            picked_recommended: true,
+        },
+        Answer {
+            question_id: "q1".into(),
+            option_ids: vec![],
+            custom_text: None,
+            skipped: true,
+            picked_recommended: false,
+        },
+        Answer {
+            question_id: "q1".into(),
+            option_ids: vec!["__custom__".into()],
+            custom_text: Some("custom answer".into()),
+            skipped: false,
+            picked_recommended: false,
+        },
+    ] {
+        let panel = MockAskQuestionPanel::new(vec![AskQuestionResult::answered(vec![answer])]);
+        let result =
+            ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
+                .await
+                .unwrap();
+        assert_eq!(result["outcome"], "answered");
+        assert_eq!(rt.executing_plan_id().as_deref(), Some("plan_x"));
     }
+    let wrong_panel = MockAskQuestionPanel::new(vec![AskQuestionResult::answered(vec![Answer {
+        question_id: "wrong-question".into(),
+        option_ids: vec!["a".into()],
+        custom_text: None,
+        skipped: false,
+        picked_recommended: true,
+    }])]);
+    assert!(ask_question::execute(
+        &rt,
+        &wrong_panel,
+        &good_args(),
+        AskQuestionTermination::default()
+    )
+    .await
+    .is_err());
+    assert_eq!(rt.executing_plan_id().as_deref(), Some("plan_x"));
 }
 
 #[tokio::test]

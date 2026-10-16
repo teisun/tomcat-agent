@@ -5,6 +5,8 @@ use crate::core::prompts::{load, render, PromptKey};
 fn planner_prompt_mentions_create_plan_and_ask_question() {
     let s = load(PromptKey::PlannerReminder);
     assert!(s.contains("create_plan"));
+    assert!(s.contains("Call `start_plan` only when the user's latest message explicitly asks"));
+    assert!(s.contains("never start merely because they asked to create or revise a plan"));
     assert!(s.contains("ask_question"));
     assert!(s.contains("PLAN mode"));
     assert!(s.contains("requested plan/proposal creation or revision"));
@@ -54,6 +56,7 @@ fn executor_prompt_renders_plan_id() {
         &[("plan_id", "plan_demo_aaaa1111")],
     );
     assert!(rendered.contains("plan_demo_aaaa1111"));
+    assert!(rendered.contains("`start_plan` result"));
     assert!(rendered.contains("update_plan"));
     assert!(rendered.contains("off-limits"));
     assert!(rendered.contains("content` is frozen"));
@@ -100,6 +103,18 @@ fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate()
     assert!(planner.contains("one final todo with `kind=acceptance`"));
     assert!(planner.contains("intermediate verification todos use `kind=work`"));
     assert!(planner.contains("human-readable \"Acceptance\" section"));
+}
+
+#[test]
+fn verify_skill_requires_every_final_screenshot_in_the_delivery() {
+    let skill = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/skills/verify/SKILL.md"
+    ));
+    assert!(skill.contains("embed every final PNG"));
+    assert!(skill.contains("failures included"));
+    assert!(skill.contains("match the count before replying"));
+    assert!(!skill.contains("the representative PNGs"));
 }
 
 /// Acceptance scope policy is written in the verify skill. Other prompts only

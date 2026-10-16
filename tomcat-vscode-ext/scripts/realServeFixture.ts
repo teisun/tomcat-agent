@@ -51,7 +51,8 @@ export async function setupRealServeFixture(baseUrl: string, api: LlmApi, setup:
   const homePath = await mkdtemp(path.join(os.tmpdir(), "tomcat-vscode-ext-"));
   const workspacePath = path.join(homePath, "workspace");
   const env = serveFixtureEnvironment(homePath, process.env, setup.coldStart);
-  const cleanup = () => rm(homePath, { force: true, recursive: true });
+  // Retry transient ENOTEMPTY/EBUSY during disposable fixture cleanup; permanent errors still reject.
+  const cleanup = () => rm(homePath, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
   try {
     await mkdir(workspacePath, { recursive: true });
     if (setup.coldStart) return { cleanup, env, homePath, workspacePath };
@@ -100,7 +101,7 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     const headers = Object.entries(request.headers).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(",") : value ?? ""}`).join("\r\n");
     const rawRequest = `${request.method} ${request.url} HTTP/1.1\r\n${headers}\r\n\r\n${body}`;
     captured.push(rawRequest);
-    if (isSessionTitleRequest(rawRequest)) {
+    if (isTitleRequest(rawRequest)) {
       response.writeHead(200, { Connection: "close", "Content-Type": "application/json" });
       response.end(sessionTitleResponseJson(rawRequest, "Generated title"));
       return;
@@ -124,7 +125,7 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     capturedRequests: () => [...captured],
-    capturedNonTitleRequests: () => captured.filter(request => !isSessionTitleRequest(request)),
+    capturedNonTitleRequests: () => captured.filter(request => !isTitleRequest(request)),
     close() {
       if (closePromise) return closePromise;
       abort.abort();
@@ -144,17 +145,18 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     },
   };
 }
-function isSessionTitleRequest(rawRequest: string): boolean {
+function isTitleRequest(rawRequest: string): boolean {
   const body = rawRequest.split("\r\n\r\n")[1];
   if (!body) return false;
   let value: unknown;
   try { value = JSON.parse(body); } catch { return false; }
-  return isRecord(value) && containsSessionTitlePrompt(value);
+  return isRecord(value) && value.stream !== true && containsTitlePrompt(value);
 }
-function containsSessionTitlePrompt(value: unknown): boolean {
-  if (typeof value === "string") return value.includes("Generate a short chat title from the user's first message.");
-  if (Array.isArray(value)) return value.some(containsSessionTitlePrompt);
-  return isRecord(value) && Object.values(value).some(containsSessionTitlePrompt);
+function containsTitlePrompt(value: unknown): boolean {
+  if (typeof value === "string") return value.includes("Generate a short chat title from the user's first message.")
+    || value.includes("Generate a short title summarizing this AI assistant thinking block and its tool usage.");
+  if (Array.isArray(value)) return value.some(containsTitlePrompt);
+  return isRecord(value) && Object.values(value).some(containsTitlePrompt);
 }
 function sessionTitleResponseJson(rawRequest: string, title: string): string {
   if (rawRequest.startsWith("POST /v1/responses ")) return JSON.stringify({

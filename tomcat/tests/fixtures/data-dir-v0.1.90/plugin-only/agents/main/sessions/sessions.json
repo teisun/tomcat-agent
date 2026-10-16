@@ -1,0 +1,14 @@
+{
+  "sessions": {
+    "1792067339303_50147962325231c9": {
+      "sessionKey": "agent:main:main",
+      "sessionId": "1792067339303_50147962325231c9",
+      "updatedAt": 1792067339303,
+      "sessionFile": "/private/var/folders/1t/xdx9bpn14bb365np42rb36rw0000gn/T/.tmpxItcyT/.tomcat/agents/main/sessions/1792067339303_50147962325231c9.jsonl",
+      "cwd": "/private/var/folders/1t/xdx9bpn14bb365np42rb36rw0000gn/T/.tmpxItcyT/workspace"
+    }
+  },
+  "current": {
+    "agent:main:main": "1792067339303_50147962325231c9"
+  }
+}

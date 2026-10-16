@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "sessions": {
+    "1792067320140_6f2fde0e3b9ee41c": {
+      "transcript": {
+        "fingerprint": {
+          "len": 3485,
+          "modifiedNs": 1792067321257315861
+        },
+        "blobShas": []
+      },
+      "sidecar": {
+        "fingerprint": {
+          "len": 228,
+          "modifiedNs": 1792067321190918595
+        },
+        "oldestUncompactedTs": null,
+        "requiresRescan": false
+      }
+    }
+  }
+}

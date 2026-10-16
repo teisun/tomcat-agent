@@ -481,7 +481,7 @@ async fn execute_tool_tuple_full(
     // B1：plan 工具分发（优先于 primitive，因为这些工具不走 primitive）。
     if matches!(
         tc.name.as_str(),
-        "create_plan" | "update_plan" | "todos" | "ask_question"
+        "create_plan" | "start_plan" | "update_plan" | "todos" | "ask_question"
     ) {
         return branches::dispatch_plan_tool(ctx, &tc.name, &args, display_out)
             .await

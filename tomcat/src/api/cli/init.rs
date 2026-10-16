@@ -6,10 +6,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config,
-    load_config_for_init, load_store, normalize_path, resolve_sessions_dir, save_store,
-    validate_config, write_file_atomic, AppConfig, AppError, PluginEngine, SessionStore,
-    DEFAULT_LLM_MODEL,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, load_store,
+    normalize_path, resolve_sessions_dir, save_store, validate_config, write_file_atomic,
+    AppConfig, AppError, PluginEngine, SessionStore, DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;
@@ -35,7 +34,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     }
 
     let mut cfg = if config_existed {
-        load_config_for_init(Some(&config_file))?
+        load_config(Some(&config_file))?
     } else {
         let llm = crate::LlmConfig {
             default_model: DEFAULT_LLM_MODEL.to_string(),

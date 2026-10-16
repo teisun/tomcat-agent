@@ -3786,17 +3786,19 @@ describe("Tomcat webview App", () => {
     });
 
     const selectSession = async (sessionId: "s1" | "s2") => {
-      fireEvent.click(screen.getByTestId("session-select"));
+      if (!screen.queryByTestId("session-dropdown")) fireEvent.click(screen.getByTestId("session-select"));
       fireEvent.click(
         screen.getAllByTestId("session-option").find(
           (option) => option.textContent?.includes(sessionId),
         ) ?? screen.getAllByTestId("session-option")[0],
       );
+      expect(screen.getByTestId("session-dropdown")).toBeTruthy();
       await emitState({
         channel: "state",
         content: approvalDraftSnapshot(sessionId),
         messageId: `state-independent-drafts-${sessionId}-${postMessage.mock.calls.length}`,
       });
+      expect(screen.getByTestId("session-dropdown")).toBeTruthy();
     };
 
     fireEvent.paste(screen.getByTestId("composer-input"), {

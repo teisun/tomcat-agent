@@ -8,6 +8,7 @@ mod delivery_flow_test;
 mod lifecycle_test;
 mod reviewer_test;
 mod shared_todo_ops_test;
+mod start_plan_test;
 mod todos_test;
 mod update_plan_test;
 mod verify_test;

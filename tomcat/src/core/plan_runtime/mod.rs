@@ -771,7 +771,14 @@ impl PlanRuntime {
         path: PathBuf,
         plan: &file_store::PlanFile,
     ) {
-        *self.active_plan.write() = Some(ActivePlan::from_file(path, plan));
+        let mut active = self.active_plan.write();
+        if active
+            .as_ref()
+            .is_some_and(|current| current.is_executing() && current.path != path)
+        {
+            return;
+        }
+        *active = Some(ActivePlan::from_file(path, plan));
     }
 
     #[cfg(test)]

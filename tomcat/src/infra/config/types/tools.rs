@@ -107,7 +107,6 @@ impl Default for ToolsWriteConfig {
 /// - `max_output_chars`：stdout / stderr 各自的内存字符上限。超限采用头尾保留，
 ///   完整输出持久化到 agent trail 的 `tool-results` 目录。
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ToolsBashConfig {
     #[serde(default = "default_tools_bash_foreground_wait_ms")]
     pub foreground_wait_ms: u64,

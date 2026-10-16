@@ -86,6 +86,16 @@ pub struct AskQuestionResult {
 }
 
 impl AskQuestionResult {
+    /// Accept only one explicit, non-custom answer to the requested runtime-owned question.
+    pub fn is_single_choice(&self, question_id: &str, option_id: &str) -> bool {
+        self.outcome == AskQuestionOutcome::Answered
+            && self.answers.len() == 1
+            && self.answers[0].question_id == question_id
+            && !self.answers[0].skipped
+            && self.answers[0].custom_text.is_none()
+            && self.answers[0].option_ids == [option_id]
+    }
+
     pub fn answered(answers: Vec<Answer>) -> Self {
         Self {
             answers,

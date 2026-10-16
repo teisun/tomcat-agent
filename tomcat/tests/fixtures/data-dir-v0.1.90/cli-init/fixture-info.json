@@ -1,0 +1,9 @@
+{
+  "baseUrl": "http://127.0.0.1:59396",
+  "binarySha256": "5b139e480b925c72e8640156c7856c9b530d53b522898b21975bc525f1604cdd",
+  "commit": "d00ebe085e2bb23b8dc9e6f395439338e730a0c4",
+  "home": "/var/folders/1t/xdx9bpn14bb365np42rb36rw0000gn/T/.tmpnalASx",
+  "planId": "plan_legacy_upgrade_fixture_plan_0aca0f7c",
+  "sessionId": "1792067320140_6f2fde0e3b9ee41c",
+  "tag": "ext-v0.1.90"
+}

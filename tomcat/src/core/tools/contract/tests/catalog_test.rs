@@ -17,6 +17,25 @@ fn desc_of(name: &str) -> &'static str {
 }
 
 #[test]
+fn start_plan_is_a_short_explicit_execution_tool() {
+    let entry = super::builtin_tool_by_name("start_plan").unwrap();
+    assert!(entry.description.chars().count() <= 300);
+    assert!(entry.description.contains("only when the user asks"));
+    assert!(entry.description.contains("confirm first"));
+    assert!(entry.plan_only && entry.requires_user_interaction && !entry.read_only);
+    assert_eq!(entry.scope, PermissionScope::Write);
+    let schema = (entry.parameters)();
+    assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
+    assert_eq!(schema["properties"]["plan_id"]["type"], "string");
+    assert!(schema.get("required").is_none());
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(!super::is_replay_safe_tool("start_plan"));
+    assert!(desc_of("ask_question").contains("CHAT / PLAN / EXEC"));
+    assert!(!desc_of("ask_question").contains("hidden in EXEC"));
+    assert!(desc_of("ask_question").contains("During plan execution, ask only when necessary."));
+}
+
+#[test]
 fn dispatch_agent_description_enforces_bounded_explorer_usage() {
     let description = desc_of("dispatch_agent");
 

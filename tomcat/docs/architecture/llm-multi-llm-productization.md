@@ -4,7 +4,7 @@
 >
 > 本文里原先很多“计划新增”已经落地，当前实现以代码为准：
 >
-> - `LlmConfig` 现在只保留“选哪个模型”和全局运行时旋钮；旧 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已删除，继续使用会直接报迁移错误。
+> - `LlmConfig` 现在只保留“选哪个模型”和全局运行时旋钮；旧 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已删除，继续出现时作为未知键忽略并记 warning，不做自动迁移；没有可用模型时通过现有 setup 流程补模型。
 > - `ModelEntry` 现在显式包含 `api`、`provider`、`base_url`、`api_key_env`、`model_name`、`capabilities`。
 > - `LlmRuntimeConfig` 已从 `LlmConfig` 拆出，provider 构造统一走 `new(entry, runtime, credential)`。
 > - provider registry 现在按 `entry.api` 路由；`provider` 只表示逻辑厂商，用于凭证推断、展示、审计。

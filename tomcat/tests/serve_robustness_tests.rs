@@ -14,6 +14,47 @@ const SERVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 #[serial]
+fn serve_with_removed_single_model_config_stays_available_without_rewriting_it() {
+    let fx = common::serve::setup_cold_serve_fixture(false);
+    let path = fx.home_path.join(".tomcat/tomcat.config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old = "[llm]\nprovider='openai'\napi_base='https://example.test'\napi_key_env='REMOVED_FAKE_KEY'\n[primitive]\npath_whitelist=[]\n[tools.bash]\ntimeout_ms=120000\n";
+    std::fs::write(&path, old).unwrap();
+    let mut child = common::serve::spawn_serve_child_with_env(&fx, &[("RUST_LOG", "warn")]);
+    let session = initialize_cold(&mut child);
+    let state = request(&mut child, json!({"type":"get_state", "sessionId":session}));
+    assert_eq!(
+        state["modelReady"], false,
+        "old connection fields are not migrated into a model"
+    );
+    let models = request(&mut child, json!({"type":"list_models"}));
+    assert_eq!(models["defaultModelId"], "gpt-5.4");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+    let output = child.wait_for_exit(SERVE_TIMEOUT);
+    assert!(output.status.success());
+    let logs = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        logs.matches("ignored unsupported config keys").count(),
+        1,
+        "{logs}"
+    );
+    for key in [
+        "llm.provider",
+        "llm.api_base",
+        "llm.api_key_env",
+        "primitive.path_whitelist",
+        "tools.bash.timeout_ms",
+    ] {
+        assert!(logs.contains(key), "{logs}");
+    }
+    assert!(
+        !logs.contains("REMOVED_FAKE_KEY"),
+        "only key paths may be logged, never their values"
+    );
+}
+
+#[test]
+#[serial]
 fn serve_cold_start_without_init_keeps_management_available() {
     assert_cold_start_management(false);
 }

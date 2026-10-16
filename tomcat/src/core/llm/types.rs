@@ -842,6 +842,10 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Tool outcome for transcript replay; None means a legacy/unknown outcome.
+    /// Local metadata only, stripped before provider transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
     /// Responses / transcript 终局元数据；仅本地持久化与恢复使用，不参与 wire 语义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -906,6 +910,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -931,6 +936,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -961,6 +967,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -987,6 +994,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -1010,6 +1018,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -1033,6 +1042,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -1056,6 +1066,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: None,
             kind: MessageKind::Steering,
             timestamp: None,
@@ -1084,6 +1095,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
+            is_error: None,
             msg_id: Some(entry_id.into()),
             kind: MessageKind::CompactionSummary,
             timestamp: None,
@@ -1147,6 +1159,7 @@ impl ChatMessage {
         cloned.usage = None;
         cloned.summary_title = None;
         cloned.tool_display = None;
+        cloned.is_error = None;
         cloned
     }
 

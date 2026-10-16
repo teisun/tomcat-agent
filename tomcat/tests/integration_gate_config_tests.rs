@@ -296,6 +296,7 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
             "serve_multi_session",
             "serve_ask_question_tests",
             "serve_robustness_tests",
+            "data_dir_forward_compat_tests",
             "serve_stdio_e2e",
             "serve_rewind_and_resend",
         ],

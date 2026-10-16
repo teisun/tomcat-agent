@@ -99,6 +99,24 @@ describe("serve fixture resource ownership", () => {
     await expect(stat(home)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it.each(["/v1/chat/completions", "/v1/responses"])("does not consume agent responses for session/turn titles at %s", async (endpoint) => {
+    const server = await spawnScriptedOpenAiStreamServer([{ parts: [sseDone()] }]);
+    const prompts = ["Generate a short chat title from the user's first message.", "Generate a short title summarizing this AI assistant thinking block and its tool usage."];
+    try {
+      for (const prompt of prompts) {
+        const response = await fetch(`${server.baseUrl}${endpoint}`, { method: "POST", body: JSON.stringify({ stream: false, messages: [{ role: "user", content: prompt }] }) });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(endpoint === "/v1/responses" ? body.output[0].content[0].text : body.choices[0].message.content).toBe("Generated title");
+      }
+      // The same text in an ordinary streamed turn must not be mistaken for a utility call.
+      const agent = await fetch(`${server.baseUrl}${endpoint}`, { method: "POST", body: JSON.stringify({ stream: true, messages: [{ role: "user", content: prompts[1] }] }) });
+      expect(await agent.text()).toBe(sseDone().body);
+      expect(server.capturedRequests()).toHaveLength(3);
+      expect(server.capturedNonTitleRequests()).toHaveLength(1);
+    } finally { await server.close(); }
+  });
+
   it("closes a socket with an unfinished request and allows repeated close", async () => {
     const server = await spawnScriptedOpenAiStreamServer([]);
     const url = new URL(server.baseUrl);

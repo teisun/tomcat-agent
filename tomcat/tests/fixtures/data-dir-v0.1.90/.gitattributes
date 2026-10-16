@@ -1,0 +1,2 @@
+# Preserve the legacy CLI capture's trailing blank line; keep other whitespace checks.
+cli-init/models.toml whitespace=-blank-at-eof

@@ -23,41 +23,38 @@ use crate::infra::i18n::tr;
 /// # Errors
 /// * [`AppError::Config`] - 配置文件解析失败或反序列化到 [`AppConfig`] 失败时返回。
 pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
-    load_config_impl(config_path, true)
+    let (config, ignored) = load_config_with_ignored_keys(config_path)?;
+    warn_ignored_config_keys(&ignored);
+    Ok(config)
 }
 
-/// 为 `tomcat init` 加载配置：保留环境变量合并，但跳过 legacy 连接字段拒绝。
-///
-/// 这样旧单模型配置用户仍可进入 init 交互流程，把连接信息迁移到 `models.toml`。
-pub fn load_config_for_init(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
-    load_config_impl(config_path, false)
-}
-
-fn load_config_impl(
-    config_path: Option<&std::path::Path>,
-    reject_legacy_keys: bool,
-) -> Result<AppConfig, AppError> {
+/// Startup needs the configuration to initialize logging. Return diagnostics to
+/// the CLI so it can emit them only after the subscriber is installed.
+pub(crate) fn load_config_with_ignored_keys(
+    config_path: Option<&Path>,
+) -> Result<(AppConfig, Vec<String>), AppError> {
     // 安全护栏（plan §5）：敏感 env vars 必须由 TOML 主导，不允许 env 覆盖。
     // 若 TOML 文件存在且声明了对应 key，则在 layered.build 之前 unset env，
     // 防止 shell 中误设的 `TOMCAT__SECURITY__*` / `TOMCAT__LLM__API_KEY*`
     // 静默覆盖磁盘配置造成提权。
     sanitize_sensitive_env(config_path);
     warn_removed_ask_question_timeout(config_path);
-    merge_config_sources(config_path, reject_legacy_keys)
+    merge_config_sources(config_path)
+}
+
+pub(crate) fn warn_ignored_config_keys(ignored: &[String]) {
+    if !ignored.is_empty() {
+        tracing::warn!(target: "config", ignored_keys = %ignored.join(", "), "ignored unsupported config keys");
+    }
 }
 
 /// Read the same layered sources without the startup-only process environment mutation.
-fn merge_config_sources(
+pub(super) fn merge_config_sources(
     config_path: Option<&Path>,
-    reject_legacy_keys: bool,
-) -> Result<AppConfig, AppError> {
+) -> Result<(AppConfig, Vec<String>), AppError> {
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
-            if reject_legacy_keys {
-                reject_legacy_whitelist_keys(p)?;
-                reject_legacy_bash_timeout_key(p)?;
-            }
             builder = builder.add_source(::config::File::from(p));
         }
     }
@@ -69,11 +66,13 @@ fn merge_config_sources(
     let layered = builder
         .build()
         .map_err(|e| AppError::Config(e.to_string()))?;
-    let merged: AppConfig = layered
-        .try_deserialize()
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let mut ignored = Vec::new();
+    let merged: AppConfig =
+        serde_ignored::deserialize(layered, |path| ignored.push(path.to_string()))
+            .map_err(|e| AppError::Config(e.to_string()))?;
     validate_config(&merged)?;
-    Ok(merged)
+    ignored.sort_unstable();
+    Ok((merged, ignored))
 }
 
 /// Model admin operations refresh only these selections, not permissions or process paths.
@@ -81,7 +80,7 @@ pub(crate) fn load_model_selection_config(
     path: &Path,
     base: &AppConfig,
 ) -> Result<AppConfig, AppError> {
-    let current = merge_config_sources(Some(path), true)?;
+    let (current, _) = merge_config_sources(Some(path))?;
     let mut config = base.clone();
     config.llm.default_model = current.llm.default_model;
     config.llm.vision_model = current.llm.vision_model;
@@ -136,21 +135,6 @@ pub(crate) fn removed_ask_question_timeout_sources(
 /// - `TOMCAT__PRIMITIVE__PATH_RULES*`
 /// - `TOMCAT__PRIMITIVE__BASH_FORBIDDEN*`
 /// - `TOMCAT__PRIMITIVE__BASH_APPROVAL_REQUIRED*`
-fn reject_legacy_bash_timeout_key(path: &Path) -> Result<(), AppError> {
-    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
-    let value: toml::Value =
-        toml::from_str(&content).map_err(|error| AppError::Config(error.to_string()))?;
-    if value
-        .get("tools")
-        .and_then(|tools| tools.get("bash"))
-        .and_then(|bash| bash.get("timeout_ms"))
-        .is_some()
-    {
-        return Err(AppError::Config(tr("config.legacyTimeout", &[])));
-    }
-    Ok(())
-}
-
 fn sanitize_sensitive_env(config_path: Option<&std::path::Path>) {
     if config_path.is_none_or(|p| !p.exists()) {
         return;
@@ -181,57 +165,8 @@ fn sanitize_sensitive_env(config_path: Option<&std::path::Path>) {
 
 /// 仅从 TOML 配置文件解析 [`AppConfig`]（**不**合并环境变量），供需整表写回的场景（如 `tomcat workspace`）。
 pub fn load_config_toml_file(path: &Path) -> Result<AppConfig, AppError> {
-    reject_legacy_whitelist_keys(path)?;
     let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
     toml::from_str(&content).map_err(|e| AppError::Config(e.to_string()))
-}
-
-fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
-    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
-    let Ok(value) = content.parse::<toml::Value>() else {
-        return Ok(());
-    };
-    let llm_hits = value
-        .get("llm")
-        .and_then(|v| v.as_table())
-        .map(|llm| {
-            [
-                ("provider", "config.migrateProvider"),
-                ("api_base", "config.migrateApiBase"),
-                ("api_key_env", "config.migrateApiKey"),
-            ]
-            .into_iter()
-            .filter(|(key, _)| llm.contains_key(*key))
-            .map(|(key, target)| format!("llm.{key} -> {}", tr(target, &[])))
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if !llm_hits.is_empty() {
-        return Err(AppError::Config(tr(
-            "config.legacyLlm",
-            &[("fields", &llm_hits.join("; "))],
-        )));
-    }
-    let Some(primitive) = value.get("primitive").and_then(|v| v.as_table()) else {
-        return Ok(());
-    };
-    let legacy = [
-        ("path_whitelist", "config.migratePathList"),
-        ("bash_whitelist", "config.migrateBashList"),
-        ("auto_confirm_whitelist", "config.migrateConfirmList"),
-    ];
-    let hits = legacy
-        .iter()
-        .filter(|(key, _)| primitive.contains_key(*key))
-        .map(|(key, target)| format!("primitive.{key} -> {}", tr(target, &[])))
-        .collect::<Vec<_>>();
-    if hits.is_empty() {
-        return Ok(());
-    }
-    Err(AppError::Config(tr(
-        "config.legacyWhitelist",
-        &[("fields", &hits.join("; "))],
-    )))
 }
 
 /// 校验并解析 `workspace.workspace_roots`：忽略仅空白项；每项须可规范化为已存在的目录；规范路径去重。

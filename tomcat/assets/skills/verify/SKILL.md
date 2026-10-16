@@ -130,4 +130,4 @@ For a visual screenshot that must return to the model through Playwright MCP, ca
 ## Artifacts and delivery
 
 - Put temporary helper scripts, reports, and replay captures under `<project_resource_dir>/scripts`, `acceptance`, and `replays` (resolved as in UI acceptance). Code, tests, fixtures, and docs the project keeps maintaining stay in their normal locations.
-- If acceptance produced screenshots, embed the representative PNGs in the final reply with `![what it shows](/absolute/path.png)` instead of only listing their paths.
+- If acceptance produced screenshots, embed every final PNG behind the verdict, failures included, one `![feature · viewport](/absolute/path.png)` each, and match the count before replying. Skip only debug or superseded shots; never substitute a representative image, collage, or folder link.

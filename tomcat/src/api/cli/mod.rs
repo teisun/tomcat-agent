@@ -26,9 +26,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, init_logging, load_config,
-    normalize_path, resolve_log_dir, validate_config, AppConfig, AppError, CLI_NAME,
-    DEFAULT_CONFIG_PATH,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, init_logging, normalize_path,
+    resolve_log_dir, validate_config, AppConfig, AppError, CLI_NAME, DEFAULT_CONFIG_PATH,
 };
 
 pub(crate) use audit_cmd::run_audit;
@@ -530,7 +529,8 @@ pub fn run_cli() -> Result<(), AppError> {
     }
 
     let config_path = normalize_path(DEFAULT_CONFIG_PATH).ok();
-    let cfg = load_config(config_path.as_deref())?;
+    let (cfg, ignored_keys) =
+        crate::infra::config::load_config_with_ignored_keys(config_path.as_deref())?;
     if let Err(e) = validate_config(&cfg) {
         eprintln!(
             "{}",
@@ -553,6 +553,8 @@ pub fn run_cli() -> Result<(), AppError> {
             None
         },
     )?;
+
+    crate::infra::config::warn_ignored_config_keys(&ignored_keys);
 
     let cmd = match cli.command {
         Some(cmd) => cmd,

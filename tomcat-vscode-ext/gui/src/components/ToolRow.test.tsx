@@ -6,6 +6,7 @@ import { LocaleProvider } from "../i18n/LocaleProvider";
 import { translate } from "../../../src/shared/i18n";
 import {
   buildFlatLabel,
+  buildToolCollectionTitle,
   clampTaskOutputBudget,
   commandBinaries,
   formatCountdown,
@@ -85,6 +86,19 @@ describe("ToolRow", () => {
 
     fireEvent.click(screen.getByTestId("file-chip"));
     expect(onOpenFile).toHaveBeenCalledWith("/workspace/README.md");
+  });
+
+  it.each([true, undefined])("does not count failed or unknown file actions (%s) as edited files", (isError) => {
+    const tools = [buildTool({ toolName: "write" }), buildTool({ toolName: "write", isError })];
+    expect(buildToolCollectionTitle(tools)).toBe(translate("en", "tool.usedTools.other", { count: 2 }));
+  });
+
+  it.each(["write", "edit", "hashline_edit"])("does not claim legacy %s succeeded when its outcome is unknown", (toolName) => {
+    const item = buildTool({ toolName, isError: undefined, args: { path: "/workspace/legacy.txt" }, summary: "legacy output" });
+    render(<LocaleProvider locale="en"><ToolRow item={item} onOpenFile={vi.fn()} /></LocaleProvider>);
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(translate("en", "tool.called", { name: toolName }));
+    expect(screen.getByTestId("tool-row-label").textContent).not.toContain(translate("en", "tool.created"));
+    expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
   });
 
   it.each(["edit", "hashline_edit", "write"])("failed %s is collapsed, labels the failure and preserves the original error", toolName => {

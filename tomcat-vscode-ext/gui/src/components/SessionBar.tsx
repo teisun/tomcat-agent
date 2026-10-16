@@ -67,13 +67,12 @@ export function SessionBar({
   const t = useT();
   const locale = useLocale();
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const closeForAction = () => { setOpen(false); triggerRef.current?.focus(); };
   const [open, setOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<WebviewSessionTab | null>(null);
   const deleteConfirmed = useRef(false);
   const [dismissedFeedback, setDismissedFeedback] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const wrapperRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const groups = useMemo<SessionGroup[]>(() => groupSessionsByDate(sessions), [sessions]);
 
@@ -87,20 +86,28 @@ export function SessionBar({
   }, [creating]);
 
   useEffect(() => {
-    if (!open) {
+    // Pinning moves a row between groups; deletion removes it. Restore focus only
+    // if that removed the focused button, not when another control already owns it.
+    if (open && !deleteTarget && document.activeElement === document.body) {
+      triggerRef.current?.focus();
+    }
+  }, [open, deleteTarget, sessions]);
+
+  useEffect(() => {
+    if (!open || deleteTarget) {
       return;
     }
     const handleClickOutside = (event: MouseEvent) => {
-      if (!wrapperRef.current) {
-        return;
-      }
-      if (event.target instanceof Node && !wrapperRef.current.contains(event.target)) {
+      if (event.target instanceof Node
+        && !dropdownRef.current?.contains(event.target)
+        && !triggerRef.current?.contains(event.target)) {
         setOpen(false);
       }
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOpen(false);
+        triggerRef.current?.focus();
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -109,7 +116,7 @@ export function SessionBar({
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [open]);
+  }, [open, deleteTarget]);
 
   const triggerLabel = activeSession
     ? formatSessionLabel(activeSession, t)
@@ -137,11 +144,10 @@ export function SessionBar({
 
   const handlePick = (sessionId: string) => {
     onSwitchSession(sessionId);
-    setOpen(false);
   };
 
   return (
-    <><section className="tc-topbar" aria-label={t("session.bar")} ref={wrapperRef}>
+    <><section className="tc-topbar" aria-label={t("session.bar")}>
       <span
         aria-label={connectionLabel}
         className={`tc-conn-light tc-conn-light--${connected ? "connected" : "connecting"}`}
@@ -170,7 +176,7 @@ export function SessionBar({
         data-testid="new-session-button"
         title={creationDisabledReason}
         disabled={!ready || creating || !!creationDisabledReason}
-        onClick={onNewSession}
+        onClick={() => { setOpen(false); onNewSession(); }}
         type="button"
       >
         {creating ? "…" : "+"}
@@ -179,14 +185,14 @@ export function SessionBar({
         aria-label={t("settings.title")}
         className="tc-icon-button tc-topbar__settings"
         data-testid="settings-button"
-        onClick={onOpenSettings}
+        onClick={() => { setOpen(false); onOpenSettings(); }}
         title={t("settings.title")}
         type="button"
       >
         <span aria-hidden="true" className="codicon codicon-settings-gear" />
       </button>
       {open ? (
-        <div className="tc-session-dropdown" data-testid="session-dropdown" role="list" aria-label={t("session.list")}>
+        <div ref={dropdownRef} className="tc-session-dropdown" data-testid="session-dropdown" role="list" aria-label={t("session.list")}>
           {groups.length === 0 ? (
             <div className="tc-session-dropdown__empty">{t("session.empty")}</div>
           ) : (
@@ -242,12 +248,12 @@ export function SessionBar({
                       {onSetPinned ? <button className="tc-icon-button tc-session-row__action" type="button"
                         aria-label={pinLabel} aria-pressed={session.isPinned === true} title={pinLabel}
                         disabled={session.deleting}
-                        onClick={() => { closeForAction(); onSetPinned(session.sessionId, !session.isPinned); }}>
+                        onClick={() => onSetPinned(session.sessionId, !session.isPinned)}>
                         <span aria-hidden="true" className={`codicon ${session.isPinned ? "codicon-pinned" : "codicon-pin"}`} />
                       </button> : null}
                       {onDeleteSession ? <span title={deleteReason}><button className="tc-icon-button tc-session-row__action" type="button"
                         aria-label={t("session.delete")} title={deleteReason} disabled={!deleteSupported || busy || session.deleting}
-                        onClick={() => { closeForAction(); deleteConfirmed.current = false; setDeleteTarget(session); }}>
+                        onClick={() => { deleteConfirmed.current = false; setDeleteTarget(session); }}>
                         <span aria-hidden="true" className="codicon codicon-trash" />
                       </button></span> : null}
                       </div>

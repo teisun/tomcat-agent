@@ -81,6 +81,285 @@ fn streamed_request_count(server: &ScriptedOpenAiServer) -> usize {
         .count()
 }
 
+fn answer(
+    child: &mut ServeChild,
+    control: &serde_json::Value,
+    session: &str,
+    question: &str,
+    option: &str,
+) {
+    child.send_value(&json!({"type":"control_response", "requestId":control["requestId"], "sessionId":session,
+        "payload":{"answers":[{"question_id":question,"option_ids":[option],"custom_text":null,"skipped":false,"picked_recommended":true}],"outcome":"answered","cancelled":false}}));
+}
+
+fn wait_question(child: &ServeChild, question: &str) -> serde_json::Value {
+    child
+        .recv_until(WAIT_TIMEOUT, |v| {
+            v["type"] == "control_request"
+                && v["subtype"] == "ask_question"
+                && v["payload"]["questions"][0]["id"] == question
+        })
+        .last()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+#[serial]
+fn serve_start_plan_writes_asks_and_continues_in_the_same_turn() {
+    execution_workflow(false, false);
+}
+
+#[test]
+#[serial]
+fn serve_stop_during_execution_question_parks_plan_and_rejects_late_answer() {
+    execution_workflow(true, false);
+}
+
+#[test]
+#[serial]
+fn serve_stop_during_recovered_execution_question_parks_plan() {
+    execution_workflow(true, true);
+}
+
+fn execution_workflow(stop: bool, restart: bool) {
+    let fx = setup_serve_fixture("http://127.0.0.1:1");
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
+        response(vec![
+            sse_tool_call("start-1", "start_plan", r#"{"plan_id":"vertical"}"#),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_tool_call(
+                "write-1",
+                "write",
+                &json!({"path":fx.workspace.join("before-answer.txt"),"content":"before"})
+                    .to_string(),
+            ),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_tool_call("ask-1", "ask_question", ASK_QUESTION_ARGS),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_tool_call(
+                "write-2",
+                "write",
+                &json!({"path":fx.workspace.join("after-answer.txt"),"content":"after"})
+                    .to_string(),
+            ),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_tool_call(
+                "complete-1",
+                "update_plan",
+                r#"{"ops":[{"kind":"set_status","id":"step","status":"completed","evidence":["files written and user answered"]}]}"#,
+            ),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_delta("execution finished"),
+            sse_finish("stop"),
+            sse_done(),
+        ]),
+    ]);
+    let models_path = fx.home_path.join(".tomcat/models.toml");
+    let models = std::fs::read_to_string(&models_path).unwrap();
+    std::fs::write(
+        &models_path,
+        models.replace("http://127.0.0.1:1", &server.base_url),
+    )
+    .unwrap();
+    let config_path = fx.home_path.join(".tomcat/tomcat.config.toml");
+    let mut config = tomcat::load_config_toml_file(&config_path).unwrap();
+    config
+        .workspace
+        .workspace_roots
+        .push(fx.workspace.to_string_lossy().to_string());
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    let path = fx.home_path.join(".tomcat/plans/vertical.plan.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = "---\nplan_id: vertical\ngoal: Execute in one turn\nstate: planning\ncreated_at: 2026-01-01T00:00:00Z\nschema_version: 1\ntodos:\n- id: step\n  content: Write files and ask a question\n  status: pending\n---\n## Plan\nExercise the existing execution loop.\n";
+    std::fs::write(&path, original).unwrap();
+    let mut child = spawn_serve_child(&fx);
+    let session = initialize(&mut child);
+    child.send_value(
+        &json!({"type":"set_plan_mode", "id":"enter-plan", "sessionId":session, "action":"enter"}),
+    );
+    let entered = child.recv_until(WAIT_TIMEOUT, |v| v["id"] == "enter-plan");
+    assert_eq!(entered.last().unwrap()["success"], true);
+    child.send_value(&json!({"type":"prompt", "id":"implement", "sessionId":session, "text":"Implement the vertical plan now.", "params":{}}));
+    let confirmation = wait_question(&child, "plan-start");
+    assert_eq!(confirmation["payload"]["toolCallId"], "start-1");
+    assert_eq!(
+        confirmation["payload"]["questions"][0]["allowCustom"],
+        false
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    answer(&mut child, &confirmation, &session, "plan-start", "start");
+    let mut question = wait_question(&child, "q1");
+    assert_eq!(question["payload"]["toolCallId"], "ask-1");
+    assert_eq!(
+        std::fs::read_to_string(fx.workspace.join("before-answer.txt")).unwrap(),
+        "before"
+    );
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("state: executing"));
+    let requests: Vec<_> = server
+        .captured_requests()
+        .iter()
+        .filter_map(|r| try_extract_json_body(r))
+        .filter(|v| v["stream"] == true)
+        .collect();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        serde_json::to_vec(&requests[0]["tools"]).unwrap(),
+        serde_json::to_vec(&requests[1]["tools"]).unwrap()
+    );
+    let before = requests[0]["messages"].as_array().unwrap();
+    let after = requests[1]["messages"].as_array().unwrap();
+    // The existing Chat Completions adapter promotes runtime tail into system
+    // (openai_provider_test::transport_messages_promotes_ephemeral_tail_to_leading_system_instruction).
+    // Compare the stable instruction snapshot separately, not the mutable wire envelope.
+    let first_system = before[0]["content"].as_str().unwrap();
+    let next_system = after[0]["content"].as_str().unwrap();
+    let first_offset = first_system
+        .find("<system_reminder kind=\"planner\">")
+        .unwrap();
+    let next_offset = next_system
+        .find("<system_reminder kind=\"executor\"")
+        .unwrap();
+    assert!(
+        first_system[..first_offset] == next_system[..next_offset],
+        "stable system instruction snapshot changed"
+    );
+    let first_tail = &first_system[first_offset..];
+    let next_tail = &next_system[next_offset..];
+    assert_eq!(
+        first_tail
+            .split_once("<system_reminder kind=\"workspace_state\">")
+            .unwrap()
+            .1,
+        next_tail
+            .split_once("<system_reminder kind=\"workspace_state\">")
+            .unwrap()
+            .1,
+        "workspace permissions must not change when starting"
+    );
+    assert_eq!(
+        before.iter().filter(|m| m["role"] == "user").count(),
+        after.iter().filter(|m| m["role"] == "user").count(),
+        "start must not inject a synthetic user message"
+    );
+    assert_eq!(
+        serde_json::to_vec(&before[1..]).unwrap(),
+        serde_json::to_vec(&after[1..before.len()]).unwrap(),
+        "history prefix must remain byte-identical"
+    );
+    assert!(first_tail.contains("kind=\"planner\""), "{first_tail}");
+    assert!(!next_tail.contains("kind=\"planner\""));
+    assert_eq!(
+        next_tail.matches("kind=\"executor\"").count(),
+        1,
+        "{next_tail}"
+    );
+    if restart {
+        let old_route = question["requestId"].clone();
+        drop(child);
+        child = spawn_serve_child(&fx);
+        assert_eq!(initialize(&mut child), session);
+        question = wait_question(&child, "q1");
+        assert_ne!(question["requestId"], old_route);
+        assert_eq!(question["payload"]["toolCallId"], "ask-1");
+    }
+    if stop {
+        child.send_value(&json!({"type":"interrupt", "id":"stop-execution", "sessionId":session}));
+        let frames = child.recv_until(WAIT_TIMEOUT, |v| v["type"] == "agent_idle");
+        assert_eq!(
+            frames.last().unwrap()["outcome"],
+            "interrupted",
+            "{frames:?}"
+        );
+        assert!(
+            frames.iter().any(|v| v["type"] == "control_cancel"
+                && v["requestId"] == question["requestId"]
+                && v["payload"]["outcome"] == "interrupted"),
+            "{frames:?}"
+        );
+        if !restart {
+            // Rehydration settles before entering AgentLoop, so its shared terminal
+            // contract is agent_idle(interrupted), not AgentLoop's intermediate event.
+            assert!(
+                frames.iter().any(|v| v["type"] == "agent_interrupted"),
+                "{frames:?}"
+            );
+        }
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("state: pending"));
+        child.send_value(&json!({"type":"get_messages", "id":"before-late", "sessionId":session}));
+        let history = child
+            .recv_until(WAIT_TIMEOUT, |v| v["id"] == "before-late")
+            .last()
+            .unwrap()["payload"]
+            .clone();
+        if restart {
+            let settled = history["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|entry| entry["message"]["tool_call_id"] == "ask-1")
+                .expect("recovered question must have a durable result");
+            let content = settled["message"]["content"].as_str().unwrap();
+            // GetMessages includes superseded placeholders. The latest result must
+            // be terminal, whether the panel or the normal Stop finalizer wins.
+            assert!(
+                content == "[interrupted]"
+                    || serde_json::from_str::<serde_json::Value>(content)
+                        .is_ok_and(|result| result["outcome"] == "interrupted"
+                            && result["cancelled"] == true),
+                "unsettled recovered result: {settled}"
+            );
+        }
+        answer(&mut child, &question, &session, "q1", "a");
+        child.send_value(&json!({"type":"get_messages", "id":"after-late", "sessionId":session}));
+        let frames = child.recv_until(WAIT_TIMEOUT, |v| v["id"] == "after-late");
+        assert_eq!(
+            frames.last().unwrap()["payload"],
+            history,
+            "late answers must not replace the interrupted result or append history"
+        );
+        assert_eq!(streamed_request_count(&server), 3);
+        assert!(!fx.workspace.join("after-answer.txt").exists());
+    } else {
+        answer(&mut child, &question, &session, "q1", "a");
+        let frames = child.recv_until(WAIT_TIMEOUT, |v| v["type"] == "agent_idle");
+        assert!(
+            frames
+                .iter()
+                .any(|v| v["assistantMessageEvent"]["delta"] == "execution finished"),
+            "{frames:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fx.workspace.join("after-answer.txt")).unwrap(),
+            "after"
+        );
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("state: completed"));
+        assert_eq!(streamed_request_count(&server), 6);
+    }
+}
+
 #[test]
 #[serial]
 fn serve_ask_question_roundtrip_resumes_turn() {

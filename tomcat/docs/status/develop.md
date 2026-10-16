@@ -1,30 +1,35 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-14 11:04 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-16 10:45 +0800 | DONE | develop | — |
 
-### CURRENT INTEGRATION (2026-10-14)
+### CURRENT INTEGRATION (2026-10-16)
+
+- **本次版本与提交**：使用 `scripts/release-version.mjs bump --all patch` 一次升级 CLI `0.1.74 → 0.1.75`、EXT `0.1.90 → 0.1.91`、内置 CLI `0.1.74 → 0.1.75`；前后版本一致性与版本文件空白检查通过，既有依赖修改保留。五项整改、拒写历史修复及相关源码/测试/旧数据夹具/文档随本次本地提交纳入。按用户要求，本次不重跑测试、不构建/打包/安装、不推送/打 tag/发布；下述测试及原生验收属于版本递增前的源码证据，不代表新版安装包已验证。Cov% 未测量，保留空值；QuickJS 未解决项继续保留。暂存检查发现旧版原始夹具 `cli-init/models.toml` 自带 EOF 空行；用夹具目录 `.gitattributes` 仅对该文件设置 `whitespace=-blank-at-eof`，保留原始字节，其余文件与其他空白检查不变。
+
+- **补充修复已验收**：拒写结果新增可选本地 `ChatMessage.is_error` 并在历史重载恢复；新失败显示 `Write failed`，旧记录缺状态显示中性调用文案，不改写历史、不按错误文字猜测、不把该元数据发送给模型。移除安装门禁的版本例外。`ask_question` 描述补 `During plan execution, ask only when necessary.`，生成工具目录已同步。
+- **本次补充证据**：Host 分批有效 765、GUI 849、相关集成 8 通过；lint、harness 类型检查、build、wire、严格 all-target Clippy、工具目录 2 项、旧数据兼容 1 项（生成器 1 项按设计 ignored）及 release 构建通过。新真实包冷启动/0.1.90 升级各 1 项通过，拒写前后重载断言、文件未写入与成功写入对照通过；拒写行实际宽窄尺寸为 1391×808 / 341×752。完整记录见 `.agents/acceptance/denied-history/acceptance.md`。Rust 全量本次仍有 QuickJS 失败，详见下表，不能称全绿。该验收完成时尚未提交或升级版本；后续本地提交与版本号以上条记录为准，仍未发布或覆盖本机 CLI。
 
 ```text
-缺 Key -> serve / 历史 / Settings 可用 -> 面板内配置模型
-       -> modelReady 控制发送，草稿仍可编辑
-       -> 保存 Key / 默认模型 -> 同进程刷新选择
-压缩模型不可用 -> 默认模型 -> 当前会话主模型
+明确要求实施 -> start_plan -> PLAN 内确认 -> 同回合工作 / 提问 / 回答继续
+执行中改另一份计划 -> 保留原执行绑定；Stop -> pending
+旧配置 -> 忽略未知键并记录一次启动告警 -> 继续使用旧模型、会话、计划
+菜单内部连续管理 -> 保持展开；最终验收截图 -> 逐张交付
 ```
 
-- **本轮范围**：提交无 Key 首次使用整改及 Opus 后续改进；读取当前差异确认最终实现，不把上一版设计中的 `chatConfiguration` 当成当前协议。引导不再展示后端诊断文本；空会话放在主空白区，有历史时放在输入框上方。
-- **模型配置**：Settings 列表标记默认模型，提供“设为默认”快捷操作；创建表单按默认模型是否可用决定默认勾选，不再借聊天面板状态推断。保存使用关联回执，失败保留输入，写盘成功与刷新失败分开反馈。
-- **连接恢复**：失败摘要收敛为一行，完整 stderr 留在日志；面板可见时不再重复弹宿主通知，旧 setup 专用轮询和终端 init 流程删除，正常重连仍复用 supervisor。
-- **发布完成**：release commit `d00ebe085e2bb23b8dc9e6f395439338e730a0c4` 已推送 develop/main/master，后两者仅 fast-forward。CLI 0.1.74 / EXT 0.1.90（pin 0.1.74）的两个正式 tag 均指向该提交，按 CLI 四项资产齐备后再发 EXT 的顺序完成；EXT 五项资产已上传。版本镜像、两个 tag guard、工作流 YAML 解析及 SHA256SUMS 与 GitHub 资产摘要核对通过；锁文件只有根包版本变化。
-- **用户确认的边界**：本次仅 GitHub Release，不自动上传 Marketplace。`release-ext` 将 GitHub `publish` 与默认关闭的 `marketplace` job 分离；后者仅在仓库变量 `PUBLISH_MARKETPLACE=true` 时运行。用户明确同意 CLI 0.1.74 延续旧版拒绝写入历史标签问题，仅扩展该版本例外；真实拒绝、文件未创建、历史状态必须存在等断言保持。
-- **检查与测试**：本次未额外运行本地测试/覆盖率。远端 CLI run `38502475468` 与 EXT run `38503229725` 均成功，三平台原生安装回执均为 `passed_with_known_issues`、`sameProcessFirstRequest=true`、`webviewErrors=[]`。已读取回执、代表性 PNG/ARIA 及 30 份 console 报告；其中 console errors 均为空，但采集范围不是全运行期，Linux 宿主截图另有下述夹具环境告警，不宣称整套视觉零告警。
-- **历史证据**：上一版在 2026-10-13 做过真实 stdio、Rust/Host/GUI 检查及 darwin-x64 原生 VSIX 验收；本机记录在 `.agents/acceptance/onboarding/acceptance.md`。其 `chatConfiguration`、卡片样式和部分回退语义已被本版替换，因此仅作历史参考。2026-10-12 合并与门禁明细保留于 Git `1d0c48f4` 中本文件的版本，不在顶部继续堆叠历史块。
-- **发布证据**：[CLI Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.74)、[EXT Release](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.1.90) 均为正式非草稿；两页均公开记录已知问题。原生 CI 证据已下载至 `.agents/acceptance/release-0.1.74-0.1.90/`，详见该目录 `release.md`。Marketplace job 明确 skipped，未向市场上传；不移动旧 tag、不强推、不覆盖已发布包。Cov% 未测量，保留 `—`。
-- **看板说明**：当前事实以本节为准；下方既有条目的日期、测试数和集成结论属于历史记录，不代表本次提交已通过测试。
+- **本轮范围**：按 `plan_agent_workflow_cli_agent_cli_serve_c46522fe` 实施五项整改；模型目录与供应商设置属于独立计划，未改。未同步/覆盖本地 CLI；整改与版本号随本次本地提交纳入，尚未发布。
+- **实现**：独立 `start_plan({plan_id?})` 复用授权与 build；PLAN 确认复用 review 面板，子 Agent 白名单不放开。执行期问答解除限制，恢复问答接当前回合取消信号；执行中绑定保护落在唯一刷新入口。菜单仅框外/Escape/触发器收起，删除弹窗暂停底层监听。
+- **配置升级**：`serde_ignored` 收集未知路径，日志初始化后一次输出；删除三处旧键拒绝、init 特殊加载和 9 条专用翻译。已知非法值、工具参数、wire、session/trust 等严格校验保留。两份真实 ext-v0.1.90 数据夹具来自 `d00ebe08` 的 CLI 0.1.74，原字节不手改，仅在测试副本中重定位 HOME 与本地 HTTP 地址。
+- **中途证据**：计划开工首批 192 项、恢复取消 1 项、配置/提示/技能批次、SessionBar/App 93 项通过；两份旧目录升级回归、Serve robustness 14 项、门禁配置 6 项、工具目录 2 项通过。真实 Serve 同回合开工→写文件→提问→回答继续、普通/恢复 Stop，以及 Host 新旧四条用例均已通过；Host 原失败来自夹具答案遗漏 pickedRecommended，未放宽协议校验。
+- **最终验收进度**：Host 单测 762、GUI 844、wire 和版本一致性通过；分批有效 Rust lib 3266、剩余 integration 367+3 定向修复复验、serial 33，以及严格 Clippy、doc（0 项）、release 构建通过。macOS x64 / VS Code 1.106.0 的真实包冷启动和预置 0.1.90 数据升级行为通过，后者验证同 PID 开工→写文件→执行提问→继续及菜单连续管理。安装 E2E 复用 22 项成功结果，修正菜单持久展开后的测试交互并定向复验 1 项通过；完整 fake `verify:vsix` 10 项通过。20 张最终 PNG 及 ARIA/console 已逐一读取：19 份 console 无错误，完整 workbench 保留 E2E harness 查询 Marketplace 的 404。本机许可数据副本烟测亦通过：36 个模型、3 个近期非当前会话（含空会话与两份真实历史）、35 个引用图片 blob、203 份计划；握手/模型列表/会话切换与读取成功，源模型和抽样历史哈希不变，副本清理完成。受保护原始配置及凭证未读取，使用新隔离配置，不冒称验证了它们或所有历史。详见 `.agents/acceptance/agent-workflow-upgrade/acceptance.md`；不把拆跑记录冒充聚合 gate 退出 0。
+- **请求断言校正**：现有 OpenAI/Anthropic 适配器把 runtime tail 合入 wire system；本轮不移动 tail，也不承诺整个 wire 缓存前缀恒定。验证稳定 system 正文、tools、历史字节不变，仅 planner→executor 提醒变化，workspace 权限提醒不变（`core/llm/openai.rs::transport_messages` 及既有 provider 测试）。
+- **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产，Marketplace 仍关闭。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- **[P1，2026-10-16]** 五项整改与拒写历史补充修复收口，CLI/EXT/内置 CLI 版本统一递增并纳入本次本地提交；版本校验通过，按用户要求未重跑测试或构建。
+- [✓] **[P0/P1，2026-10-15]** 五项整改、分批门禁补缺、本机真实包安装、许可的个人数据读取烟测与 20 张视觉截图交付完成；已知问题与未验证边界保留如下。当时尚未提交或发布。
 - **[P0，代码已实现，原生首配链路已验收]** 模型元数据与凭证解析拆分；缺 Key 不阻断 serve 建会话，配置文件在用户保存时懒创建，运行期只刷新模型选择字段；压缩模型增加当前主模型兜底。@2026-10-14
 - **[P1，代码已实现，三平台发布验收带已知问题通过]** 面板内简洁引导、默认模型标记与快捷操作、关联保存回执、单行错误与就地重试已纳入；冷启动、协议、配置、GUI 和安装包测试源码及中英文文档一并提交。@2026-10-14
-- [✓] **[P1]** CLI 0.1.74 / EXT 0.1.90 远端发布完成；EXT 三平台原生用例成功，保留 `Created` 已知显示问题。本轮没有额外本地测试，不能将发布验收等同于完整单测/供应商实测。
+- [✓] **[P1]** CLI 0.1.74 / EXT 0.1.90 远端发布完成；当时 EXT 三平台原生用例带 `Created` 已知显示问题通过。该缺陷已于 2026-10-16 在源码修复并纳入本次本地提交，旧 tag/资产不修改；历史发布验收不等同于当前完整单测/供应商实测。
 - [✓] **[P0/P1]** `tomcat` 多问题优化链路已在 `develop` 侧完成当前轮收口：GUI/webview 的 `max` reasoning 档位、pre-stream loading 指示、全量 shimmer 覆盖与 `Thinking` 文案已修复；`search_files` description 也已瘦身回归。Rust 侧把多模态从“Responses 独占”推进到“三家共用一套 `ChatMessageContentPart`，各 wire 自己翻 JSON”：新增 `FilesApiAdapter` 存储适配层，`OpenAiFilesRuntime` 改持 `Arc<dyn FilesApiAdapter>`，OpenAI Completions 已支持 inline 图片/PDF 与 uploaded `file_id`，Moonshot uploaded 图片走 `ms://...`，Anthropic Messages 已支持 inline / uploaded 图片与 PDF，并在 uploaded 引用时自动补 `anthropic-beta: files-api-2025-04-14`。内置/本地模型配置同步开启 `kimi-k3`、`kimi-k2.7-code` 与 Anthropic 全系 `files=true`。本地验证已补齐：catalog / openai provider / anthropic wire / adapter 单测通过；`serve_stdio_e2e` 新增 Moonshot `ms://` 与 Anthropic `source.type=file + beta header` 断言通过；live 结果为 **Kimi K3 成功**、**fcodex `/v1/files` 返回 404**、**Anthropic 实 key 返回 401 invalid x-api-key**，后两者已按真实结果记录。@2026-07-20
 - [✓] **[P0]** 推理档位 catalog-id / wire-name key 不一致已在 `feature/transcript-rich-render` 修复并待并入：`run_loop` 现与存盘/GetState 一样用 catalog `id` 查 `model-thinking.json`，中转站模型选 `xhigh` 不再被回退成默认 `high`；CLI `0.1.15` / 扩展 `0.1.18`。@2026-07-20
 - [✓] **[P0/P1]** 推理强度（reasoning effort）链路整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：这次不再靠“某家模型名字命中后写死映射/全局降级”硬扛，而是把**模型真正支持哪些档位**上收为 catalog 事实源。现在每个模型都可在 `builtin_models.toml` / `models.toml` 声明 `supported_reasoning_levels`；聊天框下拉按当前模型动态渲染（空列表退化为 `Thinking On/Off`），选中的档位写入 `model-thinking.json`，请求前只做一次 clamp，所以 `gpt-5.x` 的 `xhigh`、`glm/deepseek` 的 `max`、以及只支持 thinking 开关的 `mimo/kimi` 都各走各的真实协议，不再被一把梭硬折叠。与此同时，`ProviderCacheKey` 新增 `catalog_generation`，改 `thinking_format / model_name / capabilities` 后无需重启即可生效；保存模型时空 `thinking_format` 会按 API 自动物化成具体值，不再留下黑盒 `Auto`；现代 Claude `4.6/4.7/4.8` 改走 `anthropic-adaptive`（`thinking.type="adaptive" + output_config.effort`）；若 `openai/openai-responses` 线路被配成不会发 effort 的 format，保存后会回传非致命 warning。Rust focused/unit + serve 集成、GUI 单测与 targeted devhost Add Model E2E 已补齐。@2026-07-19
@@ -50,7 +55,10 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
-- 发版链路新增可选仓库变量 `PUBLISH_MARKETPLACE`（未设置时关闭）；GitHub `publish` 仍依赖完整 `build/verify`，市场 job 仅依赖已验收且已发 GitHub 的相同资产。已知显示问题例外明确限定为 CLI 0.1.73 和 0.1.74，不覆盖后续版本。
+- 历史 message 新增可选本地 `is_error`，映射到 Host/GUI 可缺省的 `isError`；缺省代表未知而非成功。发送到模型前剥离，Serve 命令/事件顶层结构不变。
+- 新增 `start_plan({plan_id?})`；`ask_question` 支持 executing，描述提示执行期仅必要时提问。`update_plan` 仍只改 todo，权限与 build 状态闸门不变。
+- 配置加载忽略未知/已删键并在日志就绪后告警，`load_config_for_init` 删除；旧连接字段不自动迁移。新增 `serde_ignored` 0.1.14。
+- 发版链路新增可选仓库变量 `PUBLISH_MARKETPLACE`（未设置时关闭）；GitHub `publish` 仍依赖完整 `build/verify`，市场 job 仅依赖已验收且已发 GitHub 的相同资产。历史显示问题的版本例外现已删除，所有当前安装门禁都必须恢复真实拒写状态。
 - 本轮新增 `LlmResolver::resolve_metadata`、`selected_model_id`、`model_ready`；`get_state.modelReady` 为可选布尔值，Host/GUI 仅在显式 `false` 时限制发送，兼容未提供该字段的旧 CLI。早期未提交实现的 `chatConfiguration` 已移除。
 - `list_models` 增加 `defaultModelId`；新增 `set_default_model` 命令/能力与 `TomcatMessenger.sendSetDefaultModel`；Settings 新增 `setDefaultModel` intent、创建模型的 `setAsDefault` 标志及关联 `modelSaveReceipt`，wire/schema 夹具随代码提交。
 - `DefaultLlmResolver::compaction_candidates` 依次尝试配置的压缩模型、默认模型、当前主模型并去重；`ServeConnectionSupervisor.reconnect()` 删除旧 setup 模式参数，新增 `summarizeServeFailure`；webview 新增 `connectionFailure` 和重试/查看日志 intent。
@@ -75,10 +83,13 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
+| 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
-| 既有历史显示问题 | 用户已明确允许 CLI 0.1.74 继续携带同一 `Created` 误标；安全断言保留 | 公开记录并使用 `passed_with_known_issues`，不称为已修复 |
+| 本次 Rust 广域检查未全绿 | 全量 lib 3265 passed / 2 failed / 5 ignored；两项 QuickJS 20ms 超时。该模块串行复验 5 passed / 2 failed，fanout 超时仍在，另有 unawaited-child 清理断言失败；相关实现/测试相对 HEAD 未修改 | 归因未证实，不把它们拼为通过；拒写链路、三家 wire、目录兼容与原生安装结果单独有效，详情与日志见 denied-history 验收记录 |
+| 历史安装包仍携带旧显示缺陷 | 拒写历史修复仅在当前源码及隔离验收包完成；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 新失败保存真实状态，旧无状态记录中性展示；源码修复随本次提交纳入，新版二进制与安装包待后续明确构建/发布；不再将缺陷作为当前门禁可接受例外 |
 | Marketplace 自动发布关闭 | 仓库和环境均未配置 Azure 凭据，用户选择本次只发 GitHub | 保持 `PUBLISH_MARKETPLACE` 未设置，后续另行配置并明确启用 |
-| 既有验证边界 | 本轮覆盖三目标原生受控模型链路，未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |
+| 既有验证边界 | 历史发布覆盖三目标原生受控模型链路，本轮仅 macOS x64；未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |
 
 - 历史 `real_mimo_web_search` slow 标记仅作性能观察，不把其旧 PASS 作为本轮复验。
 - Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。

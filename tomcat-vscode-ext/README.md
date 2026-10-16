@@ -84,6 +84,8 @@ New plan       -> saved file -> Review plan | Skip and open
 
 ### Pin or delete a session
 
+The picker stays open while you select, pin/unpin, show more, or finish/cancel deletion. Click outside the panel and its trigger (including **+** or the gear), press Escape, or click the trigger again to close it. While the delete confirmation is open, that dialog owns Escape and focus; the underlying picker stays open.
+
 Hover a session row, or reach its buttons with the keyboard, to see the pin and trash icons. Tooltips and accessible names describe each action. Pins are saved for this VS Code workspace; they do not change the session's last-active time or CLI ordering. A failed pin save is reported without automatic rollback; reload to check the persisted state. Pin saves do not block session deletion.
 
 Deletion requires confirmation and does **not** stop a running task for you. Stop it first (including work still using that session in another process). Successful deletion removes that session's local transcript, owned sidecars and exclusive preheat cache, scratchpad, local file baselines, and the extension's draft/queue/pin. It does **not** undo workspace code, delete plan files, erase audit/debug trails, or promise deletion of shared caches/checkpoints or remote uploads. Shared attachments remain available to other sessions. Cleanup warnings mean the record was deleted but some owned files may remain. A lost reply is an **unknown result**: local state is retained until the same-scope disk list can confirm what happened.
@@ -109,6 +111,18 @@ Saving uses the existing configuration writer: other values are retained, but co
 After saving a new plan, Tomcat asks in the existing question card whether to review it. Review checks design, dependencies, missing acceptance criteria and over-engineering, and may improve that same saved plan. It **may take several minutes or longer and consumes additional model tokens**; this is not a completion-time guarantee.
 
 **Skip and open** opens the saved plan without starting a reviewer. Leaving the question unanswered neither times out nor silently starts review. Stop or a host disconnect does not remove the saved plan. Skipping review does not mark a plan accepted or complete, and review itself does not begin execution.
+
+### Start or resume a plan
+
+```text
+Explicit implementation request -> start_plan -> PLAN confirmation, if needed
+  -> existing plan starts -> work / question -> answer -> continue
+                                           -> Stop -> pending
+```
+
+When you ask to implement or resume a saved plan, the agent can start it in the same turn. In PLAN mode, **Start execution** / **Stay in plan mode** appear in the existing question panel, without a custom-answer field. Declining or skipping leaves the plan unchanged. Outside PLAN, no extra confirmation is shown. The existing **Build** button and `/plan build` still work; ordinary todo edits never implicitly start execution.
+
+Questions remain available while a plan is executing. Answering resumes the current turn; Stop ends it and parks the plan.
 
 ## Files and task progress
 
@@ -207,6 +221,8 @@ If Tomcat was found but cannot connect:
 
 1. Read the failure reason in the chat panel, or click **View Logs**.
 2. After fixing it, click **Retry**.
+
+Unsupported keys in `tomcat.config.toml` are ignored with a startup warning instead of preventing Serve from connecting. Known keys with invalid values still fail. Old connection fields are not automatically migrated; use the existing model setup flow if needed. Bundled/pure CLI resolution and explicitly configured `tomcat.path` remain unchanged.
 
 If Tomcat exits during a conversation:
 

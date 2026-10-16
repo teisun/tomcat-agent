@@ -272,6 +272,15 @@ fn materialization_is_idempotent_and_refreshes_changed_managed_assets() {
         original_skill
     );
 
+    let old_skill = String::from_utf8(original_skill.clone()).unwrap().replace(
+        "- If acceptance produced screenshots, embed every final PNG behind the verdict, failures included, one `![feature · viewport](/absolute/path.png)` each, and match the count before replying. Skip only debug or superseded shots; never substitute a representative image, collage, or folder link.",
+        "- If acceptance produced screenshots, embed the representative PNGs in the final reply with `![what it shows](/absolute/path.png)` instead of only listing their paths.",
+    );
+    assert!(old_skill.contains("the representative PNGs"));
+    std::fs::write(&skill_path, old_skill).unwrap();
+    materialize_builtin_skills(&cfg).expect("upgrade the previous screenshot delivery rule");
+    assert_eq!(std::fs::read(&skill_path).unwrap(), original_skill);
+
     std::fs::write(&checklist_path, "stale managed content").expect("mutate managed file");
     materialize_builtin_skills(&cfg).expect("refresh changed managed asset");
     assert_eq!(

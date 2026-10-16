@@ -317,6 +317,84 @@ async fn native_update_plan_interrupt_cancels_permission_without_touching_plan()
     );
 }
 
+#[tokio::test]
+async fn native_start_plan_stop_during_confirmation_keeps_planning() {
+    use crate::core::permission::{DefaultPermissionGate, GateConfig, SessionGrants};
+    use crate::core::plan_runtime::{panels::*, PlanRuntime};
+    struct WaitingPanel(Arc<tokio::sync::Notify>);
+    #[async_trait::async_trait]
+    impl AskQuestionPanel for WaitingPanel {
+        async fn ask(&self, _: Vec<Question>, _: AskQuestionTermination) -> AskQuestionResult {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("confirm.plan.md");
+    let original = "---\nplan_id: confirm\ngoal: fixture\nstate: planning\ncreated_at: 2026-01-01T00:00:00Z\nschema_version: 1\ntodos: []\n---\n## Plan\nkeep this body\n";
+    std::fs::write(&path, original).unwrap();
+    let rt = PlanRuntime::new("confirm-session");
+    rt.bind_plan_file_for_test(path.clone());
+    rt.enter_plan().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    rt.attach_ask_question_panel(Arc::new(WaitingPanel(entered.clone())));
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: temp.path().to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let primitive = crate::core::DefaultPrimitiveExecutor::new(
+        crate::infra::PrimitiveConfig::default(),
+        Arc::new(crate::core::AllowAllConfirmation),
+        Arc::new(crate::infra::TracingAuditRecorder),
+        gate,
+    );
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("start-1".into()),
+            name: Some("start_plan".into()),
+            arguments_delta: Some("{}".into()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
+        Arc::new(primitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            plan_runtime: Some(rt.clone()),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+    let task =
+        tokio::spawn(async move { agent.run(vec![ChatMessage::user("start the plan")]).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_interrupted(), "{outcome:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(rt.mode(), crate::core::session::AgentMode::Plan);
+    assert!(rt.executing_plan_id().is_none());
+}
+
 fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
     let recent = messages
         .iter()

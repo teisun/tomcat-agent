@@ -215,6 +215,7 @@ fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
 fn chat_completions_wire_omits_local_message_metadata() {
     let mut message = ChatMessage::assistant("wire-visible text");
     message.summary_title = Some("local summary".to_string());
+    message.is_error = Some(true);
     message.tool_display = Some(ToolDisplay::Text {
         text: "local tool display".to_string(),
     });
@@ -222,7 +223,7 @@ fn chat_completions_wire_omits_local_message_metadata() {
 
     let body = transport_messages(&[message], "gpt-5", true, None);
     let serialized = serde_json::to_string(&body).expect("serialize wire body");
-    for local_field in ["tool_display", "summary_title", "usage"] {
+    for local_field in ["tool_display", "summary_title", "usage", "is_error"] {
         assert!(
             !serialized.contains(local_field),
             "Chat Completions wire leaked local field `{local_field}`: {serialized}"

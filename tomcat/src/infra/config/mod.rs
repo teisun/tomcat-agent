@@ -22,14 +22,16 @@ pub use assets::ensure_embedded_assets;
 pub use default_model::{clear_model_references, write_default_model};
 pub(crate) use env_file::env_file_error;
 pub use env_file::{read_env_entries, write_env_entries};
-pub(crate) use load::load_model_selection_config;
 pub use load::{
-    ensure_work_dir_structure, get_work_dir, load_config, load_config_for_init,
-    load_config_toml_file, resolve_agent_definition_dir, resolve_agent_dir,
-    resolve_agent_trail_dir, resolve_assets_dir, resolve_audit_dir, resolve_checkpoints_dir,
-    resolve_dot_tomcat_temp_dir, resolve_log_dir, resolve_memory_dir, resolve_model_thinking_path,
-    resolve_plans_dir, resolve_plugins_dir, resolve_project_resource_dir, resolve_sessions_dir,
-    resolve_tmp_dir, resolve_workspace_dir, resolve_workspace_roots_paths, validate_config,
+    ensure_work_dir_structure, get_work_dir, load_config, load_config_toml_file,
+    resolve_agent_definition_dir, resolve_agent_dir, resolve_agent_trail_dir, resolve_assets_dir,
+    resolve_audit_dir, resolve_checkpoints_dir, resolve_dot_tomcat_temp_dir, resolve_log_dir,
+    resolve_memory_dir, resolve_model_thinking_path, resolve_plans_dir, resolve_plugins_dir,
+    resolve_project_resource_dir, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
+    resolve_workspace_roots_paths, validate_config,
+};
+pub(crate) use load::{
+    load_config_with_ignored_keys, load_model_selection_config, warn_ignored_config_keys,
 };
 pub use lock::with_config_lock;
 pub use types::UiLanguage;

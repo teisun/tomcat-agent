@@ -1,0 +1,43 @@
+{
+  "schema_version": 5,
+  "transcript_size": 4951,
+  "transcript_mtime_ms": 1792067339086,
+  "total_entries": 15,
+  "last_entry_id": "err_1792067339075813",
+  "latest_boundary": null,
+  "pending_boundary_markers": {},
+  "recent_turn_starts": [
+    {
+      "entry_id": "1792067320824665_0",
+      "ordinal": 0,
+      "timestamp": "2026-10-15T12:28:40.824Z",
+      "entry_kind": "message"
+    },
+    {
+      "entry_id": "1792067321024221_3",
+      "ordinal": 3,
+      "timestamp": "2026-10-15T12:28:41.024Z",
+      "entry_kind": "message"
+    }
+  ],
+  "latest_day_first_entry": {
+    "date": "2026-10-15",
+    "first_entry": {
+      "entry_id": "1792067320824665_0",
+      "ordinal": 0,
+      "timestamp": "2026-10-15T12:28:40.824Z",
+      "entry_kind": "message"
+    }
+  },
+  "latest_plan_event": {
+    "kind": "create",
+    "plan_id": "plan_legacy_upgrade_fixture_plan_0aca0f7c",
+    "path": "/private/var/folders/1t/xdx9bpn14bb365np42rb36rw0000gn/T/.tmpnalASx/.tomcat/plans/plan_legacy_upgrade_fixture_plan_0aca0f7c.plan.md",
+    "entry_id": "1792067321111670_5",
+    "ordinal": 5,
+    "timestamp": "2026-10-15T12:28:41.111Z"
+  },
+  "agent_mode": "plan",
+  "active_plan_path": "/private/var/folders/1t/xdx9bpn14bb365np42rb36rw0000gn/T/.tmpnalASx/.tomcat/plans/plan_legacy_upgrade_fixture_plan_0aca0f7c.plan.md",
+  "active_plan_id": "plan_legacy_upgrade_fixture_plan_0aca0f7c"
+}

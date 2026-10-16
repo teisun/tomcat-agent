@@ -1852,11 +1852,15 @@ fn test_chat_with_session_dir_does_not_crash() {
     let mut c_new = cmd();
     c_new
         .args(["session", "new"])
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c_new.assert().success();
 
     let mut c = cmd();
     c.arg("chat")
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("\n")
         .timeout(std::time::Duration::from_secs(5));
@@ -2203,9 +2207,19 @@ fn test_user_doctor_detects_environment() {
     common::setup_logging();
     let _span = info_span!("test_user_doctor_detects_environment").entered();
 
-    info!("Arrange: default config");
+    let home = tempfile::tempdir().unwrap();
+    info!("Arrange: initialize default config in an owned HOME");
+    cmd()
+        .args(["init"])
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
     info!("Act: tomcat doctor");
-    let assert = cmd().args(["doctor"]).assert();
+    let assert = cmd()
+        .args(["doctor"])
+        .env("HOME", home.path())
+        .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
         "Assert: exit 0 + stdout 含 rquickjs / 配置 / 内嵌资源 / .env 检查项；actual: {}",
@@ -4880,6 +4894,8 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     info!("Act: tomcat chat without API key，timeout 5s");
     let mut c = cmd();
     c.arg("chat")
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("hello\n")

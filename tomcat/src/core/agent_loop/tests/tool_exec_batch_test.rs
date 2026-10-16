@@ -70,6 +70,38 @@ async fn update_plan_uses_existing_permission_grant_for_unknown_scope() {
 }
 
 async fn assert_plan_path_rule(mode: Option<PathRuleMode>, in_scope: bool, consent: bool) {
+    assert_named_plan_path_rule("update_plan", SubagentType::User, mode, in_scope, consent).await;
+}
+
+#[tokio::test]
+async fn start_plan_respects_native_permission_and_subagent_boundaries() {
+    for (mode, in_scope, consent) in [
+        (Some(PathRuleMode::Deny), true, true),
+        (Some(PathRuleMode::Readonly), true, true),
+        (None, true, false),
+        (None, false, false),
+        (None, false, true),
+    ] {
+        assert_named_plan_path_rule("start_plan", SubagentType::User, mode, in_scope, consent)
+            .await;
+    }
+    for subagent in [
+        SubagentType::PlanReviewer,
+        SubagentType::CodeReviewer,
+        SubagentType::Verifier,
+        SubagentType::Explorer,
+    ] {
+        assert_named_plan_path_rule("start_plan", subagent, None, true, true).await;
+    }
+}
+
+async fn assert_named_plan_path_rule(
+    name: &str,
+    subagent: SubagentType,
+    mode: Option<PathRuleMode>,
+    in_scope: bool,
+    consent: bool,
+) {
     use crate::core::plan_runtime::file_store::read_plan;
     use crate::core::plan_runtime::PlanRuntime;
     use crate::core::tools::contract::confirmation::{
@@ -132,6 +164,15 @@ async fn assert_plan_path_rule(mode: Option<PathRuleMode>, in_scope: bool, conse
     }
 
     let runtime = PlanRuntime::new("guard-session");
+    runtime.bind_plan_file_for_test(path.clone());
+    let call = if name == "start_plan" {
+        make_tc(name, serde_json::json!({"plan_id": "guarded"}))
+    } else {
+        make_tc(
+            name,
+            serde_json::json!({"path": path, "ops": [{"kind": "upsert", "id": "t1", "content": "must not be written"}]}),
+        )
+    };
     let outcome = execute_tool_full(
         &primitive,
         &None,
@@ -142,34 +183,38 @@ async fn assert_plan_path_rule(mode: Option<PathRuleMode>, in_scope: bool, conse
         None,
         Some(&runtime),
         None,
-        SubagentType::User,
+        subagent,
         &tokio_util::sync::CancellationToken::new(),
-        &make_tc(
-            "update_plan",
-            serde_json::json!({
-                "path": path,
-                "ops": [{"kind": "upsert", "id": "t1", "content": "must not be written"}]
-            }),
-        ),
+        &call,
         None,
         None,
     )
     .await;
-    if mode.is_none() && (in_scope || consent) {
+    if mode.is_none() && (in_scope || consent) && subagent == SubagentType::User {
         assert!(
             !outcome.is_error,
             "authorized update failed: {}",
             outcome.model_text
         );
         let saved = read_plan(&path).unwrap();
-        assert_eq!(saved.frontmatter.todos[0].content, "must not be written");
+        if name == "start_plan" {
+            assert_eq!(
+                saved.frontmatter.state,
+                crate::core::plan_runtime::file_store::PlanFileState::Executing
+            );
+            assert_eq!(runtime.executing_plan_id().as_deref(), Some("guarded"));
+            assert!(matches!(outcome.display, Some(ToolDisplay::Plan { .. })));
+        } else {
+            assert_eq!(saved.frontmatter.todos[0].content, "must not be written");
+        }
         assert!(saved.body.contains("fixture body"));
     } else {
         assert!(
             outcome.is_error && std::fs::read_to_string(&path).unwrap() == original,
-            "native update_plan bypassed {mode:?}: {}",
+            "native {name} bypassed {mode:?} / {subagent:?}: {}",
             outcome.model_text
         );
+        assert!(runtime.executing_plan_id().is_none());
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             1,

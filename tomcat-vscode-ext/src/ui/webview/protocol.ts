@@ -245,7 +245,8 @@ export interface WebviewToolCard {
   diffExpired?: boolean;
   diffStat?: WebviewToolDiffStat;
   id: string;
-  isError: boolean;
+  /** Absent on legacy history whose outcome was not recorded. */
+  isError?: boolean;
   planActivity?: WebviewPlanActivity;
   planId?: string | null;
   planPath?: string | null;

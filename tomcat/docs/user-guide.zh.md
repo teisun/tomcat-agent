@@ -348,7 +348,9 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 ### 旧配置迁移
 
-旧的 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已删除。现在如果继续写这些字段，Tomcat 会直接报迁移错误，并提示你把连接信息迁到 `models.toml`。
+`tomcat.config.toml` 以及合并的 `TOMCAT__*` 环境变量中，不认识或已删除的键会被忽略；启动时用一条警告日志列出路径，不改写文件。已知键的值类型错误或越界仍会报错。以后改变配置项的类型或含义时应使用新键名，使旧键仍可安全忽略。
+
+这包括旧 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env`、旧白名单键及 `[tools.bash].timeout_ms`。启动不会自动迁移旧连接信息：没有可用模型时，按现有模型配置引导重新添加，连接信息存入 `models.toml`。`tomcat workspace add` 等整结构写回操作保存时会丢弃不支持的键。工具参数、Serve 消息、会话索引与项目信任记录仍保持原有严格校验。
 
 ### tomcat doctor — 环境诊断
 
@@ -395,6 +397,8 @@ Settings → 通用 → 语言 ─┐
 Settings 保存后当前窗口及 Serve 原地切换，无需重启会话；其他窗口和独立进程下次启动读取。既有对话及已经生成的后端提示不重新翻译；VS Code 原生命令和菜单仍跟随 VS Code 自身语言。命令名、flag、配置键、模型 ID、外部原始诊断均保持不变。
 
 置顶、安全删除和可跳过的计划审查见[扩展使用说明](../../tomcat-vscode-ext/README.zh.md#会话settings-与计划审查)。审查可能需要几分钟或更久，并消耗额外模型用量；跳过直接打开已保存的计划，不启动审查或执行。
+
+当你明确要求实施或继续已保存的计划时，Agent 可调用 `start_plan`，不必再请你点 Build。在 PLAN 模式内会先通过现有问题面板确认；其它模式下直接开工。执行中可以用 `ask_question` 等你回答后继续；Stop 会中断回合并将计划停放为 pending。Build 和 `/plan build` 仍保留，把 todo 标为进行中不会顺带开工。
 
 ### 查看完整配置
 

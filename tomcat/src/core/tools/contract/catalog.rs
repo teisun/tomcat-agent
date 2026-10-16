@@ -57,7 +57,7 @@ pub struct BuiltinToolCatalogEntry {
     /// [`render_tool_guidelines_with_policy`] 聚合去重后注入 `tool_instructions.txt`，
     /// 避免在 `description` 里逐工具重复。空切片表示该工具无额外跨工具规则。
     pub prompt_guidelines: &'static [&'static str],
-    /// 计划相关工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
+    /// 计划相关工具（`create_plan` / `start_plan` / `update_plan` / `todos` / `ask_question`）。
     /// 工具始终在稳定的 LLM catalog 中；`true` 表示其 handler 必须按
     /// `PlanRuntime` 状态实施额外的 mode policy。详情见
     /// [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1。
@@ -466,6 +466,21 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: true,
     },
     BuiltinToolCatalogEntry {
+        name: "start_plan",
+        label: "Start Plan",
+        description: "Start or resume executing a plan and leave PLAN mode. Call only when the user asks to implement or resume it. In PLAN mode the user is asked to confirm first.\n",
+        display_summary: Some("Start or resume a plan; confirm first in PLAN mode."),
+        parameters: start_plan_parameters,
+        scope: PermissionScope::Write,
+        category: None,
+        read_only: false,
+        destructive: false,
+        search_hint: Some("plan start execute resume build"),
+        prompt_guidelines: &[],
+        plan_only: true,
+        requires_user_interaction: true,
+    },
+    BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
         description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. A plan completes when it has at least one todo and every todo is completed or cancelled. Starting a final `acceptance` todo returns a verify-skill hint; only frontmatter.todos is mutated.\n",
@@ -498,7 +513,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "ask_question",
         label: "Ask Question",
-        description: "Ask the user 1-4 structured single-choice questions. Each question has 2-4 `options` (stable `id` + `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI auto-appends a `__custom__` free-text slot (do NOT declare it) and a per-question `skip`. The tool blocks until the user answers, skips, or cancels (cancel -> `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / Pending / Completed; hidden in EXEC to avoid blocking the execution loop.\n",
+        description: "Ask the user 1-4 structured single-choice questions. Each question has 2-4 `options` (stable `id` + `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI auto-appends a `__custom__` free-text slot (do NOT declare it) and a per-question `skip`. The tool blocks until the user answers, skips, or cancels (cancel -> `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / EXEC / Pending / Completed. During plan execution, ask only when necessary.\n",
         display_summary: Some("Block-await structured single-choice answers from the user."),
         parameters: ask_question_parameters,
         scope: PermissionScope::Read,
@@ -1316,6 +1331,16 @@ fn create_plan_parameters() -> Value {
             }
         },
         "required": ["goal", "draft", "todos"]
+    })
+}
+
+fn start_plan_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "plan_id": { "type": "string", "description": "Defaults to the current plan." }
+        },
+        "additionalProperties": false
     })
 }
 

@@ -1,0 +1,166 @@
+[agent]
+id = "main"
+
+[checkpoint]
+retention_days = 7
+retention_max = 50
+
+[connector]
+disabled = []
+enabled = true
+
+[connector.mcp]
+call_timeout_ms = 120000
+max_concurrent_calls = 16
+startup_timeout_ms = 30000
+
+[context]
+compaction_max_tokens = 10000
+compaction_model = "gpt-5.4"
+context_window_fallback = 400000
+current_tail_compactable_min_chars = 1
+current_tail_single_result_max_chars = 10000
+keep_recent_turns = 5
+layer0_placeholder_threshold_chars = 10000
+layer0_single_result_max_chars = 50000
+resume_hydration_mode = "auto"
+resume_lazy_threshold = 2000
+
+[llm]
+agent_max_attempts = 4
+agent_retry_base_delay_ms = 500
+default_model = "gpt-5.4"
+http_read_timeout_sec = 120
+max_concurrent_requests = 4
+non_stream_stale_timeout_sec = 300
+retry_count = 3
+stream_timeout_sec = 180
+title_model = "utility-flash"
+tool_cli_verbosity = "full"
+
+[llm.files]
+expires_after_seconds = 86400
+
+[llm.openai_responses]
+use_previous_response_id = false
+
+[llm.reasoning_continuity]
+enabled = true
+
+[llm.thinking]
+enabled = true
+level = "high"
+persist = false
+print_to_stderr = false
+show = "summary"
+
+[log]
+file_enabled = false
+level = "warn"
+
+[plan]
+auto_checkpoint_on_build = false
+lock_timeout_ms = 2000
+max_code_review_rounds = 4
+max_review_rounds = 1
+verify_gate = "soft"
+
+[plugin]
+auto_load = []
+call_timeout_ms = 30000
+event_channel_capacity = 64
+idle_ttl_ms = 300000
+interrupt_budget = 5000000
+js_heap_mb = 16
+
+[preflight]
+auto_install_git = true
+auto_install_search_tools = true
+show_git_ui = false
+show_search_tools_ui = false
+
+[primitive]
+auto_confirm = true
+bash_approval_required = []
+bash_forbidden = []
+path_rules = []
+
+[reviewer]
+max_turns = 64
+
+[security]
+audit_log_retention_days = 90
+default_plugin_permission_level = "restricted"
+enable_audit_log = true
+enable_plugin_safety_scan = false
+
+[serve]
+delta_coalesce_ms = 25
+max_buffered_frames = 64
+max_sessions = 16
+session_idle_unload_ms = 0
+transport = "stdio"
+
+[session]
+default_mode = "code"
+
+[skills]
+disabled = []
+enabled = true
+expose_to_reviewer = false
+max_description_chars = 250
+max_skills = 1000
+prompt_budget_floor_chars = 2000
+prompt_budget_pct = 1
+
+[splash]
+animations = true
+enabled = true
+max_width = 56
+
+[storage]
+
+[todos]
+auto_new_todos_on_replace_after_terminal = true
+
+[tools.bash]
+foreground_wait_ms = 16000
+max_output_chars = 30000
+
+[tools.read]
+max_bytes = 26214400
+refresh_mutation_stamp = true
+
+[tools.web_fetch]
+cache_capacity_bytes = 52428800
+cache_ttl_secs = 900
+fetch_timeout_ms = 60000
+markdown_head_chars = 2000
+max_http_content_bytes = 10485760
+max_markdown_chars = 100000
+max_redirects = 10
+use_llm_processing = false
+
+[tools.web_search]
+allowed_domains = []
+backend = "auto"
+blocked_domains = []
+brave_base_url = "https://api.search.brave.com"
+cache_capacity = 50
+cache_ttl_secs = 300
+count = 5
+domain_filter = []
+serper_base_url = "https://google.serper.dev"
+tavily_base_url = "https://api.tavily.com"
+timeout_ms = 12000
+
+[tools.write]
+normalize_crlf = true
+
+[ui]
+language = "auto"
+
+[workspace]
+entries = []
+project_resource_dir = ".agents"
+workspace_roots = []

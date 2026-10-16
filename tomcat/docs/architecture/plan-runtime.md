@@ -16,6 +16,21 @@ Chat ── /plan ──► Plan            planning ── /plan build ──�
                                                            completed
 ```
 
+## 显式开工与执行中提问
+
+```text
+Build / /plan build ───────────────────────┐
+                                          ├─ build_plan：授权、锁、状态、绑定、事件
+start_plan({plan_id?}) → PLAN 内用户确认 ──┘
+  └─ 工具入口继续当前回合；不插入新的用户消息
+```
+
+`start_plan` 只在用户明确要求实施/继续时调用。省略 ID 时沿用当前绑定的 planning/pending 计划及其真实路径；显式 ID 沿用既有解析。写路径授权先于确认，等待确认时不持锁。PLAN 内拒绝/跳过不改变状态；其它模式不额外确认。重复开工、已完成、其他执行中计划等拒绝规则由 `build_plan` 统一负责，子 Agent 仍受现有工具白名单约束。
+
+同一 AgentLoop 的稳定 system 快照和 tools 不重建，runtime tail 实时切换提醒。供应商适配器会把 tail 合并到 wire 的 system/instructions 中（OpenAI Completions 亦如此），因此**不承诺整个 wire 前缀或缓存命中不变**。PLAN 中开工的首回合仍不显示 `package_install`，下一用户回合刷新工具后恢复。
+
+执行中 `ask_question` 沿用原有等待式问答；回答/跳过继续当前回合，Stop 停放计划。恢复的问题接当前回合取消信号，不会因为恢复问题而自动开工。执行 A 时修改或新建 B 不得替换 A 的执行绑定。
+
 ## 计划文件
 
 一个 PlanFile 是 YAML frontmatter 加自由 Markdown body：

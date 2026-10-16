@@ -48,6 +48,51 @@ pub(in super::super) async fn dispatch_plan_tool(
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }
+        "start_plan" => {
+            match serde_json::from_value::<plan_tools::start_plan::StartPlanArgs>(args.clone()) {
+                Ok(a) => match plan_tools::start_plan::resolve_target_plan_path(rt, &a) {
+                    Ok(path) => {
+                        let target = path.to_string_lossy();
+                        let authorized = tokio::select! {
+                            biased;
+                            _ = ctx.cancel.cancelled() => return ToolExecOutcome::err(
+                                "start_plan cancelled before starting".to_string(),
+                            ),
+                            result = ctx.primitive.authorize_write_path(&target, AGENT_PLUGIN_ID) => result,
+                        };
+                        match authorized {
+                            Ok(path) => {
+                                let termination =
+                                    crate::core::plan_runtime::AskQuestionTermination::default();
+                                if ctx.cancel.is_cancelled() {
+                                    termination.interrupt();
+                                }
+                                let watcher = termination.clone();
+                                let cancel = ctx.cancel.clone();
+                                let bridge = tokio::spawn(async move {
+                                    cancel.cancelled().await;
+                                    watcher.interrupt();
+                                });
+                                let result = plan_tools::start_plan::execute_at_path(
+                                    rt,
+                                    path,
+                                    termination,
+                                    Some(ctx.tool_call_id),
+                                )
+                                .await;
+                                bridge.abort();
+                                result
+                            }
+                            Err(error) => {
+                                return ToolExecOutcome::err(format!("start_plan failed: {error}"))
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(plan_tools::ToolError::BadArgs(error.to_string())),
+            }
+        }
         "update_plan" => {
             match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
                 Ok(a) => match plan_tools::update_plan::resolve_target_plan_path(
@@ -114,7 +159,7 @@ pub(in super::super) async fn dispatch_plan_tool(
     match result {
         Ok(v) => {
             *display_out = match name {
-                "create_plan" | "update_plan" => v
+                "create_plan" | "start_plan" | "update_plan" => v
                     .get("path")
                     .and_then(|value| value.as_str())
                     .map(|plan| ToolDisplay::Plan {

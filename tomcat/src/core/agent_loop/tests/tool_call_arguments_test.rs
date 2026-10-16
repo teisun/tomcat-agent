@@ -317,6 +317,55 @@ async fn run_tool_calls_keeps_valid_arguments_unchanged() {
 }
 
 #[tokio::test]
+async fn tool_outcomes_survive_transcript_roundtrip_but_not_provider_transport() {
+    for (name, arguments, is_error) in [("read", r#"{"path":"/abc"}"#, false), ("write", "{", true)]
+    {
+        let mut agent = make_agent();
+        let mut messages = Vec::new();
+        let calls = [ToolCallInfo {
+            id: "outcome-call".into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }];
+        run_tool_calls(
+            &mut agent,
+            &mut messages,
+            &calls,
+            "",
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("dispatch produces a terminal result even for a failed tool");
+        let message = messages.last().unwrap();
+        assert_eq!(message.is_error, Some(is_error));
+        let row = serde_json::to_value(message).unwrap();
+        assert_eq!(row["is_error"], is_error);
+        let restored: ChatMessage = serde_json::from_value(row).unwrap();
+        assert_eq!(restored.is_error, Some(is_error));
+        assert_eq!(restored.text_content(), message.text_content());
+        let wire = serde_json::to_value(restored.without_completion_metadata()).unwrap();
+        assert!(
+            wire.get("is_error").is_none(),
+            "local outcome must not leak to providers"
+        );
+    }
+    let legacy: ChatMessage = serde_json::from_value(serde_json::json!({
+        "role": "tool", "tool_call_id": "legacy", "content": "unchanged legacy output"
+    }))
+    .unwrap();
+    assert_eq!(
+        legacy.is_error, None,
+        "old transcripts must not invent success"
+    );
+}
+
+#[tokio::test]
 async fn tool_dispatch_counts_assistant_only_in_fallback_estimate() {
     let mut agent = make_agent();
     let mut messages = Vec::<ChatMessage>::new();

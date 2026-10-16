@@ -424,6 +424,8 @@ export class SettingsFrameDriver {
   }
 
   async capture(targetPath: string): Promise<SettingsDomEvidence> {
+    await this.main.send("Page.bringToFront");
+    await this.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))");
     const dom = await this.snapshot();
     const tree = await this.frame.send("Accessibility.getFullAXTree", { frameId: this.frameId });
     // Clip the workbench's compositor surface to this webview's visible owner.

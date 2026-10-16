@@ -935,7 +935,7 @@ describe("webview dual-channel state store", () => {
         args: { path: "src/app.ts" },
         assistantMessageId: "live-assistant-1",
         id: "tool-result-1",
-        isError: false,
+        isError: undefined,
         status: "complete",
         summary: "updated file",
         toolCallId: "tool-1",

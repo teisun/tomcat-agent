@@ -133,27 +133,35 @@ fn find_resumable_tail_ask_questions(entries: &[TranscriptEntry]) -> Vec<Resumab
     Vec::new()
 }
 
-async fn execute_resumed_ask_question(
-    ctx: &ChatContext,
+pub(super) async fn execute_resumed_ask_question(
+    runtime: &crate::core::plan_runtime::PlanRuntime,
     tool_call_id: &str,
     arguments: &Value,
+    turn_token: &tokio_util::sync::CancellationToken,
 ) -> Result<Value, AppError> {
-    let panel = ctx
-        .session_runtime
-        .plan_runtime
-        .ask_question_panel()
-        .ok_or_else(|| {
-            AppError::Config(crate::infra::i18n::tr("runtime.resumeQuestionPanel", &[]))
-        })?;
-    crate::core::tools::plan_tool::ask_question::execute_for_tool(
-        &ctx.session_runtime.plan_runtime,
+    let panel = runtime.ask_question_panel().ok_or_else(|| {
+        AppError::Config(crate::infra::i18n::tr("runtime.resumeQuestionPanel", &[]))
+    })?;
+    let termination = crate::core::plan_runtime::AskQuestionTermination::default();
+    if turn_token.is_cancelled() {
+        termination.interrupt();
+    }
+    let watcher = termination.clone();
+    let cancel = turn_token.clone();
+    let bridge = tokio::spawn(async move {
+        cancel.cancelled().await;
+        watcher.interrupt();
+    });
+    let result = crate::core::tools::plan_tool::ask_question::execute_for_tool(
+        runtime,
         panel.as_ref(),
         arguments,
-        crate::core::plan_runtime::AskQuestionTermination::default(),
+        termination,
         Some(tool_call_id),
     )
-    .await
-    .map_err(|error| {
+    .await;
+    bridge.abort();
+    result.map_err(|error| {
         AppError::Tool(crate::infra::i18n::tr(
             "runtime.resumeQuestion",
             &[("detail", &error.to_string())],
@@ -174,7 +182,10 @@ pub(crate) fn has_resumable_tail_ask_question(
     Ok(!find_resumable_tail_ask_questions(&entries).is_empty())
 }
 
-pub(crate) async fn resume_tail_ask_questions(ctx: &ChatContext) -> Result<bool, AppError> {
+pub(crate) async fn resume_tail_ask_questions(
+    ctx: &ChatContext,
+    turn_token: &tokio_util::sync::CancellationToken,
+) -> Result<bool, AppError> {
     let session = &ctx.session_runtime.session;
     let entries = session.get_entries(256)?;
     let resumable = find_resumable_tail_ask_questions(&entries);
@@ -182,8 +193,13 @@ pub(crate) async fn resume_tail_ask_questions(ctx: &ChatContext) -> Result<bool,
         return Ok(false);
     }
     for pending in resumable {
-        let result =
-            execute_resumed_ask_question(ctx, &pending.tool_call_id, &pending.arguments).await?;
+        let result = execute_resumed_ask_question(
+            &ctx.session_runtime.plan_runtime,
+            &pending.tool_call_id,
+            &pending.arguments,
+            turn_token,
+        )
+        .await?;
         session.replace_tool_result_by_tool_call_id(&pending.tool_call_id, result.to_string())?;
     }
     Ok(true)

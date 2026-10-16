@@ -195,7 +195,7 @@ fn child_agent_dispatch_runtime_preserves_fallback_pair() {
 
 #[test]
 #[serial(env_lock)]
-fn child_agent_dispatch_runtime_keeps_compat_fallback_boundary_when_unresolved() {
+fn child_agent_dispatch_runtime_uses_child_main_when_configured_models_are_unknown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     let mut cfg = AppConfig::default();
@@ -224,12 +224,12 @@ fn child_agent_dispatch_runtime_keeps_compat_fallback_boundary_when_unresolved()
     .expect("main model should still resolve");
 
     assert!(
-        runtime.compaction_provider.is_none(),
-        "无法解析 pair 时应保留兼容回退边界"
+        runtime.compaction_provider.is_some(),
+        "unknown configured models must fall back to the resolved child main provider"
     );
     assert_eq!(
-        runtime.context_config.compaction_model, "missing-compaction-model",
-        "未解析成功时不应偷偷改写 compaction_model"
+        runtime.context_config.compaction_model, "gpt-5.4",
+        "the compaction model must match its fallback provider, not the unknown global default"
     );
 
     unsafe {

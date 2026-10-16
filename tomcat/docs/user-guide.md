@@ -348,7 +348,9 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 ### Legacy Config Migration
 
-The old `[llm].provider`, `[llm].api_base`, and `[llm].api_key_env` fields have been removed. If you keep writing them now, tomcat raises a migration error and tells you to move the connection data into `models.toml`.
+Unknown or removed keys in `tomcat.config.toml` (and its `TOMCAT__*` environment layer) are ignored. Startup logs one warning listing their paths; it does not rewrite the file. Invalid values for known keys still fail validation. When a setting's type or meaning changes, a new key name must be used so the old key remains safely ignorable.
+
+This includes the removed `[llm].provider`, `[llm].api_base`, `[llm].api_key_env`, legacy whitelist keys, and `[tools.bash].timeout_ms`. Startup does not migrate old connection settings: if no usable model is configured, use the existing model setup flow and store connection data in `models.toml`. Whole-structure writers such as `tomcat workspace add` discard unsupported keys when saving. Tool arguments, Serve messages, session indexes and project trust records retain their existing strict checks.
 
 ### tomcat doctor - Environment Diagnostics
 
@@ -395,6 +397,8 @@ Independent CLI config set ────┘
 Saving in Settings updates the current window and Serve without restarting the session; other windows and standalone processes pick it up next time they start. Existing conversation content and already-produced backend messages are not translated again. Native VS Code contribution labels still follow VS Code's own language. Command names, flags, configuration keys, model IDs, and external diagnostic details do not change.
 
 Session pins, safe deletion, and optional plan-review consent are explained in [the extension guide](../../tomcat-vscode-ext/README.md#sessions-settings-and-plan-review). Review may take several minutes or longer and uses additional model tokens; skipping opens the already-saved plan without starting review or execution.
+
+When you explicitly ask to implement or resume a saved plan, the agent can call `start_plan` instead of asking you to press Build. In PLAN mode its existing question panel asks for confirmation first; outside PLAN it starts directly. Execution may pause for `ask_question` and continue after your answer. Stop interrupts the turn and parks the plan as pending. Build and `/plan build` remain available; marking a todo in progress does not implicitly start a plan.
 
 ### View the Full Config
 

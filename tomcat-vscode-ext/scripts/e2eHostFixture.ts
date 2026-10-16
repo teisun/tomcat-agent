@@ -1340,6 +1340,7 @@ function recordHistoryToolResult(sessionId, tool) {
     id: \`h-\${historyCounter++}\`,
     message: {
       content: tool.media?.length ? [{type:"input_text",text:tool.result}, ...tool.media.map(image => ({type:"input_image_ref",blob_sha:image.blobSha,mime_type:image.mimeType}))] : tool.result,
+      is_error: false,
       role: "tool",
       tool_display: tool.display,
       tool_call_id: tool.toolCallId,

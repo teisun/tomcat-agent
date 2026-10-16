@@ -171,6 +171,7 @@ fn tool_media_responses_wire_equals_user_media() {
 fn responses_wire_omits_local_message_metadata() {
     let mut message = ChatMessage::assistant("wire-visible text");
     message.summary_title = Some("local summary".to_string());
+    message.is_error = Some(true);
     message.tool_display = Some(ToolDisplay::Text {
         text: "local tool display".to_string(),
     });
@@ -183,7 +184,7 @@ fn responses_wire_omits_local_message_metadata() {
 
     let body = provider_with_stub_key().build_request_body(&request, true);
     let serialized = serde_json::to_string(&body).expect("serialize wire body");
-    for local_field in ["tool_display", "summary_title", "usage"] {
+    for local_field in ["tool_display", "summary_title", "usage", "is_error"] {
         assert!(
             !serialized.contains(local_field),
             "Responses wire leaked local field `{local_field}`: {serialized}"

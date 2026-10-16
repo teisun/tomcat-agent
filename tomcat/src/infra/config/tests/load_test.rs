@@ -206,26 +206,58 @@ fn load_config_defaults_and_env_overrides_project_resource_dir() {
 }
 
 #[test]
-fn load_config_rejects_legacy_whitelist_keys() {
-    let dir = std::env::temp_dir().join("tomcat_legacy_whitelist_config_test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config.toml");
-    std::fs::write(
-        &path,
-        "[primitive]\npath_whitelist=[]\nbash_whitelist=[]\nauto_confirm_whitelist=[]\n",
-    )
-    .unwrap();
-
-    let err = load_config(Some(path.as_path())).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("primitive.path_whitelist"));
-    assert!(msg.contains("workspace.workspace_roots"));
-    assert!(msg.contains("primitive.bash_whitelist"));
-    assert!(msg.contains("primitive.bash_forbidden"));
-    assert!(msg.contains("primitive.auto_confirm_whitelist"));
-
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir(&dir);
+#[serial(env_lock)]
+fn load_config_ignores_unsupported_keys_and_reports_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text = r#"
+[llm]
+default_model = "gpt-5.4"
+provider = "old-provider"
+api_base = "https://example.test"
+api_key_env = "OLD_API_KEY"
+[primitive]
+path_whitelist = []
+bash_whitelist = []
+auto_confirm_whitelist = []
+path_rules = [{ path = "/fixture-private", mode = "deny" }]
+[tools.bash]
+foreground_wait_ms = 9000
+timeout_ms = 1
+future_option = true
+[future]
+setting = { nested = true }
+"#;
+    std::fs::write(&path, text).unwrap();
+    let cfg = load_config(Some(&path)).unwrap();
+    assert_eq!(cfg.llm.default_model, "gpt-5.4");
+    assert_eq!(cfg.tools.bash.foreground_wait_ms, 9000);
+    assert_eq!(cfg.primitive.path_rules.len(), 1);
+    assert_eq!(cfg.primitive.path_rules[0].path, "/fixture-private");
+    assert_eq!(
+        cfg.primitive.path_rules[0].mode,
+        crate::core::permission::PathRuleMode::Deny
+    );
+    let (_, ignored) = super::super::load::merge_config_sources(Some(&path)).unwrap();
+    assert_eq!(
+        ignored,
+        [
+            "future",
+            "llm.api_base",
+            "llm.api_key_env",
+            "llm.provider",
+            "primitive.auto_confirm_whitelist",
+            "primitive.bash_whitelist",
+            "primitive.path_whitelist",
+            "tools.bash.future_option",
+            "tools.bash.timeout_ms"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        text,
+        "loading never rewrites old configuration"
+    );
 }
 
 #[test]
@@ -270,51 +302,39 @@ fn load_config_env_overrides_llm_files_expires_after_seconds() {
 }
 
 #[test]
-fn load_config_rejects_legacy_llm_provider_field() {
-    let dir = std::env::temp_dir().join("tomcat_legacy_llm_provider_test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config.toml");
-    std::fs::write(&path, "[llm]\nprovider = \"openai-responses\"\n").unwrap();
-
-    let err = load_config(Some(path.as_path())).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("llm.provider"));
-    assert!(msg.contains("models.toml"));
-
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir(&dir);
+#[serial(env_lock)]
+fn unsupported_environment_keys_are_ignored_and_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[tools.bash]\nforeground_wait_ms=10000\n").unwrap();
+    let names = ["TOMCAT__LLM__PROVIDER", "TOMCAT__TOOLS__BASH__TIMEOUT_MS"];
+    let previous = names.map(std::env::var_os);
+    std::env::set_var(names[0], "old-provider");
+    std::env::set_var(names[1], "1");
+    let merged = super::super::load::merge_config_sources(Some(&path));
+    for (name, value) in names.into_iter().zip(previous) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    let (config, ignored) = merged.unwrap();
+    assert_eq!(config.tools.bash.foreground_wait_ms, 10000);
+    assert_eq!(ignored, ["llm.provider", "tools.bash.timeout_ms"]);
 }
 
 #[test]
-fn load_config_rejects_legacy_llm_api_base_field() {
-    let dir = std::env::temp_dir().join("tomcat_legacy_llm_api_base_test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config.toml");
-    std::fs::write(&path, "[llm]\napi_base = \"https://example.test\"\n").unwrap();
-
-    let err = load_config(Some(path.as_path())).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("llm.api_base"));
-    assert!(msg.contains("models.toml"));
-
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir(&dir);
-}
-
-#[test]
-fn load_config_rejects_legacy_llm_api_key_env_field() {
-    let dir = std::env::temp_dir().join("tomcat_legacy_llm_api_key_env_test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("config.toml");
-    std::fs::write(&path, "[llm]\napi_key_env = \"OPENAI_API_KEY\"\n").unwrap();
-
-    let err = load_config(Some(path.as_path())).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("llm.api_key_env"));
-    assert!(msg.contains("models.toml"));
-
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir(&dir);
+#[serial(env_lock)]
+fn known_config_values_still_require_valid_types_and_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    for value in ["'not-a-number'", "7", "17000"] {
+        std::fs::write(&path, format!("[tools.bash]\nforeground_wait_ms={value}\n")).unwrap();
+        assert!(
+            load_config(Some(&path)).is_err(),
+            "invalid known value: {value}"
+        );
+    }
 }
 
 #[test]

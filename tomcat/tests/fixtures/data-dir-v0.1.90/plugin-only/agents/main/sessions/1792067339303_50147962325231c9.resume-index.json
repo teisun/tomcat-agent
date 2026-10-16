@@ -1,0 +1,15 @@
+{
+  "schema_version": 5,
+  "transcript_size": 194,
+  "transcript_mtime_ms": 1792067339304,
+  "total_entries": 0,
+  "last_entry_id": null,
+  "latest_boundary": null,
+  "pending_boundary_markers": {},
+  "recent_turn_starts": [],
+  "latest_day_first_entry": null,
+  "latest_plan_event": null,
+  "agent_mode": null,
+  "active_plan_path": null,
+  "active_plan_id": null
+}

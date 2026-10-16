@@ -386,6 +386,8 @@ export function buildFlatLabel(item: WebviewToolCard, t: Translator = defaultT, 
   }
   if (item.isError && isPlanTool(item)) return t("tool.failed", { name: item.toolName });
   if (item.isError && category === "edit") return t(item.toolName === "write" ? "tool.failedWrite" : "tool.failedEdit");
+  // Old transcripts did not persist the outcome; do not claim a file was changed.
+  if (!running && category === "edit" && item.isError === undefined) return t("tool.called", { name: item.toolName });
   switch (item.toolName) {
     case "read":
     case "read_file": return t(running ? compactFile ? "tool.reading" : "tool.readingFile" : compactFile ? "tool.read" : "tool.readFile");
@@ -465,7 +467,7 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[], t: Translator
       ? buildGroupTitleFromTool(tools[0], t, locale)
       : t(pluralKey(locale, "tool.executedCommands.other", tools.length), { count: tools.length });
   }
-  if (tools.every((tool) => toolCategory(tool.toolName) === "edit")) {
+  if (tools.every((tool) => toolCategory(tool.toolName) === "edit" && tool.isError === false)) {
     return t(pluralKey(locale, "tool.editedFiles.other", tools.length), { count: tools.length });
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "task")) {
@@ -1254,7 +1256,7 @@ function shouldShowBodyByDefault(
     return true;
   }
   if (category === "command") {
-    return item.isError;
+    return item.isError === true;
   }
   if (category === "edit") {
     return item.status !== "complete";

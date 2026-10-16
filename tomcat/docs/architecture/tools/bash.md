@@ -102,7 +102,7 @@ max_output_chars = 30000
 TOMCAT__TOOLS__BASH__FOREGROUND_WAIT_MS=9000
 ```
 
-`foreground_wait_ms` 越界在配置加载/校验时报错；工具单次参数仍在 dispatcher / executor 边界 clamp，形成双层防御。旧 `tools.bash.timeout_ms` 被拒绝并提示迁移到 `foreground_wait_ms`。
+`foreground_wait_ms` 越界在配置加载/校验时报错；工具单次参数仍在 dispatcher / executor 边界 clamp，形成双层防御。旧 `tools.bash.timeout_ms` 与其他未知键一样被忽略，启动时记一条 warning，不会迁移成 `foreground_wait_ms`。
 
 生产装配必须把同一份 resolved policy 注入两条路径：
 

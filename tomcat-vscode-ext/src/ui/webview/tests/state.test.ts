@@ -1641,6 +1641,26 @@ describe("history tool attribution", () => {
     ).toBe(readTool?.type === "tool" ? readTool.assistantMessageId : undefined);
   });
 
+  it.each([true, false, undefined])("hydrates the recorded tool outcome %s without guessing from text", (isError) => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      sessionId: "s1",
+      messages: [
+        { type: "message", id: "assistant-outcome", message: { role: "assistant", tool_calls: [
+          { id: "write-outcome", function: { name: "write", arguments: '{"path":"/workspace/a.txt"}' } },
+        ] } },
+        { type: "message", id: "write-result", message: {
+          role: "tool", tool_call_id: "write-outcome", content: "Created (untrusted output text)",
+          ...(isError === undefined ? {} : { is_error: isError }),
+        } },
+      ],
+    });
+    const tool = store.snapshot().sessionViews.s1.timeline.find((item): item is WebviewToolCard => item.type === "tool");
+    expect(tool).toMatchObject({ toolName: "write", status: "complete", summary: "Created (untrusted output text)" });
+    expect(tool?.isError).toBe(isError);
+  });
+
   it("converges idle timelines exactly onto persisted disk entries without leftovers", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -1730,7 +1750,7 @@ describe("history tool attribution", () => {
         args: { path: "src/app.ts" },
         assistantMessageId: "assistant-1",
         id: "tool-result-1",
-        isError: false,
+        isError: undefined,
         status: "complete",
         summary: "updated file",
         toolCallId: "tool-1",

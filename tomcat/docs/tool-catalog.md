@@ -498,6 +498,32 @@ Parameters:
 }
 ```
 
+### `start_plan`
+
+- Label: Start Plan
+- Category: `filesystem`
+- Permission scope: `Write`
+- Read only: `false`
+- Destructive: `false`
+- Search hint: `plan start execute resume build`
+
+Start or resume executing a plan and leave PLAN mode. Call only when the user asks to implement or resume it. In PLAN mode the user is asked to confirm first.
+
+Parameters:
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plan_id": {
+      "description": "Defaults to the current plan.",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
 ### `update_plan`
 
 - Label: Update Plan
@@ -780,7 +806,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan ask question single choice recommended custom skip`
 
-Ask the user 1-4 structured single-choice questions. Each question has 2-4 `options` (stable `id` + `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI auto-appends a `__custom__` free-text slot (do NOT declare it) and a per-question `skip`. The tool blocks until the user answers, skips, or cancels (cancel -> `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / Pending / Completed; hidden in EXEC to avoid blocking the execution loop.
+Ask the user 1-4 structured single-choice questions. Each question has 2-4 `options` (stable `id` + `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI auto-appends a `__custom__` free-text slot (do NOT declare it) and a per-question `skip`. The tool blocks until the user answers, skips, or cancels (cancel -> `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / EXEC / Pending / Completed. During plan execution, ask only when necessary.
 
 Parameters:
 
