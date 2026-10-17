@@ -18,7 +18,7 @@ import { buildProviderCards, keyStatusLabel, type ProviderCard } from "./provide
 import type { ProviderPreset } from "./providerPresets";
 import { fieldText, formatApiLabel, formatThinkingLabel, send } from "./settingsShared";
 import { SettingsShell } from "./SettingsShell";
-import { UtilityModelPicker } from "./UtilityModelPicker";
+import { ModelRolePicker } from "./ModelRolePicker";
 
 type SettingsDomAction = {
   kind: "clickTestId" | "setInputValue";
@@ -305,7 +305,7 @@ export function SettingsApp({
     setRemoveCardKeyEnv(null);
   }
 
-  function renderRow(card: ProviderCard, row: ProviderCard["rows"][number]) {
+  function renderRow(row: ProviderCard["rows"][number]) {
     const { model } = row;
     const details = buildModelDetails(model, t);
     return (
@@ -321,16 +321,6 @@ export function SettingsApp({
           <span className="tc-settings-card__protocol">{formatApiLabel(model.api, t)}</span>
         </div>
         <div className="tc-settings-model__actions">
-          {canSetDefault && !row.isDefault && card.keyPresent ? (
-            <button
-              className="tc-button tc-button--secondary"
-              data-testid={`settings-make-default-${model.id}`}
-              onClick={() => send(vscodeApi, { data: { modelId: model.id }, type: "setDefaultModel" })}
-              type="button"
-            >
-              {t("models.makeDefault")}
-            </button>
-          ) : null}
           <div className="tc-settings-model__tooltip-anchor">
             <button
               aria-label={t("models.details", { name: model.id })}
@@ -487,7 +477,7 @@ export function SettingsApp({
           </div>
         ) : null}
         <ul className="tc-settings-card__rows">
-          {card.rows.map((row) => renderRow(card, row))}
+          {card.rows.map(renderRow)}
         </ul>
         {connectSupported ? (
           <button
@@ -545,14 +535,29 @@ export function SettingsApp({
           </section>
         ) : (
           <div className="tc-settings-groups">
-            {state.utilityModelId !== undefined ? (
-              <UtilityModelPicker
-                canSet={state.capabilities.setUtilityModel === true}
-                cards={cards}
-                models={state.models}
-                onSelect={(modelId) => send(vscodeApi, { data: { modelId }, type: "setUtilityModel" })}
-                utilityModelId={state.utilityModelId}
-              />
+            {state.defaultModelId !== undefined || state.utilityModelId !== undefined ? (
+              <div className="tc-settings-roles">
+                {state.defaultModelId !== undefined ? (
+                  <ModelRolePicker
+                    role="default"
+                    canSet={canSetDefault}
+                    cards={cards}
+                    models={state.models}
+                    modelId={state.defaultModelId}
+                    onSelect={(modelId) => send(vscodeApi, { data: { modelId }, type: "setDefaultModel" })}
+                  />
+                ) : null}
+                {state.utilityModelId !== undefined ? (
+                  <ModelRolePicker
+                    role="utility"
+                    canSet={state.capabilities.setUtilityModel === true}
+                    cards={cards}
+                    models={state.models}
+                    modelId={state.utilityModelId}
+                    onSelect={(modelId) => send(vscodeApi, { data: { modelId }, type: "setUtilityModel" })}
+                  />
+                ) : null}
+              </div>
             ) : null}
 
             <section className="tc-settings-group">

@@ -223,25 +223,31 @@ describe("SettingsApp", () => {
       expect(screen.getByTestId("settings-delete-fcodex/gpt-6.1-sol")).toBeTruthy();
     });
 
-    it("marks the default, offers Set default only on other connected rows, and hides default controls on a legacy CLI", async () => {
-      const { postMessage } = mount();
-      const state = connectState({
+    it("places default before utility and keeps row details and actions without Set default", async () => {
+      mount();
+      await emitState(connectState({
         defaultModelId: "gpt-5.4",
+        utilityModelId: "gpt-5.2",
         models: [
           builtinModel({ keyPresent: true }),
           builtinModel({ id: "gpt-5.2", keyPresent: true, modelName: "gpt-5.2" }),
           relayModel("gpt-5.5", { keyPresent: false }),
         ],
-      });
-      await emitState(state);
-      expect(screen.queryAllByTestId(/^settings-default-/u).map((chip) => chip.dataset.testid)).toEqual(["settings-default-gpt-5.4"]);
-      expect(screen.queryAllByTestId(/^settings-make-default-/u).map((button) => button.dataset.testid)).toEqual(["settings-make-default-gpt-5.2"]);
-      fireEvent.click(screen.getByTestId("settings-make-default-gpt-5.2"));
-      expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ data: { modelId: "gpt-5.2" }, type: "setDefaultModel" }));
+      }));
+      expect(screen.getAllByRole("combobox").map((picker) => picker.getAttribute("data-testid"))).toEqual([
+        "settings-default-model-input", "settings-utility-model-input",
+      ]);
+      expect(screen.queryAllByTestId(/^settings-make-default-/u)).toHaveLength(0);
+      const row = screen.getByTestId("settings-model-row-gpt-5.4");
+      expect(within(row).getByTestId("settings-default-gpt-5.4")).toBeTruthy();
+      expect(within(row).getByRole("button", { name: en("models.details", { name: "gpt-5.4" }) })).toBeTruthy();
+      expect(within(row).getByTestId("settings-edit-gpt-5.4")).toBeTruthy();
+      expect(screen.getByTestId("settings-delete-fcodex/gpt-5.5")).toBeTruthy();
+      expect(screen.getByTestId("settings-utility-gpt-5.2")).toBeTruthy();
 
       await emitState(readyState({ defaultModelId: "gpt-5.4", models: [builtinModel({ keyPresent: true })] }));
       expect(screen.queryByTestId("settings-default-gpt-5.4")).toBeNull();
-      expect(screen.queryByTestId("settings-make-default-gpt-5.4")).toBeNull();
+      expect(input("settings-default-model-input").disabled).toBe(true);
     });
 
     it("fills a missing key inline and asks for the card's first model as the first default", async () => {
@@ -251,7 +257,6 @@ describe("SettingsApp", () => {
         models: [relayModel("gpt-5.5", { keyPresent: false, keySource: null }), relayModel("gpt-5.4", { keyPresent: false, keySource: null })],
       }));
       expect(screen.getByTestId("settings-card-key-FCODEX_API_KEY").textContent).toBe(en("models.card.keyMissing"));
-      expect(screen.queryByTestId("settings-make-default-fcodex/gpt-5.5")).toBeNull();
 
       fireEvent.click(screen.getByTestId("settings-card-fill-key-FCODEX_API_KEY"));
       fireEvent.click(screen.getByRole("button", { name: en("common.cancel") }));
@@ -685,7 +690,7 @@ describe("SettingsApp", () => {
     });
   });
 
-  describe("utility model picker", () => {
+  describe("model role picker", () => {
     const models = [
       deepseek("deepseek-v4-pro", { keyPresent: true, keySource: "saved" }),
       deepseek("deepseek-v4-flash", { keyPresent: true, keySource: "saved" }),
@@ -731,23 +736,109 @@ describe("SettingsApp", () => {
       expect(input("settings-utility-model-input").value).toBe("fcodex/claude-opus-5-5 · Fcodex");
     });
 
-    it("explains an unset, missing, or disconnected utility model and stays read-only on an old CLI", async () => {
+    it.each(["default", "utility"] as const)("preserves %s role values, messages and availability", async (role) => {
+      const { postMessage } = mount();
+      const field = role === "default" ? "defaultModelId" : "utilityModelId";
+      const intent = role === "default" ? "setDefaultModel" : "setUtilityModel";
+      const otherIntent = role === "default" ? "setUtilityModel" : "setDefaultModel";
+      const state = connectState({ models, defaultModelId: "deepseek-v4-pro", utilityModelId: "deepseek-v4-pro" });
+      const pickerId = `settings-${role}-model-input`;
+      await emitState(state);
+      const picker = input(pickerId);
+      expect(picker.value).toBe("deepseek-v4-pro · DeepSeek");
+      fireEvent.focus(picker);
+      fireEvent.click(screen.getByTestId(`settings-${role}-option-deepseek-v4-flash`));
+      expect(sent(postMessage, intent).map((message) => message.data)).toEqual([{ modelId: "deepseek-v4-flash" }]);
+      expect(sent(postMessage, otherIntent)).toHaveLength(0);
+      expect(picker.value).toBe("deepseek-v4-pro · DeepSeek");
+      await emitState({ ...state, [field]: "deepseek-v4-flash" });
+      expect(picker.value).toBe("deepseek-v4-flash · DeepSeek");
+      const otherRole = role === "default" ? "utility" : "default";
+      expect(input(`settings-${otherRole}-model-input`).value).toBe("deepseek-v4-pro · DeepSeek");
+
+      await emitState({ ...state, [field]: "" });
+      expect(picker.value).toBe(en(`models.${role}.unset`));
+      expect(screen.queryByTestId(`settings-${role}-model-problem`)).toBeNull();
+      await emitState({ ...state, [field]: "missing-model" });
+      expect(picker.value).toBe("missing-model");
+      expect(screen.getByTestId(`settings-${role}-model-problem`).textContent).toBe(en(`models.${role}.missing`, { name: "missing-model" }));
+      await emitState({ ...state, [field]: "gpt-5.4" });
+      expect(picker.value).toBe("gpt-5.4");
+      expect(screen.getByTestId(`settings-${role}-model-problem`).textContent).toBe(en(`models.${role}.notConnected`, { name: "OpenAI" }));
+      await emitState({ ...state, capabilities: { ...state.capabilities, [intent]: false } });
+      expect(picker.disabled).toBe(true);
+      expect(picker.title).toBe(en(`models.${role}.readOnly`));
+      expect(screen.getByTestId(`settings-${role}-model-toggle`)).toHaveProperty("disabled", true);
+      await emitState({ ...state, [field]: undefined });
+      expect(screen.queryByTestId(`settings-${role}-model`)).toBeNull();
+    });
+
+    it("allows both roles to share a model without sharing ARIA listboxes", async () => {
       mount();
-      await emitState(connectState({ models, utilityModelId: "" }));
-      expect(input("settings-utility-model-input").value).toBe(en("models.utility.unset"));
-      expect(screen.queryByTestId("settings-utility-model-problem")).toBeNull();
+      await emitState(connectState({ models, defaultModelId: "deepseek-v4-pro", utilityModelId: "deepseek-v4-pro" }));
+      const defaultPicker = input("settings-default-model-input");
+      const utilityPicker = input("settings-utility-model-input");
+      expect(defaultPicker.value).toBe(utilityPicker.value);
+      fireEvent.focus(defaultPicker);
+      const defaultListId = defaultPicker.getAttribute("aria-controls");
+      expect(document.getElementById(defaultListId!)).toHaveProperty("role", "listbox");
+      fireEvent.keyDown(defaultPicker, { key: "Tab" });
+      fireEvent.focus(utilityPicker);
+      const utilityListId = utilityPicker.getAttribute("aria-controls");
+      expect(utilityListId).not.toBe(defaultListId);
+      expect(document.getElementById(utilityListId!)).toHaveProperty("role", "listbox");
+      expect(defaultPicker.getAttribute("aria-controls")).toBeNull();
+      const row = within(screen.getByTestId("settings-model-row-deepseek-v4-pro"));
+      expect(row.getByTestId("settings-default-deepseek-v4-pro")).toBeTruthy();
+      expect(row.getByTestId("settings-utility-deepseek-v4-pro")).toBeTruthy();
+    });
 
-      await emitState(connectState({ models, utilityModelId: "utility-flash" }));
-      expect(screen.getByTestId("settings-utility-model-problem").textContent).toBe(en("models.utility.missing", { name: "utility-flash" }));
-
-      await emitState(connectState({ models, utilityModelId: "gpt-5.4" }));
-      expect(screen.getByTestId("settings-utility-model-problem").textContent).toBe(en("models.utility.notConnected", { name: "OpenAI" }));
-
-      await emitState(connectState({ capabilities: { ...readyState().capabilities, setUtilityModel: false }, models, utilityModelId: "deepseek-v4-flash" }));
-      expect(input("settings-utility-model-input").disabled).toBe(true);
-
-      await emitState(connectState({ models }));
-      expect(screen.queryByTestId("settings-utility-model")).toBeNull();
+    it("toggles the arrow without stealing focus or writing, and closes on Tab in either direction", async () => {
+      const { postMessage } = mount();
+      const state = connectState({ models, defaultModelId: "deepseek-v4-pro" });
+      await emitState(state);
+      const picker = input("settings-default-model-input");
+      const toggle = screen.getByRole("button", { name: en("models.default.title") });
+      const clickArrow = () => {
+        expect(fireEvent.mouseDown(toggle)).toBe(false);
+        fireEvent.click(toggle);
+      };
+      expect(toggle.tabIndex).toBe(-1);
+      clickArrow();
+      expect(document.activeElement).toBe(picker);
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      expect(toggle.getAttribute("aria-controls")).toBe(picker.getAttribute("aria-controls"));
+      expect(screen.getAllByRole("option").every((option) => option.tabIndex === -1)).toBe(true);
+      expect(screen.queryByTestId("settings-default-option-gpt-5.4")).toBeNull();
+      clickArrow();
+      expect(screen.queryByRole("listbox")).toBeNull();
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(picker);
+      expect(picker.value).toBe("deepseek-v4-pro · DeepSeek");
+      clickArrow();
+      fireEvent.change(picker, { target: { value: "no-match" } });
+      expect(screen.getByText(en("models.rolePicker.none"))).toBeTruthy();
+      clickArrow();
+      clickArrow();
+      expect(picker.value).toBe("");
+      expect(screen.getAllByRole("option")).toHaveLength(2);
+      for (const shiftKey of [false, true]) {
+        const event = new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true });
+        fireEvent(picker, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("listbox")).toBeNull();
+        clickArrow();
+      }
+      fireEvent.click(screen.getByTestId("settings-default-option-deepseek-v4-pro"));
+      expect(screen.queryByRole("listbox")).toBeNull();
+      clickArrow();
+      fireEvent.mouseDown(document.body);
+      expect(screen.queryByRole("listbox")).toBeNull();
+      await emitState({ ...state, capabilities: { ...state.capabilities, setDefaultModel: false } });
+      fireEvent.click(toggle);
+      expect(screen.queryByRole("listbox")).toBeNull();
+      expect(sent(postMessage, "setDefaultModel")).toHaveLength(0);
+      expect(sent(postMessage, "setUtilityModel")).toHaveLength(0);
     });
   });
 

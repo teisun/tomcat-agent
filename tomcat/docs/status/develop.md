@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-16 22:18 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-17 10:24 +0800 | ACTIVE | develop | — |
 
 ### CURRENT RELEASE：CLI 0.1.76 / EXT 0.1.92
 
@@ -49,6 +49,7 @@
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-10-17]** Models 页默认模型入口集中到顶部，与辅助模型共用 `ModelRolePicker`；移除模型行「设为默认」按钮，保留徽标／详情／编辑／删除。箭头改为可点击且不抢焦点的原生按钮，Tab／Shift+Tab 收起浮层；共享网格对齐标签，中英文词条和组件回归同步。此前设置模块 84 项、词条 4 项、两层 TypeScript 检查、GUI 构建，以及两场景宽窄屏共 10 组 PNG／ARIA／console 验收通过；浏览器使用测试 Bridge + 真实 Serve，不冒充完整扩展宿主 E2E。按用户要求，本次仅提交全部相关源码／测试与两处 status，不重跑测试、构建或视觉验收；Cov% 未测量，提交信息省略覆盖率。此前已生成纯插件 `tomcat-vscode-ext-0.1.92-pure.vsix`，本次不升版、不推送或发布。本地验收脚本、证据和 VSIX 按既有忽略规则保留，持久回归测试随源码提交；详见 `.agents/acceptance/vendor-model-settings/default-picker-acceptance.md`。
 - [✓] **[P1，2026-10-16]** 三项整改：内置技能不再嵌入本地 `node_modules`，供应商分卡复核修 4 处，提问选中项与悬停明显区分；另修全量 lib 中代理用例截流本机 mock 请求的竞态。Rust/扩展门禁与 9 场景视觉脚本通过；本次纳入本地提交，尚未推送或发布，详见 `.agents/acceptance/remediation-20261016/acceptance.md`。
 - [✓] **[P0/P1，2026-10-16]** 模型设置按供应商管理与内置目录更新：已完成实施、跨层门禁、真实包冷启动/升级验收与 42 张宽窄视觉截图验收，并实拉 3 家型号列表；本次纳入本地提交，尚未推送或发布，详见 `.agents/acceptance/vendor-model-settings/acceptance.md`。
 - **[P1，2026-10-16]** 五项整改与拒写历史补充修复收口，CLI/EXT/内置 CLI 版本统一递增并纳入本次本地提交；版本校验通过，按用户要求未重跑测试或构建。
@@ -81,6 +82,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-10-17 默认模型入口调整**：无新增宿主／CLI／wire 接口。GUI 继续发送原有 `setDefaultModel` / `setUtilityModel`；宿主报告相应角色值才显示选择器，能力仅决定是否可写，已保存值仍以宿主快照为准。首次接入自动设默认、供应商分卡和用户配置存储不变。
 - Serve 新增 `list_remote_models`、`upsert_models`、`remove_provider` 与 `set_utility_model` 四个命令，各有对应 capability。`set_default_model` 增加 `onlyIfUnset`，返回 written/skipped，并声明 `set_default_model_if_unset`。`list_models` 增加 `utilityModelId`；模型视图增加 `keySource`，取值 saved / environment / null。wire 镜像与 schema 已同步。
 - `Speed` 只剩 Standard/Fast，`"ultrafast"` 作为 Standard 的 serde 别名读入，`model.speedApi` 已删除。Anthropic 选 Fast 时发 `speed: "fast"` 与 `fast-mode-2026-02-01` beta。Chat Completions 的续传名单与 `preserve_history` 已删除，统一只回传当前回合。
 - `llm.title_model` 改为字段级默认 `deepseek-v4-flash`；`context.compaction_model` 默认改为空，候选顺序为显式配置 → 会话当前模型 → 默认模型；init 不再写入压缩模型。
@@ -112,6 +114,9 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 会话重载选错，尚未整改 | 已确认 live `SwitchSession` 分支只改内存、漏写磁盘 current 的源码缺口，与用户重载后回到旧会话的现象吻合；现场逐条切换时序未完整记录 | 已保存并复核 `plan_current_scope_61c0a7cf`，先隔离复现再实施；本次提交没有 CLI 修复，不声称问题已解决 |
+| 本机新旧发布者插件并存 | 现场同时启用旧 `tomcat.tomcat-vscode-ext@0.1.86` 和新 `tomcat-agent.tomcat-vscode-ext@0.1.92`，旧身份出现命令注册冲突；排查时实际 CLI 为 PATH 的 0.1.75 | 与会话恢复根因分开处理；未经授权不禁用插件、不替换 CLI、不重载用户主窗口。纯插件包不包含 CLI 修复 |
+| 本次提交的验证边界 | 按用户要求不重新运行测试、构建或视觉验收；上方通过项属于此前实施验收，Cov% 未测量 | 本次仅做 diff／暂存范围／格式检查；不将旧结果表述为新一轮全量通过 |
 | 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |

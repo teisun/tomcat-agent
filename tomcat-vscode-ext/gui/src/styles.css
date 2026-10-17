@@ -1536,24 +1536,36 @@ span.tc-attachment-strip__file-chip {
   margin: 8px 0 0;
 }
 
-.tc-settings-utility {
-  align-items: start;
+.tc-settings-roles {
   display: grid;
-  gap: 6px 12px;
+  gap: 16px 12px;
   grid-template-columns: max-content minmax(0, 1fr);
 }
 
-.tc-settings-utility__label {
+.tc-settings-role {
+  align-items: start;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  row-gap: 6px;
+}
+
+.tc-settings-role__label {
   font-weight: 600;
   padding-top: 9px;
 }
 
-.tc-settings-utility__control {
+.tc-settings-role__control {
   display: flex;
   flex-direction: column;
   gap: 4px;
   max-width: 560px;
   min-width: 0;
+}
+
+.tc-settings-role .tc-settings-combobox__toggle:disabled {
+  color: var(--vscode-disabledForeground);
+  cursor: not-allowed;
 }
 
 .tc-settings-connect__same {
@@ -1831,11 +1843,11 @@ span.tc-attachment-strip__file-chip {
     justify-content: flex-end;
   }
 
-  .tc-settings-utility {
-    grid-template-columns: 1fr;
+  .tc-settings-roles {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .tc-settings-utility__label {
+  .tc-settings-role__label {
     padding-top: 0;
   }
 
