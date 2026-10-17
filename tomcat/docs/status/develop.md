@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-17 11:31 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-17 12:45 +0800 | DONE | develop | — |
 
 ### CURRENT RELEASE：CLI 0.1.76 / EXT 0.1.92
 
@@ -41,7 +41,7 @@
 ```
 
 - **本轮范围**：按 `plan_agent_workflow_cli_agent_cli_serve_c46522fe` 实施五项整改；模型目录与供应商设置属于独立计划，未改。未同步/覆盖本地 CLI；整改与版本号随本次本地提交纳入，尚未发布。
-- **实现**：独立 `start_plan({plan_id?})` 复用授权与 build；PLAN 确认复用 review 面板，子 Agent 白名单不放开。执行期问答解除限制，恢复问答接当前回合取消信号；执行中绑定保护落在唯一刷新入口。菜单仅框外/Escape/触发器收起，删除弹窗暂停底层监听。
+- **实现**：独立 `start_plan({plan_id?})` 复用授权与 build；PLAN 确认复用 review 面板，子 Agent 白名单不放开。执行期问答解除限制，恢复问答接当前回合取消信号；执行中绑定保护落在唯一刷新入口。当时菜单仅框外/Escape/触发器收起，删除弹窗暂停底层监听；2026-10-17 已补齐 Webview 失焦与选择会话后收起，管理操作仍保持展开。
 - **配置升级**：`serde_ignored` 收集未知路径，日志初始化后一次输出；删除三处旧键拒绝、init 特殊加载和 9 条专用翻译。已知非法值、工具参数、wire、session/trust 等严格校验保留。两份真实 ext-v0.1.90 数据夹具来自 `d00ebe08` 的 CLI 0.1.74，原字节不手改，仅在测试副本中重定位 HOME 与本地 HTTP 地址。
 - **中途证据**：计划开工首批 192 项、恢复取消 1 项、配置/提示/技能批次、SessionBar/App 93 项通过；两份旧目录升级回归、Serve robustness 14 项、门禁配置 6 项、工具目录 2 项通过。真实 Serve 同回合开工→写文件→提问→回答继续、普通/恢复 Stop，以及 Host 新旧四条用例均已通过；Host 原失败来自夹具答案遗漏 pickedRecommended，未放宽协议校验。
 - **最终验收进度**：Host 单测 762、GUI 844、wire 和版本一致性通过；分批有效 Rust lib 3266、剩余 integration 367+3 定向修复复验、serial 33，以及严格 Clippy、doc（0 项）、release 构建通过。macOS x64 / VS Code 1.106.0 的真实包冷启动和预置 0.1.90 数据升级行为通过，后者验证同 PID 开工→写文件→执行提问→继续及菜单连续管理。安装 E2E 复用 22 项成功结果，修正菜单持久展开后的测试交互并定向复验 1 项通过；完整 fake `verify:vsix` 10 项通过。20 张最终 PNG 及 ARIA/console 已逐一读取：19 份 console 无错误，完整 workbench 保留 E2E harness 查询 Marketplace 的 404。本机许可数据副本烟测亦通过：36 个模型、3 个近期非当前会话（含空会话与两份真实历史）、35 个引用图片 blob、203 份计划；握手/模型列表/会话切换与读取成功，源模型和抽样历史哈希不变，副本清理完成。受保护原始配置及凭证未读取，使用新隔离配置，不冒称验证了它们或所有历史。详见 `.agents/acceptance/agent-workflow-upgrade/acceptance.md`；不把拆跑记录冒充聚合 gate 退出 0。
@@ -49,6 +49,7 @@
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-10-17]** 会话菜单收起优化完成并纳入本次本地提交：`SessionBar` 展开期补非捕获 window blur 监听及对称清理，选择会话（含当前会话）立即关闭并归还触发按钮焦点；外部关闭不抢焦点，置顶／展开更多／删除确认与取消的连续管理不变。生产仅新增 5 行，不改 CLI、会话恢复、草稿、协议或样式。此前先在基线复现两处真实红框点击失焦但菜单仍开，修复后 GUI 聚焦 96/96、真实 Dev Host 菜单用例与既有管理用例各 1/1、lint、harness 类型检查和构建通过；两张全景 PNG／ARIA／console 已读取，capture-time 记录无 error/exception。首次宿主取证在状态采集阶段超时，删除测试中多余的双动画帧等待后通过，生产逻辑与断言未放宽。已交付不含 CLI 的 `tomcat-vscode-ext-0.1.92-session-menu-pure.vsix`（1,798,478 字节，SHA256 `27bc0aa4e596e78c0d86128e79a9c2686754b6b41a28d3ef27564888dbc59c93`），构建新鲜度、包完整性及入口文件字节一致性检查通过。上述均为此前实施／打包记录；本次按用户要求不跑测试、不构建，Cov% 未测量；不升版、不推送或发布。本地证据 `.agents/acceptance/session-menu-dismissal/` 与 VSIX 按既有忽略规则保留，不强制加入 Git。
 - [✓] **[P1，2026-10-17]** 会话重载恢复修复完成，用户已明确反馈「验收通过」。`SwitchSession` 的 live 分支用目标 scope 的无绑定 SessionManager 先保存磁盘 current，成功后才更新内存 active；未打开分支、运行中会话绑定、扩展与协议不变。源码及两条回归一并纳入本次提交。此前新增单测修复前准确失败、修复后通过；命令模块首轮 97 通过／6 失败，补本机 NO_PROXY 后同一二进制精确复验 6/6 通过，有效结果分批覆盖 103 项；真实多会话／进程重启 8/8 及 debug CLI 构建通过。全仓 fmt 仍有 17 个文件的既有差异，与 HEAD 比较确认无新增格式差异。上述均为此前实施验收记录，本次按用户要求不重跑测试、构建或视觉验收，Cov% 未测量；未升版、未推送或发布。完整本地记录见 `.agents/acceptance/session-reload-current.md`，按现有全局忽略规则不纳入 Git。
 - [✓] **[本机，2026-10-17]** 经用户明确授权，已正常卸载旧 `tomcat.tomcat-vscode-ext@0.1.86`，扩展列表仅剩新 `tomcat-agent.tomcat-vscode-ext@0.1.92`；另按用户要求在 `~/.profile` 给 NO_PROXY/no_proxy 补齐本机地址，保留原名单与代理地址，新 Bash 登录验证通过。仅记录本机操作，不将个人 shell 配置或自动卸载机制加入仓库；Agent 未重载用户主窗口。
 - [✓] **[P1，2026-10-17]** Models 页默认模型入口集中到顶部，与辅助模型共用 `ModelRolePicker`；移除模型行「设为默认」按钮，保留徽标／详情／编辑／删除。箭头改为可点击且不抢焦点的原生按钮，Tab／Shift+Tab 收起浮层；共享网格对齐标签，中英文词条和组件回归同步。此前设置模块 84 项、词条 4 项、两层 TypeScript 检查、GUI 构建，以及两场景宽窄屏共 10 组 PNG／ARIA／console 验收通过；浏览器使用测试 Bridge + 真实 Serve，不冒充完整扩展宿主 E2E。按用户要求，本次仅提交全部相关源码／测试与两处 status，不重跑测试、构建或视觉验收；Cov% 未测量，提交信息省略覆盖率。此前已生成纯插件 `tomcat-vscode-ext-0.1.92-pure.vsix`，本次不升版、不推送或发布。本地验收脚本、证据和 VSIX 按既有忽略规则保留，持久回归测试随源码提交；详见 `.agents/acceptance/vendor-model-settings/default-picker-acceptance.md`。
@@ -84,6 +85,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-10-17 会话菜单收起**：无新增生产接口／协议。新增关闭触发来自用户选择或页面失焦，不随会话快照更新触发；既有框外点击／Escape 等关闭行为保留，会话身份仍等宿主确认。删除弹窗沿用暂停关闭监听，置顶／删除管理和草稿保存流程不变。
 - **2026-10-17 会话恢复**：无新增接口或存储格式；仅补齐显式切换已打开会话时的 scope 级 current 持久化。写失败沿用 dispatcher 错误帧且不切内存 active，registry setter 仍只负责内存；不新增前端选中态。
 - **2026-10-17 默认模型入口调整**：无新增宿主／CLI／wire 接口。GUI 继续发送原有 `setDefaultModel` / `setUtilityModel`；宿主报告相应角色值才显示选择器，能力仅决定是否可写，已保存值仍以宿主快照为准。首次接入自动设默认、供应商分卡和用户配置存储不变。
 - Serve 新增 `list_remote_models`、`upsert_models`、`remove_provider` 与 `set_utility_model` 四个命令，各有对应 capability。`set_default_model` 增加 `onlyIfUnset`，返回 written/skipped，并声明 `set_default_model_if_unset`。`list_models` 增加 `utilityModelId`；模型视图增加 `keySource`，取值 saved / environment / null。wire 镜像与 schema 已同步。
@@ -117,6 +119,7 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 会话菜单交付范围 | 已完成真实 Dev Host + fake Serve 的焦点／菜单验收并交付纯 VSIX；安装升级用例同步语义且类型检查通过 | Agent 未安装该 VSIX，不将源码宿主验证或用户请求提交等同于完整安装包／真实 CLI 验收；首次取证超时与后续通过记录均保留 |
 | 会话恢复范围 | 保留同 agent／项目 scope 级共享 current；用户已反馈本次修复验收通过 | 不承诺多个窗口各自独立恢复；尚未正式发布，不把用户验收反馈表述为 Agent 已采集主窗口截图／日志 |
 | 本轮既有格式与代理环境问题 | 全仓 fmt 的 17 个文件格式差异与 HEAD 一致；命令模块首轮 6 项本地 HTTP 测试受代理环境影响 | 不并入无关格式化；补本机 NO_PROXY 后同一二进制 6/6 复验通过，保留首轮失败，不冒称一次聚合全绿 |
 | 本次提交的验证边界 | 按用户要求不重新运行测试、构建或视觉验收；上方通过项属于此前实施验收，Cov% 未测量 | 本次仅做 diff／暂存范围／格式检查；不将旧结果表述为新一轮全量通过 |

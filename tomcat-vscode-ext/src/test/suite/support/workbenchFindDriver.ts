@@ -398,12 +398,12 @@ export class SettingsFrameDriver {
   }
 
 
-  async click(testId: string): Promise<void> {
-    const point = await waitFor(() => this.evaluate<{x:number;y:number} | null>(`(() => { const node = document.querySelector('[data-testid="${testId}"]'); if (!node || node.disabled) return null; node.scrollIntoView({block:'nearest',inline:'nearest'}); const r=node.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? {x:r.x+r.width/2,y:r.y+r.height/2} : null; })()`), value => value !== null, `Rendered enabled button unavailable: ${testId}`, 15_000);
+  async click(testId: string, index = 0): Promise<void> {
+    const point = await waitFor(() => this.evaluate<{x:number;y:number} | null>(`(() => { const node = document.querySelectorAll('[data-testid="${testId}"]')[${index}]; if (!node || node.disabled) return null; node.scrollIntoView({block:'nearest',inline:'nearest'}); const r=node.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? {x:r.x+r.width/2,y:r.y+r.height/2} : null; })()`), value => value !== null, `Rendered enabled button unavailable: ${testId}`, 15_000);
     if (!point) throw new Error(`Button unavailable: ${testId}`);
     await this.frame.send("Input.dispatchMouseEvent",{type:"mouseMoved",x:point.x,y:point.y});
     // Hover can reveal/reflow row actions; use their post-hover, hit-testable position.
-    const target = await waitFor(() => this.evaluate<{x:number;y:number} | null>(`(() => { const node=document.querySelector('[data-testid="${testId}"]'); if (!node || node.disabled) return null; const r=node.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, hit=document.elementFromPoint(x,y); return r.width>0 && r.height>0 && (hit===node || node.contains(hit)) ? {x,y} : null; })()`), value => value !== null, `Button is covered or outside the viewport: ${testId}`, 15_000);
+    const target = await waitFor(() => this.evaluate<{x:number;y:number} | null>(`(() => { const node=document.querySelectorAll('[data-testid="${testId}"]')[${index}]; if (!node || node.disabled) return null; const r=node.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, hit=document.elementFromPoint(x,y); return r.width>0 && r.height>0 && (hit===node || node.contains(hit)) ? {x,y} : null; })()`), value => value !== null, `Button is covered or outside the viewport: ${testId}`, 15_000);
     if (!target) throw new Error(`Button not reachable: ${testId}`);
     await this.frame.send("Input.dispatchMouseEvent",{type:"mousePressed",x:target.x,y:target.y,button:"left",clickCount:1});
     await this.frame.send("Input.dispatchMouseEvent",{type:"mouseReleased",x:target.x,y:target.y,button:"left",clickCount:1});
@@ -555,6 +555,29 @@ export class WorkbenchFindDriver {
       (found) => found,
       `Test window did not display ${text}`,
     );
+  }
+
+  async clickAuxiliaryTitleBlank(): Promise<{ x: number; y: number; tag: string; className: string }> {
+    const point = await this.evaluate<{ x: number; y: number; tag: string; className: string }>(`(() => {
+      const title = document.querySelector('.part.auxiliarybar > .composite.title');
+      if (!title || !title.textContent.includes('TOMCAT')) throw new Error('Tomcat auxiliary title is not visible');
+      const rect = title.getBoundingClientRect();
+      if (!rect.width || !rect.height) throw new Error('Auxiliary title has no visible bounds');
+      const y = rect.y + rect.height / 2;
+      for (const fraction of [0.5, 0.65, 0.8, 0.35]) {
+        const x = rect.x + rect.width * fraction;
+        const hit = document.elementFromPoint(x, y);
+        if (hit && title.contains(hit) && !hit.closest('button, a, [role="tab"], [role="button"], .action-item')
+          && (hit === title || hit.matches('.composite-bar-container, .composite-bar, .monaco-action-bar, .actions-container, .title-actions'))) {
+          return { x, y, tag: hit.tagName, className: hit.className };
+        }
+      }
+      throw new Error('No hit-testable title blank: ' + title.outerHTML);
+    })()`);
+    await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+    await this.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    return point;
   }
 
   async clickVisibleButton(label: string): Promise<void> {

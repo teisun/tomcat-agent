@@ -32,6 +32,9 @@ describe("SessionBar settings entry", () => {
     fireEvent.click(trash);
     expect(remove).not.toHaveBeenCalled();
     const cancel = screen.getByTestId("delete-session-cancel");
+    fireEvent.blur(window);
+    expect(screen.getByTestId("delete-session-dialog")).toBeTruthy();
+    expect(screen.getByTestId("session-dropdown")).toBeTruthy();
     expect(document.activeElement).toBe(cancel);
     fireEvent.keyDown(cancel, { key: "Escape" });
     expect(remove).not.toHaveBeenCalled();
@@ -52,17 +55,37 @@ describe("SessionBar settings entry", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("keeps selection, unpin, expansion and scrolling inside the open panel", () => {
+  it.each(["s0", "s1"])("closes when selecting %s and returns focus without waiting for the host", (sessionId) => {
+    const choose = vi.fn();
+    const now = Date.now();
+    const sessions = ["s0", "s1"].map((id) => ({ sessionId: id, title: `Session ${id}`, updatedAt: now, busy: false, isCurrent: id === "s0", ownedByThisFrontend: true }));
+    const props = { sessions, ready: true, onOpenSettings: vi.fn(), onNewSession: vi.fn(), onSwitchSession: choose };
+    const view = render(<SessionBar {...props} activeSessionId="s0" />);
+    const trigger = screen.getByTestId("session-select");
+    const originalLabel = trigger.textContent;
+    fireEvent.click(trigger);
+    const index = sessions.findIndex(session => session.sessionId === sessionId);
+    const option = screen.getAllByTestId("session-option")[index];
+    option.focus();
+    fireEvent.click(option);
+    expect(choose).toHaveBeenCalledExactlyOnceWith(sessionId);
+    expect(screen.queryByTestId("session-dropdown")).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.textContent).toBe(originalLabel);
+    expect(document.activeElement).toBe(trigger);
+    view.rerender(<SessionBar {...props} activeSessionId={sessionId} />);
+    expect(screen.queryByTestId("session-dropdown")).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.getAllByTestId("session-option")[index].getAttribute("aria-current")).toBe("true");
+  });
+
+  it("keeps unpin, expansion and scrolling inside the open panel", () => {
     const choose = vi.fn(); const pin = vi.fn();
     const sessions = Array.from({ length: 7 }, (_, i) => ({ sessionId: `s${i}`, title: `Session ${i}`, updatedAt: Date.now(), busy: false, isCurrent: i === 0, ownedByThisFrontend: true }));
     const props = { sessions, ready: true, onOpenSettings: vi.fn(), onNewSession: vi.fn(), onSwitchSession: choose, onSetPinned: pin };
     const view = render(<SessionBar {...props} activeSessionId="s0" />);
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getAllByTestId("session-option")).toHaveLength(6);
-    fireEvent.click(screen.getAllByTestId("session-option")[1]);
-    expect(choose).toHaveBeenLastCalledWith("s1");
-    view.rerender(<SessionBar {...props} activeSessionId="s1" />);
-    expect(screen.getAllByTestId("session-option")[1].getAttribute("aria-current")).toBe("true");
     fireEvent.click(screen.getByTestId("session-more"));
     fireEvent.scroll(screen.getByTestId("session-dropdown"));
     expect(screen.getAllByTestId("session-option")).toHaveLength(7);
@@ -72,13 +95,19 @@ describe("SessionBar settings entry", () => {
     expect(screen.getByTestId("session-dropdown")).toBeTruthy();
   });
 
-  it.each(["new-session-button", "settings-button", "outside", "escape", "trigger"])("closes for %s", (action) => {
+  it.each(["new-session-button", "settings-button", "outside", "escape", "trigger", "window-blur"])("closes for %s", (action) => {
     render(<><SessionBar activeSessionId={null} sessions={[]} ready onOpenSettings={vi.fn()} onNewSession={vi.fn()} onSwitchSession={vi.fn()} /><button data-testid="outside">Outside</button></>);
     const trigger = screen.getByTestId("session-select");
     fireEvent.click(trigger);
     if (action === "escape") {
       fireEvent.keyDown(screen.getByTestId("session-dropdown"), { key: "Escape" });
       expect(document.activeElement).toBe(trigger);
+    } else if (action === "window-blur") {
+      const outside = screen.getByTestId("outside");
+      outside.focus();
+      fireEvent.blur(window);
+      expect(document.activeElement).toBe(outside);
+      fireEvent.focus(window);
     } else {
       const target = action === "trigger" ? trigger : screen.getByTestId(action);
       fireEvent.mouseDown(target);

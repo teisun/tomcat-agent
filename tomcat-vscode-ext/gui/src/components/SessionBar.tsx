@@ -104,6 +104,7 @@ export function SessionBar({
         setOpen(false);
       }
     };
+    const handleWindowBlur = () => setOpen(false);
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setOpen(false);
@@ -112,9 +113,11 @@ export function SessionBar({
     };
     document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("keydown", handleEscape);
+    window.addEventListener("blur", handleWindowBlur);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("blur", handleWindowBlur);
     };
   }, [open, deleteTarget]);
 
@@ -143,6 +146,8 @@ export function SessionBar({
   };
 
   const handlePick = (sessionId: string) => {
+    setOpen(false);
+    triggerRef.current?.focus();
     onSwitchSession(sessionId);
   };
 

@@ -6,6 +6,7 @@ import { en } from "../../shared/i18n/en";
 import {
   assertPlanPreviewCustomEditorFlow,
   assertSessionSettingsLanguageFlow,
+  assertSessionMenuDismissalFlow,
   assertPlanPreviewTablesFlow,
   assertInlineUserMessageEditFlow,
   assertSessionFilesDockFlow,
@@ -63,6 +64,10 @@ suite("Tomcat host E2E", () => {
     }
   });
 
+  test("session menu dismissal: external clicks and session selection", async function () {
+    this.timeout(90_000);
+    await assertSessionMenuDismissalFlow(await getTomcatExtensionApi());
+  });
   test("session pins and language: gear, bilingual controls, deletion and fixed review choices", async function () {
     this.timeout(180_000);
     await assertSessionSettingsLanguageFlow(await getTomcatExtensionApi());

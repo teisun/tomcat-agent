@@ -99,15 +99,16 @@ async function assertLegacyUpgradeWorkflow(api: Api, artifacts: string) {
     await captureBoth("execution-continued");
 
     const fresh = await api.__testing.createFreshWebviewSession(required("TOMCAT_VSCODE_TEST_DEFAULT_CWD"));
-    await chat.click("session-select");
     const pick = async (id: string) => {
+      if (!await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]')")) await chat.click("session-select");
       const title = api.__testing.getWebviewState().sessions.find(session => session.sessionId === id)?.title ?? id;
       assert.equal(await chat.evaluate<boolean>(`(() => { const row = [...document.querySelectorAll('[data-testid="session-option"]')].find(row => row.getAttribute('title') === ${JSON.stringify(title)}); if (!row) return false; row.click(); return true; })()`), true);
       await chat.waitForSnapshot(() => api.__testing.getWebviewState().activeSessionId === id, "Session selection must settle");
-      assert.equal(await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]')"), true);
+      assert.equal(await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]')"), false);
     };
     await pick(sessionId); await pick(fresh); await pick(sessionId);
     const rowAction = async (icon: string) => {
+      if (!await chat.evaluate<boolean>("!!document.querySelector('[data-testid=\"session-dropdown\"]')")) await chat.click("session-select");
       const title = api.__testing.getWebviewState().sessions.find(session => session.sessionId === sessionId)?.title ?? sessionId;
       assert.equal(await chat.evaluate<boolean>(`(() => { const row = [...document.querySelectorAll('.tc-session-row')].find(row => row.querySelector('[data-testid="session-option"]')?.getAttribute('title') === ${JSON.stringify(title)}); const button = row?.querySelector('.codicon-' + ${JSON.stringify(icon)})?.closest('button'); if (!button || button.disabled) return false; button.focus(); button.click(); return true; })()`), true);
     };

@@ -52,6 +52,85 @@ async function waitFor(
 type CaptureRegion = "editor" | "sidebar" | "window";
 
 
+/** Collect both external-click observations before asserting dismissal, so the
+ * unmodified baseline proves both focus prerequisites even though it stays open. */
+export async function assertSessionMenuDismissalFlow(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const target = await createFreshWebviewSession(api, "menu-dismissal-target");
+  const active = await createFreshWebviewSession(api, "menu-dismissal-active");
+  const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(workspace);
+  const planPath = path.join(workspace, "menu-dismissal.plan.md");
+  await fs.writeFile(planPath, "---\nplan_id: menu-dismissal\nname: Menu dismissal\nstate: planning\ntodos:\n- id: first\n  content: Keep this preview visible\n  status: pending\n---\n# Menu dismissal\n\nClick this plan content while the session menu is open.\n");
+  await api.__testing.openPlanPreview(planPath);
+  await waitForPlanPreviewDom(api, planPath, snapshot => snapshot.bodyHasContent);
+  const chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const workbench = await WorkbenchFindDriver.connectFromEnvironment();
+  const plan = await SettingsFrameDriver.connectFromEnvironment(".tc-plan-preview__body");
+  const artifacts = requireEnv("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
+  const observations: Array<{ area: string; focused: boolean; expanded: string | null; menu: boolean; activeSessionId: string | null }> = [];
+  const readMenu = async () => ({
+    ...await chat.evaluate<{ focused: boolean; expanded: string | null; menu: boolean }>(`({
+      focused: document.hasFocus(),
+      expanded: document.querySelector('[data-testid="session-select"]')?.getAttribute('aria-expanded') ?? null,
+      menu: !!document.querySelector('[data-testid="session-dropdown"]')
+    })`),
+    activeSessionId: api.__testing.getWebviewState().activeSessionId,
+  });
+  const openMenu = async () => {
+    // Baseline can still be open; use the same real trigger to reset it.
+    if ((await readMenu()).menu) await chat.click("session-select");
+    await chat.click("session-select");
+    const opened = await readMenu();
+    assert.equal(opened.menu, true, "Session menu must open before clicking outside");
+    assert.equal(opened.focused, true, "Environment failure: the test chat must have real focus");
+  };
+  const record = async (area: string) => {
+    const observation = { area, ...await readMenu() };
+    observations.push(observation);
+    await fs.writeFile(path.join(artifacts, "session-menu-dismissal.json"), JSON.stringify(observations, null, 2));
+    console.log(`Session menu dismissal: ${JSON.stringify(observation)}`);
+    return observation;
+  };
+  try {
+    await chat.setViewport(1440, 900);
+    for (const area of ["panel-title", "plan-content"] as const) {
+      await openMenu();
+      if (area === "panel-title") {
+        const hit = await workbench.clickAuxiliaryTitleBlank();
+        await fs.writeFile(path.join(artifacts, "session-menu-title-hit.json"), JSON.stringify(hit, null, 2));
+      } else {
+        await plan.click("plan-content");
+      }
+      // Read and assert focus before any screenshot or explicit focus operation.
+      const observation = await record(area);
+      assert.equal(observation.focused, false, `${area}: prerequisite failed; actual outside click did not blur chat`);
+      assert.equal(observation.activeSessionId, active, "Outside clicks must not switch sessions");
+      if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+        await captureWorkbenchArtifacts(path.join(artifacts, `session-menu-${area}.png`));
+      }
+    }
+    await openMenu();
+    const title = api.__testing.getWebviewState().sessions.find(session => session.sessionId === target)?.title ?? target;
+    const index = await chat.evaluate<number>(`[...document.querySelectorAll('[data-testid="session-option"]')].findIndex(row => row.getAttribute('title') === ${JSON.stringify(title)})`);
+    assert.ok(index >= 0, "Target session must be rendered");
+    await chat.click("session-option", index);
+    await waitFor(() => api.__testing.getWebviewState().activeSessionId === target);
+    await record("session-selection");
+    assert.deepEqual(observations.map(({ area, menu, expanded }) => ({ area, menu, expanded })), [
+      { area: "panel-title", menu: false, expanded: "false" },
+      { area: "plan-content", menu: false, expanded: "false" },
+      { area: "session-selection", menu: false, expanded: "false" },
+    ], "External clicks and session selection must dismiss the menu");
+  } finally {
+    plan.close();
+    workbench.close();
+    chat.close();
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  }
+}
+
 /** Rendered Host + fake-Serve acceptance; disk/locking/reviewer execution is covered by real-Serve integration tests. */
 export async function assertSessionSettingsLanguageFlow(api: TomcatExtensionApi): Promise<void> {
   await api.__testing.focusWebview();

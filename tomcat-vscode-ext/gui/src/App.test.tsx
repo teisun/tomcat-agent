@@ -3786,19 +3786,24 @@ describe("Tomcat webview App", () => {
     });
 
     const selectSession = async (sessionId: "s1" | "s2") => {
+      const previousLabel = screen.getByTestId("session-select").textContent;
       if (!screen.queryByTestId("session-dropdown")) fireEvent.click(screen.getByTestId("session-select"));
       fireEvent.click(
         screen.getAllByTestId("session-option").find(
           (option) => option.textContent?.includes(sessionId),
         ) ?? screen.getAllByTestId("session-option")[0],
       );
-      expect(screen.getByTestId("session-dropdown")).toBeTruthy();
+      expect(screen.queryByTestId("session-dropdown")).toBeNull();
+      expect(screen.getByTestId("session-select").textContent).toBe(previousLabel);
+      expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+        type: "switchSession", data: { sessionId },
+      }));
       await emitState({
         channel: "state",
         content: approvalDraftSnapshot(sessionId),
         messageId: `state-independent-drafts-${sessionId}-${postMessage.mock.calls.length}`,
       });
-      expect(screen.getByTestId("session-dropdown")).toBeTruthy();
+      expect(screen.queryByTestId("session-dropdown")).toBeNull();
     };
 
     fireEvent.paste(screen.getByTestId("composer-input"), {
