@@ -1,14 +1,14 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-17 12:45 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-17 12:50 +0800 | ACTIVE | develop | — |
 
-### CURRENT RELEASE：CLI 0.1.76 / EXT 0.1.92
+### CURRENT RELEASE：CLI 0.1.77 / EXT 0.1.93
 
-- **准备状态**：用户执行标准 `/release-cli-ext`，在已提交的 `5d5546e8` 上由版本脚本统一递增 CLI/EXT patch，并 pin CLI `0.1.76`。五个版本文件只改必要版本镜像，无依赖变化；版本一致性及 CLI/EXT tag guard 已通过。目标标签起手时本地/远端均未占用，三个分支均可快进同步。
+- **准备状态**：用户执行标准 `/release-cli-ext`，在已提交的 `543a755a` 上由版本脚本统一递增 CLI `0.1.76 → 0.1.77`、EXT `0.1.92 → 0.1.93`，并 pin CLI `0.1.77`。五个版本文件只改必要版本镜像，无依赖变化；版本一致性及 CLI/EXT tag guard 已通过。目标标签起手时本地/远端均未占用，三个分支均可快进同步。
 - **执行边界**：先提交并推送 develop、FF 同步 main/master；CLI 三平台归档和 SHA256SUMS 就绪后才推 EXT 标签。原有 GitHub 构建/原生安装验收与发布门禁保留，不因前次“仅提交不跑测试”而跳过本轮发版门禁；本地不额外重跑产品测试。Cov% 未测量。
-- **发布结果**：发布提交 `cd959b55fdc4d46db41b01ccf460289b30581ef8` 已推送三个分支，两个正式标签均指向它。CLI run `38911202584` 与 EXT run `38912460284` 全部成功；GitHub 已公开 CLI 三平台归档、EXT 四份 VSIX 及各自 SHA256SUMS。EXT 原生门禁覆盖三平台冷启动和 0.1.90 数据升级，下载包/内置 CLI hash 与六份原生回执一致；不额外重跑本地产品测试。
-- **市场与更新**：保留 `PUBLISH_MARKETPLACE=true` 和仅 `ext-v*` 放行。真实 OIDC 上传三平台成功；市场校验先后完成，14:16 UTC 公开 API 已确认全部 0.1.92，且三份 VSIX hash 与 GitHub/CI 完全一致。原保留 Intel Mac profile 使用 VS Code 1.106.0 `--update-extensions` 从 0.1.89 正常更新到 0.1.92，未重装、未 `--force`、未指定 VSIX/版本 pin；内置 CLI 0.1.76 hash 一致。
-- **证据边界**：`.agents/acceptance/release-0.1.76-0.1.92/` 保留工作流、公开查询、校验、更新前后回执及市场 PNG/ARIA/console。既有 CI 截图归档不等于本次已逐张人工复阅；未验证无人值守定时更新或该 profile 的真人首配/真实付费对话。市场页面有字体 CSP/资源 404，Linux CI 保留 DBus/GPU、`/bin/zsh` 缺失和 weak GLIBC_2.39 告警；不称全宿主零告警。以下较早日期条目是历史时点，发布结果以上述为准。
+- **发布结果**：准备检查通过，等待发布提交、三个分支推送及两条 release 工作流；CLI 资产就绪前不推 `ext-v0.1.93`。完成后回填提交、工作流与资产证据，不以本地打包或标签创建代称发布成功。
+- **市场与更新**：已查询确认 `PUBLISH_MARKETPLACE=true`；保留仅 `ext-v*` 放行、原生验收及 GitHub publish 成功后才用 OIDC 上传三个平台包的既有流程。本轮不改发布权限或开关，不额外重放本机自动更新实验；市场结果以本轮实际工作流与公开查询为准。
+- **证据边界**：本轮只改版本和状态，既有功能验收记录仍有效；不把 CI 安装验收或截图归档表述为 Agent 已逐图复阅，也不冒称真人首配、真实付费对话或无人值守更新验证。上一版发布证据保留在 `.agents/acceptance/release-0.1.76-0.1.92/`；下方较早日期条目是历史时点，不充当本轮发布成功的证明。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 
