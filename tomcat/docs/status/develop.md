@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-17 13:17 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-17 13:27 +0800 | DONE | develop | — |
 
 ### CURRENT RELEASE：CLI 0.1.77 / EXT 0.1.93
 
@@ -9,6 +9,7 @@
 - **发布结果**：发布提交 `8f88e8f8725249a9bea7cb653192ba2189bccd84` 已推送三个分支，两个正式标签均指向它。CLI run `39004223945` 与 EXT run `39004819368` 全部成功，三个分支 version-sync 均通过。GitHub 已公开 CLI 三平台归档、EXT 四份 VSIX 及各自 SHA256SUMS；7 份下载包校验通过。EXT 原生门禁覆盖三平台冷启动和 0.1.90 数据升级，六次 host 运行均通过；本地检查确认包身份／版本／pin 正确，三个内置 CLI 与对应发布归档字节一致，纯 VSIX 不含 CLI。
 - **市场与更新**：保留 `PUBLISH_MARKETPLACE=true` 与既有 OIDC 权限。三个平台于 05:09 UTC 上传成功；公开校验经历短暂等待，13:16 +0800 匿名查询已确认三个平台均为 0.1.93 且 `Validated`，公开元数据的 VSIX SHA256 与 GitHub 下载包一致。未重复上传、未重跑工作流；OpenVSX 步骤为 skipped，不称已发布。本轮未安装或替换本机 CLI，未重放本机 Marketplace 自动更新实验。
 - **证据边界**：本轮证据在 `.agents/acceptance/release-0.1.77-0.1.93/`，包含工作流、发布元数据、实际下载包、校验结果与市场观察。CI 截图仍是 CI 留存，不冒称已逐张人工复阅，也不冒称真人首配、真实付费对话或无人值守更新验证。CI 保留 Node 20／Ubuntu 镜像迁移、VSCE 文件数及 Azure CLI 版本解析提示；Linux 仍有 DBus/GPU、`/bin/zsh` 缺失和 weak GLIBC_2.39 告警，功能门禁通过不等于零告警或全 Linux 兼容。下方旧日期记录仅属历史。
+- **文档补录（2026-10-17 13:27 +0800）**：按各发布 tag 补齐 `tomcat-vscode-ext/CHANGELOG.md` 的 0.1.92／0.1.93 条目，并在 `.cursor/commands/release-cli-ext.md` 强制要求发版前更新日志、核对版本归属及 bundled CLI、确认内容进入 release 提交，漏项则停止。此前文档检查通过（任务 `1792214549276-a1b7ai`、`1792214792238-ioc33p`），历史条目未改；此次仅本地提交文档和状态，不重跑产品测试／构建，不升版／推送／打标签／发布。旧 VSIX 的 CHANGELOG 仍停留在 0.1.90，仓库补录不改变已发布资产，需随后续插件包交付。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 

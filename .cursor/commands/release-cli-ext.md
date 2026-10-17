@@ -2,7 +2,7 @@
 name: /release-cli-ext
 id: release-cli-ext
 category: Workflow
-description: 递增 CLI/EXT 版本，推 develop/main/master，先发 CLI 再发 EXT
+description: 递增 CLI/EXT 版本、更新 CHANGELOG，推 develop/main/master，先发 CLI 再发 EXT
 ---
 
 # CLI / EXT 发版
@@ -11,6 +11,8 @@ description: 递增 CLI/EXT 版本，推 develop/main/master，先发 CLI 再发
 
 ```text
 改版本
+  ->
+更新并核对 CHANGELOG
   ->
 提交并推 develop
   ->
@@ -31,6 +33,7 @@ description: 递增 CLI/EXT 版本，推 develop/main/master，先发 CLI 再发
 - 私有 GUI 不独立发布，因此 GUI manifest 和 lockfile 没有 release version。
 - 默认标准发版执行 **CLI + EXT patch +1**，并让新 EXT pin 新 CLI；仍然坚持 **先发布 CLI、资产就绪后再发布 EXT**。
 - `develop -> main`、`develop -> master` 只能 **fast-forward**。
+- 发布新 EXT 前必须更新 `tomcat-vscode-ext/CHANGELOG.md`，并与版本文件进入同一个 release 提交；版本脚本或 tag guard 通过不能替代这项审核。
 - 发现非预期脏文件时先停下来问用户。
 
 ```text
@@ -89,7 +92,9 @@ node scripts/release-version.mjs set \
 
 改变 bundled CLI 会改变 VSIX 内容，因此同一次操作必须提供一个新的 EXT 版本。
 
-## 3. 审核生成结果并做只读检查
+## 3. 审核版本并更新 CHANGELOG
+
+### 3.1 核对版本文件
 
 执行：
 
@@ -99,7 +104,7 @@ git diff -- release-versions.json tomcat/Cargo.toml tomcat/Cargo.lock \
 node scripts/release-version.mjs check
 ```
 
-预期 diff 只能包含三个业务版本及其必要镜像。Cargo.lock 只能改变唯一 `tomcat` 根包版本，EXT lock 只能改变顶层和根包版本；出现依赖变化就停止调查。
+上述版本文件的 diff 只能包含三个业务版本及其必要镜像。Cargo.lock 只能改变唯一 `tomcat` 根包版本，EXT lock 只能改变顶层和根包版本；出现依赖变化就停止调查。
 
 如果维护者选择直接编辑 `release-versions.json`，随后运行：
 
@@ -109,6 +114,27 @@ node scripts/release-version.mjs check
 ```
 
 `sync` 会先验证所有输入、在内存中计算全部目标，再写文件；输入错误时不会写任何目标。修正根清单或坏镜像后重新运行即可，不要用手改多个镜像“恢复”。
+
+### 3.2 更新并审核 CHANGELOG（发布新 EXT 时必做）
+
+在 `tomcat-vscode-ext/CHANGELOG.md` 顶部新增 `## <new_ext_version>`，沿用现有英文条目与版本倒序格式。版本号必须等于 `release-versions.json` 的 `extension.version`，条目中注明的内置 CLI 必须等于 `extension.bundledCli`。
+
+先以**上一个实际发布的 EXT tag**为基线核对提交，再追查相关 diff，不凭记忆拼凑更新内容：
+
+```bash
+git log --oneline ext-v<previous_published_ext_version>..HEAD
+git diff -- tomcat-vscode-ext/CHANGELOG.md
+git diff --check
+```
+
+审核要求：
+
+- 写清用户可感知的新功能、修复、兼容性变化和必要的升级提醒；只有版本或内置 CLI 更新时如实说明，不编造功能，也不留空标题或占位文案。
+- 若先前版本漏写，按各自已发布 tag 的实际内容补齐，不能把后续修复写进旧版本；已有历史条目不随意改写。
+- **新 EXT 条目缺失、版本／CLI pin 不符或内容归属未核对时，停止发版，补齐后再提交。**
+- 只发布 CLI、EXT 版本不变时，不虚构新的 EXT 版本条目。
+
+CHANGELOG 会随 VSIX 打包；只补仓库文件不会自动更新已发布或已安装的插件，所以必须在本轮 release 提交与打 tag 之前完成。
 
 ## 4. 再跑发版 guard
 
@@ -121,7 +147,7 @@ guard 会再次先检查根清单、Cargo/npm 镜像和 bundled CLI pin，再检
 
 ## 5. 提交并推 develop
 
-把所有 release 文件一起提交。
+把版本源、必要镜像、本次 CHANGELOG 和状态文档等 release 文件一起提交。发布新 EXT 时，提交后读取 `git show HEAD:tomcat-vscode-ext/CHANGELOG.md`，确认新版本条目已进入提交，而不只是留在工作区。
 
 推荐 commit message：
 
@@ -208,6 +234,7 @@ gh release view ext-v<new_ext_version> --repo teisun/tomcat-agent --json url,ass
 - CLI 资产列表
 - EXT release URL
 - EXT 资产列表
+- CHANGELOG 更新路径、新版本条目及其已包含在 release 提交中的确认
 
 ## 不要做的事
 
@@ -215,4 +242,5 @@ gh release view ext-v<new_ext_version> --repo teisun/tomcat-agent --json url,ass
 - 不要在 CLI release 资产没出来前先打 EXT tag
 - 不要手改 Cargo/npm 版本镜像；只操作根清单或版本命令
 - 不要漏提交命令生成的 Cargo.lock / package-lock 版本变化
+- 不要先发布再补 CHANGELOG；不要为了补日志移动旧 tag 或覆盖已发布的 VSIX
 - 不要把本地打包成功当成 GitHub release 完成

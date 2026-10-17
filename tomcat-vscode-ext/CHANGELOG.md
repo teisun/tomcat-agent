@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.93
+
+- Bring the default-model and utility-model selectors together at the top of Settings. Fix dropdown-arrow clicks and close the selector on Tab or Shift+Tab without disrupting keyboard navigation.
+- Fix reopening the wrong session after switching back to an already-open conversation and reloading VS Code. Persist the latest explicit session selection for the current agent/project scope; separate windows still share that scope's saved selection.
+- Close the session picker after choosing a session, including the current one, or when focus leaves the chat Webview. Return focus to the trigger after a selection without stealing focus on outside clicks. Keep pinning, list expansion and delete-confirmation operations open for continuous management.
+- Bundle CLI 0.1.77 in platform-specific packages. Pure-extension users need to update their external CLI to receive the session-restore fix.
+
+## 0.1.92
+
+- Organize Settings into provider cards with one card per API key slot. Add **Connect provider**, remote model discovery, per-model protocol selection, and provider-level key replacement and deletion. Select the first configured model as the default only when no default is already set.
+- Add a configurable utility model for session titles, turn titles and command descriptions. Refresh the built-in model catalog while preserving existing user model entries.
+- Simplify model speed choices to Standard and Fast, including Anthropic Fast requests where supported. Read saved Ultrafast preferences as Standard without rewriting the user's files.
+- Start or resume saved plans from an explicit implementation request, with confirmation in PLAN mode. Allow necessary questions during execution and continue the same turn after an answer; preserve the active plan binding while working with other plans.
+- Keep permission-denied writes labelled as failed after history reload. Show older records without a stored outcome neutrally instead of claiming a file was created; this fixes the denied-write presentation issue documented in 0.1.90 for newly recorded results.
+- Give selected question answers a distinct highlight, separate from hover, including high-contrast themes.
+- Keep the session picker open during pin/unpin, list expansion and delete-confirmation operations.
+- Bundle CLI 0.1.76 with a leaner built-in skill payload that excludes development dependencies. Unknown or removed configuration keys now produce a startup warning instead of blocking connection; invalid values for supported keys still fail validation.
+- Publish platform-specific bundles to VS Code Marketplace for macOS Apple Silicon, macOS Intel and Linux x64, while retaining a CLI-free VSIX on GitHub.
+
 ## 0.1.90
 
 - Keep Serve, history and Settings available without model credentials. Guide first-time users in the chat panel and enable sending after configuring a model, without a terminal initialization flow or Serve restart.
