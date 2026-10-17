@@ -2,7 +2,7 @@
 
 本分支的唯一状态表维护在 [tomcat/docs/status/develop.md](../../tomcat/docs/status/develop.md)，与现有状态汇总目录保持一致；元数据、Cov%、DONE、INTERFACE 和 BLOCKED 均以该文件为准，此处不维护副本。
 
-2026-10-17 12:50 +0800，按用户 `/release-cli-ext` 开始标准发版：在 `543a755a` 上统一升级 CLI `0.1.76 → 0.1.77`、EXT `0.1.92 → 0.1.93`，新 EXT pin CLI `0.1.77`。五个版本文件仅改版本及必要镜像，版本一致性与两个 tag guard 已通过；目标标签本地／远端未占用，三个分支具备快进条件。将先推 develop 并 FF 同步 main/master，CLI 三平台资产齐全后才发布 EXT；保留原有 CI 构建、三平台原生安装门禁与已开启的 Marketplace 发布，不额外重跑本地产品测试。发布结果完成后回填唯一状态表，不以本地包或标签推送代称远端发布成功；Cov% 未测量。
+2026-10-17 13:17 +0800，CLI `0.1.77` / EXT `0.1.93` 标准发版完成，新 EXT 内置 CLI `0.1.77`。发布提交 `8f88e8f8725249a9bea7cb653192ba2189bccd84` 已推送 develop/main/master，两个标签均指向它；仅使用快进，先确认 CLI 资产齐全再发布 EXT。CLI 三平台归档、EXT 四份 VSIX 及各自 SHA256SUMS 已公开，7 份下载包校验通过；EXT 三平台冷启动／0.1.90 升级门禁均通过，内置 CLI 与对应归档字节一致，纯包不含 CLI。Marketplace 三平台上传成功，13:16 +0800 公开查询均为已验证的 0.1.93，包哈希与 GitHub 一致。未额外重跑本地产品测试、安装或替换本机 CLI；本次收尾只回填状态，不移动标签、不重建或替换发布包。CI 环境告警与证据边界见唯一状态表及 `.agents/acceptance/release-0.1.77-0.1.93/release.md`；Cov% 未测量。
 
 2026-10-16 21:43 +0800，「三项整改」与供应商分卡改动纳入本次本地提交。三项分别是：内置技能改由构建脚本生成嵌入表，开发机上的 `node_modules` 不再进入二进制，release 体积回到约 16.5MB；复核供应商分卡实现并修 4 处；Agent 提问时选中项改为金色字母块，与悬停明显区分。验收中另发现并修复一处测试竞态：代理用例清空 `NO_PROXY`，导致并发的型号列表单测失败。Rust lib/integration/Clippy/release、扩展 lint 与 GUI/core 单测、提问面板 9 场景视觉脚本均通过。这些是此前验收记录；按用户要求，本次提交不重新运行测试、构建或视觉验收，Cov% 未测量。本次未升版本、未推送或发布；截图未在真实 VS Code 安装包中复拍。详情见唯一状态表与 `.agents/acceptance/remediation-20261016/acceptance.md`。
 
