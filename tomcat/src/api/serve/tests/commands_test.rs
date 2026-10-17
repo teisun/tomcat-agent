@@ -960,6 +960,64 @@ async fn serve_command_routes_by_session_id() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn switch_to_live_session_persists_durable_current() {
+    let _api_key = install_test_api_key();
+    let (state, _buffer, _temp, first_slot) = build_initialized_state_with_streams(vec![]).await;
+    let first = first_slot.session_id.clone();
+    let durable = SessionManager::new_scoped(
+        crate::resolve_sessions_dir(&state.cfg).unwrap(),
+        first_slot.ctx.session_runtime.session.current_session_key(),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::NewSession {
+            id: Some("new-second".to_string()),
+            params: NewSessionParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let second = state.registry.active_session_id().unwrap();
+    assert_ne!(first, second);
+    let second_slot = state.registry.get(&second).expect("second session slot");
+    assert_eq!(durable.current_session_id().unwrap(), Some(second.clone()));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SwitchSession {
+            id: Some("switch-back".to_string()),
+            session_id: first.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(state.registry.active_session_id(), Some(first.clone()));
+    // An unpinned manager reads sessions.json, not a slot's in-memory binding.
+    assert_eq!(durable.current_session_id().unwrap(), Some(first.clone()));
+    assert_eq!(
+        first_slot
+            .ctx
+            .session_runtime
+            .session
+            .current_session_id()
+            .unwrap(),
+        Some(first),
+    );
+    assert_eq!(
+        second_slot
+            .ctx
+            .session_runtime
+            .session
+            .current_session_id()
+            .unwrap(),
+        Some(second),
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn detached_new_session_does_not_change_live_or_durable_current() {
     let _api_key = install_test_api_key();
     let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;

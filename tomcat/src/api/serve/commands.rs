@@ -569,7 +569,15 @@ pub(crate) async fn handle_command(
             }
         }
         ServeCommand::SwitchSession { id, session_id } => {
-            if state.registry.get(&session_id).is_none() {
+            if let Some(slot) = state.registry.get(&session_id) {
+                // Persist the selection without rebinding either live session manager.
+                SessionManager::new_scoped(
+                    crate::resolve_sessions_dir(&state.cfg)?,
+                    slot.ctx.session_runtime.session.current_session_key(),
+                )
+                .switch_current_to_session_id(&session_id)?;
+                state.registry.set_active_session(&session_id)?;
+            } else {
                 match open_existing_session_slot(Arc::clone(&state), &session_id).await {
                     Ok(slot) => {
                         let inserted_session_id = slot.session_id.clone();
@@ -593,12 +601,6 @@ pub(crate) async fn handle_command(
                     }
                     Err(error) => return Err(error),
                 }
-            } else if let Err(error) = state.registry.set_active_session(&session_id) {
-                if is_config_error(&error, "unknown_session") {
-                    send_error(&state, id, Some(session_id), "unknown_session")?;
-                    return Ok(());
-                }
-                return Err(error);
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,

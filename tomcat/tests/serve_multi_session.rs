@@ -56,6 +56,55 @@ fn new_session(child: &mut ServeChild, id: &str) -> String {
 
 #[test]
 #[serial]
+fn serve_switch_live_session_survives_restart() {
+    common::setup_logging();
+    let fx = setup_serve_fixture("http://127.0.0.1:1");
+    let mut child = spawn_serve_child(&fx);
+    let session_a = initialize(&mut child);
+    let session_b = new_session(&mut child, "new-b");
+    assert_ne!(session_a, session_b);
+
+    child.send_value(&json!({
+        "type": "switch_session",
+        "id": "switch-back",
+        "sessionId": session_a,
+    }));
+    let frames = child.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "switch-back");
+    let switched = frames.last().expect("switch response");
+    assert_eq!(switched["success"], true);
+    assert_eq!(switched["payload"]["activeSessionId"], session_a);
+    let exited = child.wait_for_exit(SERVE_TIMEOUT);
+    assert!(exited.status.success(), "serve exit: {exited:?}");
+
+    // Reuse the same HOME and scope, but no in-memory registry survives this restart.
+    let mut restarted = spawn_serve_child(&fx);
+    assert_eq!(initialize(&mut restarted), session_a);
+    restarted.send_value(&json!({
+        "type": "list_sessions",
+        "id": "disk-after-restart",
+        "scope": "disk",
+    }));
+    let frames = restarted.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "disk-after-restart");
+    let listed = frames.last().expect("disk session list response");
+    assert_eq!(listed["success"], true);
+    assert_eq!(listed["payload"]["activeSessionId"], session_a);
+    let sessions = listed["payload"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "restart must not create another session");
+    assert!(sessions
+        .iter()
+        .any(|session| session["sessionId"] == session_b));
+    let current: Vec<_> = sessions
+        .iter()
+        .filter(|session| session["isCurrent"] == true)
+        .map(|session| session["sessionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(current, vec![session_a.as_str()]);
+    let exited = restarted.wait_for_exit(SERVE_TIMEOUT);
+    assert!(exited.status.success(), "restarted serve exit: {exited:?}");
+}
+
+#[test]
+#[serial]
 fn serve_multi_session_concurrency_and_isolation() {
     common::setup_logging();
     let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
