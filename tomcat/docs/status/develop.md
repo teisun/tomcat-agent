@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-17 13:17 +0800 | DONE | develop | — |
+| Nibbles | 2026-10-18 10:40 +0800 | ACTIVE | develop | — |
+
+### CURRENT INTEGRATION：Windows 平台适配 + 发版演练（2026-10-18）
+
+- **范围**：按 `windows_平台适配_d3cab8bc` 实施 win32-x64 插件与终端 CLI 一等交付，提交 `80e7cc18`；明细、根因与证据只维护在 [feature-windows-support.md](feature-windows-support.md)。
+- **版本**：版本脚本统一递增 CLI `0.1.77 → 0.1.78`、EXT `0.1.93 → 0.1.94`，新 EXT pin CLI `0.1.78`；版本一致性检查通过。
+- **本轮边界**：只推送 develop 与 `dry-run-cli-v0.1.78`、`dry-run-ext-v0.1.94` 两个演练标签；工作流的发布步骤只对正式 `cli-v*`/`ext-v*` 标签放行，演练不创建 GitHub Release、不上传 Marketplace/OpenVSX。正式发版需用户另行确认。
+- **验证**：本机 Windows（Git Bash）gate-fast 全绿，插件 lint 与集成测试 225 项通过；演练结果完成后回填，不以标签推送代称演练通过。Cov% 未测量。
 
 ### CURRENT RELEASE：CLI 0.1.77 / EXT 0.1.93
 
