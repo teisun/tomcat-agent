@@ -299,7 +299,8 @@
   - 仓库根 `~/.tomcat/agents/<id>/checkpoints/<sha256(workdir)[:16]>/`；`HERMES_WORKDIR` 文件改名为 `TOMCAT_WORKDIR`，记录原始 `agent_workspace_dir`，便于 orphan GC。
   - `git_env` 显式 `GIT_CONFIG_GLOBAL=/dev/null` / `GIT_CONFIG_SYSTEM=/dev/null` / `GIT_CONFIG_NOSYSTEM=1`；`commit.gpgsign=false`、`tag.gpgSign=false` 写入仓库本地配置——避免 GPG pinentry 弹窗（hermes 实战教训）。
   - 每个 git 子进程的 `stdout` 与 `stderr` 都要从 `spawn` 后立即并发排空；**禁止**先等待子进程退出、再读 pipe（大 `ls-files` 输出会写满 OS pipe，父子进程互等）。超时或 `kill` 后也必须先等待两个 reader 收到 EOF，再汇总为 `Output`。**推翻条件**：若 `CheckpointStore` 整体改为 async，则改用 `tokio::process::Child::wait_with_output` + `tokio::time::timeout`，删掉线程 reader。
-  - 影子仓初始化时启用 `core.untrackedCache=true`、`feature.manyFiles=true`、`index.version=4`、`index.threads=true`，降低整工作树的 `ls-files` / `status` / `add` 成本。
+  - 每条影子仓 git 命令都以 `-c` 带上 `core.untrackedCache=true`、`feature.manyFiles=true`、`index.version=4`、`index.threads=true`，降低整工作树的 `ls-files` / `status` / `add` 成本；不写入仓库配置，省掉每个进程首次存档时的 4 次 `git config`。
+  - 等待 git 退出时每 10ms 查询一次：Windows 上单条 git 约 30ms，原来的 25ms 间隔会让每条命令白等十几毫秒，一次存档十几条命令累计可达数百毫秒。
   - 子进程超时：**代码常量**（默认 **30 s**，**无**用户配置项；与 hermes 同量级兜底）。
 - **`NoopStore`**：`record` 直接返回 `Ok(CheckpointId::null())`、`list` 返回空向量；**仅当** `git --version` 探测失败（且后台安装尚未成功）时使用。**拟定**：`PR-CKF` 落地后，若后台安装成功，运行期可切换为 `ShadowGitStore`（见 [§2.2.2](#222-chat-入口-git-预检与后台安装拟定)）。
 

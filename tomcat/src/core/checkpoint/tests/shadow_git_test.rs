@@ -278,7 +278,7 @@ fn new_canonicalizes_existing_worktree_path() {
 }
 
 #[test]
-fn initialized_shadow_repo_enables_large_worktree_git_options() {
+fn shadow_git_commands_enable_large_worktree_git_options() {
     if !git_available() {
         return;
     }
@@ -301,7 +301,7 @@ fn initialized_shadow_repo_enables_large_worktree_git_options() {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             expected,
-            "shadow git must configure {key} for large worktrees"
+            "shadow git commands must carry {key} for large worktrees"
         );
     }
 }

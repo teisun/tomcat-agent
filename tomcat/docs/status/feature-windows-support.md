@@ -314,7 +314,8 @@ infra/platform ──── 唯一平台差异层：每个接口内部 Unix 实�
   - 根因：编辑历史消息要先停掉当前任务，再等它的检查点（影子 git）写完，两步合计只有 3 秒（`api/serve/mod.rs::cancel_and_wait`，`SESSION_SHUTDOWN_TIMEOUT`）。超时就返回 `stop_timeout`，文件和历史都不动，插件提示"停止当前任务超时，尚未重发；请等任务结束后再试"。
   - 证据：本机这一步约 1.1 秒，连跑 9 次全过；runner 上整个用例慢约 1.6 倍（13.6s 对 8.6s），已贴近上限。本机开 12 个满载进程压 CPU 后 3/3 复现，serve 日志为 `checkpoint writes did not finish before timeout`。
   - 与本次整改无关：这条路径上的改动只是搬家（`shadow_git` 改用 `LEGACY_MAX_PATH`/`NULL_DEVICE` 常量，`file_baselines` 改用字段相同的 `PermissionSnapshot`），Windows 行为不变。
-  - 未改：任务进行中那一轮的检查点由停止动作本身触发，测试没法事先等它写完；放宽预算或加快检查点写入属于产品决策，见 BLOCKED。
+  - 任务进行中那一轮的检查点由停止动作本身触发，测试没法事先等它写完，所以不改测试；用户确认后加快了检查点写入，见下方「检查点存档慢」。
+  - 只改文档的 `50de1050` 上重跑（ci run `39126796027`）：三平台与插件全绿。
 - **本机 Windows gate-fast**（Git Bash，`CARGO_BUILD_JOBS=4`）：lib 3335 项通过（5 ignored）、doctest、integration 并行组 365 项与串行组 49 项全部通过；严格 Clippy 首轮报出两处新测试代码的 lint（`fs_test` 的 `set_readonly(false)`、`paths_test` 的 `MAIN_SEPARATOR_STR`），修复后 `cargo clippy --all-targets -- -D warnings` 通过，相关用例重跑通过。
 - **Windows 上的新坑**：`OpenOptions::append(true)` 得到的是只追加句柄（没有 `FILE_WRITE_DATA`），Git Bash/MSYS 程序往这种句柄写会直接以 1 退出。`spawn_detached` 改为普通写句柄并定位到文件末尾（`platform/process.rs`），由 `process_test::spawn_detached_returns_at_once_and_appends_output_to_the_log` 覆盖。
 - **Windows 手动回归**（含本次全部改动的 release `tomcat.exe`；验收方式 B/C 同上方「验收证据」，截图只在本机）：
@@ -334,10 +335,37 @@ infra/platform ──── 唯一平台差异层：每个接口内部 Unix 实�
   - 复测时有一次下载失败（winget `0x80072efd`）：当时系统代理开关是关的，直连 GitHub 下载超时，经本机代理 1.7 秒完成，属网络环境问题。失败只写进日志，下次启动 chat 会再试（没有冷却期）。
   - winget 对已安装的包返回 0，所以 Windows 安装命令 `winget install rg && winget install fd` 在"已有 rg、只缺 fd"时仍会继续装 fd。
 
+#### 检查点存档慢，编辑历史消息偶尔超时（产品性能缺陷）
+
+- **问题现象**：慢一些的 Windows 机器上，任务进行中编辑历史消息并重发，偶尔返回 `stop_timeout`（插件提示"停止当前任务超时，尚未重发；请等任务结束后再试"）；CI runner 上出现过一次（见上方 ci run `39124325898`）。
+- **根因与证据**：编辑历史消息要等检查点（影子 git）写完，停止任务加写检查点共 3 秒。
+  ```text
+  一次检查点 = 先后起十几个 git 进程（新影子仓：init + 10 条 config + 存档 8 条 = 19 个）
+    ├─ Windows 上每个 git 进程本身约 30ms（Mac/Linux 几毫秒）
+    └─ 每 25ms 才查一次 git 是否退出 → 33ms 结束的命令到 50ms 才发现
+  本机实测每条约 55ms，一次检查点约 1.1 秒
+  ```
+  - 4 条性能设置（`core.untrackedCache` 等）每个进程首次存档都会再用 `git config` 写一遍，哪怕仓库里早已写过。
+  - 临时加计时（未提交）实测：只把查询间隔改为最多 5ms，一次检查点 1.1 秒降到 0.8 秒。
+- **解决方案** <sub>`core/checkpoint/shadow_git.rs`；存档结果不变；3 秒上限（`SESSION_SHUTDOWN_TIMEOUT`）不变</sub>：
+  - 查询 git 是否退出的间隔从 25ms 改为 10ms <sub>`GIT_POLL_INTERVAL`；30 秒超时、kill、并发读输出不变；不改用"阻塞等待 + 超时"：std 没有带超时的 wait，需新增依赖或平台代码</sub>
+  - 4 条性能设置改为每条命令以 `-c` 传入（与 `core.longpaths` 同一做法），删除 `ensure_performance_config` 与 `performance_configured` <sub>`LARGE_WORKTREE_OPTIONS`；老影子仓里已写入的配置保留无害</sub>
+  - 不动：`commit.gpgsign`/`tag.gpgsign` 两条（文档记录的防 GPG 弹窗措施，仅建仓时跑一次）；"先 `status` 再 `add`"（去掉后不改文件的纯聊天轮次反而多一条命令）。
+- **效果**（本机，临时计时）：
+
+  | 场景 | git 进程数 | 一次检查点 |
+  | :--- | :--- | :--- |
+  | 新影子仓首次存档（即该测试） | 19 → 15 | 1.1 秒 → 约 0.7 秒（0.63–0.82） |
+  | 12 个满载进程压满 CPU | 同上 | 5.1–9.9 秒 → 3.7–4.1 秒 |
+
+  - 进程启动后的首次存档少 4 个 git 进程；之后每次存档的进程数不变，只省等待时间。
+  - 压满 CPU 时改前改后都超过 3 秒，测试仍返回 `stop_timeout`：这是极端负载，不承诺能过。
+- **测试用例清单**：`checkpoint` 单元测试 70 项全部通过（存档/列出、同轮去重、无改动复用、空项目首个存档、并发、文件数上限、忽略文件、大输出不卡死、冷却期）；`shadow_git_test.rs::shadow_git_commands_enable_large_worktree_git_options`（原 `initialized_shadow_repo_enables_large_worktree_git_options`，改名以对应新契约：影子仓 git 命令都带这 4 项设置）；回归 `tests/serve_rewind_and_resend.rs`。
+
 ### BLOCKED (当前风险)
 
 - 两个 dry-run 打在 `afbec1ff` 上，之后的修复提交没有重跑 dry-run；正式发版时 release 工作流会在新提交上重新构建并验收。
 - 两个 dry-run 的产物与证据 zip 需登录下载，本机未复核；同样的检查已在本机真实 VS Code 上跑过。
 - 场景 13（从商店安装）只能在正式发布后执行；正式发布需用户确认。
-- 慢的 Windows 机器上，任务进行中编辑历史消息可能先返回一次 `stop_timeout`（停止任务加检查点写入共 3 秒预算），重试即可；CI runner 上出现过一次（run `39124325898`）。是否放宽预算或加快检查点写入，待用户决定。
+- 任务进行中编辑历史消息：停止任务加写检查点共 3 秒。检查点已提速（见「检查点存档慢」），但机器极忙或项目极大时仍可能先返回一次 `stop_timeout`，重试即可；3 秒上限未改。
 - 观察（非本轮改动）：跑 lib 测试期间真实 `~/.tomcat/plans` 的修改时间变了（目录为空），疑似既有测试隔离不严，本轮未处理。
