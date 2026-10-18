@@ -844,8 +844,9 @@ fn preload_runtime_env_rejects_invalid_env_file() {
     let error = preload_runtime_env(&cfg).expect_err("broken runtime env must fail");
     assert!(matches!(error, AppError::Config(_)));
     let message = error.to_string();
+    let shown = crate::infra::platform::canonicalize(&env_path).unwrap();
     assert!(
-        message.contains(env_path.to_string_lossy().as_ref()),
+        message.contains(shown.to_string_lossy().as_ref()),
         "{message}"
     );
     assert!(

@@ -869,9 +869,8 @@ fn set_provider_key_rejects_invalid_env_file() {
     )
     .expect_err("broken env file must fail");
     assert!(matches!(error, crate::AppError::Config(_)));
-    assert!(error
-        .to_string()
-        .contains(env_path.to_string_lossy().as_ref()));
+    let shown = crate::infra::platform::canonicalize(&env_path).unwrap();
+    assert!(error.to_string().contains(shown.to_string_lossy().as_ref()));
     assert_eq!(std::fs::read_to_string(&env_path).unwrap(), invalid_env);
 }
 

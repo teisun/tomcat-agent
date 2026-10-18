@@ -829,9 +829,8 @@ async fn package_install_requires_ordinary_source_read_authorization() {
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::Permission(_)));
-    assert!(error
-        .to_string()
-        .contains(source.to_string_lossy().as_ref()));
+    let shown = crate::infra::platform::canonicalize(&source).unwrap();
+    assert!(error.to_string().contains(shown.to_string_lossy().as_ref()));
     assert!(!dir
         .path()
         .join("agents/main/skills/source-needs-read")

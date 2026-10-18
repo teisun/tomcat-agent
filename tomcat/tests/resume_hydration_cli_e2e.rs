@@ -35,8 +35,8 @@ struct Fixture {
 
 fn setup_fixture() -> Fixture {
     let home = tempfile::tempdir().unwrap();
-    let home_path = home.path().to_path_buf();
-    let workdir = home.path().join("workspace");
+    let home_path = tomcat::infra::canonicalize(home.path()).unwrap();
+    let workdir = home_path.join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
 
     cmd()

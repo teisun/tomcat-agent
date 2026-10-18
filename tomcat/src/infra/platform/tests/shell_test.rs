@@ -56,7 +56,10 @@ fn derived_bash_path_is_displayed_with_native_separators() {
         std::slice::from_ref(&bash),
     )
     .unwrap();
-    assert_eq!(found.display().to_string(), r"C:\Program Files\Git\bin\bash.exe");
+    assert_eq!(
+        found.display().to_string(),
+        r"C:\Program Files\Git\bin\bash.exe"
+    );
 }
 
 #[test]

@@ -67,9 +67,11 @@ jobs:
       - name: Annotate failures
         if: failure()
         run: |
-          failures=$(sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/gate-fast.log" \
-            | grep -E '^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$' \
-            | awk '!seen[$0]++' | head -n 80)
+          failures=$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$RUNNER_TEMP/gate-fast.log" \
+            | awk '/panicked at/ { print; for (i = 0; i < 4 && (getline line) > 0; i++) print line; next }
+                   /^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$|^ *(left|right): /' \
+            | awk '!seen[$0]++' | cut -c1-600 | head -n 200)
+          failures=${failures//'%'/%25}
           echo "::error title=gate-fast failures::${failures//$'\n'/%0A}"
 
   extension:

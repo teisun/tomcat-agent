@@ -912,7 +912,8 @@ fn serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client() 
     std::fs::write(&config, toml::to_string_pretty(&cfg).unwrap()).unwrap();
     let pid_file = fx.home_path.join("mcp.pid");
     let launcher = fx.home_path.join("lingering-mcp.cmd");
-    let script = common::serve::fixture_path(&["tests", "fixtures", "mcp", "fake_stdio_server.mjs"]);
+    let script =
+        common::serve::fixture_path(&["tests", "fixtures", "mcp", "fake_stdio_server.mjs"]);
     // cmd.exe decodes batch text with the OEM code page: keep non-ASCII paths out of the file.
     std::fs::write(
         &launcher,
@@ -927,7 +928,9 @@ fn serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client() 
     .unwrap();
 
     let mut child = spawn_serve_child(&fx);
-    child.send_value(&json!({"type":"control_request","requestId":"init-1","subtype":"initialize","payload":{}}));
+    child.send_value(
+        &json!({"type":"control_request","requestId":"init-1","subtype":"initialize","payload":{}}),
+    );
     let _ = child.recv_until(SERVE_TIMEOUT, |value| value["requestId"] == "init-1");
     let deadline = std::time::Instant::now() + SERVE_TIMEOUT;
     loop {
@@ -936,7 +939,10 @@ fn serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client() 
         if frames.last().unwrap()["payload"]["connectors"][0]["state"] == "connected" {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "connector startup: {frames:?}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "connector startup: {frames:?}"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     let pid = std::fs::read_to_string(&pid_file).unwrap();

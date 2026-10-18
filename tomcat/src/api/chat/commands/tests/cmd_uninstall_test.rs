@@ -151,12 +151,13 @@ async fn cmd_uninstall_missing_and_manual_plugin_fail_without_changing_resources
                 ),
             ]
         )));
+        let workspace = crate::infra::platform::canonicalize(fixture.workspace.path()).unwrap();
         for kind in ["plugins", "skills"] {
             assert!(
                 reply
                     .text
                     .contains(&crate::infra::platform::format_home_path(
-                        &fixture.workspace.path().join(".agents").join(kind)
+                        &workspace.join(".agents").join(kind)
                     )),
                 "reply must name the workspace {kind} directory: {}",
                 reply.text

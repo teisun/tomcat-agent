@@ -974,11 +974,12 @@ fn from_config_prefers_session_cwd_when_reopening_existing_session() {
         work_dir.path(),
         &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
     );
+    // Windows 的 current_dir 原样返回设置时的写法（8.3 短名、junction），不像 Unix 那样解析成真实路径。
     let expected_a = crate::infra::platform::canonicalize(project_a.path())
         .expect("canonicalize project_a path");
 
     {
-        let _cwd_guard = CurrentDirGuard::set(project_a.path());
+        let _cwd_guard = CurrentDirGuard::set(&expected_a);
         let ctx = ChatContext::from_config(cfg.clone()).expect("ctx from project a");
         assert_eq!(
             ctx.scope_services.agent_workspace_dir, expected_a,

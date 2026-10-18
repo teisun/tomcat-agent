@@ -3382,7 +3382,10 @@ fn bash_processes_do_not_keep_a_piped_cli_or_its_pipes_alive() {
         .recv_timeout(eof)
         .expect("a process detached by bash must not hold the exited CLI's stderr");
     assert!(status.success(), "stdout={stdout}\nstderr={stderr}");
-    assert!(stdout.contains("FIRST_DONE"), "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stdout.contains("FIRST_DONE"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
     let requests = common::serve::captured_non_title_requests(&server);
     assert!(
         requests
