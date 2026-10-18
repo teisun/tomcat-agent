@@ -12,7 +12,7 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
   ├─ CI / 发布 ........... 两个 dry-run 成功；windows-ci 全绿（`bb8c618f`，run 39097819025）（§11、§12）
   ├─ 验收 ................ 场景 1-12、14 通过或由自动化覆盖；场景 13 待正式发布（§13）
   ├─ 验收与 CI 中发现的问题 3 + 3 个已修复，见下方两节
-  └─ 平台层收口 .......... 业务层平台 cfg 清零 + 守护测试 + CI 三平台矩阵，见下方「平台层收口」
+  └─ 平台层收口 .......... 完成：业务层平台 cfg 清零 + 守护测试 + CI 三平台矩阵 + Windows 手动回归，见下方「平台层收口」
 ```
 
 - **已完成**：Git Bash 作为 bash 工具；路径身份（dunce、大小写、`~\`）；权限规则与危险命令；安装包安全快照；外部程序查找（PATHEXT、npx.cmd、MCP 环境白名单）；CRLF 计划文件、`.env`/OAuth 私有权限、shadow-git 长路径；可取消的控制台/管道输入与 ConPTY 端到端测试；`tomcat init` 写用户 PATH 与副本刷新；控制台 VT 颜色；插件 `windowsHide` 与 `@` 目录 Uri。
@@ -167,7 +167,7 @@ windows-ci.yml（新增）              release-cli.yml                    relea
 - **锁冲突判断**：Windows 上 fs2 的锁冲突返回 `ERROR_LOCK_VIOLATION`(33)，不是 `WouldBlock`。新增 `platform::is_lock_contended`，用于配置锁、MCP 配置锁、会话占用锁、模型管理锁四处；基线里 MCP 并发添加的失败由此修复。计划未列出此项。
 - **私有权限**：起初沿用 icacls（`/inheritance:r /grant:r USERDOMAIN\USERNAME:F`），CI 暴露它只去掉继承权限、不动显式授权（见下方"CI 上才失败的用例"），已改为 Win32 API 整体替换 DACL（`infra/platform/private_acl.rs`）。i18n 键从 `oauth.acl*` 改为通用的 `platform.privateAclFailed`，`.env` 头注释改为"仅当前用户可读写"。测试用 `icacls /save`（UTF-16 SDDL，避开 OEM 代码页乱码）比对 `whoami /user` 的 SID。
 - **ConPTY 测试**：除计划中的 Ctrl+C 与中文答案外，还要回复终端的光标位置查询（`ESC[6n`）并回答项目信任提示 `[y/N]`，否则 chat 卡在启动阶段。已用旧的 std `read_line` 反向验证：测试会在第二轮输入处失败。
-- **stdin 的 Unix 分支**：原样搬入 `infra/platform/stdin.rs`，但本机无法编译 Unix 代码，依赖 CI 的 macOS/Linux 任务验证。
+- **stdin 的 Unix 分支**：原样搬入 `infra/platform/stdin.rs`，本机无法编译 Unix 代码；平台层收口后由 CI 的 Ubuntu/macOS 任务编译并跑门禁（ci run `39124325898` 通过）。
 - **VT 开启位置**：计划写在 `main.rs`，实际放在 `run_cli()` 开头。`main.rs` 是独立的二进制 crate，访问不到 `pub(crate)` 的 platform 模块；为此把 platform 改成公开 API 不值得。效果相同（`main` 的第一件事就是调用 `run_cli`）。
 - **副本刷新测试位置**：计划写在 `run_basic_test.rs`。内容不同/相同、清理 `*.old` 三项在该文件；"旧副本正在运行时仍可替换"需要真实的 tomcat.exe，单测拿不到二进制，因此放在 `tests/cli_tests.rs`（`test_init_replaces_a_running_windows_command_copy`）。
 - **临时注册表键**：测试用 `HKCU\Software\TomcatTest-<uuid>`，而不是 `Software\TomcatTest\<uuid>`，删除后不会留下空的父键。
@@ -310,13 +310,34 @@ infra/platform ──── 唯一平台差异层：每个接口内部 Unix 实�
 - **Unix 基线**（矩阵先单独推送，`3f806987`，ci run `39119964917`）：macOS、Windows、插件全绿；Ubuntu 只有 `project_trust_cli_tests` 两项失败。根因：测试在 CLI 还没进入 rustyline 原始模式时就发 Ctrl+D，Linux 终端处于行模式，EOF 被终端驱动吞掉、CLI 收不到。修复：先等到 `]> ` 提示符再发（`0833f055`，只改测试）。
 - **守护测试的自测**：同一文件内喂样例行，确认"该报的报、该放的放"（含跨行的 `cfg(any(...))`、测试门控、注释、`std::os::raw`）；另在 `src` 下放一个含 `#[cfg(windows)]` 的临时文件，测试按预期报出 `zz_boundary_probe.rs:2`，删除后恢复通过。
 - **CI 上的偶发失败**（`0833f055`，ci run `39121643637`，Windows）：`connector_mcp_tests` 两项报"deferred MCP tool did not become available"，用时约 1.8 秒。根因：等待 MCP 工具出现的预算只有 50×20ms≈1 秒，其中还包括启动 node 假服务器；runner 上 4 并发时 node 启动会超过 1 秒（同一份代码上一轮通过，本机这两项各约 10 秒、全部通过）。修复：改为最长 10 秒的截止时间，条件满足立即返回（`tests/connector_mcp_tests.rs::wait_for_deferred_tool`，只改测试）。
+- **整改提交的三平台 CI**（`2b937138`，ci run `39124325898`）：Ubuntu、macOS、插件全绿，这是整改代码第一次在 Unix 上完整编译并跑门禁。Windows 只有串行组 `serve_rewind_and_resend::rewind_and_resend_real_files_payload_and_restart` 一项失败，失败的是"任务进行中编辑历史消息"那一轮，回复不是 success。
+  - 根因：编辑历史消息要先停掉当前任务，再等它的检查点（影子 git）写完，两步合计只有 3 秒（`api/serve/mod.rs::cancel_and_wait`，`SESSION_SHUTDOWN_TIMEOUT`）。超时就返回 `stop_timeout`，文件和历史都不动，插件提示"停止当前任务超时，尚未重发；请等任务结束后再试"。
+  - 证据：本机这一步约 1.1 秒，连跑 9 次全过；runner 上整个用例慢约 1.6 倍（13.6s 对 8.6s），已贴近上限。本机开 12 个满载进程压 CPU 后 3/3 复现，serve 日志为 `checkpoint writes did not finish before timeout`。
+  - 与本次整改无关：这条路径上的改动只是搬家（`shadow_git` 改用 `LEGACY_MAX_PATH`/`NULL_DEVICE` 常量，`file_baselines` 改用字段相同的 `PermissionSnapshot`），Windows 行为不变。
+  - 未改：任务进行中那一轮的检查点由停止动作本身触发，测试没法事先等它写完；放宽预算或加快检查点写入属于产品决策，见 BLOCKED。
 - **本机 Windows gate-fast**（Git Bash，`CARGO_BUILD_JOBS=4`）：lib 3335 项通过（5 ignored）、doctest、integration 并行组 365 项与串行组 49 项全部通过；严格 Clippy 首轮报出两处新测试代码的 lint（`fs_test` 的 `set_readonly(false)`、`paths_test` 的 `MAIN_SEPARATOR_STR`），修复后 `cargo clippy --all-targets -- -D warnings` 通过，相关用例重跑通过。
 - **Windows 上的新坑**：`OpenOptions::append(true)` 得到的是只追加句柄（没有 `FILE_WRITE_DATA`），Git Bash/MSYS 程序往这种句柄写会直接以 1 退出。`spawn_detached` 改为普通写句柄并定位到文件末尾（`platform/process.rs`），由 `process_test::spawn_detached_returns_at_once_and_appends_output_to_the_log` 覆盖。
+- **Windows 手动回归**（含本次全部改动的 release `tomcat.exe`；验收方式 B/C 同上方「验收证据」，截图只在本机）：
+
+| 场景 | 结果 | 证据 |
+| :--- | :--- | :--- |
+| 6 `package_install` 装 skill | 通过 | B：从中文路径的本地目录安装，只弹一次写入确认，`SKILL.md` 落到 agent 技能目录，工具结果为 installed（上一轮只有自动化覆盖） |
+| 7 Stop 后整棵进程树消失 | 通过 | B：前台 interrupt、后台 `task_stop` 后 sleep 与 bash 全部消失；Serve 关闭 7ms；窗口监视器未发现新窗口 |
+| 8 init → 新终端 → chat | 通过 | C：真实用户目录 `init`，配置内容不变，副本与 release 一致，用户 PATH 含 `.local\bin`，提示合并为"已把 … 加入用户 PATH / 请打开新的终端窗口后再运行 tomcat"；doctor 显示 Git Bash 行；新终端 `tomcat code` 正常进入对话（`platform-new-terminal-tomcat-code.png`）；Ctrl+C 由 `windows_conpty_cli_tests` 覆盖（本机 gate 通过） |
+| 12 Playwright MCP | 通过 | B：连上后 24 个工具，navigate 与截图成功；Serve 关闭 520ms；之后只剩探针启动前就在的 4 个 Cursor 自带 Playwright 进程 |
+| 预检后台安装（计划 7.4） | 通过 | 见下 |
+
+- **预检后台安装**：
+  - 新开终端运行 `tomcat chat`（rg、fd 都不在 PATH；为显示提示设 `TOMCAT__PREFLIGHT__SHOW_SEARCH_TOOLS_UI=true`）：依次提示"工具缺失，正在尝试后台安装""安装已在后台继续，退出 chat 不影响；安装完成后请重新打开终端"、日志路径、`Get-Content -Wait <日志>`（`preflight-before-terminal-full.png`）。
+  - 约 10 秒后关闭终端窗口（WM_CLOSE，等同点 ✕）：tomcat 退出，安装用的 cmd 与 winget 继续运行，日志在关闭后继续增长，约 40 秒后 rg 15.2.0、fd 10.5.0 均"已成功安装"。窗口监视器只记录到终端本身的窗口，安装开始后没有新窗口，即后台安装不弹控制台。
+  - 再开新终端：`rg`、`fd` 可用，`tomcat chat` 不再触发安装、不生成新日志（`preflight-after-terminal.png`）。
+  - 复测时有一次下载失败（winget `0x80072efd`）：当时系统代理开关是关的，直连 GitHub 下载超时，经本机代理 1.7 秒完成，属网络环境问题。失败只写进日志，下次启动 chat 会再试（没有冷却期）。
+  - winget 对已安装的包返回 0，所以 Windows 安装命令 `winget install rg && winget install fd` 在"已有 rg、只缺 fd"时仍会继续装 fd。
 
 ### BLOCKED (当前风险)
 
 - 两个 dry-run 打在 `afbec1ff` 上，之后的修复提交没有重跑 dry-run；正式发版时 release 工作流会在新提交上重新构建并验收。
 - 两个 dry-run 的产物与证据 zip 需登录下载，本机未复核；同样的检查已在本机真实 VS Code 上跑过。
-- stdin 的 Unix 分支与 serve 的 Unix 读取路径未在本机编译，依赖 macOS/Linux CI。
 - 场景 13（从商店安装）只能在正式发布后执行；正式发布需用户确认。
+- 慢的 Windows 机器上，任务进行中编辑历史消息可能先返回一次 `stop_timeout`（停止任务加检查点写入共 3 秒预算），重试即可；CI runner 上出现过一次（run `39124325898`）。是否放宽预算或加快检查点写入，待用户决定。
 - 观察（非本轮改动）：跑 lib 测试期间真实 `~/.tomcat/plans` 的修改时间变了（目录为空），疑似既有测试隔离不严，本轮未处理。
