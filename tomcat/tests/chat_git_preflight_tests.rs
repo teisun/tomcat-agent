@@ -130,9 +130,17 @@ fn write_fake_shell_script(bin_dir: &Path, name: &str, body: &str) -> PathBuf {
     script
 }
 
+/// The package manager the preflight picks on this OS when it is the only one on PATH.
 #[cfg(unix)]
-fn write_fake_brew_script(bin_dir: &Path, body: &str) -> PathBuf {
-    write_fake_shell_script(bin_dir, "brew", body)
+const FAKE_PACKAGE_MANAGER: &str = if cfg!(target_os = "macos") {
+    "brew"
+} else {
+    "apt-get"
+};
+
+#[cfg(unix)]
+fn write_fake_package_manager(bin_dir: &Path, body: &str) -> PathBuf {
+    write_fake_shell_script(bin_dir, FAKE_PACKAGE_MANAGER, body)
 }
 
 #[cfg(unix)]
@@ -152,7 +160,7 @@ fn git_preflight_detached_spawn_does_not_block() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = home.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let _brew = write_fake_brew_script(&bin_dir, "/bin/sleep 2\nexit 0");
+    let _manager = write_fake_package_manager(&bin_dir, "/bin/sleep 2\nexit 0");
     let _nohup = write_fake_nohup_script(&bin_dir);
     let (_root, worktree, trail) = worktree_fixture();
     let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
@@ -219,7 +227,7 @@ fn git_preflight_install_enables_shadow_on_next_checkpoint() {
     fs::create_dir_all(&bin_dir).unwrap();
     let git_link = bin_dir.join("git");
     let script_body = "/bin/sleep 2\nexit 0";
-    let _brew = write_fake_brew_script(&bin_dir, script_body);
+    let _manager = write_fake_package_manager(&bin_dir, script_body);
     let _nohup = write_fake_nohup_script(&bin_dir);
     let (_root, worktree, trail) = worktree_fixture();
     let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());

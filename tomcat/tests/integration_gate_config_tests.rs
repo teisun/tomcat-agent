@@ -180,7 +180,13 @@ fn missing_live_credentials_is_not_a_successful_skip() {
         } else {
             target
         };
-        let output = std::process::Command::new(tomcat::infra::posix_shell().unwrap())
+        // The gate script is bash; Unix `sh` may be dash, and on Windows the only bash we
+        // may launch is Git Bash (System32\bash.exe is WSL).
+        #[cfg(unix)]
+        let bash = PathBuf::from("bash");
+        #[cfg(windows)]
+        let bash = tomcat::infra::posix_shell().unwrap();
+        let output = std::process::Command::new(bash)
             .arg(repo_root().join("scripts/run-integration-tests.sh"))
             .arg("integration-openai-responses-wire")
             .env("TOMCAT_E2E_OPENAI_TARGET", target)

@@ -178,18 +178,17 @@ fn reap_configured_idle_noops_when_ttl_zero() {
 fn touch_refreshes_idle_deadline() {
     let mgr = PluginRuntimeManager::new();
     let key = PluginRuntimeKey::new("session-touch", "plugin-touch");
-    let ttl = Duration::from_millis(40);
+    // Shared CI runners can stall a thread for tens of milliseconds: keep every
+    // margin far larger than that so this stays a semantic check, not a timing race.
+    let ttl = Duration::from_millis(300);
     mgr.insert(key.clone(), make_stub_handle());
 
-    // Leave enough margin on both sides of the touch so scheduler jitter does not
-    // turn this into a flaky boundary-timing assertion.
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(Duration::from_millis(400));
     assert!(
         mgr.touch(&key),
         "touch should succeed for registered runtime"
     );
 
-    std::thread::sleep(Duration::from_millis(5));
     let reaped = mgr.reap_idle(ttl);
     assert!(
         reaped.is_empty(),
@@ -200,7 +199,7 @@ fn touch_refreshes_idle_deadline() {
         "runtime should remain after a fresh touch"
     );
 
-    std::thread::sleep(Duration::from_millis(45));
+    std::thread::sleep(Duration::from_millis(400));
     let reaped = mgr.reap_idle(ttl);
     assert_eq!(
         reaped.len(),

@@ -84,9 +84,16 @@ jobs:
           failures=$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$RUNNER_TEMP/gate-fast.log" \
             | awk '/panicked at/ { print; for (i = 0; i < 4 && (getline line) > 0; i++) print line; next }
                    /^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$|^ *(left|right): /' \
-            | awk '!seen[$0]++' | cut -c1-600 | head -n 200)
-          failures=${failures//'%'/%25}
-          echo "::error title=gate-fast failures (${{ matrix.os }})::${failures//$'\n'/%0A}"
+            | awk '!seen[$0]++' | cut -c1-600 | head -n 400)
+          # GitHub truncates each annotation to about 4 KB: emit consecutive parts instead.
+          part=0
+          while [ -n "$failures" ] && [ "$part" -lt 9 ]; do
+            chunk=$(printf '%s\n' "$failures" | awk '{ n += length($0) + 1; if (n > 3500 && NR > 1) exit; print }')
+            failures=$(printf '%s\n' "$failures" | tail -n +"$(( $(printf '%s\n' "$chunk" | wc -l) + 1 ))")
+            part=$((part + 1))
+            chunk=${chunk//'%'/%25}
+            echo "::error title=gate-fast failures (${{ matrix.os }}) part ${part}::${chunk//$'\n'/%0A}"
+          done
 
   extension:
     name: extension gate:fast (windows)
