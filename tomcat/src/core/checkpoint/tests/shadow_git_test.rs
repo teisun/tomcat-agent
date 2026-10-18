@@ -272,7 +272,7 @@ fn new_canonicalizes_existing_worktree_path() {
     let store = ShadowGitStore::new(root.path().join("trail"), worktree.clone());
     assert_eq!(
         store.work_tree,
-        fs::canonicalize(worktree).unwrap(),
+        crate::infra::platform::canonicalize(worktree).unwrap(),
         "已存在目录应规范化，避免同一路径别名落到不同 checkpoint 仓"
     );
 }
@@ -656,4 +656,61 @@ exec git "$@"
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
     script
+}
+
+/// 用户全局 git 配置开了 autocrlf 时（用 `GIT_CONFIG_GLOBAL` 模拟），超过 260
+/// 字符的路径仍能做检查点，恢复后 CRLF/LF 文件字节不变。
+#[cfg(windows)]
+#[test]
+fn windows_long_paths_and_line_endings_survive_checkpoint_restore() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(&trail).unwrap();
+    let deep = (0..6).fold(worktree.clone(), |dir, i| {
+        dir.join(format!("{i}-{}", "d".repeat(40)))
+    });
+    fs::create_dir_all(&deep).unwrap();
+    let long_file = deep.join("long.txt");
+    assert!(long_file.as_os_str().len() > 260);
+    let files = [
+        (long_file, b"long\n".as_slice()),
+        (worktree.join("crlf.txt"), b"a\r\nb\r\n".as_slice()),
+        (worktree.join("lf.txt"), b"a\nb\n".as_slice()),
+    ];
+    for (path, bytes) in &files {
+        fs::write(path, bytes).unwrap();
+    }
+    let user_config = root.path().join("user.gitconfig");
+    fs::write(&user_config, "[core]\n\tautocrlf = true\n").unwrap();
+    let previous = std::env::var_os("GIT_CONFIG_GLOBAL");
+    unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", &user_config) };
+
+    let store = ShadowGitStore::new(trail, worktree);
+    let id = store
+        .record(request("t1"))
+        .expect("record long-path worktree");
+    assert!(!id.is_null());
+    for (path, _) in &files {
+        fs::write(path, "changed").unwrap();
+    }
+    let restored = store.restore(
+        &id,
+        crate::core::checkpoint::types::RestoreOptions {
+            paths: Vec::new(),
+            dry_run: false,
+        },
+    );
+    match previous {
+        Some(value) => unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", value) },
+        None => unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") },
+    }
+
+    restored.expect("restore long-path worktree");
+    for (path, bytes) in &files {
+        assert_eq!(fs::read(path).unwrap(), *bytes, "{}", path.display());
+    }
 }

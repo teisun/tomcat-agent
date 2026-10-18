@@ -1,17 +1,12 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import { execFileSync } from "node:child_process";
-
 import { createHostE2eFixture } from "./e2eHostFixture";
 import { packageVsix, PREBUILT_VSIX_ENV } from "./package-vsix";
+import { runCommand } from "./runCommand";
 
 function run(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): void {
-  execFileSync(command, args, {
-    cwd,
-    env,
-    stdio: "inherit",
-  });
+  runCommand(command, args, { cwd, env });
 }
 
 function currentVsCodeTarget(): string | undefined {

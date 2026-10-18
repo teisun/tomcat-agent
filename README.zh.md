@@ -29,7 +29,9 @@
 - **VS Code 插件（推荐）**：从 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext) 安装 `tomcat-agent.tomcat-vscode-ext`，确认发布者为 **tomcat-agent**；GitHub 平台 VSIX 仍可离线安装。安装后按 `Cmd/Ctrl+Shift+P` 运行 `Tomcat: Focus Agent Box` 打开 **Tomcat Agent Box**；也可以先打开右侧二级侧边栏（Secondary Side Bar）再点击 Tomcat Agent Box 图标。首次使用若看到提示，点击 `Start Setup` 让 VS Code 帮你跑 `tomcat init`。包怎么选、怎么装，见 [`tomcat-vscode-ext/README.zh.md`](tomcat-vscode-ext/README.zh.md)。
 - **CLI**：见 **[用户使用说明](tomcat/docs/user-guide.zh.md)**，覆盖前置依赖、构建、`init` / `doctor` / `chat`、会话与工作区、配置、审计及集成测试等完整步骤与示例输出。
 
-通用前提：需要与目标模型匹配的 API 密钥（例如 OpenAI 兼容、DeepSeek、MiMo、GLM、Kimi 或 Anthropic）；无论通过 VS Code 插件还是 CLI 使用，首次运行都可通过 `tomcat init`（或在 VS Code 里点击 `Start Setup`）完成配置，Key 会以 `0600` 权限写入 `~/.tomcat/assets/.env` 并在启动时自动加载。运行态数据默认在 `~/.tomcat/`，目录布局见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
+支持平台：macOS（Apple Silicon 与 Intel）、Linux x64（glibc）、Windows x64。Windows 上请先安装 [Git for Windows](https://git-scm.com/download/win)：`bash` 工具通过其中的 Git Bash 执行命令。
+
+通用前提：需要与目标模型匹配的 API 密钥（例如 OpenAI 兼容、DeepSeek、MiMo、GLM、Kimi 或 Anthropic）；无论通过 VS Code 插件还是 CLI 使用，首次运行都可通过 `tomcat init`（或在 VS Code 里点击 `Start Setup`）完成配置，Key 会写入 `~/.tomcat/assets/.env`，仅当前用户可读写（Unix 为 `0600`，Windows 为私有 ACL），并在启动时自动加载。运行态数据默认在 `~/.tomcat/`，目录布局见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
 
 仅从源码编译时才需要 Rust stable 1.70+；仓库内的 `tomcat/.env` 仅用于本地/CI 测试夹具，不是终端用户的配置路径。
 

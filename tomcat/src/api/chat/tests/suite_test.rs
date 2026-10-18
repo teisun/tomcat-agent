@@ -1562,7 +1562,10 @@ fn chat_turn_test_context(
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.default_model = entries.first().map_or("gpt-5.6", |entry| entry.id).to_string();
+    cfg.llm.default_model = entries
+        .first()
+        .map_or("gpt-5.6", |entry| entry.id)
+        .to_string();
     crate::test_support::write_models_override(dir.path(), entries);
 
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");

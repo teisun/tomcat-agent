@@ -182,7 +182,7 @@ fn validate_config_rejects_invalid_proxy() {
 #[test]
 fn validate_config_rejects_duplicate_workspace_roots() {
     let dir = tempfile::tempdir().unwrap();
-    let c = std::fs::canonicalize(dir.path()).unwrap();
+    let c = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let s = c.to_string_lossy().into_owned();
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();
@@ -270,7 +270,7 @@ fn resolve_workspace_roots_always_includes_dot_tomcat_temp() {
     let cfg = AppConfig::default();
     let roots = crate::resolve_workspace_roots_paths(&cfg).unwrap();
     let temp = crate::resolve_dot_tomcat_temp_dir().unwrap();
-    let temp_canon = std::fs::canonicalize(&temp).unwrap_or(temp);
+    let temp_canon = crate::infra::platform::canonicalize(&temp).unwrap_or(temp);
     assert!(
         roots.iter().any(|r| r == &temp_canon),
         "应始终包含 ~/.tomcat/temp，实际: {:?}",

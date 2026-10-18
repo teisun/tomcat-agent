@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           tag="cli-v${PINNED_CLI_VERSION}"
           asset_names=""
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
             archive="tomcat-${tag}-${target}.tar.gz"
             artifact_dir="../bundles/artifacts/release-cli-${target}"
             test -f "${artifact_dir}/${archive}"
@@ -179,6 +179,7 @@ jobs:
           package_bundled_vsix() {
             local cli_target="$1"
             local vscode_target="$2"
+            local binary="$3"
             local tag="cli-v${PINNED_CLI_VERSION}"
             local bundle_dir="bundles/${cli_target}"
             local archive="tomcat-${tag}-${cli_target}.tar.gz"
@@ -203,13 +204,14 @@ jobs:
             npx tsx scripts/package-vsix.ts \
               --skip-build \
               --target "${vscode_target}" \
-              --bundle-binary "${bundle_dir}/tomcat" \
+              --bundle-binary "${bundle_dir}/${binary}" \
               --out "dist/tomcat-vscode-ext-${EXT_VERSION}-${vscode_target}.vsix"
           }
 
-          package_bundled_vsix "aarch64-apple-darwin" "darwin-arm64"
-          package_bundled_vsix "x86_64-apple-darwin" "darwin-x64"
-          package_bundled_vsix "x86_64-unknown-linux-gnu" "linux-x64"
+          package_bundled_vsix "aarch64-apple-darwin" "darwin-arm64" "tomcat"
+          package_bundled_vsix "x86_64-apple-darwin" "darwin-x64" "tomcat"
+          package_bundled_vsix "x86_64-unknown-linux-gnu" "linux-x64" "tomcat"
+          package_bundled_vsix "x86_64-pc-windows-msvc" "win32-x64" "tomcat.exe"
 
           npx tsx scripts/package-vsix.ts \
             --skip-build \
@@ -244,6 +246,8 @@ jobs:
             target: darwin-x64
           - runner: ubuntu-22.04
             target: linux-x64
+          - runner: windows-latest
+            target: win32-x64
     defaults:
       run:
         shell: bash
@@ -345,7 +349,7 @@ jobs:
     environment: marketplace
     env:
       EXT_VERSION: ${{ needs.build.outputs.extension_version }}
-      MARKETPLACE_TARGETS: darwin-arm64 darwin-x64 linux-x64
+      MARKETPLACE_TARGETS: darwin-arm64 darwin-x64 linux-x64 win32-x64
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_CORE_OUTPUT: none

@@ -974,7 +974,8 @@ fn from_config_prefers_session_cwd_when_reopening_existing_session() {
         work_dir.path(),
         &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
     );
-    let expected_a = std::fs::canonicalize(project_a.path()).expect("canonicalize project_a path");
+    let expected_a = crate::infra::platform::canonicalize(project_a.path())
+        .expect("canonicalize project_a path");
 
     {
         let _cwd_guard = CurrentDirGuard::set(project_a.path());

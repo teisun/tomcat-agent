@@ -160,9 +160,9 @@ pub trait McpTransport: Send + Sync {
     ) -> Result<McpClient, McpFailure>;
 }
 
-/// Client-side stdio transport. Only PATH and HOME survive env_clear; configured
-/// environment variables are added explicitly, so an MCP configuration cannot
-/// silently inherit unrelated process secrets.
+/// Client-side stdio transport. Only [`INHERITED_ENV_VARS`] survive env_clear;
+/// configured environment variables are added explicitly, so an MCP configuration
+/// cannot silently inherit unrelated process secrets.
 pub struct StdioTransport {
     workspace_root: Option<PathBuf>,
 }
@@ -175,7 +175,7 @@ impl StdioTransport {
     }
 
     fn command(&self, server: &ConfiguredMcpServer) -> tokio::process::Command {
-        tokio::process::Command::new(&server.config.command).configure(|command| {
+        tokio::process::Command::new(program(server)).configure(|command| {
             command.args(&server.config.args);
             command.kill_on_drop(true);
             if let Some(cwd) = server.config.cwd.as_deref() {
@@ -187,7 +187,7 @@ impl StdioTransport {
                 }
             }
             command.env_clear();
-            for key in ["PATH", "HOME"] {
+            for key in INHERITED_ENV_VARS {
                 if let Some(value) = std::env::var_os(key) {
                     command.env(key, value);
                 }
@@ -198,6 +198,60 @@ impl StdioTransport {
             }
         })
     }
+}
+
+/// Windows adds the official MCP SDK's win32 list (`DEFAULT_INHERITED_ENV_VARS` in
+/// its `stdio.ts`): without SYSTEMROOT and friends Node-based servers crash on start.
+#[cfg(unix)]
+const INHERITED_ENV_VARS: &[&str] = &["PATH", "HOME"];
+#[cfg(windows)]
+const INHERITED_ENV_VARS: &[&str] = &[
+    "APPDATA",
+    "COMSPEC",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "USERNAME",
+    "USERPROFILE",
+    "WINDIR",
+    "HOME",
+];
+
+/// Rust only appends `.exe` on Windows, so a bare name such as `npx` is resolved to
+/// `npx.cmd` via PATHEXT against the PATH the child will actually receive.
+fn program(server: &ConfiguredMcpServer) -> PathBuf {
+    let command = &server.config.command;
+    #[cfg(windows)]
+    if Path::new(command).components().count() == 1 {
+        let path = server
+            .config
+            .env
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| std::ffi::OsString::from(value))
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let pathext = std::env::var_os("PATHEXT");
+        if let Some(found) = crate::infra::platform::find_executable_in(
+            &path,
+            pathext.as_deref(),
+            &[command.as_str()],
+            Path::is_file,
+        ) {
+            return found;
+        }
+    }
+    PathBuf::from(command)
 }
 
 /// Phase 1's bootstrap records the system Chrome fallback here when Playwright

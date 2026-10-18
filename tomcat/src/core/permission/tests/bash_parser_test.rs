@@ -70,8 +70,8 @@ fn ignores_non_identifier_lhs() {
 
 #[test]
 fn multiple_leading_assignments() {
-    let v = extract_paths("A=/x B=/y cmd");
-    assert_eq!(v, vec!["/x", "/y"]);
+    let v = extract_paths("A=/opt B=/srv cmd");
+    assert_eq!(v, vec!["/opt", "/srv"]);
 }
 
 #[test]
@@ -94,4 +94,19 @@ fn handles_quoted_strings() {
 fn no_longer_treats_plain_slash_tokens_as_paths() {
     let v = extract_paths("npm i -D @playwright/test && node -e \"console.log('http://x/y')\"");
     assert!(v.is_empty(), "legacy helper 只应识别显式路径前缀: {:?}", v);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_extracts_drive_and_unc_paths_and_maps_git_bash_drives() {
+    assert_eq!(
+        extract_paths(r"cat C:/x 'C:\y' '\\srv\s\x'"),
+        vec!["C:/x", r"C:\y", r"\\srv\s\x"]
+    );
+    assert_eq!(
+        extract_paths("ls /c/Users/a /d"),
+        vec![r"C:\Users\a", r"D:\"]
+    );
+    assert_eq!(extract_paths("ls /tmp/x"), vec!["/tmp/x"]);
+    assert!(extract_paths("node -e 'require(\"node:fs\")' && npm i @scope/pkg").is_empty());
 }

@@ -85,6 +85,25 @@ fn quoted_path_with_space_recognized() {
     assert!(is_path_token("/Users/yan/My Documents/foo"));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_path_command_keeps_backslashes_in_drive_and_unc_paths() {
+    for (line, expected) in [
+        (r"/path D:\work", r"D:\work"),
+        (r#"/path "D:\My Work""#, r"D:\My Work"),
+        (r"/path \\srv\share", r"\\srv\share"),
+    ] {
+        assert_eq!(
+            parse_chat_command(line),
+            ChatCommand::Path {
+                path: PathBuf::from(expected),
+                original_line: line.to_string(),
+            },
+            "{line}"
+        );
+    }
+}
+
 #[test]
 fn path_menu_choice_parses_inputs() {
     assert_eq!(

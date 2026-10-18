@@ -998,7 +998,7 @@ fn test_workspace_add_list_remove_e2e() {
 
     let home = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
-    let proj_canon = std::fs::canonicalize(proj.path()).unwrap();
+    let proj_canon = tomcat::infra::canonicalize(proj.path()).unwrap();
     let proj_str = proj_canon.to_str().unwrap();
 
     cmd()
@@ -1056,7 +1056,7 @@ fn test_workspace_add_cwd_e2e() {
 
     let home = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
-    let proj_canon = std::fs::canonicalize(proj.path()).unwrap();
+    let proj_canon = tomcat::infra::canonicalize(proj.path()).unwrap();
     let proj_str = proj_canon.to_str().unwrap();
 
     cmd()
@@ -1091,6 +1091,7 @@ fn test_workspace_add_cwd_e2e() {
 }
 
 /// [E2E-CLI-005] init 自动将 PATH 写入隔离 HOME 下的 shell 配置文件
+#[cfg(unix)]
 #[test]
 fn test_init_auto_adds_path_to_shell_profile() {
     common::setup_logging();
@@ -1125,6 +1126,7 @@ fn test_init_auto_adds_path_to_shell_profile() {
 }
 
 /// init 两次后 shell 配置中仅一条 export PATH（幂等）
+#[cfg(unix)]
 #[test]
 fn test_init_path_export_idempotent_in_shell_profile() {
     common::setup_logging();
@@ -1163,6 +1165,7 @@ fn test_init_path_export_idempotent_in_shell_profile() {
 }
 
 /// bash 场景下，init 会让 login shell 同时加载 .profile 与 .bashrc，避免截断通用环境变量。
+#[cfg(unix)]
 #[test]
 fn test_init_bash_profile_sources_profile_and_bashrc() {
     common::setup_logging();
@@ -1199,6 +1202,7 @@ fn test_init_bash_profile_sources_profile_and_bashrc() {
 }
 
 /// bash 场景下，重复 init 不应重复注入 .bash_profile 的 source 语句或 .bashrc 的 PATH。
+#[cfg(unix)]
 #[test]
 fn test_init_bash_profile_source_idempotent() {
     common::setup_logging();
@@ -1247,6 +1251,7 @@ fn test_init_bash_profile_source_idempotent() {
 }
 
 /// bash 场景下，init 会先清理旧的 target/* PATH 垃圾，再补一条稳定的 ~/.local/bin。
+#[cfg(unix)]
 #[test]
 fn test_init_prunes_stale_target_paths_from_shell_profile() {
     common::setup_logging();
@@ -1295,7 +1300,103 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
     );
 }
 
+/// Windows：HOME 指向临时目录时，init 不改真实的 HKCU\Environment\Path，只打印手动步骤。
+#[cfg(windows)]
+#[test]
+fn test_init_with_isolated_home_leaves_real_user_path_untouched() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_init_with_isolated_home_leaves_real_user_path_untouched").entered();
+
+    let real_user_path = || {
+        let value = windows_registry::CURRENT_USER
+            .open("Environment")
+            .and_then(|key| key.get_value("Path"))
+            .ok()?;
+        Some((value.ty(), String::try_from(value).ok()))
+    };
+    let before = real_user_path();
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(real_user_path(), before, "real user PATH must not change");
+    let stdout = String::from_utf8_lossy(&output);
+    let bin_dir = dir.path().join(".local").join("bin");
+    assert!(
+        stdout.contains(&bin_dir.display().to_string()),
+        "expected manual PATH step naming {}, got: {}",
+        bin_dir.display(),
+        trunc(&stdout, 600)
+    );
+    assert!(
+        bin_dir.join("tomcat.exe").exists(),
+        "init should still copy tomcat.exe into the isolated HOME"
+    );
+}
+
+/// Windows：~/.local/bin/tomcat.exe 正在运行 serve --stdio 时，再次 init 仍能换成新版本；
+/// 改名留下的旧副本在进程退出后的下一次 init 被清理。
+#[cfg(windows)]
+#[test]
+fn test_init_replaces_a_running_windows_command_copy() {
+    common::setup_logging();
+    let _span = info_span!("test_init_replaces_a_running_windows_command_copy").entered();
+
+    let fx = common::serve::setup_cold_serve_fixture(true);
+    let local_bin = fx.home_path.join(".local").join("bin");
+    let installed = local_bin.join("tomcat.exe");
+    let current = fs::read(common::serve::cargo_bin_path()).unwrap();
+    // Trailing bytes keep the PE image runnable while making the next init see a different build.
+    let mut stale = current.clone();
+    stale.extend_from_slice(b"older-build");
+    fs::write(&installed, &stale).unwrap();
+    let parked_copies = || {
+        fs::read_dir(&local_bin)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".old"))
+            .count()
+    };
+    let init = || {
+        let output = common::serve::isolated_serve_command(&fx.home_path)
+            .arg("init")
+            .current_dir(&fx.workspace)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "init: {output:?}");
+    };
+
+    let mut running = common::serve::isolated_serve_command_with_binary(&fx.home_path, &installed)
+        .args(["serve", "--stdio"])
+        .current_dir(&fx.workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    init();
+    let still_running = running.try_wait().unwrap().is_none();
+    let _ = running.kill();
+    let _ = running.wait();
+
+    assert!(still_running, "the old copy must be running during init");
+    assert_eq!(fs::read(&installed).unwrap(), current);
+    assert_eq!(parked_copies(), 1, "the running copy is parked as .old");
+    init();
+    assert_eq!(parked_copies(), 0, "the next init removes the parked copy");
+}
+
 /// install.sh 在 zsh 下同时写 .zprofile 与 .zshrc，且重复执行保持幂等。
+#[cfg(unix)]
 #[test]
 fn test_install_sh_writes_zprofile_and_zshrc_for_zsh() {
     common::setup_logging();
@@ -1685,10 +1786,8 @@ fn test_session_list_exits_ok() {
     let _span = info_span!("test_session_list_exits_ok").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: temp work dir {:?}", work_dir);
     let mut c = cmd();
@@ -1712,10 +1811,8 @@ fn test_session_new_creates_session() {
     let _span = info_span!("test_session_new_creates_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: temp work dir {:?}", work_dir);
     let mut c = cmd();
@@ -1955,10 +2052,8 @@ fn test_session_switch_nonexistent_shows_error() {
     let _span = info_span!("test_session_switch_nonexistent_shows_error").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: switch to nonexistent session key");
     let mut c = cmd();
@@ -1986,10 +2081,8 @@ fn test_session_delete_via_cli_removes_session() {
     let _span = info_span!("test_session_delete_via_cli_removes_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create a session first");
     let session_id = create_session_via_cli(&work_dir);
@@ -2019,10 +2112,8 @@ fn test_session_archive_exits_ok() {
     let _span = info_span!("test_session_archive_exits_ok").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session then archive");
     let session_id = create_session_via_cli(&work_dir);
@@ -2347,6 +2438,48 @@ fn test_doctor_reports_all_checks() {
         ))
         .stdout(predicate::str::contains(tr("cli.doctor.assetsReady", &[])))
         .stdout(predicate::str::contains(tr("cli.doctor.quickJsReady", &[])));
+}
+
+/// [Windows] doctor 显示 Git Bash 路径；找不到时给出安装提示
+///
+/// 只改 doctor 子进程的 PATH / ProgramFiles / LOCALAPPDATA，测试进程自身环境不变。
+/// 64 位进程启动时系统会用 ProgramW6432 重置 ProgramFiles，所以两者都要改。
+#[cfg(windows)]
+#[test]
+fn test_doctor_reports_git_bash_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .assert()
+        .success();
+
+    cmd()
+        .args(["doctor"])
+        .env("HOME", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(tr(
+            "cli.doctor.gitBashReady",
+            &[("path", "")],
+        )));
+
+    let empty = dir.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    cmd()
+        .args(["doctor"])
+        .env("HOME", dir.path())
+        .env("PATH", &empty)
+        .env("ProgramFiles", &empty)
+        .env("ProgramW6432", &empty)
+        .env("LOCALAPPDATA", &empty)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(tr(
+            "cli.doctor.gitBashMissing",
+            &[],
+        )))
+        .stdout(predicate::str::contains(tr("bash.gitBashMissing", &[])));
 }
 
 /// [E2E-CLI-010] init 幂等：第二次不覆盖配置并给出提示
@@ -2734,7 +2867,7 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
 
     let scratch = dir.path().join(scratch_leaf);
     std::fs::create_dir_all(&scratch).unwrap();
-    let scratch = scratch.canonicalize().expect("workspace-temp scratch path");
+    let scratch = tomcat::infra::canonicalize(&scratch).expect("workspace-temp scratch path");
     let scratch_str = scratch.to_str().expect("utf8 scratch path");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
@@ -3140,6 +3273,129 @@ fn background_wait_trace_rejects_wrong_order_task_and_stop() {
             "the real acceptance oracle must reject {problem}"
         );
     }
+}
+
+/// 通过管道启动 CLI 的父进程（脚本、插件）在 stdin 结束后要等到 CLI 退出并读到 EOF：
+/// 仍在运行的后台任务不能拖住 CLI 退出，bash 里脱离出去、比 CLI 活得久的进程也不能
+/// 持有 CLI 自己的 stdout/stderr。
+#[test]
+fn bash_processes_do_not_keep_a_piped_cli_or_its_pipes_alive() {
+    /// Let the detached loop finish before the fixture directory is removed under it.
+    struct ReleaseOnDrop(PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.join("release"), "go");
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while !self.0.join("released").exists() && Instant::now() < deadline {
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
+    let bash_turn = |call_id: &str, args: Value| {
+        common::serve::response(vec![
+            common::serve::sse_tool_call(call_id, "bash", &args.to_string()),
+            common::serve::sse_finish("tool_calls"),
+            common::serve::sse_done(),
+        ])
+    };
+    let server = common::serve::spawn_scripted_openai_stream_server(vec![
+        bash_turn(
+            "call_detach",
+            json!({"command": "(while [ ! -f release ]; do sleep 0.1; done; : > released) > /dev/null 2>&1 &"}),
+        ),
+        bash_turn(
+            "call_bg",
+            json!({"command": "while [ ! -f release ]; do sleep 0.1; done", "run_in_background": true}),
+        ),
+        common::serve::response(vec![
+            common::serve::sse_delta("FIRST_DONE"),
+            common::serve::sse_finish("stop"),
+            common::serve::sse_done(),
+        ]),
+    ]);
+    let fx = common::serve::setup_serve_fixture(&server.base_url);
+    let release = ReleaseOnDrop(fx.workspace.clone());
+    let cli = || {
+        let mut command = common::serve::isolated_serve_command(&fx.home_path);
+        command
+            .current_dir(&fx.workspace)
+            .env("OPENAI_API_KEY", "dummy-key")
+            .env("TOMCAT__PRIMITIVE__AUTO_CONFIRM", "true");
+        command
+    };
+    let added = cli()
+        .args(["workspace", "add"])
+        .arg(&fx.workspace)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "workspace add: {added:?}");
+
+    let mut child = cli()
+        .arg("code")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"start the bash tasks\n")
+        .unwrap();
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        let (sender, text) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            let _ = sender.send(String::from_utf8_lossy(&bytes).into_owned());
+        });
+        text
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let collect = |text: &std::sync::mpsc::Receiver<String>| {
+                text.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap_or_default()
+            };
+            panic!(
+                "a running background task kept the CLI from exiting after stdin EOF\nstdout={}\nstderr={}",
+                collect(&stdout),
+                collect(&stderr)
+            );
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let eof = std::time::Duration::from_secs(5);
+    let stdout = stdout
+        .recv_timeout(eof)
+        .expect("a process detached by bash must not hold the exited CLI's stdout");
+    let stderr = stderr
+        .recv_timeout(eof)
+        .expect("a process detached by bash must not hold the exited CLI's stderr");
+    assert!(status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("FIRST_DONE"), "stdout={stdout}\nstderr={stderr}");
+    let requests = common::serve::captured_non_title_requests(&server);
+    assert!(
+        requests
+            .last()
+            .is_some_and(|request| request.contains("running_in_background")),
+        "the background task must have started: {requests:?}"
+    );
+
+    drop(release);
+    assert!(
+        fx.workspace.join("released").exists(),
+        "the detached loop must have outlived the CLI, otherwise the pipe check proved nothing"
+    );
 }
 
 /// [E2E-CLI-016D] `task_output(block=true)` wait-slice 真 LLM 黑盒回归
@@ -3608,7 +3864,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         .join("workspace-temp")
         .join("e2e_cli013_hello");
     std::fs::create_dir_all(&scratch).unwrap();
-    let scratch_canon = scratch.canonicalize().expect("workspace-temp scratch path");
+    let scratch_canon = tomcat::infra::canonicalize(&scratch).expect("workspace-temp scratch path");
     let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
@@ -3772,10 +4028,8 @@ fn test_user_loads_plugin_and_lists() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-list");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: plugin dir = {:?}", plugin_dir.path());
     info!("Act: tomcat plugin load");
@@ -3810,10 +4064,8 @@ fn test_user_views_plugin_info() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-info");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin first");
     cmd()
@@ -3850,10 +4102,8 @@ fn test_user_disables_plugin() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-disable");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin");
     cmd()
@@ -3882,10 +4132,8 @@ fn test_user_enables_plugin_after_disable() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-enable");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load + disable plugin");
     cmd()
@@ -3919,10 +4167,8 @@ fn test_user_unloads_plugin_removes_from_list() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-unload");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin");
     cmd()
@@ -4622,10 +4868,8 @@ fn test_user_creates_new_session() {
     let _span = info_span!("test_user_creates_new_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: fresh work dir");
     info!("Act: tomcat session new");
@@ -4656,10 +4900,8 @@ fn test_user_lists_sessions() {
     let _span = info_span!("test_user_lists_sessions").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create a session first");
     let first_id = create_session_via_cli(&work_dir);
@@ -4701,10 +4943,8 @@ fn test_user_switches_to_existing_session() {
     let _span = info_span!("test_user_switches_to_existing_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     let session_id = create_session_via_cli(&work_dir);
@@ -4729,10 +4969,8 @@ fn test_user_switches_to_nonexistent_session_shows_error() {
     let _span = info_span!("test_user_switches_to_nonexistent_session_shows_error").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: no session pre-created");
     info!("Act: tomcat session switch nonexistent-key-e2e");
@@ -4762,10 +5000,8 @@ fn test_user_deletes_session() {
     let _span = info_span!("test_user_deletes_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     let session_id = create_session_via_cli(&work_dir);
@@ -4798,10 +5034,8 @@ fn test_user_archives_session() {
     let _span = info_span!("test_user_archives_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     let session_id = create_session_via_cli(&work_dir);
@@ -4834,10 +5068,8 @@ fn test_user_searches_sessions_by_keyword() {
     let _span = info_span!("test_user_searches_sessions_by_keyword").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir
-        .path()
-        .canonicalize()
-        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir =
+        tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     let first_id = create_session_via_cli(&work_dir);

@@ -89,10 +89,10 @@ fn tool_owned_media_gc_keeps_subagent_only_refs_and_namespaces_cached_ids() {
     write_transcript_references(&dir, "same", std::slice::from_ref(&main));
     write_transcript_references(&children, "same", std::slice::from_ref(&child));
     for sha in [&main, &child] {
-        std::fs::File::open(mgr.attachment_store().blobs_dir().join(sha))
-            .unwrap()
-            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
-            .unwrap();
+        crate::test_support::set_mtime(
+            &mgr.attachment_store().blobs_dir().join(sha),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+        );
     }
     let first = mgr.run_incremental_attachment_housekeeping().unwrap();
     assert_eq!(first.live_blob_references.transcripts_scanned, 2);

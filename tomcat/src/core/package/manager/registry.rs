@@ -46,12 +46,12 @@ impl RegistrySnapshot {
     }
 
     fn capture(path: &Path) -> Result<Self, AppError> {
-        match fs::read_to_string(path) {
-            Ok(raw_json) => Ok(Self {
+        match read_registry_text(path) {
+            Ok(Some(raw_json)) => Ok(Self {
                 existed: true,
                 raw_json,
             }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+            Ok(None) => Ok(Self {
                 existed: false,
                 raw_json: String::new(),
             }),
@@ -97,13 +97,34 @@ impl RegistrySnapshot {
     }
 }
 
+/// 读取 registry 原文，不存在时返回 `None`。父路径是普通文件时 Unix 报 ENOTDIR，
+/// Windows 却只报 NotFound；这里统一按 NotADirectory 拒绝，保证在复制资源前失败。
+fn read_registry_text(path: &Path) -> std::io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let blocked = path
+                .ancestors()
+                .skip(1)
+                .find(|dir| dir.exists())
+                .is_some_and(|dir| !dir.is_dir());
+            if blocked {
+                Err(std::io::ErrorKind::NotADirectory.into())
+            } else {
+                Ok(None)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn load_registry<T>(path: &Path) -> Result<T, AppError>
 where
     T: serde::de::DeserializeOwned + Default,
 {
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+    let raw = match read_registry_text(path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return Ok(T::default()),
         Err(error) => return Err(AppError::Io(error)),
     };
     serde_json::from_str(&raw).map_err(|error| {

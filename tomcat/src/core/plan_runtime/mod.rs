@@ -1795,8 +1795,9 @@ impl PlanRuntime {
         };
         // macOS `/var/folders` 实际是 `/private/var/folders` 的 symlink；只比较
         // canonical 形态可避免误放过 plan_dir 下的写入。两侧都尽量 canonicalize。
-        let canon_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let canon_plans = plans_dir.canonicalize().unwrap_or(plans_dir);
+        let canon_path =
+            crate::infra::platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon_plans = crate::infra::platform::canonicalize(&plans_dir).unwrap_or(plans_dir);
         if !canon_path.starts_with(&canon_plans) {
             return true;
         }

@@ -308,6 +308,10 @@ async fn run_chat_stream_warn_log_never_contains_base64_payload() {
             move || SharedLogWriter(logs.clone())
         })
         .finish();
+    // With a single live dispatcher, tracing-core lets a parallel test's thread cache this warn
+    // callsite as "never" for every thread. A second dispatcher keeps registration on the shared
+    // list, which includes this test's subscriber.
+    let _shared_registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let _ = run_chat_stream(&mut agent, req, 1, 4).await;

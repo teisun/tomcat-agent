@@ -61,7 +61,7 @@ fn unwrap_text(result: ReadResult) -> (String, ReadTextResult) {
 #[tokio::test]
 async fn read_offset_limit_returns_window() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("ten.txt");
     let body: String = (1..=10).map(|n| format!("line{}\n", n)).collect();
     std::fs::write(&f, &body).unwrap();
@@ -95,7 +95,7 @@ async fn read_offset_limit_returns_window() {
 #[tokio::test]
 async fn read_offset_beyond_eof_returns_empty() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("short.txt");
     std::fs::write(&f, "a\nb\nc\n").unwrap();
 
@@ -117,7 +117,7 @@ async fn read_offset_beyond_eof_returns_empty() {
 #[tokio::test]
 async fn read_limit_truncates_with_resume_hint() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("two_hundred.txt");
     let body: String = (1..=200).map(|n| format!("L{:03}\n", n)).collect();
     std::fs::write(&f, &body).unwrap();
@@ -146,7 +146,7 @@ async fn read_limit_truncates_with_resume_hint() {
 #[tokio::test]
 async fn read_binary_returns_structured_hint() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("blob.bin");
     std::fs::write(&f, [0x89, 0x50, 0x4E, 0x47, 0x00, 0x01, 0x02]).unwrap();
 
@@ -182,7 +182,7 @@ async fn read_binary_returns_structured_hint() {
 #[tokio::test]
 async fn read_no_offset_large_file_rejected_with_hint() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("big.txt");
     std::fs::write(&f, vec![b'a'; 256]).unwrap();
 
@@ -204,7 +204,7 @@ async fn read_no_offset_large_file_rejected_with_hint() {
 #[tokio::test]
 async fn read_with_offset_bypasses_max_bytes_check() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("big_log.txt");
     let body: String = (1..=200).map(|n| format!("entry-{}\n", n)).collect();
     std::fs::write(&f, &body).unwrap();
@@ -223,7 +223,7 @@ async fn read_with_offset_bypasses_max_bytes_check() {
 #[tokio::test]
 async fn read_applies_post_output_budget_guard_with_resume_hint() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("budget.txt");
     let body: String = (1..=40)
         .map(|n| format!("L{:03}:{}\n", n, "a".repeat(4090)))
@@ -261,7 +261,7 @@ async fn read_applies_post_output_budget_guard_with_resume_hint() {
 #[tokio::test]
 async fn read_first_returned_line_over_budget_returns_structured_error() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("long-first-line.txt");
     std::fs::write(&f, format!("{}\nsecond\n", "x".repeat(128 * 1024 + 1))).unwrap();
 
@@ -312,7 +312,7 @@ fn format_with_line_numbers_handles_empty_and_no_trailing_newline() {
 #[tokio::test]
 async fn read_default_renders_cat_n_line_numbers() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("nums.txt");
     std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
 
@@ -330,7 +330,7 @@ async fn read_default_renders_cat_n_line_numbers() {
 #[tokio::test]
 async fn read_offset_window_uses_absolute_line_numbers() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("offsets.txt");
     let body: String = (1..=20).map(|n| format!("L{:02}\n", n)).collect();
     std::fs::write(&f, body).unwrap();
@@ -354,7 +354,7 @@ async fn read_offset_window_uses_absolute_line_numbers() {
 #[tokio::test]
 async fn read_routes_png_to_image_variant() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let png_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/llm_multimodal/sample_image.png");
     let png = dir_path.join("dog.png");
@@ -380,7 +380,7 @@ async fn read_routes_png_to_image_variant() {
 async fn read_routes_pdf_to_pdf_variant() {
     use base64::Engine;
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let pdf_b64 = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/llm_multimodal/sample_pdf_b64.txt"),
@@ -410,7 +410,7 @@ async fn read_routes_pdf_to_pdf_variant() {
 #[tokio::test]
 async fn read_unknown_extension_falls_back_to_text() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("notes.md");
     std::fs::write(&f, "# heading\nbody\n").unwrap();
 
@@ -430,7 +430,7 @@ async fn read_unknown_extension_falls_back_to_text() {
 #[tokio::test]
 async fn read_oversize_image_rejected_at_metadata_stage() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("big.png");
     // PNG magic + 5 MiB padding（>IMAGE_MAX_BYTES=4.5 MiB）；不会被 read_to_end，
     // 只要 metadata 阶段拦下即可。
@@ -527,7 +527,7 @@ fn hash_tag(rendered_line: &str) -> &str {
 #[tokio::test]
 async fn read_with_hashline_renders_hash_prefixed_lines() {
     let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().canonicalize().unwrap();
+    let dir_path = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir_path.join("h.txt");
     std::fs::write(&f, "alpha\nbeta\n").unwrap();
 

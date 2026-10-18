@@ -2,9 +2,14 @@
 mod common;
 
 use std::fs;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use common::serve::{cargo_bin_path, setup_serve_fixture};
@@ -34,6 +39,7 @@ fn isolated_command(home: &Path, cwd: &Path) -> Command {
     command
 }
 
+#[cfg(unix)]
 fn wait_for_exit(child: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {

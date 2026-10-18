@@ -39,7 +39,7 @@ fn metadata_strict_boolean_and_crlf() {
 #[test]
 fn discovers_all_sources_and_duplicates_without_granting_cwd() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let gate = gate();
     assert!(matches!(
         gate.check(PrimitiveOperation::Read, root.to_str().unwrap())
@@ -71,7 +71,7 @@ fn discovers_all_sources_and_duplicates_without_granting_cwd() {
 #[test]
 fn rules_extensions_refresh_budget_and_deny() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let gate = gate();
     for ext in ["md", "mdc"] {
         put(
@@ -96,7 +96,7 @@ fn rules_extensions_refresh_budget_and_deny() {
 #[test]
 fn byte_limit_empty_and_invalid_utf8() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let gate = gate();
     put(&root, ".agents/commands/a.md", &"a".repeat(MAX_FILE_BYTES));
     let path = root.join(".agents/commands/a.md");
@@ -115,7 +115,7 @@ fn byte_limit_empty_and_invalid_utf8() {
 #[test]
 fn rejects_leaf_and_ancestor_links() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let gate = gate();
     put(&root, "real/commands/x.md", "body");
     std::os::unix::fs::symlink(root.join("real"), root.join(".cursor")).unwrap();
@@ -131,7 +131,7 @@ fn rejects_leaf_and_ancestor_links() {
 #[test]
 fn deny_is_checked_before_invalid_file_content_and_metadata_are_read() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let gate = gate();
     let path = root.join(".cursor/commands/secret.md");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -149,7 +149,7 @@ fn deny_is_checked_before_invalid_file_content_and_metadata_are_read() {
 #[test]
 fn sorted_candidate_truncation() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     for n in (0..257).rev() {
         put(&root, &format!(".cursor/commands/{n:03}.md"), "body");
     }

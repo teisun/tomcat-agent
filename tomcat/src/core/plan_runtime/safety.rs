@@ -97,7 +97,7 @@ pub fn enforce_write_path_policy(
 ) -> Result<(), WritePathDenied> {
     let plans_dir = super::file_store::plans_dir()
         .map_err(|e| WritePathDenied::PlansDirUnavailable(e.to_string()))?;
-    let canon_plans = plans_dir.canonicalize().unwrap_or(plans_dir);
+    let canon_plans = crate::infra::platform::canonicalize(&plans_dir).unwrap_or(plans_dir);
     // 目标文件未必存在（如 PLAN 期 LLM `write` 新文件），canonicalize 会失败；
     // 优先 canonicalize 父目录，再拼回文件名，保证 macOS `/var/folders` →
     // `/private/var/folders` 这种 symlink 边界两侧都用统一形态比较。
@@ -105,19 +105,19 @@ pub fn enforce_write_path_policy(
         .to_str()
         .and_then(|raw| crate::infra::platform::normalize_path(raw).ok())
         .unwrap_or_else(|| target_path.to_path_buf());
-    let canon_target: PathBuf = if let Ok(canon) = normalized_target.canonicalize() {
-        canon
-    } else if let Some(parent) = normalized_target.parent() {
-        let canon_parent = parent
-            .canonicalize()
-            .unwrap_or_else(|_| parent.to_path_buf());
-        match normalized_target.file_name() {
-            Some(name) => canon_parent.join(name),
-            None => normalized_target,
-        }
-    } else {
-        normalized_target
-    };
+    let canon_target: PathBuf =
+        if let Ok(canon) = crate::infra::platform::canonicalize(&normalized_target) {
+            canon
+        } else if let Some(parent) = normalized_target.parent() {
+            let canon_parent = crate::infra::platform::canonicalize(parent)
+                .unwrap_or_else(|_| parent.to_path_buf());
+            match normalized_target.file_name() {
+                Some(name) => canon_parent.join(name),
+                None => normalized_target,
+            }
+        } else {
+            normalized_target
+        };
 
     let in_plans_dir = canon_target.starts_with(&canon_plans);
     let is_plan_file = in_plans_dir && canon_target.extension() == Some(OsStr::new("md"));
@@ -149,7 +149,8 @@ pub fn enforce_write_path_policy(
 /// 在 `tool_exec` 的 `edit` 分支被调用：传入原文 + 模拟应用 edits 后的新文，
 /// 返回 `Err` 表示 frontmatter 有变化。正文其余部分全部允许。
 pub fn reviewer_body_diff_guard(old: &str, new: &str) -> Result<(), ReviewDiffDenied> {
-    if extract_frontmatter(old) != extract_frontmatter(new) {
+    let (old, new) = (old.replace("\r\n", "\n"), new.replace("\r\n", "\n"));
+    if extract_frontmatter(&old) != extract_frontmatter(&new) {
         return Err(ReviewDiffDenied::FrontmatterTouched);
     }
     Ok(())

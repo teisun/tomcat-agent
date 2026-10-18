@@ -19,7 +19,7 @@ Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 
 code --install-extension tomcat-agent.tomcat-vscode-ext
 ```
 
-本次市场发布范围是 **Apple Silicon macOS（darwin-arm64）、Intel macOS（darwin-x64）、Linux x64（linux-x64）**，每个平台包都内置对应 CLI。Linux 包使用 glibc；Alpine/musl、Windows、Linux ARM64、远程开发及 vscode.dev 不在本次支持承诺内。原生发布验收记录实际 OS，不代表已经验证所有 Linux 发行版。
+本次市场发布范围是 **Apple Silicon macOS（darwin-arm64）、Intel macOS（darwin-x64）、Linux x64（linux-x64）、Windows x64（win32-x64）**，每个平台包都内置对应 CLI。Linux 包使用 glibc。Windows 上 Agent 通过 Git Bash 执行命令，请先安装 [Git for Windows](https://git-scm.com/download/win)（`winget install --id Git.Git -e`）。Alpine/musl、Linux ARM64、Windows ARM64、远程开发及 vscode.dev 不在本次支持承诺内。原生发布验收记录实际 OS，不代表已经验证所有 Linux 发行版。
 
 ## 离线安装与 GitHub 下载
 
@@ -30,6 +30,8 @@ code --install-extension tomcat-agent.tomcat-vscode-ext
 ```bash
 code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 ```
+
+Windows 上下载 `tomcat-vscode-ext-<版本>-win32-x64.vsix`，传入完整路径，例如在 PowerShell 中：`code --install-extension "$env:USERPROFILE\Downloads\tomcat-vscode-ext-<版本>-win32-x64.vsix"`。
 
 安装后重新加载 VS Code。VS Code 会将安装包解压到扩展目录；内置 CLI 不是从 VSIX 文件或 Downloads 目录直接运行。
 
@@ -203,6 +205,11 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 
 1. 看聊天面板里的失败原因，或点「查看日志」。
 2. 修复后点「重试」。
+
+如果 Windows 上执行命令时提示"在 Windows 上运行命令需要 Git for Windows（Git Bash）"：
+
+1. 安装 Git for Windows：`winget install --id Git.Git -e`。
+2. 重启 VS Code，让扩展拿到新的 `PATH`。不会使用 WSL 的 `bash.exe`。
 
 `tomcat.config.toml` 中不支持的键会被忽略并在启动日志中告警，不再因此阻断 Serve 连接；已知键的非法值仍报错。旧连接信息不会自动迁移，需要时按现有模型配置引导添加。内置/纯包的 CLI 选择顺序以及显式 `tomcat.path` 的优先级不变。
 

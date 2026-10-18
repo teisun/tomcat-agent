@@ -156,7 +156,7 @@ async fn measure(
 #[test]
 fn rendered_rules_keep_snapshot_stable_until_body_changes() -> ProbeResult<()> {
     let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?;
+    let root = tomcat::infra::canonicalize(dir.path())?;
     let rules = root.join(".cursor/rules/example.mdc");
     fs::create_dir_all(rules.parent().unwrap())?;
     let original =
@@ -220,12 +220,13 @@ async fn project_rules_cache_ab() -> ProbeResult<()> {
     common::apply_models_toml_entry_app_config(&mut cfg, &models_path, &env_path, &model)?;
     cfg.llm.retry_count = 0;
     let resolved = common::resolve_main_call(&cfg);
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("missing repo root")?
-        .canonicalize()?;
+    let source = tomcat::infra::canonicalize(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or("missing repo root")?,
+    )?;
     let fixture = tempfile::tempdir()?;
-    let root = fixture.path().canonicalize()?;
+    let root = tomcat::infra::canonicalize(fixture.path())?;
     let paths = copy_project_rules(&source, &root)?;
     let rules = rendered_rules(&root)?;
     let context = main_agent_context();

@@ -1,7 +1,5 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import { execFileSync } from "node:child_process";
-
 import {
   createHostE2eFixture,
   resolveVsCodeCli,
@@ -9,6 +7,7 @@ import {
   seedChatUserSettings,
 } from "./e2eHostFixture";
 import { packageVsixOrReuse } from "./package-vsix";
+import { runCommand } from "./runCommand";
 import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 async function main(): Promise<void> {
@@ -31,29 +30,20 @@ async function main(): Promise<void> {
     await fs.mkdir(userDataDir, { recursive: true });
     await seedChatUserSettings(userDataDir);
 
-    execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], {
-      cwd: extensionRoot,
-      stdio: "inherit",
-    });
+    runCommand("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
     const packagedVsixPath = packageVsixOrReuse({
       extensionRoot,
       outPath: path.join(installRoot, "tomcat-vscode-ext.vsix"),
     });
-    execFileSync(
-      resolveVsCodeCli(),
-      [
-        "--user-data-dir",
-        userDataDir,
-        "--extensions-dir",
-        extensionsDir,
-        "--install-extension",
-        packagedVsixPath,
-        "--force",
-      ],
-      {
-        stdio: "inherit",
-      },
-    );
+    runCommand(resolveVsCodeCli(), [
+      "--user-data-dir",
+      userDataDir,
+      "--extensions-dir",
+      extensionsDir,
+      "--install-extension",
+      packagedVsixPath,
+      "--force",
+    ]);
 
     await fs.access(harnessTestsPath);
     await runVsCodeGuiTests(runTests, {

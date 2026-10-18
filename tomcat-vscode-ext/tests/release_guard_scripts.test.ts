@@ -83,11 +83,11 @@ async function withFixture(callback: (root: string) => Promise<void>): Promise<v
 }
 
 describe("release guard scripts", () => {
-  it("requires all three native jobs before release and never activates the legacy PAT publisher", async () => {
+  it("requires all four native jobs before release and never activates the legacy PAT publisher", async () => {
     const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
     expect(workflow).toContain("needs: [build, verify]");
     expect(workflow).toContain("fail-fast: false");
-    for (const [runner, target] of [["macos-14", "darwin-arm64"], ["macos-15-intel", "darwin-x64"], ["ubuntu-22.04", "linux-x64"]]) {
+    for (const [runner, target] of [["macos-14", "darwin-arm64"], ["macos-15-intel", "darwin-x64"], ["ubuntu-22.04", "linux-x64"], ["windows-latest", "win32-x64"]]) {
       expect(workflow).toMatch(new RegExp(`runner: ${runner}\\s+target: ${target}`));
     }
     expect(workflow).toContain('npm run verify:vsix -- --release-bundle "${vsix}"');
@@ -122,21 +122,24 @@ describe("release guard scripts", () => {
     expect(publish).not.toContain("continue-on-error");
   });
 
+  // These run blocks execute on the Ubuntu runner; on Windows a bare `bash` is WSL.
+  const itRunsWorkflowBash = it.skipIf(process.platform === "win32");
+
   // Execute the workflow's actual run blocks; the substitute only records the CLI
   // boundary and returns a chosen status, never implements package selection.
   const publishingCases = [
-    { name: "publishes exactly the three native packages and clears an inherited PAT" },
-    { name: "rejects a missing last package before any upload", missingTarget: "linux-x64" },
+    { name: "publishes exactly the four native packages and clears an inherited PAT" },
+    { name: "rejects a missing last package before any upload", missingTarget: "win32-x64" },
     { name: "rejects a missing client ID before any upload", missingAuth: "AZURE_CLIENT_ID" },
     { name: "rejects a missing tenant ID before any upload", missingAuth: "AZURE_TENANT_ID" },
     { name: "stops at the first failed upload", failTarget: "darwin-arm64" },
     { name: "reports a middle-platform failure without uploading later targets", failTarget: "darwin-x64" },
   ];
   for (const scenario of publishingCases) {
-    it(scenario.name, async () => {
+    itRunsWorkflowBash(scenario.name, async () => {
       const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
       const targets = workflow.match(/^      MARKETPLACE_TARGETS: (.+)$/m)?.[1];
-      expect(targets).toBe("darwin-arm64 darwin-x64 linux-x64");
+      expect(targets).toBe("darwin-arm64 darwin-x64 linux-x64 win32-x64");
       const runBlock = (name: string): string => {
         const step = workflow.split(`      - name: ${name}\n`)[1]?.split("\n      - ")[0];
         const script = step?.split("        run: |\n")[1];
@@ -148,7 +151,7 @@ describe("release guard scripts", () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-marketplace-upload-"));
       const run = promisify(execFile);
       const version = "0.1.90";
-      const expectedTargets = ["darwin-arm64", "darwin-x64", "linux-x64"];
+      const expectedTargets = ["darwin-arm64", "darwin-x64", "linux-x64", "win32-x64"];
       const log = path.join(root, "calls.jsonl");
       const env = {
         ...process.env,
@@ -203,7 +206,7 @@ if (process.env.FAIL_TARGET && args.at(-1).endsWith('-' + process.env.FAIL_TARGE
     });
   }
 
-  it("verifies the actual release download before extraction and rejects corruption or missing checksum", async () => {
+  itRunsWorkflowBash("verifies the actual release download before extraction and rejects corruption or missing checksum", async () => {
     const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
     const start = workflow.indexOf('            if [ "${USE_CLI_ARTIFACTS}" != "1" ]; then');
     const endLine = '            tar -xzf "${bundle_dir}/${archive}" -C "${bundle_dir}"';
@@ -339,11 +342,13 @@ if (process.env.FAIL_TARGET && args.at(-1).endsWith('-' + process.env.FAIL_TARGE
       "tomcat-cli-v0.1.8-aarch64-apple-darwin.tar.gz",
       "tomcat-cli-v0.1.8-x86_64-apple-darwin.tar.gz",
       "tomcat-cli-v0.1.8-x86_64-unknown-linux-gnu.tar.gz",
+      "tomcat-cli-v0.1.8-x86_64-pc-windows-msvc.tar.gz",
     ];
 
+    expect(guards.expectedCliAssetNames("0.1.8")).toEqual(assetNames);
     expect(() => guards.validateBundledCliAssets("0.1.8", assetNames)).not.toThrow();
     expect(() =>
-      guards.validateBundledCliAssets("0.1.8", assetNames.slice(0, 2)),
-    ).toThrow(/Missing pinned CLI asset/);
+      guards.validateBundledCliAssets("0.1.8", assetNames.slice(0, 3)),
+    ).toThrow(/Missing pinned CLI asset: tomcat-cli-v0\.1\.8-x86_64-pc-windows-msvc\.tar\.gz/);
   });
 });

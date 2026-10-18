@@ -33,7 +33,7 @@ pub use config::{
     resolve_checkpoints_dir, resolve_dot_tomcat_temp_dir, resolve_log_dir, resolve_memory_dir,
     resolve_model_thinking_path, resolve_plans_dir, resolve_plugins_dir,
     resolve_project_resource_dir, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
-    resolve_workspace_roots_paths, validate_config, write_llm_model_key, write_env_entries,
+    resolve_workspace_roots_paths, validate_config, write_env_entries, write_llm_model_key,
     AgentConfig, AppConfig, CheckpointConfig, ConnectorConfig, ContextConfig, LlmConfig, LogConfig,
     PreflightConfig, PrimitiveConfig, ResumeHydrationMode, SecurityConfig, ServeConfig,
     ServeTransport, SessionConfig, ToolCliVerbosity, ToolsBashConfig, ToolsConfig, ToolsReadConfig,
@@ -57,7 +57,7 @@ pub use events::wire;
 pub use events::{AgentEvent, ExtensionEvent};
 pub use i18n::tr;
 pub use logging::init_logging;
-pub use platform::{normalize_path, read_file_utf8, write_file_atomic};
+pub use platform::{canonicalize, normalize_path, posix_shell, read_file_utf8, write_file_atomic};
 
 #[cfg(test)]
 mod tests;

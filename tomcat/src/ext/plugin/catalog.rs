@@ -180,7 +180,8 @@ fn read_catalog_entry(
     let manifest_json = std::fs::read_to_string(manifest_path).map_err(AppError::Io)?;
     let manifest = parse_manifest(&manifest_json)?;
     let script = std::fs::read(plugin_root.join(&manifest.main)).map_err(AppError::Io)?;
-    let normalized_root = std::fs::canonicalize(plugin_root).map_err(AppError::Io)?;
+    let normalized_root =
+        crate::infra::platform::canonicalize(plugin_root).map_err(AppError::Io)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     normalized_root.hash(&mut hasher);
     manifest_json.as_bytes().hash(&mut hasher);

@@ -10,6 +10,7 @@ use crate::infra::{
     AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry, PrimitiveConfig, ToolAuditEntry,
     TracingAuditRecorder,
 };
+use crate::test_support::{shell_pwd, PWD_COMMAND};
 use serial_test::serial;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -99,7 +100,7 @@ impl Drop for HomeEnvGuard {
 async fn read_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_read");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("f.txt");
     std::fs::write(&f, "hello").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -119,7 +120,7 @@ async fn read_file_success() {
 async fn read_file_missing_path_returns_not_found_error() {
     let dir = std::env::temp_dir().join("tomcat_exec_read_missing");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let missing = dir.join("missing_file_for_read.txt");
     let path_str = missing.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
@@ -157,7 +158,7 @@ async fn read_file_missing_path_returns_not_found_error() {
 async fn read_file_binary_returns_product_error() {
     let dir = std::env::temp_dir().join("tomcat_exec_binary_read");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("image.png");
     std::fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -199,7 +200,7 @@ async fn list_dir_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_list");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("f.txt"), "").unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
         Arc::new(AllowAllConfirmation),
@@ -217,7 +218,7 @@ async fn list_dir_success() {
 async fn write_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_write");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("w.txt");
     let path_str = f.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
@@ -258,7 +259,7 @@ async fn native_write_confirmation_waits_cancel_without_touching_disk() {
         ("edit", true),
     ] {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().canonicalize().unwrap();
+        let dir = crate::infra::platform::canonicalize(temp.path()).unwrap();
         let path = dir.join("target.txt");
         std::fs::write(&path, "old\n").unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -376,7 +377,7 @@ async fn native_write_pre_cancel_never_registers_confirmation() {
 #[tokio::test]
 async fn write_file_with_cancel_skips_disk_write() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir.join("cancel-write.txt");
     std::fs::write(&f, "old").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -404,7 +405,7 @@ async fn write_file_with_cancel_skips_disk_write() {
 async fn write_file_user_denied_returns_permission_and_audit() {
     let dir = std::env::temp_dir().join("tomcat_exec_deny");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("d.txt");
     std::fs::write(&f, "old").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -442,7 +443,7 @@ impl AuditRecorder for DenyAuditRecorder {
 async fn edit_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_edit");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("e.txt");
     std::fs::write(&f, "line1\nline2\nline3").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -474,7 +475,7 @@ async fn edit_file_success() {
 #[tokio::test]
 async fn edit_file_with_cancel_skips_disk_write() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir.join("cancel-edit.txt");
     std::fs::write(&f, "line1\nline2\nline3\n").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -510,7 +511,7 @@ async fn edit_file_with_cancel_skips_disk_write() {
 #[tokio::test]
 async fn hashline_edit_with_cancel_skips_disk_write() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir.join("cancel-hashline.txt");
     std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -544,7 +545,7 @@ async fn hashline_edit_with_cancel_skips_disk_write() {
 #[tokio::test]
 async fn hashline_edit_success_returns_line_diff_stat() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir.join("hashline-success.txt");
     std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -579,7 +580,7 @@ async fn hashline_edit_success_returns_line_diff_stat() {
 async fn execute_bash_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -601,7 +602,6 @@ async fn execute_bash_success() {
     let _ = std::fs::remove_dir(&dir);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn execute_bash_single_command_runs_node_script_and_shell_composition() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -628,7 +628,6 @@ async fn execute_bash_single_command_runs_node_script_and_shell_composition() {
     assert_eq!(result.stdout, "node-shell-ok\n:pipeline");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn execute_bash_preserves_real_streams_instead_of_parsing_log_labels() {
     for shared in [false, true] {
@@ -668,7 +667,7 @@ async fn execute_bash_preserves_real_streams_instead_of_parsing_log_labels() {
 #[tokio::test]
 async fn execute_bash_marks_child_as_nested_agent() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -676,10 +675,7 @@ async fn execute_bash_marks_child_as_nested_agent() {
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),
     );
-    #[cfg(unix)]
     let command = r#"printf "%s" "${TOMCAT_AGENT_ACTIVE:-missing}""#;
-    #[cfg(windows)]
-    let command = r#"echo %TOMCAT_AGENT_ACTIVE%"#;
 
     let res = exec
         .execute_bash(command, Some(&path_str), "p1", None)
@@ -691,10 +687,31 @@ async fn execute_bash_marks_child_as_nested_agent() {
 }
 
 #[tokio::test]
+async fn execute_bash_passes_unicode_spaces_and_quotes_verbatim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path_str = dir.path().to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(dir.path()),
+    );
+    let command = r#"echo 你好 && printf '[%s]\n' "a b" "say \"hi\"" 'x*y'"#;
+
+    let res = exec
+        .execute_bash(command, Some(&path_str), "p1", None)
+        .await
+        .expect("bash command should succeed");
+
+    assert_eq!(res.exit_code, 0, "stderr={}", res.stderr);
+    assert_eq!(res.stdout, "你好\n[a b]\n[say \"hi\"]\n[x*y]\n");
+}
+
+#[tokio::test]
 #[serial(env_lock)]
 async fn execute_bash_empty_string_cwd_treated_as_none() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let _cwd = CurrentDirGuard::set(&dir);
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -704,24 +721,24 @@ async fn execute_bash_empty_string_cwd_treated_as_none() {
     );
 
     let res = exec
-        .execute_bash("pwd", Some(""), "p1", None)
+        .execute_bash(PWD_COMMAND, Some(""), "p1", None)
         .await
         .expect("空 cwd 应视同未传");
 
     assert_eq!(res.exit_code, 0);
-    assert_eq!(res.stdout.trim(), dir.display().to_string());
+    assert_eq!(res.stdout.trim(), shell_pwd(&dir));
 }
 
 #[tokio::test]
 #[serial(env_lock)]
 async fn bash_registry_empty_string_cwd_treated_as_none() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let _cwd = CurrentDirGuard::set(&dir);
     let registry = BashTaskRegistry::new(dir.join("tool-results"));
 
     let ticket = registry
-        .spawn_tracked("pwd".to_string(), Some(PathBuf::from("")), false)
+        .spawn_tracked(PWD_COMMAND.to_string(), Some(PathBuf::from("")), false)
         .await
         .expect("空 cwd 应视同未传");
     registry
@@ -732,7 +749,7 @@ async fn bash_registry_empty_string_cwd_treated_as_none() {
         .tail_output_chunk(&ticket.task_id, 1024)
         .await
         .expect("tail output");
-    assert_eq!(output.content.trim(), dir.display().to_string());
+    assert_eq!(output.content.trim(), shell_pwd(&dir));
 }
 
 #[tokio::test]
@@ -742,12 +759,12 @@ async fn bash_registry_tilde_cwd_executes_without_guard() {
     let _home = HomeEnvGuard::set(home.path());
     let target = home.path().join("tilde-registry");
     std::fs::create_dir_all(&target).unwrap();
-    let target = target.canonicalize().unwrap();
+    let target = crate::infra::platform::canonicalize(&target).unwrap();
     let registry = BashTaskRegistry::new(home.path().join("tool-results"));
 
     let ticket = registry
         .spawn_tracked(
-            "pwd".to_string(),
+            PWD_COMMAND.to_string(),
             Some(PathBuf::from("~/tilde-registry")),
             false,
         )
@@ -761,7 +778,7 @@ async fn bash_registry_tilde_cwd_executes_without_guard() {
         .tail_output_chunk(&ticket.task_id, 1024)
         .await
         .expect("tail output");
-    assert_eq!(output.content.trim(), target.display().to_string());
+    assert_eq!(output.content.trim(), shell_pwd(&target));
 }
 
 #[tokio::test]
@@ -771,12 +788,12 @@ async fn bash_registry_unchecked_still_normalizes_tilde_cwd() {
     let _home = HomeEnvGuard::set(home.path());
     let target = home.path().join("tilde-unchecked");
     std::fs::create_dir_all(&target).unwrap();
-    let target = target.canonicalize().unwrap();
+    let target = crate::infra::platform::canonicalize(&target).unwrap();
     let registry = BashTaskRegistry::new(home.path().join("tool-results"));
 
     let ticket = registry
         .spawn_tracked_unchecked(
-            "pwd".to_string(),
+            PWD_COMMAND.to_string(),
             ResolvedCwd::from_raw(Some("~/tilde-unchecked")).expect("resolved cwd"),
             false,
         )
@@ -790,13 +807,13 @@ async fn bash_registry_unchecked_still_normalizes_tilde_cwd() {
         .tail_output_chunk(&ticket.task_id, 1024)
         .await
         .expect("tail output");
-    assert_eq!(output.content.trim(), target.display().to_string());
+    assert_eq!(output.content.trim(), shell_pwd(&target));
 }
 
 #[tokio::test]
 async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let missing = dir.join("missing-subdir");
     let path_str = missing.display().to_string();
     let exec = DefaultPrimitiveExecutor::new(
@@ -822,7 +839,7 @@ async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
 #[tokio::test]
 async fn execute_bash_non_directory_cwd_returns_clear_error() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let file = dir.join("not-a-dir.txt");
     std::fs::write(&file, "hello").unwrap();
     let path_str = file.display().to_string();
@@ -846,7 +863,7 @@ async fn execute_bash_non_directory_cwd_returns_clear_error() {
 #[tokio::test]
 async fn execute_bash_dollar_var_like_cwd_returns_hint_when_path_missing() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
         Arc::new(AllowAllConfirmation),
@@ -869,7 +886,7 @@ async fn execute_bash_dollar_var_like_cwd_returns_hint_when_path_missing() {
 #[serial(env_lock)]
 async fn execute_bash_dollar_var_like_cwd_executes_when_real_dir() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let literal = dir.join("$HOME");
     std::fs::create_dir_all(&literal).unwrap();
     let _cwd = CurrentDirGuard::set(&dir);
@@ -881,18 +898,18 @@ async fn execute_bash_dollar_var_like_cwd_executes_when_real_dir() {
     );
 
     let res = exec
-        .execute_bash("pwd", Some("$HOME"), "p1", None)
+        .execute_bash(PWD_COMMAND, Some("$HOME"), "p1", None)
         .await
         .expect("客观存在的 $HOME 字面目录不应被误伤");
 
     assert_eq!(res.exit_code, 0);
-    assert_eq!(res.stdout.trim(), literal.display().to_string());
+    assert_eq!(res.stdout.trim(), shell_pwd(&literal));
 }
 
 #[tokio::test]
 async fn execute_bash_pre_validation_failure_writes_audit() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let missing = dir.join("missing-audit-subdir");
     let path_str = missing.display().to_string();
     let entries = Arc::new(Mutex::new(Vec::<PrimitiveAuditEntry>::new()));
@@ -930,7 +947,7 @@ async fn execute_bash_pre_validation_failure_writes_audit() {
 #[tokio::test]
 async fn execute_bash_missing_command_is_a_shell_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let path_str = dir.display().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -981,20 +998,26 @@ async fn bash_registry_tracks_missing_shell_command_failure() {
 
 #[test]
 fn tokio_spawn_with_dollar_home_returns_enoent_when_literal_path_missing() {
-    let err = tokio::process::Command::new("sh")
+    let err = tokio::process::Command::new(crate::infra::platform::posix_shell().unwrap())
         .arg("-c")
         .arg("pwd")
         .current_dir("$HOME/definitely-missing-literal")
         .spawn()
         .expect_err("tokio spawn 应返回 ENOENT");
-    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    // Windows CreateProcess 对不存在的工作目录返回 ERROR_DIRECTORY。
+    let expected = if cfg!(windows) {
+        std::io::ErrorKind::NotADirectory
+    } else {
+        std::io::ErrorKind::NotFound
+    };
+    assert_eq!(err.kind(), expected);
 }
 
 #[tokio::test]
 async fn execute_bash_tokens_no_longer_trigger_path_gate() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_url");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -1293,7 +1316,7 @@ async fn bash_foreground_wait_expiry_promotes_with_shared_registry() {
 async fn bash_output_truncation_keeps_head_tail() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_truncate");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     // max_output_chars 压到 64：fixture 命令打印 ~2000 字符肯定触发截断。
     let exec = DefaultPrimitiveExecutor::new(
@@ -1340,7 +1363,7 @@ async fn bash_output_truncation_keeps_head_tail() {
 async fn bash_persists_full_output_when_truncated() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_persist");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let persist_dir = dir.join("tool-results");
     let exec = DefaultPrimitiveExecutor::new(
@@ -1385,7 +1408,7 @@ async fn bash_ast_allowlist_denies_compound_command_short_circuit() {
 
     let dir = std::env::temp_dir().join("tomcat_exec_bash_ast_deny");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     // 留个 fixture 文件验证 rm 真没执行。
     let probe = dir.join("must_survive.txt");
@@ -1429,7 +1452,7 @@ async fn bash_ast_default_empty_lists_keeps_legacy_behavior() {
 
     let dir = std::env::temp_dir().join("tomcat_exec_bash_ast_default");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -1456,7 +1479,7 @@ async fn bash_ast_heredoc_returns_unsupported_error() {
 
     let dir = std::env::temp_dir().join("tomcat_exec_bash_ast_heredoc");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -1480,7 +1503,7 @@ async fn execute_bash_forbidden() {
     // 走 gate 主路径，不再依赖 PrimitiveConfig.bash_forbidden 字段。
     let dir = std::env::temp_dir().join("tomcat_exec_forbid");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         PrimitiveConfig::default(),
@@ -1541,7 +1564,7 @@ async fn require_user_confirmation_deny_returns_false() {
 async fn read_file_on_directory_returns_err() {
     let dir = std::env::temp_dir().join("tomcat_exec_read_dir");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let path_str = dir.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(&dir),
@@ -1562,7 +1585,7 @@ async fn read_file_on_directory_returns_err() {
 async fn write_file_auto_confirm_skips_confirmation() {
     let dir = std::env::temp_dir().join("tomcat_exec_autoconfirm");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("ac.txt");
     std::fs::write(&f, "old").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -1587,7 +1610,7 @@ async fn write_file_auto_confirm_skips_confirmation() {
 async fn write_file_overwrite_creates_backup() {
     let dir = std::env::temp_dir().join("tomcat_exec_backup");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("overwrite.txt");
     std::fs::write(&f, "original").unwrap();
     let path_str = f.to_string_lossy().to_string();
@@ -1614,7 +1637,7 @@ async fn write_file_overwrite_creates_backup() {
 #[tokio::test]
 async fn write_file_overwrite_backup_failure_preserves_original() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir.join("overwrite.txt");
     std::fs::write(&f, "original").unwrap();
     let backup = dir.join("overwrite.bak");
@@ -1643,7 +1666,7 @@ async fn write_file_overwrite_rollback_failure_surfaces_error() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let dir = dir.path().canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let f = dir.join("overwrite.txt");
     let original = "original";
     std::fs::write(&f, original.as_bytes()).unwrap();
@@ -1679,11 +1702,11 @@ async fn write_file_overwrite_rollback_failure_surfaces_error() {
 async fn workspace_roots_allow_external_path() {
     let ws_dir = std::env::temp_dir().join("tomcat_exec_extra_ws");
     std::fs::create_dir_all(&ws_dir).unwrap();
-    let ws_dir = ws_dir.canonicalize().unwrap();
+    let ws_dir = crate::infra::platform::canonicalize(&ws_dir).unwrap();
 
     let ext_dir = std::env::temp_dir().join("tomcat_exec_extra_ext");
     std::fs::create_dir_all(&ext_dir).unwrap();
-    let ext_dir = ext_dir.canonicalize().unwrap();
+    let ext_dir = crate::infra::platform::canonicalize(&ext_dir).unwrap();
     let ext_file = ext_dir.join("ext.txt");
     std::fs::write(&ext_file, "external").unwrap();
 
@@ -1708,7 +1731,7 @@ async fn workspace_roots_allow_external_path() {
 async fn workspace_roots_still_rejects_unlisted_path() {
     let ws_dir = std::env::temp_dir().join("tomcat_exec_extra_reject");
     std::fs::create_dir_all(&ws_dir).unwrap();
-    let ws_dir = ws_dir.canonicalize().unwrap();
+    let ws_dir = crate::infra::platform::canonicalize(&ws_dir).unwrap();
 
     let exec = DefaultPrimitiveExecutor::new(
         PrimitiveConfig::default(),
@@ -1765,7 +1788,7 @@ fn temp_edit_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    crate::infra::platform::canonicalize(&dir).unwrap()
 }
 
 #[tokio::test]
@@ -2404,7 +2427,7 @@ async fn edit_legacy_line_oriented_path_still_works() {
 async fn write_normalizes_crlf_when_enabled() {
     let dir = std::env::temp_dir().join("tomcat_exec_lf_on");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("crlf.txt");
     let path_str = f.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
@@ -2432,7 +2455,7 @@ async fn write_normalizes_crlf_when_enabled() {
 async fn write_does_not_normalize_when_disabled() {
     let dir = std::env::temp_dir().join("tomcat_exec_lf_off");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("crlf_off.txt");
     let path_str = f.to_string_lossy().to_string();
     let exec = DefaultPrimitiveExecutor::new(
@@ -2537,7 +2560,7 @@ async fn write_secrets_hit_denied_reverts_to_no_op() {
 async fn write_result_includes_byte_count_and_diff_hint() {
     let dir = std::env::temp_dir().join("tomcat_exec_diff");
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let dir = crate::infra::platform::canonicalize(&dir).unwrap();
     let f = dir.join("diff.txt");
     std::fs::write(&f, "line1\nline2\nline3\n").unwrap();
     let path_str = f.to_string_lossy().to_string();

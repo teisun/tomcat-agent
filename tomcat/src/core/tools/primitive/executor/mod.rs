@@ -69,7 +69,7 @@
 //! 单文件 `executor.rs`（2105 行）按职责拆分到：
 //!
 //! - [`gate`]：`PermissionGate` 桥接（`gate_check_path` / `gate_check_bash`）+ `run_search_command`
-//! - [`helpers`]：审计字符串化 + `find_binary` 等无状态小工具
+//! - [`helpers`]：审计字符串化等无状态小工具
 //! - [`read`]：`read_file` / `read` / `list_dir` 实现 + cat-n / hashline / 多模态 magic
 //! - [`search`]：`search_files` Tier1（rg/fd）+ Tier2（rust-fallback）
 //! - [`write_edit`]：`write_file` / `edit_file` 实现
@@ -115,7 +115,7 @@ pub(crate) use read::{
     compute_line_hash, detect_inline_mime, format_with_hashlines, format_with_line_numbers,
     DetectedInlineMime, InlineKind,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use write_edit::simulate_failed_commit_with_backup_for_test;
 
 /// 单次读取文件最大字节数，避免 OOM。

@@ -49,9 +49,7 @@ pub(crate) fn try_acquire_config_lock(
     let lock = open_lock_file(config_path)?;
     match FileExt::try_lock_exclusive(&lock) {
         Ok(()) => Ok(Some(lock)),
-        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
-            Ok(None)
-        }
+        Err(error) if crate::infra::platform::is_lock_contended(&error) => Ok(None),
         Err(error) => Err(AppError::Io(error)),
     }
 }

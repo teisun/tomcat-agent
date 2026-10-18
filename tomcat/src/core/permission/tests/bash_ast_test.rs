@@ -142,8 +142,9 @@ fn glob_prefix_pattern_matches() {
 #[tokio::test]
 async fn noop_sandbox_backend_spawns_directly() {
     let backend = NoopSandboxBackend;
-    let mut cmd = tokio::process::Command::new("echo");
-    cmd.arg("hello").stdout(std::process::Stdio::piped());
+    let mut cmd = tokio::process::Command::new(crate::infra::platform::posix_shell().unwrap());
+    cmd.args(["-c", "echo hello"])
+        .stdout(std::process::Stdio::piped());
     let child = backend.spawn(cmd).await.expect("spawn");
     let output = child.wait_with_output().await.expect("wait");
     assert_eq!(output.status.code(), Some(0));

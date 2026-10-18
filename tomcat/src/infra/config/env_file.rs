@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
-use crate::infra::platform::write_file_atomic;
+use crate::infra::platform::{set_private_file_permissions, write_file_atomic};
 
 pub(crate) fn env_file_error(path: &Path, error: dotenvy::Error) -> AppError {
     // dotenvy's line/variable variants carry raw credential text. Never render it.
@@ -55,15 +55,7 @@ pub fn write_env_entries(env_path: &Path, vars: &BTreeMap<String, String>) -> Re
         }
     }
     write_file_atomic(env_path, format!("{}\n", lines.join("\n")).as_bytes())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(env_path, perms).map_err(AppError::Io)?;
-    }
-
-    Ok(())
+    set_private_file_permissions(env_path)
 }
 
 fn is_proxy_key(key: &str) -> bool {

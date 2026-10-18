@@ -9,6 +9,7 @@
 //! - 以 `/` 开头（绝对路径）
 //! - 以 `~` 开头（home 缩写）
 //! - 以 `./` / `../` 开头（相对路径）
+//! - 仅 Windows：`X:\`、`X:/`、`\\server\share`；`/c/...` 映射为 `C:\...`
 //!
 //! 不会展开 glob；**不会**把 `>` / `<` 重定向目标当路径提取（见下方 TODO）。
 //! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令再分别提取。
@@ -50,7 +51,7 @@ pub fn extract_paths(command: &str) -> Vec<String> {
                 break;
             };
             if looks_like_path(rhs) {
-                paths.push(rhs.to_string());
+                paths.push(host_path(rhs));
             }
             iter.next();
         }
@@ -66,7 +67,7 @@ pub fn extract_paths(command: &str) -> Vec<String> {
 fn collect_candidates(tok: &str, out: &mut Vec<String>) {
     if let Some(rhs) = is_env_assignment(tok) {
         if looks_like_path(rhs) {
-            out.push(rhs.to_string());
+            out.push(host_path(rhs));
         }
         return;
     }
@@ -77,13 +78,13 @@ fn collect_candidates(tok: &str, out: &mut Vec<String>) {
         if tok.starts_with('-') {
             let value = &tok[eq + 1..];
             if looks_like_path(value) {
-                out.push(value.to_string());
+                out.push(host_path(value));
             }
             return;
         }
     }
     if looks_like_path(tok) {
-        out.push(tok.to_string());
+        out.push(host_path(tok));
     }
 }
 
@@ -113,7 +114,39 @@ fn looks_like_path(s: &str) -> bool {
     if s.starts_with('-') {
         return false;
     }
-    s.starts_with('/') || s.starts_with("~") || s.starts_with("./") || s.starts_with("../")
+    s.starts_with('/')
+        || s.starts_with("~")
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || (cfg!(windows) && is_windows_absolute(s))
+}
+
+/// `X:\`、`X:/`、`\\server\share`：Windows 上 Git Bash 命令里的绝对路径。
+fn is_windows_absolute(s: &str) -> bool {
+    let b = s.as_bytes();
+    let drive =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\');
+    drive || s.starts_with(r"\\")
+}
+
+/// Windows：Git Bash 把盘符挂在 `/c/`，映射回 `C:\...`；`/tmp`、`/usr` 等其它 MSYS 路径不猜测，
+/// 按工作区外路径处理（会弹确认，偏安全）。其它平台原样返回。
+fn host_path(s: &str) -> String {
+    #[cfg(windows)]
+    if let Some(rest) = s.strip_prefix('/') {
+        let mut chars = rest.chars();
+        if let Some(drive) = chars.next().filter(char::is_ascii_alphabetic) {
+            let tail = chars.as_str();
+            if tail.is_empty() || tail.starts_with('/') {
+                return format!(
+                    "{}:\\{}",
+                    drive.to_ascii_uppercase(),
+                    tail.trim_start_matches('/').replace('/', "\\")
+                );
+            }
+        }
+    }
+    s.to_string()
 }
 
 /// 把一条命令按 `|` `;` `&` `>` `<` `&&` `||` 拆成子命令。

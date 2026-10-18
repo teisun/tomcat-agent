@@ -405,6 +405,46 @@ fn bash_approval_required_layer2() {
     assert!(matches!(dec, PermissionDecision::NeedConfirm { .. }));
 }
 
+#[test]
+fn windows_style_destructive_commands_hit_builtin_bash_rules() {
+    let gate = gate_with(tmpdir("ws_win_danger"), vec![], vec![]);
+    for bad in [
+        "rm -rf C:/",
+        r"rm -rf C:\",
+        "rm -rf /c",
+        "rm -rf /c/",
+        "format D:",
+        "diskpart",
+    ] {
+        let dec = gate.check_bash(bad).unwrap();
+        assert!(
+            matches!(dec, PermissionDecision::Deny { .. }),
+            "`{bad}`: {dec:?}"
+        );
+    }
+    for risky in [
+        "cmd //c rd /s /q build",
+        "cmd //c rmdir //s //q build",
+        "del /s *.tmp",
+        "powershell -c Remove-Item build -Recurse -Force",
+        r"reg delete HKCU\Software\X /f",
+    ] {
+        let dec = gate.check_bash(risky).unwrap();
+        assert!(
+            matches!(dec, PermissionDecision::NeedConfirm { .. }),
+            "`{risky}`: {dec:?}"
+        );
+    }
+    let dec = gate.check_bash("cmd //c rd build").unwrap();
+    assert!(
+        !matches!(
+            dec,
+            PermissionDecision::Deny { .. } | PermissionDecision::NeedConfirm { .. }
+        ),
+        "{dec:?}"
+    );
+}
+
 // ── PR-9：Agent trail dir 凭据保护 / 历史只读集成 ─────────────────────────
 
 /// 写 `~/.tomcat/agents/main/agent/auth-profiles.json` → builtin path_rule deny。
@@ -648,4 +688,58 @@ fn workspace_roots_grant_writable() {
             if grant.grant_type == GrantType::AgentWorkspaceRoot
                 && grant.trigger == GrantTrigger::WorkspaceRootsConfig
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_workspace_root_matches_differently_cased_target() {
+    let def = tmpdir("ws_case_def");
+    let root = tmpdir("Ws_Case_Root");
+    let gate = gate_with(def, vec![root.clone()], vec![]);
+    let target = root.join("a.txt").to_string_lossy().to_lowercase();
+    let dec = gate.check(PrimitiveOperation::Write, &target).unwrap();
+    assert!(
+        matches!(dec, PermissionDecision::Allow { ref grant, .. }
+            if grant.grant_type == GrantType::AgentWorkspaceRoot),
+        "{dec:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_builtin_sessions_rule_blocks_backslash_write() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::HomeOverride::new(home.path());
+    let gate = gate_with(tmpdir("ws_win_sessions"), vec![], vec![]);
+    let target = home.path().join(r".tomcat\agents\main\sessions\a.jsonl");
+    let dec = gate
+        .check(PrimitiveOperation::Write, target.to_str().unwrap())
+        .unwrap();
+    assert!(matches!(dec, PermissionDecision::Deny { .. }), "{dec:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_deny_rule_blocks_differently_cased_missing_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::HomeOverride::new(home.path());
+
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: home.path().to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![PathRule::new("~/.ssh", PathRuleMode::Deny)],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    );
+    assert!(!home.path().join(".ssh").exists());
+    let target = home.path().join(".SSH").join("x");
+    let dec = gate
+        .check(PrimitiveOperation::Read, target.to_str().unwrap())
+        .unwrap();
+    assert!(matches!(dec, PermissionDecision::Deny { .. }), "{dec:?}");
 }

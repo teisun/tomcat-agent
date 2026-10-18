@@ -3,15 +3,16 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serial_test::serial;
 use tomcat::api::chat::preflight::start_git_preflight;
 use tomcat::infra::ScopedEventEmitter;
-use tomcat::{
-    wire, AppConfig, CheckpointKind, CheckpointRecordRequest, CheckpointStore, DefaultEventBus,
-    EventBus, EventContext, SwitchingCheckpointStore,
-};
+use tomcat::{wire, AppConfig, DefaultEventBus, EventBus, EventContext, SwitchingCheckpointStore};
+#[cfg(unix)]
+use tomcat::{CheckpointKind, CheckpointRecordRequest, CheckpointStore};
 
 fn worktree_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let root = tempfile::tempdir().unwrap();
@@ -30,6 +31,7 @@ fn git_preflight_config(home: &Path, auto_install_git: bool) -> AppConfig {
     cfg
 }
 
+#[cfg(unix)]
 fn record_once(store: &dyn CheckpointStore) -> tomcat::CheckpointId {
     store
         .record(CheckpointRecordRequest {
@@ -42,6 +44,7 @@ fn record_once(store: &dyn CheckpointStore) -> tomcat::CheckpointId {
         .unwrap()
 }
 
+#[cfg(unix)]
 fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -74,6 +77,7 @@ fn git_preflight_emitter(bus: Arc<dyn EventBus>) -> Arc<ScopedEventEmitter> {
     Arc::new(ScopedEventEmitter::new(bus, "sess-git-preflight"))
 }
 
+#[cfg(unix)]
 fn find_binary_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {

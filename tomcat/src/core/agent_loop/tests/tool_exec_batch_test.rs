@@ -279,7 +279,7 @@ async fn windowed_and_truncated_reads_hash_only_the_returned_view_and_still_reje
     use crate::core::tools::pipeline::read_state::hash_content;
     use crate::core::tools::primitive::ReadResult;
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let path = root.join("large.log");
     let primitive = make_executor(&root);
     let original = format!("target\n{}", "filler\n".repeat(20_000));

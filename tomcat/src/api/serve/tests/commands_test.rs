@@ -3953,7 +3953,9 @@ async fn transcript_migration_preserves_get_messages_image_and_display_semantics
 
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/migrate_transcripts_v2.py");
-    let migration = StdCommand::new("python3")
+    // On Windows `python3` is usually the Microsoft Store placeholder; installers provide `python`.
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let migration = StdCommand::new(python)
         .env("TOMCAT_MIGRATION_TEST_ALLOW_RUNNING_SERVE", "1")
         .arg(script)
         .arg("--sessions-dir")
@@ -7074,7 +7076,7 @@ async fn serve_get_state_ignores_persisted_context_ratio() {
 
     assert_eq!(
         payload["activePlan"]["path"].as_str(),
-        Some(plan_path.to_string_lossy().as_ref())
+        Some(crate::infra::platform::format_home_path(&plan_path).as_str())
     );
     assert!(
         payload["contextUtilizationRatio"].is_null(),
@@ -7973,10 +7975,9 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
                 && request.contains("\"output_config\":{\"effort\":\"xhigh\"}")
         })
         .expect("expected a streamed claude request with adaptive effort");
-    let body: serde_json::Value = serde_json::from_str(
-        claude_request.split("\r\n\r\n").nth(1).unwrap_or_default(),
-    )
-    .expect("claude request body is JSON");
+    let body: serde_json::Value =
+        serde_json::from_str(claude_request.split("\r\n\r\n").nth(1).unwrap_or_default())
+            .expect("claude request body is JSON");
     assert_eq!(
         body["thinking"],
         serde_json::json!({ "type": "adaptive", "display": "summarized" }),
@@ -8686,7 +8687,10 @@ async fn serve_restore_checkpoint_rejects_foreign_session_checkpoint() {
     );
 }
 
-async fn serve_one_models_response(status: u16, body: &'static str) -> (String, oneshot::Receiver<String>) {
+async fn serve_one_models_response(
+    status: u16,
+    body: &'static str,
+) -> (String, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = oneshot::channel();
@@ -8746,7 +8750,12 @@ fn relay_model(id: &str, api: &str) -> ModelEntryInput {
         supported_speeds: None,
         supported_reasoning_levels: None,
         thinking_format: Some(
-            if api == "anthropic-messages" { "anthropic" } else { "openai" }.to_string(),
+            if api == "anthropic-messages" {
+                "anthropic"
+            } else {
+                "openai"
+            }
+            .to_string(),
         ),
     }
 }
@@ -8758,8 +8767,11 @@ async fn serve_remote_model_list_returns_names_and_classified_failures_without_t
     let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
     let secret = "sk-dialog-only-secret-0001";
 
-    let (ok_url, ok_request) =
-        serve_one_models_response(200, r#"{"data":[{"id":"deepseek-v4-pro"},{"id":"deepseek-chat"}]}"#).await;
+    let (ok_url, ok_request) = serve_one_models_response(
+        200,
+        r#"{"data":[{"id":"deepseek-v4-pro"},{"id":"deepseek-chat"}]}"#,
+    )
+    .await;
     let listed = run_and_read(
         &state,
         &buffer,
@@ -8774,10 +8786,17 @@ async fn serve_remote_model_list_returns_names_and_classified_failures_without_t
     )
     .await;
     assert_eq!(listed["success"].as_bool(), Some(true));
-    assert_eq!(listed["payload"]["models"][1]["id"].as_str(), Some("deepseek-chat"));
-    assert!(ok_request.await.unwrap().contains(&format!("Bearer {secret}")));
+    assert_eq!(
+        listed["payload"]["models"][1]["id"].as_str(),
+        Some("deepseek-chat")
+    );
+    assert!(ok_request
+        .await
+        .unwrap()
+        .contains(&format!("Bearer {secret}")));
 
-    let (denied_url, _denied_request) = serve_one_models_response(401, r#"{"error":"bad key"}"#).await;
+    let (denied_url, _denied_request) =
+        serve_one_models_response(401, r#"{"error":"bad key"}"#).await;
     let denied = run_and_read(
         &state,
         &buffer,
@@ -8798,7 +8817,10 @@ async fn serve_remote_model_list_returns_names_and_classified_failures_without_t
         .iter()
         .map(serde_json::Value::to_string)
         .collect::<String>();
-    assert!(!all_output.contains(secret), "serve output leaked the dialog key");
+    assert!(
+        !all_output.contains(secret),
+        "serve output leaked the dialog key"
+    );
 }
 
 #[tokio::test]
@@ -8866,12 +8888,20 @@ async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() 
     let listed = run_and_read(
         &state,
         &buffer,
-        ServeCommand::ListModels { id: Some("list-after-save".to_string()) },
+        ServeCommand::ListModels {
+            id: Some("list-after-save".to_string()),
+        },
         "list-after-save",
     )
     .await;
-    assert_eq!(listed["payload"]["defaultModelId"].as_str(), Some("gpt-5.4"));
-    assert_eq!(listed["payload"]["utilityModelId"].as_str(), Some("fcodex/claude-opus-5-5"));
+    assert_eq!(
+        listed["payload"]["defaultModelId"].as_str(),
+        Some("gpt-5.4")
+    );
+    assert_eq!(
+        listed["payload"]["utilityModelId"].as_str(),
+        Some("fcodex/claude-opus-5-5")
+    );
     let relay = listed["payload"]["models"]
         .as_array()
         .unwrap()
@@ -8901,7 +8931,9 @@ async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() 
     let after = run_and_read(
         &state,
         &buffer,
-        ServeCommand::ListModels { id: Some("list-after-remove".to_string()) },
+        ServeCommand::ListModels {
+            id: Some("list-after-remove".to_string()),
+        },
         "list-after-remove",
     )
     .await;
@@ -8913,7 +8945,10 @@ async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() 
         .as_array()
         .unwrap()
         .iter()
-        .all(|model| !model["id"].as_str().unwrap_or_default().starts_with("fcodex/")));
+        .all(|model| !model["id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("fcodex/")));
 
     let unknown = run_and_read(
         &state,

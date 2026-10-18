@@ -397,9 +397,7 @@ pub fn upsert_user_models(
                     .lookup(&entry.id)
                     .cloned()
                     .map(|resolved| ModelView::from_entry(&reloaded, resolved))
-                    .ok_or_else(|| {
-                        AppError::Config(tr("model.reloadFailed", &[("id", &entry.id)]))
-                    })
+                    .ok_or_else(|| AppError::Config(tr("model.reloadFailed", &[("id", &entry.id)])))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(UpsertModelsResult {
@@ -806,12 +804,12 @@ fn with_file_lock<T>(
         match file.try_lock_exclusive() {
             Ok(()) => break,
             Err(error) if Instant::now() < deadline => {
-                if error.kind() != std::io::ErrorKind::WouldBlock {
+                if !crate::infra::platform::is_lock_contended(&error) {
                     return Err(AppError::Io(error));
                 }
                 std::thread::sleep(LOCK_RETRY);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if crate::infra::platform::is_lock_contended(&error) => {
                 return Err(AppError::Config(tr(
                     "model.lockTimeout",
                     &[

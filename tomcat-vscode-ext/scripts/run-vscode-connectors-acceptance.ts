@@ -6,6 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { runTests } from "@vscode/test-electron";
 import { resolveVsCodeCli, resolveVsCodeExecutable, seedChatUserSettings } from "./e2eHostFixture";
 import { packageVsix } from "./package-vsix";
+import { runCommand } from "./runCommand";
 import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 import { EXTENSION_ID } from "../src/constants";
 
@@ -106,9 +107,9 @@ async function main(): Promise<void> {
   let failure: unknown;
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
-    execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot, stdio: "inherit" });
+    runCommand("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
     packageVsix({ extensionRoot, outPath: vsixPath, skipBuild: process.env.TOMCAT_ACCEPT_SKIP_BUILD === "1" });
-    execFileSync(resolveVsCodeCli(), ["--user-data-dir", path.join(installRoot, "installer"), "--extensions-dir", extensionsDir, "--install-extension", vsixPath, "--force"], { stdio: "inherit" });
+    runCommand(resolveVsCodeCli(), ["--user-data-dir", path.join(installRoot, "installer"), "--extensions-dir", extensionsDir, "--install-extension", vsixPath, "--force"]);
     const candidates = (await fs.readdir(extensionsDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && entry.name.startsWith(`${EXTENSION_ID}-`));
     if (candidates.length !== 1) throw new Error(`Expected one installed Tomcat extension, found ${candidates.length}`);
     const installed = path.join(extensionsDir, candidates[0].name);

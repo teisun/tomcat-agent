@@ -58,7 +58,7 @@ pub fn with_resource_transaction_lock<R>(
             ))
         })?
         .to_path_buf();
-    let key = layer_root.canonicalize().unwrap_or(layer_root);
+    let key = crate::infra::platform::canonicalize(&layer_root).unwrap_or(layer_root);
     let slot = resource_transaction_coordinator()
         .write()
         .entry(key.clone())
@@ -603,10 +603,10 @@ fn detect_package_manifest_file(
     manifest_path: &Path,
     require_tomcat_block: bool,
 ) -> Result<Option<DetectedPackageSource>, AppError> {
-    let root = manifest_path
-        .parent()
-        .ok_or_else(|| AppError::Config(tr("package.noParent", &[("file", "package.json")])))?
-        .canonicalize()
+    let root =
+        crate::infra::platform::canonicalize(manifest_path.parent().ok_or_else(|| {
+            AppError::Config(tr("package.noParent", &[("file", "package.json")]))
+        })?)
         .map_err(AppError::Io)?;
     let raw = read_file_utf8(manifest_path)?;
     let parsed: RawPackageJson = serde_json::from_str(&raw).map_err(|error| {
@@ -864,7 +864,7 @@ fn validate_plugin_main(
     plugin_root: &Path,
     manifest: &crate::PluginManifest,
 ) -> Result<(), AppError> {
-    let root = plugin_root.canonicalize().map_err(AppError::Io)?;
+    let root = crate::infra::platform::canonicalize(plugin_root).map_err(AppError::Io)?;
     let main_path = canonicalize_existing_path(&root.join(&manifest.main)).map_err(|error| {
         AppError::Config(tr(
             "package.mainUnreadable",
@@ -1097,7 +1097,7 @@ fn resolve_package_resource_path(
 }
 
 fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, AppError> {
-    path.canonicalize().map_err(|error| {
+    crate::infra::platform::canonicalize(path).map_err(|error| {
         AppError::Config(tr(
             "package.pathUnreadable",
             &[

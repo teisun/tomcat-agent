@@ -29,8 +29,9 @@ fn localized_environment_comments_preserve_values_and_private_permissions() {
     write_env_entries(&path, &vars).unwrap();
     assert_eq!(read_env_entries(&path).unwrap(), vars);
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("tomcat init"));
-    assert!(text.contains("0600"));
+    assert!(text.starts_with(&crate::infra::i18n::tr("config.envHeader", &[])));
+    #[cfg(windows)]
+    crate::test_support::assert_private_to_current_user(&path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

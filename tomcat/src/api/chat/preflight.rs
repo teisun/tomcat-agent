@@ -17,15 +17,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::json;
-use shell_words;
 
 use crate::core::SwitchingCheckpointStore;
 use crate::infra::i18n::tr;
+use crate::infra::platform::find_executable;
 use crate::infra::{wire, AppConfig, ScopedEventEmitter};
 
 const SKIP_ENV: &str = "PI_SKIP_SEARCH_TOOLS_PREFLIGHT";
 
 /// 最近一次 detached 安装的日志路径（仅 UX；**不用作**「是否仍在安装」的判定）。
+#[cfg(unix)]
 pub(crate) const DETACHED_LOG_MARKER_NAME: &str = "preflight-detached-log.marker";
 #[cfg(unix)]
 const GIT_DETACHED_LOG_MARKER_NAME: &str = "preflight-detached-git-log.marker";
@@ -203,7 +204,7 @@ pub fn start_git_preflight(
 
     std::thread::spawn(move || {
         let started = Instant::now();
-        if find_binary(&["git"]).is_some() {
+        if find_executable(&["git"]).is_some() {
             #[cfg(unix)]
             remove_detached_log_marker_file(GIT_DETACHED_LOG_MARKER_NAME);
             checkpoint_switcher.force_activate_shadow();
@@ -232,7 +233,7 @@ pub fn start_git_preflight(
         {
             let output = StdCommand::new(plan.program).args(&plan.args).output();
             match output {
-                Ok(output) if output.status.success() && find_binary(&["git"]).is_some() => {
+                Ok(output) if output.status.success() && find_executable(&["git"]).is_some() => {
                     checkpoint_switcher.force_activate_shadow();
                     emit_git_preflight(
                         &emitter,
@@ -539,10 +540,10 @@ fn should_skip_git_preflight(config: &AppConfig) -> bool {
 
 fn missing_search_tools() -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if find_binary(&["rg", "ripgrep"]).is_none() {
+    if find_executable(&["rg", "ripgrep"]).is_none() {
         missing.push("ripgrep");
     }
-    if find_binary(&["fd", "fdfind"]).is_none() {
+    if find_executable(&["fd", "fdfind"]).is_none() {
         missing.push("fd");
     }
     missing
@@ -554,7 +555,7 @@ struct InstallPlan {
 }
 
 fn install_plan() -> Option<InstallPlan> {
-    if is_termux() && find_binary(&["pkg"]).is_some() {
+    if is_termux() && find_executable(&["pkg"]).is_some() {
         return Some(InstallPlan {
             program: "pkg",
             args: vec!["install", "-y", "ripgrep", "fd"],
@@ -566,7 +567,7 @@ fn install_plan() -> Option<InstallPlan> {
         return None;
     }
 
-    if cfg!(target_os = "macos") && find_binary(&["brew"]).is_some() {
+    if cfg!(target_os = "macos") && find_executable(&["brew"]).is_some() {
         return Some(InstallPlan {
             program: "brew",
             args: vec!["install", "--force-bottle", "ripgrep", "fd"],
@@ -574,7 +575,7 @@ fn install_plan() -> Option<InstallPlan> {
     }
 
     // TODO: implement detached install for Windows (PowerShell Start-Process -NoWait); v1 仍为阻塞 output()
-    if cfg!(target_os = "windows") && find_binary(&["winget"]).is_some() {
+    if cfg!(target_os = "windows") && find_executable(&["winget"]).is_some() {
         return Some(InstallPlan {
             program: "cmd",
             args: vec![
@@ -584,19 +585,19 @@ fn install_plan() -> Option<InstallPlan> {
         });
     }
 
-    if find_binary(&["apt-get"]).is_some() {
+    if find_executable(&["apt-get"]).is_some() {
         return Some(InstallPlan {
             program: "apt-get",
             args: vec!["install", "-y", "ripgrep", "fd-find"],
         });
     }
-    if find_binary(&["dnf"]).is_some() {
+    if find_executable(&["dnf"]).is_some() {
         return Some(InstallPlan {
             program: "dnf",
             args: vec!["install", "-y", "ripgrep", "fd-find"],
         });
     }
-    if find_binary(&["pacman"]).is_some() {
+    if find_executable(&["pacman"]).is_some() {
         return Some(InstallPlan {
             program: "pacman",
             args: vec!["-S", "--noconfirm", "ripgrep", "fd"],
@@ -606,7 +607,7 @@ fn install_plan() -> Option<InstallPlan> {
 }
 
 fn git_install_plan() -> Option<InstallPlan> {
-    if is_termux() && find_binary(&["pkg"]).is_some() {
+    if is_termux() && find_executable(&["pkg"]).is_some() {
         return Some(InstallPlan {
             program: "pkg",
             args: vec!["install", "-y", "git"],
@@ -618,14 +619,14 @@ fn git_install_plan() -> Option<InstallPlan> {
         return None;
     }
 
-    if cfg!(target_os = "macos") && find_binary(&["brew"]).is_some() {
+    if cfg!(target_os = "macos") && find_executable(&["brew"]).is_some() {
         return Some(InstallPlan {
             program: "brew",
             args: vec!["install", "--force-bottle", "git"],
         });
     }
 
-    if cfg!(target_os = "windows") && find_binary(&["winget"]).is_some() {
+    if cfg!(target_os = "windows") && find_executable(&["winget"]).is_some() {
         return Some(InstallPlan {
             program: "cmd",
             args: vec![
@@ -635,19 +636,19 @@ fn git_install_plan() -> Option<InstallPlan> {
         });
     }
 
-    if find_binary(&["apt-get"]).is_some() {
+    if find_executable(&["apt-get"]).is_some() {
         return Some(InstallPlan {
             program: "apt-get",
             args: vec!["install", "-y", "git"],
         });
     }
-    if find_binary(&["dnf"]).is_some() {
+    if find_executable(&["dnf"]).is_some() {
         return Some(InstallPlan {
             program: "dnf",
             args: vec!["install", "-y", "git"],
         });
     }
-    if find_binary(&["pacman"]).is_some() {
+    if find_executable(&["pacman"]).is_some() {
         return Some(InstallPlan {
             program: "pacman",
             args: vec!["-S", "--noconfirm", "git"],
@@ -659,26 +660,6 @@ fn git_install_plan() -> Option<InstallPlan> {
 fn is_termux() -> bool {
     std::env::var_os("TERMUX_VERSION").is_some()
         || Path::new("/data/data/com.termux/files/usr/bin/pkg").exists()
-}
-
-fn find_binary(candidates: &[&str]) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for candidate in candidates {
-            let path = dir.join(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-            #[cfg(windows)]
-            {
-                let exe = dir.join(format!("{}.exe", candidate));
-                if exe.is_file() {
-                    return Some(exe);
-                }
-            }
-        }
-    }
-    None
 }
 
 fn preflight_log_dir() -> Option<PathBuf> {

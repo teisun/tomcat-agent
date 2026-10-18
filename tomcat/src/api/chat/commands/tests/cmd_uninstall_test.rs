@@ -151,22 +151,17 @@ async fn cmd_uninstall_missing_and_manual_plugin_fail_without_changing_resources
                 ),
             ]
         )));
-        assert!(reply.text.contains(
-            &fixture
-                .workspace
-                .path()
-                .join(".agents/plugins")
-                .display()
-                .to_string()
-        ));
-        assert!(reply.text.contains(
-            &fixture
-                .workspace
-                .path()
-                .join(".agents/skills")
-                .display()
-                .to_string()
-        ));
+        for kind in ["plugins", "skills"] {
+            assert!(
+                reply
+                    .text
+                    .contains(&crate::infra::platform::format_home_path(
+                        &fixture.workspace.path().join(".agents").join(kind)
+                    )),
+                "reply must name the workspace {kind} directory: {}",
+                reply.text
+            );
+        }
         assert_eq!(std::fs::read(manual.join("plugin.json")).unwrap(), original);
         assert_eq!(
             ctx.global_services

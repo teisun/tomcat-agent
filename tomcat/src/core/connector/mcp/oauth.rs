@@ -21,6 +21,7 @@ use crate::core::connector::mcp::config::McpOAuthConfig;
 use crate::infra::config::get_work_dir;
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
+use crate::infra::platform::set_private_file_permissions;
 use crate::AppConfig;
 
 const TOKEN_FILE_NAME: &str = "connector-oauth.json";
@@ -927,32 +928,6 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
-}
-
-fn set_private_file_permissions(path: &std::path::Path) -> Result<(), AppError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(windows)]
-    {
-        let username =
-            std::env::var("USERNAME").map_err(|_| AppError::Config(tr("oauth.aclUser", &[])))?;
-        let grant = format!("{username}:F");
-        let status = std::process::Command::new("icacls")
-            .args([
-                path.as_os_str(),
-                std::ffi::OsStr::new("/inheritance:r"),
-                std::ffi::OsStr::new("/grant:r"),
-                std::ffi::OsStr::new(&grant),
-            ])
-            .status()?;
-        if !status.success() {
-            return Err(AppError::Config(tr("oauth.aclFailed", &[])));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

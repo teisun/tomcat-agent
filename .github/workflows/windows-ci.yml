@@ -1,0 +1,92 @@
+name: windows-ci
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "tomcat/**"
+      - "tomcat-vscode-ext/**"
+      - ".github/workflows/windows-ci.yml"
+  pull_request:
+    paths:
+      - "tomcat/**"
+      - "tomcat-vscode-ext/**"
+      - ".github/workflows/windows-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust gate-fast (windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        # Git Bash: the gate script and the bash tool under test both need it.
+        shell: bash
+        working-directory: tomcat
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node for test fixtures
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tomcat -> target
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run gate-fast
+        run: bash scripts/run-integration-tests.sh gate-fast
+
+  extension:
+    name: extension gate:fast (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: tomcat-vscode-ext
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: |
+            tomcat-vscode-ext/package-lock.json
+            tomcat-vscode-ext/gui/package-lock.json
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm --prefix gui ci
+
+      - name: Run gate:fast
+        run: npm run gate:fast

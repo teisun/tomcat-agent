@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.94
+
+- Add Windows x64 (`win32-x64`): the Marketplace, OpenVSX and GitHub packages bundle `tomcat.exe` (CLI 0.1.78). Commands run through Git Bash from Git for Windows, which must be installed; WSL's `bash.exe` is never used. When Git Bash is missing, the command fails with installation instructions instead of falling back.
+- Start the Serve process without a console window, and resolve `@` folder references from Windows paths.
+- On Windows, a background command still running when the CLI exits is stopped together with its process tree instead of blocking the exit, and processes detached by commands no longer hold the CLI's output pipes open.
+- Windows ARM64 and other platforms remain outside the support claim.
+
 ## 0.1.90
 
 - Keep Serve, history and Settings available without model credentials. Guide first-time users in the chat panel and enable sending after configuring a model, without a terminal initialization flow or Serve restart.

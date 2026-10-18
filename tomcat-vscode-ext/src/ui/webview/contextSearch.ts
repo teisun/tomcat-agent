@@ -145,7 +145,10 @@ function resolveWorkspaceRoot(uri: vscode.Uri): string | null {
 function withUriPath(baseUri: vscode.Uri, nextPath: string): vscode.Uri {
   return vscode.Uri.from({
     authority: baseUri.authority,
-    path: normalizePath(nextPath),
+    path:
+      baseUri.scheme === "file"
+        ? vscode.Uri.file(nextPath).path
+        : normalizePath(nextPath),
     query: baseUri.query,
     scheme: baseUri.scheme,
   });

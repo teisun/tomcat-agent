@@ -1,5 +1,6 @@
 //! `preflight` 私有项单元测试（`tests/preflight_test.rs`，与同目录 `suite_test` / `cwd_lazy_prompt_test` 的 `*_test` 命名一致；由 `preflight.rs` 末尾 `#[path]` 挂载）。
 
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 

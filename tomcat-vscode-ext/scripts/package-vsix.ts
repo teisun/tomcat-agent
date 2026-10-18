@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { execFileSync } from "node:child_process";
 import { assertBuildArtifacts } from "./buildArtifacts";
+import { runCommand } from "./runCommand";
 
 type PackageManifest = {
   name: string;
@@ -62,12 +62,7 @@ const DIRECTORY_ASSETS = [
 ] as const;
 
 function run(command: string, args: string[], cwd: string, capture = false): string {
-  const result = execFileSync(command, args, {
-    cwd,
-    encoding: "utf8",
-    stdio: capture ? ["inherit", "pipe", "inherit"] : "inherit",
-  });
-  return capture ? result : "";
+  return runCommand(command, args, { cwd, capture });
 }
 
 export const assertPrebuiltArtifactsFresh = assertBuildArtifacts;
@@ -245,18 +240,14 @@ export function assertVsixExtractable(vsixPath: string): void {
   const extensionRoot = path.resolve(__dirname, "..");
   const archivePath = path.resolve(vsixPath);
   try {
-    execFileSync(
+    runCommand(
       resolveLocalBin(extensionRoot, "tsx"),
       [path.join(__dirname, "vsix-extractable.ts"), archivePath],
-      { cwd: extensionRoot, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
+      { cwd: extensionRoot, capture: true },
     );
   } catch (error) {
-    const stderr =
-      error && typeof error === "object" && "stderr" in error
-        ? String((error as { stderr: unknown }).stderr).trim()
-        : "";
     throw new Error(
-      `VSIX is not extractable by Cursor/VS Code: ${stderr || archivePath}`,
+      `VSIX is not extractable by Cursor/VS Code: ${error instanceof Error ? error.message : archivePath}`,
     );
   }
 }

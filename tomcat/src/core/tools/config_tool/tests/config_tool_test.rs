@@ -331,10 +331,7 @@ async fn config_set_array_path_rule_appends_with_json_value() {
     )
     .into_arc();
     let ctx = ConfigToolContext::new(p.clone(), confirm).with_gate(gate.clone());
-    let rule = format!(
-        r#"{{"path":"{}","mode":"deny"}}"#,
-        blocked.to_string_lossy()
-    );
+    let rule = serde_json::json!({"path": blocked.to_string_lossy(), "mode": "deny"}).to_string();
     let outcome = config_set_impl("primitive.path_rules", &rule, &ctx)
         .await
         .unwrap();

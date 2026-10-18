@@ -42,7 +42,11 @@ impl PathRule {
     pub fn expanded_path(&self) -> Result<String, AppError> {
         if self.has_glob() {
             // glob 用字符串匹配：仅展开 `~`。
-            if let Some(rest) = self.path.strip_prefix("~/") {
+            if let Some(rest) = self
+                .path
+                .strip_prefix("~/")
+                .or_else(|| self.path.strip_prefix("~\\").filter(|_| cfg!(windows)))
+            {
                 let home = crate::infra::platform::home_dir().ok_or_else(|| {
                     AppError::Config("无法解析 home 目录用于 path_rule".to_string())
                 })?;
@@ -92,8 +96,12 @@ impl PathRule {
 }
 
 fn glob_matches_canonicalized(pattern: &str, target: &str) -> bool {
-    let matcher = |pat: &str| match globset::Glob::new(pat) {
-        Ok(g) => g.compile_matcher().is_match(target),
+    let target = glob_separators(target);
+    let matcher = |pat: &str| match globset::GlobBuilder::new(&glob_separators(pat))
+        .case_insensitive(cfg!(windows))
+        .build()
+    {
+        Ok(g) => g.compile_matcher().is_match(target.as_ref()),
         Err(_) => false,
     };
     if matcher(pattern) {
@@ -107,7 +115,7 @@ fn glob_matches_canonicalized(pattern: &str, target: &str) -> bool {
 fn canonicalized_glob_pattern(pattern: &str) -> Option<String> {
     let first_glob = pattern.find(['*', '?'])?;
     let prefix_dir = pattern[..first_glob]
-        .rfind(std::path::MAIN_SEPARATOR)
+        .rfind(std::path::is_separator)
         .map(|idx| &pattern[..idx])
         .unwrap_or("");
     if prefix_dir.is_empty() {
@@ -116,4 +124,13 @@ fn canonicalized_glob_pattern(pattern: &str) -> Option<String> {
     let canon_prefix = super::gate::canonicalize_with_existing_ancestor(Path::new(prefix_dir));
     let remainder = &pattern[prefix_dir.len()..];
     Some(format!("{}{}", canon_prefix.to_string_lossy(), remainder))
+}
+
+/// globset 把 `\` 当转义符，Windows 路径先统一成 `/` 再匹配；Unix 上 `\` 是合法文件名字符，保持原样。
+fn glob_separators(path: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        std::borrow::Cow::Owned(path.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
 }

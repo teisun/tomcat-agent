@@ -316,25 +316,24 @@ impl PluginManager {
         path: &Path,
     ) -> Result<(PathBuf, PluginManifest), AppError> {
         let (root, manifest_path) = if path.is_dir() {
-            let root = path.canonicalize().map_err(|e| {
+            let root = crate::infra::platform::canonicalize(path).map_err(|e| {
                 AppError::Plugin(tr("plugin.directoryInvalid", &[("detail", &e.to_string())]))
             })?;
-            let manifest_path = root
-                .join("plugin.json")
-                .canonicalize()
+            let manifest_path = crate::infra::platform::canonicalize(root.join("plugin.json"))
                 .map_err(|_| AppError::Plugin(tr("plugin.manifestMissing", &[])))?;
             (root, manifest_path)
         } else {
-            let manifest_path = path.canonicalize().map_err(|e| {
+            let manifest_path = crate::infra::platform::canonicalize(path).map_err(|e| {
                 AppError::Plugin(tr("plugin.manifestInvalid", &[("detail", &e.to_string())]))
             })?;
-            let root = manifest_path
-                .parent()
-                .ok_or_else(|| AppError::Plugin(tr("plugin.manifestParent", &[])))?
-                .canonicalize()
-                .map_err(|e| {
-                    AppError::Plugin(tr("plugin.rootInvalid", &[("detail", &e.to_string())]))
-                })?;
+            let root = crate::infra::platform::canonicalize(
+                manifest_path
+                    .parent()
+                    .ok_or_else(|| AppError::Plugin(tr("plugin.manifestParent", &[])))?,
+            )
+            .map_err(|e| {
+                AppError::Plugin(tr("plugin.rootInvalid", &[("detail", &e.to_string())]))
+            })?;
             (root, manifest_path)
         };
         let json = std::fs::read_to_string(&manifest_path).map_err(|e| {
@@ -350,7 +349,7 @@ impl PluginManager {
         manifest: &PluginManifest,
     ) -> Result<String, AppError> {
         let main_path = plugin_root.join(&manifest.main);
-        let main_path = main_path.canonicalize().map_err(|e| {
+        let main_path = crate::infra::platform::canonicalize(&main_path).map_err(|e| {
             AppError::Plugin(tr(
                 "plugin.mainInvalid",
                 &[
@@ -360,7 +359,7 @@ impl PluginManager {
                 ],
             ))
         })?;
-        let root_canon = plugin_root.canonicalize().map_err(AppError::Io)?;
+        let root_canon = crate::infra::platform::canonicalize(plugin_root).map_err(AppError::Io)?;
         if !main_path.starts_with(&root_canon) {
             return Err(AppError::Permission(tr(
                 "plugin.mainOutside",
@@ -396,9 +395,7 @@ impl PluginManager {
         plugin_root: impl AsRef<Path>,
         manifest: PluginManifest,
     ) -> Result<(), AppError> {
-        let plugin_root = plugin_root
-            .as_ref()
-            .canonicalize()
+        let plugin_root = crate::infra::platform::canonicalize(plugin_root.as_ref())
             .unwrap_or_else(|_| plugin_root.as_ref().to_path_buf());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

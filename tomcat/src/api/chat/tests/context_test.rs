@@ -98,7 +98,7 @@ fn malformed_mcp_json_disables_mcp_without_failing_chat() {
     let path = crate::core::connector::mcp::config::global_mcp_path(&cfg).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, r#"{"mcpServers":{"broken": "#).unwrap();
-    let path = path.canonicalize().unwrap();
+    let path = crate::infra::platform::canonicalize(&path).unwrap();
 
     let error = match connector_registry_for(&cfg, Some(temp.path())) {
         Ok(_) => panic!("invalid JSON should isolate the MCP runtime"),

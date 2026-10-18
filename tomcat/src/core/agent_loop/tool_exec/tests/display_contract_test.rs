@@ -164,7 +164,7 @@ async fn native_write_display_baseline_registration_matrix() {
     for name in ["write", "edit", "hashline_edit", "batch_edit"] {
         for decision in ["allow", "deny", "cancel"] {
             let temp = tempfile::tempdir().unwrap();
-            let cwd = temp.path().canonicalize().unwrap();
+            let cwd = crate::infra::platform::canonicalize(temp.path()).unwrap();
             let path = cwd.join("a.txt");
             std::fs::write(&path, "original\n").unwrap();
             let transcript = cwd.join("s.jsonl");

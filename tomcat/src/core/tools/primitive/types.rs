@@ -547,7 +547,7 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         let _ = cancel;
         self.hashline_edit(path, segments, plugin_id).await
     }
-    /// 执行完整 shell 命令行（经 Unix `sh -c` / Windows `cmd /C`）。
+    /// 执行完整 shell 命令行（经 Unix `sh -c` / Windows Git Bash `bash -c`）。
     /// - `foreground_wait_ms` controls only how long this call observes the tracked command.
     ///   Expiry returns the same task as `RunningInBackground`; it never terminates the process.
     ///   Explicit cancellation or `task_stop` are the only process-tree stop paths.

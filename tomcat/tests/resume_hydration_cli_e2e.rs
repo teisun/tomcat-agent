@@ -583,6 +583,10 @@ fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
     std::fs::create_dir_all(shadow_path.parent().unwrap()).unwrap();
     file_store::write_plan(&shadow_path, &plan, 2_000).unwrap();
     let shadow_before = std::fs::read(&shadow_path).unwrap();
+    // The CLI child expands the persisted `~/...` against its HOME, so persist under the same
+    // one: on Windows the temp dir sits inside the real profile and would become `~/AppData/...`.
+    let real_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &fx.home_path);
     // Persist via real runtime events and the real session writer, not bind_for_test.
     {
         let runtime = PlanRuntime::new(session_key);
@@ -597,6 +601,10 @@ fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
             .build_plan(&plan_path.to_string_lossy(), Some(session_id.clone()))
             .unwrap();
         runtime.park_executing_plan().unwrap();
+    }
+    match real_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
     }
     assert_eq!(
         file_store::read_plan(&plan_path).unwrap().frontmatter.state,
@@ -658,10 +666,10 @@ fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
             .unwrap()
             .iter()
             .any(|message| message["role"] == "user"
-                && message["content"].to_string().contains("start building")
-                && message["content"]
-                    .to_string()
-                    .contains(plan_path.to_string_lossy().as_ref())),
+                && message["content"].as_str().is_some_and(|text| {
+                    text.contains("start building")
+                        && text.contains(plan_path.to_string_lossy().as_ref())
+                })),
         "the real CLI loop must consume its build continuation, not merely return it"
     );
     assert_eq!(

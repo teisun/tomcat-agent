@@ -8,6 +8,8 @@ mod code_cmd;
 mod config_cmd;
 mod init;
 pub(crate) mod init_model_wizard;
+#[cfg(windows)]
+mod init_windows_path;
 mod localization;
 mod model_cmd;
 mod models_toml;
@@ -50,11 +52,13 @@ pub(crate) use audit_cmd::{parse_audit_line, read_audit_entries};
 #[cfg(test)]
 pub(crate) use config_cmd::{resolve_toml_key, set_toml_key};
 #[cfg(test)]
-pub(crate) use init::{
-    auto_add_to_path, install_canonical_symlink, path_export_targets, prune_stale_lines,
-};
+pub(crate) use init::install_canonical_symlink;
+#[cfg(all(test, unix))]
+pub(crate) use init::{auto_add_to_path, path_export_targets, prune_stale_lines};
 #[cfg(test)]
 pub(crate) use init_model_wizard::{apply_model_choice, write_env_entries};
+#[cfg(all(test, windows))]
+pub(crate) use init_windows_path::{add_to_user_path, merge_user_path};
 #[cfg(test)]
 pub(crate) use plugin_cmd::{
     load_plugin_registry, save_plugin_registry, PluginRegistryEntry, PluginRegistryFile,
@@ -517,6 +521,12 @@ fn guard_nested_invocation_for(active: bool, cmd: Option<&Commands>) -> Result<(
 
 /// 解析参数并执行对应子命令；无子命令时按配置进入默认 session mode。
 pub fn run_cli() -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        crate::infra::platform::enable_virtual_terminal_output();
+        crate::infra::platform::restore_ctrl_c_input();
+        crate::infra::platform::stop_std_handle_inheritance();
+    }
     let cli = localization::parse();
     let had_explicit_command = cli.command.is_some();
 

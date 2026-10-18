@@ -42,7 +42,9 @@ async fn rewind_only_reverses_keep_when_disk_returns_before_it() {
             .unwrap();
         let transcript = session.transcript_path(&slot.session_id);
         let cwd = file_baselines::session_cwd(&transcript).unwrap();
-        let a = temp.path().canonicalize().unwrap().join("a");
+        let a = crate::infra::platform::canonicalize(temp.path())
+            .unwrap()
+            .join("a");
         std::fs::write(&a, "original").unwrap();
         let tracker =
             file_baselines::TurnFileBaselines::new(&transcript, &first, cwd.clone()).unwrap();
@@ -69,7 +71,9 @@ async fn rewind_only_reverses_keep_when_disk_returns_before_it() {
             let target = session
                 .append_message(json!({"role":"user","content":"change b"}))
                 .unwrap();
-            let b = temp.path().canonicalize().unwrap().join("b");
+            let b = crate::infra::platform::canonicalize(temp.path())
+                .unwrap()
+                .join("b");
             let tracker =
                 file_baselines::TurnFileBaselines::new(&transcript, &target, cwd).unwrap();
             let pending = tracker.prepare(b.to_str().unwrap()).unwrap();
@@ -667,7 +671,10 @@ async fn rewind_partial_restore_failure_keeps_history_and_can_retry() {
     assert_eq!(reply["error"], "revert_failed");
     assert_eq!(
         reply["payload"]["path"],
-        b.canonicalize().unwrap().to_string_lossy().as_ref()
+        crate::infra::platform::canonicalize(&b)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
     );
     assert_eq!(std::fs::read(&transcript).unwrap(), before);
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");

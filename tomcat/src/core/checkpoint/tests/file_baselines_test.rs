@@ -12,14 +12,11 @@ fn prune_keeps_active_sessions_and_drops_idle_ones() {
         for name in ["user-one", "keep-100"] {
             let backup = session_dir(&transcript).join(name);
             fs::create_dir_all(&backup).unwrap();
-            fs::File::open(&backup).unwrap().set_modified(old).unwrap();
+            crate::test_support::set_mtime(&backup, old);
         }
         if id != "deleted" {
             fs::write(&transcript, "session").unwrap();
-            fs::File::open(&transcript)
-                .unwrap()
-                .set_modified(if id == "idle" { old } else { now })
-                .unwrap();
+            crate::test_support::set_mtime(&transcript, if id == "idle" { old } else { now });
         }
     }
     prune(dir.path(), 7, now);
@@ -62,7 +59,7 @@ fn discard_keeps_after_preserves_earlier_boundaries_and_message_backups() {
 #[test]
 fn file_baseline_recapture_after_keep_preserves_original_for_rewind() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let transcript = root.join("s.jsonl");
     let path = root.join("a");
     fs::write(&path, b"original").unwrap();
@@ -117,7 +114,7 @@ fn file_baseline_recapture_after_keep_preserves_original_for_rewind() {
 #[test]
 fn file_baseline_legacy_rows_do_not_seed_tracker_or_rewind() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let transcript = root.join("s.jsonl");
     let path = root.join("a");
     fs::write(&path, b"legacy work").unwrap();
@@ -161,7 +158,7 @@ fn file_baseline_legacy_rows_do_not_seed_tracker_or_rewind() {
 fn file_baseline_content_dedup_preserves_per_path_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let transcript = root.join("s.jsonl");
     let tracker = TurnFileBaselines::new(&transcript, "u1", root.clone()).unwrap();
     for (name, mode) in [("a", 0o755), ("b", 0o644)] {

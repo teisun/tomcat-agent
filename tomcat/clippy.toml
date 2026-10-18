@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "std::fs::canonicalize", reason = "use crate::infra::platform::canonicalize (strips Windows \\\\?\\ prefixes)" },
+    { path = "std::path::Path::canonicalize", reason = "use crate::infra::platform::canonicalize (strips Windows \\\\?\\ prefixes)" },
+]

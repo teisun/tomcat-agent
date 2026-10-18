@@ -36,7 +36,7 @@ impl ProjectTrustStore {
         if !path.is_absolute() {
             return Err(AppError::Config(tr("trust.absolute", &[])));
         }
-        let canonical = std::fs::canonicalize(path).map_err(|error| {
+        let canonical = crate::infra::platform::canonicalize(path).map_err(|error| {
             AppError::Config(tr(
                 "trust.directory",
                 &[

@@ -12,11 +12,10 @@ use crate::{resolve_agent_trail_dir, AppConfig, AppError};
 
 use super::types::{
     ConnectorRecoveryProgress, ConnectorReloadReceipt, ControlFrame, IngestAttachmentResponse,
-    ListConnectorToolsPayload, ListModelsPayload, ListProviderKeysPayload,
-    ListRemoteModelsPayload, OutFrame, ProjectTrustPayload, RemoveModelResponse,
-    RemoveProviderResponse, ResponseFrame, RetainAttachmentLeasesResponse, ServeCommand,
-    SetConnectorToolEnabledResponse, SetProviderKeyResponse, UpsertModelResponse,
-    UpsertModelsResponse,
+    ListConnectorToolsPayload, ListModelsPayload, ListProviderKeysPayload, ListRemoteModelsPayload,
+    OutFrame, ProjectTrustPayload, RemoveModelResponse, RemoveProviderResponse, ResponseFrame,
+    RetainAttachmentLeasesResponse, ServeCommand, SetConnectorToolEnabledResponse,
+    SetProviderKeyResponse, UpsertModelResponse, UpsertModelsResponse,
 };
 use crate::core::llm::remote_models::RemoteModelsFailure;
 use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
@@ -174,7 +173,10 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("ListModelsPayload", &bundle.list_models_payload),
         ("UpsertModelResponse", &bundle.upsert_model_response),
         ("UpsertModelsResponse", &bundle.upsert_models_response),
-        ("ListRemoteModelsPayload", &bundle.list_remote_models_payload),
+        (
+            "ListRemoteModelsPayload",
+            &bundle.list_remote_models_payload,
+        ),
         ("RemoteModelsFailure", &bundle.remote_models_failure),
         ("RemoveProviderResponse", &bundle.remove_provider_response),
         ("RemoveModelResponse", &bundle.remove_model_response),

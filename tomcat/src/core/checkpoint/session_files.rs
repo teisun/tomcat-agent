@@ -83,7 +83,7 @@ fn turn_dir(transcript: &Path, source: &str) -> Result<PathBuf, AppError> {
         return Err(error("unknown_path"));
     }
     let root = file_baselines::session_dir(transcript);
-    let root = root.canonicalize().map_err(|e| {
+    let root = crate::infra::platform::canonicalize(&root).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             error("unknown_path")
         } else {
@@ -314,7 +314,7 @@ fn effective_baselines(
             .map_err(|_| error("invalid_git_path"))?
             .trim_end_matches('\n'),
     );
-    let root = root.canonicalize()?;
+    let root = crate::infra::platform::canonicalize(&root)?;
     let mut groups: BTreeMap<Option<String>, Vec<(usize, String)>> = BTreeMap::new();
     for (index, (_, row)) in rows.iter().enumerate() {
         if row.git_head.as_ref() == Some(&head) {

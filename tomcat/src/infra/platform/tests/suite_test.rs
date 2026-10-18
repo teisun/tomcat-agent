@@ -103,3 +103,38 @@ fn write_file_atomic_removes_temp_file_when_rename_fails() {
     assert_eq!(temp_file_names(dir.path()), Vec::<String>::new());
     assert!(path.join("keep.txt").exists());
 }
+
+#[test]
+fn normalize_path_expands_tilde_with_either_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(home.join(".tomcat")).unwrap();
+    let _home = crate::test_support::HomeOverride::new(&home);
+    assert_eq!(normalize_path("~/.tomcat").unwrap(), home.join(".tomcat"));
+    assert_eq!(normalize_path("~\\.tomcat").unwrap(), home.join(".tomcat"));
+}
+
+#[test]
+fn format_home_path_joins_home_relative_parts_with_forward_slashes() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::HomeOverride::new(home.path());
+    assert_eq!(format_home_path(&home.path().join("a").join("b")), "~/a/b");
+    assert_eq!(format_home_path(home.path()), "~");
+}
+
+#[test]
+fn canonicalize_returns_plain_paths_and_long_paths_stay_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = canonicalize(dir.path()).unwrap();
+    assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
+
+    let mut long = canonical;
+    while long.as_os_str().len() <= 300 {
+        long.push("a-fairly-long-directory-name");
+    }
+    std::fs::create_dir_all(&long).unwrap();
+    let file = long.join("x.txt");
+    std::fs::write(&file, "ok").unwrap();
+    let resolved = canonicalize(&file).unwrap();
+    assert_eq!(std::fs::read_to_string(resolved).unwrap(), "ok");
+}

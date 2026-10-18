@@ -33,7 +33,7 @@ it("typechecks plugin SDK consumers without relaxing JSON or the full-shell comm
   };
   const host = ts.createCompilerHost(options);
   const getSourceFile = host.getSourceFile;
-  host.getSourceFile = (file, ...args) => file === fixture
+  host.getSourceFile = (file, ...args) => path.resolve(file) === fixture
     ? ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true)
     : getSourceFile.call(host, file, ...args);
   const program = ts.createProgram([sdk, fixture], options, host);

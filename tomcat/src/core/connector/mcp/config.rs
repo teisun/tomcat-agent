@@ -236,7 +236,8 @@ pub fn connector_config_key(path: &Path, name: &str) -> Result<String, AppError>
         ))
     })?;
     let lexical_parent = normalize_path_lexically(parent);
-    let normalized_parent = std::fs::canonicalize(&lexical_parent).unwrap_or(lexical_parent);
+    let normalized_parent =
+        crate::infra::platform::canonicalize(&lexical_parent).unwrap_or(lexical_parent);
     let normalized_path = normalized_parent.join(file_name);
     let mut hasher = Sha256::new();
     hasher.update(b"tomcat.mcp.config-key.v1\0");
@@ -623,11 +624,12 @@ fn acquire_mcp_file_lock(path: &Path) -> Result<File, AppError> {
         match lock.try_lock_exclusive() {
             Ok(()) => return Ok(lock),
             Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                if crate::infra::platform::is_lock_contended(&error)
+                    && Instant::now() < deadline =>
             {
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if crate::infra::platform::is_lock_contended(&error) => {
                 return Err(AppError::Config(tr(
                     "mcp.config.lockTimeout",
                     &[("path", &path.display().to_string())],

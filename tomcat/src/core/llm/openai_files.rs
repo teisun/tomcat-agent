@@ -769,7 +769,8 @@ impl OpenAiFilesRuntime {
         filename: &str,
         purpose: FilePurpose,
     ) -> Result<OpenAiFileMeta, AppError> {
-        let cache_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let cache_path =
+            crate::infra::platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let meta = std::fs::metadata(path).map_err(|e| {
             AppError::Llm(tr(
                 "files.cacheStat",

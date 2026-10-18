@@ -7,7 +7,7 @@
 //!
 //! 详见 `docs/architecture/tools/search_files.md` 与 plan §5–§7。
 
-use super::helpers::{find_binary, grant_trigger_str, grant_type_str, permission_scope_str};
+use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
 use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{PathRule, PathRuleMode};
 use crate::core::tools::primitive::{
@@ -17,6 +17,7 @@ use crate::core::tools::primitive::{
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
+use crate::infra::platform::find_executable;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry as IgnoreEntry, WalkBuilder};
 use regex::RegexBuilder;
@@ -780,7 +781,7 @@ pub(super) async fn search_files_impl(
 
     let output = match args.target {
         SearchFilesTarget::Files => {
-            if let Some(fd) = find_binary(&["fd", "fdfind"]) {
+            if let Some(fd) = find_executable(&["fd", "fdfind"]) {
                 tier1_warning(&mut warnings);
                 let mut cmd = Command::new(fd);
                 cmd.arg("--color=never")
@@ -838,7 +839,7 @@ pub(super) async fn search_files_impl(
             }
         }
         SearchFilesTarget::Content => {
-            if let Some(rg) = find_binary(&["rg", "ripgrep"]) {
+            if let Some(rg) = find_executable(&["rg", "ripgrep"]) {
                 tier1_warning(&mut warnings);
                 let mut cmd = Command::new(rg);
                 cmd.arg("--color=never");

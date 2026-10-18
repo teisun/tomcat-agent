@@ -898,7 +898,7 @@ Parameters:
 {
   "properties": {
     "command": {
-      "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / `cmd /C` (Windows).",
+      "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / Git Bash `bash -c` (Windows; write Windows paths with forward slashes, e.g. C:/Users/...).",
       "type": "string"
     },
     "cwd": {

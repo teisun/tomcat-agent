@@ -273,8 +273,7 @@ impl TurnFileBaselines {
         // Resolve existing parent aliases once (macOS /var and /tmp are symlinks).
         // Store the actual location, then reject any *new* symlink at restore time.
         let path = path.parent()?.ancestors().find_map(|ancestor| {
-            ancestor
-                .canonicalize()
+            crate::infra::platform::canonicalize(ancestor)
                 .ok()
                 .and_then(|base| path.strip_prefix(ancestor).ok().map(|tail| base.join(tail)))
         })?;

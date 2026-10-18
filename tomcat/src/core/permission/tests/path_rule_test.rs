@@ -28,3 +28,27 @@ fn tilde_expansion_no_glob() {
     let home = crate::infra::platform::home_dir().expect("home");
     assert!(expanded.starts_with(&home.to_string_lossy().to_string()));
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_builtin_globs_match_backslash_targets_ignoring_case() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::HomeOverride::new(home.path());
+    let rules = crate::core::permission::builtin_default_rules();
+    let hits = |target: PathBuf, mode: PathRuleMode| {
+        rules
+            .iter()
+            .any(|rule| rule.mode == mode && rule.matches(&target))
+    };
+
+    let agent = home.path().join(r".tomcat\agents\main");
+    assert!(hits(
+        agent.join(r"sessions\a.jsonl"),
+        PathRuleMode::Readonly
+    ));
+    assert!(hits(
+        agent.join(r"agent\AUTH-PROFILES-x.JSON"),
+        PathRuleMode::Deny
+    ));
+    assert!(!hits(agent.join(r"notes\a.md"), PathRuleMode::Readonly));
+}

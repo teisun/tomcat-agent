@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +11,7 @@ import {
   seedChatUserSettings,
 } from "./e2eHostFixture";
 import { packageVsix } from "./package-vsix";
+import { runCommand } from "./runCommand";
 
 async function seedAcceptanceSettings(
   userDataDir: string,
@@ -97,28 +97,21 @@ async function main(): Promise<void> {
     await seedAcceptanceSettings(userDataDir, fakeServePath);
     console.log(`Image acceptance artifacts will be written to: ${artifactsRoot}`);
 
-    execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], {
-      cwd: extensionRoot,
-      stdio: "inherit",
-    });
+    runCommand("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
     packageVsix({
       extensionRoot,
       outPath: vsixPath,
       skipBuild: process.env.TOMCAT_ACCEPT_SKIP_BUILD === "1",
     });
-    execFileSync(
-      resolveVsCodeCli(),
-      [
-        "--user-data-dir",
-        userDataDir,
-        "--extensions-dir",
-        extensionsDir,
-        "--install-extension",
-        vsixPath,
-        "--force",
-      ],
-      { stdio: "inherit" },
-    );
+    runCommand(resolveVsCodeCli(), [
+      "--user-data-dir",
+      userDataDir,
+      "--extensions-dir",
+      extensionsDir,
+      "--install-extension",
+      vsixPath,
+      "--force",
+    ]);
 
     await fs.access(harnessTestsPath);
     {

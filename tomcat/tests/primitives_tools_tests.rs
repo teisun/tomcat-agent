@@ -142,7 +142,7 @@ async fn test_primitive_executor_read_file_in_whitelist_succeeds(
         tracing::info_span!("test_primitive_executor_read_file_in_whitelist_succeeds").entered();
 
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let config = PrimitiveConfig::default();
     let executor = DefaultPrimitiveExecutor::new(
         config,
@@ -208,7 +208,7 @@ async fn test_primitive_executor_empty_whitelist_allows_workspace_dir_only(
             .entered();
 
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let config = PrimitiveConfig::default();
     let executor = DefaultPrimitiveExecutor::new(
         config,
@@ -251,7 +251,7 @@ async fn test_primitive_executor_write_file_with_allow_all_succeeds(
         tracing::info_span!("test_primitive_executor_write_file_with_allow_all_succeeds").entered();
 
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let mut config = temp_whitelist_config(&canonical_dir);
     config.auto_confirm = true;
     let executor = DefaultPrimitiveExecutor::new(
@@ -287,7 +287,7 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
     .entered();
 
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let mut config = temp_whitelist_config(&canonical_dir);
     config.auto_confirm = false;
     let executor = DefaultPrimitiveExecutor::new(
@@ -329,7 +329,7 @@ async fn test_primitive_executor_edit_file_replaces_content(
     let _span = tracing::info_span!("test_primitive_executor_edit_file_replaces_content").entered();
 
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let config = temp_whitelist_config(&canonical_dir);
     let executor = DefaultPrimitiveExecutor::new(
         config,
@@ -375,7 +375,7 @@ async fn test_primitive_executor_execute_bash_echo_succeeds(
     let _span = tracing::info_span!("test_primitive_executor_execute_bash_echo_succeeds").entered();
 
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let config = temp_whitelist_config(&canonical_dir);
     let executor = DefaultPrimitiveExecutor::new(
         config,
@@ -411,7 +411,7 @@ async fn test_primitive_executor_execute_bash_shell_echo() -> Result<(), Box<dyn
 {
     common::setup_logging();
     let tmp = TempDir::new()?;
-    let canonical_dir = tmp.path().canonicalize()?;
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path())?;
     let config = temp_whitelist_config(&canonical_dir);
     let executor = DefaultPrimitiveExecutor::new(
         config,

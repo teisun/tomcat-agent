@@ -274,9 +274,9 @@ fn copy_dir_snapshot_checked(
 
 /// Walks an already named source directory into a private staging snapshot. It
 /// accepts only regular files and directories, rejects every symbolic link and
-/// special file, and on Unix opens files with `O_NOFOLLOW` before copying bytes.
-/// Platforms without that no-follow primitive fail closed instead of performing
-/// an installation with weaker guarantees.
+/// special file, and opens every entry without following links (`O_NOFOLLOW` on
+/// Unix, `FILE_FLAG_OPEN_REPARSE_POINT` plus a reparse-point check on Windows)
+/// before copying bytes.
 fn snapshot_tree(
     source: &Path,
     relative: &Path,
@@ -356,9 +356,48 @@ fn open_source_directory(path: &Path) -> Result<File, AppError> {
         .map_err(AppError::Io)
 }
 
-#[cfg(not(unix))]
-fn open_source_directory(_path: &Path) -> Result<File, AppError> {
-    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
+#[cfg(windows)]
+fn open_source_directory(path: &Path) -> Result<File, AppError> {
+    open_without_following(path)
+}
+
+/// Windows 版 `O_NOFOLLOW`：打开链接本身而不是目标，再拒绝任何 reparse point
+/// （符号链接、junction 等）。BACKUP_SEMANTICS 是打开目录句柄所必需的。
+#[cfg(windows)]
+fn open_without_following(path: &Path) -> Result<File, AppError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(AppError::Io)?;
+    let attributes = file.metadata().map_err(AppError::Io)?.file_attributes();
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(AppError::Permission(tr(
+            "package.copySymlink",
+            &[("path", &path.display().to_string())],
+        )));
+    }
+    Ok(file)
+}
+
+/// 卷序列号 + 文件索引：Windows 上与 Unix `dev + ino` 对应的对象身份。
+#[cfg(windows)]
+fn file_identity(file: &File) -> Result<(u32, u64), AppError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: 句柄在 `file` 存活期间有效，`info` 是合法的输出指针。
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(AppError::Io(std::io::Error::last_os_error()));
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok((info.dwVolumeSerialNumber, index))
 }
 
 #[cfg(unix)]
@@ -378,9 +417,21 @@ fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), A
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn ensure_source_directory_unchanged(_path: &Path, _handle: &File) -> Result<(), AppError> {
-    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
+#[cfg(windows)]
+fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), AppError> {
+    let changed = || {
+        AppError::Permission(tr(
+            "package.directoryChanged",
+            &[("path", &path.display().to_string())],
+        ))
+    };
+    let current = open_without_following(path).map_err(|_| changed())?;
+    if !current.metadata().map_err(AppError::Io)?.is_dir()
+        || file_identity(handle)? != file_identity(&current)?
+    {
+        return Err(changed());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -392,9 +443,9 @@ fn open_source_file(path: &Path) -> Result<File, AppError> {
         .map_err(AppError::Io)
 }
 
-#[cfg(not(unix))]
-fn open_source_file(_path: &Path) -> Result<File, AppError> {
-    Err(AppError::Permission(tr("package.noSafeSnapshot", &[])))
+#[cfg(windows)]
+fn open_source_file(path: &Path) -> Result<File, AppError> {
+    open_without_following(path)
 }
 
 fn copy_regular_file(
@@ -451,3 +502,7 @@ fn copy_regular_file(
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+#[path = "../tests/install_fs_windows_test.rs"]
+mod windows_tests;

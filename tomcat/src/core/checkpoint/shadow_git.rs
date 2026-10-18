@@ -122,13 +122,13 @@ impl ShadowGitStore {
         store
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_git_timeout(mut self, git_timeout: Duration) -> Self {
         store_set_git_timeout(&mut self, git_timeout);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_git_program(mut self, git_program: PathBuf) -> Self {
         self.git_program = git_program;
         self
@@ -159,7 +159,10 @@ impl ShadowGitStore {
             return Ok(());
         }
 
-        let output = Command::new(&self.git_program)
+        let mut init = Command::new(&self.git_program);
+        #[cfg(windows)]
+        init.args(["-c", "core.longpaths=true"]);
+        let output = init
             .arg("init")
             .arg("--bare")
             .arg(&self.git_dir)
@@ -313,6 +316,9 @@ impl ShadowGitStore {
 
     fn run_git_allow_failure_args(&self, args: &[OsString]) -> Result<Output, CheckpointError> {
         let mut cmd = Command::new(&self.git_program);
+        // 下面屏蔽用户 git 配置时也屏蔽了用户自己开的 core.longpaths；Windows 默认路径上限 260 字符。
+        #[cfg(windows)]
+        cmd.args(["-c", "core.longpaths=true"]);
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GIT_DIR", &self.git_dir)
@@ -893,7 +899,7 @@ fn merge_notes_with_changed_paths(
 }
 
 fn canonicalize_existing_path(path: PathBuf) -> PathBuf {
-    fs::canonicalize(&path).unwrap_or(path)
+    crate::infra::platform::canonicalize(&path).unwrap_or(path)
 }
 
 fn short_hash(seed: u64) -> String {
@@ -1017,7 +1023,7 @@ fn render_duration(duration: Duration) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn store_set_git_timeout(store: &mut ShadowGitStore, git_timeout: Duration) {
     store.git_timeout = git_timeout;
 }

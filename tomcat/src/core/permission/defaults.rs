@@ -72,7 +72,11 @@ pub fn builtin_default_rules() -> Vec<PathRule> {
 pub const BUILTIN_BASH_FORBIDDEN: &[&str] = &[
     // ── §4.1 系统级灾难命令 ──
     r#"^\s*rm\s+-[rRfF]+\s+(/|/\*|~|\$HOME)\s*$"#,
+    // Windows 盘符根目录（Git Bash 里 `/` 只是 Git 安装目录，`/c` 才是整个 C 盘）。
+    r#"^\s*rm\s+-[rRfF]+\s+([A-Za-z]:[/\\]?\*?|/[A-Za-z]/?\*?)\s*$"#,
     r#"^\s*mkfs(\.[a-z0-9]+)?\b"#,
+    r#"(?i)^\s*format(\.com)?\s+[a-z]:"#,
+    r#"(?i)^\s*diskpart\b"#,
     r#"^\s*dd\b.*if=.*/dev/.*\bof=/dev/"#,
     r#"^\s*:\(\)\s*\{\s*:\|:&\s*\}"#,
     r#"^\s*chmod\s+-R\s+777\s+/"#,
@@ -99,6 +103,10 @@ pub const BUILTIN_BASH_FORBIDDEN: &[&str] = &[
 /// 命中弹 confirm（**不可被用户弱化**）。
 pub const BUILTIN_BASH_APPROVAL_REQUIRED: &[&str] = &[
     r#"\brm\s+-[rRfF]+\b"#,
+    // Windows 原生递归删除（Git Bash 里写成 `cmd //c rd //s` 或调用 PowerShell）。
+    r#"(?i)\b(rd|rmdir|del)\b.*\s/{1,2}s\b"#,
+    r#"(?i)\bRemove-Item\b.*\s-Recurse\b"#,
+    r#"(?i)\breg(\.exe)?\s+delete\b"#,
     r#"^\s*sudo\s+"#,
     r#"\bchmod\s+-R\b"#,
     r#"\bchown\s+-R\b"#,

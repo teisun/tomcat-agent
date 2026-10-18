@@ -50,12 +50,11 @@ use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 use super::control;
 use super::types::{
     AttachmentMode, CacheThumbnailInput, ConnectorScope, IngestAttachmentInput,
-    IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload,
-    ListRemoteModelsPayload, ListSessionsScope, OutFrame, RemoveModelResponse,
-    RemoveProviderResponse, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
-    ServeContentSegment, ServeContextRefKind, ServeContextReference, ServeMessageParams,
-    ServeSessionMode, SetConnectorToolEnabledResponse, SetPlanModeAction, SetProviderKeyResponse,
-    UpsertModelResponse, UpsertModelsResponse,
+    IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, ListRemoteModelsPayload,
+    ListSessionsScope, OutFrame, RemoveModelResponse, RemoveProviderResponse, ResponseFrame,
+    ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment, ServeContextRefKind,
+    ServeContextReference, ServeMessageParams, ServeSessionMode, SetConnectorToolEnabledResponse,
+    SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse, UpsertModelsResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -1534,23 +1533,22 @@ pub(crate) async fn handle_command(
                     api_key,
                     api_key_env,
                 };
-                let frame = match crate::core::llm::remote_models::list_remote_models(
-                    &runtime, request,
-                )
-                .await
-                {
-                    Ok(models) => ResponseFrame::ok(
-                        id,
-                        session_id,
-                        serde_json::to_value(ListRemoteModelsPayload { models }).ok(),
-                    ),
-                    Err(failure) => ResponseFrame::error_with_payload(
-                        id,
-                        session_id,
-                        failure.message(),
-                        serde_json::to_value(&failure).unwrap_or_default(),
-                    ),
-                };
+                let frame =
+                    match crate::core::llm::remote_models::list_remote_models(&runtime, request)
+                        .await
+                    {
+                        Ok(models) => ResponseFrame::ok(
+                            id,
+                            session_id,
+                            serde_json::to_value(ListRemoteModelsPayload { models }).ok(),
+                        ),
+                        Err(failure) => ResponseFrame::error_with_payload(
+                            id,
+                            session_id,
+                            failure.message(),
+                            serde_json::to_value(&failure).unwrap_or_default(),
+                        ),
+                    };
                 if let Err(error) = state.writer.send(OutFrame::Response(frame)) {
                     tracing::warn!(error = %error, "list_remote_models response could not be sent");
                 }

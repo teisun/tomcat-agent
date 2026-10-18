@@ -113,7 +113,7 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
     let _span = tracing::info_span!("test_hostcall_read_file_with_primitive_returns_ok").entered();
 
     let tmp = tempfile::tempdir().unwrap();
-    let canonical_dir = tmp.path().canonicalize().unwrap();
+    let canonical_dir = tomcat::infra::canonicalize(tmp.path()).unwrap();
     let file_path = canonical_dir.join("hostcall_read.txt");
     std::fs::write(&file_path, "hostcall-content").unwrap();
 

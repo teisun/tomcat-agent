@@ -6,6 +6,8 @@ use std::os::fd::RawFd;
 
 #[cfg(unix)]
 use crate::api::chat::panels::cli_ask_question_panel::read_one_line_from_fd_for_test;
+#[cfg(windows)]
+use crate::api::chat::panels::cli_ask_question_panel::read_one_line_from_pipe_for_test;
 use crate::api::chat::panels::CliAskQuestionPanel;
 use crate::core::plan_runtime::panels::{
     AskQuestionOutcome, AskQuestionPanel, AskQuestionTermination, Question, QuestionOption,
@@ -257,5 +259,56 @@ async fn cli_pty_eof_returns_host_disconnected_without_reader_leak() {
     .await
     .expect("EOF reader did not exit")
     .expect_err("PTY EOF must not be treated as an answer");
+    assert_eq!(result.outcome, AskQuestionOutcome::HostDisconnected);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_pipe_waits_without_input_then_interrupt_releases_reader_for_next_line() {
+    use std::io::Write;
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let reader = std::sync::Arc::new(reader);
+    let first_termination = AskQuestionTermination::default();
+    let first = tokio::spawn(read_one_line_from_pipe_for_test(
+        reader.clone(),
+        first_termination.clone(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !first.is_finished(),
+        "pipe reader must have no wall-clock deadline"
+    );
+
+    first_termination.interrupt();
+    let interrupted = tokio::time::timeout(std::time::Duration::from_millis(200), first)
+        .await
+        .expect("interrupted pipe reader did not exit")
+        .expect("pipe reader task")
+        .expect_err("interrupt must terminate the question reader");
+    assert_eq!(interrupted.outcome, AskQuestionOutcome::Interrupted);
+
+    writer.write_all("c 中文答案\n".as_bytes()).expect("write");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        read_one_line_from_pipe_for_test(reader, AskQuestionTermination::default()),
+    )
+    .await
+    .expect("next pipe reader was blocked by a leaked owner")
+    .expect("next pipe line");
+    assert_eq!(second, "c 中文答案\n");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_pipe_closed_writer_returns_host_disconnected() {
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    drop(writer);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        read_one_line_from_pipe_for_test(reader.into(), AskQuestionTermination::default()),
+    )
+    .await
+    .expect("closed pipe reader did not exit")
+    .expect_err("closed pipe must not be treated as an answer");
     assert_eq!(result.outcome, AskQuestionOutcome::HostDisconnected);
 }

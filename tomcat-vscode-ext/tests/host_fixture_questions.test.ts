@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { createHostE2eFixture } from "../scripts/e2eHostFixture";
+import { createHostE2eFixture, spawnFakeServe } from "../scripts/e2eHostFixture";
 import { initializeServe } from "../src/serveClient/initialize";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
 import type { ControlRequestFrame } from "../src/serveClient/protocol";
@@ -11,7 +11,7 @@ type HistoryEntry = { id: string; message?: {
 
 it("does not recycle a deleted session ID after a restart without a pending question", async () => {
   const fixture = await createHostE2eFixture();
-  const messenger = new TomcatMessenger({ executable: fixture.fakeServePath, env: fixture.env });
+  const messenger = new TomcatMessenger({ executable: fixture.fakeServePath, env: fixture.env, spawnFactory: spawnFakeServe });
   try {
     const first = await initializeServe(messenger);
     const deleted = await messenger.request({ type: "delete_session", sessionId: first.sessionId! });
@@ -26,7 +26,7 @@ it("does not recycle a deleted session ID after a restart without a pending ques
 
 it("keeps distinct question calls durable across a host restart and settles the resumed call", async () => {
   const fixture = await createHostE2eFixture();
-  const messenger = new TomcatMessenger({ executable: fixture.fakeServePath, env: fixture.env });
+  const messenger = new TomcatMessenger({ executable: fixture.fakeServePath, env: fixture.env, spawnFactory: spawnFakeServe });
   const requests: ControlRequestFrame[] = [];
   messenger.onControlRequest((frame) => requests.push(frame));
   const history = async (sessionId: string) => {

@@ -19,7 +19,7 @@ Requires **VS Code 1.106.0 or newer**. In Extensions, search for the exact ID **
 code --install-extension tomcat-agent.tomcat-vscode-ext
 ```
 
-The Marketplace release targets **Apple Silicon macOS (`darwin-arm64`), Intel macOS (`darwin-x64`), and Linux x64 (`linux-x64`)** with a matching CLI bundled inside each package. Linux packages use glibc; Alpine/musl, Windows, Linux ARM64, remote development and vscode.dev are not part of this release's support claim. Native release checks record the actual OS used; they do not establish compatibility with every Linux distribution.
+The Marketplace release targets **Apple Silicon macOS (`darwin-arm64`), Intel macOS (`darwin-x64`), Linux x64 (`linux-x64`), and Windows x64 (`win32-x64`)** with a matching CLI bundled inside each package. Linux packages use glibc. On Windows, the agent runs commands through Git Bash, so install [Git for Windows](https://git-scm.com/download/win) (`winget install --id Git.Git -e`) first. Alpine/musl, Linux ARM64, Windows ARM64, remote development and vscode.dev are not part of this release's support claim. Native release checks record the actual OS used; they do not establish compatibility with every Linux distribution.
 
 ## Offline installation / GitHub downloads
 
@@ -30,6 +30,8 @@ Use [GitHub Releases](https://github.com/teisun/tomcat-agent/releases) for platf
 ```bash
 code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 ```
+
+On Windows, download `tomcat-vscode-ext-<version>-win32-x64.vsix` and pass its full path, for example in PowerShell: `code --install-extension "$env:USERPROFILE\Downloads\tomcat-vscode-ext-<version>-win32-x64.vsix"`.
 
 Reload VS Code after installation. VS Code unpacks the bundle into its extension directory; the CLI does not run from the downloaded VSIX or your Downloads folder.
 
@@ -221,6 +223,11 @@ If Tomcat was found but cannot connect:
 
 1. Read the failure reason in the chat panel, or click **View Logs**.
 2. After fixing it, click **Retry**.
+
+If commands fail on Windows with "Running commands on Windows requires Git for Windows (Git Bash)":
+
+1. Install Git for Windows: `winget install --id Git.Git -e`.
+2. Restart VS Code so the extension sees the new `PATH`. WSL's `bash.exe` is not used.
 
 Unsupported keys in `tomcat.config.toml` are ignored with a startup warning instead of preventing Serve from connecting. Known keys with invalid values still fail. Old connection fields are not automatically migrated; use the existing model setup flow if needed. Bundled/pure CLI resolution and explicitly configured `tomcat.path` remain unchanged.
 

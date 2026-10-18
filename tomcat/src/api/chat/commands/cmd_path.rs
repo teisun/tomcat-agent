@@ -15,6 +15,12 @@ use crate::infra::i18n::tr;
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
 pub(crate) fn parse_args(tokens: Vec<String>, original_line: &str) -> ChatCommand {
+    // Windows 路径里的 `\` 是分隔符，不能按 POSIX 规则当转义符吃掉：单参数时取原文。
+    #[cfg(windows)]
+    let tokens = match tokens.as_slice() {
+        [cmd, _] => vec![cmd.clone(), raw_single_argument(original_line, cmd)],
+        _ => tokens,
+    };
     match tokens.as_slice() {
         [_cmd, path] if is_path_token(path) => ChatCommand::Path {
             path: PathBuf::from(path),
@@ -102,14 +108,25 @@ pub(super) fn extra_root_menu_line(path: &Path) -> String {
     }
 }
 
-/// 路径前缀判定：以 `/` 或 `~/` 开头，且长度 > 1。
+/// `<cmd> <arg>` 的参数原文，去掉一层成对引号。
+#[cfg(windows)]
+fn raw_single_argument(line: &str, cmd: &str) -> String {
+    let arg = line.strip_prefix(cmd).unwrap_or(line).trim();
+    ['"', '\'']
+        .iter()
+        .find_map(|quote| arg.strip_prefix(*quote)?.strip_suffix(*quote))
+        .unwrap_or(arg)
+        .to_string()
+}
+
+/// 路径前缀判定：以 `/` 或 `~/` 开头，且长度 > 1；Windows 上另接受盘符/UNC 绝对路径。
 ///
 /// 仅用作快速过滤；真正的纯路径合法性由 [`is_path_token`] 决定。
 fn is_path_prefix_token(tok: &str) -> bool {
     if tok == "/" || tok == "~" {
         return false;
     }
-    tok.starts_with('/') || tok.starts_with("~/")
+    tok.starts_with('/') || tok.starts_with("~/") || (cfg!(windows) && Path::new(tok).is_absolute())
 }
 
 pub fn is_path_token(tok: &str) -> bool {
@@ -313,7 +330,7 @@ fn apply_menu_choice(
         PathMenuChoice::PersistWorkspaceRoot => {
             precheck_read_allow(ctx, path)?;
             let target = effective_workspace_root(path);
-            let canon = std::fs::canonicalize(&target).map_err(AppError::Io)?;
+            let canon = crate::infra::platform::canonicalize(&target).map_err(AppError::Io)?;
             let cfg_path = crate::api::cli::config_file_path()?;
             crate::infra::config::append_workspace_root_to_disk(
                 &cfg_path,

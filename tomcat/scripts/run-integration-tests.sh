@@ -46,6 +46,9 @@ export TOMCAT_TEST_EXPORTED_ENV_ONLY=1
 # Preserve existing exclusions and all proxy settings for real remote providers.
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
+# CLI tests must not install rg/fd on the host. On Windows the installer also inherits
+# the CLI's stdout pipe, so the test would wait for it long after the CLI has exited.
+export PI_SKIP_SEARCH_TOOLS_PREFLIGHT=1
 
 NEXTTEST_INSTALL_HINT="cargo install cargo-nextest --locked"
 

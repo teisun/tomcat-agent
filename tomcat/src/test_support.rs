@@ -37,6 +37,102 @@ pub(crate) fn cwd_lock() -> &'static TestLock {
     home_env_lock()
 }
 
+/// 设置文件或目录的修改时间。
+///
+/// Windows 改时间需要 `FILE_WRITE_ATTRIBUTES`，只读打开会被拒绝，打开目录还要
+/// `FILE_FLAG_BACKUP_SEMANTICS`；Unix 上目录不能以写方式打开，而只读句柄足以改自己文件的时间。
+pub(crate) fn set_mtime(path: &Path, time: std::time::SystemTime) {
+    #[cfg(unix)]
+    let file = std::fs::File::open(path);
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        };
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    };
+    file.and_then(|file| file.set_modified(time))
+        .unwrap_or_else(|error| panic!("set mtime of {}: {error}", path.display()));
+}
+
+/// 创建目录 junction（`mklink /J` 无需管理员权限）。
+#[cfg(windows)]
+pub(crate) fn create_junction(link: &Path, target: &Path) {
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run mklink");
+    assert!(status.success(), "mklink /J failed: {}", link.display());
+}
+
+/// 断言文件 ACL 不继承且只有一条"当前用户完全控制"。
+///
+/// 用 `icacls /save` 的 SDDL（UTF-16）与 `whoami /user` 的 SID 比对，
+/// 避开 icacls 普通输出按 OEM 代码页编码导致中文用户名乱码。
+#[cfg(windows)]
+pub(crate) fn assert_private_to_current_user(path: &Path) {
+    let whoami = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .expect("run whoami");
+    let whoami = String::from_utf8_lossy(&whoami.stdout);
+    let sid = whoami.trim().rsplit(',').next().unwrap().trim_matches('"');
+    let dir = tempfile::tempdir().unwrap();
+    let saved = dir.path().join("acl");
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/save")
+        .arg(&saved)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run icacls /save");
+    assert!(status.success(), "icacls /save failed: {}", path.display());
+    let bytes = std::fs::read(&saved).unwrap();
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    let text = String::from_utf16(&units).unwrap();
+    let sddl = text.lines().nth(1).unwrap_or_default().trim();
+    assert_eq!(sddl, format!("D:PAI(A;;FA;;;{sid})"), "{}", path.display());
+}
+
+/// 持有 HOME 锁并把 `HOME` 临时指向 `home`；drop 时（仍持锁）恢复原值。
+pub(crate) struct HomeOverride {
+    previous: Option<std::ffi::OsString>,
+    _lock: TestLockGuard<'static>,
+}
+
+impl HomeOverride {
+    pub(crate) fn new(home: &Path) -> Self {
+        let lock = home_env_lock().lock().unwrap();
+        let previous = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home) };
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for HomeOverride {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TestModelOverride<'a> {
     pub id: &'a str,
@@ -74,6 +170,20 @@ impl<'a> TestModelOverride<'a> {
     pub(crate) fn with_base_url(mut self, base_url: &'a str) -> Self {
         self.base_url = base_url;
         self
+    }
+}
+
+/// 让 bash 工具打印当前目录的命令：Git Bash 的 `pwd` 输出 `/c/...`（临时目录还会显示成 `/tmp/...`），
+/// `pwd -W` 才输出与宿主一致的 `C:/...`。
+pub(crate) const PWD_COMMAND: &str = if cfg!(windows) { "pwd -W" } else { "pwd" };
+
+/// 把宿主路径写成 [`PWD_COMMAND`] 的输出形式。
+pub(crate) fn shell_pwd(path: &Path) -> String {
+    let text = path.display().to_string();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
     }
 }
 

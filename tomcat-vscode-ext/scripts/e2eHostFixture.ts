@@ -1,4 +1,5 @@
 import * as os from "node:os";
+import { spawn, type SpawnOptions } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -3212,6 +3213,10 @@ export async function createHostE2eFixture(
     workspaceDir,
   };
 }
+
+/** `spawnFactory` for the fake CLI: Windows ignores its shebang, so run it with this Node. */
+export const spawnFakeServe = ((script: string, args: readonly string[], options: SpawnOptions) =>
+  spawn(process.execPath, [script, ...args], options)) as typeof spawn;
 
 export function resolveVsCodeCli(): string {
   return (
