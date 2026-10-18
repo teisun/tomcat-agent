@@ -8,6 +8,8 @@ use super::error::AppError;
 
 mod executable;
 #[cfg(windows)]
+mod private_acl;
+#[cfg(windows)]
 mod process_job;
 mod shell;
 pub(crate) mod stdin;
@@ -208,13 +210,12 @@ pub fn write_file_atomic_with(
 
 /// 把存放凭据的文件限制为仅当前用户可访问。
 ///
-/// Unix 设为 0600。Windows 用 `%SystemRoot%\System32\icacls.exe`（不经 PATH）
-/// 去掉继承的权限，只给 `USERDOMAIN\USERNAME` 完全控制：Entra ID 账户必须带
-/// `AzureAD\` 前缀才能被识别，本机账户的 USERDOMAIN 就是计算机名。
+/// Unix 设为 0600。Windows 把 DACL 整体换成只给当前令牌用户完全控制的受保护 DACL，
+/// 继承来的与文件上已有的显式授权都会去掉。
 ///
 /// # Errors
-/// * [`AppError::Io`] - 设置权限或启动 icacls 失败。
-/// * [`AppError::Config`] - Windows 上取不到 USERNAME，或 icacls 返回失败。
+/// * [`AppError::Io`] - Unix 上设置权限失败。
+/// * [`AppError::Config`] - Windows 上读取令牌或设置 DACL 失败。
 pub fn set_private_file_permissions(path: &Path) -> Result<(), AppError> {
     #[cfg(unix)]
     {
@@ -222,30 +223,15 @@ pub fn set_private_file_permissions(path: &Path) -> Result<(), AppError> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(windows)]
-    {
-        let shown = path.display().to_string();
-        let error = |key| AppError::Config(crate::infra::i18n::tr(key, &[("path", &shown)]));
-        let username = std::env::var("USERNAME")
-            .ok()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| error("platform.privateAclUser"))?;
-        let account = match std::env::var("USERDOMAIN") {
-            Ok(domain) if !domain.is_empty() => format!("{domain}\\{username}"),
-            _ => username,
-        };
-        let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-        let status =
-            std::process::Command::new(Path::new(&system_root).join(r"System32\icacls.exe"))
-                .arg(path)
-                .args(["/inheritance:r", "/grant:r"])
-                .arg(format!("{account}:F"))
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()?;
-        if !status.success() {
-            return Err(error("platform.privateAclFailed"));
-        }
-    }
+    private_acl::restrict_to_current_user(path).map_err(|error| {
+        AppError::Config(crate::infra::i18n::tr(
+            "platform.privateAclFailed",
+            &[
+                ("path", &path.display().to_string()),
+                ("error", &error.to_string()),
+            ],
+        ))
+    })?;
     Ok(())
 }
 

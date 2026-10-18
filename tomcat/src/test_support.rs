@@ -84,6 +84,12 @@ pub(crate) fn assert_private_to_current_user(path: &Path) {
         .expect("run whoami");
     let whoami = String::from_utf8_lossy(&whoami.stdout);
     let sid = whoami.trim().rsplit(',').next().unwrap().trim_matches('"');
+    // SDDL 把内置 Administrator / Guest 写成别名；GitHub runner 的 runneradmin 就是 RID 500。
+    let trustee = match sid.rsplit('-').next() {
+        Some("500") => "LA",
+        Some("501") => "LG",
+        _ => sid,
+    };
     let dir = tempfile::tempdir().unwrap();
     let saved = dir.path().join("acl");
     let status = std::process::Command::new("icacls")
@@ -103,7 +109,12 @@ pub(crate) fn assert_private_to_current_user(path: &Path) {
         .collect();
     let text = String::from_utf16(&units).unwrap();
     let sddl = text.lines().nth(1).unwrap_or_default().trim();
-    assert_eq!(sddl, format!("D:PAI(A;;FA;;;{sid})"), "{}", path.display());
+    assert_eq!(
+        sddl,
+        format!("D:PAI(A;;FA;;;{trustee})"),
+        "{}",
+        path.display()
+    );
 }
 
 /// 持有 HOME 锁并把 `HOME` 临时指向 `home`；drop 时（仍持锁）恢复原值。

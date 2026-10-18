@@ -163,6 +163,7 @@ tomcat --version
 | Node.js | 22，用于 VS Code 插件 |
 | Git for Windows | 提供 Git Bash，`bash` 工具和测试脚本都用它 |
 | cargo-nextest | 运行集成测试分组 |
+| ripgrep（`rg`） | `search_files` 的测试覆盖 ripgrep 后端（`winget install BurntSushi.ripgrep.MSVC`）；没有它时工具改用不带上下文行的兜底实现 |
 
 仓库根目录的 `.gitattributes`（`* text=auto eol=lf`）让所有文本文件都以 LF 换行检出，不管 `core.autocrlf` 怎么设，Windows 上的夹具和快照都能逐字节一致。如果是在这个文件加入之前克隆的仓库，请重新克隆，让已有文件以 LF 检出。
 

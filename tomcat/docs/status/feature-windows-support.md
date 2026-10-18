@@ -162,7 +162,7 @@ windows-ci.yml（新增）              release-cli.yml                    relea
 - **安装包 registry 读取**：父路径是普通文件时，Unix 报 ENOTDIR，Windows 只报 NotFound。`read_registry_text` 统一按 NotADirectory 拒绝，保证在复制资源前就失败（`core/package/manager/registry.rs`）。
 - **测试里的输出生成器**：用 `awk` 代替 `python3`（Git Bash 自带 awk，Windows 默认没有 python3）。
 - **锁冲突判断**：Windows 上 fs2 的锁冲突返回 `ERROR_LOCK_VIOLATION`(33)，不是 `WouldBlock`。新增 `platform::is_lock_contended`，用于配置锁、MCP 配置锁、会话占用锁、模型管理锁四处；基线里 MCP 并发添加的失败由此修复。计划未列出此项。
-- **私有权限**：icacls 的输出被丢弃（它用 OEM 代码页，中文用户名会乱码）；失败只看退出码。i18n 键从 `oauth.acl*` 改为通用的 `platform.privateAcl*`，`.env` 头注释改为"仅当前用户可读写"。测试用 `icacls /save`（UTF-16 SDDL）比对 `whoami /user` 的 SID。
+- **私有权限**：起初沿用 icacls（`/inheritance:r /grant:r USERDOMAIN\USERNAME:F`），CI 暴露它只去掉继承权限、不动显式授权（见下方"CI 上才失败的用例"），已改为 Win32 API 整体替换 DACL（`infra/platform/private_acl.rs`）。i18n 键从 `oauth.acl*` 改为通用的 `platform.privateAclFailed`，`.env` 头注释改为"仅当前用户可读写"。测试用 `icacls /save`（UTF-16 SDDL，避开 OEM 代码页乱码）比对 `whoami /user` 的 SID。
 - **ConPTY 测试**：除计划中的 Ctrl+C 与中文答案外，还要回复终端的光标位置查询（`ESC[6n`）并回答项目信任提示 `[y/N]`，否则 chat 卡在启动阶段。已用旧的 std `read_line` 反向验证：测试会在第二轮输入处失败。
 - **stdin 的 Unix 分支**：原样搬入 `infra/platform/stdin.rs`，但本机无法编译 Unix 代码，依赖 CI 的 macOS/Linux 任务验证。
 - **VT 开启位置**：计划写在 `main.rs`，实际放在 `run_cli()` 开头。`main.rs` 是独立的二进制 crate，访问不到 `pub(crate)` 的 platform 模块；为此把 platform 改成公开 API 不值得。效果相同（`main` 的第一件事就是调用 `run_cli`）。
@@ -203,6 +203,40 @@ windows-ci.yml（新增）              release-cli.yml                    relea
 - **根因与证据**：只有"自动下载 VS Code"分支会同时设置 `VSCODE_CLI_PATH`；指定了可执行文件时，CLI 回落到 macOS 默认路径。CI 走下载分支，所以没暴露。
 - **解决方案**：未设置 `VSCODE_CLI_PATH` 时，一律由 `VSCODE_EXECUTABLE_PATH` 推导（与下载分支同一个函数） <sub>`tomcat-vscode-ext/scripts/run-vscode-verify-vsix.ts`</sub>。
 - **测试用例清单**：本机 release-bundle 验收即覆盖（见下方场景 1）。
+
+### CI 上才失败的用例（windows-ci）
+
+本机 gate-fast 全绿，GitHub 的 Windows runner 上 lib 8 项、integration 1 项失败。原始日志要管理员权限，所以给工作流加了失败注解（含 panic 信息与 left/right），再用本机能造出来的等价环境复现。
+
+```text
+runner 与本机的差别                     影响到的用例
+  ├─ TEMP 是 8.3 短名 RUNNER~1 ........ 6 项：期望值用了字面临时路径
+  ├─ 临时目录的权限不同 ............... 2 项：私有文件仍带别的显式授权（产品缺陷）
+  └─ 没装 ripgrep ..................... 1 项：search_files 默认上下文行
+```
+
+#### 临时目录是 8.3 短名，期望值与规范路径对不上（测试缺陷）
+
+- **问题现象**：报错信息、会话目录里出现的是 `C:\Users\runneradmin\...`，测试拿来比的是 `C:\Users\RUNNER~1\...`。
+- **根因与证据**：产品按规范路径显示和比较（`canonicalize` 会展开短名）；测试直接用 `tempdir().path()` 作期望值。Unix 的 cwd 总是内核解析过的真实路径，Windows 的 `current_dir` 则原样返回设置时的写法。macOS 上没暴露，是因为 `/private/var/...` 恰好包含 `/var/...` 这个子串。本机不生成短名，改用 junction 作 TEMP，同样复现 6 项。
+  - 权限判断不受影响：`gate.rs::canonicalize_with_existing_ancestor` 两边都先规范化再比较，所以这是测试问题，不改产品。
+- **解决方案**：期望值改用 `canonicalize` 后的路径；`runtime_split_test` 直接把进程 cwd 设成规范路径 <sub>`run_basic_test`、`admin_test`、`config_tool_test`、`cmd_uninstall_test`、`runtime_split_test`、`tests/resume_hydration_cli_e2e.rs` 的夹具</sub>。
+- **测试用例清单**：上述 6 项在 TEMP 为 junction 与普通目录时都通过。
+
+#### 私有文件（`.env`、OAuth 令牌）仍带别的显式授权（产品缺陷）
+
+- **问题现象**：`assert_private_to_current_user` 在 runner 上失败。
+- **根因与证据**：旧实现 `icacls /inheritance:r /grant:r 用户:F` 只去掉继承来的权限，文件上已有的显式授权原样保留。父目录没有可继承权限时，新文件按令牌默认 DACL 带上显式授权。本机造了这样的目录作 TEMP，复现结果是 `D:PAI(A;;FA;;;<用户>)(A;;FA;;;SY)(A;;0x1200a9;;;<登录会话>)`。用户手工给 `.env` 加过 "Everyone 读" 时同样会留下（`(A;;FR;;;WD)`）。这与 Unix 0600 "只剩自己"的承诺不符。
+- **解决方案**：改用 Win32 API，把 DACL 整体换成只含当前令牌用户一条完全控制的受保护 DACL <sub>新增 `infra/platform/private_acl.rs`（`OpenProcessToken` 取 SID → `InitializeAcl`/`AddAccessAllowedAce` → `SetNamedSecurityInfoW` + `PROTECTED_DACL_SECURITY_INFORMATION`）；不再依赖 `USERNAME`/`USERDOMAIN` 与 icacls，删掉 `platform.privateAclUser`；`Cargo.toml` 的 windows-sys 加 `Win32_Security_Authorization`</sub>。
+- **测试用例清单**：新增 `platform/tests/suite_test.rs::private_file_permissions_drop_explicit_grants_to_other_accounts`：先显式授予 Everyone 读，调用后 SDDL 只剩当前用户（按旧做法手工执行会留下 `(A;;FR;;;WD)`）。原有 `env_file_test`、`oauth_test` 在两种 TEMP 下都通过。
+  - runner 注解还暴露了断言本身的一个问题：runner 账户 `runneradmin` 是内置 Administrator（RID 500），SDDL 把它写成别名 `LA` 而不是 SID。`test_support::assert_private_to_current_user` 对 RID 500/501 改用 `LA`/`LG` 比对。
+
+#### `search_files` 默认上下文行缺失（CI 环境缺 ripgrep）
+
+- **问题现象**：`search_files_content_mode_defaults_to_three_context_lines` 报"缺少 line 3"。
+- **根因与证据**：没有 `rg` 时工具走兜底实现（tier2），它本来就不带上下文行，只给出警告（`executor/search.rs`，既有设计）。本机的 `rg` 来自 Cursor 安装目录里自带的那份，所以本机一直走 ripgrep；runner 上没有 rg。从 PATH 去掉 rg 后本机同样复现。
+- **解决方案**：windows-ci 在跑门禁前用 choco 装 ripgrep；用户指南的 Windows 开发环境表加上 ripgrep。产品不改：普通用户缺 rg 时，启动时的 preflight 本来就会提示安装。
+- **测试用例清单**：无新增；该用例在装了 rg 的环境里通过。
 
 ### 验收证据
 

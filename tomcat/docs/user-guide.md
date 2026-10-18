@@ -163,6 +163,7 @@ tomcat --version
 | Node.js | 22, for the VS Code extension |
 | Git for Windows | Provides Git Bash for the `bash` tool and for the test scripts |
 | cargo-nextest | Runs the integration test groups |
+| ripgrep (`rg`) | The `search_files` tests cover the ripgrep backend (`winget install BurntSushi.ripgrep.MSVC`); without it the tool uses a fallback that has no context lines |
 
 The repository root `.gitattributes` (`* text=auto eol=lf`) checks every text file out with LF line endings, so fixtures and snapshots match byte-for-byte on Windows regardless of `core.autocrlf`. If you cloned before that file existed, re-clone so existing files are checked out with LF.
 

@@ -127,6 +127,24 @@ fn normalize_path_displays_missing_home_paths_with_native_separators() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn private_file_permissions_drop_explicit_grants_to_other_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".env");
+    std::fs::write(&path, "KEY=value\n").unwrap();
+    // Everyone 只读：显式授权，去掉继承并不会移除它。
+    let granted = std::process::Command::new("icacls")
+        .arg(&path)
+        .args(["/grant", "*S-1-1-0:R"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(granted.success());
+    super::super::set_private_file_permissions(&path).unwrap();
+    crate::test_support::assert_private_to_current_user(&path);
+}
+
 #[test]
 fn format_home_path_joins_home_relative_parts_with_forward_slashes() {
     let home = tempfile::tempdir().unwrap();

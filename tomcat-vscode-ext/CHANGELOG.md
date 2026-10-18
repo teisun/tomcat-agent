@@ -7,6 +7,7 @@
 - On Windows, a background command still running when the CLI exits is stopped together with its process tree instead of blocking the exit, and processes detached by commands no longer hold the CLI's output pipes open.
 - On Windows, MCP stdio servers launched through `npx` (such as the default Playwright server) are stopped with their whole process tree when the CLI exits or the connection closes, so exiting no longer waits for a browser call in progress.
 - Show Windows paths in `tomcat init` and `tomcat doctor` with `\` separators only, instead of mixing `/` and `\`.
+- On Windows, restrict `.env` and MCP OAuth token files to the current user by replacing their whole access list, so access granted to other accounts earlier is removed as well.
 - Windows ARM64 and other platforms remain outside the support claim.
 
 ## 0.1.90

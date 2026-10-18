@@ -58,6 +58,12 @@ jobs:
         with:
           tool: nextest
 
+      # search_files tests cover the ripgrep backend; without rg the tool uses a walker without context lines.
+      - name: Install ripgrep
+        run: |
+          choco install ripgrep --no-progress -y
+          rg --version
+
       - name: Run gate-fast
         run: |
           set -o pipefail
