@@ -276,6 +276,23 @@ fn managed_playwright_executable(server: &ConfiguredMcpServer) -> Option<PathBuf
     executable_path.is_file().then_some(executable_path)
 }
 
+/// Windows 上 `kill_on_drop` 只杀得到 `npx.cmd` 外层的 cmd.exe，真正的服务（node、它启动的浏览器）
+/// 继续握着 stdout 管道；tokio 在 Windows 上用阻塞线程读子进程管道，运行时关闭会一直等它们退出。
+/// 放进关闭即终止的 Job 后，传输被丢弃或 tomcat 退出时整棵进程树一起结束。
+#[cfg(windows)]
+fn owned_process_tree(command: tokio::process::Command) -> process_wrap::tokio::CommandWrap {
+    let mut command = process_wrap::tokio::CommandWrap::from(command);
+    command
+        .wrap(process_wrap::tokio::KillOnDrop)
+        .wrap(process_wrap::tokio::JobObject);
+    command
+}
+
+#[cfg(unix)]
+fn owned_process_tree(command: tokio::process::Command) -> tokio::process::Command {
+    command
+}
+
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn connect_cancellable(
@@ -287,7 +304,7 @@ impl McpTransport for StdioTransport {
         if cancel.is_cancelled() {
             return Err(McpFailure::new(FailureKind::Cancelled, "spawn"));
         }
-        let transport = TokioChildProcess::new(self.command(server))
+        let transport = TokioChildProcess::new(owned_process_tree(self.command(server)))
             .map_err(|_| McpFailure::new(FailureKind::Configuration, "spawn"))?;
         ().serve_with_ct(
             CancellationBoundedTransport::managed(transport, cleanup),

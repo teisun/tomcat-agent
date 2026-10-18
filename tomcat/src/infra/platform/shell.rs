@@ -6,7 +6,7 @@
 //!   `C:\Windows\System32\bash.exe` 是 WSL，不是 Git Bash。找不到时 fail-closed，
 //!   不回落到 cmd，避免权限层按 POSIX 语义检查、实际却交给另一种 shell 执行。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::infra::error::AppError;
 
@@ -60,12 +60,16 @@ fn git_exec_path() -> Option<String> {
 pub(crate) fn locate_git_bash(
     exec_path: Option<&str>,
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
-    is_file: impl Fn(&std::path::Path) -> bool,
+    is_file: impl Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
     let derived = exec_path
         .map(str::trim)
         .filter(|path| !path.is_empty())
-        .and_then(|path| PathBuf::from(path).ancestors().nth(3).map(PathBuf::from));
+        .and_then(|path| {
+            // `git --exec-path` 用 `/`；按组件重建才能得到本机分隔符，避免展示 `C:/Git\bin\bash.exe`。
+            let root = Path::new(path).ancestors().nth(3)?;
+            Some(root.components().collect::<PathBuf>())
+        });
     let fallbacks = [
         env("ProgramFiles").map(|dir| PathBuf::from(dir).join("Git")),
         env("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Programs").join("Git")),

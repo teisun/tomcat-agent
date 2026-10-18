@@ -4099,6 +4099,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "predicates",
+ "process-wrap",
  "regex",
  "reqwest",
  "rmcp",

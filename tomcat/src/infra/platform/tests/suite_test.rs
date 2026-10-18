@@ -114,6 +114,19 @@ fn normalize_path_expands_tilde_with_either_separator() {
     assert_eq!(normalize_path("~\\.tomcat").unwrap(), home.join(".tomcat"));
 }
 
+#[cfg(windows)]
+#[test]
+fn normalize_path_displays_missing_home_paths_with_native_separators() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = canonicalize(dir.path()).unwrap();
+    let _home = crate::test_support::HomeOverride::new(&home);
+    let path = normalize_path("~/.tomcat/tomcat.config.toml").unwrap();
+    assert_eq!(
+        path.display().to_string(),
+        format!(r"{}\.tomcat\tomcat.config.toml", home.display())
+    );
+}
+
 #[test]
 fn format_home_path_joins_home_relative_parts_with_forward_slashes() {
     let home = tempfile::tempdir().unwrap();

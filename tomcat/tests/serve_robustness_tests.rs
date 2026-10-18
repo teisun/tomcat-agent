@@ -897,3 +897,58 @@ fn serve_eof_exits_cleanly() {
         "stderr should not contain panic output: {stderr}"
     );
 }
+
+/// `npx` 在 Windows 上是 `npx.cmd`：直接子进程是 cmd.exe，真正的服务是它启动的 node。
+/// 服务在客户端断开后还要很久才退出（例如正在关闭浏览器）时，serve 仍须在 EOF 后及时退出且不留下服务进程。
+#[cfg(windows)]
+#[test]
+#[serial]
+fn serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client() {
+    let server = spawn_scripted_openai_stream_server(vec![]);
+    let fx = setup_serve_fixture(&server.base_url);
+    let config = fx.home_path.join(".tomcat/tomcat.config.toml");
+    let mut cfg = tomcat::load_config_toml_file(&config).unwrap();
+    cfg.connector.enabled = true;
+    std::fs::write(&config, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    let pid_file = fx.home_path.join("mcp.pid");
+    let launcher = fx.home_path.join("lingering-mcp.cmd");
+    let script = common::serve::fixture_path(&["tests", "fixtures", "mcp", "fake_stdio_server.mjs"]);
+    // cmd.exe decodes batch text with the OEM code page: keep non-ASCII paths out of the file.
+    std::fs::write(
+        &launcher,
+        "@node \"%FAKE_MCP_SCRIPT%\" --linger-after-eof-ms 60000 --pid-file \"%~dp0mcp.pid\"\r\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fx.home_path.join(".tomcat/mcp.json"),
+        json!({"mcpServers":{"lingering":{"command":launcher,"env":{"FAKE_MCP_SCRIPT":script}}}})
+            .to_string(),
+    )
+    .unwrap();
+
+    let mut child = spawn_serve_child(&fx);
+    child.send_value(&json!({"type":"control_request","requestId":"init-1","subtype":"initialize","payload":{}}));
+    let _ = child.recv_until(SERVE_TIMEOUT, |value| value["requestId"] == "init-1");
+    let deadline = std::time::Instant::now() + SERVE_TIMEOUT;
+    loop {
+        child.send_value(&json!({"type":"list_connectors","id":"ready","context":{}}));
+        let frames = child.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "ready");
+        if frames.last().unwrap()["payload"]["connectors"][0]["state"] == "connected" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "connector startup: {frames:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+
+    let output = child.wait_for_exit(SERVE_TIMEOUT);
+    assert!(output.status.success(), "{output:?}");
+    let tasks = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&tasks.stdout).contains("node.exe"),
+        "the wrapped MCP server must not outlive serve"
+    );
+}

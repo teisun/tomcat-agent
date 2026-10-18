@@ -46,6 +46,19 @@ fn derives_git_root_from_exec_path() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn derived_bash_path_is_displayed_with_native_separators() {
+    let bash = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+    let found = locate(
+        Some("C:/Program Files/Git/mingw64/libexec/git-core"),
+        &[],
+        std::slice::from_ref(&bash),
+    )
+    .unwrap();
+    assert_eq!(found.display().to_string(), r"C:\Program Files\Git\bin\bash.exe");
+}
+
 #[test]
 fn falls_back_to_standard_dirs_when_derived_root_has_no_bash() {
     let mingit = "D:/tools/mingit/mingw64/libexec/git-core";

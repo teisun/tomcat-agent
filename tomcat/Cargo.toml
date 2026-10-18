@@ -114,6 +114,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-registry = "0.6"
+# rmcp 的子进程封装（已是传递依赖）：MCP stdio 服务整棵进程树放进 Job，随传输一起结束。
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
 [build-dependencies]
 sha2 = "0.10"

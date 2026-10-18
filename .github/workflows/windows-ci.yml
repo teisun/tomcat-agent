@@ -59,7 +59,18 @@ jobs:
           tool: nextest
 
       - name: Run gate-fast
-        run: bash scripts/run-integration-tests.sh gate-fast
+        run: |
+          set -o pipefail
+          bash scripts/run-integration-tests.sh gate-fast 2>&1 | tee "$RUNNER_TEMP/gate-fast.log"
+
+      # Raw job logs need repository admin rights; annotations are visible to every reader.
+      - name: Annotate failures
+        if: failure()
+        run: |
+          failures=$(sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/gate-fast.log" \
+            | grep -E '^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$' \
+            | awk '!seen[$0]++' | head -n 80)
+          echo "::error title=gate-fast failures::${failures//$'\n'/%0A}"
 
   extension:
     name: extension gate:fast (windows)

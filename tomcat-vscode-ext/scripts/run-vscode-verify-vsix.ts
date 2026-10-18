@@ -279,8 +279,8 @@ async function main(): Promise<void> {
       if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) throw new Error(`Cannot resolve minimum VS Code version: ${version}`);
       const executable = await downloadAndUnzipVSCode({ version });
       process.env.VSCODE_EXECUTABLE_PATH = executable;
-      process.env.VSCODE_CLI_PATH = resolveCliPathFromVSCodeExecutablePath(executable);
     }
+    process.env.VSCODE_CLI_PATH ??= resolveCliPathFromVSCodeExecutablePath(process.env.VSCODE_EXECUTABLE_PATH);
     const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(extensionRoot, "../.agents/marketplace", expectedRelease().version, currentVsCodeTarget());
     await fs.mkdir(artifactsDir, { recursive: true });
     runCommand("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });

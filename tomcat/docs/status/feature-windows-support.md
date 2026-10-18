@@ -9,8 +9,9 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
   ├─ CLI 产品代码 ........ 完成（§1-§8）
   ├─ 插件宿主修复 ........ 完成（§9）
   ├─ 测试基线修复 ........ 完成：本机 Rust gate-fast、插件 lint 与集成测试全绿（§10）
-  ├─ CI / 发布 ........... 已推送 develop，dry-run 进行中（§11、§12）
-  └─ 验收 ................ 场景 8 的颜色部分已截图，其余进行中（§13）
+  ├─ CI / 发布 ........... 两个 dry-run 成功；windows-ci 的 rust job 失败待定位（§11、§12）
+  ├─ 验收 ................ 场景 1-12、14 通过或由自动化覆盖；场景 13 待正式发布（§13）
+  └─ 验收中发现的问题 .... 3 个已修复（MCP 拖住退出、路径分隔符混用、验收脚本），见下方
 ```
 
 - **已完成**：Git Bash 作为 bash 工具；路径身份（dunce、大小写、`~\`）；权限规则与危险命令；安装包安全快照；外部程序查找（PATHEXT、npx.cmd、MCP 环境白名单）；CRLF 计划文件、`.env`/OAuth 私有权限、shadow-git 长路径；可取消的控制台/管道输入与 ConPTY 端到端测试；`tomcat init` 写用户 PATH 与副本刷新；控制台 VT 颜色；插件 `windowsHide` 与 `@` 目录 Uri。
@@ -168,16 +169,83 @@ windows-ci.yml（新增）              release-cli.yml                    relea
 - **副本刷新测试位置**：计划写在 `run_basic_test.rs`。内容不同/相同、清理 `*.old` 三项在该文件；"旧副本正在运行时仍可替换"需要真实的 tomcat.exe，单测拿不到二进制，因此放在 `tests/cli_tests.rs`（`test_init_replaces_a_running_windows_command_copy`）。
 - **临时注册表键**：测试用 `HKCU\Software\TomcatTest-<uuid>`，而不是 `Software\TomcatTest\<uuid>`，删除后不会留下空的父键。
 
+### 验收中发现并修复的问题（§13）
+
+#### MCP 服务（经 `npx.cmd` 启动）拖住 CLI/Serve 退出（产品缺陷）
+
+- **问题现象**：Playwright MCP 正在执行工具调用时关闭 Serve 的 stdin，tomcat 过了 16.3 秒才退出；插件关闭 Serve 的 5 秒期限因此超时（`timed out closing tomcat serve after 5000ms`），只能强杀。服务器忙时完全不理会 EOF 的话，就会一直等下去。
+- **根因与证据**：与上面"后台任务没结束时 CLI 退不出"是同一类问题，发生在 MCP 子进程上：
+  ```text
+  tomcat.exe ──▶ cmd.exe（npx.cmd 外壳）──▶ node（playwright MCP）──▶ chrome × 8
+                    ▲ kill_on_drop 只杀到这里        │
+                                                     └─ 仍握着 MCP 的 stdout 管道
+  Windows 上 tokio 读子进程管道用阻塞线程 → 运行时关闭等这条读线程拿到 EOF → 等 node 自己退出
+  ```
+  - 证据：脚本模拟模型发起 `browser_navigate`，确认 node 与 8 个 chrome 在跑后关闭 stdin，测得进程退出 16337ms、管道关闭 16337ms，随后整棵树才消失。
+  - 空闲时 Playwright 收到 EOF 会自己退出（实测 23ms），所以只在"服务正忙或清理很慢"时出现。Unix 不受影响：子进程管道不占阻塞线程，运行时关闭不等它。
+- **解决方案**：MCP stdio 子进程在 Windows 上放进关闭即终止（`KILL_ON_JOB_CLOSE`）的 Job：传输被丢弃或 tomcat 退出时，整棵进程树一起结束 <sub>`core/connector/mcp/transport.rs::owned_process_tree`；用 rmcp 自带的 `process-wrap` 的 `JobObject` + `KillOnDrop`（已是传递依赖，`Cargo.toml` 只在 Windows 下显式声明）；Unix 不变</sub>。
+  - 为什么不复用 bash 的 `ProcessJob`：rmcp 只接受 `CommandWrap` 并在内部创建进程，拿不到"挂起创建 → 加入 Job → 恢复"的时机；`process-wrap` 的 `JobObject` 正是在这一处做同样的事。
+- **测试用例清单**：`tests/serve_robustness_tests.rs::serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client`（仅 Windows）：用 `.cmd` 启动假 MCP 服务（与 `npx.cmd` 同样是 cmd.exe → node），服务在 EOF 后还会再活 60 秒；要求 Serve 10 秒内退出且服务进程不残留。去掉修复时报 `timed out waiting for serve exit`（nextest 同时报 LEAK），修复后 0.8 秒通过。夹具 `fake_stdio_server.mjs` 为此新增 `--linger-after-eof-ms`、`--pid-file` 两个可选参数。
+  - 写测试时踩到的坑（已在测试里规避并注明）：cmd.exe 按 OEM 代码页解码批处理文件，路径里的中文会乱码；`.cmd` 里只写 ASCII，路径经 `%~dp0` 和环境变量传入。
+
+#### 路径分隔符混用（展示缺陷）
+
+- **问题现象**：真实 `tomcat init` 输出 `配置文件已写入: C:\Users\汤姆猫\.tomcat/tomcat.config.toml`，doctor 显示 `Git Bash：C:/Program Files/Git\bin\bash.exe`。能用，但看起来像出错。
+- **根因与证据**：
+  - 配置路径由 `~/.tomcat/tomcat.config.toml` 展开；文件已存在时 `canonicalize` 会顺带统一分隔符，init 时文件还不存在，原样保留了 `/`。
+  - `git --exec-path` 输出用 `/`，向上取 3 级后再 `join("bin")`。
+- **解决方案**：两处都在源头按路径组件重建，得到本机分隔符 <sub>`infra/platform/mod.rs::normalize_path`（仅 Windows，路径不存在时）、`infra/platform/shell.rs::locate_git_bash`</sub>。
+- **测试用例清单**：`platform/tests/suite_test.rs::normalize_path_displays_missing_home_paths_with_native_separators`、`platform/tests/shell_test.rs::derived_bash_path_is_displayed_with_native_separators`（仅 Windows，断言展示串本身；原有用例按组件比较路径，发现不了这个问题）。
+
+#### 验收脚本只设 `VSCODE_EXECUTABLE_PATH` 时用错 VS Code CLI（脚本缺陷）
+
+- **问题现象**：本机用已安装的 VS Code 跑 `run-vscode-verify-vsix.ts --release-bundle`，安装扩展时报 `spawnSync /Applications/Visual Studio Code.app/... ENOENT`。
+- **根因与证据**：只有"自动下载 VS Code"分支会同时设置 `VSCODE_CLI_PATH`；指定了可执行文件时，CLI 回落到 macOS 默认路径。CI 走下载分支，所以没暴露。
+- **解决方案**：未设置 `VSCODE_CLI_PATH` 时，一律由 `VSCODE_EXECUTABLE_PATH` 推导（与下载分支同一个函数） <sub>`tomcat-vscode-ext/scripts/run-vscode-verify-vsix.ts`</sub>。
+- **测试用例清单**：本机 release-bundle 验收即覆盖（见下方场景 1）。
+
 ### 验收证据
 
-截图只保存在本机，不入库：`%USERPROFILE%\.tomcat\temp\windows-acceptance\`。
+截图与脚本只保存在本机，不入库：`%USERPROFILE%\.tomcat\temp\windows-acceptance\`。按用户要求不用真实模型：模型回复由脚本模拟，其余（VS Code、`tomcat.exe`、Git Bash、Playwright、Chrome）都是真实的。本机用户目录 `C:\Users\汤姆猫` 含中文，临时目录也在其下，因此全程覆盖非 ASCII 路径。
 
+```text
+验收方式
+  ├─ A 真实 VS Code + 安装 release VSIX（run-vscode-verify-vsix.ts --release-bundle）....... 场景 1
+  ├─ B 脚本探针：真实 TomcatMessenger（插件同一套 spawn 代码）启动 release tomcat.exe .... 场景 1、2、5、7
+  ├─ C 真实用户目录跑 init + 经资源管理器打开新终端 ......................................... 场景 8
+  ├─ D 隐藏 Git 的临时环境 + dumpbin 查依赖 ................................................... 场景 9
+  └─ E 已在 Windows 上跑过的自动化用例（gate-fast 全绿）...................................... 其余场景
+```
+
+| 场景 | 结果 | 证据 |
+| :--- | :--- | :--- |
+| 1 安装 VSIX、连接、无黑窗 | 通过 | A：1 passing（17s），截图 `vsix-local/gui-*/release-workbench.png` 等；B：窗口监视器全程未发现新窗口（先用手动打开的控制台做过正向对照，0.1 秒内能捕获） |
+| 2 Git Bash 跑 `ls`/`git status`，中文输出 | 通过 | B：回传给模型的工具结果含 `中文文件.txt`、`你好，Windows` 与 git 状态 |
+| 3 CRLF 文件编辑 / Files 面板 / Undo | 自动化覆盖 | `primitive/tests/suite_test.rs::edit_preserves_crlf_line_endings`；Files 面板还原：插件 `serve_session_files.test.ts`（真实 Serve） |
+| 4 检查点恢复 CRLF | 自动化覆盖 | `checkpoint/tests/shadow_git_test.rs::windows_long_paths_and_line_endings_survive_checkpoint_restore` |
+| 5 会话记录只读 | 通过 | B：写 `~/.tomcat/agents/main/sessions/probe.jsonl` 被拒绝、文件未生成；另有 `gate_test.rs::windows_builtin_sessions_rule_blocks_backslash_write` |
+| 6 `/install` 安装 skill | 自动化覆盖 | `serve_package_install_integration`、`package_manager_test`（含 junction 拒绝） |
+| 7 Stop 后整棵进程树消失 | 通过 | B：前台 `sleep 300` 发 interrupt、后台任务 `task_stop`，两次 `tasklist` 都确认 sleep 与新起的 bash 全部消失；探针退出后无残留 |
+| 8 init → 新终端 → chat；Ctrl+C；颜色 | 通过 | C：见下方；Ctrl+C 由 `windows_conpty_cli_tests` 覆盖；颜色见下方截图说明 |
+| 9 无 Git / 无 VC++ 运行库 | 通过（替代环境） | D：本机 Home 版没有 Windows Sandbox；见下方 |
+| 10 CRLF `.plan.md` | 自动化覆盖 | `file_store_frontmatter_test.rs::crlf_plan_checked_out_by_git_parses_and_writes_back_as_lf`、`safety_test.rs::reviewer_body_diff_guard_still_protects_crlf_plans` |
+| 11 `d:\` 与 `D:\` 同一会话列表 | 自动化覆盖 | `session/tests/scope_test.rs::code_key_ignores_path_case_and_has_no_verbatim_prefix_on_windows` |
+| 12 Playwright MCP 连接并截图 | 通过 | B（含 Job 修复的 release exe）：经 `npx.cmd` 连上，`browser_navigate` 与 `browser_take_screenshot` 均成功，输出目录生成 PNG（`mcp-playwright-screenshot.png`，中文正常）；Chrome 在 Job 内工作正常，Serve 关闭 514ms，之后无 Playwright/Chrome 残留进程 |
+| 13 从商店安装 | 未做 | 需要正式发布后才能执行 |
+| 14 超过 260 字符的路径 | 自动化覆盖 | 同场景 4 的用例（`core.longpaths`） |
+
+- 场景 8（init 与新终端）：用 release `tomcat.exe` 在真实用户目录运行 `init`：写入配置、`models.toml`、`mcp.json`，复制 `~/.local/bin/tomcat.exe`，把 `C:\Users\汤姆猫\.local\bin` 加入用户 PATH，并提示"请打开新的终端窗口"。随后经资源管理器启动检查脚本（等同用户新开终端，环境来自刷新后的注册表）：`where tomcat` → `C:\Users\汤姆猫\.local\bin\tomcat.exe`，`tomcat --version` → `0.1.78`，`tomcat code` 正常进入对话模式（`new-terminal-tomcat-code.png`，Windows 11 默认用 Windows Terminal 打开）。
+- 场景 8（退出）：真实默认配置（含 Playwright MCP）下 `tomcat code` 收到 EOF 后 199ms 退出；`serve --stdio` 连上 Playwright 后关闭 stdin，23ms 退出，8 个 cmd/node 进程全部清理。工具调用进行中退出的情况见上方"MCP 服务拖住退出"。
+- 场景 9：PATH 只留 `C:\Windows\System32;C:\Windows`、ProgramFiles/LOCALAPPDATA 指向空目录来隐藏 Git：`doctor` 显示"✗ Git Bash：未找到"及 winget 安装提示，`serve --stdio` 正常完成 initialize 并以 0 退出。`dumpbin /dependents` 显示 release `tomcat.exe` 只依赖系统 DLL（CRT 静态链接），不需要 VC++ 运行库。自动化用例 `test_doctor_reports_git_bash_on_windows` 同样覆盖。
+- 场景 12 的附带发现：把 `USERPROFILE` 指向一个空的临时目录时（测试夹具隔离 HOME 的做法），Playwright 直接调用也会卡在 `browser_navigate`（同样的白名单环境、真实 `USERPROFILE` 则 0.4 秒完成）。这是夹具隔离带来的，不是产品问题；真实用户的 `USERPROFILE` 总是真实目录。
 - 场景 8（颜色）：`HKCU\Console\VirtualTerminalLevel` 未设置的前提下，在 conhost 中运行 `tomcat chat`，吉祥物显示为橙色，没有 `←[` 乱码（`conhost-vt.png`）；Windows Terminal 同样正常（`wt-vt.png`）。
   - 观察：conhost 的默认中文字体（新宋体）不含盲文字符，吉祥物显示为方框轮廓；Windows Terminal（Cascadia）显示正常。这是字体问题，与 VT 无关，本轮不处理；用户可设置 `TOMCAT_SPLASH=0` 关闭吉祥物。
   - 注意：Cursor 的终端会注入 `NO_COLOR=1` 和 `TERM=dumb`，从那里启动的进程会去掉颜色，人工验收时要先清掉这两个变量。
 
 ### BLOCKED (当前风险)
 
-- `windows-ci.yml` 与 release 工作流的 Windows 部分只在本地校验过，需要首次推送 / dry-run 才能确认能跑通。
+- windows-ci（run `39090230175`）的 rust gate-fast 在 GitHub 的 Windows runner 上失败，本机同一门禁全绿；原始日志需仓库管理员权限，已加失败注解步骤，下次推送后据注解定位。
+- 两个 dry-run 的产物与证据 zip 需登录下载，本机未复核；同样的检查已在本机真实 VS Code 上跑过。
 - stdin 的 Unix 分支与 serve 的 Unix 读取路径未在本机编译，依赖 macOS/Linux CI。
-- dry-run 推 tag 与正式发布前需要用户确认。
+- 场景 13（从商店安装）只能在正式发布后执行；正式发布需用户确认。
+- 观察（非本轮改动）：跑 lib 测试期间真实 `~/.tomcat/plans` 的修改时间变了（目录为空），疑似既有测试隔离不严，本轮未处理。

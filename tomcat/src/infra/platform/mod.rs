@@ -116,6 +116,9 @@ pub fn normalize_path(path: &str) -> Result<PathBuf, AppError> {
     } else {
         PathBuf::from(path)
     };
+    // 路径尚不存在时 canonicalize 会失败，原样返回会把 `C:\Users\x\.tomcat/a.toml` 这类混合分隔符展示给用户。
+    #[cfg(windows)]
+    let expanded: PathBuf = expanded.components().collect();
     Ok(canonicalize(&expanded).unwrap_or(expanded))
 }
 
