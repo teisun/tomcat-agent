@@ -57,6 +57,24 @@ async fn kill_after_exit_is_ok() {
     tree.kill().unwrap();
 }
 
+#[tokio::test]
+async fn kill_after_exit_before_reaping_is_ok() {
+    let (mut child, tree) = ProcessTree::spawn(&mut shell_command("exit 0")).unwrap();
+    // 读到 EOF 说明 shell 已退出；不调用 wait，进程就停在"已退出、未回收"的状态。
+    let mut rest = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        child.stdout.take().unwrap().read_to_end(&mut rest),
+    )
+    .await
+    .expect("shell did not exit in time")
+    .unwrap();
+    // 关闭 stdout 到进程彻底退出之间还有一小段时间。
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tree.kill().unwrap();
+    child.wait().await.unwrap();
+}
+
 #[test]
 fn exit_code_reports_shell_exit_status() {
     assert_eq!(exit_code(&shell_status("exit 3")), 3);

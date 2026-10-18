@@ -298,7 +298,7 @@ infra/platform ──── 唯一平台差异层：每个接口内部 Unix 实�
 
 | 主题 | 收口后的统一接口 | 顺带修掉的问题 |
 | :--- | :--- | :--- |
-| 进程树 | `ProcessTree`（Unix 进程组 / Windows Job）、`kill_tree_on_drop`（MCP）、`resolve_program`、`CHILD_STARTUP_ENV_VARS` | 停止失败时 Unix 原来静默忽略 `killpg` 的返回值，现在两平台都回滚并报错 |
+| 进程树 | `ProcessTree`（Unix 进程组 / Windows Job）、`kill_tree_on_drop`（MCP）、`resolve_program`、`CHILD_STARTUP_ENV_VARS` | 停止失败时 Unix 原来静默忽略 `killpg` 的返回值，现在两平台都回滚并报错；"组里已没有能收到信号的进程"（ESRCH，以及 macOS 上只剩已退出未回收进程时的 EPERM）算作已结束 |
 | 私密文件 | `write_private_file_atomic` | `.env` 临时文件原来按默认权限写入、改名后才收紧，中间有一瞬间别人可读；现在临时文件创建即私有，权限只设一次 |
 | 文件身份与权限位 | `open_no_follow`、`same_file`、`set_create_mode`、`mode_bits` | — |
 | 路径语法 | `path_starts_with`、`PATH_COMPARE_IGNORES_CASE`、`to_slash`、`shell_path_to_native`；绝对路径统一用 `Path::is_absolute` | "是不是绝对路径"原来有两套判断 |
@@ -361,6 +361,9 @@ infra/platform ──── 唯一平台差异层：每个接口内部 Unix 实�
   - 进程启动后的首次存档少 4 个 git 进程；之后每次存档的进程数不变，只省等待时间。
   - 压满 CPU 时改前改后都超过 3 秒，测试仍返回 `stop_timeout`：这是极端负载，不承诺能过。
 - **测试用例清单**：`checkpoint` 单元测试 70 项全部通过（存档/列出、同轮去重、无改动复用、空项目首个存档、并发、文件数上限、忽略文件、大输出不卡死、冷却期）；`shadow_git_test.rs::shadow_git_commands_enable_large_worktree_git_options`（原 `initialized_shadow_repo_enables_large_worktree_git_options`，改名以对应新契约：影子仓 git 命令都带这 4 项设置）；回归 `tests/serve_rewind_and_resend.rs`。
+- **CI**（`bee76947`，ci run `39132555799`）：Windows、插件全绿（含 `serve_rewind_and_resend`）。Ubuntu、macOS 各有问题，均已修复：
+  - 3 项仅 Unix 的影子 git 用例失败：用例用假 git 脚本按第一个参数分派，命令前面多了 `-c` 后认不出子命令。另有 `record_does_not_deadlock_when_ls_files_exceeds_pipe_capacity` 没报错，但假脚本转给了真 git，实际已不再覆盖大输出。修复：三个假脚本先跳过开头的 `-c key=value` 再判断，转发时保留全部参数（`shadow_git_test.rs` 的 `make_*_git_script`）。
+  - macOS 上 `submodules_test::inspector_task_controls_use_only_their_own_registry` 偶发报 "failed to stop bash process tree: Operation not permitted"（前两轮 CI 通过）。根因：命令刚结束、还没被回收时停止任务，macOS 的 `killpg` 返回 EPERM（组里没有能收到信号的进程）而不是 ESRCH；平台层收口后 Unix 不再忽略这个返回值。修复：EPERM 与 ESRCH 一样算作树已结束（`infra/platform/process.rs::ProcessTree::kill`）；新增 `platform/tests/process_test.rs::kill_after_exit_before_reaping_is_ok`（shell 已退出、未调用 wait 时停止，必须成功）。
 
 ### BLOCKED (当前风险)
 

@@ -580,12 +580,15 @@ fn make_status_timeout_git_script(dir: &std::path::Path) -> std::path::PathBuf {
     fs::write(
         &script,
         r#"#!/usr/bin/env bash
+args=("$@")
+# 影子仓的 git 调用都以若干 `-c key=value` 开头，跳过它们再看子命令。
+while [ "$1" = "-c" ]; do shift 2; done
 if [ "$1" = "status" ]; then
   echo "?? should-not-leak-from-status"
   sleep 0.2
   exit 0
 fi
-exec git "$@"
+exec git "${args[@]}"
 "#,
     )
     .unwrap();
@@ -611,6 +614,9 @@ emit_kib() {
     printf '%s' "$chunk"
   done
 }
+args=("$@")
+# 影子仓的 git 调用都以若干 `-c key=value` 开头，跳过它们再看子命令。
+while [ "$1" = "-c" ]; do shift 2; done
 if [ "$1" = "emit-large-output" ] || [ "$1" = "emit-large-output-and-hang" ]; then
   emit_kib x 256
   emit_kib y 128 >&2
@@ -619,7 +625,7 @@ if [ "$1" = "emit-large-output" ] || [ "$1" = "emit-large-output-and-hang" ]; th
   fi
   exit 0
 fi
-exec git "$@"
+exec git "${args[@]}"
 "#,
     )
     .unwrap();
@@ -643,12 +649,15 @@ emit_kib() {
     printf '%s' "$chunk"
   done
 }
+args=("$@")
+# 影子仓的 git 调用都以若干 `-c key=value` 开头，跳过它们再看子命令。
+while [ "$1" = "-c" ]; do shift 2; done
 if [ "$1" = "ls-files" ]; then
   emit_kib
   printf '\0'
   exit 0
 fi
-exec git "$@"
+exec git "${args[@]}"
 "#,
     )
     .unwrap();

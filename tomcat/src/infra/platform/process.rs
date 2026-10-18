@@ -87,7 +87,9 @@ impl ProcessTree {
                 return Ok(());
             }
             let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
+            // EPERM：组里没有一个进程能收到信号。macOS 上组里只剩已退出、未回收的进程时
+            // 就报这个而不是 ESRCH；和 ESRCH 一样，再发也杀不到任何进程。
+            if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::EPERM)) {
                 Ok(())
             } else {
                 Err(error)
