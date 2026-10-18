@@ -1,4 +1,4 @@
-name: windows-ci
+name: ci
 
 on:
   push:
@@ -8,12 +8,12 @@ on:
     paths:
       - "tomcat/**"
       - "tomcat-vscode-ext/**"
-      - ".github/workflows/windows-ci.yml"
+      - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "tomcat/**"
       - "tomcat-vscode-ext/**"
-      - ".github/workflows/windows-ci.yml"
+      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,13 +24,17 @@ env:
 
 jobs:
   rust:
-    name: rust gate-fast (windows)
-    runs-on: windows-latest
+    name: rust gate-fast (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
 
     defaults:
       run:
-        # Git Bash: the gate script and the bash tool under test both need it.
+        # Windows runs Git Bash: the gate script and the bash tool under test both need it.
         shell: bash
         working-directory: tomcat
 
@@ -61,7 +65,11 @@ jobs:
       # search_files tests cover the ripgrep backend; without rg the tool uses a walker without context lines.
       - name: Install ripgrep
         run: |
-          choco install ripgrep --no-progress -y
+          case "$RUNNER_OS" in
+            Windows) choco install ripgrep --no-progress -y ;;
+            Linux) sudo apt-get update && sudo apt-get install -y ripgrep ;;
+            macOS) brew install ripgrep ;;
+          esac
           rg --version
 
       - name: Run gate-fast
@@ -78,7 +86,7 @@ jobs:
                    /^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$|^ *(left|right): /' \
             | awk '!seen[$0]++' | cut -c1-600 | head -n 200)
           failures=${failures//'%'/%25}
-          echo "::error title=gate-fast failures::${failures//$'\n'/%0A}"
+          echo "::error title=gate-fast failures (${{ matrix.os }})::${failures//$'\n'/%0A}"
 
   extension:
     name: extension gate:fast (windows)
