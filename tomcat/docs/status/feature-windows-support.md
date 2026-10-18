@@ -9,13 +9,13 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
   ├─ CLI 产品代码 ........ 完成（§1-§8）
   ├─ 插件宿主修复 ........ 完成（§9）
   ├─ 测试基线修复 ........ 完成：本机 Rust gate-fast、插件 lint 与集成测试全绿（§10）
-  ├─ CI / 发布 ........... 两个 dry-run 成功；windows-ci 的 rust job 失败待定位（§11、§12）
+  ├─ CI / 发布 ........... 两个 dry-run 成功；windows-ci 全绿（`bb8c618f`，run 39097819025）（§11、§12）
   ├─ 验收 ................ 场景 1-12、14 通过或由自动化覆盖；场景 13 待正式发布（§13）
-  └─ 验收中发现的问题 .... 3 个已修复（MCP 拖住退出、路径分隔符混用、验收脚本），见下方
+  └─ 验收与 CI 中发现的问题 3 + 3 个已修复，见下方两节
 ```
 
 - **已完成**：Git Bash 作为 bash 工具；路径身份（dunce、大小写、`~\`）；权限规则与危险命令；安装包安全快照；外部程序查找（PATHEXT、npx.cmd、MCP 环境白名单）；CRLF 计划文件、`.env`/OAuth 私有权限、shadow-git 长路径；可取消的控制台/管道输入与 ConPTY 端到端测试；`tomcat init` 写用户 PATH 与副本刷新；控制台 VT 颜色；插件 `windowsHide` 与 `@` 目录 Uri。
-- **验证**（本机，版本已升到 CLI 0.1.78 / EXT 0.1.94）：Git Bash 下 `./scripts/run-integration-tests.sh gate-fast` 全绿——严格 Clippy、lib 3304 项（5 ignored）、doctest、integration 并行组 365 项、串行组 48 项；插件 `npm run lint` 通过，`npm run test:integration` 225 项通过（9 项为仅 Unix 的用例，按设计跳过）。基线失败的修复见下方"测试基线修复"。
+- **验证**（本机，版本已升到 CLI 0.1.78 / EXT 0.1.94）：Git Bash 下 `./scripts/run-integration-tests.sh gate-fast` 全绿（`26af661d`）——严格 Clippy、lib 3306 项（5 ignored）、doctest、integration 并行组 365 项、串行组 49 项；之后的私有权限修复另跑 lib 全量 3307 项通过与严格 Clippy。GitHub windows-ci 在 `bb8c618f` 上全绿；插件 `npm run lint` 通过，`npm run test:integration` 225 项通过（9 项为仅 Unix 的用例，按设计跳过）。基线失败的修复见下方"测试基线修复"。
 
 ### 基线（改动前，2026-10-17）
 
@@ -278,7 +278,7 @@ runner 与本机的差别                     影响到的用例
 
 ### BLOCKED (当前风险)
 
-- windows-ci（run `39090230175`）的 rust gate-fast 在 GitHub 的 Windows runner 上失败，本机同一门禁全绿；原始日志需仓库管理员权限，已加失败注解步骤，下次推送后据注解定位。
+- 两个 dry-run 打在 `afbec1ff` 上，之后的修复提交没有重跑 dry-run；正式发版时 release 工作流会在新提交上重新构建并验收。
 - 两个 dry-run 的产物与证据 zip 需登录下载，本机未复核；同样的检查已在本机真实 VS Code 上跑过。
 - stdin 的 Unix 分支与 serve 的 Unix 读取路径未在本机编译，依赖 macOS/Linux CI。
 - 场景 13（从商店安装）只能在正式发布后执行；正式发布需用户确认。

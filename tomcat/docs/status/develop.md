@@ -8,8 +8,8 @@
 - **版本**：版本脚本统一递增 CLI `0.1.77 → 0.1.78`、EXT `0.1.93 → 0.1.94`，新 EXT pin CLI `0.1.78`；版本一致性检查通过。
 - **本轮边界**：只推送 develop 与 `dry-run-cli-v0.1.78`、`dry-run-ext-v0.1.94` 两个演练标签；工作流的发布步骤只对正式 `cli-v*`/`ext-v*` 标签放行，演练不创建 GitHub Release、不上传 Marketplace/OpenVSX。正式发版需用户另行确认。
 - **验证**：本机 Windows（Git Bash）gate-fast 全绿，插件 lint 与集成测试 225 项通过。Cov% 未测量。
-- **演练结果（`afbec1ff`）**：release-cli run `39090243675` 成功（四平台归档，含 `x86_64-pc-windows-msvc`）；release-ext run `39090933463` 成功，含 win32-x64 原生安装验收。产物与证据 zip 需登录才能下载，本机未下载复核；同样的检查已用本机 release harness 在真实 VS Code 上跑过。windows-ci run `39090230175`：插件 job 与 version-sync 通过，**rust gate-fast（windows）失败**；原始日志需仓库管理员权限，已给工作流加失败摘要注解，待下次推送定位。
-- **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径三个问题在 `afbec1ff` 之后另行提交，因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
+- **演练结果（`afbec1ff`）**：release-cli run `39090243675` 成功（四平台归档，含 `x86_64-pc-windows-msvc`）；release-ext run `39090933463` 成功，含 win32-x64 原生安装验收。产物与证据 zip 需登录才能下载，本机未下载复核；同样的检查已用本机 release harness 在真实 VS Code 上跑过。windows-ci run `39090230175`：插件 job 与 version-sync 通过，**rust gate-fast（windows）失败**。原始日志需仓库管理员权限，因此给工作流加了失败注解，据此定位到 9 项只在 runner 上失败的用例：6 项是测试期望值用了 8.3 短名临时路径，2 项暴露私有文件权限缺陷（已改为整体替换 DACL），1 项是 runner 缺 ripgrep。明细见 [feature-windows-support.md](feature-windows-support.md)"CI 上才失败的用例"。修复后 windows-ci run `39097819025`（`bb8c618f`）rust 与插件两个 job 全部通过。
+- **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径，以及 CI 暴露的问题，都在 `afbec1ff` 之后另行提交（`26af661d`、`a8a100f0`、`bb8c618f`），因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
 
 ### CURRENT RELEASE：CLI 0.1.77 / EXT 0.1.93
 
