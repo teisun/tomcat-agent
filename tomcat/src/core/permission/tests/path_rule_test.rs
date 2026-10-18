@@ -29,6 +29,15 @@ fn tilde_expansion_no_glob() {
     assert!(expanded.starts_with(&home.to_string_lossy().to_string()));
 }
 
+#[test]
+fn backslash_tilde_glob_expands_only_where_backslash_is_a_separator() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::HomeOverride::new(home.path());
+    let r = PathRule::new(r"~\.ssh\*", PathRuleMode::Deny);
+    let key = home.path().join(".ssh").join("id_rsa");
+    assert_eq!(r.matches(&key), cfg!(windows));
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_builtin_globs_match_backslash_targets_ignoring_case() {

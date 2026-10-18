@@ -1,14 +1,14 @@
 //! `tomcat init` 与 `tomcat doctor` 子命令实现。
 
 use crate::infra::i18n::tr;
+use crate::infra::platform::{
+    add_user_bin_dir_to_path, canonicalize, install_user_command, manual_path_step, mode_bits,
+    posix_shell, user_bin_dir, ManualPathStep, POSIX_SHELL_NEEDS_INSTALL,
+};
 use std::ffi::OsStr;
 use std::io;
-#[cfg(unix)]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use crate::write_file_atomic;
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, load_store,
     normalize_path, resolve_sessions_dir, save_store, validate_config, AppConfig, AppError,
@@ -16,11 +16,6 @@ use crate::{
 };
 
 use super::DEFAULT_CONFIG_PATH;
-
-#[cfg(unix)]
-const LOCAL_BIN_EXPORT_LINE: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
-#[cfg(unix)]
-const TOMCAT_INIT_COMMENT: &str = "# Added by tomcat init";
 
 pub(crate) fn run_init() -> Result<(), AppError> {
     let config_file = normalize_path(DEFAULT_CONFIG_PATH)?;
@@ -192,15 +187,14 @@ pub(crate) fn run_init() -> Result<(), AppError> {
 
     match std::env::current_exe() {
         Ok(exe) => {
-            let canonical_exe = crate::infra::platform::canonicalize(&exe);
-            if canonical_exe
+            if canonicalize(&exe)
                 .as_ref()
                 .is_ok_and(|path| is_target_deps_artifact(path))
             {
                 println!("{}", tr("cli.init.testBinary", &[]));
             } else if let Some(home) = crate::infra::platform::home_dir() {
-                let local_bin_dir = canonical_local_bin_dir(&home);
-                match install_canonical_symlink(&exe, &local_bin_dir) {
+                let local_bin_dir = user_bin_dir(&home);
+                match install_tomcat_command(&exe, &local_bin_dir) {
                     Ok(Some(link)) => println!(
                         "{}",
                         tr(
@@ -216,21 +210,24 @@ pub(crate) fn run_init() -> Result<(), AppError> {
                         );
                     }
                 }
-                configure_path(&home);
-            } else if let Some(bin_dir) = exe.parent() {
-                #[cfg(unix)]
-                {
-                    println!("{}", tr("cli.init.homeMissing", &[]));
-                    println!("    export PATH=\"{}:$PATH\"", bin_dir.display());
+                match add_user_bin_dir_to_path(&home) {
+                    Ok(()) => println!(
+                        "{}",
+                        tr(
+                            "cli.init.pathAdded",
+                            &[("dir", &local_bin_dir.display().to_string())]
+                        )
+                    ),
+                    Err(step) => {
+                        for line in manual_path_lines(&step, false) {
+                            println!("{line}");
+                        }
+                    }
                 }
-                #[cfg(windows)]
-                println!(
-                    "{}",
-                    tr(
-                        "cli.init.pathManualWindows",
-                        &[("dir", &bin_dir.display().to_string())]
-                    )
-                );
+            } else if let Some(bin_dir) = exe.parent() {
+                for line in manual_path_lines(&manual_path_step(bin_dir), true) {
+                    println!("{line}");
+                }
             } else {
                 println!("{}", tr("cli.init.binMissing", &[]));
             }
@@ -307,18 +304,6 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     Ok(())
 }
 
-fn canonical_local_bin_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("bin")
-}
-
-fn canonical_tomcat_command_path(local_bin_dir: &Path) -> PathBuf {
-    if cfg!(windows) {
-        local_bin_dir.join("tomcat.exe")
-    } else {
-        local_bin_dir.join("tomcat")
-    }
-}
-
 fn is_target_deps_artifact(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
@@ -331,271 +316,34 @@ fn is_target_deps_artifact(path: &Path) -> bool {
         .any(|ancestor| ancestor.file_name() == Some(OsStr::new("target")))
 }
 
-pub(crate) fn install_canonical_symlink(
+/// 把当前 exe 装成 `local_bin_dir` 里的 `tomcat` 命令；测试二进制、或 exe 本身已在该目录时不装。
+pub(crate) fn install_tomcat_command(
     exe: &Path,
     local_bin_dir: &Path,
 ) -> io::Result<Option<PathBuf>> {
-    let exe = crate::infra::platform::canonicalize(exe)?;
+    let exe = canonicalize(exe)?;
     if is_target_deps_artifact(&exe) || exe.starts_with(local_bin_dir) {
         return Ok(None);
     }
+    install_user_command(&exe, local_bin_dir, crate::CLI_NAME)
+}
 
-    std::fs::create_dir_all(local_bin_dir)?;
-    let link = canonical_tomcat_command_path(local_bin_dir);
-    #[cfg(windows)]
-    remove_parked_copies(local_bin_dir);
-
-    if let Ok(meta) = std::fs::symlink_metadata(&link) {
-        if meta.file_type().is_symlink() {
-            if crate::infra::platform::canonicalize(&link)
-                .ok()
-                .as_deref()
-                .is_some_and(|target| target == exe.as_path())
-            {
-                return Ok(None);
-            }
-            std::fs::remove_file(&link)?;
-        } else {
-            #[cfg(windows)]
-            return refresh_windows_copy(&exe, &link);
-            #[cfg(unix)]
-            return Ok(None);
+/// 自动配置 PATH 做不到时给用户看的步骤；`home_missing` 决定 shell 命令前的那句说明。
+pub(crate) fn manual_path_lines(step: &ManualPathStep, home_missing: bool) -> Vec<String> {
+    match step {
+        ManualPathStep::RunInShell(line) => {
+            let key = if home_missing {
+                "cli.init.homeMissing"
+            } else {
+                "cli.init.pathManual"
+            };
+            vec![tr(key, &[]), format!("    {line}")]
         }
+        ManualPathStep::AddUserPathEntry(dir) => vec![tr(
+            "cli.init.pathManualWindows",
+            &[("dir", &dir.display().to_string())],
+        )],
     }
-
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&exe, &link)?;
-    }
-    #[cfg(windows)]
-    {
-        std::fs::copy(&exe, &link)?;
-    }
-
-    Ok(Some(link))
-}
-
-/// Windows 的命令入口是复制出来的 exe：内容不同才替换。正在运行的 exe 不能覆盖或删除，
-/// 但可以改名，所以先把旧副本改名成 `*.old` 再复制；删不掉的 `*.old` 留给下次 init 清理。
-#[cfg(windows)]
-fn refresh_windows_copy(exe: &Path, link: &Path) -> io::Result<Option<PathBuf>> {
-    if std::fs::read(link)? == std::fs::read(exe)? {
-        return Ok(None);
-    }
-    let parked = link.with_file_name(format!(
-        "tomcat.exe.{}{PARKED_COPY_SUFFIX}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::rename(link, &parked)?;
-    if let Err(error) = std::fs::copy(exe, link) {
-        let _ = std::fs::rename(&parked, link);
-        return Err(error);
-    }
-    let _ = std::fs::remove_file(&parked);
-    Ok(Some(link.to_path_buf()))
-}
-
-#[cfg(windows)]
-const PARKED_COPY_SUFFIX: &str = ".old";
-
-/// 清理上次替换时因旧副本仍在运行而没删掉的 `tomcat.exe.*.old`；仍在运行的会删除失败，跳过即可。
-#[cfg(windows)]
-fn remove_parked_copies(local_bin_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(local_bin_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("tomcat.exe.") && name.ends_with(PARKED_COPY_SUFFIX) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-#[cfg(unix)]
-fn configure_path(home: &Path) {
-    if auto_add_to_path(home) {
-        println!("{}", tr("cli.init.pathAdded", &[]));
-    } else {
-        println!("{}", tr("cli.init.pathManual", &[]));
-        println!("    {}", LOCAL_BIN_EXPORT_LINE);
-    }
-}
-
-/// Windows 写用户级注册表 PATH，不写 shell profile。
-#[cfg(windows)]
-fn configure_path(home: &Path) {
-    use super::init_windows_path::{
-        add_to_user_path, broadcast_environment_change, USER_ENVIRONMENT_KEY,
-    };
-    let dir = canonical_local_bin_dir(home).display().to_string();
-    let added = is_system_user_home(home)
-        && match add_to_user_path(USER_ENVIRONMENT_KEY, &dir) {
-            Ok(changed) => {
-                if changed {
-                    broadcast_environment_change();
-                }
-                true
-            }
-            Err(_) => false,
-        };
-    let key = if added {
-        "cli.init.pathAddedWindows"
-    } else {
-        "cli.init.pathManualWindows"
-    };
-    println!("{}", tr(key, &[("dir", &dir)]));
-}
-
-/// 只有 HOME 就是系统登记的用户目录时才改注册表：测试/沙箱用 HOME 做隔离时绝不碰真实
-/// PATH。`dirs::home_dir` 在 Windows 读系统登记的用户目录，不看 HOME/USERPROFILE。
-#[cfg(windows)]
-fn is_system_user_home(home: &Path) -> bool {
-    let canonical = |path: &Path| crate::infra::platform::canonicalize(path).ok();
-    dirs::home_dir()
-        .and_then(|system| canonical(&system))
-        .is_some_and(|system| canonical(home).as_ref() == Some(&system))
-}
-
-#[cfg(unix)]
-pub(crate) fn path_export_targets(shell: &str, home: &Path) -> Vec<PathBuf> {
-    if shell.contains("zsh") {
-        return vec![home.join(".zprofile"), home.join(".zshrc")];
-    }
-    if shell.contains("bash") {
-        return vec![home.join(".bashrc")];
-    }
-    vec![home.join(".profile")]
-}
-
-/// 将稳定的 `~/.local/bin` 追加到 shell 启动脚本中的 PATH；已存在同序 export 则跳过。
-#[cfg(unix)]
-pub(crate) fn auto_add_to_path(home: &Path) -> bool {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let mut ok = true;
-    for profile in path_export_targets(&shell, home) {
-        ok &= prune_stale_tomcat_exports(&profile);
-        ok &= append_export_once(&profile, LOCAL_BIN_EXPORT_LINE);
-    }
-    if shell.contains("bash") {
-        // macOS 的 login bash 会优先读 .bash_profile（存在时不再继续读 .profile），而
-        // 交互式 bash 通常读 .bashrc。为避免截断用户写在 .profile 里的通用环境（如 Rust 的
-        // ~/.cargo/env），PATH 仍写进 .bashrc，再确保 .bash_profile 同时 source
-        // .profile 与 .bashrc。
-        ok &= ensure_bash_profile_sources_profile_and_bashrc(home);
-    }
-    ok
-}
-
-/// 幂等地把一行 export 追加到指定 shell 启动脚本；已存在同序 export 则跳过。
-#[cfg(unix)]
-fn append_export_once(profile: &Path, export_line: &str) -> bool {
-    if let Ok(content) = std::fs::read_to_string(profile) {
-        if content.contains(export_line) {
-            return true;
-        }
-    }
-    let mut f = match std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(profile)
-    {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    writeln!(f, "\n{}\n{}", TOMCAT_INIT_COMMENT, export_line).is_ok()
-}
-
-#[cfg(unix)]
-fn is_stale_tomcat_target_export(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("export PATH=") && trimmed.contains("/target/")
-}
-
-#[cfg(unix)]
-pub(crate) fn prune_stale_lines(content: &str) -> String {
-    let lines = content.lines().collect::<Vec<_>>();
-    let mut result = Vec::with_capacity(lines.len());
-    let mut changed = false;
-    let mut index = 0;
-
-    while index < lines.len() {
-        let line = lines[index];
-        if line.trim() == TOMCAT_INIT_COMMENT
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| is_stale_tomcat_target_export(next))
-        {
-            changed = true;
-            index += 2;
-            continue;
-        }
-        if is_stale_tomcat_target_export(line) {
-            changed = true;
-            index += 1;
-            continue;
-        }
-        result.push(line);
-        index += 1;
-    }
-
-    if !changed {
-        return content.to_string();
-    }
-
-    let mut pruned = result.join("\n");
-    if content.ends_with('\n') {
-        pruned.push('\n');
-    }
-    pruned
-}
-
-#[cfg(unix)]
-pub(crate) fn prune_stale_tomcat_exports(profile: &Path) -> bool {
-    let content = match std::fs::read_to_string(profile) {
-        Ok(content) => content,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return true,
-        Err(_) => return false,
-    };
-    let pruned = prune_stale_lines(&content);
-    if pruned == content {
-        return true;
-    }
-    write_file_atomic(profile, pruned.as_bytes()).is_ok()
-}
-
-/// 确保 `~/.bash_profile` 会同时 source `~/.profile` 与 `~/.bashrc`，使 macOS 上的
-/// login bash 既保留用户已有的通用环境变量，也能加载写入 `.bashrc` 的 PATH。
-#[cfg(unix)]
-fn ensure_bash_profile_sources_profile_and_bashrc(home: &Path) -> bool {
-    let bash_profile = home.join(".bash_profile");
-    let profile_snippet = "[ -r \"$HOME/.profile\" ] && . \"$HOME/.profile\"";
-    let bashrc_snippet = "[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"";
-    let content = std::fs::read_to_string(&bash_profile).unwrap_or_default();
-    let needs_profile = !content.contains(profile_snippet);
-    let needs_bashrc = !content.contains(bashrc_snippet);
-    if !needs_profile && !needs_bashrc {
-        return true;
-    }
-    let mut f = match std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&bash_profile)
-    {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    if writeln!(f, "\n# Added by tomcat init").is_err() {
-        return false;
-    }
-    if needs_profile && writeln!(f, "{}", profile_snippet).is_err() {
-        return false;
-    }
-    if needs_bashrc && writeln!(f, "{}", bashrc_snippet).is_err() {
-        return false;
-    }
-    true
 }
 
 /// 与 `tomcat doctor` 相同的逐项检查。`skip_api_key` 为 true 时（用于 `tomcat init` 第二步）不输出 .env 权限与 OPENAI_API_KEY 相关行。
@@ -651,9 +399,10 @@ pub(crate) fn run_doctor_checks(
     for line in doctor_proxy_lines(cfg) {
         println!("{line}");
     }
-    #[cfg(windows)]
-    for line in doctor_git_bash_lines(crate::infra::platform::posix_shell().ok()) {
-        println!("{line}");
+    if POSIX_SHELL_NEEDS_INSTALL {
+        for line in doctor_git_bash_lines(posix_shell().ok()) {
+            println!("{line}");
+        }
     }
 
     if !skip_api_key {
@@ -661,14 +410,10 @@ pub(crate) fn run_doctor_checks(
         let work_dir = get_work_dir(cfg)?;
         let env_path = work_dir.join("assets").join(".env");
         if env_path.exists() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&env_path) {
-                    let mode = meta.permissions().mode() & 0o777;
-                    if mode == 0o600 {
-                        println!("{}", tr("cli.doctor.envModeOk", &[]));
-                    } else {
+            if let Ok(meta) = std::fs::metadata(&env_path) {
+                match mode_bits(&meta).map(|mode| mode & 0o777) {
+                    Some(0o600) => println!("{}", tr("cli.doctor.envModeOk", &[])),
+                    Some(mode) => {
                         println!(
                             "{}",
                             tr(
@@ -678,10 +423,9 @@ pub(crate) fn run_doctor_checks(
                         );
                         println!("  → chmod 600 {}", env_path.display());
                     }
+                    None => println!("{}", tr("cli.doctor.envExists", &[])),
                 }
             }
-            #[cfg(not(unix))]
-            println!("{}", tr("cli.doctor.envExists", &[]));
         } else {
             println!("{}", tr("cli.doctor.envMissing", &[]));
             println!("{}", tr("cli.doctor.envHint", &[]));
@@ -795,7 +539,6 @@ pub(crate) fn doctor_plugin_runtime_lines(probe: Result<(), AppError>) -> Vec<St
     }
 }
 
-#[cfg(windows)]
 fn doctor_git_bash_lines(git_bash: Option<PathBuf>) -> Vec<String> {
     match git_bash {
         Some(path) => vec![tr(

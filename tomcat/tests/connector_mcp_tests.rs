@@ -120,7 +120,9 @@ async fn wait_for_deferred_tool(ctx: &ChatContext, name: &str, present: bool) {
         .as_ref()
         .expect("connector module enabled")
         .mcp_manager();
-    for _ in 0..50 {
+    // 预算里包含启动 node 假服务器；Windows runner 并发跑测试时会超过 1 秒。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         let found = manager
             .list_servers()
             .iter()

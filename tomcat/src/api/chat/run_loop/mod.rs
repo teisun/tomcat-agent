@@ -403,17 +403,17 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
     let mut rl = input::make_readline_editor()?;
 
-    #[cfg(target_os = "macos")]
-    // macOS 中文输入法在 `ExternalPrinter` 激活的输入路径下更容易出现回显异常。
     let search_tools_printer: Option<
         Arc<std::sync::Mutex<Box<dyn rustyline::ExternalPrinter + Send>>>,
-    > = None;
-    #[cfg(not(target_os = "macos"))]
-    let search_tools_printer = rl.create_external_printer().ok().map(|printer| {
-        Arc::new(std::sync::Mutex::new(
-            Box::new(printer) as Box<dyn rustyline::ExternalPrinter + Send>
-        ))
-    });
+    > = if crate::infra::platform::ASYNC_PRINT_DURING_INPUT {
+        rl.create_external_printer().ok().map(|printer| {
+            Arc::new(std::sync::Mutex::new(
+                Box::new(printer) as Box<dyn rustyline::ExternalPrinter + Send>
+            ))
+        })
+    } else {
+        None
+    };
 
     let context_config = &ctx.config.context;
     if ctx.config.skills.enabled {

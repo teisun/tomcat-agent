@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use crate::infra::platform::PermissionSnapshot;
 use crate::AppError;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -28,47 +29,8 @@ pub(crate) struct Baseline {
     pub(crate) backup: Option<String>,
     pub(crate) git_head: Option<String>,
     pub(crate) at: i64,
-    pub(crate) permissions: Option<BackupPermissions>,
-}
-
-// Permissions belong to each path, not to its deduplicated content.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub(crate) struct BackupPermissions {
-    #[cfg(unix)]
-    mode: u32,
-    #[cfg(not(unix))]
-    readonly: bool,
-}
-impl BackupPermissions {
-    fn capture(permissions: fs::Permissions) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            Self {
-                mode: permissions.mode(),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            Self {
-                readonly: permissions.readonly(),
-            }
-        }
-    }
-    fn restore(self, file: &fs::File) -> std::io::Result<()> {
-        #[cfg(unix)]
-        let permissions = {
-            use std::os::unix::fs::PermissionsExt;
-            fs::Permissions::from_mode(self.mode)
-        };
-        #[cfg(not(unix))]
-        let permissions = {
-            let mut p = file.metadata()?.permissions();
-            p.set_readonly(self.readonly);
-            p
-        };
-        file.set_permissions(permissions)
-    }
+    // Permissions belong to each path, not to its deduplicated content.
+    pub(crate) permissions: Option<PermissionSnapshot>,
 }
 
 pub(crate) fn valid_backup_name(name: &str) -> bool {
@@ -291,7 +253,7 @@ impl TurnFileBaselines {
             let (backup, permissions) = match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.is_file() => (
                     Some(capture_content(&path, &self.directory)?),
-                    Some(BackupPermissions::capture(meta.permissions())),
+                    Some(PermissionSnapshot::capture(meta.permissions())),
                 ),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
                 Ok(_) => {
@@ -412,8 +374,8 @@ pub(crate) fn require_regular_path(path: &Path) -> Result<(), AppError> {
 }
 
 pub(crate) enum RestoreSource {
-    Backup(PathBuf, Option<BackupPermissions>),
-    Content(Vec<u8>, Option<BackupPermissions>),
+    Backup(PathBuf, Option<PermissionSnapshot>),
+    Content(Vec<u8>, Option<PermissionSnapshot>),
     Absent,
 }
 
@@ -454,7 +416,7 @@ impl RestoreFiles {
                         // the live path's permissions, or its capture if it was deleted.
                         let permissions = match fs::metadata(path) {
                             Ok(metadata) => {
-                                Some(BackupPermissions::capture(metadata.permissions()))
+                                Some(PermissionSnapshot::capture(metadata.permissions()))
                             }
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                                 *captured_permissions
@@ -483,7 +445,7 @@ impl RestoreFiles {
 fn write_restored_file(
     path: &Path,
     bytes: &[u8],
-    permissions: Option<BackupPermissions>,
+    permissions: Option<PermissionSnapshot>,
 ) -> Result<(), AppError> {
     let parent = path
         .parent()

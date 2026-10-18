@@ -15,10 +15,11 @@ use crate::infra::i18n::tr;
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
 pub(crate) fn parse_args(tokens: Vec<String>, original_line: &str) -> ChatCommand {
-    // Windows 路径里的 `\` 是分隔符，不能按 POSIX 规则当转义符吃掉：单参数时取原文。
-    #[cfg(windows)]
+    // `\` 是路径分隔符时（Windows）不能按 POSIX 规则当转义符吃掉：单参数时取原文。
     let tokens = match tokens.as_slice() {
-        [cmd, _] => vec![cmd.clone(), raw_single_argument(original_line, cmd)],
+        [cmd, _] if std::path::is_separator('\\') => {
+            vec![cmd.clone(), raw_single_argument(original_line, cmd)]
+        }
         _ => tokens,
     };
     match tokens.as_slice() {
@@ -109,7 +110,6 @@ pub(super) fn extra_root_menu_line(path: &Path) -> String {
 }
 
 /// `<cmd> <arg>` 的参数原文，去掉一层成对引号。
-#[cfg(windows)]
 fn raw_single_argument(line: &str, cmd: &str) -> String {
     let arg = line.strip_prefix(cmd).unwrap_or(line).trim();
     ['"', '\'']
@@ -119,14 +119,14 @@ fn raw_single_argument(line: &str, cmd: &str) -> String {
         .to_string()
 }
 
-/// 路径前缀判定：以 `/` 或 `~/` 开头，且长度 > 1；Windows 上另接受盘符/UNC 绝对路径。
+/// 路径前缀判定：以 `/` 或 `~/` 开头，或是本机绝对路径（Windows 的盘符/UNC），且不是 `/`、`~` 本身。
 ///
 /// 仅用作快速过滤；真正的纯路径合法性由 [`is_path_token`] 决定。
 fn is_path_prefix_token(tok: &str) -> bool {
     if tok == "/" || tok == "~" {
         return false;
     }
-    tok.starts_with('/') || tok.starts_with("~/") || (cfg!(windows) && Path::new(tok).is_absolute())
+    tok.starts_with('/') || tok.starts_with("~/") || Path::new(tok).is_absolute()
 }
 
 pub fn is_path_token(tok: &str) -> bool {

@@ -1,7 +1,5 @@
 //! `preflight` 私有项单元测试（`tests/preflight_test.rs`，与同目录 `suite_test` / `cwd_lazy_prompt_test` 的 `*_test` 命名一致；由 `preflight.rs` 末尾 `#[path]` 挂载）。
 
-#[cfg(unix)]
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::infra::AppConfig;
@@ -35,48 +33,119 @@ fn trim_for_event_limits_long_messages() {
     assert!(out.len() < input.len());
 }
 
-#[cfg(unix)]
 #[test]
-fn nohup_shell_quotes_log_path_with_spaces() {
-    use super::{build_nohup_shell_command, InstallPlan};
+fn install_plan_builds_the_same_command_for_every_manager_and_target() {
+    use super::{install_plan, InstallTarget};
+    use crate::infra::platform::PackageManager::{AptGet, Brew, Dnf, Pacman, TermuxPkg, Winget};
 
-    let plan = InstallPlan {
-        program: "brew",
-        args: vec!["install", "--force-bottle", "ripgrep", "fd"],
-    };
-    let log = Path::new("/tmp/fake preflight.log");
-    let cmd = build_nohup_shell_command(&plan, log);
-    assert!(
-        cmd.starts_with("HOMEBREW_NO_BUILD_FROM_SOURCE=1 nohup "),
-        "brew install should forbid source builds: {cmd}"
+    const WINGET_FLAGS: &str = "--silent --accept-source-agreements --accept-package-agreements";
+    let winget_search = format!(
+        "winget install --id BurntSushi.ripgrep.MSVC {WINGET_FLAGS} && winget install --id sharkdp.fd {WINGET_FLAGS}"
     );
-    assert!(cmd.contains("--force-bottle"));
-    assert!(cmd.contains(">>"));
-    assert!(cmd.ends_with(" 2>&1 &"));
-    assert!(
-        cmd.contains("'") || !log.display().to_string().contains(' '),
-        "path with spaces should be quoted: {cmd}"
-    );
+    let winget_git = format!("winget install --id Git.Git {WINGET_FLAGS}");
+    let cases: [(_, _, &str, Vec<&str>); 12] = [
+        (
+            TermuxPkg,
+            InstallTarget::SearchTools,
+            "pkg",
+            vec!["install", "-y", "ripgrep", "fd"],
+        ),
+        (
+            TermuxPkg,
+            InstallTarget::Git,
+            "pkg",
+            vec!["install", "-y", "git"],
+        ),
+        (
+            Brew,
+            InstallTarget::SearchTools,
+            "brew",
+            vec!["install", "--force-bottle", "ripgrep", "fd"],
+        ),
+        (
+            Brew,
+            InstallTarget::Git,
+            "brew",
+            vec!["install", "--force-bottle", "git"],
+        ),
+        (
+            Winget,
+            InstallTarget::SearchTools,
+            "cmd",
+            vec!["/C", winget_search.as_str()],
+        ),
+        (
+            Winget,
+            InstallTarget::Git,
+            "cmd",
+            vec!["/C", winget_git.as_str()],
+        ),
+        (
+            AptGet,
+            InstallTarget::SearchTools,
+            "apt-get",
+            vec!["install", "-y", "ripgrep", "fd-find"],
+        ),
+        (
+            AptGet,
+            InstallTarget::Git,
+            "apt-get",
+            vec!["install", "-y", "git"],
+        ),
+        (
+            Dnf,
+            InstallTarget::SearchTools,
+            "dnf",
+            vec!["install", "-y", "ripgrep", "fd-find"],
+        ),
+        (Dnf, InstallTarget::Git, "dnf", vec!["install", "-y", "git"]),
+        (
+            Pacman,
+            InstallTarget::SearchTools,
+            "pacman",
+            vec!["-S", "--noconfirm", "ripgrep", "fd"],
+        ),
+        (
+            Pacman,
+            InstallTarget::Git,
+            "pacman",
+            vec!["-S", "--noconfirm", "git"],
+        ),
+    ];
+    for (manager, target, program, args) in cases {
+        let plan = install_plan(manager, target);
+        assert_eq!(
+            (plan.manager, plan.program, plan.args),
+            (manager, program, args),
+            "{manager:?} {target:?}"
+        );
+    }
 }
 
-#[cfg(unix)]
 #[test]
-fn nohup_shell_non_brew_has_no_homebrew_env_prefix() {
-    use super::{build_nohup_shell_command, InstallPlan};
+fn detached_message_mentions_reopening_the_terminal_only_when_path_needs_restart() {
+    use super::{git_detached_message_key, search_detached_message_key};
+    use crate::infra::platform::PackageManager::{AptGet, Brew, Winget};
 
-    let plan = InstallPlan {
-        program: "apt-get",
-        args: vec!["install", "-y", "ripgrep", "fd-find"],
-    };
-    let cmd = build_nohup_shell_command(&plan, Path::new("/tmp/p.log"));
-    assert!(
-        !cmd.contains("HOMEBREW_NO_BUILD_FROM_SOURCE"),
-        "non-brew plans must not inject brew env: {cmd}"
+    assert_eq!(
+        search_detached_message_key(Winget, true),
+        "preflight.searchDetachedRestart"
     );
-    assert!(cmd.starts_with("nohup apt-get "));
+    assert_eq!(
+        search_detached_message_key(AptGet, false),
+        "preflight.searchDetached"
+    );
+    assert_eq!(
+        search_detached_message_key(Brew, false),
+        "preflight.searchDetachedBrew"
+    );
+    assert_eq!(
+        git_detached_message_key(true),
+        "preflight.gitDetachedRestart"
+    );
+    assert_eq!(git_detached_message_key(false), "preflight.gitDetached");
 }
 
-#[cfg(unix)]
 #[test]
 fn detached_marker_paths_are_distinct_per_preflight_kind() {
     use super::{detached_log_marker_path, DETACHED_LOG_MARKER_NAME, GIT_DETACHED_LOG_MARKER_NAME};

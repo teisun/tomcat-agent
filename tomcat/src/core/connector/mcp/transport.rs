@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ pub use super::failure::McpFailure;
 use crate::core::connector::mcp::config::ConfiguredMcpServer;
 use crate::core::connector::mcp::oauth::{OAuthDiscovery, OAuthTokenStore};
 use crate::infra::error::AppError;
+use crate::infra::platform::{kill_tree_on_drop, resolve_program, CHILD_STARTUP_ENV_VARS};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -160,7 +162,8 @@ pub trait McpTransport: Send + Sync {
     ) -> Result<McpClient, McpFailure>;
 }
 
-/// Client-side stdio transport. Only [`INHERITED_ENV_VARS`] survive env_clear;
+/// Client-side stdio transport. Only [`INHERITED_ENV_VARS`] and the platform's
+/// [`CHILD_STARTUP_ENV_VARS`] survive env_clear;
 /// configured environment variables are added explicitly, so an MCP configuration
 /// cannot silently inherit unrelated process secrets.
 pub struct StdioTransport {
@@ -187,7 +190,7 @@ impl StdioTransport {
                 }
             }
             command.env_clear();
-            for key in INHERITED_ENV_VARS {
+            for key in INHERITED_ENV_VARS.iter().chain(CHILD_STARTUP_ENV_VARS) {
                 if let Some(value) = std::env::var_os(key) {
                     command.env(key, value);
                 }
@@ -200,58 +203,17 @@ impl StdioTransport {
     }
 }
 
-/// Windows adds the official MCP SDK's win32 list (`DEFAULT_INHERITED_ENV_VARS` in
-/// its `stdio.ts`): without SYSTEMROOT and friends Node-based servers crash on start.
-#[cfg(unix)]
 const INHERITED_ENV_VARS: &[&str] = &["PATH", "HOME"];
-#[cfg(windows)]
-const INHERITED_ENV_VARS: &[&str] = &[
-    "APPDATA",
-    "COMSPEC",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "LOCALAPPDATA",
-    "PATH",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "PROGRAMDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PROGRAMW6432",
-    "SYSTEMDRIVE",
-    "SYSTEMROOT",
-    "TEMP",
-    "USERNAME",
-    "USERPROFILE",
-    "WINDIR",
-    "HOME",
-];
 
-/// Rust only appends `.exe` on Windows, so a bare name such as `npx` is resolved to
-/// `npx.cmd` via PATHEXT against the PATH the child will actually receive.
+/// Bare names are resolved against the PATH the child will actually receive.
 fn program(server: &ConfiguredMcpServer) -> PathBuf {
-    let command = &server.config.command;
-    #[cfg(windows)]
-    if Path::new(command).components().count() == 1 {
-        let path = server
-            .config
-            .env
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
-            .map(|(_, value)| std::ffi::OsString::from(value))
-            .or_else(|| std::env::var_os("PATH"))
-            .unwrap_or_default();
-        let pathext = std::env::var_os("PATHEXT");
-        if let Some(found) = crate::infra::platform::find_executable_in(
-            &path,
-            pathext.as_deref(),
-            &[command.as_str()],
-            Path::is_file,
-        ) {
-            return found;
-        }
-    }
-    PathBuf::from(command)
+    let child_path = server
+        .config
+        .env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| OsStr::new(value));
+    resolve_program(&server.config.command, child_path)
 }
 
 /// Phase 1's bootstrap records the system Chrome fallback here when Playwright
@@ -276,23 +238,6 @@ fn managed_playwright_executable(server: &ConfiguredMcpServer) -> Option<PathBuf
     executable_path.is_file().then_some(executable_path)
 }
 
-/// Windows 上 `kill_on_drop` 只杀得到 `npx.cmd` 外层的 cmd.exe，真正的服务（node、它启动的浏览器）
-/// 继续握着 stdout 管道；tokio 在 Windows 上用阻塞线程读子进程管道，运行时关闭会一直等它们退出。
-/// 放进关闭即终止的 Job 后，传输被丢弃或 tomcat 退出时整棵进程树一起结束。
-#[cfg(windows)]
-fn owned_process_tree(command: tokio::process::Command) -> process_wrap::tokio::CommandWrap {
-    let mut command = process_wrap::tokio::CommandWrap::from(command);
-    command
-        .wrap(process_wrap::tokio::KillOnDrop)
-        .wrap(process_wrap::tokio::JobObject);
-    command
-}
-
-#[cfg(unix)]
-fn owned_process_tree(command: tokio::process::Command) -> tokio::process::Command {
-    command
-}
-
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn connect_cancellable(
@@ -304,7 +249,7 @@ impl McpTransport for StdioTransport {
         if cancel.is_cancelled() {
             return Err(McpFailure::new(FailureKind::Cancelled, "spawn"));
         }
-        let transport = TokioChildProcess::new(owned_process_tree(self.command(server)))
+        let transport = TokioChildProcess::new(kill_tree_on_drop(self.command(server)))
             .map_err(|_| McpFailure::new(FailureKind::Configuration, "spawn"))?;
         ().serve_with_ct(
             CancellationBoundedTransport::managed(transport, cleanup),

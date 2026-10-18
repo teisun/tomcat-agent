@@ -210,7 +210,7 @@ match vm.run_func(Some("quickjs"), "_start", []) {
 
 ### 实践 (Practice)
 ```rust
-// src/infra/platform.rs
+// src/infra/platform/fs.rs
 pub fn safe_write_file(path: &Path, content: &[u8]) -> Result<(), AppError> {
     // 1. 规范化并校验路径是否越权（防止 ../../）
     let safe_path = normalize_and_verify(path)?;
@@ -223,6 +223,41 @@ pub fn safe_write_file(path: &Path, content: &[u8]) -> Result<(), AppError> {
     std::fs::rename(temp_path, safe_path)?;
     Ok(())
 }
+```
+
+### 平台差异边界 (Platform Boundary)
+
+`src/infra/platform` 是唯一的平台差异层：业务代码（`core/`、`api/` 等）只调用它暴露的统一接口，不写平台 `cfg`，也不直接用系统 crate。新功能要适配某个平台时，只改 platform 内部实现。
+
+```text
+一段代码该放哪？依次问三个问题：
+ ① 它调用了某个系统独有的 API 吗？
+    std::os::{unix,windows,fd}、libc、windows-sys、windows-registry、process-wrap、
+    信号、Job Object、注册表、权限位、ACL
+        是 ─► 放 infra/platform
+ ② 它的判断依据是"操作系统的事实"吗？
+    路径是否区分大小写、`\` 算不算分隔符、路径长度有没有 260 字符上限、
+    改了 PATH 要不要重开终端、默认编辑器、空设备名、用什么命令跟随查看日志
+        是 ─► 标准库已经提供的，直接用标准库；没提供的，由 platform 给一个常量或函数
+ ③ 剩下的就是产品决定
+    包名、界面文案、危险命令表、命令叫 tomcat、测试二进制不安装
+        ─► 留在业务层，只调用 ①② 给的接口，不写平台 cfg
+例外：测试代码可以按平台写（tests/ 目录、*_test.rs、test_support.rs，以及 cfg(all(test, ..)) 门控）
+```
+
+- **标准库优先**：`Path::is_absolute()` 认识 `C:\`，`std::env::consts::EXE_SUFFIX` 是 `.exe` 或空串，`std::path::is_separator('\\')` 回答"反斜杠算不算分隔符"，这类不新增接口。
+- **platform 不懂产品**：platform 只回答"系统怎么做"，不引用 i18n 文案、包名这类产品知识；需要让上层选择文案时，返回一个描述机制的枚举（如 `ManualPathStep`），由业务层渲染。
+- **守护**：`src/infra/platform/tests/boundary_test.rs` 扫描业务代码，发现平台 `cfg` 或系统 crate 就失败，并输出 `文件:行号`；CI 在 Windows / Ubuntu / macOS 三平台运行门禁（`.github/workflows/ci.yml`）。
+
+```rust
+// ❌ 业务层自己判断平台
+#[cfg(windows)]
+let command = "Get-Content -Wait";
+#[cfg(not(windows))]
+let command = "tail -f";
+
+// ✅ 业务层只用 platform 给的事实
+let command = crate::infra::platform::FOLLOW_FILE_COMMAND;
 ```
 
 ---

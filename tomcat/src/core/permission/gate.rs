@@ -28,13 +28,13 @@ use super::defaults::{
 use super::path_rule::PathRule;
 use super::session_grants::{SessionGrants, SessionPathRules};
 use super::types::{
-    path_starts_with, EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode,
-    PermissionDecision, PermissionScope,
+    EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode, PermissionDecision,
+    PermissionScope,
 };
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
-use crate::infra::platform::normalize_path;
+use crate::infra::platform::{normalize_path, path_starts_with};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PermissionGate Trait

@@ -123,19 +123,3 @@ pub struct EffectiveRoots {
     /// `agents/{id}`（除凭据外） + `path_rules` 中的 `Readonly` 命中。
     pub read_only: Vec<PathBuf>,
 }
-
-/// `path_rule.matches` 与 `EffectiveRoots` 的最小化前缀匹配辅助。
-///
-/// 不做 canonicalize（调用方负责），只做规范化的字符串前缀比较；
-/// trail-slash 容错。Windows 上忽略大小写：目标目录尚不存在时 canonicalize 无法纠正
-/// 大小写，而 NTFS 把 `.SSH` 与 `.ssh` 视为同一目录。
-pub(crate) fn path_starts_with(target: &str, prefix: &str) -> bool {
-    #[cfg(windows)]
-    let (target, prefix) = (target.to_lowercase(), prefix.to_lowercase());
-    let t = target.trim_end_matches(std::path::MAIN_SEPARATOR);
-    let p = prefix.trim_end_matches(std::path::MAIN_SEPARATOR);
-    if t == p {
-        return true;
-    }
-    t.starts_with(&format!("{}{}", p, std::path::MAIN_SEPARATOR))
-}

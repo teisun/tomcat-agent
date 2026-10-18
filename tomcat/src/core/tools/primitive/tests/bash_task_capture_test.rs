@@ -19,10 +19,7 @@ async fn failed_capture_is_reported_after_draining_the_pipe() {
             log_path: log.display().to_string(),
             status: BashTaskStatus::Running,
         }),
-        #[cfg(unix)]
-        pid: None,
-        #[cfg(windows)]
-        job: crate::infra::platform::ProcessJob::new().unwrap(),
+        process_tree: ProcessTree::empty(),
         notify: Arc::new(Notify::new()),
         lifecycle_emitted: parking_lot::Mutex::new(false),
         delivery: parking_lot::Mutex::new(TaskDelivery::Foreground),

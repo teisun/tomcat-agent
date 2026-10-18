@@ -176,13 +176,8 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                 );
                 return Ok(());
             }
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-                if cfg!(target_os = "windows") {
-                    "notepad".to_string()
-                } else {
-                    "vi".to_string()
-                }
-            });
+            let editor = std::env::var("EDITOR")
+                .unwrap_or_else(|_| crate::infra::platform::DEFAULT_EDITOR.to_string());
             match std::process::Command::new(&editor).arg(&path).status() {
                 Ok(status) if status.success() => match load_config(Some(path.as_path())) {
                     Ok(ref c) => {

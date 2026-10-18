@@ -14,6 +14,7 @@
   - **EXT 0.1.94 暂停**：用户决定先手动验收，`ext-v0.1.94` 未推送，Marketplace/OpenVSX 未上传。手动验收用本机包 `%USERPROFILE%\.tomcat\temp\windows-acceptance\manual\tomcat-vscode-ext-0.1.94-win32-x64.vsix`：同一提交本机编译的 `tomcat.exe`，与包内 `extension/bin/tomcat.exe` 的 SHA256 一致；正式包内置的是 CI 编译的那份。
   - **恢复发布时**：EXT tag 所指提交的说明不能带 `[skip ci]`；CLI 资产已就绪，可直接推 `ext-v0.1.94`。
 - **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径，以及 CI 暴露的问题，都在 `afbec1ff` 之后另行提交（`26af661d`、`a8a100f0`、`bb8c618f`），因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
+- **平台层收口**：按 `平台层收口整改_90f59927` 把业务层的平台 `cfg` 与系统 crate 调用清零，`infra/platform` 成为唯一平台差异层，由 `platform/tests/boundary_test.rs` 守护；预检两平台统一为后台安装。工作流 `windows-ci.yml` 改名为 `ci.yml`，rust gate-fast 扩成 Windows / Ubuntu / macOS 三平台矩阵（上文 windows-ci run 均为改名前的记录）。本改动随下一个 CLI 版本发布，暂停中的 `ext-v0.1.94` 仍从已验收的提交打 tag。明细与证据见 [feature-windows-support.md](feature-windows-support.md)「平台层收口」。
 
 ### CURRENT RELEASE：CLI 0.1.77 / EXT 0.1.93
 

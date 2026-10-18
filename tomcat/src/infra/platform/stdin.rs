@@ -94,13 +94,27 @@ mod imp {
     }
 }
 
+/// serve 持续读取协议输入的异步输入端。
+///
+/// Windows 上先把进程 stdin 交给调用者独占（见 `take_process_stdin`）；Unix 直接用 tokio 的 stdin。
+pub(crate) fn protocol_input() -> std::io::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    #[cfg(unix)]
+    {
+        Ok(Box::new(tokio::io::stdin()))
+    }
+    #[cfg(windows)]
+    {
+        Ok(Box::new(tokio::fs::File::from_std(take_process_stdin()?)))
+    }
+}
+
 /// Windows：把进程 stdin 交给调用者独占，进程自己的 stdin 换成 NUL。
 ///
 /// 一个线程阻塞在同步管道的 ReadFile 上时，继承同一管道的子进程会在启动时卡住，
 /// 直到管道里来了下一条数据。serve 一直这样读协议输入，所以子进程只能继承 NUL；
 /// 此后 `Stdio::inherit()` 与 `std::io::stdin()` 拿到的都是 NUL。
 #[cfg(windows)]
-pub(crate) fn take_process_stdin() -> std::io::Result<std::fs::File> {
+fn take_process_stdin() -> std::io::Result<std::fs::File> {
     use std::os::windows::io::{FromRawHandle, IntoRawHandle};
 
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;

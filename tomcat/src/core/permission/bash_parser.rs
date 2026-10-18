@@ -35,6 +35,8 @@
 
 use std::path::PathBuf;
 
+use crate::infra::platform::shell_path_to_native;
+
 /// 把 bash 命令拆成子命令并提取候选路径。
 ///
 /// 返回值未做去重 / 规范化；调用方应负责把结果交给 gate.check 做规范化与判定。
@@ -51,7 +53,7 @@ pub fn extract_paths(command: &str) -> Vec<String> {
                 break;
             };
             if looks_like_path(rhs) {
-                paths.push(host_path(rhs));
+                paths.push(shell_path_to_native(rhs));
             }
             iter.next();
         }
@@ -67,7 +69,7 @@ pub fn extract_paths(command: &str) -> Vec<String> {
 fn collect_candidates(tok: &str, out: &mut Vec<String>) {
     if let Some(rhs) = is_env_assignment(tok) {
         if looks_like_path(rhs) {
-            out.push(host_path(rhs));
+            out.push(shell_path_to_native(rhs));
         }
         return;
     }
@@ -78,13 +80,13 @@ fn collect_candidates(tok: &str, out: &mut Vec<String>) {
         if tok.starts_with('-') {
             let value = &tok[eq + 1..];
             if looks_like_path(value) {
-                out.push(host_path(value));
+                out.push(shell_path_to_native(value));
             }
             return;
         }
     }
     if looks_like_path(tok) {
-        out.push(host_path(tok));
+        out.push(shell_path_to_native(tok));
     }
 }
 
@@ -118,35 +120,8 @@ fn looks_like_path(s: &str) -> bool {
         || s.starts_with("~")
         || s.starts_with("./")
         || s.starts_with("../")
-        || (cfg!(windows) && is_windows_absolute(s))
-}
-
-/// `X:\`、`X:/`、`\\server\share`：Windows 上 Git Bash 命令里的绝对路径。
-fn is_windows_absolute(s: &str) -> bool {
-    let b = s.as_bytes();
-    let drive =
-        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\');
-    drive || s.starts_with(r"\\")
-}
-
-/// Windows：Git Bash 把盘符挂在 `/c/`，映射回 `C:\...`；`/tmp`、`/usr` 等其它 MSYS 路径不猜测，
-/// 按工作区外路径处理（会弹确认，偏安全）。其它平台原样返回。
-fn host_path(s: &str) -> String {
-    #[cfg(windows)]
-    if let Some(rest) = s.strip_prefix('/') {
-        let mut chars = rest.chars();
-        if let Some(drive) = chars.next().filter(char::is_ascii_alphabetic) {
-            let tail = chars.as_str();
-            if tail.is_empty() || tail.starts_with('/') {
-                return format!(
-                    "{}:\\{}",
-                    drive.to_ascii_uppercase(),
-                    tail.trim_start_matches('/').replace('/', "\\")
-                );
-            }
-        }
-    }
-    s.to_string()
+        // Windows 上 `C:\x`、`C:/x`、`\\server\share\x` 也是绝对路径。
+        || std::path::Path::new(s).is_absolute()
 }
 
 /// 把一条命令按 `|` `;` `&` `>` `<` `&&` `||` 拆成子命令。

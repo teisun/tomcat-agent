@@ -193,7 +193,13 @@ pub(crate) fn register_chat_session_stderr_listeners(
                             block.push_str(&format!("\n\x1b[90m[tools] log: {}\x1b[0m", p));
                             block.push_str(&format!(
                                 "\n\x1b[90m{}\x1b[0m",
-                                tr("terminal.searchProgress", &[("path", p)])
+                                tr(
+                                    "terminal.searchProgress",
+                                    &[
+                                        ("command", crate::infra::platform::FOLLOW_FILE_COMMAND),
+                                        ("path", p)
+                                    ]
+                                )
                             ));
                         }
                     }

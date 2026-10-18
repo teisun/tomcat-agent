@@ -18,6 +18,7 @@ use super::types::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
     CheckpointRestoreReport, ListOptions, RestoreOptions, RetentionPolicy,
 };
+use crate::infra::platform::{LEGACY_MAX_PATH, NULL_DEVICE};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_COOLDOWN: Duration = Duration::from_secs(60);
@@ -160,8 +161,9 @@ impl ShadowGitStore {
         }
 
         let mut init = Command::new(&self.git_program);
-        #[cfg(windows)]
-        init.args(["-c", "core.longpaths=true"]);
+        if LEGACY_MAX_PATH {
+            init.args(["-c", "core.longpaths=true"]);
+        }
         let output = init
             .arg("init")
             .arg("--bare")
@@ -316,16 +318,17 @@ impl ShadowGitStore {
 
     fn run_git_allow_failure_args(&self, args: &[OsString]) -> Result<Output, CheckpointError> {
         let mut cmd = Command::new(&self.git_program);
-        // 下面屏蔽用户 git 配置时也屏蔽了用户自己开的 core.longpaths；Windows 默认路径上限 260 字符。
-        #[cfg(windows)]
-        cmd.args(["-c", "core.longpaths=true"]);
+        // 下面屏蔽用户 git 配置时也屏蔽了用户自己开的 core.longpaths。
+        if LEGACY_MAX_PATH {
+            cmd.args(["-c", "core.longpaths=true"]);
+        }
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GIT_DIR", &self.git_dir)
             .env("GIT_WORK_TREE", &self.work_tree)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_SYSTEM", null_device())
-            .env("GIT_CONFIG_GLOBAL", null_device());
+            .env("GIT_CONFIG_SYSTEM", NULL_DEVICE)
+            .env("GIT_CONFIG_GLOBAL", NULL_DEVICE);
         cmd.args(args);
 
         let mut child = cmd.spawn()?;
@@ -843,17 +846,6 @@ impl CheckpointStore for ShadowGitStore {
         let _ = self.run_git_allow_failure(["gc", "--prune=now", "--quiet"]);
         removed += dropped.len();
         Ok(removed)
-    }
-}
-
-fn null_device() -> &'static str {
-    #[cfg(windows)]
-    {
-        "NUL"
-    }
-    #[cfg(not(windows))]
-    {
-        "/dev/null"
     }
 }
 

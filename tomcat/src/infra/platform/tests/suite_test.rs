@@ -1,17 +1,7 @@
 use super::super::*;
-
-#[test]
-fn system_info_has_os_and_arch() {
-    let info = system_info();
-    assert!(!info.os.is_empty());
-    assert!(!info.arch.is_empty());
-}
-
-#[test]
-fn current_dir_ok() {
-    let r = current_dir();
-    assert!(r.is_ok());
-}
+use crate::infra::error::AppError;
+use std::io::Write;
+use std::path::Path;
 
 #[test]
 fn read_file_utf8_missing_is_io_error() {
@@ -141,7 +131,7 @@ fn private_file_permissions_drop_explicit_grants_to_other_accounts() {
         .status()
         .unwrap();
     assert!(granted.success());
-    super::super::set_private_file_permissions(&path).unwrap();
+    set_private_file_permissions(&path).unwrap();
     crate::test_support::assert_private_to_current_user(&path);
 }
 

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use crate::infra::error::AppError;
 
+/// bash 工具依赖的 shell 是否需要用户另外安装（Windows 要装 Git for Windows；Unix 自带 `sh`）。
+pub const POSIX_SHELL_NEEDS_INSTALL: bool = cfg!(windows);
+
 /// 返回 bash 工具使用的 shell 程序。
 ///
 /// # Errors
@@ -36,6 +39,28 @@ pub fn posix_shell() -> Result<PathBuf, AppError> {
         })
         .clone()
         .ok_or_else(|| AppError::Primitive(crate::infra::i18n::tr("bash.gitBashMissing", &[])))
+}
+
+/// 把 POSIX shell 命令里的路径写法换成本机路径。
+///
+/// Windows：Git Bash 把盘符挂在 `/c/`，映射回 `C:\...`；`/tmp`、`/usr` 等其它 MSYS 路径不猜测、
+/// 原样返回（调用方按工作区外路径处理，会弹确认，偏安全）。其它平台原样返回。
+pub fn shell_path_to_native(path: &str) -> String {
+    #[cfg(windows)]
+    if let Some(rest) = path.strip_prefix('/') {
+        let mut chars = rest.chars();
+        if let Some(drive) = chars.next().filter(char::is_ascii_alphabetic) {
+            let tail = chars.as_str();
+            if tail.is_empty() || tail.starts_with('/') {
+                return format!(
+                    "{}:\\{}",
+                    drive.to_ascii_uppercase(),
+                    tail.trim_start_matches('/').replace('/', "\\")
+                );
+            }
+        }
+    }
+    path.to_string()
 }
 
 #[cfg(windows)]

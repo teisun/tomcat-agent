@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::infra::error::AppError;
-use crate::infra::platform::normalize_path;
+use crate::infra::platform::{
+    normalize_path, path_starts_with, to_slash, PATH_COMPARE_IGNORES_CASE,
+};
 
-use super::types::{path_starts_with, PathRuleMode};
+use super::types::PathRuleMode;
 
 /// 单条 path_rule（TOML 中 `[[primitive.path_rules]]` 的反序列化目标）。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -44,8 +46,8 @@ impl PathRule {
             // glob 用字符串匹配：仅展开 `~`。
             if let Some(rest) = self
                 .path
-                .strip_prefix("~/")
-                .or_else(|| self.path.strip_prefix("~\\").filter(|_| cfg!(windows)))
+                .strip_prefix('~')
+                .and_then(|rest| rest.strip_prefix(std::path::is_separator))
             {
                 let home = crate::infra::platform::home_dir().ok_or_else(|| {
                     AppError::Config("无法解析 home 目录用于 path_rule".to_string())
@@ -95,10 +97,11 @@ impl PathRule {
     }
 }
 
+/// globset 把 `\` 当转义符：模式和目标都先统一成 `/` 再匹配。
 fn glob_matches_canonicalized(pattern: &str, target: &str) -> bool {
-    let target = glob_separators(target);
-    let matcher = |pat: &str| match globset::GlobBuilder::new(&glob_separators(pat))
-        .case_insensitive(cfg!(windows))
+    let target = to_slash(target);
+    let matcher = |pat: &str| match globset::GlobBuilder::new(&to_slash(pat))
+        .case_insensitive(PATH_COMPARE_IGNORES_CASE)
         .build()
     {
         Ok(g) => g.compile_matcher().is_match(target.as_ref()),
@@ -124,13 +127,4 @@ fn canonicalized_glob_pattern(pattern: &str) -> Option<String> {
     let canon_prefix = super::gate::canonicalize_with_existing_ancestor(Path::new(prefix_dir));
     let remainder = &pattern[prefix_dir.len()..];
     Some(format!("{}{}", canon_prefix.to_string_lossy(), remainder))
-}
-
-/// globset 把 `\` 当转义符，Windows 路径先统一成 `/` 再匹配；Unix 上 `\` 是合法文件名字符，保持原样。
-fn glob_separators(path: &str) -> std::borrow::Cow<'_, str> {
-    if cfg!(windows) {
-        std::borrow::Cow::Owned(path.replace('\\', "/"))
-    } else {
-        std::borrow::Cow::Borrowed(path)
-    }
 }

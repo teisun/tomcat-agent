@@ -31,7 +31,7 @@
 | `skills/` | **全局**共享 skill 目录（Managed 层） |
 | `packages/` | **全局** package ledger 命名空间；只存 `packages/registry.json`，不存 plugin/skill 正文 |
 | `assets/js/` | **全局** JS runtime/shim 资源（如 `pi_bridge.js`、`pi_crypto_shim.js`、`pi_node_shim.js` 等） |
-| `assets/.env` | 敏感配置（API Key 等），`tomcat init` 生成，仅当前用户可读写：Unix 权限 0600；Windows 把 DACL 整体换成只给当前令牌用户完全控制的受保护 DACL，继承来的和文件上已有的显式授权都会去掉（`platform::set_private_file_permissions`）。`run_cli` 启动时 dotenvy 加载 |
+| `assets/.env` | 敏感配置（API Key 等），`tomcat init` 生成，仅当前用户可读写：Unix 权限 0600；Windows 把 DACL 整体换成只给当前令牌用户完全控制的受保护 DACL，继承来的和文件上已有的显式授权都会去掉。写入走 `platform::write_private_file_atomic`：临时文件从创建那一刻起就是私有的，写入任何字节前别的用户都读不到，改名后权限跟着文件走。`run_cli` 启动时 dotenvy 加载 |
 | `assets/.versions.json` | 内嵌资源版本记录（SHA-256 + extracted_at），`ensure_embedded_assets` 写入 |
 | `assets/.lock` | 并发写入保护文件锁（fs2 exclusive lock），`ensure_embedded_assets` 使用 |
 

@@ -2,7 +2,21 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::locate_git_bash;
+use super::{locate_git_bash, shell_path_to_native};
+
+#[test]
+fn shell_path_to_native_maps_only_git_bash_drive_mounts() {
+    for unchanged in ["/tmp/x", "/cdrom/x", "relative/x"] {
+        assert_eq!(shell_path_to_native(unchanged), unchanged);
+    }
+    let (drive, drive_root) = if cfg!(windows) {
+        (r"C:\Users\a", r"D:\")
+    } else {
+        ("/c/Users/a", "/d")
+    };
+    assert_eq!(shell_path_to_native("/c/Users/a"), drive);
+    assert_eq!(shell_path_to_native("/d"), drive_root);
+}
 
 fn bash_under(root: &str) -> PathBuf {
     PathBuf::from(root).join("bin").join("bash.exe")

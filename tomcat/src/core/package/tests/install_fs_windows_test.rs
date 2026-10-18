@@ -7,7 +7,7 @@ fn source_directory_replaced_after_open_is_reported_as_changed() {
     let source = root.path().join("pkg");
     let moved = root.path().join("moved");
     fs::create_dir(&source).unwrap();
-    let handle = open_source_directory(&source).unwrap();
+    let handle = open_no_follow(&source).unwrap();
     ensure_source_directory_unchanged(&source, &handle).unwrap();
     let changed = tr(
         "package.directoryChanged",

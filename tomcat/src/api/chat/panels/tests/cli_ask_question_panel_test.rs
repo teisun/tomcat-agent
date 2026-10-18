@@ -4,17 +4,50 @@ use std::sync::OnceLock;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 
-#[cfg(unix)]
-use crate::api::chat::panels::cli_ask_question_panel::read_one_line_from_fd_for_test;
-#[cfg(windows)]
-use crate::api::chat::panels::cli_ask_question_panel::read_one_line_from_pipe_for_test;
 use crate::api::chat::panels::CliAskQuestionPanel;
 use crate::core::plan_runtime::panels::{
-    AskQuestionOutcome, AskQuestionPanel, AskQuestionTermination, Question, QuestionOption,
+    AskQuestionOutcome, AskQuestionPanel, AskQuestionResult, AskQuestionTermination, Question,
+    QuestionOption,
 };
+use crate::infra::platform::stdin;
 use tokio::sync::Mutex;
 
-use super::parse_custom_answer;
+use super::{panel_result, parse_custom_answer};
+
+#[cfg(unix)]
+async fn read_one_line_from_fd(
+    fd: RawFd,
+    termination: AskQuestionTermination,
+) -> Result<String, AskQuestionResult> {
+    tokio::task::spawn_blocking(move || {
+        // SAFETY: the test keeps fd open until this read returns.
+        let input = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        panel_result(stdin::read_line_from(input, || termination.result()))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(AskQuestionResult::terminal(
+            AskQuestionOutcome::HostDisconnected,
+        ))
+    })
+}
+
+#[cfg(windows)]
+async fn read_one_line_from_pipe(
+    reader: std::sync::Arc<std::io::PipeReader>,
+    termination: AskQuestionTermination,
+) -> Result<String, AskQuestionResult> {
+    tokio::task::spawn_blocking(move || {
+        let input = std::os::windows::io::AsHandle::as_handle(&*reader);
+        panel_result(stdin::read_line_from(input, || termination.result()))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(AskQuestionResult::terminal(
+            AskQuestionOutcome::HostDisconnected,
+        ))
+    })
+}
 
 #[tokio::test]
 async fn cli_custom_answer_counts_characters_not_utf8_bytes() {
@@ -212,10 +245,7 @@ impl Drop for TestPty {
 async fn cli_pty_waits_without_input_then_sigint_releases_reader_for_next_line() {
     let pty = TestPty::open();
     let first_termination = AskQuestionTermination::default();
-    let first = tokio::spawn(read_one_line_from_fd_for_test(
-        pty.slave,
-        first_termination.clone(),
-    ));
+    let first = tokio::spawn(read_one_line_from_fd(pty.slave, first_termination.clone()));
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
         !first.is_finished(),
@@ -233,7 +263,7 @@ async fn cli_pty_waits_without_input_then_sigint_releases_reader_for_next_line()
     pty.write_line("2\n");
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        read_one_line_from_fd_for_test(pty.slave, AskQuestionTermination::default()),
+        read_one_line_from_fd(pty.slave, AskQuestionTermination::default()),
     )
     .await
     .expect("next PTY reader was blocked by a leaked owner")
@@ -254,7 +284,7 @@ async fn cli_pty_eof_returns_host_disconnected_without_reader_leak() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        read_one_line_from_fd_for_test(pty.slave, AskQuestionTermination::default()),
+        read_one_line_from_fd(pty.slave, AskQuestionTermination::default()),
     )
     .await
     .expect("EOF reader did not exit")
@@ -269,7 +299,7 @@ async fn windows_pipe_waits_without_input_then_interrupt_releases_reader_for_nex
     let (reader, mut writer) = std::io::pipe().expect("pipe");
     let reader = std::sync::Arc::new(reader);
     let first_termination = AskQuestionTermination::default();
-    let first = tokio::spawn(read_one_line_from_pipe_for_test(
+    let first = tokio::spawn(read_one_line_from_pipe(
         reader.clone(),
         first_termination.clone(),
     ));
@@ -290,7 +320,7 @@ async fn windows_pipe_waits_without_input_then_interrupt_releases_reader_for_nex
     writer.write_all("c 中文答案\n".as_bytes()).expect("write");
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        read_one_line_from_pipe_for_test(reader, AskQuestionTermination::default()),
+        read_one_line_from_pipe(reader, AskQuestionTermination::default()),
     )
     .await
     .expect("next pipe reader was blocked by a leaked owner")
@@ -305,7 +335,7 @@ async fn windows_pipe_closed_writer_returns_host_disconnected() {
     drop(writer);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        read_one_line_from_pipe_for_test(reader.into(), AskQuestionTermination::default()),
+        read_one_line_from_pipe(reader.into(), AskQuestionTermination::default()),
     )
     .await
     .expect("closed pipe reader did not exit")

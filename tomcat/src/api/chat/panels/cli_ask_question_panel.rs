@@ -192,41 +192,6 @@ fn panel_result(
     })
 }
 
-#[cfg(all(test, unix))]
-pub(crate) async fn read_one_line_from_fd_for_test(
-    fd: std::os::fd::RawFd,
-    termination: AskQuestionTermination,
-) -> Result<String, AskQuestionResult> {
-    tokio::task::spawn_blocking(move || {
-        // SAFETY: the test keeps fd open until this read returns.
-        let input = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-        panel_result(stdin::read_line_from(input, || termination.result()))
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(AskQuestionResult::terminal(
-            AskQuestionOutcome::HostDisconnected,
-        ))
-    })
-}
-
-#[cfg(all(test, windows))]
-pub(crate) async fn read_one_line_from_pipe_for_test(
-    reader: std::sync::Arc<std::io::PipeReader>,
-    termination: AskQuestionTermination,
-) -> Result<String, AskQuestionResult> {
-    tokio::task::spawn_blocking(move || {
-        let input = std::os::windows::io::AsHandle::as_handle(&*reader);
-        panel_result(stdin::read_line_from(input, || termination.result()))
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err(AskQuestionResult::terminal(
-            AskQuestionOutcome::HostDisconnected,
-        ))
-    })
-}
-
 #[cfg(test)]
 #[path = "tests/cli_ask_question_panel_test.rs"]
 mod tests;

@@ -2,14 +2,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-
 use sha2::{Digest, Sha256};
 
 use uuid::Uuid;
 
 use crate::infra::i18n::tr;
+use crate::infra::platform::{mode_bits, open_no_follow, same_file, set_create_mode};
 use crate::infra::AppError;
 
 use super::super::model::PreparedInstallResource;
@@ -274,16 +272,15 @@ fn copy_dir_snapshot_checked(
 
 /// Walks an already named source directory into a private staging snapshot. It
 /// accepts only regular files and directories, rejects every symbolic link and
-/// special file, and opens every entry without following links (`O_NOFOLLOW` on
-/// Unix, `FILE_FLAG_OPEN_REPARSE_POINT` plus a reparse-point check on Windows)
-/// before copying bytes.
+/// special file, and opens every entry without following links
+/// ([`open_no_follow`]) before copying bytes.
 fn snapshot_tree(
     source: &Path,
     relative: &Path,
     target: Option<&Path>,
     hasher: &mut Sha256,
 ) -> Result<(), AppError> {
-    let directory_handle = open_source_directory(source)?;
+    let directory_handle = open_no_follow(source).map_err(AppError::Io)?;
     let metadata = directory_handle.metadata().map_err(AppError::Io)?;
     if !metadata.is_dir() {
         return Err(AppError::Config(tr(
@@ -347,105 +344,20 @@ fn snapshot_tree(
     Ok(())
 }
 
-#[cfg(unix)]
-fn open_source_directory(path: &Path) -> Result<File, AppError> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(AppError::Io)
-}
-
-#[cfg(windows)]
-fn open_source_directory(path: &Path) -> Result<File, AppError> {
-    open_without_following(path)
-}
-
-/// Windows 版 `O_NOFOLLOW`：打开链接本身而不是目标，再拒绝任何 reparse point
-/// （符号链接、junction 等）。BACKUP_SEMANTICS 是打开目录句柄所必需的。
-#[cfg(windows)]
-fn open_without_following(path: &Path) -> Result<File, AppError> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    };
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-        .map_err(AppError::Io)?;
-    let attributes = file.metadata().map_err(AppError::Io)?.file_attributes();
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(AppError::Permission(tr(
-            "package.copySymlink",
-            &[("path", &path.display().to_string())],
-        )));
-    }
-    Ok(file)
-}
-
-/// 卷序列号 + 文件索引：Windows 上与 Unix `dev + ino` 对应的对象身份。
-#[cfg(windows)]
-fn file_identity(file: &File) -> Result<(u32, u64), AppError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-    };
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: 句柄在 `file` 存活期间有效，`info` 是合法的输出指针。
-    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-        return Err(AppError::Io(std::io::Error::last_os_error()));
-    }
-    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-    Ok((info.dwVolumeSerialNumber, index))
-}
-
-#[cfg(unix)]
+/// The path must still name the very directory that was opened and walked.
 fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), AppError> {
-    let opened = handle.metadata().map_err(AppError::Io)?;
-    let current = fs::symlink_metadata(path).map_err(AppError::Io)?;
-    if current.file_type().is_symlink()
-        || !current.is_dir()
-        || opened.dev() != current.dev()
-        || opened.ino() != current.ino()
-    {
+    // Rule out links and non-directories first so the reopen cannot block on a swapped-in FIFO.
+    let unchanged = fs::symlink_metadata(path).is_ok_and(|current| current.is_dir())
+        && open_no_follow(path)
+            .and_then(|current| same_file(handle, &current))
+            .unwrap_or(false);
+    if !unchanged {
         return Err(AppError::Permission(tr(
             "package.directoryChanged",
             &[("path", &path.display().to_string())],
         )));
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), AppError> {
-    let changed = || {
-        AppError::Permission(tr(
-            "package.directoryChanged",
-            &[("path", &path.display().to_string())],
-        ))
-    };
-    let current = open_without_following(path).map_err(|_| changed())?;
-    if !current.metadata().map_err(AppError::Io)?.is_dir()
-        || file_identity(handle)? != file_identity(&current)?
-    {
-        return Err(changed());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn open_source_file(path: &Path) -> Result<File, AppError> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(AppError::Io)
-}
-
-#[cfg(windows)]
-fn open_source_file(path: &Path) -> Result<File, AppError> {
-    open_without_following(path)
 }
 
 fn copy_regular_file(
@@ -453,7 +365,7 @@ fn copy_regular_file(
     target: Option<&Path>,
     hasher: &mut Sha256,
 ) -> Result<(), AppError> {
-    let mut source_file = open_source_file(source)?;
+    let mut source_file = open_no_follow(source).map_err(AppError::Io)?;
     let metadata = source_file.metadata().map_err(AppError::Io)?;
     if !metadata.is_file() {
         return Err(AppError::Permission(tr(
@@ -462,15 +374,15 @@ fn copy_regular_file(
         )));
     }
     hasher.update(metadata.len().to_le_bytes());
-    #[cfg(unix)]
-    hasher.update(metadata.mode().to_le_bytes());
+    if let Some(mode) = mode_bits(&metadata) {
+        hasher.update(mode.to_le_bytes());
+    }
     let mut target_file = target
         .map(|path| {
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             // Staging bytes stay private until the complete file has its source mode.
-            #[cfg(unix)]
-            options.mode(0o600);
+            set_create_mode(&mut options, 0o600);
             options.open(path).map_err(AppError::Io)
         })
         .transpose()?;

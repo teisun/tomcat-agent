@@ -93,9 +93,10 @@ ed25519-dalek = "2.2.0"
 # Do not use rmcp's `reqwest` feature: it enables reqwest/rustls and feature unification would
 # silently reintroduce a second TLS backend. Keep this aligned with the direct reqwest feature.
 rmcp = { version = "=3.4.0", default-features = false, features = ["auth", "client", "reqwest-native-tls", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+# rmcp 的子进程封装（同版本的传递依赖）：infra/platform 用它让 MCP stdio 服务的整棵进程树随传输一起结束。
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
-# Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
-# （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。
+# Unix-only 系统调用（进程组信号、文件身份与权限位），只在 infra/platform 内使用。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -115,8 +116,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-registry = "0.6"
-# rmcp 的子进程封装（已是传递依赖）：MCP stdio 服务整棵进程树放进 Job，随传输一起结束。
-process-wrap = { version = "10", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 
 [build-dependencies]
 sha2 = "0.10"

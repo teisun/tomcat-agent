@@ -1,18 +1,14 @@
 //! `tomcat chat` 会话入口的非阻塞预检。
 //!
-//! 预检只负责尽早补齐 `search_files` Tier1 依赖（rg/fd）；失败不影响聊天，
+//! 预检只负责尽早补齐 `search_files` Tier1 依赖（rg/fd）与 checkpoint 依赖的 git；失败不影响聊天，
 //! `search_files` 仍会在运行时自动回落到 Tier2。
 //!
-//! **墙钟**：Windows 上包管理器仍用 [`std::process::Command::output`]（阻塞至结束），无宿主侧超时。
-//! **Unix**：安装命令通过 `nohup … >> 日志 &` 脱离会话后台运行，tomcat 仅 `spawn` shell，不等待 brew/apt 完成。
-//! 勿与环境变量 `PI_SEARCH_TIER2_DEADLINE_MS` 混淆（后者仅约束 `search_files` Tier2 兜底路径的墙钟）。
+//! **墙钟**：安装命令经 [`spawn_detached`] 脱离本进程在后台运行，tomcat 只负责启动，不等待包管理器
+//! 完成，也不当场判断成败（看日志）。勿与环境变量 `PI_SEARCH_TIER2_DEADLINE_MS` 混淆（后者仅约束
+//! `search_files` Tier2 兜底路径的墙钟）。
 
-#[cfg(windows)]
-use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-#[cfg(windows)]
-use std::process::Output;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,15 +16,16 @@ use serde_json::json;
 
 use crate::core::SwitchingCheckpointStore;
 use crate::infra::i18n::tr;
-use crate::infra::platform::find_executable;
+use crate::infra::platform::{
+    find_executable, spawn_detached, system_package_manager, PackageManager,
+    PATH_CHANGES_NEED_RESTART,
+};
 use crate::infra::{wire, AppConfig, ScopedEventEmitter};
 
 const SKIP_ENV: &str = "PI_SKIP_SEARCH_TOOLS_PREFLIGHT";
 
 /// 最近一次 detached 安装的日志路径（仅 UX；**不用作**「是否仍在安装」的判定）。
-#[cfg(unix)]
 pub(crate) const DETACHED_LOG_MARKER_NAME: &str = "preflight-detached-log.marker";
-#[cfg(unix)]
 const GIT_DETACHED_LOG_MARKER_NAME: &str = "preflight-detached-git-log.marker";
 
 /// `tracing` target：仅开预检诊断时用 `RUST_LOG=tomcat_preflight=debug`。
@@ -54,7 +51,6 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
                 target: TRACE_TARGET,
                 "search_files Tier1 binaries already on PATH"
             );
-            #[cfg(unix)]
             remove_detached_log_marker_file(DETACHED_LOG_MARKER_NAME);
             emit_preflight(
                 &emitter,
@@ -72,7 +68,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
             json!({ "missing": missing }),
         );
 
-        let Some(plan) = install_plan() else {
+        let Some(manager) = system_package_manager() else {
             tracing::debug!(
                 target: TRACE_TARGET,
                 "no supported package manager for automatic install"
@@ -85,6 +81,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
             );
             return;
         };
+        let plan = install_plan(manager, InstallTarget::SearchTools);
 
         tracing::debug!(
             target: TRACE_TARGET,
@@ -92,100 +89,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, emitter: Arc<Scop
             args = ?plan.args,
             "search_tools preflight running package manager"
         );
-
-        #[cfg(unix)]
-        {
-            run_unix_preflight_install(&emitter, &plan, started);
-        }
-
-        #[cfg(windows)]
-        {
-            emit_preflight(
-                &emitter,
-                "progress",
-                &tr(
-                    "preflight.running",
-                    &[("program", plan.program), ("args", &plan.args.join(" "))],
-                ),
-                json!({ "program": plan.program, "args": plan.args }),
-            );
-
-            let output = StdCommand::new(plan.program).args(&plan.args).output();
-            match output {
-                Ok(output) => {
-                    let log_path = write_install_log(&plan, &output);
-                    if let Some(ref p) = log_path {
-                        tracing::debug!(
-                            target: TRACE_TARGET,
-                            path = %p.display(),
-                            "search_tools preflight install log written"
-                        );
-                    } else {
-                        tracing::debug!(
-                            target: TRACE_TARGET,
-                            "search_tools preflight install log not written (I/O or home dir)"
-                        );
-                    }
-                    let stderr_lossy = String::from_utf8_lossy(&output.stderr);
-                    tracing::debug!(
-                        target: TRACE_TARGET,
-                        elapsed_ms = started.elapsed().as_millis(),
-                        exit_ok = output.status.success(),
-                        stdout_len = output.stdout.len(),
-                        stderr_len = output.stderr.len(),
-                        stderr_tail_chars = trim_for_event(&stderr_lossy).chars().count(),
-                        "search_tools preflight command finished"
-                    );
-                    if output.status.success() {
-                        let mut extra = json!({
-                            "elapsedMs": started.elapsed().as_millis(),
-                            "missingAfter": missing_search_tools(),
-                        });
-                        if let Some(p) = log_path {
-                            extra["logPath"] = json!(p.display().to_string());
-                        }
-                        emit_preflight(
-                            &emitter,
-                            "success",
-                            &tr("preflight.searchDone", &[]),
-                            extra,
-                        );
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let mut extra = json!({
-                            "exitCode": output.status.code(),
-                            "stderr": trim_for_event(&stderr),
-                            "elapsedMs": started.elapsed().as_millis(),
-                        });
-                        if let Some(p) = log_path {
-                            extra["logPath"] = json!(p.display().to_string());
-                        }
-                        emit_preflight(
-                            &emitter,
-                            "failed",
-                            &tr("preflight.searchFailed", &[]),
-                            extra,
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        target: TRACE_TARGET,
-                        error = %err,
-                        "search_tools preflight could not spawn package manager"
-                    );
-                    emit_preflight(
-                        &emitter,
-                        "failed",
-                        &tr("preflight.searchSpawnFailed", &[]),
-                        json!({
-                            "error": err.to_string(),
-                            "elapsedMs": started.elapsed().as_millis(),
-                        }),
-                    );
-                }
-            }
-        }
+        run_search_tools_install(&emitter, &plan, started);
     });
 }
 
@@ -205,7 +109,6 @@ pub fn start_git_preflight(
     std::thread::spawn(move || {
         let started = Instant::now();
         if find_executable(&["git"]).is_some() {
-            #[cfg(unix)]
             remove_detached_log_marker_file(GIT_DETACHED_LOG_MARKER_NAME);
             checkpoint_switcher.force_activate_shadow();
             emit_git_preflight(&emitter, "ready", &tr("preflight.gitReady", &[]), json!({}));
@@ -214,7 +117,7 @@ pub fn start_git_preflight(
 
         emit_git_preflight(&emitter, "start", &tr("preflight.gitStart", &[]), json!({}));
 
-        let Some(plan) = git_install_plan() else {
+        let Some(manager) = system_package_manager() else {
             emit_git_preflight(
                 &emitter,
                 "failed",
@@ -223,57 +126,15 @@ pub fn start_git_preflight(
             );
             return;
         };
-
-        #[cfg(unix)]
-        {
-            run_unix_git_preflight_install(&emitter, &plan, started);
-        }
-
-        #[cfg(windows)]
-        {
-            let output = StdCommand::new(plan.program).args(&plan.args).output();
-            match output {
-                Ok(output) if output.status.success() && find_executable(&["git"]).is_some() => {
-                    checkpoint_switcher.force_activate_shadow();
-                    emit_git_preflight(
-                        &emitter,
-                        "success",
-                        &tr("preflight.gitDone", &[]),
-                        json!({
-                            "elapsedMs": started.elapsed().as_millis(),
-                        }),
-                    );
-                }
-                Ok(output) => {
-                    emit_git_preflight(
-                        &emitter,
-                        "failed",
-                        &tr("preflight.gitFailed", &[]),
-                        json!({
-                            "elapsedMs": started.elapsed().as_millis(),
-                            "stderr": trim_for_event(&String::from_utf8_lossy(&output.stderr)),
-                            "exitCode": output.status.code(),
-                        }),
-                    );
-                }
-                Err(err) => {
-                    emit_git_preflight(
-                        &emitter,
-                        "failed",
-                        &tr("preflight.gitCommandFailed", &[]),
-                        json!({
-                            "elapsedMs": started.elapsed().as_millis(),
-                            "error": err.to_string(),
-                        }),
-                    );
-                }
-            }
-        }
+        run_git_install(
+            &emitter,
+            &install_plan(manager, InstallTarget::Git),
+            started,
+        );
     });
 }
 
-#[cfg(unix)]
-fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, started: Instant) {
+fn run_search_tools_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, started: Instant) {
     remove_detached_log_marker_if_homebrew_idle(DETACHED_LOG_MARKER_NAME);
 
     if brew_install_already_in_progress(plan) {
@@ -306,18 +167,17 @@ fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, 
         return;
     };
 
-    match spawn_unix_detached_install(plan, &log_path) {
+    match spawn_detached_install(plan, &log_path) {
         Ok(()) => {
             write_detached_log_marker(DETACHED_LOG_MARKER_NAME, &log_path);
             let extra = json!({
                 "logPath": log_path.display().to_string(),
                 "elapsedMs": started.elapsed().as_millis(),
             });
-            let detached_msg = if plan.program == "brew" {
-                tr("preflight.searchDetachedBrew", &[])
-            } else {
-                tr("preflight.searchDetached", &[])
-            };
+            let detached_msg = tr(
+                search_detached_message_key(plan.manager, PATH_CHANGES_NEED_RESTART),
+                &[],
+            );
             emit_preflight(emitter, "detached", &detached_msg, extra);
         }
         Err(err) => {
@@ -339,12 +199,7 @@ fn run_unix_preflight_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, 
     }
 }
 
-#[cfg(unix)]
-fn run_unix_git_preflight_install(
-    emitter: &ScopedEventEmitter,
-    plan: &InstallPlan,
-    started: Instant,
-) {
+fn run_git_install(emitter: &ScopedEventEmitter, plan: &InstallPlan, started: Instant) {
     remove_detached_log_marker_if_homebrew_idle(GIT_DETACHED_LOG_MARKER_NAME);
 
     if brew_install_already_in_progress(plan) {
@@ -375,13 +230,13 @@ fn run_unix_git_preflight_install(
         return;
     };
 
-    match spawn_unix_detached_install(plan, &log_path) {
+    match spawn_detached_install(plan, &log_path) {
         Ok(()) => {
             write_detached_log_marker(GIT_DETACHED_LOG_MARKER_NAME, &log_path);
             emit_git_preflight(
                 emitter,
                 "detached",
-                &tr("preflight.gitDetached", &[]),
+                &tr(git_detached_message_key(PATH_CHANGES_NEED_RESTART), &[]),
                 json!({
                     "elapsedMs": started.elapsed().as_millis(),
                     "logPath": log_path.display().to_string(),
@@ -402,23 +257,36 @@ fn run_unix_git_preflight_install(
     }
 }
 
+/// 装好的程序要新开终端才找得到时，detached 文案多提醒一句"重新打开终端"。
+fn search_detached_message_key(manager: PackageManager, path_needs_restart: bool) -> &'static str {
+    if manager == PackageManager::Brew {
+        "preflight.searchDetachedBrew"
+    } else if path_needs_restart {
+        "preflight.searchDetachedRestart"
+    } else {
+        "preflight.searchDetached"
+    }
+}
+
+fn git_detached_message_key(path_needs_restart: bool) -> &'static str {
+    if path_needs_restart {
+        "preflight.gitDetachedRestart"
+    } else {
+        "preflight.gitDetached"
+    }
+}
+
 /// Homebrew 安装/编译是否可能在跑（**窄匹配**，仅供并发判定；不以 marker 为依据）。
-#[cfg(unix)]
+/// 本机没有 brew 时直接返回 false，不去启动 pgrep。
 fn homebrew_install_in_progress() -> bool {
     const PATTERNS: &[&str] = &[
         "[Hh]omebrew/.*brew\\.rb",
         "[Hh]omebrew/.*build\\.rb",
         "brew\\.rb.*install",
     ];
-    for pat in PATTERNS {
-        if pgrep_f_matches(pat) {
-            return true;
-        }
-    }
-    false
+    find_executable(&["brew"]).is_some() && PATTERNS.iter().any(|pat| pgrep_f_matches(pat))
 }
 
-#[cfg(unix)]
 fn pgrep_f_matches(pattern: &str) -> bool {
     StdCommand::new("pgrep")
         .args(["-f", pattern])
@@ -427,16 +295,11 @@ fn pgrep_f_matches(pattern: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(unix)]
 fn brew_install_already_in_progress(plan: &InstallPlan) -> bool {
-    if plan.program != "brew" {
-        return false;
-    }
-    homebrew_install_in_progress()
+    plan.manager == PackageManager::Brew && homebrew_install_in_progress()
 }
 
 /// Marker 仅在「当前没有检测到 Homebrew 活动」时清除，避免陈旧路径。
-#[cfg(unix)]
 fn remove_detached_log_marker_if_homebrew_idle(marker_name: &str) {
     if homebrew_install_in_progress() {
         return;
@@ -444,20 +307,17 @@ fn remove_detached_log_marker_if_homebrew_idle(marker_name: &str) {
     remove_detached_log_marker_file(marker_name);
 }
 
-#[cfg(unix)]
 fn detached_log_marker_path(marker_name: &str) -> Option<PathBuf> {
     let dir = preflight_log_dir()?;
     Some(dir.join(marker_name))
 }
 
-#[cfg(unix)]
 fn remove_detached_log_marker_file(marker_name: &str) {
     if let Some(p) = detached_log_marker_path(marker_name) {
         let _ = std::fs::remove_file(p);
     }
 }
 
-#[cfg(unix)]
 fn read_valid_detached_marker_log_path(marker_name: &str) -> Option<PathBuf> {
     let marker = detached_log_marker_path(marker_name)?;
     let raw = std::fs::read_to_string(&marker).ok()?;
@@ -473,7 +333,6 @@ fn read_valid_detached_marker_log_path(marker_name: &str) -> Option<PathBuf> {
     }
 }
 
-#[cfg(unix)]
 fn write_detached_log_marker(marker_name: &str, log_path: &Path) {
     let Some(marker_path) = detached_log_marker_path(marker_name) else {
         return;
@@ -490,7 +349,6 @@ fn write_detached_log_marker(marker_name: &str, log_path: &Path) {
     let _ = std::fs::rename(&tmp, &marker_path);
 }
 
-#[cfg(unix)]
 fn new_preflight_log_file_path() -> Option<PathBuf> {
     let dir = preflight_log_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
@@ -498,33 +356,13 @@ fn new_preflight_log_file_path() -> Option<PathBuf> {
     Some(dir.join(format!("preflight-file-log-{stamp}.log")))
 }
 
-/// 构造 `nohup … >> log 2>&1 &` 并 `spawn`（不经由 [`write_install_log`]）。
-#[cfg(unix)]
-fn spawn_unix_detached_install(plan: &InstallPlan, log_path: &Path) -> std::io::Result<()> {
-    let shell_cmd = build_nohup_shell_command(plan, log_path);
-    tracing::debug!(
-        target: TRACE_TARGET,
-        shell_cmd_len = shell_cmd.len(),
-        "search_tools preflight detached shell command"
-    );
-    StdCommand::new("/bin/sh")
-        .arg("-c")
-        .arg(&shell_cmd)
-        .spawn()
-        .map(|_| ())
-}
-
-#[cfg(unix)]
-fn build_nohup_shell_command(plan: &InstallPlan, log_path: &Path) -> String {
-    let joined = shell_words::join(std::iter::once(plan.program).chain(plan.args.iter().copied()));
-    let log_lossy = log_path.to_string_lossy();
-    let quoted_log = shell_words::quote(log_lossy.as_ref());
-    let body = format!("nohup {joined} >> {quoted_log} 2>&1 &");
-    if plan.program == "brew" {
-        format!("HOMEBREW_NO_BUILD_FROM_SOURCE=1 {body}")
+fn spawn_detached_install(plan: &InstallPlan, log_path: &Path) -> std::io::Result<()> {
+    let envs: &[(&str, &str)] = if plan.manager == PackageManager::Brew {
+        &[("HOMEBREW_NO_BUILD_FROM_SOURCE", "1")]
     } else {
-        body
-    }
+        &[]
+    };
+    spawn_detached(plan.program, &plan.args, envs, log_path)
 }
 
 fn should_skip_preflight(config: &AppConfig) -> bool {
@@ -549,117 +387,55 @@ fn missing_search_tools() -> Vec<&'static str> {
     missing
 }
 
+#[derive(Debug, Clone, Copy)]
+enum InstallTarget {
+    SearchTools,
+    Git,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct InstallPlan {
+    manager: PackageManager,
     program: &'static str,
     args: Vec<&'static str>,
 }
 
-fn install_plan() -> Option<InstallPlan> {
-    if is_termux() && find_executable(&["pkg"]).is_some() {
-        return Some(InstallPlan {
-            program: "pkg",
-            args: vec!["install", "-y", "ripgrep", "fd"],
-        });
-    }
+/// 用 `manager` 安装 `target` 的命令；各管理器下的包名是产品知识，只在这里维护。
+fn install_plan(manager: PackageManager, target: InstallTarget) -> InstallPlan {
+    use InstallTarget::{Git, SearchTools};
+    use PackageManager::{AptGet, Brew, Dnf, Pacman, TermuxPkg, Winget};
 
-    #[cfg(target_os = "android")]
-    {
-        return None;
-    }
-
-    if cfg!(target_os = "macos") && find_executable(&["brew"]).is_some() {
-        return Some(InstallPlan {
-            program: "brew",
-            args: vec!["install", "--force-bottle", "ripgrep", "fd"],
-        });
-    }
-
-    // TODO: implement detached install for Windows (PowerShell Start-Process -NoWait); v1 仍为阻塞 output()
-    if cfg!(target_os = "windows") && find_executable(&["winget"]).is_some() {
-        return Some(InstallPlan {
-            program: "cmd",
-            args: vec![
+    let (program, args) = match (manager, target) {
+        (TermuxPkg, SearchTools) => ("pkg", vec!["install", "-y", "ripgrep", "fd"]),
+        (TermuxPkg, Git) => ("pkg", vec!["install", "-y", "git"]),
+        (Brew, SearchTools) => ("brew", vec!["install", "--force-bottle", "ripgrep", "fd"]),
+        (Brew, Git) => ("brew", vec!["install", "--force-bottle", "git"]),
+        (Winget, SearchTools) => (
+            "cmd",
+            vec![
                 "/C",
                 "winget install --id BurntSushi.ripgrep.MSVC --silent --accept-source-agreements --accept-package-agreements && winget install --id sharkdp.fd --silent --accept-source-agreements --accept-package-agreements",
             ],
-        });
-    }
-
-    if find_executable(&["apt-get"]).is_some() {
-        return Some(InstallPlan {
-            program: "apt-get",
-            args: vec!["install", "-y", "ripgrep", "fd-find"],
-        });
-    }
-    if find_executable(&["dnf"]).is_some() {
-        return Some(InstallPlan {
-            program: "dnf",
-            args: vec!["install", "-y", "ripgrep", "fd-find"],
-        });
-    }
-    if find_executable(&["pacman"]).is_some() {
-        return Some(InstallPlan {
-            program: "pacman",
-            args: vec!["-S", "--noconfirm", "ripgrep", "fd"],
-        });
-    }
-    None
-}
-
-fn git_install_plan() -> Option<InstallPlan> {
-    if is_termux() && find_executable(&["pkg"]).is_some() {
-        return Some(InstallPlan {
-            program: "pkg",
-            args: vec!["install", "-y", "git"],
-        });
-    }
-
-    #[cfg(target_os = "android")]
-    {
-        return None;
-    }
-
-    if cfg!(target_os = "macos") && find_executable(&["brew"]).is_some() {
-        return Some(InstallPlan {
-            program: "brew",
-            args: vec!["install", "--force-bottle", "git"],
-        });
-    }
-
-    if cfg!(target_os = "windows") && find_executable(&["winget"]).is_some() {
-        return Some(InstallPlan {
-            program: "cmd",
-            args: vec![
+        ),
+        (Winget, Git) => (
+            "cmd",
+            vec![
                 "/C",
                 "winget install --id Git.Git --silent --accept-source-agreements --accept-package-agreements",
             ],
-        });
+        ),
+        (AptGet, SearchTools) => ("apt-get", vec!["install", "-y", "ripgrep", "fd-find"]),
+        (AptGet, Git) => ("apt-get", vec!["install", "-y", "git"]),
+        (Dnf, SearchTools) => ("dnf", vec!["install", "-y", "ripgrep", "fd-find"]),
+        (Dnf, Git) => ("dnf", vec!["install", "-y", "git"]),
+        (Pacman, SearchTools) => ("pacman", vec!["-S", "--noconfirm", "ripgrep", "fd"]),
+        (Pacman, Git) => ("pacman", vec!["-S", "--noconfirm", "git"]),
+    };
+    InstallPlan {
+        manager,
+        program,
+        args,
     }
-
-    if find_executable(&["apt-get"]).is_some() {
-        return Some(InstallPlan {
-            program: "apt-get",
-            args: vec!["install", "-y", "git"],
-        });
-    }
-    if find_executable(&["dnf"]).is_some() {
-        return Some(InstallPlan {
-            program: "dnf",
-            args: vec!["install", "-y", "git"],
-        });
-    }
-    if find_executable(&["pacman"]).is_some() {
-        return Some(InstallPlan {
-            program: "pacman",
-            args: vec!["-S", "--noconfirm", "git"],
-        });
-    }
-    None
-}
-
-fn is_termux() -> bool {
-    std::env::var_os("TERMUX_VERSION").is_some()
-        || Path::new("/data/data/com.termux/files/usr/bin/pkg").exists()
 }
 
 fn preflight_log_dir() -> Option<PathBuf> {
@@ -670,48 +446,6 @@ fn preflight_log_dir() -> Option<PathBuf> {
             .join("main")
             .join("logs"),
     )
-}
-
-/// 将安装子进程完整 stdout/stderr 写入 `~/.tomcat/agents/main/logs/preflight-file-log-<ts>.log`。
-/// **Windows** 阻塞路径使用；Unix detached 由 shell 重定向实时写入，不经此函数汇总。
-#[cfg(windows)]
-fn write_install_log(plan: &InstallPlan, output: &Output) -> Option<PathBuf> {
-    let dir = preflight_log_dir()?;
-    if std::fs::create_dir_all(&dir).is_err() {
-        tracing::warn!(
-            target: TRACE_TARGET,
-            "search_tools preflight: could not create log directory"
-        );
-        return None;
-    }
-    let stamp = chrono::Local::now().format("%Y%m%dT%H%M%S%.6f");
-    let path = dir.join(format!("preflight-file-log-{stamp}.log"));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut buf = String::new();
-    buf.push_str(&format!(
-        "timestamp={}\nos={}\nprogram={}\nargs={:?}\nexit_code={:?}\n",
-        chrono::Local::now().to_rfc3339(),
-        std::env::consts::OS,
-        plan.program,
-        plan.args,
-        output.status.code()
-    ));
-    buf.push_str("\n--- stdout ---\n");
-    buf.push_str(stdout.as_ref());
-    buf.push_str("\n--- stderr ---\n");
-    buf.push_str(stderr.as_ref());
-    buf.push('\n');
-
-    let mut f = std::fs::File::create(&path).ok()?;
-    if f.write_all(buf.as_bytes()).is_err() {
-        tracing::warn!(
-            target: TRACE_TARGET,
-            "search_tools preflight: could not write install log file"
-        );
-        return None;
-    }
-    Some(path)
 }
 
 fn emit_preflight(

@@ -15,8 +15,28 @@ pub fn find_executable(candidates: &[&str]) -> Option<PathBuf> {
     find_executable_in(&path, pathext.as_deref(), candidates, |p| p.is_file())
 }
 
+/// 把要启动的程序名解析成可以直接交给 `Command::new` 的路径。
+///
+/// Rust 只在 Windows 上自动补 `.exe`：裸名 `npx` 要按 PATHEXT 解析成 `npx.cmd`，而且要查子进程
+/// 实际拿到的 PATH（`child_path`，`None` 表示沿用当前进程的 PATH）。其余情况原样返回。
+pub fn resolve_program(command: &str, child_path: Option<&OsStr>) -> PathBuf {
+    #[cfg(windows)]
+    if Path::new(command).components().count() == 1 {
+        let inherited = std::env::var_os("PATH");
+        let path = child_path.or(inherited.as_deref()).unwrap_or_default();
+        let pathext = std::env::var_os("PATHEXT");
+        if let Some(found) = find_executable_in(path, pathext.as_deref(), &[command], Path::is_file)
+        {
+            return found;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = child_path;
+    PathBuf::from(command)
+}
+
 /// 纯函数版本：PATH、PATHEXT 与文件存在性都由调用方提供。
-pub(crate) fn find_executable_in(
+fn find_executable_in(
     path: &OsStr,
     pathext: Option<&OsStr>,
     candidates: &[&str],

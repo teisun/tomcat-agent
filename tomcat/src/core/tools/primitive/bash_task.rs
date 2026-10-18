@@ -7,7 +7,7 @@
 //!   `BashTaskTicket{ task_id, log_path }`；后台 `tokio::spawn` 守护把 stdout/stderr
 //!   持续写到 `<persist_dir>/bash-<task_id>.log`；模型用三件套自驱：
 //!     - `task_output`：按字节偏移拉日志增量；
-//!     - `task_stop`：`killpg(SIGKILL)` 杀整组（与 PR-E.2 同口径）；
+//!     - `task_stop`：由 `platform::ProcessTree` 结束整棵进程树（与 PR-E.2 同口径）；
 //!     - `task_list`：枚举所有 task 现状（含 `Finished{ exit_code }` / `Stopped`）。
 //!
 //! ## 锁分层（避免「stop 等 wait」死锁）
@@ -15,12 +15,10 @@
 //! - `BashTaskRegistry.tasks: RwLock<HashMap<...>>`：注册表本身，操作短促。
 //! - `BashTask.info: RwLock<BashTaskInfo>`：每任务的元信息 + 状态机，操作短促。
 //! - 子进程 `Child` 句柄**不**入锁——直接 move 进 wait 任务（独占 `await`）。
-//!   stop 走的是 `pid → libc::killpg(SIGKILL)`，不依赖 Child 句柄，杀完
+//!   stop 走的是 `platform::ProcessTree::kill`，不依赖 Child 句柄，杀完
 //!   wait 任务自然 `wait()` 返回 → 状态翻成 `Finished{ exit_code }`。
 
 use std::collections::{HashMap, VecDeque};
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,7 +40,7 @@ use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmati
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::audit::{AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
-use crate::infra::platform::normalize_path;
+use crate::infra::platform::{exit_code, normalize_path, ProcessTree};
 
 fn permission_scope_str(scope: PermissionScope) -> String {
     match scope {
@@ -456,13 +454,9 @@ type StreamCapture = (
 
 struct BashTask {
     info: RwLock<BashTaskInfo>,
-    /// 子进程 PID（spawn 后立即记录）；stop 路径用 `killpg` 杀整组；句柄已 move 进
+    /// 子进程及全部后代所在的进程树；stop 路径一次结束整棵树。Child 句柄已 move 进
     /// wait 任务独占 await。
-    #[cfg(unix)]
-    pid: Option<u32>,
-    /// 子进程及全部后代所在的 Job；stop 路径一次终止整棵树。
-    #[cfg(windows)]
-    job: crate::infra::platform::ProcessJob,
+    process_tree: ProcessTree,
     /// P1：每 task 一份 `Notify`。pump 任务每 flush 一次后 `notify_waiters()`；
     /// wait 任务把 status 翻成 `Finished` / `Stopped` 时也 `notify_waiters()`。
     /// 配合 [`BashTaskRegistry::wait_for_finish`] 实现"按文件长度 vs since"判定，
@@ -479,17 +473,13 @@ struct BashTask {
     preview_flush_notify: Arc<Notify>,
 }
 
-/// Windows 上 `kill_on_drop` 只杀得到 Git Bash 启动器（`bin\bash.exe`），真正执行命令的
-/// `usr\bin\bash.exe` 会继续运行并占住输出管道，而运行时关闭要等这些管道读取结束。
-/// wait 任务没跑完就被丢弃（只发生在运行时关闭）时，终止整棵进程树。
-#[cfg(windows)]
-struct TerminateTreeIfAbandoned(Option<Arc<BashTask>>);
+/// wait 任务没跑完就被丢弃（只发生在运行时关闭）时，交给 [`ProcessTree::kill_if_abandoned`]。
+struct KillTreeIfAbandoned(Option<Arc<BashTask>>);
 
-#[cfg(windows)]
-impl Drop for TerminateTreeIfAbandoned {
+impl Drop for KillTreeIfAbandoned {
     fn drop(&mut self) {
         if let Some(task) = self.0.take() {
-            let _ = task.job.terminate();
+            task.process_tree.kill_if_abandoned();
         }
     }
 }
@@ -784,18 +774,8 @@ impl BashTaskRegistry {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
-        // 与 PR-E.2 同口径：新进程组 + stop 时 killpg 整组，避免 sh 派生孙子进程被遗弃。
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        #[cfg(unix)]
-        let spawned = cmd.spawn().map(|child| {
-            let pid = child.id();
-            (child, pid)
-        });
-        #[cfg(windows)]
-        let spawned = crate::infra::platform::ProcessJob::spawn(&mut cmd);
-        let (mut child, process_tree) = spawned.map_err(|e| {
+        // 与 PR-E.2 同口径：stop 时结束整棵进程树，避免 sh 派生的孙子进程被遗弃。
+        let (mut child, process_tree) = ProcessTree::spawn(&mut cmd).map_err(|e| {
             let err = AppError::Primitive(format!(
                 "bash spawn failed (cwd={}, input={:?}): {e}",
                 cwd.resolved_path().display(),
@@ -819,10 +799,7 @@ impl BashTaskRegistry {
                 log_path: log_path.display().to_string(),
                 status: BashTaskStatus::Running,
             }),
-            #[cfg(unix)]
-            pid: process_tree,
-            #[cfg(windows)]
-            job: process_tree,
+            process_tree,
             notify: Arc::new(Notify::new()),
             lifecycle_emitted: parking_lot::Mutex::new(false),
             delivery: parking_lot::Mutex::new(if deliver_completion_on_finish {
@@ -883,22 +860,9 @@ impl BashTaskRegistry {
         let command_for_wait = command.clone();
         let output_tx_for_wait = self.output_tx.clone();
         tokio::spawn(async move {
-            #[cfg(windows)]
-            let mut abandoned = TerminateTreeIfAbandoned(Some(task_for_wait.clone()));
+            let mut abandoned = KillTreeIfAbandoned(Some(task_for_wait.clone()));
             let exit_code = match child.wait().await {
-                Ok(status) => {
-                    #[cfg(unix)]
-                    {
-                        status
-                            .code()
-                            .or_else(|| status.signal().map(|s| 128 + s))
-                            .unwrap_or(-1)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        status.code().unwrap_or(-1)
-                    }
-                }
+                Ok(status) => exit_code(&status),
                 Err(_) => -1,
             };
             {
@@ -978,10 +942,7 @@ impl BashTaskRegistry {
                 });
             }
             task_for_wait.notify.notify_waiters();
-            #[cfg(windows)]
-            {
-                abandoned.0 = None;
-            }
+            abandoned.0 = None;
         });
 
         Ok(BashTaskTicket {
@@ -1155,18 +1116,9 @@ impl BashTaskRegistry {
         ) {
             return Ok(());
         }
-        #[cfg(windows)]
         let previous_stop = task.stop_requested.load(Ordering::Acquire);
         task.stop_requested.store(true, Ordering::Release);
-        #[cfg(unix)]
-        if let Some(pid) = task.pid {
-            // SAFETY: POSIX signal API; ESRCH is harmless if the child already exited.
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-        #[cfg(windows)]
-        if let Err(error) = task.job.terminate() {
+        if let Err(error) = task.process_tree.kill() {
             task.stop_requested.store(previous_stop, Ordering::Release);
             return Err(AppError::Primitive(format!(
                 "failed to stop bash process tree {task_id}: {error}"

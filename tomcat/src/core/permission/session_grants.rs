@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::{GrantTrigger, PathRule};
+use crate::infra::platform::path_starts_with;
 
 /// 会话级临时授权（write/edit/bash）。
 #[derive(Debug, Clone, Default)]
@@ -57,7 +58,7 @@ impl SessionGrants {
             Ok(g) => g.paths.iter().any(|p| {
                 let pc = super::gate::canonicalize_with_existing_ancestor(p);
                 let prefix = pc.to_string_lossy();
-                super::types::path_starts_with(&target, &prefix)
+                path_starts_with(&target, &prefix)
             }),
             Err(_) => false,
         }
@@ -83,7 +84,7 @@ impl SessionGrants {
                 .find(|p| {
                     let pc = super::gate::canonicalize_with_existing_ancestor(p);
                     let prefix = pc.to_string_lossy();
-                    super::types::path_starts_with(&target, &prefix)
+                    path_starts_with(&target, &prefix)
                 })
                 .and_then(|p| g.triggers.get(p).copied()),
             Err(_) => None,

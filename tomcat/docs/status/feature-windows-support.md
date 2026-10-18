@@ -11,7 +11,8 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
   ├─ 测试基线修复 ........ 完成：本机 Rust gate-fast、插件 lint 与集成测试全绿（§10）
   ├─ CI / 发布 ........... 两个 dry-run 成功；windows-ci 全绿（`bb8c618f`，run 39097819025）（§11、§12）
   ├─ 验收 ................ 场景 1-12、14 通过或由自动化覆盖；场景 13 待正式发布（§13）
-  └─ 验收与 CI 中发现的问题 3 + 3 个已修复，见下方两节
+  ├─ 验收与 CI 中发现的问题 3 + 3 个已修复，见下方两节
+  └─ 平台层收口 .......... 业务层平台 cfg 清零 + 守护测试 + CI 三平台矩阵，见下方「平台层收口」
 ```
 
 - **已完成**：Git Bash 作为 bash 工具；路径身份（dunce、大小写、`~\`）；权限规则与危险命令；安装包安全快照；外部程序查找（PATHEXT、npx.cmd、MCP 环境白名单）；CRLF 计划文件、`.env`/OAuth 私有权限、shadow-git 长路径；可取消的控制台/管道输入与 ConPTY 端到端测试；`tomcat init` 写用户 PATH 与副本刷新；控制台 VT 颜色；插件 `windowsHide` 与 `@` 目录 Uri。
@@ -86,7 +87,7 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
 
 - **问题现象**：`windows_conpty_cli_tests` 在门禁里失败（提问时按 Ctrl+C，2 秒内没有回到主输入），从 PowerShell 单跑却 3/3 通过。
 - **根因与证据**：门禁经 Git Bash 运行。Windows 的"忽略 Ctrl+C"属性会被子进程继承（父进程以新进程组启动时就带上它），于是 tomcat 收不到 Ctrl+C。同一条用例在 Git Bash 下单独跑也 0/2 失败，排除了机器负载。用户从 Git Bash 运行 `tomcat chat` 会遇到同样的问题：Ctrl+C 既打断不了生成，也打断不了提问。
-- **解决方案**：CLI 启动时（与开启 VT 颜色同一处）调用 `SetConsoleCtrlHandler(NULL, FALSE)` 恢复 Ctrl+C <sub>`infra/platform/mod.rs::restore_ctrl_c_input`、`api/cli/mod.rs::run_cli`；仅 Windows</sub>。
+- **解决方案**：CLI 启动时（与开启 VT 颜色同一处）调用 `SetConsoleCtrlHandler(NULL, FALSE)` 恢复 Ctrl+C <sub>`infra/platform/console.rs::restore_ctrl_c_input`（经 `prepare_console` 调用）、`api/cli/mod.rs::run_cli`；仅 Windows</sub>。
 - **测试用例清单**：`tests/windows_conpty_cli_tests.rs` 即回归用例；修复后在 Git Bash 下 2/2 通过。
 
 #### 后台任务没结束时 CLI 退不出、管道不关（产品缺陷，插件集成测试发现）
@@ -106,8 +107,8 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
   - 证据 2：杀掉遗留的 bash 后，整条 PowerShell → nextest → 测试 → tomcat 链才一起返回；去掉修复 2 后新用例报"脱离出去的进程握着 stdout"。
   - Unix 不受影响：子进程不会保留父进程的 0/1/2，子进程管道也不占阻塞线程。
 - **解决方案**：
-  - 修复 1：后台任务的 wait 协程没跑完就被丢弃（只在运行时关闭时发生）时，终止该任务的 Job（整棵进程树）；正常结束时不动，用户用 `&` 脱离出去的进程照常保留 <sub>`core/tools/primitive/bash_task.rs::TerminateTreeIfAbandoned`；仅 Windows</sub>。
-  - 修复 2：CLI 启动时去掉本进程 stdin/stdout/stderr 的继承标记，相当于 Unix 的 CLOEXEC；`Stdio::inherit()` 创建子进程时会另外复制一份可继承句柄，不受影响（已核对 Rust 1.99.1 标准库 `sys/process/windows.rs`） <sub>`infra/platform/mod.rs::stop_std_handle_inheritance`、`api/cli/mod.rs::run_cli`；仅 Windows，覆盖 serve 在内的全部子命令</sub>。
+  - 修复 1：后台任务的 wait 协程没跑完就被丢弃（只在运行时关闭时发生）时，终止该任务的 Job（整棵进程树）；正常结束时不动，用户用 `&` 脱离出去的进程照常保留 <sub>`core/tools/primitive/bash_task.rs::KillTreeIfAbandoned` → `infra/platform/process.rs::ProcessTree::kill_if_abandoned`；仅 Windows 结束整棵树</sub>。
+  - 修复 2：CLI 启动时去掉本进程 stdin/stdout/stderr 的继承标记，相当于 Unix 的 CLOEXEC；`Stdio::inherit()` 创建子进程时会另外复制一份可继承句柄，不受影响（已核对 Rust 1.99.1 标准库 `sys/process/windows.rs`） <sub>`infra/platform/console.rs::stop_std_handle_inheritance`（经 `prepare_console` 调用）、`api/cli/mod.rs::run_cli`；仅 Windows，覆盖 serve 在内的全部子命令</sub>。
 - **测试用例清单**：`tests/cli_tests.rs::bash_processes_do_not_keep_a_piped_cli_or_its_pipes_alive`（跨平台）：脚本模型先让 bash 用 `&` 脱离出一个循环，再起一个不会结束的后台任务，关闭 stdin 后要求 30 秒内退出、5 秒内读到 EOF，最后确认脱离出去的循环确实活过了 CLI。分别去掉两个修复各跑一次，都按预期报出对应的失败；两个修复都在时 3.5 秒通过。插件侧 `cli_autofeed` 即端到端回归。
 
 #### 附件租约续期不生效（产品缺陷）
@@ -137,6 +138,8 @@ Windows 平台适配（win32-x64：VS Code 插件 + 终端 CLI）
 | `bash_task_test::lifecycle_waits_for_final_preview_barrier` | 固定睡 100ms 就假定 `printf` 已退出；Git Bash 启动比 `sh` 慢，满载时仍是 Running | 改为轮询到进程退出再断言（"生命周期事件不能抢在确认之前"这条断言因此真正在进程退出后检查） |
 
 ### CI 与发布（§11、§12）
+
+> 平台层收口时 `windows-ci.yml` 改名为 `ci.yml`，rust job 扩成 Windows / Ubuntu / macOS 三平台矩阵，见下方「平台层收口」。
 
 ```text
 windows-ci.yml（新增）              release-cli.yml                    release-ext.yml
@@ -183,7 +186,7 @@ windows-ci.yml（新增）              release-cli.yml                    relea
   ```
   - 证据：脚本模拟模型发起 `browser_navigate`，确认 node 与 8 个 chrome 在跑后关闭 stdin，测得进程退出 16337ms、管道关闭 16337ms，随后整棵树才消失。
   - 空闲时 Playwright 收到 EOF 会自己退出（实测 23ms），所以只在"服务正忙或清理很慢"时出现。Unix 不受影响：子进程管道不占阻塞线程，运行时关闭不等它。
-- **解决方案**：MCP stdio 子进程在 Windows 上放进关闭即终止（`KILL_ON_JOB_CLOSE`）的 Job：传输被丢弃或 tomcat 退出时，整棵进程树一起结束 <sub>`core/connector/mcp/transport.rs::owned_process_tree`；用 rmcp 自带的 `process-wrap` 的 `JobObject` + `KillOnDrop`（已是传递依赖，`Cargo.toml` 只在 Windows 下显式声明）；Unix 不变</sub>。
+- **解决方案**：MCP stdio 子进程在 Windows 上放进关闭即终止（`KILL_ON_JOB_CLOSE`）的 Job：传输被丢弃或 tomcat 退出时，整棵进程树一起结束 <sub>`infra/platform/process.rs::kill_tree_on_drop`（`core/connector/mcp/transport.rs` 调用）；用 rmcp 自带的 `process-wrap` 的 `JobObject` + `KillOnDrop`（已是传递依赖，`Cargo.toml` 全平台声明，Unix 只用 `KillOnDrop`）；Unix 行为不变</sub>。
   - 为什么不复用 bash 的 `ProcessJob`：rmcp 只接受 `CommandWrap` 并在内部创建进程，拿不到"挂起创建 → 加入 Job → 恢复"的时机；`process-wrap` 的 `JobObject` 正是在这一处做同样的事。
 - **测试用例清单**：`tests/serve_robustness_tests.rs::serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client`（仅 Windows）：用 `.cmd` 启动假 MCP 服务（与 `npx.cmd` 同样是 cmd.exe → node），服务在 EOF 后还会再活 60 秒；要求 Serve 10 秒内退出且服务进程不残留。去掉修复时报 `timed out waiting for serve exit`（nextest 同时报 LEAK），修复后 0.8 秒通过。夹具 `fake_stdio_server.mjs` 为此新增 `--linger-after-eof-ms`、`--pid-file` 两个可选参数。
   - 写测试时踩到的坑（已在测试里规避并注明）：cmd.exe 按 OEM 代码页解码批处理文件，路径里的中文会乱码；`.cmd` 里只写 ASCII，路径经 `%~dp0` 和环境变量传入。
@@ -194,7 +197,7 @@ windows-ci.yml（新增）              release-cli.yml                    relea
 - **根因与证据**：
   - 配置路径由 `~/.tomcat/tomcat.config.toml` 展开；文件已存在时 `canonicalize` 会顺带统一分隔符，init 时文件还不存在，原样保留了 `/`。
   - `git --exec-path` 输出用 `/`，向上取 3 级后再 `join("bin")`。
-- **解决方案**：两处都在源头按路径组件重建，得到本机分隔符 <sub>`infra/platform/mod.rs::normalize_path`（仅 Windows，路径不存在时）、`infra/platform/shell.rs::locate_git_bash`</sub>。
+- **解决方案**：两处都在源头按路径组件重建，得到本机分隔符 <sub>`infra/platform/paths.rs::normalize_path`（仅 Windows，路径不存在时）、`infra/platform/shell.rs::locate_git_bash`</sub>。
 - **测试用例清单**：`platform/tests/suite_test.rs::normalize_path_displays_missing_home_paths_with_native_separators`、`platform/tests/shell_test.rs::derived_bash_path_is_displayed_with_native_separators`（仅 Windows，断言展示串本身；原有用例按组件比较路径，发现不了这个问题）。
 
 #### 验收脚本只设 `VSCODE_EXECUTABLE_PATH` 时用错 VS Code CLI（脚本缺陷）
@@ -275,6 +278,40 @@ runner 与本机的差别                     影响到的用例
 - 场景 8（颜色）：`HKCU\Console\VirtualTerminalLevel` 未设置的前提下，在 conhost 中运行 `tomcat chat`，吉祥物显示为橙色，没有 `←[` 乱码（`conhost-vt.png`）；Windows Terminal 同样正常（`wt-vt.png`）。
   - 观察：conhost 的默认中文字体（新宋体）不含盲文字符，吉祥物显示为方框轮廓；Windows Terminal（Cascadia）显示正常。这是字体问题，与 VT 无关，本轮不处理；用户可设置 `TOMCAT_SPLASH=0` 关闭吉祥物。
   - 注意：Cursor 的终端会注入 `NO_COLOR=1` 和 `TERM=dumb`，从那里启动的进程会去掉颜色，人工验收时要先清掉这两个变量。
+
+### 平台层收口（2026-10-18）
+
+上一轮计划承诺"平台差异全部收口到 `infra/platform`"，实际仍有 18 个业务文件、约 150 行平台 `cfg` 和系统 crate 调用散落在 `core/`、`api/`；CI 也只在 Windows 上跑 Rust 门禁，Unix 分支在 Windows 开发机上编译不到。本次按 `平台层收口整改_90f59927` 计划收口。
+
+```text
+业务层 core/ api/ ── 0 行平台 cfg、0 个系统 crate；只说"我要什么"
+        │              ProcessTree / write_private_file_atomic / same_file / path_starts_with
+        │              install_user_command / system_package_manager / spawn_detached ...
+        ▼
+infra/platform ──── 唯一平台差异层：每个接口内部 Unix 实现 │ Windows 实现
+        │
+守护 1：platform/tests/boundary_test.rs —— 业务层一写平台 cfg 或系统 crate，测试就失败（文件:行号）
+守护 2：.github/workflows/ci.yml —— rust gate-fast 在 windows-latest / ubuntu-latest / macos-14 都跑
+```
+
+边界规则（三个问题判断代码放哪）写进了 `Codeing&Architecture_Spec.md` §5「平台差异边界」；platform 模块地图见 `src/infra/README.md` §3.5。
+
+| 主题 | 收口后的统一接口 | 顺带修掉的问题 |
+| :--- | :--- | :--- |
+| 进程树 | `ProcessTree`（Unix 进程组 / Windows Job）、`kill_tree_on_drop`（MCP）、`resolve_program`、`CHILD_STARTUP_ENV_VARS` | 停止失败时 Unix 原来静默忽略 `killpg` 的返回值，现在两平台都回滚并报错 |
+| 私密文件 | `write_private_file_atomic` | `.env` 临时文件原来按默认权限写入、改名后才收紧，中间有一瞬间别人可读；现在临时文件创建即私有，权限只设一次 |
+| 文件身份与权限位 | `open_no_follow`、`same_file`、`set_create_mode`、`mode_bits` | — |
+| 路径语法 | `path_starts_with`、`PATH_COMPARE_IGNORES_CASE`、`to_slash`、`shell_path_to_native`；绝对路径统一用 `Path::is_absolute` | "是不是绝对路径"原来有两套判断 |
+| 命令入口与 PATH | `user_install.rs`（并入原 `init_windows_path.rs`）：`install_user_command`、`add_user_bin_dir_to_path`、`ManualPathStep` | — |
+| 预检 | `system_package_manager`、`spawn_detached`、`PATH_CHANGES_NEED_RESTART`、`FOLLOW_FILE_COMMAND` | Windows 用 winget 装好 git 后必报"安装未成功"（本进程 PATH 不会刷新）；两平台改为同一套后台安装，Windows 文案提醒重开终端，进度提示用 `Get-Content -Wait` |
+| 其余零散判断 | `prepare_console`、`protocol_input`、`open_url`、`DEFAULT_EDITOR`、`ASYNC_PRINT_DURING_INPUT`、`LEGACY_MAX_PATH` | — |
+| 死代码 | 删除 `current_dir`、`SystemInfo`、`system_info` | — |
+
+- **Unix 基线**（矩阵先单独推送，`3f806987`，ci run `39119964917`）：macOS、Windows、插件全绿；Ubuntu 只有 `project_trust_cli_tests` 两项失败。根因：测试在 CLI 还没进入 rustyline 原始模式时就发 Ctrl+D，Linux 终端处于行模式，EOF 被终端驱动吞掉、CLI 收不到。修复：先等到 `]> ` 提示符再发（`0833f055`，只改测试）。
+- **守护测试的自测**：同一文件内喂样例行，确认"该报的报、该放的放"（含跨行的 `cfg(any(...))`、测试门控、注释、`std::os::raw`）；另在 `src` 下放一个含 `#[cfg(windows)]` 的临时文件，测试按预期报出 `zz_boundary_probe.rs:2`，删除后恢复通过。
+- **CI 上的偶发失败**（`0833f055`，ci run `39121643637`，Windows）：`connector_mcp_tests` 两项报"deferred MCP tool did not become available"，用时约 1.8 秒。根因：等待 MCP 工具出现的预算只有 50×20ms≈1 秒，其中还包括启动 node 假服务器；runner 上 4 并发时 node 启动会超过 1 秒（同一份代码上一轮通过，本机这两项各约 10 秒、全部通过）。修复：改为最长 10 秒的截止时间，条件满足立即返回（`tests/connector_mcp_tests.rs::wait_for_deferred_tool`，只改测试）。
+- **本机 Windows gate-fast**（Git Bash，`CARGO_BUILD_JOBS=4`）：lib 3335 项通过（5 ignored）、doctest、integration 并行组 365 项与串行组 49 项全部通过；严格 Clippy 首轮报出两处新测试代码的 lint（`fs_test` 的 `set_readonly(false)`、`paths_test` 的 `MAIN_SEPARATOR_STR`），修复后 `cargo clippy --all-targets -- -D warnings` 通过，相关用例重跑通过。
+- **Windows 上的新坑**：`OpenOptions::append(true)` 得到的是只追加句柄（没有 `FILE_WRITE_DATA`），Git Bash/MSYS 程序往这种句柄写会直接以 1 退出。`spawn_detached` 改为普通写句柄并定位到文件末尾（`platform/process.rs`），由 `process_test::spawn_detached_returns_at_once_and_appends_output_to_the_log` 覆盖。
 
 ### BLOCKED (当前风险)
 
