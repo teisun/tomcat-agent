@@ -445,7 +445,7 @@ fn thinking_single_read_tool_stream(path: &str) -> Vec<Result<StreamEvent, AppEr
             index: 0,
             id: Some("read-1".to_string()),
             name: Some("read".to_string()),
-            arguments_delta: Some(format!(r#"{{"path":"{}"}}"#, path)),
+            arguments_delta: Some(serde_json::json!({ "path": path }).to_string()),
         }),
         Ok(StreamEvent::FinishReason {
             reason: "tool_calls".to_string(),

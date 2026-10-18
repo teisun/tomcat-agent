@@ -270,7 +270,8 @@ impl CwdLazyPrompt {
     ) -> Result<ConfirmDecision, AppError> {
         match choice {
             CwdPromptChoice::AddPersistent => {
-                let canon = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+                let canon = crate::infra::platform::canonicalize(&self.cwd)
+                    .unwrap_or_else(|_| self.cwd.clone());
                 ensure_not_denied(&*self.gate, &canon)?;
                 if let Err(e) = crate::infra::config::append_workspace_root_to_disk(
                     &self.cfg_path,
@@ -298,7 +299,8 @@ impl CwdLazyPrompt {
                 Ok(ConfirmDecision::AllowOnce)
             }
             CwdPromptChoice::AllowSessionOnly => {
-                let canon = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+                let canon = crate::infra::platform::canonicalize(&self.cwd)
+                    .unwrap_or_else(|_| self.cwd.clone());
                 ensure_not_denied(&*self.gate, &canon)?;
                 self.session_grants
                     .add(canon.clone(), GrantTrigger::CwdLazyPrompt);

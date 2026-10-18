@@ -244,7 +244,8 @@ impl PackageInstallBackend for ChatPackageInstallBackend {
         if source_metadata.file_type().is_symlink() {
             return Err(AppError::Config(tr("install.symlinkRoot", &[])));
         }
-        let source_path = std::fs::canonicalize(&request.source).map_err(AppError::Io)?;
+        let source_path =
+            crate::infra::platform::canonicalize(&request.source).map_err(AppError::Io)?;
         // A manifest selects a package/skill/plugin directory, not just one file.
         // Authorize that whole tree before prepare_install reads manifests or hashes it;
         // keep the original entry point so manifest-selection precedence is unchanged.

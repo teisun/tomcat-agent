@@ -36,7 +36,7 @@ async fn cmd_reload_instruction_counts_paths_and_deny_source() {
         "---\nalwaysApply: true\n---\nSECRET",
     );
     let ctx = fixture.ctx();
-    let root = ctx.scope_services.resource_root.canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(&ctx.scope_services.resource_root).unwrap();
     let denied = root
         .join(".cursor/rules/secret.mdc")
         .to_string_lossy()

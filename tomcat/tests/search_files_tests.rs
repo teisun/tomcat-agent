@@ -1,3 +1,6 @@
+mod common;
+
+use common::write_fake_executable;
 use serde_json::json;
 use serial_test::serial;
 use std::sync::Arc;
@@ -82,16 +85,6 @@ fn test_search_files_args_deserializes_empty_optional_fields_as_none() {
     assert_eq!(args.file_type, None);
 }
 
-#[cfg(unix)]
-fn write_executable(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::write(path, content)?;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)
-}
-
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_search_files_content_files_with_matches_paginates_and_filters_denied(
@@ -105,14 +98,15 @@ async fn test_search_files_content_files_with_matches_paginates_and_filters_deni
     std::fs::write(root.join("src/lib.rs"), "needle\n")?;
     std::fs::write(root.join("src/main.rs"), "needle\n")?;
     std::fs::write(root.join("secret/token.rs"), "needle\n")?;
-    write_executable(
-        &bin.join("rg"),
+    write_fake_executable(
+        &bin,
+        "rg",
         "#!/bin/sh\nprintf 'src/lib.rs\\nsrc/main.rs\\nsecret/token.rs\\n'\n",
-    )?;
+    );
     let _path = PathGuard::set(&bin);
 
     let deny = PathRule::new(root.join("secret").to_string_lossy(), PathRuleMode::Deny);
-    let executor = make_executor(&root.canonicalize()?, vec![deny]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![deny]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -155,8 +149,9 @@ async fn test_search_files_content_lines_and_count_modes() -> Result<(), Box<dyn
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
     std::fs::write(root.join("src/lib.rs"), "needle\n")?;
-    write_executable(
-        &bin.join("rg"),
+    write_fake_executable(
+        &bin,
+        "rg",
         r#"#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "--count" ]; then
@@ -166,10 +161,10 @@ for arg in "$@"; do
 done
 printf 'src/lib.rs:3:1:needle here\n'
 "#,
-    )?;
+    );
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let lines = executor
         .search_files(
             SearchFilesArgs {
@@ -222,14 +217,15 @@ async fn test_search_files_target_files_uses_fd_glob() -> Result<(), Box<dyn std
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(root.join("secret"))?;
     std::fs::create_dir_all(&bin)?;
-    write_executable(
-        &bin.join("fd"),
+    write_fake_executable(
+        &bin,
+        "fd",
         "#!/bin/sh\nprintf 'src/lib.rs\\nsrc/main.rs\\nsecret/token.rs\\n'\n",
-    )?;
+    );
     let _path = PathGuard::set(&bin);
 
     let deny = PathRule::new(root.join("secret").to_string_lossy(), PathRuleMode::Deny);
-    let executor = make_executor(&root.canonicalize()?, vec![deny]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![deny]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -269,7 +265,7 @@ async fn test_search_files_missing_binary_uses_tier2_content_fallback(
     std::fs::write(root.join("src/lib.rs"), "Needle\nother\nneedle again\n")?;
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -308,8 +304,9 @@ async fn test_search_files_ignores_empty_file_type() -> Result<(), Box<dyn std::
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
     std::fs::write(root.join("src/lib.rs"), "needle\n")?;
-    write_executable(
-        &bin.join("rg"),
+    write_fake_executable(
+        &bin,
+        "rg",
         r#"#!/bin/sh
 prev=''
 for arg in "$@"; do
@@ -321,10 +318,10 @@ for arg in "$@"; do
 done
 printf 'src/lib.rs\n'
 "#,
-    )?;
+    );
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -358,8 +355,9 @@ async fn test_search_files_ignores_empty_glob() -> Result<(), Box<dyn std::error
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
     std::fs::write(root.join("src/lib.rs"), "needle\n")?;
-    write_executable(
-        &bin.join("rg"),
+    write_fake_executable(
+        &bin,
+        "rg",
         r#"#!/bin/sh
 prev=''
 for arg in "$@"; do
@@ -371,10 +369,10 @@ for arg in "$@"; do
 done
 printf 'src/lib.rs\n'
 "#,
-    )?;
+    );
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -413,7 +411,7 @@ async fn test_search_files_missing_fd_uses_tier2_files_fallback(
     std::fs::write(root.join(".hidden/lib.rs"), "needle\n")?;
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -455,7 +453,7 @@ async fn test_search_files_tier2_count_and_deny() -> Result<(), Box<dyn std::err
     let _path = PathGuard::set(&bin);
 
     let deny = PathRule::new(root.join("secret").to_string_lossy(), PathRuleMode::Deny);
-    let executor = make_executor(&root.canonicalize()?, vec![deny]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![deny]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -495,7 +493,7 @@ async fn test_search_files_tier2_fallback_ignores_empty_type_and_glob(
     std::fs::write(root.join("src/lib.rs"), "needle\n")?;
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -541,7 +539,7 @@ async fn test_search_files_tier2_lookaround_returns_empty_with_warning(
     std::fs::write(root.join("src/lib.rs"), "needle\nhaystack\n")?;
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -589,7 +587,7 @@ async fn test_search_files_tier2_skips_binary_and_large_files(
     std::fs::write(root.join("src/huge.rs"), &big)?;
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let out = executor
         .search_files(
             SearchFilesArgs {
@@ -631,7 +629,7 @@ async fn test_search_files_tier2_include_hidden_toggle() -> Result<(), Box<dyn s
     std::fs::write(root.join(".hidden/secret.rs"), "needle\n")?;
     let _path = PathGuard::set(&bin);
 
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
 
     let visible_only = executor
         .search_files(
@@ -683,7 +681,7 @@ async fn test_search_files_head_limit_validation() -> Result<(), Box<dyn std::er
     let tmp = TempDir::new()?;
     let root = test_agent_definition_root(&tmp);
     std::fs::create_dir_all(&root)?;
-    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let executor = make_executor(&tomcat::infra::canonicalize(&root)?, vec![]);
     let err = executor
         .search_files(
             SearchFilesArgs {

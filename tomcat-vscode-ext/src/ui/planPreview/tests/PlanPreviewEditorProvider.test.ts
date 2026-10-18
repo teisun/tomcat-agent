@@ -888,8 +888,11 @@ describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
     const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
     const newText = PLAN_TEXT.replace("Body paragraph.", "Canonical refresh paragraph.");
     const planPath = await createTempPlanFile(oldText);
-    const aliasPath = path.join(path.dirname(planPath), "alias.plan.md");
-    await fsPromises.symlink(planPath, aliasPath);
+    // A directory junction needs no symlink privilege on Windows; elsewhere it is a symlink.
+    const aliasDir = `${path.dirname(planPath)}-alias`;
+    await fsPromises.symlink(path.dirname(planPath), aliasDir, "junction");
+    refreshTempDirs.push(aliasDir);
+    const aliasPath = path.join(aliasDir, path.basename(planPath));
 
     const provider = new PlanPreviewEditorProvider(makeDeps());
     const { panel } = await resolveEditor(provider, oldText, planPath);

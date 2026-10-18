@@ -911,7 +911,10 @@ fn install_rejects_source_target_overlap_in_both_directions() {
             &[
                 (
                     "source",
-                    &source.canonicalize().unwrap().display().to_string()
+                    &crate::infra::platform::canonicalize(&source)
+                        .unwrap()
+                        .display()
+                        .to_string()
                 ),
                 ("destination", &destination.display().to_string()),
             ]
@@ -947,6 +950,34 @@ fn prepare_install_rejects_special_files_in_source_tree() {
         .to_string();
     assert!(
         error.contains(&tr_in(Locale::En, "package.specialFile", &[("path", "")])),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn prepare_install_rejects_junctions_in_source_tree() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(source.path(), "junction-skill", "contains a junction");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+    crate::test_support::create_junction(&source.path().join("linked"), outside.path());
+
+    let error = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&tr_in(Locale::En, "package.copySymlink", &[("path", "")])),
         "unexpected error: {error}"
     );
 }

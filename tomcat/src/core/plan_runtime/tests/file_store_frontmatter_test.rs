@@ -65,6 +65,23 @@ fn plan_file_round_trip_frontmatter() {
 }
 
 #[test]
+fn crlf_plan_checked_out_by_git_parses_and_writes_back_as_lf() {
+    let plan = PlanFile {
+        frontmatter: sample_frontmatter(),
+        body: "## Goal\n\nThis is the goal.\n".to_string(),
+    };
+    let lf = serialize_plan_file(&plan).expect("serialize");
+    let crlf = lf.replace('\n', "\r\n");
+
+    let parsed = parse_plan_file(&crlf).expect("CRLF plan must parse");
+    assert_eq!(parsed.frontmatter.plan_id, "demo_plan_1");
+    assert_eq!(parsed.body, "## Goal\n\nThis is the goal.\n");
+    let written = serialize_plan_file(&parsed).expect("serialize again");
+    assert!(!written.contains('\r'));
+    assert_eq!(written, lf);
+}
+
+#[test]
 fn plan_file_round_trip_preserves_unknown_keys() {
     let mut frontmatter = sample_frontmatter();
     let mut extra = serde_yaml::Mapping::new();

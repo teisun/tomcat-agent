@@ -49,10 +49,16 @@ async fn bash_assignment_rhs_denied_in_all_supported_positions() {
     std::fs::write(&denied, "secret").unwrap();
 
     let exec = make_executor(&agent_def_dir, &denied);
+    // Unquoted, bash strips the backslashes of a Windows path and never reaches the file.
+    let rhs = if cfg!(windows) {
+        format!("'{}'", denied.display())
+    } else {
+        denied.display().to_string()
+    };
     for command in [
-        format!("stat -c %s p={}", denied.display()),
-        format!("p={} ls -la \"$p\"", denied.display()),
-        format!("p={}; ls -la \"$p\"", denied.display()),
+        format!("stat -c %s p={rhs}"),
+        format!("p={rhs} ls -la \"$p\""),
+        format!("p={rhs}; ls -la \"$p\""),
     ] {
         let err = exec
             .execute_bash(&command, None, "__test__", None)

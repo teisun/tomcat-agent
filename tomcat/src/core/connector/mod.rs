@@ -105,7 +105,7 @@ fn normalized_config_path(path: &Path) -> PathBuf {
     let Some(file_name) = path.file_name() else {
         return path.to_path_buf();
     };
-    std::fs::canonicalize(parent)
+    crate::infra::platform::canonicalize(parent)
         .unwrap_or_else(|_| parent.to_path_buf())
         .join(file_name)
 }

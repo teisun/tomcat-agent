@@ -87,7 +87,7 @@ fn safe_path(root: &Path, path: &Path) -> Result<(), String> {
             return Err(tr("instructions.noSymlink", &[]));
         }
     }
-    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let canonical = crate::infra::platform::canonicalize(path).map_err(|e| e.to_string())?;
     if !canonical.starts_with(root) {
         return Err(tr("instructions.outsideRoot", &[]));
     }
@@ -149,7 +149,7 @@ pub fn discover(
     gate: &dyn PermissionGate,
 ) -> Discovery {
     let mut result = Discovery::default();
-    let Ok(root) = root.canonicalize() else {
+    let Ok(root) = crate::infra::platform::canonicalize(root) else {
         return result;
     };
     let mut sources = vec![".cursor".to_string(), ".agents".to_string()];

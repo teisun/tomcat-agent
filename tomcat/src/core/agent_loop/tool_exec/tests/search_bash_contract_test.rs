@@ -50,7 +50,7 @@ fn make_executor_with_bash_timeout(
 #[tokio::test]
 async fn search_files_contract_ignores_empty_type_string() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     std::fs::write(root.join("README.md"), "needle\n").unwrap();
     let primitive = make_executor(&root);
     let tc = ToolCallInfo {
@@ -85,7 +85,7 @@ async fn search_files_contract_ignores_empty_type_string() {
 #[tokio::test]
 async fn bash_contract_surfaces_cwd_context_in_user_visible_error() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let primitive = make_executor(&root);
     let raw_cwd = "$HOME/this-does-not-exist";
     let tc = ToolCallInfo {
@@ -121,7 +121,7 @@ async fn bash_contract_surfaces_cwd_context_in_user_visible_error() {
 #[tokio::test]
 async fn edit_success_returns_bounded_current_disk_view_for_the_next_edit() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let path = root.join("edit-feedback.txt");
     std::fs::write(&path, "before\nold value\nafter\n").expect("write fixture");
     let primitive = make_executor(&root);
@@ -166,7 +166,7 @@ async fn edit_success_returns_bounded_current_disk_view_for_the_next_edit() {
 #[tokio::test]
 async fn bash_and_edit_sequence_needs_no_recovery_turns_after_contract_fixes() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let script = root.join("参数回显.mjs");
     let argument = "含空格的参数";
     std::fs::write(&script, "process.stdout.write(process.argv[2]);\n").expect("write script");
@@ -178,7 +178,7 @@ async fn bash_and_edit_sequence_needs_no_recovery_turns_after_contract_fixes() {
         id: "tc-contract-sequence-bash".to_string(),
         name: "bash".to_string(),
         arguments: serde_json::json!({
-            "command": format!("node {} \"{argument}\"", script.display()),
+            "command": format!("node '{}' \"{argument}\"", script.display()),
             "cwd": root.display().to_string()
         })
         .to_string(),
@@ -234,7 +234,7 @@ async fn bash_and_edit_sequence_needs_no_recovery_turns_after_contract_fixes() {
 #[tokio::test]
 async fn edit_notfound_returns_nearby_current_disk_view_when_an_old_line_is_unique() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let path = root.join("edit-notfound-feedback.txt");
     std::fs::write(&path, "function target() {\n  return \"new\";\n}\n").expect("write fixture");
     let primitive = make_executor(&root);
@@ -286,7 +286,7 @@ async fn edit_notfound_returns_nearby_current_disk_view_when_an_old_line_is_uniq
 #[tokio::test]
 async fn edit_notfound_without_a_reliable_anchor_requests_a_fresh_read() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let path = root.join("edit-notfound-unanchored.txt");
     std::fs::write(&path, "current file content\n").expect("write fixture");
     let primitive = make_executor(&root);
@@ -317,7 +317,7 @@ async fn edit_notfound_without_a_reliable_anchor_requests_a_fresh_read() {
 #[tokio::test]
 async fn bash_contract_stops_pipe_holder_without_hanging_when_no_registry() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let marker = root.join("pipe-holder-leak.txt");
     // 后台 child 持有 stdout/stderr 写端；若前台等待到期后不 kill 整个进程组，
     // 这条子进程会继续活到 9s 并写 marker，形成 runaway。
@@ -361,7 +361,7 @@ async fn bash_contract_stops_pipe_holder_without_hanging_when_no_registry() {
 #[tokio::test]
 async fn search_files_content_mode_defaults_to_three_context_lines() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(dir.path()).unwrap();
     let body: String = (1..=11)
         .map(|i| {
             if i == 6 {

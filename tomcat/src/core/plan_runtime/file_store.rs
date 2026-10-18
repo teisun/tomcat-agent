@@ -289,7 +289,11 @@ pub fn serialize_plan_file(plan: &PlanFile) -> Result<String, PlanError> {
 }
 
 /// 从磁盘文本反序列化 PlanFile（分离 frontmatter / body）。
+///
+/// Windows 上 git `core.autocrlf=true` 检出的 plan 是 CRLF，这里先统一成 LF；
+/// 写回走 [`serialize_plan_file`]，始终是 LF。
 pub fn parse_plan_file(text: &str) -> Result<PlanFile, PlanError> {
+    let text = text.replace("\r\n", "\n");
     let stripped = text
         .strip_prefix("---\n")
         .ok_or(PlanError::FrontmatterDelimMissing)?;

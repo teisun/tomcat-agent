@@ -36,11 +36,17 @@ fn request_line(request_text: &str) -> &str {
     request_text.lines().next().unwrap_or_default()
 }
 
-fn assert_failure(result: Result<Vec<impl std::fmt::Debug>, RemoteModelsFailure>, reason: RemoteModelsFailureReason) -> RemoteModelsFailure {
+fn assert_failure(
+    result: Result<Vec<impl std::fmt::Debug>, RemoteModelsFailure>,
+    reason: RemoteModelsFailureReason,
+) -> RemoteModelsFailure {
     let failure = result.expect_err("listing should fail");
     assert_eq!(failure.reason, reason);
     let serialized = serde_json::to_string(&failure).unwrap();
-    assert!(!serialized.contains(TEMP_KEY), "failure payload leaked the key: {serialized}");
+    assert!(
+        !serialized.contains(TEMP_KEY),
+        "failure payload leaked the key: {serialized}"
+    );
     assert!(!failure.message().contains(TEMP_KEY));
     failure
 }
@@ -53,15 +59,21 @@ async fn openai_compatible_listing_uses_bearer_and_returns_deduplicated_names() 
     )])
     .await;
 
-    let models = list_remote_models(&LlmRuntimeConfig::default(), request(&server.base_url, "openai"))
-        .await
-        .expect("listing succeeds");
+    let models = list_remote_models(
+        &LlmRuntimeConfig::default(),
+        request(&server.base_url, "openai"),
+    )
+    .await
+    .expect("listing succeeds");
 
     let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(ids, ["deepseek-v4-pro", "deepseek-v4-flash"]);
     let texts = server.request_texts();
     assert_eq!(request_line(&texts[0]), "GET /v1/models HTTP/1.1");
-    assert_eq!(header_value(&texts[0], "authorization"), Some(format!("Bearer {TEMP_KEY}").as_str()));
+    assert_eq!(
+        header_value(&texts[0], "authorization"),
+        Some(format!("Bearer {TEMP_KEY}").as_str())
+    );
     assert_eq!(header_value(&texts[0], "x-api-key"), None);
     server.shutdown().await;
 }
@@ -83,16 +95,23 @@ async fn anthropic_listing_uses_x_api_key_version_and_page_limit() {
 
     assert_eq!(models.len(), 1);
     let texts = server.request_texts();
-    assert_eq!(request_line(&texts[0]), "GET /v1/models?limit=1000 HTTP/1.1");
+    assert_eq!(
+        request_line(&texts[0]),
+        "GET /v1/models?limit=1000 HTTP/1.1"
+    );
     assert_eq!(header_value(&texts[0], "x-api-key"), Some(TEMP_KEY));
-    assert_eq!(header_value(&texts[0], "anthropic-version"), Some("2023-06-01"));
+    assert_eq!(
+        header_value(&texts[0], "anthropic-version"),
+        Some("2023-06-01")
+    );
     assert_eq!(header_value(&texts[0], "authorization"), None);
     server.shutdown().await;
 }
 
 #[tokio::test]
 async fn path_aware_base_url_keeps_its_path() {
-    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(200, r#"{"data":[]}"#)]).await;
+    let server =
+        MockHttpServer::start(vec![ScriptedHttpResponse::json(200, r#"{"data":[]}"#)]).await;
 
     let models = list_remote_models(
         &LlmRuntimeConfig::default(),
@@ -102,7 +121,10 @@ async fn path_aware_base_url_keeps_its_path() {
     .expect("empty list is still a list");
 
     assert!(models.is_empty());
-    assert_eq!(request_line(&server.request_texts()[0]), "GET /coding/v1/models HTTP/1.1");
+    assert_eq!(
+        request_line(&server.request_texts()[0]),
+        "GET /coding/v1/models HTTP/1.1"
+    );
     server.shutdown().await;
 }
 
@@ -174,7 +196,11 @@ async fn saved_key_is_read_from_slot_when_no_temporary_key_is_given() {
         "REMOTE_MODELS_TEST_API_KEY".to_string(),
         SAVED_KEY.to_string(),
     )]));
-    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(200, r#"{"data":[{"id":"m"}]}"#)]).await;
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+        200,
+        r#"{"data":[{"id":"m"}]}"#,
+    )])
+    .await;
 
     let result = list_remote_models(
         &LlmRuntimeConfig::default(),

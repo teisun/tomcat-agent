@@ -331,10 +331,7 @@ async fn config_set_array_path_rule_appends_with_json_value() {
     )
     .into_arc();
     let ctx = ConfigToolContext::new(p.clone(), confirm).with_gate(gate.clone());
-    let rule = format!(
-        r#"{{"path":"{}","mode":"deny"}}"#,
-        blocked.to_string_lossy()
-    );
+    let rule = serde_json::json!({"path": blocked.to_string_lossy(), "mode": "deny"}).to_string();
     let outcome = config_set_impl("primitive.path_rules", &rule, &ctx)
         .await
         .unwrap();
@@ -832,9 +829,8 @@ async fn package_install_requires_ordinary_source_read_authorization() {
         .await
         .unwrap_err();
     assert!(matches!(error, AppError::Permission(_)));
-    assert!(error
-        .to_string()
-        .contains(source.to_string_lossy().as_ref()));
+    let shown = crate::infra::platform::canonicalize(&source).unwrap();
+    assert!(error.to_string().contains(shown.to_string_lossy().as_ref()));
     assert!(!dir
         .path()
         .join("agents/main/skills/source-needs-read")

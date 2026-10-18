@@ -11,7 +11,8 @@ function runBash(script: string): string {
   }).trim();
 }
 
-describe("install.sh release selection", () => {
+// install.sh is the Unix installer and is not shipped for Windows.
+describe.skipIf(process.platform === "win32")("install.sh release selection", () => {
   it("picks the newest CLI release instead of the newest extension release", () => {
     const releasesJson = JSON.stringify([
       {

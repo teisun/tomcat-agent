@@ -767,7 +767,7 @@ fn wait_for_playwright_ready(child: &mut ServeChild, fixture: &ServeFixture) {
         attempt += 1;
         let id = format!("playwright-status-{attempt}");
         child.send_value(&json!({ "type": "list_connectors", "id": id,
-            "context": { "workspaceRoot": fixture.workspace.canonicalize().unwrap() } }));
+            "context": { "workspaceRoot": tomcat::infra::canonicalize(&fixture.workspace).unwrap() } }));
         let frames = child.recv_until(Duration::from_secs(15), |frame| {
             frame.get("id").and_then(Value::as_str) == Some(id.as_str())
         });

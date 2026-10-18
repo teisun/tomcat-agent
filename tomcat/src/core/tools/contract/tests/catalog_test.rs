@@ -536,5 +536,8 @@ fn bash_schema_exposes_only_a_single_command_string() {
             description.contains("Complete shell command line")
                 && description.contains("pipes")
                 && description.contains("sh -c")
+                && description.contains("Git Bash `bash -c`")
+                && description.contains("forward slashes")
+                && !description.contains("cmd /C")
         }));
 }

@@ -7,7 +7,6 @@
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +20,7 @@ use crate::core::connector::mcp::config::McpOAuthConfig;
 use crate::infra::config::get_work_dir;
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
+use crate::infra::platform::{set_private_file_permissions, write_private_file_atomic};
 use crate::AppConfig;
 
 const TOKEN_FILE_NAME: &str = "connector-oauth.json";
@@ -371,27 +371,7 @@ impl OAuthTokenStore {
                 &[("detail", &error.to_string())],
             ))
         })?;
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| AppError::Config(tr("oauth.storeParent", &[])))?;
-        std::fs::create_dir_all(parent)?;
-        let temp_path = parent.join(format!(
-            ".{}.{}",
-            self.path.file_name().unwrap_or_default().to_string_lossy(),
-            uuid::Uuid::new_v4()
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut output = options.open(&temp_path)?;
-        set_private_file_permissions(&temp_path)?;
-        output.write_all(&contents)?;
-        output.sync_all()?;
-        std::fs::rename(&temp_path, &self.path)?;
-        set_private_file_permissions(&self.path)?;
-        Ok(())
+        write_private_file_atomic(&self.path, &contents)
     }
 }
 
@@ -835,18 +815,13 @@ pub(crate) async fn authorize_token(
     Ok(stored)
 }
 fn open_url(url: &str) -> Result<(), AppError> {
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "windows")]
-    let mut command = std::process::Command::new("explorer.exe");
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    return Err(AppError::Tool(tr("oauth.browserUnsupported", &[])));
-    command.arg(url).spawn().map_err(|error| {
-        AppError::Tool(tr("oauth.browserOpen", &[("detail", &error.to_string())]))
-    })?;
-    Ok(())
+    crate::infra::platform::open_url(url).map_err(|error| {
+        AppError::Tool(if error.kind() == std::io::ErrorKind::Unsupported {
+            tr("oauth.browserUnsupported", &[])
+        } else {
+            tr("oauth.browserOpen", &[("detail", &error.to_string())])
+        })
+    })
 }
 
 pub fn pkce_pair() -> Result<(String, String), AppError> {
@@ -927,32 +902,6 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
-}
-
-fn set_private_file_permissions(path: &std::path::Path) -> Result<(), AppError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(windows)]
-    {
-        let username =
-            std::env::var("USERNAME").map_err(|_| AppError::Config(tr("oauth.aclUser", &[])))?;
-        let grant = format!("{username}:F");
-        let status = std::process::Command::new("icacls")
-            .args([
-                path.as_os_str(),
-                std::ffi::OsStr::new("/inheritance:r"),
-                std::ffi::OsStr::new("/grant:r"),
-                std::ffi::OsStr::new(&grant),
-            ])
-            .status()?;
-        if !status.success() {
-            return Err(AppError::Config(tr("oauth.aclFailed", &[])));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

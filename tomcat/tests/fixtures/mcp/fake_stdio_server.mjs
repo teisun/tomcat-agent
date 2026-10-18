@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
+import { writeFileSync } from "node:fs";
 import { access, appendFile, open } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -27,6 +28,10 @@ const exitGateFile = option("--exit-gate-file");
 const exitOnceFile = option("--exit-once-file");
 const startupGateFile = option("--startup-gate-file");
 const failStartupFile = option("--fail-startup-file");
+const lingerAfterEofMs = Number(option("--linger-after-eof-ms") ?? 0);
+const pidFile = option("--pid-file");
+// Synchronous: an await here would let readline emit lines before the handler below exists.
+if (pidFile) writeFileSync(pidFile, String(process.pid));
 const pending = new Map();
 let writes = Promise.resolve();
 
@@ -175,4 +180,6 @@ input.on("line", (line) => {
 });
 input.on("close", () => {
   for (const controller of pending.values()) controller.abort();
+  // Like a browser-backed server whose cleanup outlives its client.
+  if (lingerAfterEofMs > 0) setTimeout(() => {}, lingerAfterEofMs);
 });

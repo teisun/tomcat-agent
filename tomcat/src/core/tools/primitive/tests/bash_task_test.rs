@@ -317,7 +317,10 @@ async fn spawn_denied_by_path_preflight_has_no_task_side_effect() {
         ));
     let err = reg
         .spawn(
-            format!("ls {}", denied_root.join("secret.txt").display()),
+            format!(
+                "ls {}",
+                crate::test_support::shell_pwd(&denied_root.join("secret.txt"))
+            ),
             Some(dir.path().to_path_buf()),
         )
         .await
@@ -379,7 +382,10 @@ async fn runtime_preview_is_bounded_by_bytes_and_tracks_offsets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let ticket = reg
-        .spawn("python3 -c 'print(\"x\" * 70000)'".to_string(), None)
+        .spawn(
+            "awk 'BEGIN { for (i = 0; i < 70000; i++) printf \"x\"; print \"\" }'".to_string(),
+            None,
+        )
         .await
         .expect("spawn");
     reg.wait_for_finish(&ticket.task_id).await.expect("finish");
@@ -478,7 +484,11 @@ async fn lifecycle_waits_for_final_preview_barrier() {
         .await
         .expect("spawn");
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while reg.get_info(&ticket.task_id).expect("task").status == BashTaskStatus::Running {
+        assert!(std::time::Instant::now() < deadline, "shell never exited");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(30), lifecycle.recv())
             .await
@@ -511,7 +521,17 @@ async fn stop_finishes_only_after_output_drain_and_preview_barrier() {
         .spawn_tracked_with_preview_barrier("printf before-stop; sleep 30".to_string(), None, true)
         .await
         .expect("spawn");
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !reg
+        .read_output(&ticket.task_id, None)
+        .await
+        .expect("read")
+        .content
+        .contains("before-stop")
+    {
+        assert!(std::time::Instant::now() < deadline, "shell never printed");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     reg.stop(&ticket.task_id).await.expect("stop request");
 
     assert!(
@@ -566,4 +586,68 @@ async fn stderr_preview_offsets_match_durable_combined_log() {
     assert_eq!(preview.output, durable.content);
     assert_eq!(preview.start_offset, 0);
     assert_eq!(preview.next_offset, durable.next_offset);
+}
+
+#[cfg(windows)]
+fn windows_pid_alive(pid: u32) -> bool {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .expect("tasklist");
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn stop_kills_every_process_in_the_git_bash_tree() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
+    let ticket = reg
+        .spawn(
+            "sleep 60 & cat /proc/$!/winpid; ping -n 60 127.0.0.1 >/dev/null & cat /proc/$!/winpid; wait"
+                .to_string(),
+            None,
+        )
+        .await
+        .expect("spawn");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let pids = loop {
+        let chunk = reg.read_output(&ticket.task_id, None).await.expect("read");
+        let pids: Vec<u32> = chunk
+            .content
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        if pids.len() == 2 {
+            break pids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected two background pids: {:?}",
+            chunk.content
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(pids.iter().all(|pid| windows_pid_alive(*pid)));
+
+    reg.stop(&ticket.task_id).await.expect("stop");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        reg.wait_for_finish(&ticket.task_id),
+    )
+    .await
+    .expect("stop must end the task long before its 60s children would exit")
+    .expect("finish");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while pids.iter().any(|pid| windows_pid_alive(*pid)) {
+        assert!(
+            Instant::now() < deadline,
+            "sleep processes outlived stop: {pids:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

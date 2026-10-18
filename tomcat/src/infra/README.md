@@ -168,7 +168,28 @@ AgentEvent / ExtensionEvent / raw payload
 
 ### 3.5 平台与日志
 
-- **platform**：`normalize_path(path)`、`read_file_utf8(path)`、`write_file_atomic(path, content)`、`current_dir()`、`system_info()`（`SystemInfo { os, arch }`）。
+- **platform**：唯一的平台差异层，业务代码不写平台 `cfg`、不直接用系统 crate（`tests/boundary_test.rs` 守护；边界规则见 `Codeing&Architecture_Spec.md` §5「平台差异边界」）。`mod.rs` 只放 mod 声明与 `pub use`，一页看全所有接口：
+
+```text
+platform/
+├─ mod.rs           门面：mod 声明 + pub use
+├─ paths.rs         home_dir canonicalize normalize_path format_home_path
+│                   path_starts_with PATH_COMPARE_IGNORES_CASE to_slash LEGACY_MAX_PATH
+├─ fs.rs            read_file_utf8 write_file_atomic(_with) write_private_file_atomic
+│                   set_private_file_permissions is_lock_contended NULL_DEVICE
+│                   open_no_follow same_file set_create_mode mode_bits PermissionSnapshot
+├─ private_acl.rs   （Windows 内部实现：私密文件 DACL）
+├─ process.rs       ProcessTree exit_code kill_tree_on_drop spawn_detached CHILD_STARTUP_ENV_VARS
+├─ process_job.rs   （Windows 内部实现：Job Object 进程树）
+├─ executable.rs    find_executable resolve_program
+├─ shell.rs         posix_shell shell_path_to_native POSIX_SHELL_NEEDS_INSTALL
+├─ console.rs       prepare_console ASYNC_PRINT_DURING_INPUT
+├─ stdin.rs         read_line_cancellable protocol_input
+├─ user_install.rs  user_bin_dir install_user_command add_user_bin_dir_to_path manual_path_step
+└─ system.rs        system_package_manager PATH_CHANGES_NEED_RESTART FOLLOW_FILE_COMMAND
+                    DEFAULT_EDITOR open_url
+```
+
 - **logging**：`init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), AppError>`，基于 tracing：stderr；`file_enabled` 且 `log_dir = Some(resolve_log_dir(...))` 时另写按日文件。禁止在日志中打印敏感信息。CLI 在 `run_cli` 中于 `ensure_work_dir_structure` 之后调用。
 
 ---

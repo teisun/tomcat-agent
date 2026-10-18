@@ -251,7 +251,7 @@ fn generate_legacy_data() {
     }
 }
 
-fn copy_relocated(source: &Path, destination: &Path, home: &str, info: &Value, url: &str) {
+fn copy_relocated(source: &Path, destination: &Path, replacements: &[(String, String)]) {
     fs::create_dir_all(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {
         let path = entry.unwrap().path();
@@ -260,12 +260,12 @@ fn copy_relocated(source: &Path, destination: &Path, home: &str, info: &Value, u
             continue;
         }
         if path.is_dir() {
-            copy_relocated(&path, &destination.join(name), home, info, url);
+            copy_relocated(&path, &destination.join(name), replacements);
         } else {
             let raw = fs::read_to_string(&path).unwrap();
-            let relocated = raw
-                .replace(info["home"].as_str().unwrap(), home)
-                .replace(info["baseUrl"].as_str().unwrap(), url);
+            let relocated = replacements
+                .iter()
+                .fold(raw, |text, (from, to)| text.replace(from, to));
             fs::write(destination.join(name), relocated).unwrap();
         }
     }
@@ -286,13 +286,23 @@ fn legacy_data_directories_remain_usable_after_upgrade() {
             sse_done(),
         ])]);
         let data = fx.home_path.join(".tomcat");
-        copy_relocated(
-            &source,
-            &data,
-            fx.home_path.to_str().unwrap(),
-            &info,
-            &server.base_url,
-        );
+        // The legacy home only occurs inside JSON strings, so a Windows home needs `\\`.
+        // macOS also recorded canonical paths, whose `/private` prefix the home lacks.
+        let json_text = |path: &Path| {
+            let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+            quoted.trim_matches('"').to_string()
+        };
+        let old_home = info["home"].as_str().unwrap();
+        let canonical_home = tomcat::infra::canonicalize(&fx.home_path).unwrap();
+        let replacements = [
+            (format!("/private{old_home}"), json_text(&canonical_home)),
+            (old_home.to_string(), json_text(&fx.home_path)),
+            (
+                info["baseUrl"].as_str().unwrap().to_string(),
+                server.base_url.clone(),
+            ),
+        ];
+        copy_relocated(&source, &data, &replacements);
         if variant == "cli-init" {
             let mut models = fs::read_to_string(data.join("models.toml")).unwrap();
             models.push_str(&format!(
@@ -357,7 +367,10 @@ fn legacy_data_directories_remain_usable_after_upgrade() {
                 .unwrap();
             assert_eq!(saved["keySource"], "saved", "{saved}");
             let state = request(&mut child, json!({"type":"get_state", "sessionId":session}));
-            assert_eq!(state["modelReady"], false, "a retired default asks to reselect: {state}");
+            assert_eq!(
+                state["modelReady"], false,
+                "a retired default asks to reselect: {state}"
+            );
             // Only after proving unmodified cold loading, route the builtin through the local
             // mock using the same Settings command; never send the stored fake key off-host.
             local_model(&mut child, &server.base_url);

@@ -120,8 +120,14 @@ fn key_source_distinguishes_saved_keys_from_shell_environment() {
         "saved".to_string(),
     )]));
 
-    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_SAVED_KEY"), Some(KeySource::Saved));
-    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_ENV_KEY"), Some(KeySource::Environment));
+    assert_eq!(
+        key_source_for_env("KEY_SOURCE_TEST_SAVED_KEY"),
+        Some(KeySource::Saved)
+    );
+    assert_eq!(
+        key_source_for_env("KEY_SOURCE_TEST_ENV_KEY"),
+        Some(KeySource::Environment)
+    );
     assert_eq!(key_source_for_env("KEY_SOURCE_TEST_MISSING_KEY"), None);
 
     refresh_managed_credentials_from_entries(&BTreeMap::new());
@@ -153,7 +159,10 @@ fn removing_a_saved_key_revokes_its_startup_preloaded_copy() {
         "KEY_SOURCE_TEST_PRELOADED_KEY".to_string(),
         "copied-from-dotenv".to_string(),
     )]));
-    assert_eq!(key_source_for_env("KEY_SOURCE_TEST_PRELOADED_KEY"), Some(KeySource::Saved));
+    assert_eq!(
+        key_source_for_env("KEY_SOURCE_TEST_PRELOADED_KEY"),
+        Some(KeySource::Saved)
+    );
 
     refresh_managed_credentials_from_entries(&BTreeMap::new());
 

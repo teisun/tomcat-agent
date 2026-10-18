@@ -747,7 +747,11 @@ fn switching_models_or_legacy_vendor_sources_strip_reasoning_without_empty_field
         .unwrap()
         .source_provider = "deepseek".to_string();
     let legacy_wire = transport_messages(
-        &[ChatMessage::user("look"), legacy, ChatMessage::tool("call_1", "ok")],
+        &[
+            ChatMessage::user("look"),
+            legacy,
+            ChatMessage::tool("call_1", "ok"),
+        ],
         "deepseek-v4-pro",
         true,
         None,
@@ -756,10 +760,16 @@ fn switching_models_or_legacy_vendor_sources_strip_reasoning_without_empty_field
 
     let plain = ChatMessage::assistant_with_tool_calls(
         None,
-        vec![serde_json::json!({"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}})],
+        vec![
+            serde_json::json!({"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}),
+        ],
     );
     let plain_wire = transport_messages(
-        &[ChatMessage::user("look"), plain, ChatMessage::tool("call_1", "ok")],
+        &[
+            ChatMessage::user("look"),
+            plain,
+            ChatMessage::tool("call_1", "ok"),
+        ],
         "glm-5.2",
         true,
         None,

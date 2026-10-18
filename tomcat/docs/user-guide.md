@@ -100,6 +100,23 @@ install -m 755 ./tomcat "$HOME/.local/bin/tomcat"
 
 `tomcat init` writes the default config, creates the working directory structure, deploys embedded assets, and configures API keys. After initialization, continue with [Section 2](#2-initialization-and-environment-checks) and [Section 6](#6-chat-modes).
 
+### Windows x64
+
+There is no install script for Windows; download `tomcat-<tag>-x86_64-pc-windows-msvc.tar.gz` from the Release page. Install [Git for Windows](https://git-scm.com/download/win) first (`winget install --id Git.Git -e`): the `bash` tool runs commands through its Git Bash and never uses WSL's `bash.exe`.
+
+```powershell
+# 1. Extract (tar ships with Windows 10 and later)
+tar -xzf tomcat-<tag>-x86_64-pc-windows-msvc.tar.gz
+
+# 2. Initialize: copies tomcat.exe to %USERPROFILE%\.local\bin and adds that directory to your user PATH
+.\tomcat.exe init
+
+# 3. Open a new terminal so it picks up the new PATH, then verify
+tomcat --version
+```
+
+Run `tomcat chat` in Windows Terminal, PowerShell, or cmd. The mintty window that ships with Git Bash is not covered by acceptance testing.
+
 ---
 
 ## 1. Build from Source
@@ -136,6 +153,28 @@ Check the version:
 tomcat --version
 # tomcat 0.1.8
 ```
+
+### Windows Development Environment
+
+| Dependency | Notes |
+|------------|-------|
+| Visual Studio Build Tools | "Desktop development with C++" workload (MSVC linker and Windows SDK) |
+| Rust | `rustup` with the default `x86_64-pc-windows-msvc` toolchain and `clippy` |
+| Node.js | 22, for the VS Code extension |
+| Git for Windows | Provides Git Bash for the `bash` tool and for the test scripts |
+| cargo-nextest | Runs the integration test groups |
+| ripgrep (`rg`) | The `search_files` tests cover the ripgrep backend (`winget install BurntSushi.ripgrep.MSVC`); without it the tool uses a fallback that has no context lines |
+
+The repository root `.gitattributes` (`* text=auto eol=lf`) checks every text file out with LF line endings, so fixtures and snapshots match byte-for-byte on Windows regardless of `core.autocrlf`. If you cloned before that file existed, re-clone so existing files are checked out with LF.
+
+Run the test gate from Git Bash rather than WSL; a bare `bash` in PowerShell may resolve to WSL:
+
+```bash
+cd tomcat
+./scripts/run-integration-tests.sh gate-fast
+```
+
+For the extension, `npm run gate:fast` and `npm run test:integration` run on Windows. The VS Code end-to-end suites that use a fake CLI script (`gate:full`, `test:e2e:*`) only run on macOS and Linux; the Windows package is verified with the real `tomcat.exe` by the release pipeline.
 
 ### Working Directory
 
@@ -499,7 +538,7 @@ Value types are inferred automatically: integers, booleans (`true` / `false`), a
 
 ### Startup Preflight and Search-Tool Installation
 
-After you enter `tomcat code` or `tomcat claw`, tomcat checks in the background for fast implementations used by `search_files` (`rg`/ripgrep and `fd`/`fdfind`). If they are missing, tomcat attempts a background install for the current platform. This does not block chat. If installation fails, `search_files` automatically falls back to the in-process Tier 2 implementation (`walkdir + globset + Rust regex`). These preflights still run by default, but the `[tools]` / `[git]` terminal prompts are **off** by default to avoid interrupting input.
+After you enter `tomcat code` or `tomcat claw`, tomcat checks in the background for fast implementations used by `search_files` (`rg`/ripgrep and `fd`/`fdfind`). If they are missing, tomcat attempts a background install for the current platform (Homebrew or apt on Unix, `winget` on Windows). This does not block chat. If installation fails, `search_files` automatically falls back to the in-process Tier 2 implementation (`walkdir + globset + Rust regex`). These preflights still run by default, but the `[tools]` / `[git]` terminal prompts are **off** by default to avoid interrupting input.
 
 To disable background installation attempts, set:
 

@@ -9,7 +9,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn canonicalize_for_compare(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    tomcat::infra::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn parse_shell_array(script: &str, name: &str) -> Vec<String> {
@@ -180,7 +180,13 @@ fn missing_live_credentials_is_not_a_successful_skip() {
         } else {
             target
         };
-        let output = std::process::Command::new("bash")
+        // The gate script is bash; Unix `sh` may be dash, and on Windows the only bash we
+        // may launch is Git Bash (System32\bash.exe is WSL).
+        #[cfg(unix)]
+        let bash = PathBuf::from("bash");
+        #[cfg(windows)]
+        let bash = tomcat::infra::posix_shell().unwrap();
+        let output = std::process::Command::new(bash)
             .arg(repo_root().join("scripts/run-integration-tests.sh"))
             .arg("integration-openai-responses-wire")
             .env("TOMCAT_E2E_OPENAI_TARGET", target)

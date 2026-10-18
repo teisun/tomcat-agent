@@ -260,7 +260,10 @@ overview: Updated overview.
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-home-"));
     tempDirs.push(dir);
     const previousHome = process.env.HOME;
+    // os.homedir() reads USERPROFILE on Windows and HOME elsewhere.
+    const previousUserProfile = process.env.USERPROFILE;
     process.env.HOME = dir;
+    process.env.USERPROFILE = dir;
     try {
       const planPath = path.join(dir, "demo.plan.md");
       await fs.writeFile(
@@ -276,7 +279,13 @@ goal: Home-expanded plan
       const metadata = await readPlanMetadata("~/demo.plan.md", cache);
       expect(metadata).toEqual({ title: "Home-expanded plan" });
     } finally {
-      process.env.HOME = previousHome;
+      for (const [key, value] of [["HOME", previousHome], ["USERPROFILE", previousUserProfile]] as const) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
     }
   });
 });

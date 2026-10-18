@@ -141,7 +141,10 @@ pub fn anthropic_test_base_url() -> String {
 }
 
 pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
-    matches!(target, "gpt-5.6" | "openai/gpt-6-astra" | "openai/gpt-6.1-sol")
+    matches!(
+        target,
+        "gpt-5.6" | "openai/gpt-6-astra" | "openai/gpt-6.1-sol"
+    )
 }
 
 pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {
@@ -864,6 +867,34 @@ impl Drop for CwdGuard {
         if let Some(p) = &self.orig {
             let _ = std::env::set_current_dir(p);
         }
+    }
+}
+
+/// 在 `dir` 下写一个可被 PATH 查找到的假命令 `name`，内容是 POSIX sh 脚本 `script`。
+///
+/// Unix：可执行脚本 `dir/name`。Windows：PATH 查找只认 PATHEXT 后缀，所以写成
+/// `dir/name.sh` 加启动器 `dir/name.cmd`，由 Git Bash 执行同一份脚本。
+pub fn write_fake_executable(dir: &Path, name: &str, script: &str) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, script).expect("write fake executable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake executable");
+        path
+    }
+    #[cfg(windows)]
+    {
+        std::fs::write(dir.join(format!("{name}.sh")), script).expect("write fake script");
+        let bash = tomcat::infra::posix_shell().expect("Git Bash for fake executable");
+        let launcher = dir.join(format!("{name}.cmd"));
+        std::fs::write(
+            &launcher,
+            format!("@\"{}\" \"%~dp0{name}.sh\" %*\r\n", bash.display()),
+        )
+        .expect("write fake executable launcher");
+        launcher
     }
 }
 

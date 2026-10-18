@@ -1,3 +1,5 @@
+import * as path from "node:path";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
@@ -49,8 +51,13 @@ describe("VsCodeIde session file diff", () => {
 });
 
 describe("VsCodeIde files", () => {
+  // `/workspace` has no drive letter on Windows, so anchor it like a real fsPath.
+  const root = path.resolve("/workspace");
   beforeEach(() => {
     __testing.reset();
+    (vscode.workspace as { workspaceFolders?: Array<{ uri: vscode.Uri }> }).workspaceFolders = [
+      { uri: vscode.Uri.file(root) },
+    ];
   });
 
   it("does not overwrite an existing inline breakpoint", async () => {
@@ -68,11 +75,11 @@ describe("VsCodeIde files", () => {
 
   it("opens files at a specific line and reveals the selection", async () => {
     const ide = new VsCodeIde();
-    __testing.registerFile("/workspace/src/reveal.ts", "alpha\nbeta\ngamma\n");
+    __testing.registerFile(path.join(root, "src", "reveal.ts"), "alpha\nbeta\ngamma\n");
 
     await ide.showFile("src/reveal.ts", 2);
 
-    expect(vscode.window.activeTextEditor?.document.uri.fsPath).toBe("/workspace/src/reveal.ts");
+    expect(vscode.window.activeTextEditor?.document.uri.fsPath).toBe(path.join(root, "src", "reveal.ts"));
     expect(vscode.window.activeTextEditor?.selection.start.line).toBe(1);
     expect(vscode.window.activeTextEditor?.selection.end.line).toBe(1);
     expect(__testing.lastRevealRange?.range.start.line).toBe(1);
@@ -80,14 +87,14 @@ describe("VsCodeIde files", () => {
 
   it("reveals a resolved directory in the explorer instead of opening it as text", async () => {
     const ide = new VsCodeIde();
-    __testing.registerDirectory("/workspace/src/components");
+    __testing.registerDirectory(path.join(root, "src", "components"));
     const executeCommand = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
 
     await ide.showFile("src/components");
 
     expect(executeCommand).toHaveBeenCalledWith(
       "revealInExplorer",
-      vscode.Uri.file("/workspace/src/components"),
+      vscode.Uri.file(path.join(root, "src", "components")),
     );
     executeCommand.mockRestore();
   });

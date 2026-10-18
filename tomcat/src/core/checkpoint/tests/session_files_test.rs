@@ -13,7 +13,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().canonicalize().unwrap();
+        let dir = crate::infra::platform::canonicalize(temp.path()).unwrap();
         let transcript = dir.join("s.jsonl");
         fs::write(
             &transcript,
@@ -72,16 +72,12 @@ impl Fixture {
         path
     }
     fn set_manifest_time(&self, id: &str, tick: u64) {
-        fs::File::open(
-            session_dir(&self.transcript)
+        crate::test_support::set_mtime(
+            &session_dir(&self.transcript)
                 .join(id)
                 .join("baselines.jsonl"),
-        )
-        .unwrap()
-        .set_modified(
             std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000 + tick),
-        )
-        .unwrap();
+        );
     }
     fn keep(&self) -> String {
         let source = self.list().source_turn_id.unwrap();
@@ -114,6 +110,11 @@ impl Fixture {
             "git {args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        if args.first() == Some(&"init") {
+            // Git for Windows enables core.autocrlf system-wide; fixture repositories stay
+            // byte-exact for both the test's git commands and the code under test.
+            self.git(&["config", "core.autocrlf", "false"]);
+        }
     }
     fn commit(&self) {
         fs::write(
@@ -558,7 +559,9 @@ fn session_file_late_repository_and_outside_path_use_correct_baselines() {
         "v1"
     );
     let outside = tempfile::tempdir().unwrap();
-    let path = outside.path().canonicalize().unwrap().join("outside");
+    let path = crate::infra::platform::canonicalize(outside.path())
+        .unwrap()
+        .join("outside");
     fs::write(&path, b"original").unwrap();
     let tracker = TurnFileBaselines::new(&f.transcript, "u2", f.dir.clone()).unwrap();
     let pending = tracker.prepare(path.to_str().unwrap()).unwrap();
@@ -965,7 +968,7 @@ fn session_file_corrupt_manifest_before_scope_is_ignored() {
     let result = f.list();
     assert_eq!(result.source_turn_id.as_deref(), Some(start.as_str()));
     assert_eq!(result.files.len(), 1);
-    assert!(result.files[0].path.ends_with("/b"));
+    assert!(Path::new(&result.files[0].path).ends_with("b"));
 }
 
 #[test]

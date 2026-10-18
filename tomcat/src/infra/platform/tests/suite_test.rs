@@ -1,17 +1,7 @@
 use super::super::*;
-
-#[test]
-fn system_info_has_os_and_arch() {
-    let info = system_info();
-    assert!(!info.os.is_empty());
-    assert!(!info.arch.is_empty());
-}
-
-#[test]
-fn current_dir_ok() {
-    let r = current_dir();
-    assert!(r.is_ok());
-}
+use crate::infra::error::AppError;
+use std::io::Write;
+use std::path::Path;
 
 #[test]
 fn read_file_utf8_missing_is_io_error() {
@@ -102,4 +92,70 @@ fn write_file_atomic_removes_temp_file_when_rename_fails() {
     assert!(matches!(r, Err(AppError::Io(_))), "{r:?}");
     assert_eq!(temp_file_names(dir.path()), Vec::<String>::new());
     assert!(path.join("keep.txt").exists());
+}
+
+#[test]
+fn normalize_path_expands_tilde_with_either_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(home.join(".tomcat")).unwrap();
+    let _home = crate::test_support::HomeOverride::new(&home);
+    assert_eq!(normalize_path("~/.tomcat").unwrap(), home.join(".tomcat"));
+    assert_eq!(normalize_path("~\\.tomcat").unwrap(), home.join(".tomcat"));
+}
+
+#[cfg(windows)]
+#[test]
+fn normalize_path_displays_missing_home_paths_with_native_separators() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = canonicalize(dir.path()).unwrap();
+    let _home = crate::test_support::HomeOverride::new(&home);
+    let path = normalize_path("~/.tomcat/tomcat.config.toml").unwrap();
+    assert_eq!(
+        path.display().to_string(),
+        format!(r"{}\.tomcat\tomcat.config.toml", home.display())
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn private_file_permissions_drop_explicit_grants_to_other_accounts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".env");
+    std::fs::write(&path, "KEY=value\n").unwrap();
+    // Everyone 只读：显式授权，去掉继承并不会移除它。
+    let granted = std::process::Command::new("icacls")
+        .arg(&path)
+        .args(["/grant", "*S-1-1-0:R"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(granted.success());
+    set_private_file_permissions(&path).unwrap();
+    crate::test_support::assert_private_to_current_user(&path);
+}
+
+#[test]
+fn format_home_path_joins_home_relative_parts_with_forward_slashes() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::HomeOverride::new(home.path());
+    assert_eq!(format_home_path(&home.path().join("a").join("b")), "~/a/b");
+    assert_eq!(format_home_path(home.path()), "~");
+}
+
+#[test]
+fn canonicalize_returns_plain_paths_and_long_paths_stay_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = canonicalize(dir.path()).unwrap();
+    assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
+
+    let mut long = canonical;
+    while long.as_os_str().len() <= 300 {
+        long.push("a-fairly-long-directory-name");
+    }
+    std::fs::create_dir_all(&long).unwrap();
+    let file = long.join("x.txt");
+    std::fs::write(&file, "ok").unwrap();
+    let resolved = canonicalize(&file).unwrap();
+    assert_eq!(std::fs::read_to_string(resolved).unwrap(), "ok");
 }

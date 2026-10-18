@@ -1,4 +1,5 @@
 use crate::infra::i18n::tr;
+use crate::infra::platform::stdin;
 use async_trait::async_trait;
 
 use crate::core::plan_runtime::panels::{
@@ -8,8 +9,9 @@ use crate::core::plan_runtime::panels::{
 
 const ASK_QUESTION_TEST_AUTO_PICK_ENV: &str = "TOMCAT_ASK_QUESTION_TEST_AUTO_PICK";
 
-/// CLI panel with one cancel-safe stdin owner. On Unix `poll` bounds every read wait, so an
-/// interrupt releases ownership before the chat prompt starts reading the next line.
+/// CLI panel with one cancel-safe stdin owner. [`stdin::read_line_cancellable`] rechecks the
+/// termination every 50ms, so an interrupt releases ownership before the chat prompt starts
+/// reading the next line.
 pub struct CliAskQuestionPanel;
 
 #[async_trait]
@@ -168,120 +170,26 @@ fn parse_single_choice_answer(question: &Question, line: &str) -> Option<Answer>
 
 async fn read_one_line(termination: &AskQuestionTermination) -> Result<String, AskQuestionResult> {
     let termination = termination.clone();
-    tokio::task::spawn_blocking(move || read_one_line_owned(&termination))
-        .await
-        .unwrap_or_else(|_| {
-            Err(AskQuestionResult::terminal(
-                AskQuestionOutcome::HostDisconnected,
-            ))
-        })
-}
-
-#[cfg(unix)]
-fn read_one_line_owned(termination: &AskQuestionTermination) -> Result<String, AskQuestionResult> {
-    read_one_line_from_fd_owned(libc::STDIN_FILENO, termination)
-}
-
-#[cfg(unix)]
-fn read_one_line_from_fd_owned(
-    fd: std::os::fd::RawFd,
-    termination: &AskQuestionTermination,
-) -> Result<String, AskQuestionResult> {
-    static STDIN_OWNER: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _owner = STDIN_OWNER
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    #[cfg(unix)]
-    {
-        let mut bytes = Vec::new();
-        loop {
-            if let Some(result) = termination.result() {
-                return Err(result);
-            }
-            let mut descriptor = libc::pollfd {
-                fd,
-                events: libc::POLLIN | libc::POLLHUP,
-                revents: 0,
-            };
-            // SAFETY: descriptor points to one initialized pollfd for the whole call.
-            let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
-            if ready < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(AskQuestionResult::terminal(
-                    AskQuestionOutcome::HostDisconnected,
-                ));
-            }
-            if ready == 0 {
-                continue;
-            }
-            let mut byte = 0u8;
-            // SAFETY: byte is writable and stdin is a process-owned file descriptor.
-            let count = unsafe { libc::read(fd, (&mut byte as *mut u8).cast::<libc::c_void>(), 1) };
-            if count <= 0 {
-                return Err(AskQuestionResult::terminal(
-                    AskQuestionOutcome::HostDisconnected,
-                ));
-            }
-            bytes.push(byte);
-            if byte == b'\n' {
-                return String::from_utf8(bytes).map_err(|_| {
-                    AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected)
-                });
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let mut line = String::new();
-        let read =
-            std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)
-                .map_err(|_| AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected))?;
-        if read == 0 {
-            Err(AskQuestionResult::terminal(
-                AskQuestionOutcome::HostDisconnected,
-            ))
-        } else {
-            Ok(line)
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn read_one_line_owned(termination: &AskQuestionTermination) -> Result<String, AskQuestionResult> {
-    if let Some(result) = termination.result() {
-        return Err(result);
-    }
-    let mut line = String::new();
-    let read =
-        std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)
-            .map_err(|_| AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected))?;
-    if read == 0 {
+    tokio::task::spawn_blocking(move || {
+        panel_result(stdin::read_line_cancellable(|| termination.result()))
+    })
+    .await
+    .unwrap_or_else(|_| {
         Err(AskQuestionResult::terminal(
             AskQuestionOutcome::HostDisconnected,
         ))
-    } else {
-        Ok(line)
-    }
+    })
 }
 
-#[cfg(all(test, unix))]
-pub(crate) async fn read_one_line_from_fd_for_test(
-    fd: std::os::fd::RawFd,
-    termination: AskQuestionTermination,
+fn panel_result(
+    read: Result<String, stdin::ReadLineError<AskQuestionResult>>,
 ) -> Result<String, AskQuestionResult> {
-    tokio::task::spawn_blocking(move || read_one_line_from_fd_owned(fd, &termination))
-        .await
-        .unwrap_or_else(|_| {
-            Err(AskQuestionResult::terminal(
-                AskQuestionOutcome::HostDisconnected,
-            ))
-        })
+    read.map_err(|error| match error {
+        stdin::ReadLineError::Stopped(result) => result,
+        stdin::ReadLineError::Disconnected => {
+            AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected)
+        }
+    })
 }
 
 #[cfg(test)]

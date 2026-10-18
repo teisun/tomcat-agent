@@ -48,7 +48,7 @@ fn file_primitive(root: &std::path::Path) -> Arc<dyn PrimitiveExecutor> {
 async fn file_baseline_dispatcher_rebuilds_for_keep_changes_only() {
     use crate::core::checkpoint::{file_baselines, session_files};
     let workspace = tempfile::tempdir().unwrap();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(workspace.path()).unwrap();
     let path = root.join("a.txt");
     std::fs::write(&path, "original").unwrap();
     let mut streams = Vec::new();
@@ -217,7 +217,7 @@ async fn dispatch_baseline_write(
 async fn file_baseline_owner_survives_compacted_history() {
     use crate::core::checkpoint::{file_baselines, session_files};
     let workspace = tempfile::tempdir().unwrap();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(workspace.path()).unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let manager = SessionManager::new(sessions.path().into());
     manager
@@ -296,7 +296,7 @@ async fn file_baseline_owner_survives_compacted_history() {
 async fn file_baseline_owner_after_resume_without_user_message() {
     use crate::core::checkpoint::{file_baselines, session_files};
     let workspace = tempfile::tempdir().unwrap();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(workspace.path()).unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let manager = SessionManager::new(sessions.path().into());
     manager
@@ -386,7 +386,7 @@ async fn file_baseline_owner_after_resume_without_user_message() {
 async fn file_baseline_owner_sticky_within_run_after_compaction() {
     use crate::core::checkpoint::{file_baselines, session_files};
     let workspace = tempfile::tempdir().unwrap();
-    let root = workspace.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(workspace.path()).unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let manager = SessionManager::new(sessions.path().into());
     manager
@@ -444,7 +444,7 @@ async fn file_baseline_owner_sticky_within_run_after_compaction() {
 #[tokio::test]
 async fn genuine_image_only_user_keeps_file_ownership() {
     let root = tempfile::tempdir().unwrap();
-    let root = root.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(root.path()).unwrap();
     let path = root.join("written.txt");
     let (provider, _) = RecordingStreamLlmProvider::new(vec![
         vec![
@@ -505,7 +505,7 @@ async fn genuine_image_only_user_keeps_file_ownership() {
 #[tokio::test]
 async fn tool_media_follow_up_does_not_take_file_ownership() {
     let root = tempfile::tempdir().unwrap();
-    let root_path = root.path().canonicalize().unwrap();
+    let root_path = crate::infra::platform::canonicalize(root.path()).unwrap();
     let image = root_path.join("photo.png");
     std::fs::copy(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -656,7 +656,7 @@ async fn tool_owned_media_subagent_uses_shared_blob_repository_without_session_m
     use crate::core::agent_loop::SubagentType;
     use crate::core::session::subagent_transcript::open_subagent_transcript;
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let image = root.join("photo.png");
     std::fs::copy(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

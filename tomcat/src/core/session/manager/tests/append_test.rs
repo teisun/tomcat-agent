@@ -134,7 +134,7 @@ fn sidecar_write_can_precede_a_failed_transcript_append_without_creating_a_messa
     std::fs::set_permissions(&transcript, original_permissions).unwrap();
 
     assert!(
-        error.to_string().contains("Permission denied") || error.to_string().contains("permission"),
+        matches!(&error, crate::AppError::Io(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied),
         "the injected transcript append failure must reach the caller: {error}"
     );
     assert!(

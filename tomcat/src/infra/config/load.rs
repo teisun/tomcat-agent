@@ -179,7 +179,7 @@ pub fn resolve_workspace_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, Ap
             continue;
         }
         let p = normalize_path(t)?;
-        let canon = std::fs::canonicalize(&p)
+        let canon = crate::infra::platform::canonicalize(&p)
             .map_err(|_| AppError::Config(tr("config.rootInvalid", &[("path", t)])))?;
         if !canon.is_dir() {
             return Err(AppError::Config(tr(
@@ -206,7 +206,7 @@ fn push_builtin_workspace_root(
 ) -> Result<(), AppError> {
     let temp = resolve_dot_tomcat_temp_dir()?;
     std::fs::create_dir_all(&temp).map_err(AppError::Io)?;
-    let canon = std::fs::canonicalize(&temp).unwrap_or(temp);
+    let canon = crate::infra::platform::canonicalize(&temp).unwrap_or(temp);
     if !canon.is_dir() {
         return Err(AppError::Config(tr(
             "config.builtinNotDir",

@@ -489,7 +489,7 @@ export const workspace = {
   asRelativePath(resource: string | Uri): string {
     const raw = typeof resource === "string" ? resource : resource.fsPath;
     const normalized = raw.replace(/\\/g, "/");
-    const workspaceRoot = "/workspace";
+    const workspaceRoot = normalizePath(workspace.workspaceFolders[0]?.uri.fsPath ?? "/workspace");
     return normalized.startsWith(`${workspaceRoot}/`)
       ? normalized.slice(workspaceRoot.length + 1)
       : raw;

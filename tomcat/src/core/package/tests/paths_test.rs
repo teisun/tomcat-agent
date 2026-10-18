@@ -20,7 +20,7 @@ fn resolve_visibility_roots_global_agent_scope() {
     let mut cfg = test_config(work_dir.path());
     let global =
         resolve_layer_paths(&cfg, PackageVisibility::Global, Some(workspace.path())).unwrap();
-    let canonical_work_dir = work_dir.path().canonicalize().unwrap();
+    let canonical_work_dir = crate::infra::platform::canonicalize(work_dir.path()).unwrap();
     assert_eq!(global.plugins_dir, canonical_work_dir.join("plugins"));
     assert_eq!(global.packages_dir, canonical_work_dir.join("packages"));
 
@@ -43,7 +43,7 @@ fn resolve_visibility_roots_global_agent_scope() {
         Some(&non_canonical_scope_root),
     )
     .unwrap();
-    let canonical_scope = workspace.path().canonicalize().unwrap();
+    let canonical_scope = crate::infra::platform::canonicalize(workspace.path()).unwrap();
     assert_eq!(scope.scope_root.as_deref(), Some(canonical_scope.as_path()));
     assert_eq!(scope.layer_root, canonical_scope.join(".agents"));
     assert_eq!(scope.plugins_dir, canonical_scope.join(".agents/plugins"));

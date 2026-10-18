@@ -68,7 +68,7 @@ async fn session_files_chat_only_rewind_then_real_build_recaptures_old_owner() {
     let _key = EnvGuard::set(TEST_API_KEY_ENV, "stub");
     for with_keep in [false, true] {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
         let a = root.join("a.txt");
         let c = root.join("c.txt");
         let call = |id: &str, name: &str, args: serde_json::Value| {
@@ -252,9 +252,7 @@ async fn session_files_build_resume_continue_never_reset() {
             let response = file_response(&buffer, &id).await;
             assert_eq!(response["success"], true, "{response}");
         }
-        let path = temp
-            .path()
-            .canonicalize()
+        let path = crate::infra::platform::canonicalize(temp.path())
             .unwrap()
             .join(format!("{name}.txt"));
         let tracker =
@@ -262,16 +260,12 @@ async fn session_files_build_resume_continue_never_reset() {
         let pending = tracker.prepare(path.to_str().unwrap()).unwrap();
         std::fs::write(&path, name).unwrap();
         pending.commit();
-        std::fs::File::open(
-            session_dir(&transcript)
+        crate::test_support::set_mtime(
+            &session_dir(&transcript)
                 .join(&owner)
                 .join("baselines.jsonl"),
-        )
-        .unwrap()
-        .set_modified(
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + index as u64),
-        )
-        .unwrap();
+        );
         paths.push(path.to_string_lossy().into_owned());
         if index != 1 {
             crate::api::serve::control::handle_control_or_interrupt(
@@ -331,7 +325,9 @@ async fn session_file_rpc_busy_read_restore_and_chat_preservation() {
         .append_message(serde_json::json!({"role":"user","content":"edit"}))
         .unwrap();
     let transcript = session.transcript_path(&slot.session_id);
-    let path = temp.path().canonicalize().unwrap().join("target.txt");
+    let path = crate::infra::platform::canonicalize(temp.path())
+        .unwrap()
+        .join("target.txt");
     std::fs::write(&path, "before").unwrap();
     let cwd = crate::core::checkpoint::file_baselines::session_cwd(&transcript).unwrap();
     let tracker =
@@ -402,18 +398,18 @@ async fn session_file_real_history_rewrite_reselects_source() {
     let transcript = session.transcript_path(&slot.session_id);
     let root = session_dir(&transcript);
     let publish = |owner: &str, name: &str, tick: u64| {
-        let path = temp.path().canonicalize().unwrap().join(name);
+        let path = crate::infra::platform::canonicalize(temp.path())
+            .unwrap()
+            .join(name);
         let tracker =
             TurnFileBaselines::new(&transcript, owner, session_cwd(&transcript).unwrap()).unwrap();
         let pending = tracker.prepare(path.to_str().unwrap()).unwrap();
         std::fs::write(&path, "changed").unwrap();
         pending.commit();
-        std::fs::File::open(root.join(owner).join("baselines.jsonl"))
-            .unwrap()
-            .set_modified(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + tick),
-            )
-            .unwrap();
+        crate::test_support::set_mtime(
+            &root.join(owner).join("baselines.jsonl"),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + tick),
+        );
         path.to_string_lossy().into_owned()
     };
     let u1 = session
@@ -552,7 +548,9 @@ async fn session_files_keep_rpc_busy_then_accepts() {
         .append_message(serde_json::json!({"role":"user","content":"edit"}))
         .unwrap();
     let transcript = session.transcript_path(&slot.session_id);
-    let path = temp.path().canonicalize().unwrap().join("kept.txt");
+    let path = crate::infra::platform::canonicalize(temp.path())
+        .unwrap()
+        .join("kept.txt");
     let tracker =
         TurnFileBaselines::new(&transcript, &owner, session_cwd(&transcript).unwrap()).unwrap();
     let pending = tracker.prepare(path.to_str().unwrap()).unwrap();
@@ -602,7 +600,7 @@ async fn session_files_rpc_commit_accepts_then_next_edit_uses_committed_baseline
     use crate::core::checkpoint::file_baselines::TurnFileBaselines;
     let _key = EnvGuard::set(TEST_API_KEY_ENV, "stub");
     let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![]).await;
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let session = &slot.ctx.session_runtime.session;
     let transcript = session.transcript_path(&slot.session_id);
     let mut lines = std::fs::read_to_string(&transcript)

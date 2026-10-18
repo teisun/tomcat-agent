@@ -10,8 +10,9 @@ use super::types::{OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
 
 pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppError> {
-    let stdin = tokio::io::stdin();
-    let reader = tokio::io::BufReader::new(stdin);
+    let reader = tokio::io::BufReader::new(
+        crate::infra::platform::stdin::protocol_input().map_err(AppError::Io)?,
+    );
     let mut lines = reader.lines();
     // Normal commands retain FIFO execution because many mutate session state. Interrupt is a
     // control-plane signal: keeping it behind a transcript read or model bootstrap would make

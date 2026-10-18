@@ -3,8 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { beforeAll, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { EXTENSION_ID } from "../src/constants";
 import { BUILD_RECORD, recordBuildArtifacts, REQUIRED_OUTPUTS } from "../scripts/buildArtifacts";
@@ -23,7 +22,8 @@ import {
   PREBUILT_VSIX_ENV,
   preparePublishDirectory,
 } from "../scripts/package-vsix";
-import { extractVsixLikeCursor } from "../scripts/vsix-extractable";
+import { extractVsixLikeCursor, readVsixEntry } from "../scripts/vsix-extractable";
+import { spawnCommand } from "../scripts/runCommand";
 import { parseProductionSource, validateReleaseMetadata } from "../scripts/run-vscode-verify-vsix";
 
 function writeU16(value: number): Buffer {
@@ -94,7 +94,7 @@ describe("VSIX packaging", () => {
     const root = path.resolve(__dirname, "..");
     if (!process.env[PREBUILT_VSIX_ENV]) {
       await new Promise<void>((resolve, reject) => {
-        const child = spawn("npm", ["run", "build"], { cwd: root, stdio: "inherit", detached: process.platform !== "win32" });
+        const child = spawnCommand("npm", ["run", "build"], { cwd: root, stdio: "inherit", detached: process.platform !== "win32" });
         let timedOut = false;
         const timer = setTimeout(() => {
           timedOut = true;
@@ -143,26 +143,27 @@ describe("VSIX packaging", () => {
         const stat = await fs.stat(packaged);
         expect(stat.isFile()).toBe(true);
         expect(() => assertVsixExtractable(packaged)).not.toThrow();
-        const metadata = JSON.parse(execFileSync("unzip", ["-p", packaged, "extension/package.json"], { encoding: "utf8" }));
+        const readText = async (name: string) => (await readVsixEntry(packaged, name)).toString("utf8");
+        const metadata = JSON.parse(await readText("extension/package.json"));
         expect(`${metadata.publisher}.${metadata.name}`).toBe(EXTENSION_ID);
         const sourceMetadata = JSON.parse(await fs.readFile(path.join(extensionRoot, "package.json"), "utf8"));
         expect(metadata.version).toBe(sourceMetadata.version);
         expect(metadata.displayName).toBe(sourceMetadata.displayName);
-        const vsixManifest = execFileSync("unzip", ["-p", packaged, "extension.vsixmanifest"], { encoding: "utf8" });
+        const vsixManifest = await readText("extension.vsixmanifest");
         expect(vsixManifest).toContain(`<DisplayName>${sourceMetadata.displayName}</DisplayName>`);
         for (const localeFile of ["readme.md", "README.zh.md"]) {
-          const readme = execFileSync("unzip", ["-p", packaged, `extension/${localeFile}`], { encoding: "utf8" });
+          const readme = await readText(`extension/${localeFile}`);
           expect(readme).toContain(`code --install-extension ${EXTENSION_ID}`);
           expect(readme).toContain("https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png");
           expect(readme).toContain("https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md");
           expect(readme).not.toMatch(/HEAD\/\.\.|tomcat-vscode-ext-0\.1\.3/);
           if (localeFile === "readme.md") expect(readme).toContain("Known limitation with bundled CLI 0.1.73");
         }
-        const icon = execFileSync("unzip", ["-p", packaged, "extension/media/icon.png"]);
+        const icon = await readVsixEntry(packaged, "extension/media/icon.png");
         expect(icon.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
         expect(icon.readUInt32BE(16)).toBeGreaterThanOrEqual(128);
         expect(icon.readUInt32BE(20)).toBeGreaterThanOrEqual(128);
-        expect(execFileSync("unzip", ["-p", packaged, "extension/LICENSE.txt"], { encoding: "utf8" })).toContain("MIT");
+        expect(await readText("extension/LICENSE.txt")).toContain("MIT");
       } finally {
         if (publishRoot) {
           await fs.rm(publishRoot, { force: true, recursive: true });
@@ -209,6 +210,16 @@ describe("VSIX packaging", () => {
       });
       const stat = await fs.stat(packaged);
       expect(stat.isFile()).toBe(true);
+
+      const windowsPackaged = packageVsix({
+        bundleBinaryPath: fakeBinaryPath,
+        extensionRoot,
+        outPath: path.join(tempRoot, "tomcat-vscode-ext-win32-x64.vsix"),
+        target: "win32-x64",
+        skipBuild: true,
+      });
+      expect(await readVsixEntry(windowsPackaged, "extension/bin/tomcat.exe")).toEqual(await fs.readFile(fakeBinaryPath));
+      await expect(readVsixEntry(windowsPackaged, "extension/bin/tomcat")).rejects.toThrow(/not found/);
     } finally {
       if (plainPublishRoot) {
         await fs.rm(plainPublishRoot, { force: true, recursive: true });

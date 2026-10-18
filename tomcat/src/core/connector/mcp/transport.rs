@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ pub use super::failure::McpFailure;
 use crate::core::connector::mcp::config::ConfiguredMcpServer;
 use crate::core::connector::mcp::oauth::{OAuthDiscovery, OAuthTokenStore};
 use crate::infra::error::AppError;
+use crate::infra::platform::{kill_tree_on_drop, resolve_program, CHILD_STARTUP_ENV_VARS};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -160,9 +162,10 @@ pub trait McpTransport: Send + Sync {
     ) -> Result<McpClient, McpFailure>;
 }
 
-/// Client-side stdio transport. Only PATH and HOME survive env_clear; configured
-/// environment variables are added explicitly, so an MCP configuration cannot
-/// silently inherit unrelated process secrets.
+/// Client-side stdio transport. Only [`INHERITED_ENV_VARS`] and the platform's
+/// [`CHILD_STARTUP_ENV_VARS`] survive env_clear;
+/// configured environment variables are added explicitly, so an MCP configuration
+/// cannot silently inherit unrelated process secrets.
 pub struct StdioTransport {
     workspace_root: Option<PathBuf>,
 }
@@ -175,7 +178,7 @@ impl StdioTransport {
     }
 
     fn command(&self, server: &ConfiguredMcpServer) -> tokio::process::Command {
-        tokio::process::Command::new(&server.config.command).configure(|command| {
+        tokio::process::Command::new(program(server)).configure(|command| {
             command.args(&server.config.args);
             command.kill_on_drop(true);
             if let Some(cwd) = server.config.cwd.as_deref() {
@@ -187,7 +190,7 @@ impl StdioTransport {
                 }
             }
             command.env_clear();
-            for key in ["PATH", "HOME"] {
+            for key in INHERITED_ENV_VARS.iter().chain(CHILD_STARTUP_ENV_VARS) {
                 if let Some(value) = std::env::var_os(key) {
                     command.env(key, value);
                 }
@@ -198,6 +201,19 @@ impl StdioTransport {
             }
         })
     }
+}
+
+const INHERITED_ENV_VARS: &[&str] = &["PATH", "HOME"];
+
+/// Bare names are resolved against the PATH the child will actually receive.
+fn program(server: &ConfiguredMcpServer) -> PathBuf {
+    let child_path = server
+        .config
+        .env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| OsStr::new(value));
+    resolve_program(&server.config.command, child_path)
 }
 
 /// Phase 1's bootstrap records the system Chrome fallback here when Playwright
@@ -233,7 +249,7 @@ impl McpTransport for StdioTransport {
         if cancel.is_cancelled() {
             return Err(McpFailure::new(FailureKind::Cancelled, "spawn"));
         }
-        let transport = TokioChildProcess::new(self.command(server))
+        let transport = TokioChildProcess::new(kill_tree_on_drop(self.command(server)))
             .map_err(|_| McpFailure::new(FailureKind::Configuration, "spawn"))?;
         ().serve_with_ct(
             CancellationBoundedTransport::managed(transport, cleanup),

@@ -74,6 +74,50 @@ export function extractVsixLikeCursor(vsixPath: string): Promise<void> {
   });
 }
 
+/** Read one archive entry without relying on a system `unzip` (Windows has none). */
+export function readVsixEntry(vsixPath: string, name: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    yauzl.open(vsixPath, { autoClose: true, lazyEntries: true }, (error, zip) => {
+      if (error || !zip) {
+        reject(error ?? new Error(`failed to open ${vsixPath}`));
+        return;
+      }
+      let settled = false;
+      const finish = (cause: Error | null, data?: Buffer): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        zip.close();
+        if (cause) {
+          reject(cause);
+        } else {
+          resolve(data as Buffer);
+        }
+      };
+      zip.on("error", finish);
+      zip.on("end", () => finish(new Error(`${name} not found in ${vsixPath}`)));
+      zip.on("entry", (entry) => {
+        if (entry.fileName !== name) {
+          zip.readEntry();
+          return;
+        }
+        zip.openReadStream(entry, (streamError, stream) => {
+          if (streamError || !stream) {
+            finish(streamError ?? new Error(`cannot read ${name}`));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+          stream.on("error", (streamCause: Error) => finish(streamCause));
+          stream.on("end", () => finish(null, Buffer.concat(chunks)));
+        });
+      });
+      zip.readEntry();
+    });
+  });
+}
+
 function main(): void {
   const vsixPath = process.argv[2];
   if (!vsixPath) {

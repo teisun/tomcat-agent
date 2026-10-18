@@ -95,7 +95,7 @@ fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn stable_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::infra::platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn stable_path_string(path: &Path) -> String {

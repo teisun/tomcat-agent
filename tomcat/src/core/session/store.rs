@@ -257,7 +257,7 @@ fn store_mutation_locks() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<()>>>> {
 }
 
 fn normalized_store_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
+    crate::infra::platform::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {
             path.to_path_buf()
         } else {

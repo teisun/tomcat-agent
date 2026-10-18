@@ -142,10 +142,10 @@
 
 | 检查项 | 要求 |
 |--------|------|
-| 线程模型 | 与 `start_search_tools_preflight` 同构：`std::thread` 探测 + Unix detached 安装，**不**在 `readline` 热路径 `wait` 包管理器。 |
+| 线程模型 | 与 `start_search_tools_preflight` 同构：`std::thread` 探测 + `platform::spawn_detached` 后台安装（两平台同一流程），**不**在 `readline` 热路径 `wait` 包管理器。 |
 | 启动 GC | **`CheckpointStore::prune(retention)`** **默认在启动时调度一次**（**后台线程 / 不阻塞**主线程与 `readline`）；**无**斜杠 `/ckpt prune` 等其它入口（见 §9 / G7）。 |
-| 事件负载 | `WIRE_GIT_PREFLIGHT` 字段集**完整镜像** `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `progress` / `success` / `failed` / `detached` / `already_installing`（与 [`search_files.md` §7 / §8](./search_files.md#7-启动预检tomcat-chat) 一一对齐；Unix detached 路径主要发 `start` / `detached` / `already_installing` / `failed`，Windows 阻塞路径走 `start` / `progress` / `success` / `failed` —— **状态字符串集合两边统一**，便于 stderr 渲染共用代码路径）。 |
-| stderr | [`events/stderr.rs`](../../../src/api/chat/events/stderr.rs) 注册方式与 rg 预检 **同一套**灰字 + `tail -f` 提示文案结构。 |
+| 事件负载 | `WIRE_GIT_PREFLIGHT` 字段集**完整镜像** `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `detached` / `already_installing` / `failed`（与 [`search_files.md` §7 / §8](./search_files.md#7-启动预检tomcat-chat) 一一对齐；两平台相同，tomcat 不等待安装结束，成败看日志）。 |
+| stderr | [`events/stderr.rs`](../../../src/api/chat/events/stderr.rs) 注册方式与 rg 预检 **同一套**灰字 + 跟踪日志命令（`platform::FOLLOW_FILE_COMMAND`）提示文案结构。 |
 | 配置 | checkpoint 对外**仅** `[checkpoint] retention_*`（§9）；git 后台安装**仅** `[preflight] auto_install_git`（**无**独立 `PI_SKIP_*` env；关安装 = `auto_install_git=false`）。 |
 | 文档交叉 | 本方案 §2.2.2 与 [`search_files.md` §7](./search_files.md#7-启动预检tomcat-chat) 互相引用，避免两处漂移。 |
 
@@ -159,11 +159,11 @@
 |----|------|
 | **入口** | `tomcat chat`：`chat_loop` 在注册 stderr 监听后，与 `preflight::start_search_tools_preflight(cfg, bus)` **并列**再调 `preflight::start_git_preflight(cfg, bus)`（**拟定符号名**；亦可合并为单一 `start_chat_preflight` 分发两类任务）。**硬约束**：`readline` **永不**等待包管理器结束；**`prune(retention)` 亦不得阻塞主线程**（默认启动即 **spawn** 后台执行，见 §4.2.4 / §9）。 |
 | **探测** | `find_binary(&["git"])` 或等价 `git --version`；即时读 `PATH`（与 rg 预检一致）。 |
-| **安装（Unix）** | 复用 `preflight.rs` 已验证路径：`spawn_unix_detached_install` + `nohup … >> ~/.tomcat/agents/main/logs/preflight-git-log-<ts>.log 2>&1 &`，经 `/bin/sh -c` **`spawn`**；**不** `wait` brew/apt。 |
-| **平台矩阵（拟定）** | 与 rg 分支同形：`brew install git`（macOS + `HOMEBREW_NO_BUILD_FROM_SOURCE=1` 前缀）、`apt-get install -y git` / `dnf` / `pacman`、`pkg install -y git`（Termux）；**Android 非 Termux** → 不自动装，仅事件 `failed`。**Windows v1**：与 rg 一致可仍为阻塞 `winget` 或单独 TODO（[`preflight.rs:419`](../../../src/api/chat/preflight.rs) 已有 Windows detached 注释）。 |
+| **安装（两平台同一流程）** | 复用 rg 预检路径：`platform::spawn_detached`，输出追加到 `~/.tomcat/agents/main/logs/preflight-file-log-<ts>.log`；**不** `wait` brew/apt/winget。Windows 的 `detached` 文案提醒安装完成后重新打开终端（`preflight.gitDetachedRestart`）。 |
+| **平台矩阵** | 包管理器由 `platform::system_package_manager()` 选出，命令由 `preflight.rs::install_plan` 给出：`brew install --force-bottle git`（环境变量 `HOMEBREW_NO_BUILD_FROM_SOURCE=1`）、`winget install --id Git.Git`、`apt-get install -y git` / `dnf` / `pacman`、`pkg install -y git`（Termux）；**Android 非 Termux** → 不自动装，仅事件 `failed`。 |
 | **并发** | Homebrew 等：复用「进程表窄匹配 / `already_installing`」思路，避免叠两套 nohup（与 rg 预检 §7 一致）。 |
 | **运行期行为** | 探测失败或安装未完成：`CheckpointStore` 仍为 **`NoopStore`**（与现行 §4.2.1 一致）。`git` 首次可用后 **惰性切换** 为 `ShadowGitStore`（**拟定**：`RwLock` 持 store、`record` 前 `try_upgrade`、或 `ArcSwap` 原子替换；PR 定稿）。**禁止**：在 `git` 未就绪时阻塞 tool 执行去等安装。 |
-| **事件 / stderr** | **拟定** `WIRE_GIT_PREFLIGHT`（**完整镜像** `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `progress` / `success` / `failed` / `detached` / `already_installing`；Unix detached 路径主要走 `start` / `detached` / `already_installing` / `failed`，Windows 阻塞路径走 `start` / `progress` / `success` / `failed`）；[`events/stderr.rs`](../../../src/api/chat/events/stderr.rs) 对称挂监听，终端 `[git]` 提示由 `[preflight] show_git_ui` 单独控制，默认 `false`。 |
+| **事件 / stderr** | `WIRE_GIT_PREFLIGHT`（**完整镜像** `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `detached` / `already_installing` / `failed`，两平台相同）；[`events/stderr.rs`](../../../src/api/chat/events/stderr.rs) 对称挂监听，终端 `[git]` 提示由 `[preflight] show_git_ui` 单独控制，默认 `false`。 |
 | **安装开关** | **仅** `[preflight] auto_install_git`（bool；默认以落地 PR 为准）。`false` 时不 spawn 后台安装（仍可探测 `git --version`）；CI / 沙箱无 sudo 时置 `false` 即可，**无**单独 env 跳过开关。 |
 
 ### 2.2.3 演进 TODO：IDE 产品形态（窄快照 / 时间线）
@@ -299,7 +299,8 @@
   - 仓库根 `~/.tomcat/agents/<id>/checkpoints/<sha256(workdir)[:16]>/`；`HERMES_WORKDIR` 文件改名为 `TOMCAT_WORKDIR`，记录原始 `agent_workspace_dir`，便于 orphan GC。
   - `git_env` 显式 `GIT_CONFIG_GLOBAL=/dev/null` / `GIT_CONFIG_SYSTEM=/dev/null` / `GIT_CONFIG_NOSYSTEM=1`；`commit.gpgsign=false`、`tag.gpgSign=false` 写入仓库本地配置——避免 GPG pinentry 弹窗（hermes 实战教训）。
   - 每个 git 子进程的 `stdout` 与 `stderr` 都要从 `spawn` 后立即并发排空；**禁止**先等待子进程退出、再读 pipe（大 `ls-files` 输出会写满 OS pipe，父子进程互等）。超时或 `kill` 后也必须先等待两个 reader 收到 EOF，再汇总为 `Output`。**推翻条件**：若 `CheckpointStore` 整体改为 async，则改用 `tokio::process::Child::wait_with_output` + `tokio::time::timeout`，删掉线程 reader。
-  - 影子仓初始化时启用 `core.untrackedCache=true`、`feature.manyFiles=true`、`index.version=4`、`index.threads=true`，降低整工作树的 `ls-files` / `status` / `add` 成本。
+  - 每条影子仓 git 命令都以 `-c` 带上 `core.untrackedCache=true`、`feature.manyFiles=true`、`index.version=4`、`index.threads=true`，降低整工作树的 `ls-files` / `status` / `add` 成本；不写入仓库配置，省掉每个进程首次存档时的 4 次 `git config`。
+  - 等待 git 退出时每 10ms 查询一次：Windows 上单条 git 约 30ms，原来的 25ms 间隔会让每条命令白等十几毫秒，一次存档十几条命令累计可达数百毫秒。
   - 子进程超时：**代码常量**（默认 **30 s**，**无**用户配置项；与 hermes 同量级兜底）。
 - **`NoopStore`**：`record` 直接返回 `Ok(CheckpointId::null())`、`list` 返回空向量；**仅当** `git --version` 探测失败（且后台安装尚未成功）时使用。**拟定**：`PR-CKF` 落地后，若后台安装成功，运行期可切换为 `ShadowGitStore`（见 [§2.2.2](#222-chat-入口-git-预检与后台安装拟定)）。
 

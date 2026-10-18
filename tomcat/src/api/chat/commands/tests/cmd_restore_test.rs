@@ -733,7 +733,9 @@ fn restore_core_discards_keeps_only_when_reverting_files() {
         let anchor = session
             .append_message(json!({"role":"assistant","content":"checkpoint"}))
             .unwrap();
-        let file = workspace.path().canonicalize().unwrap().join("a.txt");
+        let file = crate::infra::platform::canonicalize(workspace.path())
+            .unwrap()
+            .join("a.txt");
         std::fs::write(&file, "original").unwrap();
         let checkpoint = ctx
             .scope_services

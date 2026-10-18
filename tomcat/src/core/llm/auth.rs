@@ -180,7 +180,11 @@ pub fn key_present_for_env(env_name: &str) -> bool {
 }
 
 pub fn key_source_for_env(env_name: &str) -> Option<KeySource> {
-    if managed_credential_state().read().values.contains_key(env_name) {
+    if managed_credential_state()
+        .read()
+        .values
+        .contains_key(env_name)
+    {
         return Some(KeySource::Saved);
     }
     process_env_value(env_name).map(|_| KeySource::Environment)
@@ -212,7 +216,11 @@ pub(crate) fn read_env_value(env_name: &str) -> Option<String> {
 }
 
 fn process_env_value(env_name: &str) -> Option<String> {
-    if managed_credential_state().read().preloaded.contains(env_name) {
+    if managed_credential_state()
+        .read()
+        .preloaded
+        .contains(env_name)
+    {
         return None;
     }
     std::env::var(env_name)

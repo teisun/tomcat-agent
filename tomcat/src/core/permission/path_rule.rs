@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::infra::error::AppError;
-use crate::infra::platform::normalize_path;
+use crate::infra::platform::{
+    normalize_path, path_starts_with, to_slash, PATH_COMPARE_IGNORES_CASE,
+};
 
-use super::types::{path_starts_with, PathRuleMode};
+use super::types::PathRuleMode;
 
 /// 单条 path_rule（TOML 中 `[[primitive.path_rules]]` 的反序列化目标）。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -42,7 +44,11 @@ impl PathRule {
     pub fn expanded_path(&self) -> Result<String, AppError> {
         if self.has_glob() {
             // glob 用字符串匹配：仅展开 `~`。
-            if let Some(rest) = self.path.strip_prefix("~/") {
+            if let Some(rest) = self
+                .path
+                .strip_prefix('~')
+                .and_then(|rest| rest.strip_prefix(std::path::is_separator))
+            {
                 let home = crate::infra::platform::home_dir().ok_or_else(|| {
                     AppError::Config("无法解析 home 目录用于 path_rule".to_string())
                 })?;
@@ -91,9 +97,14 @@ impl PathRule {
     }
 }
 
+/// globset 把 `\` 当转义符：模式和目标都先统一成 `/` 再匹配。
 fn glob_matches_canonicalized(pattern: &str, target: &str) -> bool {
-    let matcher = |pat: &str| match globset::Glob::new(pat) {
-        Ok(g) => g.compile_matcher().is_match(target),
+    let target = to_slash(target);
+    let matcher = |pat: &str| match globset::GlobBuilder::new(&to_slash(pat))
+        .case_insensitive(PATH_COMPARE_IGNORES_CASE)
+        .build()
+    {
+        Ok(g) => g.compile_matcher().is_match(target.as_ref()),
         Err(_) => false,
     };
     if matcher(pattern) {
@@ -107,7 +118,7 @@ fn glob_matches_canonicalized(pattern: &str, target: &str) -> bool {
 fn canonicalized_glob_pattern(pattern: &str) -> Option<String> {
     let first_glob = pattern.find(['*', '?'])?;
     let prefix_dir = pattern[..first_glob]
-        .rfind(std::path::MAIN_SEPARATOR)
+        .rfind(std::path::is_separator)
         .map(|idx| &pattern[..idx])
         .unwrap_or("");
     if prefix_dir.is_empty() {

@@ -14,7 +14,7 @@ fn store(dir: &Path) -> ProjectTrustStore {
 #[test]
 fn absent_file_idempotence_and_corruption_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let root = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let trust = store(temp.path());
     assert!(!trust.is_trusted(&root).unwrap());
     trust.trust(&root).unwrap();
@@ -41,7 +41,7 @@ fn concurrent_writers_keep_both_projects() {
         .map(|path| {
             let barrier = Arc::clone(&barrier);
             let store = store(temp.path());
-            let root = std::fs::canonicalize(path).unwrap();
+            let root = crate::infra::platform::canonicalize(path).unwrap();
             std::thread::spawn(move || {
                 barrier.wait();
                 store.trust(&root).unwrap();
@@ -54,7 +54,7 @@ fn concurrent_writers_keep_both_projects() {
     let store = store(temp.path());
     for path in roots {
         assert!(store
-            .is_trusted(&std::fs::canonicalize(path).unwrap())
+            .is_trusted(&crate::infra::platform::canonicalize(path).unwrap())
             .unwrap());
     }
 }
@@ -62,7 +62,7 @@ fn concurrent_writers_keep_both_projects() {
 #[test]
 fn only_canonical_roots_can_be_trusted() {
     let temp = tempfile::tempdir().unwrap();
-    let project = std::fs::canonicalize(temp.path()).unwrap();
+    let project = crate::infra::platform::canonicalize(temp.path()).unwrap();
     let child = project.join("child");
     std::fs::create_dir(&child).unwrap();
     let store = store(temp.path());
@@ -99,11 +99,11 @@ fn git_subfolders_share_one_root_but_other_repos_do_not() {
     let nested = repo.join("nested");
     std::fs::create_dir(&nested).unwrap();
     let root = ProjectTrustStore::root_for(&nested).unwrap();
-    assert_eq!(root, std::fs::canonicalize(&repo).unwrap());
+    assert_eq!(root, crate::infra::platform::canonicalize(&repo).unwrap());
     let store = store(temp.path());
     assert!(store.trust(&nested).is_err());
     store.trust(&root).unwrap();
     assert!(!store
-        .is_trusted(&std::fs::canonicalize(other).unwrap())
+        .is_trusted(&crate::infra::platform::canonicalize(other).unwrap())
         .unwrap());
 }

@@ -163,10 +163,7 @@ impl ChatContext {
                     .iter()
                     .find(|f| f.card.id == id)
                     .ok_or_else(|| tr("runtime.commandMissing", &[("id", id)]))?;
-                let root = self
-                    .scope_services
-                    .resource_root
-                    .canonicalize()
+                let root = crate::infra::platform::canonicalize(&self.scope_services.resource_root)
                     .map_err(|e| e.to_string())?;
                 (
                     file.card.path.clone(),
@@ -185,7 +182,8 @@ impl ChatContext {
                 let skill = snapshot
                     .resolve_any(name)
                     .ok_or_else(|| tr("runtime.skillMissing", &[("name", name)]))?;
-                let base = skill.base_dir.canonicalize().map_err(|e| e.to_string())?;
+                let base = crate::infra::platform::canonicalize(&skill.base_dir)
+                    .map_err(|e| e.to_string())?;
                 let file = base.join("SKILL.md");
                 (
                     skill.file_path.to_string_lossy().into_owned(),
@@ -220,10 +218,7 @@ impl ChatContext {
     }
 
     pub(crate) fn project_rules(&self, budget: usize) -> (String, Vec<String>, usize) {
-        let root = self
-            .scope_services
-            .resource_root
-            .canonicalize()
+        let root = crate::infra::platform::canonicalize(&self.scope_services.resource_root)
             .unwrap_or_else(|_| self.scope_services.resource_root.clone());
         let rules = crate::core::project_instructions::discover(
             &root,
@@ -399,7 +394,7 @@ fn checkpoint_store_for(
     agent_trail_dir: std::path::PathBuf,
     work_tree: std::path::PathBuf,
 ) -> Arc<crate::core::SwitchingCheckpointStore> {
-    let key = std::fs::canonicalize(&work_tree).unwrap_or(work_tree);
+    let key = crate::infra::platform::canonicalize(&work_tree).unwrap_or(work_tree);
     if let Some(existing) = checkpoint_store_cache()
         .read()
         .get(&key)
@@ -470,7 +465,7 @@ fn scope_runtime_for(
     overrides: &ChatContextOverrides,
 ) -> Result<Arc<ScopeContainer>, AppError> {
     let disable_cache = overrides.fetch_http_client.is_some();
-    let key = std::fs::canonicalize(&resource_root).unwrap_or(resource_root);
+    let key = crate::infra::platform::canonicalize(&resource_root).unwrap_or(resource_root);
     let cache_key = ScopeRuntimeCacheKey {
         resource_root: key.clone(),
         project_root: session_project_root.clone(),
@@ -731,7 +726,7 @@ impl ChatContext {
             .as_deref()
             .map(std::path::PathBuf::from)
             .filter(|path| path.is_dir())
-            .and_then(|path| std::fs::canonicalize(path).ok());
+            .and_then(|path| crate::infra::platform::canonicalize(path).ok());
         let resource_root = session_project_root
             .clone()
             // Older session records have no explicit root. Keep their established discovery
@@ -1367,7 +1362,7 @@ struct PluginRuntimeDeps {
 }
 
 fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::infra::platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn host_function_source_rank(source: PluginSource) -> u8 {

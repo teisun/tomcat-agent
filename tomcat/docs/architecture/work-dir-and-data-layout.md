@@ -6,8 +6,9 @@
 
 ## 1. 默认工作根目录（work_dir）
 
-- **默认值**：`~/.tomcat`。
-- **可配置**：支持通过主配置文件 `tomcat.config.toml` 的 `[storage].work_dir` 与环境变量 `TOMCAT__STORAGE__WORK_DIR` 覆盖。路径支持 `~` 与相对路径，经现有 `normalize_path` 展开。
+- **默认值**：`~/.tomcat`。Windows 上 `~` 是 `%USERPROFILE%`（设置了 `HOME` 时以 `HOME` 为准），即 `%USERPROFILE%\.tomcat`。
+- **可配置**：支持通过主配置文件 `tomcat.config.toml` 的 `[storage].work_dir` 与环境变量 `TOMCAT__STORAGE__WORK_DIR` 覆盖。路径支持 `~`（Windows 上也支持 `~\`）与相对路径，经现有 `normalize_path` 展开。
+- **路径显示**：日志与界面里 home 下的路径缩写为 `~/...`，Windows 上也统一用 `/` 分隔。
 
 ## 2. 多 agent 子目录约定
 
@@ -30,7 +31,7 @@
 | `skills/` | **全局**共享 skill 目录（Managed 层） |
 | `packages/` | **全局** package ledger 命名空间；只存 `packages/registry.json`，不存 plugin/skill 正文 |
 | `assets/js/` | **全局** JS runtime/shim 资源（如 `pi_bridge.js`、`pi_crypto_shim.js`、`pi_node_shim.js` 等） |
-| `assets/.env` | 敏感配置（API Key 等），`tomcat init` 生成，权限 0600，`run_cli` 启动时 dotenvy 加载 |
+| `assets/.env` | 敏感配置（API Key 等），`tomcat init` 生成，仅当前用户可读写：Unix 权限 0600；Windows 把 DACL 整体换成只给当前令牌用户完全控制的受保护 DACL，继承来的和文件上已有的显式授权都会去掉。写入走 `platform::write_private_file_atomic`：临时文件从创建那一刻起就是私有的，写入任何字节前别的用户都读不到，改名后权限跟着文件走。`run_cli` 启动时 dotenvy 加载 |
 | `assets/.versions.json` | 内嵌资源版本记录（SHA-256 + extracted_at），`ensure_embedded_assets` 写入 |
 | `assets/.lock` | 并发写入保护文件锁（fs2 exclusive lock），`ensure_embedded_assets` 使用 |
 

@@ -76,7 +76,7 @@ async fn read_text_offset_limit_window_with_line_numbers() {
     async {
         info!(stage = "arrange", "writing 20-line fixture file");
         let dir: TempDir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let f = dir_path.join("offsets.txt");
         let body: String = (1..=20).map(|n| format!("L{:02}\n", n)).collect();
         std::fs::write(&f, &body).expect("write fixture");
@@ -119,7 +119,7 @@ async fn read_large_window_is_cut_at_post_read_budget_with_resume_hint() {
             "writing 40 oversized text rows to trigger 128KiB post-read budget"
         );
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let f = dir_path.join("budget.txt");
         let body: String = (1..=40)
             .map(|n| format!("L{:03}:{}\n", n, "a".repeat(4090)))
@@ -175,7 +175,7 @@ async fn read_first_returned_line_over_budget_returns_recoverable_error() {
             "writing fixture whose first returned line exceeds 128KiB"
         );
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let f = dir_path.join("long-first-line.txt");
         std::fs::write(&f, format!("{}\nsecond\n", "x".repeat(128 * 1024 + 1)))
             .expect("write fixture");
@@ -218,7 +218,7 @@ async fn read_binary_returns_structured_hint() {
             "writing fixture with NUL bytes (unknown ext)"
         );
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let f = dir_path.join("blob.bin");
         // 12 bytes，第 4 字节 NUL，触发二进制检测；不命中 png/jpeg/pdf 等 magic。
         let bytes: [u8; 12] = [
@@ -259,7 +259,7 @@ async fn read_hashline_renders_two_char_hash_prefix() {
     async {
         info!(stage = "arrange", "writing 3-line fixture for hashline");
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let f = dir_path.join("hash.txt");
         std::fs::write(&f, "alpha\nbeta\ngamma\n").expect("write fixture");
         let exec = make_executor(&dir_path);
@@ -313,7 +313,7 @@ async fn read_png_routes_to_image_and_can_build_input_image_part() {
     async {
         info!(stage = "arrange", "copying PNG fixture into tempdir");
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let png_src = repo_root().join(FIXTURE_PNG);
         let png = dir_path.join("dog.png");
         std::fs::copy(&png_src, &png).expect("copy png fixture");
@@ -366,7 +366,7 @@ async fn read_pdf_routes_to_pdf_and_can_build_input_file_part() {
             "decoding base64 PDF fixture into tempdir"
         );
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let pdf_b64 = std::fs::read_to_string(repo_root().join(FIXTURE_PDF_B64))
             .expect("read pdf b64 fixture");
         let bytes = base64::engine::general_purpose::STANDARD
@@ -422,7 +422,7 @@ async fn read_oversize_image_rejected_before_loading_bytes() {
             "writing 5 MiB PNG-magic blob (>IMAGE_MAX_BYTES)"
         );
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let dir_path = tomcat::infra::canonicalize(dir.path()).expect("canonicalize");
         let f = dir_path.join("big.png");
         let png_magic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let mut bytes = Vec::with_capacity(5 * 1024 * 1024 + png_magic.len());

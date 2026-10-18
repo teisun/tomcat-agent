@@ -167,7 +167,7 @@ async fn add_persistent_choice_writes_workspace_roots_and_grants() {
     assert_eq!(dec, ConfirmDecision::AllowOnce);
 
     // toml 校验
-    let canon = std::fs::canonicalize(&cwd).unwrap();
+    let canon = tomcat::infra::canonicalize(&cwd).unwrap();
     let toml_text = std::fs::read_to_string(&cfg_path).unwrap();
     assert!(
         toml_text.contains(canon.to_string_lossy().as_ref()),
@@ -220,7 +220,7 @@ async fn allow_session_only_choice_does_not_write_disk() {
     let toml_after = std::fs::read_to_string(&cfg_path).unwrap();
     assert_eq!(toml_after, toml_before, "[s] 不应改 toml");
 
-    let canon = std::fs::canonicalize(&cwd).unwrap();
+    let canon = tomcat::infra::canonicalize(&cwd).unwrap();
     assert!(session_grants.snapshot().iter().any(|p| p == &canon));
 }
 

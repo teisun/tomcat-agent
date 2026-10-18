@@ -35,7 +35,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
                 any = true;
                 match normalize_path(t)
                     .ok()
-                    .and_then(|p| std::fs::canonicalize(p).ok())
+                    .and_then(|p| crate::infra::platform::canonicalize(p).ok())
                 {
                     Some(c) => println!("{}", c.display()),
                     None => println!("{}", t),
@@ -68,7 +68,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
             } else {
                 return Err(AppError::Config(tr("cli.workspace.required", &[])));
             };
-            let abs = std::fs::canonicalize(&target).map_err(|_| {
+            let abs = crate::infra::platform::canonicalize(&target).map_err(|_| {
                 AppError::Config(tr(
                     "cli.workspace.inaccessible",
                     &[("path", &target.display().to_string())],
@@ -121,7 +121,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
             }
             let mut file_cfg = load_config_toml_file(&config_path)?;
             let norm_user = normalize_path(&path_arg)?;
-            let canon_user = std::fs::canonicalize(&norm_user).ok();
+            let canon_user = crate::infra::platform::canonicalize(&norm_user).ok();
 
             let before_len = file_cfg.workspace.workspace_roots.len();
             file_cfg.workspace.workspace_roots.retain(|entry| {
@@ -132,7 +132,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
                 let matches = if let Some(ref cu) = canon_user {
                     normalize_path(t)
                         .ok()
-                        .and_then(|p| std::fs::canonicalize(p).ok())
+                        .and_then(|p| crate::infra::platform::canonicalize(p).ok())
                         .map(|ct| &ct == cu)
                         .unwrap_or(false)
                 } else {

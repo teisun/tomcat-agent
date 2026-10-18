@@ -2,9 +2,8 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { execFileSync } from "node:child_process";
-
 import { runTests } from "@vscode/test-electron";
+import { runCommand } from "./runCommand";
 import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 import {
@@ -80,10 +79,7 @@ async function main(): Promise<void> {
   const cdpPort = await reserveLoopbackPort();
 
   try {
-    execFileSync("npm", ["run", "build"], {
-      cwd: extensionDevelopmentPath,
-      stdio: "inherit",
-    });
+    runCommand("npm", ["run", "build"], { cwd: extensionDevelopmentPath });
     await seedChatUserSettings(userDataDir);
 
     await fs.access(extensionTestsPath);

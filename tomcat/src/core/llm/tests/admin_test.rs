@@ -869,9 +869,8 @@ fn set_provider_key_rejects_invalid_env_file() {
     )
     .expect_err("broken env file must fail");
     assert!(matches!(error, crate::AppError::Config(_)));
-    assert!(error
-        .to_string()
-        .contains(env_path.to_string_lossy().as_ref()));
+    let shown = crate::infra::platform::canonicalize(&env_path).unwrap();
+    assert!(error.to_string().contains(shown.to_string_lossy().as_ref()));
     assert_eq!(std::fs::read_to_string(&env_path).unwrap(), invalid_env);
 }
 
@@ -1022,7 +1021,12 @@ fn relay_input(id: &str, api: &str, key_env: &str) -> ModelEntryInput {
         supported_speeds: None,
         supported_reasoning_levels: None,
         thinking_format: Some(
-            if api == "anthropic-messages" { "anthropic" } else { "openai" }.to_string(),
+            if api == "anthropic-messages" {
+                "anthropic"
+            } else {
+                "openai"
+            }
+            .to_string(),
         ),
     }
 }
@@ -1046,16 +1050,28 @@ fn upsert_user_models_writes_a_mixed_protocol_batch_with_one_key_slot() {
         &cfg,
         vec![
             relay_input("fcodex/gpt-6.1-sol", "openai-responses", "FCODEX_API_KEY"),
-            relay_input("fcodex/claude-opus-5-5", "anthropic-messages", "FCODEX_API_KEY"),
+            relay_input(
+                "fcodex/claude-opus-5-5",
+                "anthropic-messages",
+                "FCODEX_API_KEY",
+            ),
             relay_input("fcodex/my-relay-model", "openai", "FCODEX_API_KEY"),
         ],
     )
     .expect("batch upsert");
 
-    let returned: Vec<_> = result.models.iter().map(|model| model.id.as_str()).collect();
+    let returned: Vec<_> = result
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
     assert_eq!(
         returned,
-        ["fcodex/gpt-6.1-sol", "fcodex/claude-opus-5-5", "fcodex/my-relay-model"]
+        [
+            "fcodex/gpt-6.1-sol",
+            "fcodex/claude-opus-5-5",
+            "fcodex/my-relay-model"
+        ]
     );
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
     for (id, api) in [
@@ -1090,7 +1106,10 @@ fn upsert_user_models_rejects_the_whole_batch_when_one_entry_is_invalid() {
 
     assert!(error.to_string().contains("not-a-protocol"), "{error}");
     assert_eq!(fs::read(&models_path).expect("reread models.toml"), before);
-    assert!(upsert_user_models(&cfg, Vec::new()).expect("empty batch").models.is_empty());
+    assert!(upsert_user_models(&cfg, Vec::new())
+        .expect("empty batch")
+        .models
+        .is_empty());
     assert_eq!(fs::read(&models_path).expect("reread models.toml"), before);
 }
 
@@ -1104,8 +1123,16 @@ fn remove_provider_deletes_slot_models_saved_key_and_their_selections() {
         &cfg,
         vec![
             relay_input("fcodex/gpt-6.1-sol", "openai-responses", "FCODEX_API_KEY"),
-            relay_input("fcodex/claude-opus-5-5", "anthropic-messages", "FCODEX_API_KEY"),
-            relay_input("fcodex2/claude-fable-5", "anthropic-messages", "FCODEX_2_API_KEY"),
+            relay_input(
+                "fcodex/claude-opus-5-5",
+                "anthropic-messages",
+                "FCODEX_API_KEY",
+            ),
+            relay_input(
+                "fcodex2/claude-fable-5",
+                "anthropic-messages",
+                "FCODEX_2_API_KEY",
+            ),
         ],
     )
     .expect("seed relay models");
@@ -1116,8 +1143,11 @@ fn remove_provider_deletes_slot_models_saved_key_and_their_selections() {
     cfg.llm.default_model = "fcodex/gpt-6.1-sol".to_string();
     cfg.llm.title_model = Some("fcodex2/claude-fable-5".to_string());
     let config_path = work_dir.path().join("tomcat.config.toml");
-    fs::write(&config_path, toml::to_string_pretty(&cfg).expect("serialize config"))
-        .expect("write config");
+    fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize config"),
+    )
+    .expect("write config");
 
     let result = remove_provider(&cfg, &config_path, "FCODEX_API_KEY").expect("remove provider");
 
@@ -1133,7 +1163,10 @@ fn remove_provider_deletes_slot_models_saved_key_and_their_selections() {
     assert!(env_text.contains("OTHER_KEEP=keep"));
     let persisted = crate::load_config_toml_file(&config_path).expect("read config");
     assert_eq!(persisted.llm.default_model, "");
-    assert_eq!(persisted.llm.title_model.as_deref(), Some("fcodex2/claude-fable-5"));
+    assert_eq!(
+        persisted.llm.title_model.as_deref(),
+        Some("fcodex2/claude-fable-5")
+    );
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
     let views = list_model_views(&catalog);
     assert!(views.iter().all(|view| !view.id.starts_with("fcodex/")));
@@ -1156,7 +1189,11 @@ fn remove_provider_keeps_an_environment_key_and_reports_its_source() {
     }
     upsert_user_models(
         &cfg,
-        vec![relay_input("shell/model", "openai", "ADMIN_TEST_SHELL_API_KEY")],
+        vec![relay_input(
+            "shell/model",
+            "openai",
+            "ADMIN_TEST_SHELL_API_KEY",
+        )],
     )
     .expect("seed model");
     let catalog = ModelCatalog::load(&cfg).expect("catalog");
@@ -1166,8 +1203,12 @@ fn remove_provider_keeps_an_environment_key_and_reports_its_source() {
         .expect("model view");
     assert_eq!(view.key_source, Some(KeySource::Environment));
 
-    let result = remove_provider(&cfg, &work_dir.path().join("tomcat.config.toml"), "ADMIN_TEST_SHELL_API_KEY")
-        .expect("remove provider");
+    let result = remove_provider(
+        &cfg,
+        &work_dir.path().join("tomcat.config.toml"),
+        "ADMIN_TEST_SHELL_API_KEY",
+    )
+    .expect("remove provider");
 
     unsafe {
         std::env::remove_var("ADMIN_TEST_SHELL_API_KEY");
@@ -1191,10 +1232,14 @@ fn remove_provider_on_a_builtin_slot_removes_the_key_and_restores_overrides() {
     let mut moved = relay_input("gpt-5.6", "openai-responses", "FCODEX_API_KEY");
     moved.model_name = builtin.model_name.clone();
     upsert_user_model(&cfg, moved).expect("move builtin under relay key");
-    write_env_file(work_dir.path(), "DEEPSEEK_API_KEY=ds\nFCODEX_API_KEY=relay\n");
+    write_env_file(
+        work_dir.path(),
+        "DEEPSEEK_API_KEY=ds\nFCODEX_API_KEY=relay\n",
+    );
     let config_path = work_dir.path().join("tomcat.config.toml");
 
-    let deepseek = remove_provider(&cfg, &config_path, "DEEPSEEK_API_KEY").expect("remove deepseek");
+    let deepseek =
+        remove_provider(&cfg, &config_path, "DEEPSEEK_API_KEY").expect("remove deepseek");
     assert!(deepseek.removed_model_ids.is_empty());
     assert!(deepseek.key_removed);
     let relay = remove_provider(&cfg, &config_path, "FCODEX_API_KEY").expect("remove relay");
@@ -1202,14 +1247,20 @@ fn remove_provider_on_a_builtin_slot_removes_the_key_and_restores_overrides() {
 
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
     let views = list_model_views(&catalog);
-    let flash = views.iter().find(|view| view.id == "deepseek-v4-flash").expect("builtin stays");
+    let flash = views
+        .iter()
+        .find(|view| view.id == "deepseek-v4-flash")
+        .expect("builtin stays");
     assert!(!flash.key_present);
     assert_eq!(flash.key_source, None::<KeySource>);
-    let restored = views.iter().find(|view| view.id == "gpt-5.6").expect("builtin restored");
+    let restored = views
+        .iter()
+        .find(|view| view.id == "gpt-5.6")
+        .expect("builtin restored");
     assert_eq!(restored.source, ModelSource::Builtin);
     assert_eq!(restored.api_key_env, "OPENAI_API_KEY");
-    let error = remove_provider(&cfg, &config_path, "NOBODY_USES_THIS_API_KEY")
-        .expect_err("unknown slot");
+    let error =
+        remove_provider(&cfg, &config_path, "NOBODY_USES_THIS_API_KEY").expect_err("unknown slot");
     assert!(error.to_string().contains("NOBODY_USES_THIS_API_KEY"));
     clear_managed_credentials_for_test();
 }
@@ -1222,18 +1273,30 @@ fn set_utility_model_writes_title_model_and_rejects_unknown_ids() {
     let (work_dir, cfg) = temp_cfg();
     upsert_user_models(
         &cfg,
-        vec![relay_input("fcodex/claude-opus-5-5", "anthropic-messages", "FCODEX_API_KEY")],
+        vec![relay_input(
+            "fcodex/claude-opus-5-5",
+            "anthropic-messages",
+            "FCODEX_API_KEY",
+        )],
     )
     .expect("seed relay model");
     let config_path = work_dir.path().join("tomcat.config.toml");
-    fs::write(&config_path, "[llm]\ndefault_model = \"deepseek-v4-pro\"\nretry_count = 7\n")
-        .expect("write config");
+    fs::write(
+        &config_path,
+        "[llm]\ndefault_model = \"deepseek-v4-pro\"\nretry_count = 7\n",
+    )
+    .expect("write config");
 
     set_utility_model(&cfg, &config_path, "fcodex/claude-opus-5-5").expect("set utility model");
-    assert!(set_default_model(&cfg, &config_path, "deepseek-v4-flash", false).expect("set default"));
+    assert!(
+        set_default_model(&cfg, &config_path, "deepseek-v4-flash", false).expect("set default")
+    );
 
     let persisted = crate::load_config_toml_file(&config_path).expect("read config");
-    assert_eq!(persisted.llm.title_model.as_deref(), Some("fcodex/claude-opus-5-5"));
+    assert_eq!(
+        persisted.llm.title_model.as_deref(),
+        Some("fcodex/claude-opus-5-5")
+    );
     assert_eq!(persisted.llm.default_model, "deepseek-v4-flash");
     assert_eq!(persisted.llm.retry_count, 7);
     let before = fs::read(&config_path).expect("read config bytes");

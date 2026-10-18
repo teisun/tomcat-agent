@@ -43,6 +43,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   primitives_tools_tests
   tool_catalog_doc
   serve_schema_fixture
+  windows_conpty_cli_tests
 )
 
 # Local HTTP/OAuth fake, compiled only with the test-server feature.

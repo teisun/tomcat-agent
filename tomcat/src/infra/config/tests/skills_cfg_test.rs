@@ -112,7 +112,7 @@ fn disabled_list_filters_skill() {
     std::fs::write(
         &path,
         format!(
-            "[storage]\nwork_dir = \"{}\"\n\n[skills]\ndisabled = [\"commit\"]\n",
+            "[storage]\nwork_dir = '{}'\n\n[skills]\ndisabled = [\"commit\"]\n",
             work_dir.to_string_lossy()
         ),
     )

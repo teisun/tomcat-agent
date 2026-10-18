@@ -236,8 +236,11 @@ impl AttachmentBlobStore {
         }
         let dir = self.session_pending_dir(session_id);
         std::fs::create_dir_all(&dir).map_err(AppError::Io)?;
-        std::fs::write(dir.join(sha), []).map_err(AppError::Io)?;
-        Ok(())
+        // Windows does not update the modification time when truncating an already empty
+        // file, so the renewal must set it explicitly.
+        std::fs::File::create(dir.join(sha))
+            .and_then(|lease| lease.set_modified(SystemTime::now()))
+            .map_err(AppError::Io)
     }
 
     /// 续期租约（扩展层 hydrate 草稿时调用，证明这份草稿还活着）。

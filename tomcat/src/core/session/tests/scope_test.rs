@@ -45,7 +45,30 @@ fn code_falls_back_to_cwd_for_non_git_dirs() {
     let key_a = session_key_for(SessionMode::Code, &dir_a);
     let key_b = session_key_for(SessionMode::Code, &dir_b);
     assert_ne!(key_a, key_b);
-    assert_eq!(project_root(&dir_a), std::fs::canonicalize(&dir_a).unwrap());
+    assert_eq!(
+        project_root(&dir_a),
+        crate::infra::platform::canonicalize(&dir_a).unwrap()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn code_key_ignores_path_case_and_has_no_verbatim_prefix_on_windows() {
+    let base = tempfile::tempdir().unwrap();
+    let plain = base.path().join("Proj");
+    std::fs::create_dir_all(&plain).unwrap();
+    for dir in [plain, temp_git_repo("scope_case_repo")] {
+        let text = dir.to_string_lossy();
+        let lower = PathBuf::from(text.to_lowercase());
+        let upper = PathBuf::from(text.to_uppercase());
+        assert_eq!(
+            session_key_for(SessionMode::Code, &lower),
+            session_key_for(SessionMode::Code, &upper),
+            "{}",
+            dir.display()
+        );
+        assert!(!project_root(&lower).to_string_lossy().starts_with(r"\\?\"));
+    }
 }
 
 #[test]

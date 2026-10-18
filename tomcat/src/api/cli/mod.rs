@@ -50,9 +50,7 @@ pub(crate) use audit_cmd::{parse_audit_line, read_audit_entries};
 #[cfg(test)]
 pub(crate) use config_cmd::{resolve_toml_key, set_toml_key};
 #[cfg(test)]
-pub(crate) use init::{
-    auto_add_to_path, install_canonical_symlink, path_export_targets, prune_stale_lines,
-};
+pub(crate) use init::{install_tomcat_command, manual_path_lines};
 #[cfg(test)]
 pub(crate) use init_model_wizard::{apply_model_choice, write_env_entries};
 #[cfg(test)]
@@ -517,6 +515,7 @@ fn guard_nested_invocation_for(active: bool, cmd: Option<&Commands>) -> Result<(
 
 /// 解析参数并执行对应子命令；无子命令时按配置进入默认 session mode。
 pub fn run_cli() -> Result<(), AppError> {
+    crate::infra::platform::prepare_console();
     let cli = localization::parse();
     let had_explicit_command = cli.command.is_some();
 

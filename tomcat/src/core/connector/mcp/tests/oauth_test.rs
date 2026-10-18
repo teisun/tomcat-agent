@@ -167,6 +167,8 @@ fn token_store_round_trips_without_logging_secret() {
             },
         )
         .expect("save");
+    #[cfg(windows)]
+    crate::test_support::assert_private_to_current_user(&store.path);
     assert_eq!(
         store
             .load("fake")

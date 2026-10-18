@@ -87,5 +87,5 @@ impl FunctionRegistry {
 }
 
 fn canonicalize_or_keep(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::infra::platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

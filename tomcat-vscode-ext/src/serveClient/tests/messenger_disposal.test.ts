@@ -12,6 +12,19 @@ function fixture(child = new FakeChildProcess()) {
 afterEach(() => vi.useRealTimers());
 
 describe("TomcatMessenger awaited disposal", () => {
+  it("spawns serve without allocating a visible Windows console", async () => {
+    const child = new FakeChildProcess();
+    const spawnFactory = vi.fn(createSpawnFactory(child)) as unknown as typeof spawn;
+    const messenger = new TomcatMessenger({ executable: "tomcat", extraArgs: ["--x"], spawnFactory });
+    messenger.start();
+    expect(spawnFactory).toHaveBeenCalledWith(
+      "tomcat",
+      ["serve", "--stdio", "--x"],
+      expect.objectContaining({ stdio: "pipe", windowsHide: true }),
+    );
+    await messenger.disposeAsync();
+  });
+
   it("is idempotent without starting an unused messenger", async () => {
     const spawnFactory = vi.fn();
     const messenger = new TomcatMessenger({ executable: "unused", spawnFactory });

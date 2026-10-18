@@ -393,7 +393,7 @@ describe("shared tool thumbnail cache", () => {
       for (const id of ["first", "second"]) {
         const tool = provider.currentState().sessionViews[id].timeline.find(item => item.type === "tool");
         expect(tool).toMatchObject({ attachments: [{ blobSha, hasThumb: true,
-          thumbUri: `https://webview.test${root}/thumbs/${blobSha}` }] });
+          thumbUri: `https://webview.test${vscode.Uri.joinPath(vscode.Uri.file(root), "thumbs", blobSha).path}` }] });
       }
       expect(request).toHaveBeenCalledOnce();
       expect(provider.currentState().activeSessionId).toBe("second");

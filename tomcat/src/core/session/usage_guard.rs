@@ -34,7 +34,7 @@ impl SessionUsageGuard {
             FileExt::try_lock_shared(&file)
         };
         result.map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
+            if crate::infra::platform::is_lock_contended(&error) {
                 AppError::Config("session_in_use".into())
             } else {
                 AppError::Io(error)

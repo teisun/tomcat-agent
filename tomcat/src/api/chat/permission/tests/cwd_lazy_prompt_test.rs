@@ -297,7 +297,7 @@ async fn apply_choice_add_persistent_writes_disk_and_session_grants() {
 
     // 校验 toml 写盘
     let toml_after = std::fs::read_to_string(&cfg_path).unwrap();
-    let canon = std::fs::canonicalize(&cwd).unwrap();
+    let canon = crate::infra::platform::canonicalize(&cwd).unwrap();
     assert!(
         toml_after.contains(canon.to_string_lossy().as_ref()),
         "workspace_roots 应写入 cwd canonical 路径，实际:\n{}",
@@ -353,7 +353,7 @@ async fn apply_choice_allow_session_only_does_not_write_disk() {
     assert_eq!(toml_after, toml_before, "[s] 不应写盘");
 
     // SessionGrants 应包含 cwd
-    let canon = std::fs::canonicalize(&cwd).unwrap();
+    let canon = crate::infra::platform::canonicalize(&cwd).unwrap();
     assert!(
         session_grants.snapshot().iter().any(|p| p == &canon),
         "[s] 应将 cwd 加入 SessionGrants"
@@ -420,7 +420,7 @@ async fn apply_choice_add_persistent_is_idempotent_for_session_grants() {
             .unwrap();
     }
 
-    let canon = std::fs::canonicalize(&cwd).unwrap();
+    let canon = crate::infra::platform::canonicalize(&cwd).unwrap();
     let snap = session_grants.snapshot();
     let count = snap.iter().filter(|p| **p == canon).count();
     assert_eq!(count, 1, "SessionGrants 必须去重");

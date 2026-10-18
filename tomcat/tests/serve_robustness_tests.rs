@@ -94,7 +94,12 @@ fn assert_cold_start_management(initialized: bool) {
     let written_default = before
         .as_deref()
         .map(|bytes| toml::from_str::<toml::Value>(std::str::from_utf8(bytes).unwrap()).unwrap())
-        .and_then(|config| config["llm"].get("default_model")?.as_str().map(str::to_string))
+        .and_then(|config| {
+            config["llm"]
+                .get("default_model")?
+                .as_str()
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     assert_eq!(initialized, !written_default.is_empty());
     assert_eq!(
@@ -379,11 +384,23 @@ fn assert_selected_model_ready(initialized: bool) {
 
 fn anthropic_text_response(text: &str) -> common::serve::ScriptedResponse {
     let events = [
-        ("message_start", json!({"message":{"usage":{"input_tokens":1}}})),
-        ("content_block_start", json!({"index":0, "content_block":{"type":"text", "text":""}})),
-        ("content_block_delta", json!({"index":0, "delta":{"type":"text_delta", "text":text}})),
+        (
+            "message_start",
+            json!({"message":{"usage":{"input_tokens":1}}}),
+        ),
+        (
+            "content_block_start",
+            json!({"index":0, "content_block":{"type":"text", "text":""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"index":0, "delta":{"type":"text_delta", "text":text}}),
+        ),
         ("content_block_stop", json!({"index":0})),
-        ("message_delta", json!({"delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":1}})),
+        (
+            "message_delta",
+            json!({"delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":1}}),
+        ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
     common::serve::response(
@@ -405,7 +422,9 @@ fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn prompt_until_reply(child: &mut common::serve::ServeChild, session: &str, reply: &str) {
-    child.send_value(&json!({"type":"prompt", "sessionId":session, "text":"hello relay", "params":{}}));
+    child.send_value(
+        &json!({"type":"prompt", "sessionId":session, "text":"hello relay", "params":{}}),
+    );
     let frames = child.recv_until(SERVE_TIMEOUT, |v| v["type"] == "agent_idle");
     assert!(
         frames
@@ -424,7 +443,11 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         if body["model"] == "relay-claude" {
             anthropic_text_response("anthropic-relay-ok")
         } else {
-            response(vec![sse_delta("openai-relay-ok"), sse_finish("stop"), sse_done()])
+            response(vec![
+                sse_delta("openai-relay-ok"),
+                sse_finish("stop"),
+                sse_done(),
+            ])
         }
     });
     let entry = |id: &str, name: &str, api: &str, key_env: &str| {
@@ -457,7 +480,10 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         &mut child,
         json!({"type":"set_default_model", "modelId":"relay/relay-claude", "onlyIfUnset":true}),
     );
-    assert_eq!(retried["written"], false, "a configured default is never replaced");
+    assert_eq!(
+        retried["written"], false,
+        "a configured default is never replaced"
+    );
     request(
         &mut child,
         json!({"type":"set_utility_model", "modelId":"relay/relay-claude"}),
@@ -470,9 +496,17 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         .unwrap()
         .iter()
         .filter(|model| model["apiKeyEnv"] == "RELAY_API_KEY")
-        .map(|model| (model["api"].as_str().unwrap(), model["keySource"].as_str().unwrap()))
+        .map(|model| {
+            (
+                model["api"].as_str().unwrap(),
+                model["keySource"].as_str().unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
-    assert_eq!(relay_rows, [("openai", "saved"), ("anthropic-messages", "saved")]);
+    assert_eq!(
+        relay_rows,
+        [("openai", "saved"), ("anthropic-messages", "saved")]
+    );
 
     prompt_until_reply(&mut child, &session, "openai-relay-ok");
     let deadline = std::time::Instant::now() + SERVE_TIMEOUT;
@@ -487,7 +521,10 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert!(title.starts_with("POST /v1/messages "), "{title}");
-    assert_eq!(request_header(&title, "x-api-key"), Some("shared-fixture-key"));
+    assert_eq!(
+        request_header(&title, "x-api-key"),
+        Some("shared-fixture-key")
+    );
     assert_eq!(extract_json_body(&title)["model"], "relay-claude");
     request(
         &mut child,
@@ -519,28 +556,48 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         .map(|request| {
             let auth = request_header(request, "authorization")
                 .map(str::to_string)
-                .or_else(|| request_header(request, "x-api-key").map(|key| format!("x-api-key {key}")));
-            (request.lines().next().unwrap().to_string(), auth.unwrap_or_default())
+                .or_else(|| {
+                    request_header(request, "x-api-key").map(|key| format!("x-api-key {key}"))
+                });
+            (
+                request.lines().next().unwrap().to_string(),
+                auth.unwrap_or_default(),
+            )
         })
         .collect::<Vec<_>>();
     assert_eq!(
         sent,
         [
-            ("POST /v1/chat/completions HTTP/1.1".to_string(), "Bearer shared-fixture-key".to_string()),
-            ("POST /v1/messages HTTP/1.1".to_string(), "x-api-key shared-fixture-key".to_string()),
-            ("POST /v1/chat/completions HTTP/1.1".to_string(), "Bearer second-fixture-key".to_string()),
+            (
+                "POST /v1/chat/completions HTTP/1.1".to_string(),
+                "Bearer shared-fixture-key".to_string()
+            ),
+            (
+                "POST /v1/messages HTTP/1.1".to_string(),
+                "x-api-key shared-fixture-key".to_string()
+            ),
+            (
+                "POST /v1/chat/completions HTTP/1.1".to_string(),
+                "Bearer second-fixture-key".to_string()
+            ),
         ]
     );
     assert!(child.wait_for_exit(SERVE_TIMEOUT).status.success());
     for name in ["tomcat.config.toml", "models.toml"] {
         let saved = std::fs::read_to_string(fx.home_path.join(".tomcat").join(name)).unwrap();
-        assert!(!saved.contains("fixture-key"), "{name} must not contain keys");
+        assert!(
+            !saved.contains("fixture-key"),
+            "{name} must not contain keys"
+        );
     }
 
     let mut restarted = spawn_serve_child(&fx);
     let session = initialize_cold(&mut restarted);
     assert_eq!(
-        request(&mut restarted, json!({"type":"get_state", "sessionId":session}))["modelReady"],
+        request(
+            &mut restarted,
+            json!({"type":"get_state", "sessionId":session})
+        )["modelReady"],
         true
     );
     assert_eq!(
@@ -557,7 +614,10 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
     );
     assert_eq!(removed["keyRemoved"], true);
     let listed = request(&mut restarted, json!({"type":"list_models"}));
-    assert_eq!(listed["defaultModelId"], "", "the GUI asks the user to choose again");
+    assert_eq!(
+        listed["defaultModelId"], "",
+        "the GUI asks the user to choose again"
+    );
     assert_eq!(
         listed["utilityModelId"], "deepseek-v4-flash",
         "a cleared utility role falls back to its compiled default"
@@ -567,10 +627,18 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         .unwrap()
         .iter()
         .filter(|model| model["provider"] == "relay")
-        .map(|model| (model["id"].as_str().unwrap(), model["keyPresent"].as_bool().unwrap()))
+        .map(|model| {
+            (
+                model["id"].as_str().unwrap(),
+                model["keyPresent"].as_bool().unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(remaining, [("relay-2/relay-gpt", true)]);
-    let resumed = request(&mut restarted, json!({"type":"get_state", "sessionId":session}));
+    let resumed = request(
+        &mut restarted,
+        json!({"type":"get_state", "sessionId":session}),
+    );
     assert_eq!(
         (resumed["model"].as_str(), resumed["modelReady"].as_bool()),
         (Some("relay-2/relay-gpt"), Some(true)),
@@ -580,7 +648,10 @@ fn serve_relay_cards_share_one_key_across_protocols_and_keep_two_keys_apart() {
         .as_str()
         .unwrap()
         .to_string();
-    let fresh = request(&mut restarted, json!({"type":"get_state", "sessionId":fresh}));
+    let fresh = request(
+        &mut restarted,
+        json!({"type":"get_state", "sessionId":fresh}),
+    );
     assert_eq!(
         (fresh["model"].as_str(), fresh["modelReady"].as_bool()),
         (Some(""), Some(false))
@@ -824,5 +895,66 @@ fn serve_eof_exits_cleanly() {
     assert!(
         !stderr.contains("panic"),
         "stderr should not contain panic output: {stderr}"
+    );
+}
+
+/// `npx` 在 Windows 上是 `npx.cmd`：直接子进程是 cmd.exe，真正的服务是它启动的 node。
+/// 服务在客户端断开后还要很久才退出（例如正在关闭浏览器）时，serve 仍须在 EOF 后及时退出且不留下服务进程。
+#[cfg(windows)]
+#[test]
+#[serial]
+fn serve_eof_exits_promptly_when_a_cmd_wrapped_mcp_server_outlives_its_client() {
+    let server = spawn_scripted_openai_stream_server(vec![]);
+    let fx = setup_serve_fixture(&server.base_url);
+    let config = fx.home_path.join(".tomcat/tomcat.config.toml");
+    let mut cfg = tomcat::load_config_toml_file(&config).unwrap();
+    cfg.connector.enabled = true;
+    std::fs::write(&config, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    let pid_file = fx.home_path.join("mcp.pid");
+    let launcher = fx.home_path.join("lingering-mcp.cmd");
+    let script =
+        common::serve::fixture_path(&["tests", "fixtures", "mcp", "fake_stdio_server.mjs"]);
+    // cmd.exe decodes batch text with the OEM code page: keep non-ASCII paths out of the file.
+    std::fs::write(
+        &launcher,
+        "@node \"%FAKE_MCP_SCRIPT%\" --linger-after-eof-ms 60000 --pid-file \"%~dp0mcp.pid\"\r\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fx.home_path.join(".tomcat/mcp.json"),
+        json!({"mcpServers":{"lingering":{"command":launcher,"env":{"FAKE_MCP_SCRIPT":script}}}})
+            .to_string(),
+    )
+    .unwrap();
+
+    let mut child = spawn_serve_child(&fx);
+    child.send_value(
+        &json!({"type":"control_request","requestId":"init-1","subtype":"initialize","payload":{}}),
+    );
+    let _ = child.recv_until(SERVE_TIMEOUT, |value| value["requestId"] == "init-1");
+    let deadline = std::time::Instant::now() + SERVE_TIMEOUT;
+    loop {
+        child.send_value(&json!({"type":"list_connectors","id":"ready","context":{}}));
+        let frames = child.recv_until(SERVE_TIMEOUT, |frame| frame["id"] == "ready");
+        if frames.last().unwrap()["payload"]["connectors"][0]["state"] == "connected" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "connector startup: {frames:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+
+    let output = child.wait_for_exit(SERVE_TIMEOUT);
+    assert!(output.status.success(), "{output:?}");
+    let tasks = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&tasks.stdout).contains("node.exe"),
+        "the wrapped MCP server must not outlive serve"
     );
 }

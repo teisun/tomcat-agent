@@ -19,12 +19,16 @@ fn current_model_selection_reads_latest_values_without_mutating_environment_or_r
     const CHILD: &str = "TOMCAT_TEST_MODEL_SELECTION_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let home = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
             .args(["--exact", "infra::config::tests::load_test::current_model_selection_reads_latest_values_without_mutating_environment_or_runtime_policy"])
             .env_clear()
             .env("HOME", home.path())
-            .env(CHILD, "1")
-            .output().unwrap();
+            .env(CHILD, "1");
+        // Without TMP, Windows resolves the temporary directory to the unwritable C:\Windows.
+        #[cfg(windows)]
+        child.env("TMP", std::env::temp_dir());
+        let output = child.output().unwrap();
         assert!(
             output.status.success(),
             "{}\n{}",
@@ -377,8 +381,8 @@ fn resolve_model_thinking_path_uses_work_dir_root() {
     let path = resolve_model_thinking_path(&cfg).unwrap();
 
     assert_eq!(
-        std::fs::canonicalize(path.parent().expect("parent path")).unwrap(),
-        std::fs::canonicalize(temp.path()).unwrap()
+        crate::infra::platform::canonicalize(path.parent().expect("parent path")).unwrap(),
+        crate::infra::platform::canonicalize(temp.path()).unwrap()
     );
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),

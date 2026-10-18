@@ -510,7 +510,8 @@ pub(crate) fn builtin_seed_entries_result(
 }
 
 fn missing_definition_field(raw: &UserModelEntry) -> Option<&'static str> {
-    let blank = |value: &Option<String>| value.as_deref().is_none_or(|value| value.trim().is_empty());
+    let blank =
+        |value: &Option<String>| value.as_deref().is_none_or(|value| value.trim().is_empty());
     if blank(&raw.api) {
         Some("api")
     } else if blank(&raw.provider) {

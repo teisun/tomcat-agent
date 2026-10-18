@@ -69,10 +69,7 @@ fn bump_mtime(path: &std::path::Path) {
 
 /// 保持文件字节不变，只让 mtime 失配。
 fn touch_mtime(path: &std::path::Path) {
-    let new_t = SystemTime::now() + Duration::from_secs(2);
-    if let Ok(file) = std::fs::File::open(path) {
-        let _ = file.set_modified(new_t);
-    }
+    crate::test_support::set_mtime(path, SystemTime::now() + Duration::from_secs(2));
 }
 
 fn write_fake_pdf(path: &std::path::Path, total_bytes: usize) {
@@ -499,7 +496,7 @@ async fn tool_exec_pdf_ignores_cached_file_id_and_stays_inline() {
         dir_path.join("openai-files-registry.json"),
     ));
     runtime.cache.by_path.insert(
-        std::fs::canonicalize(&pdf).unwrap_or(pdf.clone()),
+        crate::infra::platform::canonicalize(&pdf).unwrap_or(pdf.clone()),
         CacheEntry {
             mtime_ms,
             size,

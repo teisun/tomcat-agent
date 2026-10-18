@@ -18,8 +18,19 @@ use super::types::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
     CheckpointRestoreReport, ListOptions, RestoreOptions, RetentionPolicy,
 };
+use crate::infra::platform::{LEGACY_MAX_PATH, NULL_DEVICE};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+// 单条 git 在 Windows 上约 30ms；间隔越长，每条命令结束后白等越久。
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// 影子仓对整工作树执行 status/add，打开 Git 的原生大工作树优化。
+// 随每条命令传入，不必为写入仓库配置再起 git 进程。
+const LARGE_WORKTREE_OPTIONS: &[&str] = &[
+    "core.untrackedCache=true",
+    "feature.manyFiles=true",
+    "index.version=4",
+    "index.threads=true",
+];
 const CHECKPOINT_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_WORKDIR_FILES: usize = 50_000;
 const TOMCAT_WORKDIR_MARKER: &str = "TOMCAT_WORKDIR";
@@ -80,7 +91,6 @@ pub struct ShadowGitStore {
     git_timeout: Duration,
     git_program: PathBuf,
     cooldown_until: Mutex<Option<Instant>>,
-    performance_configured: Mutex<bool>,
     lock: Mutex<()>,
     #[cfg(test)]
     file_count_calls: AtomicUsize,
@@ -104,7 +114,6 @@ impl ShadowGitStore {
             git_timeout: GIT_TIMEOUT,
             git_program: PathBuf::from(DEFAULT_GIT_PROGRAM),
             cooldown_until: Mutex::new(None),
-            performance_configured: Mutex::new(false),
             lock: Mutex::new(()),
             #[cfg(test)]
             file_count_calls: AtomicUsize::new(0),
@@ -122,13 +131,13 @@ impl ShadowGitStore {
         store
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_git_timeout(mut self, git_timeout: Duration) -> Self {
         store_set_git_timeout(&mut self, git_timeout);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_git_program(mut self, git_program: PathBuf) -> Self {
         self.git_program = git_program;
         self
@@ -155,11 +164,14 @@ impl ShadowGitStore {
             self.ensure_metadata_file()?;
             self.write_workdir_marker()?;
             self.ensure_exclude_file()?;
-            self.ensure_performance_config()?;
             return Ok(());
         }
 
-        let output = Command::new(&self.git_program)
+        let mut init = Command::new(&self.git_program);
+        if LEGACY_MAX_PATH {
+            init.args(["-c", "core.longpaths=true"]);
+        }
+        let output = init
             .arg("init")
             .arg("--bare")
             .arg(&self.git_dir)
@@ -185,29 +197,9 @@ impl ShadowGitStore {
         self.run_git(["config", "user.email", "tomcat@local"])?;
         self.run_git(["config", "commit.gpgsign", "false"])?;
         self.run_git(["config", "tag.gpgsign", "false"])?;
-        self.ensure_performance_config()?;
         self.ensure_metadata_file()?;
         self.write_workdir_marker()?;
         self.ensure_exclude_file()?;
-        Ok(())
-    }
-
-    fn ensure_performance_config(&self) -> Result<(), CheckpointError> {
-        let mut configured = self.performance_configured.lock();
-        if *configured {
-            return Ok(());
-        }
-        // 影子仓对整工作树执行 status/add，打开 Git 的原生大工作树优化，
-        // 避免 checkpoint 在文件多的项目里无谓变慢。
-        for (key, value) in [
-            ("core.untrackedCache", "true"),
-            ("feature.manyFiles", "true"),
-            ("index.version", "4"),
-            ("index.threads", "true"),
-        ] {
-            self.run_git(["config", key, value])?;
-        }
-        *configured = true;
         Ok(())
     }
 
@@ -313,13 +305,20 @@ impl ShadowGitStore {
 
     fn run_git_allow_failure_args(&self, args: &[OsString]) -> Result<Output, CheckpointError> {
         let mut cmd = Command::new(&self.git_program);
+        // 下面屏蔽用户 git 配置时也屏蔽了用户自己开的 core.longpaths。
+        if LEGACY_MAX_PATH {
+            cmd.args(["-c", "core.longpaths=true"]);
+        }
+        for option in LARGE_WORKTREE_OPTIONS {
+            cmd.args(["-c", option]);
+        }
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GIT_DIR", &self.git_dir)
             .env("GIT_WORK_TREE", &self.work_tree)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_SYSTEM", null_device())
-            .env("GIT_CONFIG_GLOBAL", null_device());
+            .env("GIT_CONFIG_SYSTEM", NULL_DEVICE)
+            .env("GIT_CONFIG_GLOBAL", NULL_DEVICE);
         cmd.args(args);
 
         let mut child = cmd.spawn()?;
@@ -371,7 +370,7 @@ impl ShadowGitStore {
                     .map(|status| (status, true))
                     .map_err(CheckpointError::Io);
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(GIT_POLL_INTERVAL);
         };
 
         // stdout/stderr 必须从子进程启动起并发排空。若等 git 退出后才读取，
@@ -840,17 +839,6 @@ impl CheckpointStore for ShadowGitStore {
     }
 }
 
-fn null_device() -> &'static str {
-    #[cfg(windows)]
-    {
-        "NUL"
-    }
-    #[cfg(not(windows))]
-    {
-        "/dev/null"
-    }
-}
-
 fn workdir_hash(path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.to_string_lossy().as_bytes());
@@ -893,7 +881,7 @@ fn merge_notes_with_changed_paths(
 }
 
 fn canonicalize_existing_path(path: PathBuf) -> PathBuf {
-    fs::canonicalize(&path).unwrap_or(path)
+    crate::infra::platform::canonicalize(&path).unwrap_or(path)
 }
 
 fn short_hash(seed: u64) -> String {
@@ -1017,7 +1005,7 @@ fn render_duration(duration: Duration) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn store_set_git_timeout(store: &mut ShadowGitStore, git_timeout: Duration) {
     store.git_timeout = git_timeout;
 }

@@ -20,7 +20,7 @@ pub struct LayerPaths {
 }
 
 pub fn canonical_scope_root(path: &Path) -> Result<PathBuf, AppError> {
-    path.canonicalize().map_err(|error| {
+    crate::infra::platform::canonicalize(path).map_err(|error| {
         AppError::Config(tr(
             "package.scopeCanonical",
             &[("detail", &error.to_string())],

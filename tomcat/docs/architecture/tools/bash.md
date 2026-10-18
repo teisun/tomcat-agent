@@ -28,7 +28,7 @@ LLM 调用 bash
 
 主要入参：
 
-- `command`：必填的完整 shell 命令行，含可执行程序和全部参数；Unix 经 `sh -c`、Windows 经 `cmd /C` 执行，支持管道、重定向、条件执行和引号；
+- `command`：必填的完整 shell 命令行，含可执行程序和全部参数；Unix 经 `sh -c`、Windows 经 Git Bash 的 `bash.exe -c` 执行（见 §3.1），支持管道、重定向、条件执行和引号；
 - `cwd`：可选工作目录；
 - `run_in_background`：立即转为 tracked background task；
 - `foreground_wait_ms`：单次调用覆盖前台观察窗口，执行前统一 clamp 到 `8000..=16000`。
@@ -58,11 +58,26 @@ bash -> { task_id, log_path }
 1. 解析并校验 `cwd`；
 2. 可选 `BashAstChecker` 接线（仅显式启用才检查；当前生产禁用）；
 3. permission gate / confirmation / audit；
-4. 创建独立 process group 并 spawn；
+4. 经 `platform::ProcessTree::spawn` 创建独立进程树并 spawn（Unix 是新 process group，Windows 是独立 Job Object）；
 5. stdout、stderr reader 持续泵流；
 6. 等待自然退出、转后台或收到取消。
 
-`task_stop` 与 cancel 都针对 process group，而不是只调用单个 child 的 kill。终态翻转与 lifecycle event 有一次性 guard，避免 stop 与自然退出竞态产生双通知。
+`task_stop` 与 cancel 都经 `ProcessTree::kill` 结束整棵进程树，而不是只调用单个 child 的 kill。终态翻转与 lifecycle event 有一次性 guard，避免 stop 与自然退出竞态产生双通知。
+
+### 3.1 Windows：Git Bash 与 Job Object
+
+```text
+posix_shell()（进程内只解析一次）
+  ① git --exec-path → 向上 3 级得 Git 根 → <根>\bin\bash.exe
+  ② %ProgramFiles%\Git\bin\bash.exe
+  ③ %LOCALAPPDATA%\Programs\Git\bin\bash.exe
+  都没有 → 报 bash.gitBashMissing（附 winget 安装命令），不执行
+```
+
+- **绝不按名字在 PATH 里找 `bash`**：`C:\Windows\System32\bash.exe` 是 WSL，不是 Git Bash。
+- **找不到就失败（fail-closed）**，不回落到 `cmd`：权限层按 POSIX 语义解析命令，交给另一种 shell 执行会让检查失效。MinGit 没有 `bash.exe`，会继续查 ②③。
+- 解析结果在进程内缓存，安装 Git 后需要重启 VS Code 或终端；`tomcat doctor` 会显示 Git Bash 是否找到。
+- **进程树用 Job Object 代替 process group**：Git Bash 启动命令时会经过一个随即退出的中转进程，父子 PID 链断开，`taskkill /T` 找不到孙进程。每个任务以挂起方式创建、加入独立 Job 后再恢复；`task_stop`、cancel 与超时都用 `TerminateJobObject` 结束整棵树。业务层只看到 `platform::ProcessTree`（`src/infra/platform/process.rs`），Job 实现在 `src/infra/platform/process_job.rs`。CLI/Serve 退出时仍在运行的任务同样整树终止（`ProcessTree::kill_if_abandoned`）：`kill_on_drop` 只杀得到启动器，真正的 bash 会占住输出管道，而 Windows 上 tokio 的子进程管道是阻塞读，运行时关闭会一直等它；任务正常结束后用 `&` 脱离出去的进程不受影响。
 
 ## 4. 输出链路
 
@@ -168,7 +183,7 @@ Spawned / Running ────────────────────�
 ## 9. 风险与约束
 
 - 长时间不读取 pipe 会死锁：所有路径必须使用统一 reader / `DrainingOutput`；
-- 只终止直接 child 会泄漏孙进程：停止路径必须面向 process group；
+- 只终止直接 child 会泄漏孙进程：停止路径必须面向整棵进程树（`ProcessTree`）；
 - foreground 与 registry 分别拼配置会漂移：生产只从同一 resolved policy 装配；
 - 输出事件可能很密：UI 层应节流展示，但不能阻塞 drain 与落盘；
 - lifecycle 与主动读取可能重复交付：completion route 与一次性 guard 共同去重。
@@ -180,4 +195,7 @@ Spawned / Running ────────────────────�
 - `src/core/tools/primitive/executor/output_accum.rs`：有界输出；
 - `src/core/agent_loop/tool_exec/branches/bash.rs`：参数解析与结果协议；
 - `src/api/chat/context.rs`：生产配置装配；
-- `src/infra/config/types/tools.rs`：配置契约与范围常量。
+- `src/infra/config/types/tools.rs`：配置契约与范围常量；
+- `src/infra/platform/shell.rs`：Windows 的 Git Bash 解析；
+- `src/infra/platform/process.rs`：`ProcessTree` 统一接口（Unix 进程组 / Windows Job Object）；
+- `src/infra/platform/process_job.rs`：Windows 的 Job Object 进程树管理。

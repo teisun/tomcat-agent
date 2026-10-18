@@ -1,0 +1,126 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "tomcat/**"
+      - "tomcat-vscode-ext/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "tomcat/**"
+      - "tomcat-vscode-ext/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust gate-fast (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+
+    defaults:
+      run:
+        # Windows runs Git Bash: the gate script and the bash tool under test both need it.
+        shell: bash
+        working-directory: tomcat
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node for test fixtures
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tomcat -> target
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # search_files tests cover the ripgrep backend; without rg the tool uses a walker without context lines.
+      - name: Install ripgrep
+        run: |
+          case "$RUNNER_OS" in
+            Windows) choco install ripgrep --no-progress -y ;;
+            Linux) sudo apt-get update && sudo apt-get install -y ripgrep ;;
+            macOS) brew install ripgrep ;;
+          esac
+          rg --version
+
+      - name: Run gate-fast
+        run: |
+          set -o pipefail
+          bash scripts/run-integration-tests.sh gate-fast 2>&1 | tee "$RUNNER_TEMP/gate-fast.log"
+
+      # Raw job logs need repository admin rights; annotations are visible to every reader.
+      - name: Annotate failures
+        if: failure()
+        run: |
+          failures=$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$RUNNER_TEMP/gate-fast.log" \
+            | awk '/panicked at/ { print; for (i = 0; i < 4 && (getline line) > 0; i++) print line; next }
+                   /^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$|^ *(left|right): /' \
+            | awk '!seen[$0]++' | cut -c1-600 | head -n 400)
+          # GitHub truncates each annotation to about 4 KB: emit consecutive parts instead.
+          part=0
+          while [ -n "$failures" ] && [ "$part" -lt 9 ]; do
+            chunk=$(printf '%s\n' "$failures" | awk '{ n += length($0) + 1; if (n > 3500 && NR > 1) exit; print }')
+            failures=$(printf '%s\n' "$failures" | tail -n +"$(( $(printf '%s\n' "$chunk" | wc -l) + 1 ))")
+            part=$((part + 1))
+            chunk=${chunk//'%'/%25}
+            echo "::error title=gate-fast failures (${{ matrix.os }}) part ${part}::${chunk//$'\n'/%0A}"
+          done
+
+  extension:
+    name: extension gate:fast (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: tomcat-vscode-ext
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: |
+            tomcat-vscode-ext/package-lock.json
+            tomcat-vscode-ext/gui/package-lock.json
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm --prefix gui ci
+
+      - name: Run gate:fast
+        run: npm run gate:fast

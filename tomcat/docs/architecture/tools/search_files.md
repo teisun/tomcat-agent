@@ -113,8 +113,8 @@
 
 ## 3. 协议（入参 / 出参 / Schema）
 
-> 单一事实源：[`src/core/tools/primitive/types.rs`](../../../../src/core/tools/primitive/types.rs)；
-> 派生：[`src/core/tools/contract/catalog.rs::search_files_parameters`](../../../../src/core/tools/contract/catalog.rs)
+> 单一事实源：[`src/core/tools/primitive/types.rs`](../../../src/core/tools/primitive/types.rs)；
+> 派生：[`src/core/tools/contract/catalog.rs::search_files_parameters`](../../../src/core/tools/contract/catalog.rs)
 > → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)。
 
 ### 3.1 入参 `SearchFilesArgs`
@@ -262,17 +262,17 @@ SearchFilesStats
 │  • start_search_tools_preflight(cfg, bus)                    │
 │  • should_skip_preflight: env > config > 默认 true           │
 │  • missing_search_tools: find_binary("rg"/"fd"/"fdfind")     │
-│  • Unix：nohup 重定向 + sh -c spawn，不等待安装结束；         │
+│  • 两平台同一流程：platform::spawn_detached 后台安装，       │
+│    不等待安装结束，退出 chat 后安装继续                      │
 │    并发仅进程表（Homebrew 窄匹配），可选 log-path marker     │
-│  • Windows：Command::output() 阻塞；v1 无 detached           │
-│  • 日志：Unix 由 shell 实时写 preflight-file-log-*.log；     │
-│    Windows 由宿主在 output 后汇总写入                        │
+│  • 日志：安装进程实时追加 preflight-file-log-*.log           │
 │  • tracing target：tomcat_preflight（RUST_LOG=debug）       │
-│  • install_plan: cfg!(target_os) + TERMUX_VERSION 决策       │
+│  • platform::system_package_manager() 选包管理器，           │
+│    install_plan(manager, target) 给出命令：                  │
+│      Termux → pkg install ripgrep fd                         │
 │      macOS  → brew install ripgrep fd                        │
 │      Win    → winget install (UAC 弹窗为系统行为)            │
-│      Linux  → apt-get / dnf / pacman / zypper                │
-│      Termux → pkg install ripgrep fd                         │
+│      其它   → apt-get / dnf / pacman                         │
 │      Android (非 Termux) → 不自动装；走 Tier2                │
 │  • 事件 wire::WIRE_SEARCH_TOOLS_PREFLIGHT                    │
 └──────────────────────────────────────────────────────────────┘
@@ -404,14 +404,14 @@ SearchFilesStats
 | 入口 | `chat_loop` 注册完 stderr 监听后调用 `preflight::start_search_tools_preflight(cfg, bus)`；与会话循环并行；不影响首屏 |
 | **git 预检（对称，拟定）** | **`start_git_preflight`** 与上格 **同构**：detached 安装、`WIRE_GIT_PREFLIGHT` 字段镜像 `WIRE_SEARCH_TOOLS_PREFLIGHT`、stderr 与 env 对称；详见 [`checkpoint-resume.md` §2.2.2](./checkpoint-resume.md#222-chat-入口-git-预检与后台安装拟定)。 |
 | 探测 | `find_binary("rg")` / `find_binary("fd")` / `find_binary("fdfind")`；即时读 `PATH`，无缓存 |
-| 安装（Unix） | 后台线程内对包管理器使用 **`nohup … >> ~/.tomcat/agents/main/logs/preflight-file-log-<ts>.log 2>&1 &`**，经 `/bin/sh -c` **`spawn`**；**不**阻塞等待安装结束，退出 `tomcat chat` / tomcat 进程结束后安装可继续 |
-| macOS Homebrew | **`brew install --force-bottle ripgrep fd`**，且 detached shell 前缀 **`HOMEBREW_NO_BUILD_FROM_SOURCE=1`**：仅用 bottle，**禁止**从源码构建（避免 llvm 等超长后台编译）；无 bottle 时安装失败，会话仍可用 Tier2 |
-| 安装（Windows） | v1 仍为 **`Command::output()` 阻塞**直至结束；detached 留代码 TODO（PowerShell `Start-Process -NoWait`） |
+| 安装（两平台同一流程） | 后台线程内调 **`platform::spawn_detached`**，输出追加到 `~/.tomcat/agents/main/logs/preflight-file-log-<ts>.log`；**不**阻塞等待安装结束，退出 `tomcat chat` / tomcat 进程结束后安装可继续。Unix 实现是 `/bin/sh -c "nohup … >> <log> 2>&1 &"`；Windows 实现是无窗口（`CREATE_NO_WINDOW`）、独立进程组（`CREATE_NEW_PROCESS_GROUP`）的子进程，stdout/stderr 直接写日志文件 |
+| macOS Homebrew | **`brew install --force-bottle ripgrep fd`**，且安装进程环境变量 **`HOMEBREW_NO_BUILD_FROM_SOURCE=1`**：仅用 bottle，**禁止**从源码构建（避免 llvm 等超长后台编译）；无 bottle 时安装失败，会话仍可用 Tier2 |
+| Windows 重开终端 | winget 把 PATH 改在注册表里，运行中的终端看不到新装的程序（`platform::PATH_CHANGES_NEED_RESTART`），所以 `detached` 文案多一句"安装完成后请重新打开终端"（`preflight.searchDetachedRestart`）；跟踪日志的命令由 `platform::FOLLOW_FILE_COMMAND` 给出（Windows `Get-Content -Wait`，Unix `tail -f`） |
 | 并发（Unix / Homebrew） | 仅依据 **进程表**（如 `pgrep -f` 匹配 `brew.rb` / Homebrew `build.rb` 等窄模式）判断是否已有安装/编译；为真则 emit `already_installing`，**不**再起第二套 nohup |
-| log-path marker（UX） | 可选文件 `preflight-detached-log.marker`（与日志同目录）仅存**一行**本次 detached 日志绝对路径，便于 `already_installing` 时提示 `tail -f`；**从不**单独作为「正在安装」的判定依据 |
+| log-path marker（UX） | 可选文件 `preflight-detached-log.marker`（与日志同目录）仅存**一行**本次 detached 日志绝对路径，便于 `already_installing` 时提示跟踪日志的命令；**从不**单独作为「正在安装」的判定依据 |
 | 日志清理 | v1 **不**自动删除历史 `preflight-file-log-*.log`（保持实现简单） |
-| 平台决策 | `cfg!(target_os)` + 运行期 `TERMUX_VERSION` env；详见 §9 决策树 |
-| 事件 | `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `progress`（主要为 Windows）/ `success` \|\| `failed`（Windows 阻塞路径）/ **`detached`** / **`already_installing`**（Unix 后台路径） |
+| 平台决策 | `platform::system_package_manager()`：按固定顺序找本机包管理器（Termux pkg → Android 到此为止 → macOS brew → Windows winget → apt-get → dnf → pacman）；详见 §9 决策树 |
+| 事件 | `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / **`detached`** / **`already_installing`** / `failed`（两平台相同；tomcat 不等待安装结束，所以不再发出 `progress` / `success`，成败看日志） |
 | 取消 | 复用 `ctx.cancel_token`；Ctrl+C 软中断同时取消子进程 |
 | 竞态 | 装完前用户调用 `search_files`：行为不变（缺一策略回落 Tier2） |
 | sudo / 权限 | Linux 不抢 root；失败发事件，不静默 |
@@ -423,7 +423,7 @@ SearchFilesStats
 
 ## 8. 预检事件状态机
 
-实现侧 wire `payload.status` 字符串（非下图字面量）：`ready`、`start`、`progress`、`success`、`failed`、`detached`、`already_installing`。
+实现侧 wire `payload.status` 字符串（非下图字面量）：`ready`、`start`、`failed`、`detached`、`already_installing`。
 
 ```text
                        ┌──────────────────┐
@@ -441,21 +441,19 @@ SearchFilesStats
                 ┌──────────────────────────┐
                 │       start             │  emit start（仍缺工具）
                 └──────────────┬──────────┘
-                               │
-              ┌────────────────┴────────────────┐
-              │ Unix（v1）                     │ Windows（v1）
-              ▼                                ▼
-   install_plan 有方案？              install_plan 有方案？
-       │ no → failed                         │ no → failed
-       │ yes                                 │ yes
-       ▼                                     ▼
-   Homebrew 安装中？                  progress → output() 阻塞
-       │ yes → already_installing              │
-       │ no                                  ┘
-       ▼                                  success / failed
-   spawn nohup + detached
-       │
-       └────────► chat 继续（Tier1 就绪后自动接管 / 否则 Tier2 兜底）
+                               │（Unix / Windows 同一流程）
+                               ▼
+              system_package_manager() 找到包管理器？
+                  │ no → failed
+                  │ yes
+                  ▼
+              Homebrew 安装中？
+                  │ yes → already_installing
+                  │ no
+                  ▼
+              spawn_detached → detached（Windows 文案提醒重开终端）
+                  │            （启动失败 → failed）
+                  └────────► chat 继续（Tier1 就绪后自动接管 / 否则 Tier2 兜底）
 
 ```
 
@@ -480,39 +478,34 @@ SearchFilesStats
         ║  skip install ║                            │
         ╚═══════════════╝               ┌───── none ─┴── some ─────┐
                                         ▼                          ▼
-                                ╔════════════╗     ┌──────────────────────────┐
-                                ║ no-op done ║     │   match cfg!(target_os)  │
-                                ╚════════════╝     └──────────┬───────────────┘
+                                ╔════════════╗     ┌──────────────────────────────┐
+                                ║ no-op done ║     │ platform::system_package_    │
+                                ╚════════════╝     │   manager()（按顺序取第一个） │
+                                                   └──────────┬───────────────────┘
                                                               │
-                ┌─────────────────────────┬────────┬──────────┼───────────┬──────────┐
-                ▼                         ▼        ▼          ▼           ▼          ▼
-             macos                     windows   linux+    linux+      android+    其它
-                │                         │      TERMUX     非 Termux   非 Termux   (freebsd…)
-                │                         │      VERSION                            │
-                ▼                         ▼        ▼          ▼           ▼         ▼
-        brew install            winget install   pkg install   /etc/os-     不自动装  仅探测
-        ripgrep fd              ripgrep fd       ripgrep fd    release →    走 Tier2 不安装
-                                (UAC 弹窗)                     apt/dnf/
-                                                              pacman/zypper
-                │                         │        │          │           │         │
-                └────────────┬────────────┴────────┴──────────┴───────────┴─────────┘
-                             ▼
-                  Unix：start → detached / already_installing / failed（不阻塞）
-                  Windows：start → progress → success / failed（阻塞至 output 返回）
+         ┌─────────────┬──────────────┬───────────────┬───────┴──────┬──────────────┐
+         ▼             ▼              ▼               ▼              ▼              ▼
+     Termux 且      android 且      macOS 且       windows 且     apt-get /      都没有
+     有 pkg         非 Termux       有 brew        有 winget      dnf / pacman
+         │             │              │               │              │              │
+         ▼             ▼              ▼               ▼              ▼              ▼
+     pkg install   不自动装       brew install    winget install  apt-get/dnf/   failed
+     ripgrep fd    failed         ripgrep fd      ripgrep fd      pacman 安装    走 Tier2
+                   走 Tier2                       (UAC 弹窗)
+         │                            │               │              │
+         └────────────────────────────┴───────┬───────┴──────────────┘
+                                              ▼
+                  start → detached / already_installing / failed（两平台相同，不阻塞）
                   (chat_loop 永远不被预检线程阻塞)
 ```
 
 | 形态 | `search_files` 主路径 | 预检 / 安装 |
 |------|------------------------|-------------|
-| **macOS / Linux / Windows** | 用户已装则 Tier1，否则 Tier2 | brew / winget / apt / dnf / pacman / zypper |
+| **macOS / Linux / Windows** | 用户已装则 Tier1，否则 Tier2 | brew / winget / apt-get / dnf / pacman |
 | **Termux** | 优先 Tier1；缺则 Tier2 | `pkg install ripgrep fd` |
 | **普通 Android App**（沙箱 APK） | 直接 Tier2 | **不自动装**，仅 warn 或后续后台解压内置二进制 |
 
-运行期 Termux 判定：
-
-- 优先：`std::env::var("TERMUX_VERSION").is_ok()`。
-- 兜底：构建 feature `termux`（编译期强制走 Termux 分支）。
-- `/data/data/com.termux` 路径探测、`runtime_profile` 等增强**仅留 TODO**，不阻塞首版。
+运行期 Termux 判定（`platform/system.rs::is_termux`）：环境变量 `TERMUX_VERSION` 存在，或 `/data/data/com.termux/files/usr/bin/pkg` 存在。
 
 ---
 
@@ -578,14 +571,19 @@ show_search_tools_ui = false
 | T9 | `test_search_files_tier2_skips_binary_and_large_files` | 二进制 NUL 嗅探 + > 5 MiB 跳过 + warning |
 | T10 | `test_search_files_tier2_include_hidden_toggle` | `include_hidden=true/false` 与 Tier1 `--hidden` 对齐 |
 
-预检相关单元测试（[`src/api/chat/tests/preflight_test.rs`](../../../../src/api/chat/tests/preflight_test.rs)，经 `preflight.rs` 末尾 `#[path]` 挂载；见 `RUST_FILE_LINES_SPEC` §A.9）：
+预检相关单元测试（[`src/api/chat/tests/preflight_test.rs`](../../../src/api/chat/tests/preflight_test.rs)，经 `preflight.rs` 末尾 `#[path]` 挂载；见 `RUST_FILE_LINES_SPEC` §A.9）：
 
 - `should_skip_preflight_when_config_disables_auto_install`
 - `trim_for_event_limits_long_messages`
-- （Unix）`nohup_shell_quotes_log_path_with_spaces`：`shell_words` 拼接 nohup 重定向路径；**brew** 计划含 `HOMEBREW_NO_BUILD_FROM_SOURCE=1` 与 `--force-bottle`
-- （Unix）`nohup_shell_non_brew_has_no_homebrew_env_prefix`：非 brew 计划不注入 Homebrew 环境变量
+- `install_plan_builds_the_same_command_for_every_manager_and_target`：每个包管理器 × 安装目标的命令；brew 计划含 `--force-bottle`
+- `detached_message_mentions_reopening_the_terminal_only_when_path_needs_restart`：只有 PATH 变更要重开终端时（Windows）才用 `*Restart` 文案
 
-配置加载测试（[`src/infra/config/tests/load_test.rs`](../../../../src/infra/config/tests/load_test.rs)）：
+后台启动与包管理器检测在 platform 层测试：
+
+- [`src/infra/platform/tests/process_test.rs`](../../../src/infra/platform/tests/process_test.rs)：`spawn_detached_returns_at_once_and_appends_output_to_the_log`（三平台：立即返回、输出追加进日志）；（Unix）`nohup_shell_command_quotes_log_path_with_spaces`、`nohup_shell_command_without_envs_starts_with_nohup`
+- [`src/infra/platform/tests/system_test.rs`](../../../src/infra/platform/tests/system_test.rs)：包管理器检测顺序
+
+配置加载测试（[`src/infra/config/tests/load_test.rs`](../../../src/infra/config/tests/load_test.rs)）：
 
 - `load_config_accepts_preflight_section`
 

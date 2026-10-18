@@ -194,6 +194,7 @@ export class TomcatMessenger {
           ...this.options.env,
         },
         stdio: "pipe",
+        windowsHide: true,
       },
     );
 

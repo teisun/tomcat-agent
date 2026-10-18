@@ -28,13 +28,13 @@ use super::defaults::{
 use super::path_rule::PathRule;
 use super::session_grants::{SessionGrants, SessionPathRules};
 use super::types::{
-    path_starts_with, EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode,
-    PermissionDecision, PermissionScope,
+    EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode, PermissionDecision,
+    PermissionScope,
 };
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
-use crate::infra::platform::normalize_path;
+use crate::infra::platform::{normalize_path, path_starts_with};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PermissionGate Trait
@@ -501,7 +501,7 @@ pub(crate) fn compile_glob(pattern: &str) -> Option<globset::GlobMatcher> {
 /// 例如 `/var/tmp/foo/k.txt`（k.txt 不存在）：canonicalize `/var/tmp/foo` ->
 /// `/private/var/tmp/foo`，最终返回 `/private/var/tmp/foo/k.txt`。
 pub(crate) fn canonicalize_with_existing_ancestor(path: &Path) -> PathBuf {
-    if let Ok(c) = std::fs::canonicalize(path) {
+    if let Ok(c) = crate::infra::platform::canonicalize(path) {
         return c;
     }
     let mut tail = Vec::new();
@@ -513,7 +513,7 @@ pub(crate) fn canonicalize_with_existing_ancestor(path: &Path) -> PathBuf {
         if parent.as_os_str().is_empty() {
             break;
         }
-        if let Ok(c) = std::fs::canonicalize(&parent) {
+        if let Ok(c) = crate::infra::platform::canonicalize(&parent) {
             let mut out = c;
             for seg in tail.iter().rev() {
                 out.push(seg);

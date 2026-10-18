@@ -12,25 +12,61 @@ import {
   resolveVsCodeExecutable,
   seedChatUserSettings,
 } from "./e2eHostFixture";
-import { packageVsixOrReuse } from "./package-vsix";
+import { bundledExecutableRelativePath, packageVsixOrReuse } from "./package-vsix";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { EXTENSION_ID } from "../src/constants";
-import { extractVsixLikeCursor } from "./vsix-extractable";
+import { extractVsixLikeCursor, readVsixEntry } from "./vsix-extractable";
+import { runCommand } from "./runCommand";
 import { setupRealServeFixture, spawnScriptedOpenAiStreamServer, type ScriptedResponse, sseDelta, sseFinish, sseDone, sseToolCall } from "./realServeFixture";
 
-function currentVsCodeTarget(): string {
-  if (process.platform === "darwin" && process.arch === "arm64") {
+export function vscodeTargetFor(platform: NodeJS.Platform, arch: string): string {
+  if (platform === "darwin" && arch === "arm64") {
     return "darwin-arm64";
   }
-  if (process.platform === "darwin" && process.arch === "x64") {
+  if (platform === "darwin" && arch === "x64") {
     return "darwin-x64";
   }
-  if (process.platform === "linux" && process.arch === "x64") {
+  if (platform === "linux" && arch === "x64") {
     return "linux-x64";
   }
-  throw new Error(`Unsupported local verify platform: ${process.platform}/${process.arch}`);
+  if (platform === "win32" && arch === "x64") {
+    return "win32-x64";
+  }
+  throw new Error(`Unsupported local verify platform: ${platform}/${arch}`);
 }
+
+function currentVsCodeTarget(): string {
+  return vscodeTargetFor(process.platform, process.arch);
+}
+
+/** COFF Machine field of a PE image, or undefined when the bytes are not a PE image. */
+export function peMachine(image: Buffer): number | undefined {
+  if (image.length < 0x40) return undefined;
+  const header = image.readUInt32LE(0x3c);
+  if (header + 6 > image.length || image.toString("latin1", header, header + 4) !== "PE\0\0") return undefined;
+  return image.readUInt16LE(header + 4);
+}
+
+export const PE_MACHINE_AMD64 = 0x8664;
+
+/** Both the bundled binary and this host must match the release target. */
+async function nativeArchitecture(binary: string): Promise<{ binaryArchitecture: string; nativeMachine: string }> {
+  if (process.platform === "win32") {
+    const machine = peMachine(await fs.readFile(binary));
+    const binaryArchitecture = machine === undefined ? "not a PE image" : `PE machine 0x${machine.toString(16)}`;
+    if (machine !== PE_MACHINE_AMD64 || process.arch !== "x64") throw new Error(`Not a native ${currentVsCodeTarget()} binary/host: ${binaryArchitecture}; ${process.arch}`);
+    return { binaryArchitecture, nativeMachine: process.arch };
+  }
+  const binaryArchitecture = execFileSync("file", [binary], { encoding: "utf8" }).trim();
+  const archPattern = process.arch === "arm64" ? /arm64|aarch64/ : /x86_64|x86-64/;
+  const nativeMachine = execFileSync("uname", ["-m"], { encoding: "utf8" }).trim();
+  if (!archPattern.test(binaryArchitecture) || !archPattern.test(nativeMachine)) throw new Error(`Not a native ${currentVsCodeTarget()} binary/host: ${binaryArchitecture}; ${nativeMachine}`);
+  return { binaryArchitecture, nativeMachine };
+}
+
+// Unix keeps the existing short /tmp roots; Windows has no /tmp.
+const tempRoot = process.platform === "win32" ? os.tmpdir() : "/tmp";
 
 export type ProductionSource = { kind: "bundle" | "marketplace"; value: string };
 export function parseProductionSource(args: string[]): ProductionSource | undefined {
@@ -58,15 +94,15 @@ export function validateReleaseMetadata(metadata: ReleaseMetadata, target: strin
 async function inspectReleaseVsix(file: string) {
   await fs.access(file); // A missing filename must never turn into a gallery ID.
   await extractVsixLikeCursor(file);
-  const metadata = JSON.parse(execFileSync("unzip", ["-p", file, "extension/package.json"], { encoding: "utf8" })) as ReleaseMetadata;
-  const xml = execFileSync("unzip", ["-p", file, "extension.vsixmanifest"], { encoding: "utf8" });
+  const metadata = JSON.parse((await readVsixEntry(file, "extension/package.json")).toString("utf8")) as ReleaseMetadata;
+  const xml = (await readVsixEntry(file, "extension.vsixmanifest")).toString("utf8");
   const target = /TargetPlatform="([^"]+)"/.exec(xml)?.[1] ?? "universal";
   const identity = /<Identity\s+([^>]+)\/>/.exec(xml)?.[1];
   for (const [key, value] of Object.entries({ Id: metadata.name, Publisher: metadata.publisher, Version: metadata.version })) {
     if (!identity || new RegExp(`${key}="([^"]+)"`).exec(identity)?.[1] !== value) throw new Error(`VSIX manifest ${key} does not match package metadata`);
   }
   validateReleaseMetadata(metadata, currentVsCodeTarget(), target);
-  const binary = execFileSync("unzip", ["-p", file, "extension/bin/tomcat"], { maxBuffer: 128 * 1024 * 1024 });
+  const binary = await readVsixEntry(file, `extension/${bundledExecutableRelativePath(target)}`);
   return { metadata, target, vsixSha256: createHash("sha256").update(await fs.readFile(file)).digest("hex"), cliSha256: createHash("sha256").update(binary).digest("hex") };
 }
 
@@ -105,7 +141,7 @@ type InstalledScenarioOptions = {
 };
 
 export async function runInstalledScenario(options: InstalledScenarioOptions): Promise<void> {
-  const installRoot = await fs.mkdtemp("/tmp/tvsi-verify-");
+  const installRoot = await fs.mkdtemp(path.join(tempRoot, "tvsi-verify-"));
   const extensionsDir = path.join(installRoot, "extensions");
   const userDataDir = path.join(installRoot, "user-data");
   let fixture: Awaited<ReturnType<typeof setupRealServeFixture>> | undefined;
@@ -125,21 +161,15 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       );
     }
 
-    execFileSync(
-      resolveVsCodeCli(),
-      [
-        "--user-data-dir",
-        userDataDir,
-        "--extensions-dir",
-        extensionsDir,
-        "--install-extension",
-        options.vsixPath,
-        "--force",
-      ],
-      {
-        stdio: "inherit",
-      },
-    );
+    runCommand(resolveVsCodeCli(), [
+      "--user-data-dir",
+      userDataDir,
+      "--extensions-dir",
+      extensionsDir,
+      "--install-extension",
+      options.vsixPath,
+      "--force",
+    ]);
 
     let testEnv = options.testEnv;
     let workspacePath = options.workspacePath;
@@ -155,14 +185,11 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       // VS Code records gallery metadata in extensions.json; local VSIX target
       // comes from the archive already checked before installation.
       validateReleaseMetadata(metadata, currentVsCodeTarget(), options.production.bundle?.target ?? entries[0].metadata?.targetPlatform ?? "universal");
-      const binary = path.join(installed, "bin/tomcat");
+      const binary = path.join(installed, bundledExecutableRelativePath(currentVsCodeTarget()));
       const cliSha256 = createHash("sha256").update(await fs.readFile(binary)).digest("hex");
       if (options.production.bundle && cliSha256 !== options.production.bundle.cliSha256) throw new Error("Installed CLI bytes differ from the validated VSIX");
       await fs.chmod(binary, 0o755);
-      const binaryArchitecture = execFileSync("file", [binary], { encoding: "utf8" }).trim();
-      const archPattern = process.arch === "arm64" ? /arm64|aarch64/ : /x86_64|x86-64/;
-      const nativeMachine = execFileSync("uname", ["-m"], { encoding: "utf8" }).trim();
-      if (!archPattern.test(binaryArchitecture) || !archPattern.test(nativeMachine)) throw new Error(`Not a native ${currentVsCodeTarget()} binary/host: ${binaryArchitecture}; ${nativeMachine}`);
+      const { binaryArchitecture, nativeMachine } = await nativeArchitecture(binary);
       // Real CLI and Host; only upstream model replies are controlled.
       const responses: ScriptedResponse[] = [];
       server = await spawnScriptedOpenAiStreamServer(responses, ["deepseek-v4-flash", "deepseek-v4-pro", "claude-opus-5"]);
@@ -252,16 +279,19 @@ async function main(): Promise<void> {
       if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) throw new Error(`Cannot resolve minimum VS Code version: ${version}`);
       const executable = await downloadAndUnzipVSCode({ version });
       process.env.VSCODE_EXECUTABLE_PATH = executable;
-      process.env.VSCODE_CLI_PATH = resolveCliPathFromVSCodeExecutablePath(executable);
     }
+    process.env.VSCODE_CLI_PATH ??= resolveCliPathFromVSCodeExecutablePath(process.env.VSCODE_EXECUTABLE_PATH);
     const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(extensionRoot, "../.agents/marketplace", expectedRelease().version, currentVsCodeTarget());
     await fs.mkdir(artifactsDir, { recursive: true });
-    execFileSync("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot, stdio: "inherit" });
+    runCommand("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
     const options = { extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
     await runInstalledScenario(options);
-    const upgradeArtifacts = path.join(artifactsDir, "upgrade-v0.1.90");
-    await fs.mkdir(upgradeArtifacts, { recursive: true });
-    await runInstalledScenario({ ...options, artifactsDir: upgradeArtifacts, upgradeFixture: path.resolve(extensionRoot, "../tomcat/tests/fixtures/data-dir-v0.1.90/cli-init") });
+    // 0.1.90 never shipped for Windows, so there is no Windows data to upgrade.
+    if (process.platform !== "win32") {
+      const upgradeArtifacts = path.join(artifactsDir, "upgrade-v0.1.90");
+      await fs.mkdir(upgradeArtifacts, { recursive: true });
+      await runInstalledScenario({ ...options, artifactsDir: upgradeArtifacts, upgradeFixture: path.resolve(extensionRoot, "../tomcat/tests/fixtures/data-dir-v0.1.90/cli-init") });
+    }
     console.log(`Production bundle evidence: ${artifactsDir}`);
     return;
   }
@@ -290,7 +320,7 @@ async function main(): Promise<void> {
   const slowHandshakeFixture = await createHostE2eFixture({
     handshakeDelayMs: 15_000,
   });
-  const prebuiltVsixRoot = await fs.mkdtemp("/tmp/tvsi-prebuilt-vsix-");
+  const prebuiltVsixRoot = await fs.mkdtemp(path.join(tempRoot, "tvsi-prebuilt-vsix-"));
   const {
     TOMCAT_VSCODE_TEST_PATH: _ignoredBundledTestPath,
     ...bundledOnlyFixtureEnv
@@ -328,7 +358,7 @@ async function main(): Promise<void> {
     TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
     TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsDir,
   };
-  const pureExtWorkspacePath = await fs.mkdtemp("/tmp/tvsi-pure-ext-workspace-");
+  const pureExtWorkspacePath = await fs.mkdtemp(path.join(tempRoot, "tvsi-pure-ext-workspace-"));
   const pureExtPromptEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: process.platform === "win32" ? process.env.PATH : "/usr/bin:/bin",
@@ -377,10 +407,7 @@ async function main(): Promise<void> {
   };
 
   try {
-    execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], {
-      cwd: extensionRoot,
-      stdio: "inherit",
-    });
+    runCommand("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
     const reusableVsixPath = packageVsixOrReuse({
       bundleBinaryPath: bundledFixture.fakeServePath,
       extensionRoot,

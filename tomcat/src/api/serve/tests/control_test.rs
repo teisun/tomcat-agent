@@ -218,7 +218,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     assert!(
         empty_listed["payload"]["configPaths"]["workspace"]["raw"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
+            .is_some_and(|path| std::path::Path::new(path).ends_with(".workspace-data/mcp.json")),
         "an empty connector list must still provide the actual workspace config path",
     );
 
@@ -371,19 +371,19 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     assert!(
         listed["payload"]["configPaths"]["workspace"]["raw"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
+            .is_some_and(|path| std::path::Path::new(path).ends_with(".workspace-data/mcp.json")),
         "the connector response must expose the configured workspace MCP path",
     );
     assert!(
         summary["configPathRaw"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
+            .is_some_and(|path| std::path::Path::new(path).ends_with(".workspace-data/mcp.json")),
         "connector summaries must expose the real configuration path to the host",
     );
     assert!(
         summary["configPath"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
+            .is_some_and(|path| std::path::Path::new(path).ends_with(".workspace-data/mcp.json")),
         "connector summaries must identify the configuration file",
     );
     assert_eq!(summary["state"], "connected");

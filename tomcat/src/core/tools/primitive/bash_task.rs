@@ -7,7 +7,7 @@
 //!   `BashTaskTicket{ task_id, log_path }`；后台 `tokio::spawn` 守护把 stdout/stderr
 //!   持续写到 `<persist_dir>/bash-<task_id>.log`；模型用三件套自驱：
 //!     - `task_output`：按字节偏移拉日志增量；
-//!     - `task_stop`：`killpg(SIGKILL)` 杀整组（与 PR-E.2 同口径）；
+//!     - `task_stop`：由 `platform::ProcessTree` 结束整棵进程树（与 PR-E.2 同口径）；
 //!     - `task_list`：枚举所有 task 现状（含 `Finished{ exit_code }` / `Stopped`）。
 //!
 //! ## 锁分层（避免「stop 等 wait」死锁）
@@ -15,12 +15,10 @@
 //! - `BashTaskRegistry.tasks: RwLock<HashMap<...>>`：注册表本身，操作短促。
 //! - `BashTask.info: RwLock<BashTaskInfo>`：每任务的元信息 + 状态机，操作短促。
 //! - 子进程 `Child` 句柄**不**入锁——直接 move 进 wait 任务（独占 `await`）。
-//!   stop 走的是 `pid → libc::killpg(SIGKILL)`，不依赖 Child 句柄，杀完
+//!   stop 走的是 `platform::ProcessTree::kill`，不依赖 Child 句柄，杀完
 //!   wait 任务自然 `wait()` 返回 → 状态翻成 `Finished{ exit_code }`。
 
 use std::collections::{HashMap, VecDeque};
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,7 +40,7 @@ use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmati
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::audit::{AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
-use crate::infra::platform::normalize_path;
+use crate::infra::platform::{exit_code, normalize_path, ProcessTree};
 
 fn permission_scope_str(scope: PermissionScope) -> String {
     match scope {
@@ -456,9 +454,9 @@ type StreamCapture = (
 
 struct BashTask {
     info: RwLock<BashTaskInfo>,
-    /// 子进程 PID（spawn 后立即记录）；stop 路径在 Unix 用 `killpg`，在 Windows 用
-    /// `taskkill /T /F` 杀整组；句柄已 move 进 wait 任务独占 await。
-    pid: Option<u32>,
+    /// 子进程及全部后代所在的进程树；stop 路径一次结束整棵树。Child 句柄已 move 进
+    /// wait 任务独占 await。
+    process_tree: ProcessTree,
     /// P1：每 task 一份 `Notify`。pump 任务每 flush 一次后 `notify_waiters()`；
     /// wait 任务把 status 翻成 `Finished` / `Stopped` 时也 `notify_waiters()`。
     /// 配合 [`BashTaskRegistry::wait_for_finish`] 实现"按文件长度 vs since"判定，
@@ -473,6 +471,17 @@ struct BashTask {
     preview_flush_required: bool,
     preview_flushed: AtomicBool,
     preview_flush_notify: Arc<Notify>,
+}
+
+/// wait 任务没跑完就被丢弃（只发生在运行时关闭）时，交给 [`ProcessTree::kill_if_abandoned`]。
+struct KillTreeIfAbandoned(Option<Arc<BashTask>>);
+
+impl Drop for KillTreeIfAbandoned {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.process_tree.kill_if_abandoned();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,13 +716,14 @@ impl BashTaskRegistry {
         preview_flush_required: bool,
         captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
     ) -> Result<BashTaskTicket, AppError> {
+        let shell = crate::infra::platform::posix_shell()?;
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let task_id = format!("{}-{}", now, simple_rand6());
-        let log_path = self.persist_dir.join(format!("bash-{}.log", &task_id));
+        let log_path = self.persist_dir.join(format!("bash-{task_id}.log"));
         let audit_cmd = command.clone();
         let bash_scope_grant = if apply_guard {
             if let Some(guard) = self.background_guard.as_ref() {
@@ -754,12 +764,8 @@ impl BashTaskRegistry {
             (None, None)
         };
 
-        #[cfg(unix)]
-        let (shell, arg) = ("sh", "-c");
-        #[cfg(windows)]
-        let (shell, arg) = ("cmd", "/C");
         let mut cmd = Command::new(shell);
-        cmd.arg(arg).arg(&command);
+        cmd.arg("-c").arg(&command);
         if let Some(c) = cwd.command_cwd() {
             cmd.current_dir(c);
         }
@@ -768,11 +774,8 @@ impl BashTaskRegistry {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
-        // 与 PR-E.2 同口径：新进程组 + stop 时 killpg 整组，避免 sh 派生孙子进程被遗弃。
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = cmd.spawn().map_err(|e| {
+        // 与 PR-E.2 同口径：stop 时结束整棵进程树，避免 sh 派生的孙子进程被遗弃。
+        let (mut child, process_tree) = ProcessTree::spawn(&mut cmd).map_err(|e| {
             let err = AppError::Primitive(format!(
                 "bash spawn failed (cwd={}, input={:?}): {e}",
                 cwd.resolved_path().display(),
@@ -785,7 +788,6 @@ impl BashTaskRegistry {
             }
             err
         })?;
-        let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -797,7 +799,7 @@ impl BashTaskRegistry {
                 log_path: log_path.display().to_string(),
                 status: BashTaskStatus::Running,
             }),
-            pid,
+            process_tree,
             notify: Arc::new(Notify::new()),
             lifecycle_emitted: parking_lot::Mutex::new(false),
             delivery: parking_lot::Mutex::new(if deliver_completion_on_finish {
@@ -858,20 +860,9 @@ impl BashTaskRegistry {
         let command_for_wait = command.clone();
         let output_tx_for_wait = self.output_tx.clone();
         tokio::spawn(async move {
+            let mut abandoned = KillTreeIfAbandoned(Some(task_for_wait.clone()));
             let exit_code = match child.wait().await {
-                Ok(status) => {
-                    #[cfg(unix)]
-                    {
-                        status
-                            .code()
-                            .or_else(|| status.signal().map(|s| 128 + s))
-                            .unwrap_or(-1)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        status.code().unwrap_or(-1)
-                    }
-                }
+                Ok(status) => exit_code(&status),
                 Err(_) => -1,
             };
             {
@@ -951,6 +942,7 @@ impl BashTaskRegistry {
                 });
             }
             task_for_wait.notify.notify_waiters();
+            abandoned.0 = None;
         });
 
         Ok(BashTaskTicket {
@@ -1124,49 +1116,13 @@ impl BashTaskRegistry {
         ) {
             return Ok(());
         }
-        // Termination is a host operation, not an executable resolved from the workspace.
-        #[cfg(windows)]
-        let taskkill = std::env::var_os("SystemRoot")
-            .map(|root| PathBuf::from(root).join("System32").join("taskkill.exe"))
-            .filter(|path| path.is_absolute())
-            .ok_or_else(|| {
-                AppError::Primitive(
-                    "cannot stop bash process tree without an absolute Windows SystemRoot".into(),
-                )
-            })?;
-        #[cfg(windows)]
         let previous_stop = task.stop_requested.load(Ordering::Acquire);
         task.stop_requested.store(true, Ordering::Release);
-        #[cfg(unix)]
-        if let Some(pid) = task.pid {
-            // SAFETY: POSIX signal API; ESRCH is harmless if the child already exited.
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-        #[cfg(windows)]
-        if let Some(pid) = task.pid {
-            let pid = pid.to_string();
-            match std::process::Command::new(taskkill)
-                .args(["/PID", pid.as_str(), "/T", "/F"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-            {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    task.stop_requested.store(previous_stop, Ordering::Release);
-                    return Err(AppError::Primitive(format!(
-                        "taskkill failed for bash process tree {task_id}: exit {:?}",
-                        status.code()
-                    )));
-                }
-                Err(error) => {
-                    task.stop_requested.store(previous_stop, Ordering::Release);
-                    return Err(AppError::Io(error));
-                }
-            }
+        if let Err(error) = task.process_tree.kill() {
+            task.stop_requested.store(previous_stop, Ordering::Release);
+            return Err(AppError::Primitive(format!(
+                "failed to stop bash process tree {task_id}: {error}"
+            )));
         }
         Ok(())
     }

@@ -18,7 +18,7 @@ pub use bash_task::{
 pub(crate) use diff::{line_diff_stat, MAX_DIFF_INPUT_BYTES, MAX_DIFF_INPUT_LINES};
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use executor::simulate_failed_commit_with_backup_for_test;
 pub use executor::DefaultPrimitiveExecutor;
 pub(crate) use registry_builder::build_bash_task_registry;

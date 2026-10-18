@@ -1,12 +1,11 @@
 //! # 原语执行器内部小工具
 //!
-//! 与 [`super::DefaultPrimitiveExecutor`] 共用的字符串化 / 二进制查找等无状态 helper。
+//! 与 [`super::DefaultPrimitiveExecutor`] 共用的字符串化等无状态 helper。
 //! 所有函数仅暴露给 `executor` 子模块（`pub(super)`），不向外扩散。
 
 use crate::core::permission::{is_url_like, GrantTrigger, GrantType, PermissionScope};
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
-use std::path::PathBuf;
 
 /// Cancellation only races pre-commit waits, never a running disk commit.
 pub(super) async fn until_cancelled<T>(
@@ -69,26 +68,6 @@ pub(super) fn grant_trigger_str(s: GrantTrigger) -> String {
         GrantTrigger::AutoConfirmFlag => "auto_confirm_flag",
     }
     .to_string()
-}
-
-pub(super) fn find_binary(candidates: &[&str]) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for candidate in candidates {
-            let path = dir.join(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-            #[cfg(windows)]
-            {
-                let exe = dir.join(format!("{}.exe", candidate));
-                if exe.is_file() {
-                    return Some(exe);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// 纯文件工具收到 URL-like 输入时，直接以“这不是本地文件路径”失败，

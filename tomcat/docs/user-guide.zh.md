@@ -100,6 +100,23 @@ install -m 755 ./tomcat "$HOME/.local/bin/tomcat"
 
 `tomcat init` 会完成默认配置写入、工作目录创建、资源部署与 API Key 配置。初始化完成后，可继续阅读 [第 2 节](#2-初始化与环境检测) 与 [第 6 节](#6-对话模式)。
 
+### Windows x64
+
+Windows 没有一键安装脚本，请从 Release 页面下载 `tomcat-<tag>-x86_64-pc-windows-msvc.tar.gz`。先安装 [Git for Windows](https://git-scm.com/download/win)（`winget install --id Git.Git -e`）：`bash` 工具通过其中的 Git Bash 执行命令，不会使用 WSL 的 `bash.exe`。
+
+```powershell
+# 1. 解压（Windows 10 及以上自带 tar）
+tar -xzf tomcat-<tag>-x86_64-pc-windows-msvc.tar.gz
+
+# 2. 初始化：把 tomcat.exe 复制到 %USERPROFILE%\.local\bin，并把该目录加入用户 PATH
+.\tomcat.exe init
+
+# 3. 打开一个新终端（这样才能读到新的 PATH），然后验证
+tomcat --version
+```
+
+请在 Windows Terminal、PowerShell 或 cmd 中运行 `tomcat chat`。Git Bash 自带的 mintty 窗口不在验收范围内。
+
 ---
 
 ## 1. 下载源码并编译构建
@@ -136,6 +153,28 @@ tomcat --help
 tomcat --version
 # tomcat 0.1.8
 ```
+
+### Windows 开发环境
+
+| 依赖 | 说明 |
+|------|------|
+| Visual Studio Build Tools | 勾选"使用 C++ 的桌面开发"（提供 MSVC 链接器和 Windows SDK） |
+| Rust | `rustup`，默认 `x86_64-pc-windows-msvc` 工具链，并安装 `clippy` |
+| Node.js | 22，用于 VS Code 插件 |
+| Git for Windows | 提供 Git Bash，`bash` 工具和测试脚本都用它 |
+| cargo-nextest | 运行集成测试分组 |
+| ripgrep（`rg`） | `search_files` 的测试覆盖 ripgrep 后端（`winget install BurntSushi.ripgrep.MSVC`）；没有它时工具改用不带上下文行的兜底实现 |
+
+仓库根目录的 `.gitattributes`（`* text=auto eol=lf`）让所有文本文件都以 LF 换行检出，不管 `core.autocrlf` 怎么设，Windows 上的夹具和快照都能逐字节一致。如果是在这个文件加入之前克隆的仓库，请重新克隆，让已有文件以 LF 检出。
+
+请在 Git Bash 里运行测试门禁，不要用 WSL；PowerShell 里直接输入 `bash` 可能会进入 WSL：
+
+```bash
+cd tomcat
+./scripts/run-integration-tests.sh gate-fast
+```
+
+插件侧在 Windows 上运行 `npm run gate:fast` 与 `npm run test:integration`。使用假 CLI 脚本的 VS Code 端到端测试（`gate:full`、`test:e2e:*`）只在 macOS 和 Linux 上运行；Windows 包由发布流水线用真实的 `tomcat.exe` 验证。
 
 ### 工作目录
 
@@ -499,7 +538,7 @@ tomcat config set log.file_enabled true
 
 ### 启动预检与搜索工具安装
 
-进入 `tomcat code` / `tomcat claw` 后，tomcat 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。默认情况下这些预检仍会执行，但 `[tools]` / `[git]` 终端提示默认**关闭**，避免打扰输入。
+进入 `tomcat code` / `tomcat claw` 后，tomcat 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装（Unix 用 Homebrew 或 apt，Windows 用 `winget`）；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。默认情况下这些预检仍会执行，但 `[tools]` / `[git]` 终端提示默认**关闭**，避免打扰输入。
 
 如需关闭后台安装尝试，可在配置中设置：
 

@@ -195,3 +195,16 @@ fn reviewer_body_diff_guard_rejects_frontmatter_change() {
     let err = reviewer_body_diff_guard(SAMPLE_PLAN, &new).expect_err("改 frontmatter 应被拒");
     assert!(matches!(err, ReviewDiffDenied::FrontmatterTouched));
 }
+
+#[test]
+fn reviewer_body_diff_guard_still_protects_crlf_plans() {
+    let crlf = SAMPLE_PLAN.replace('\n', "\r\n");
+    let body_edit = crlf.replace("board", "rewritten board");
+    reviewer_body_diff_guard(&crlf, &body_edit).expect("改 CRLF plan 正文应放行");
+    reviewer_body_diff_guard(&crlf, SAMPLE_PLAN).expect("只换行风格变化不算改 frontmatter");
+
+    let fm_edit = crlf.replace("plan_id: x", "plan_id: y");
+    let err =
+        reviewer_body_diff_guard(&crlf, &fm_edit).expect_err("改 CRLF plan 的 frontmatter 应被拒");
+    assert!(matches!(err, ReviewDiffDenied::FrontmatterTouched));
+}

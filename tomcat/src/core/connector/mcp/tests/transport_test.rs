@@ -32,6 +32,51 @@ fn configured_env_is_added_after_environment_is_cleared() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_resolves_bare_npx_to_cmd_and_inherits_only_the_sdk_env_list() {
+    let bin = tempfile::tempdir().expect("temporary directory");
+    let npx = bin.path().join("npx.cmd");
+    std::fs::write(&npx, "@exit /b 0\r\n").expect("fake npx");
+    unsafe { std::env::set_var("TOMCAT_TEST_FOO_SECRET", "leak") };
+    let transport = StdioTransport::new(None);
+    let server = ConfiguredMcpServer {
+        config_key: "mcp:npx".to_string(),
+        name: "npx".to_string(),
+        source: McpConfigSource::Project,
+        config: McpServerConfig {
+            command: "npx".to_string(),
+            args: Vec::new(),
+            env: [(
+                "PATH".to_string(),
+                bin.path().to_string_lossy().into_owned(),
+            )]
+            .into(),
+            url: None,
+            auth: None,
+            headers: Default::default(),
+            oauth: None,
+            cwd: None,
+            tool_filter: ToolFilter::default(),
+        },
+    };
+
+    let command = transport.command(&server);
+    let std_command = command.as_std();
+    assert_eq!(Path::new(std_command.get_program()), npx);
+    let keys: Vec<String> = std_command
+        .get_envs()
+        .map(|(key, _)| key.to_string_lossy().to_uppercase())
+        .collect();
+    for required in ["SYSTEMROOT", "PATHEXT", "PATH"] {
+        assert!(
+            keys.iter().any(|key| key == required),
+            "{required}: {keys:?}"
+        );
+    }
+    assert!(!keys.iter().any(|key| key == "TOMCAT_TEST_FOO_SECRET"));
+}
+
 #[test]
 fn curated_playwright_passes_bootstrap_system_browser_fallback_to_mcp() {
     let temp = tempfile::tempdir().expect("temporary directory");

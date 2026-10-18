@@ -1,3 +1,5 @@
+import * as path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 import { translate } from "../../shared/i18n";
@@ -184,7 +186,7 @@ describe("ImagePreviewPanel host", () => {
     // Saving copies file-to-file out of the blob store; the bytes never enter the
     // extension host's heap.
     expect(mocks.copy).toHaveBeenCalledWith(
-      { fsPath: `${ATTACHMENT_ROOT}/blobs/${SHA_ONE}` },
+      { fsPath: path.join(ATTACHMENT_ROOT, "blobs", SHA_ONE) },
       mocks.saveUri,
       { overwrite: true },
     );

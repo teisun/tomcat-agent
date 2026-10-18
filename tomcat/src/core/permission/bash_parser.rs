@@ -9,6 +9,7 @@
 //! - 以 `/` 开头（绝对路径）
 //! - 以 `~` 开头（home 缩写）
 //! - 以 `./` / `../` 开头（相对路径）
+//! - 仅 Windows：`X:\`、`X:/`、`\\server\share`；`/c/...` 映射为 `C:\...`
 //!
 //! 不会展开 glob；**不会**把 `>` / `<` 重定向目标当路径提取（见下方 TODO）。
 //! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令再分别提取。
@@ -34,6 +35,8 @@
 
 use std::path::PathBuf;
 
+use crate::infra::platform::shell_path_to_native;
+
 /// 把 bash 命令拆成子命令并提取候选路径。
 ///
 /// 返回值未做去重 / 规范化；调用方应负责把结果交给 gate.check 做规范化与判定。
@@ -50,7 +53,7 @@ pub fn extract_paths(command: &str) -> Vec<String> {
                 break;
             };
             if looks_like_path(rhs) {
-                paths.push(rhs.to_string());
+                paths.push(shell_path_to_native(rhs));
             }
             iter.next();
         }
@@ -66,7 +69,7 @@ pub fn extract_paths(command: &str) -> Vec<String> {
 fn collect_candidates(tok: &str, out: &mut Vec<String>) {
     if let Some(rhs) = is_env_assignment(tok) {
         if looks_like_path(rhs) {
-            out.push(rhs.to_string());
+            out.push(shell_path_to_native(rhs));
         }
         return;
     }
@@ -77,13 +80,13 @@ fn collect_candidates(tok: &str, out: &mut Vec<String>) {
         if tok.starts_with('-') {
             let value = &tok[eq + 1..];
             if looks_like_path(value) {
-                out.push(value.to_string());
+                out.push(shell_path_to_native(value));
             }
             return;
         }
     }
     if looks_like_path(tok) {
-        out.push(tok.to_string());
+        out.push(shell_path_to_native(tok));
     }
 }
 
@@ -113,7 +116,12 @@ fn looks_like_path(s: &str) -> bool {
     if s.starts_with('-') {
         return false;
     }
-    s.starts_with('/') || s.starts_with("~") || s.starts_with("./") || s.starts_with("../")
+    s.starts_with('/')
+        || s.starts_with("~")
+        || s.starts_with("./")
+        || s.starts_with("../")
+        // Windows 上 `C:\x`、`C:/x`、`\\server\share\x` 也是绝对路径。
+        || std::path::Path::new(s).is_absolute()
 }
 
 /// 把一条命令按 `|` `;` `&` `>` `<` `&&` `||` 拆成子命令。

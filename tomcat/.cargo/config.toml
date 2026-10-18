@@ -1,0 +1,4 @@
+# Link the C runtime statically so tomcat.exe starts on clean Windows installs
+# that lack the VC++ redistributable (VCRUNTIME140.dll).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { expect, it } from "vitest";
-import { createHostE2eFixture } from "../scripts/e2eHostFixture";
+import { createHostE2eFixture, spawnFakeServe } from "../scripts/e2eHostFixture";
 import { TEST_HISTORY_PAGE_GATE_FILE } from "../src/constants";
 import { initializeServe } from "../src/serveClient/initialize";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
@@ -12,6 +12,7 @@ it("holds only older history pages until the Host has observed loading", async (
   const messenger = new TomcatMessenger({
     executable: fixture.fakeServePath,
     env: { ...fixture.env, TOMCAT_E2E_HISTORY_PAGE_DELAY_MS: "0" },
+    spawnFactory: spawnFakeServe,
   });
   try {
     const initialized = await initializeServe(messenger);

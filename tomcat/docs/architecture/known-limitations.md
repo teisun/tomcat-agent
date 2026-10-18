@@ -4,12 +4,6 @@
 
 ## P1
 
-### 非 Unix 平台的阻塞 `read_line`
-
-CLI 的交互输入在 Unix 以外的平台仍可能无法被取消信号及时打断。它不影响已落盘的会话恢复语义，但关闭 CLI 时可能比预期晚返回。
-
-重新排期条件：支持 Windows 作为一等交付目标，或出现无法退出的实际报告。修复应选择跨平台 async stdin，而不是增加平台特判超时。
-
 ### 旧 `timeout_ms` 配置缺少运行时迁移覆盖
 
 旧的 `ask_question.timeout_ms` 配置会产生迁移提示，但真实运行时组合尚没有端到端测试。当前产品语义仍是“无超时”。
@@ -41,6 +35,36 @@ VS Code E2E 的 `workbenchFindDriver` 依赖当前 workbench DOM 的可访问性
 少数 Plan 图相关 test id 沿用早期组件名，测试覆盖本身有效。改名只会制造无功能收益的快照噪音。
 
 重新排期条件：该组件的可访问性标识重构时，一并迁移并保留兼容选择器窗口。
+
+### Windows：旧代码页程序的输出可能乱码
+
+bash 工具按 UTF-8 解码命令输出。Git Bash 里的 GNU 工具和多数现代程序输出 UTF-8，但仍使用 OEM/ANSI 代码页的老程序（如部分 `cmd` 内置命令、`ipconfig`、`icacls`）在中文系统上输出 GBK，显示为乱码。命令本身照常执行，退出码不受影响。
+
+重新排期条件：验收或用户报告中，常用开发工具的输出因此不可读时。修复应按程序实际代码页解码，不能全局改控制台代码页。
+
+### Windows：tomcat.exe 未签名
+
+Release 与 VSIX 里的 `tomcat.exe` 没有 Authenticode 签名。从浏览器下载的压缩包可能触发 SmartScreen 提示；企业环境的应用白名单可能拦截。
+
+重新排期条件：出现 SmartScreen/杀毒软件拦截的用户报告，或有企业部署需求时。需要先取得代码签名证书，再在 release-cli 里加签名步骤。
+
+### Windows：没有 ARM64 原生包
+
+只发布 `x86_64-pc-windows-msvc` / `win32-x64`。Windows ARM64 不在支持承诺内。
+
+重新排期条件：出现 Windows ARM64 用户需求，且 CI 有可用的 ARM64 Windows runner 跑原生验收时。
+
+### Windows：没有一键安装脚本（install.ps1）
+
+Windows 上的终端 CLI 需要手动下载压缩包、解压后运行 `.\tomcat.exe init`；`install.sh` 只用于 Unix。插件用户不受影响（插件包内置 CLI）。
+
+重新排期条件：终端 CLI 的 Windows 用户反馈手动安装成本高时。脚本应复用 release 的 `SHA256SUMS` 校验，与 `install.sh` 保持同一套资产命名。
+
+### Windows：conhost 默认字体显示不了吉祥物
+
+conhost 的默认中文字体（新宋体）不含盲文字符，启动吉祥物显示为方框；Windows Terminal（Cascadia）显示正常。颜色与功能不受影响，可用 `TOMCAT_SPLASH=0` 关闭吉祥物。
+
+重新排期条件：用户反馈 conhost 下的启动画面影响使用时。
 
 ### Verifier 目前是 dormant
 

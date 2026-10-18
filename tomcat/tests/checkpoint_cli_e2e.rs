@@ -1,19 +1,27 @@
+#[cfg(unix)]
 #[path = "checkpoint_cli_e2e/child_harness.rs"]
 mod child_harness;
 mod common;
 #[path = "checkpoint_cli_e2e/mock_protocol.rs"]
+#[cfg_attr(not(unix), allow(dead_code))]
 mod mock_protocol;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
 use std::fs;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use tomcat::core::session::read_entries_tail;
 use tomcat::infra::tr;
 use tomcat::{
@@ -23,8 +31,8 @@ use tomcat::{
 use tracing::{info, info_span};
 
 #[cfg(unix)]
-use child_harness::BackgroundProcessGuard;
-use child_harness::CheckpointChild;
+use child_harness::{BackgroundProcessGuard, CheckpointChild};
+#[cfg(unix)]
 use mock_protocol::{classify_mock_request, MockRequestClass};
 
 fn isolated_cli_command() -> StdCommand {
@@ -257,6 +265,7 @@ fn write_sse_chunk(stream: &mut std::net::TcpStream, chunk: serde_json::Value) {
     let _ = stream.flush();
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MockServerState {
     AwaitInitialUser,

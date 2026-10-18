@@ -2,9 +2,14 @@
 mod common;
 
 use std::fs;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use common::serve::{cargo_bin_path, setup_serve_fixture};
@@ -34,6 +39,7 @@ fn isolated_command(home: &Path, cwd: &Path) -> Command {
     command
 }
 
+#[cfg(unix)]
 fn wait_for_exit(child: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
@@ -136,6 +142,14 @@ impl Interactive {
         self.input.write_all(answer.as_bytes()).unwrap();
         self.input.flush().unwrap();
     }
+
+    /// 等主输入框的提示符出现再发 Ctrl+D：在那之前终端还处于行模式，Linux 上此时的
+    /// Ctrl+D 被行模式处理掉，行编辑器收不到 EOF。
+    fn quit_at_prompt(&mut self) {
+        self.until("]> ");
+        self.answer("\u{4}");
+        wait_for_exit(&mut self.child);
+    }
 }
 
 #[cfg(unix)]
@@ -169,14 +183,12 @@ fn tty_trust_once_then_does_not_prompt_again() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(record.exists(), "yes must persist the project decision");
-    first.answer("\u{4}");
-    wait_for_exit(&mut first.child);
+    first.quit_at_prompt();
     drop(first);
 
     let mut second = Interactive::start(&fixture.home_path, &fixture.workspace);
     second.until("Enter /help for a command list.");
-    second.answer("\u{4}");
-    wait_for_exit(&mut second.child);
+    second.quit_at_prompt();
     while let Ok(chunk) = second.output.try_recv() {
         second.seen.push_str(&chunk);
     }
@@ -194,8 +206,7 @@ fn tty_not_now_does_not_persist_and_non_tty_keeps_first_command() {
     let mut child = Interactive::start(&fixture.home_path, &fixture.workspace);
     child.until("Trust this project?");
     child.answer("n\n");
-    child.answer("\u{4}");
-    wait_for_exit(&mut child.child);
+    child.quit_at_prompt();
     assert!(
         !record.exists(),
         "not now must not write a denial or a grant"

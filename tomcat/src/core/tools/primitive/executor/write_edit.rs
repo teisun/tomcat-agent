@@ -98,7 +98,7 @@ fn commit_bytes_with_backup(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn simulate_failed_commit_with_backup_for_test(
     path: &std::path::Path,
     cancel: &CancellationToken,
