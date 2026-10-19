@@ -69,13 +69,16 @@ pub fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
 /// 规范化路径：展开 `~` 为当前用户 home、解析 `.`/`..`，失败时返回未 canonicalize 的路径。
 ///
 /// # Arguments
-/// * `path` - 原始路径字符串，支持以 `~`、`~/` 或 `~\` 开头的 home 缩写。
+/// * `path` - 原始路径字符串，支持以 `~` 开头的 home 缩写。
+///   `/` 在两平台均为分隔符；`\` 仅在 Windows 上作为分隔符，Unix 上保留为文件名字符。
 ///
 /// # Returns
 /// 规范化后的 [`PathBuf`]；若 `canonicalize` 失败（如路径不存在），则返回展开后的路径而不报错。
 pub fn normalize_path(path: &str) -> Result<PathBuf, AppError> {
     let expanded = if path.starts_with("~") {
-        let rest = path.trim_start_matches('~').trim_start_matches(['/', '\\']);
+        let rest = path
+            .trim_start_matches('~')
+            .trim_start_matches(std::path::is_separator);
         if let Some(home) = home_dir() {
             home.join(rest)
         } else {

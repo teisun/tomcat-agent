@@ -61,11 +61,12 @@ pub fn write_file_atomic_with(
 
 /// 原子写入只有当前用户能读写的文件（存放凭据）。
 ///
-/// 临时文件从创建那一刻起就是私有的，写入任何字节之前别的用户都读不到；改名后权限跟着文件走，
-/// 不必再设一次。
+/// Unix 临时文件以 0600 创建，并在写入前补足被 umask 屏蔽的属主读写权限；
+/// Windows 在写入前设置私有 DACL。改名后权限跟着文件走，不必再设一次。
 ///
 /// # Errors
-/// 同 [`write_file_atomic`]；另外 Windows 上设置 DACL 失败时返回 [`AppError::Config`]。
+/// 同 [`write_file_atomic`]；另外 Unix 上设置权限失败时返回 [`AppError::Io`]，
+/// Windows 上设置 DACL 失败时返回 [`AppError::Config`]。
 pub fn write_private_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
     write_atomic(path, true, |writer| {
         writer.write_all(content).map_err(AppError::Io)
@@ -90,9 +91,15 @@ fn write_atomic(
     }
     let file = options.open(&tmp).map_err(AppError::Io)?;
     let result = (|| {
-        // Windows 没有创建时的权限位：在写入第一个字节之前换掉 DACL。
-        #[cfg(windows)]
         if private {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // 创建模式受 umask 约束；按句柄补回属主权限，不重新解析临时路径。
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            // Windows 没有创建时的权限位：在写入第一个字节之前换掉 DACL。
+            #[cfg(windows)]
             set_private_file_permissions(&tmp)?;
         }
         let mut writer = BufWriter::new(file);

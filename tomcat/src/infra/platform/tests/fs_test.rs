@@ -154,13 +154,11 @@ fn temp_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-#[test]
-fn private_write_temp_file_is_private_before_the_first_byte() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(".env");
+fn assert_private_write(dir: &Path) {
+    let path = dir.join(".env");
 
     write_atomic(&path, true, |writer| {
-        let temps = temp_files(dir.path());
+        let temps = temp_files(dir);
         assert_eq!(temps.len(), 1, "{temps:?}");
         assert_private(&temps[0]);
         writer.write_all(b"KEY=secret\n").map_err(AppError::Io)
@@ -169,6 +167,42 @@ fn private_write_temp_file_is_private_before_the_first_byte() {
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "KEY=secret\n");
     assert_private(&path);
+}
+
+#[test]
+fn private_write_temp_file_is_private_before_the_first_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_private_write(dir.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn private_write_keeps_owner_access_under_a_umask_that_strips_it() {
+    const CHILD: &str = "TOMCAT_TEST_PRIVATE_WRITE_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "infra::platform::fs::tests::private_write_keeps_owner_access_under_a_umask_that_strips_it",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+
+    // Create the directory before umask can strip its traversal permissions.
+    let dir = tempfile::tempdir().unwrap();
+    // SAFETY: only this test runs in the child process; the parent umask is untouched.
+    unsafe { libc::umask(0o777) };
+    assert_private_write(dir.path());
 }
 
 #[test]

@@ -1,8 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-18 10:40 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-19 08:00 +0800 | ACTIVE | develop | — |
 
-### CURRENT INTEGRATION：Windows 平台适配 + 发版演练（2026-10-18）
+### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
+
+- **当前收口**：Windows 适配后的两项 macOS/Unix 回归与四项搜索测试的本地代理排除配置随本次本地提交纳入，具体实现、既有验收结果与未解决项见下方 DONE / INTERFACE / BLOCKED。按用户要求本次不重跑测试或构建；不升版、不推送、不发布，Cov% 未测量。以下保留此前 Windows 交付与发布事实，不作为本轮修复的 Windows 原生验收证据。
 
 - **范围**：按 `windows_平台适配_d3cab8bc` 实施 win32-x64 插件与终端 CLI 一等交付，提交 `80e7cc18`；明细、根因与证据只维护在 [feature-windows-support.md](feature-windows-support.md)。
 - **版本**：版本脚本统一递增 CLI `0.1.77 → 0.1.78`、EXT `0.1.93 → 0.1.94`，新 EXT pin CLI `0.1.78`；版本一致性检查通过。
@@ -64,6 +66,8 @@
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-10-19]** macOS/Unix 回归修复：`normalize_path` 只剥离本机分隔符，避免把合法反斜杠文件名指向另一个文件；私有原子写入保留创建时的 0600 保护，并在第一字节前按句柄补足被 umask 扣除的属主权限。此前两项用例均完成红→绿，平台模块 54/54、env_file 2/2、OAuth 7/7 通过；平台修复后的严格 Clippy 复验通过。
+- [✓] **[P1，2026-10-19]** 四项 hosted web-search 测试不再清空本地代理排除，`NO_PROXY`/`no_proxy` 均设为 `127.0.0.1,localhost,::1`；原第 4–7 项定向复测 4/4、显式 OpenAI 代理对照 1/1 通过，原断言与超时未放宽。上述记录来自本次提交前的实施验收，不代表重新跑过全量门禁；7 个源码/测试文件及两处 status 全部纳入。本地报告 `.agents/acceptance/windows-macos-regression/fixes.md` 与临时验收产物按既有全局忽略规则保留，不强制加入 Git。
 - [✓] **[P1，2026-10-17]** 会话菜单收起优化完成并纳入本次本地提交：`SessionBar` 展开期补非捕获 window blur 监听及对称清理，选择会话（含当前会话）立即关闭并归还触发按钮焦点；外部关闭不抢焦点，置顶／展开更多／删除确认与取消的连续管理不变。生产仅新增 5 行，不改 CLI、会话恢复、草稿、协议或样式。此前先在基线复现两处真实红框点击失焦但菜单仍开，修复后 GUI 聚焦 96/96、真实 Dev Host 菜单用例与既有管理用例各 1/1、lint、harness 类型检查和构建通过；两张全景 PNG／ARIA／console 已读取，capture-time 记录无 error/exception。首次宿主取证在状态采集阶段超时，删除测试中多余的双动画帧等待后通过，生产逻辑与断言未放宽。已交付不含 CLI 的 `tomcat-vscode-ext-0.1.92-session-menu-pure.vsix`（1,798,478 字节，SHA256 `27bc0aa4e596e78c0d86128e79a9c2686754b6b41a28d3ef27564888dbc59c93`），构建新鲜度、包完整性及入口文件字节一致性检查通过。上述均为此前实施／打包记录；本次按用户要求不跑测试、不构建，Cov% 未测量；不升版、不推送或发布。本地证据 `.agents/acceptance/session-menu-dismissal/` 与 VSIX 按既有忽略规则保留，不强制加入 Git。
 - [✓] **[P1，2026-10-17]** 会话重载恢复修复完成，用户已明确反馈「验收通过」。`SwitchSession` 的 live 分支用目标 scope 的无绑定 SessionManager 先保存磁盘 current，成功后才更新内存 active；未打开分支、运行中会话绑定、扩展与协议不变。源码及两条回归一并纳入本次提交。此前新增单测修复前准确失败、修复后通过；命令模块首轮 97 通过／6 失败，补本机 NO_PROXY 后同一二进制精确复验 6/6 通过，有效结果分批覆盖 103 项；真实多会话／进程重启 8/8 及 debug CLI 构建通过。全仓 fmt 仍有 17 个文件的既有差异，与 HEAD 比较确认无新增格式差异。上述均为此前实施验收记录，本次按用户要求不重跑测试、构建或视觉验收，Cov% 未测量；未升版、未推送或发布。完整本地记录见 `.agents/acceptance/session-reload-current.md`，按现有全局忽略规则不纳入 Git。
 - [✓] **[本机，2026-10-17]** 经用户明确授权，已正常卸载旧 `tomcat.tomcat-vscode-ext@0.1.86`，扩展列表仅剩新 `tomcat-agent.tomcat-vscode-ext@0.1.92`；另按用户要求在 `~/.profile` 给 NO_PROXY/no_proxy 补齐本机地址，保留原名单与代理地址，新 Bash 登录验证通过。仅记录本机操作，不将个人 shell 配置或自动卸载机制加入仓库；Agent 未重载用户主窗口。
@@ -100,6 +104,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-10-19 平台兼容修复**：无新增 API、配置键、存储格式或依赖；Unix 的反斜杠保留为文件名字符，Windows 的两种分隔符行为不变。私有写入沿用创建→设权限→写入→原子发布流程，Windows DACL 与普通文件写入逻辑不变；NO_PROXY 改动仅在四个测试环境夹具内，不修改用户系统代理。
 - **2026-10-17 会话菜单收起**：无新增生产接口／协议。新增关闭触发来自用户选择或页面失焦，不随会话快照更新触发；既有框外点击／Escape 等关闭行为保留，会话身份仍等宿主确认。删除弹窗沿用暂停关闭监听，置顶／删除管理和草稿保存流程不变。
 - **2026-10-17 会话恢复**：无新增接口或存储格式；仅补齐显式切换已打开会话时的 scope 级 current 持久化。写失败沿用 dispatcher 错误帧且不切内存 active，registry setter 仍只负责内存；不新增前端选中态。
 - **2026-10-17 默认模型入口调整**：无新增宿主／CLI／wire 接口。GUI 继续发送原有 `setDefaultModel` / `setUtilityModel`；宿主报告相应角色值才显示选择器，能力仅决定是否可写，已保存值仍以宿主快照为准。首次接入自动设默认、供应商分卡和用户配置存储不变。
@@ -141,7 +146,9 @@
 | 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
-| 历史 QuickJS 偶发失败 | 五项整改/拒写验收期间全量 lib 3265 passed / 2 failed / 5 ignored；模块复验仍有超时和清理断言失败。后续供应商分卡与三项整改的全量 lib 已通过，但不证明该问题已修 | 保留原失败记录与后续通过记录；本次按用户要求未复跑，不宣称根因已消除 |
+| QuickJS 20ms 超时仍未解决（2026-10-19） | 当前 `code_vm_fanout_uses_independent_progress_windows_not_vm_wall_time` 与 `code_vm_polling_and_sibling_progress_cannot_renew_a_wrong_token_call` 两项仍保留失败；原 7 项中的四项搜索用例已通过 NO_PROXY 复验，凭据用例此前隔离环境后已通过 | 两项使用测试特设的 20ms，具体计时原因尚未定位；不能把旧产物或偶发通过当作已修复，也不凭默认 30s 就保证用户侧无影响。按用户要求本次仅提交，不重跑测试 |
+| 本轮平台验收边界（2026-10-19） | 两项修复的原生执行平台为 Intel macOS；本轮未在 Windows、Linux 或 Apple Silicon 原生复验 | 保留跨平台待验；此前 Windows CI 通过不覆盖本次尚未推送的修复，不据此放行跨平台发布 |
+| 本轮全量门禁记录（2026-10-19） | 平台修复后 gate-fast 原始结果为 lib 3342 passed / 4 failed / 5 ignored、parallel 376 passed / 3 failed、serial 50 passed；后续为定向隔离和复验 | 保留原始失败与后续通过记录，未重新执行完整门禁，不将定向 4/4 与代理对照通过写成全量全绿 |
 | 历史安装包仍携带旧显示缺陷 | CLI 0.1.76 / EXT 0.1.92 正式三平台原生验收已通过拒写与重载后的状态断言；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 使用新版本接收修复；旧无状态记录中性展示，不改写历史，不再使用旧版本已知问题豁免 |
 | 市场更新验收边界 | 0.1.92 真实 OIDC 三平台上传、公开 hash 和保留 profile 的 0.1.89 → 0.1.92 正常市场更新已验证 | 不把 `--update-extensions` 当作无人值守定时更新，也不把 CI 受控模型当作真人首配/付费模型验证；长期总验收边界保留 |
 | 既有验证边界 | 历史发布覆盖三目标原生受控模型链路，本轮仅 macOS x64；未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |

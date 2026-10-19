@@ -2,7 +2,7 @@
 
 本分支的唯一状态表维护在 [tomcat/docs/status/develop.md](../../tomcat/docs/status/develop.md)，与现有状态汇总目录保持一致；元数据、Cov%、DONE、INTERFACE 和 BLOCKED 均以该文件为准，此处不维护副本。
 
-2026-10-18 10:40 +0800，Windows 平台适配（win32-x64 插件 + 终端 CLI）已提交为 `80e7cc18`，版本递增到 CLI `0.1.78` / EXT `0.1.94`（EXT 内置 CLI `0.1.78`）。本轮只推 develop 与两个 dry-run 演练标签，不创建 GitHub Release、不上传市场；正式发版待用户确认。本机 Windows gate-fast 与插件集成测试通过，演练结果待回填；详情见唯一状态表与 `tomcat/docs/status/feature-windows-support.md`，Cov% 未测量。
+2026-10-19 08:00 +0800，Windows 适配后的两项 macOS/Unix 回归已修复：HOME 展开保留 Unix 反斜杠文件名，私有写入在写入前按句柄补足 0600；另为四项搜索测试显式配置本地 NO_PROXY。7 个源码/测试文件与两处状态文件一并纳入本次本地提交。此前两项修复的专项验证及搜索 4 项复测、显式代理对照均通过；全量门禁仍保留两项 QuickJS 20ms 超时未解决，不称全绿。按用户要求，本次提交不重跑测试或构建，不升版、不推送或发布；Cov% 未测量。此轮修复尚未在 Windows/Apple Silicon 原生复验，详情见唯一状态表。
 
 2026-10-17 13:27 +0800，补齐插件 `0.1.92` / `0.1.93` 的 CHANGELOG，并在 `/release-cli-ext` 命令中明确发版前更新、核对版本归属和内置 CLI、确认日志进入 release 提交的要求；漏项时停止发版。两项文档及本次状态记录一并纳入本地提交。此前已核对发布标签、CLI pin、历史条目完整性和命令结构，本次不重跑产品测试或构建；不升版、不推送、不打标签或发布，既有资产不替换。已发布包仍含旧 CHANGELOG，补录内容须随后续插件包交付。CLI `0.1.77` / EXT `0.1.93` 的既有发布结果与环境告警保留在唯一状态表；Cov% 未测量。
 

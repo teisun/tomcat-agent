@@ -6823,8 +6823,9 @@ async fn test_chat_path_routes_auto_web_search_through_hosted_openai_candidate()
         ("HTTPS_PROXY", None),
         ("HTTP_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Local mock traffic must also bypass proxies discovered from OS settings.
+        ("NO_PROXY", Some("127.0.0.1,localhost,::1")),
+        ("no_proxy", Some("127.0.0.1,localhost,::1")),
     ]);
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let _cwd_guard = common::CwdGuard::set(workspace.path());
@@ -6949,8 +6950,9 @@ async fn test_chat_path_web_search_falls_back_to_plugin_after_hosted_openai_fail
         ("HTTPS_PROXY", None),
         ("HTTP_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Local mock traffic must also bypass proxies discovered from OS settings.
+        ("NO_PROXY", Some("127.0.0.1,localhost,::1")),
+        ("no_proxy", Some("127.0.0.1,localhost,::1")),
         (common::DEEPSEEK_TEST_API_KEY_ENV, None),
     ]);
     let workspace = tempfile::tempdir().expect("workspace tempdir");

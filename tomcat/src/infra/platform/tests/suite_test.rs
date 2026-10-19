@@ -95,13 +95,30 @@ fn write_file_atomic_removes_temp_file_when_rename_fails() {
 }
 
 #[test]
-fn normalize_path_expands_tilde_with_either_separator() {
+fn normalize_path_expands_tilde_with_native_separators() {
     let dir = tempfile::tempdir().unwrap();
     let home = canonicalize(dir.path()).unwrap();
-    std::fs::create_dir_all(home.join(".tomcat")).unwrap();
+    std::fs::write(home.join("notes"), "plain").unwrap();
     let _home = crate::test_support::HomeOverride::new(&home);
-    assert_eq!(normalize_path("~/.tomcat").unwrap(), home.join(".tomcat"));
-    assert_eq!(normalize_path("~\\.tomcat").unwrap(), home.join(".tomcat"));
+    assert_eq!(normalize_path("~/notes").unwrap(), home.join("notes"));
+    #[cfg(windows)]
+    for input in [r"~\notes", r"~/\notes"] {
+        assert_eq!(normalize_path(input).unwrap(), home.join("notes"));
+    }
+    #[cfg(unix)]
+    // These leading backslashes are Unix filename characters, not path separators.
+    #[allow(clippy::join_absolute_paths)]
+    {
+        let backslash = home.join(r"\notes");
+        std::fs::write(&backslash, "backslash").unwrap();
+        for input in [r"~/\notes", r"~\notes"] {
+            assert_eq!(normalize_path(input).unwrap(), backslash, "{input}");
+        }
+        assert_eq!(
+            normalize_path(r"~/\missing").unwrap(),
+            home.join(r"\missing")
+        );
+    }
 }
 
 #[cfg(windows)]

@@ -1281,8 +1281,9 @@ async fn web_search_sends_request_model_name_not_id() {
         ("HTTPS_PROXY", None),
         ("HTTP_PROXY", None),
         ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        // Local mock traffic must also bypass proxies discovered from OS settings.
+        ("NO_PROXY", Some("127.0.0.1,localhost,::1")),
+        ("no_proxy", Some("127.0.0.1,localhost,::1")),
     ]);
 
     let mut cfg = AppConfig::default();
