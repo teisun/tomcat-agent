@@ -2,7 +2,7 @@
 
 本分支的唯一状态表维护在 [tomcat/docs/status/develop.md](../../tomcat/docs/status/develop.md)，与现有状态汇总目录保持一致；元数据、Cov%、DONE、INTERFACE 和 BLOCKED 均以该文件为准，此处不维护副本。
 
-2026-10-19 08:03 +0800，开始标准发版 CLI `0.1.79` / EXT `0.1.95`，EXT 内置 CLI `0.1.79`。统一版本脚本已更新五个版本源/镜像，CHANGELOG 以实际已发布的 `ext-v0.1.93` 为基线核对，包含此前待发布的 Windows 支持与 macOS/Unix 修复。先提交并推送 develop，再只用 fast-forward 同步 main/master；CLI 四平台资产齐全后才推 EXT tag。发版与四平台原生安装验收交由既有工作流执行，本地不额外重跑产品测试或构建；两项既有 QuickJS 超时仍保留，Cov% 未测量。当前只是发布准备，不代表 GitHub/Marketplace 已上线；结果将回填唯一状态表。
+2026-10-19 08:30 +0800，CLI `0.1.79` / EXT `0.1.95` 标准发版完成，EXT 内置 CLI `0.1.79`。发布提交 `ca1542117494d7f36a7a310b2d86cd69121a0007` 已推送 develop/main/master，两个标签均指向该提交；先确认 CLI 四平台资产齐全，再发布 EXT。GitHub 四份 CLI 归档、五份 VSIX 及各自 SHA256SUMS 已公开，9 份下载包校验通过；四平台原生安装验收通过，包内 CLI 与对应归档一致，CHANGELOG 与发布提交一致。Marketplace 四平台已公开且全部 Validated，哈希与 GitHub 一致；OpenVSX 跳过。本地未额外跑产品测试、构建或安装。普通 CI 仍有已知 QuickJS 用例失败，不称全量全绿；详情与证据见唯一状态表及 `.agents/acceptance/release-0.1.79-0.1.95/release.md`，Cov% 未测量。
 
 2026-10-17 13:27 +0800，补齐插件 `0.1.92` / `0.1.93` 的 CHANGELOG，并在 `/release-cli-ext` 命令中明确发版前更新、核对版本归属和内置 CLI、确认日志进入 release 提交的要求；漏项时停止发版。两项文档及本次状态记录一并纳入本地提交。此前已核对发布标签、CLI pin、历史条目完整性和命令结构，本次不重跑产品测试或构建；不升版、不推送、不打标签或发布，既有资产不替换。已发布包仍含旧 CHANGELOG，补录内容须随后续插件包交付。CLI `0.1.77` / EXT `0.1.93` 的既有发布结果与环境告警保留在唯一状态表；Cov% 未测量。
 

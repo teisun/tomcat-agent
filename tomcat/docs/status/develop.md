@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-19 08:03 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-19 08:30 +0800 | ACTIVE | develop | — |
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
 
@@ -20,12 +20,12 @@
 
 ### CURRENT RELEASE：CLI 0.1.79 / EXT 0.1.95
 
-- **准备状态**：用户执行标准 `/release-cli-ext`；在 `eb1dc2ac` 上运行 `node scripts/release-version.mjs bump --all patch`，CLI `0.1.78 → 0.1.79`、EXT `0.1.94 → 0.1.95`，并 pin CLI `0.1.79`。五个版本源/镜像只改变业务版本，没有依赖变化，版本一致性检查通过。两个目标 tag 在起手时本地/远端均未占用，develop/main/master 均可快进同步；提交前还须通过 CLI/EXT tag guard。
-- **执行边界**：提交并推送 develop，以 fast-forward 同步 main/master；CLI 四平台归档与 SHA256SUMS 就绪后才能推 EXT 标签。保留既有 GitHub 构建、四平台原生安装验收和 Marketplace 发布流程，本地不额外重跑产品测试或构建；不安装或替换本机 CLI。Cov% 未测量。
-- **发布结果**：待本轮提交、推送和工作流完成后回填；不以本地版本校验或已有旧版 Release 代替本轮发布成功。
-- **市场与更新**：已核对 `PUBLISH_MARKETPLACE=true`，沿用既有 OIDC 权限；工作流将上传 darwin-arm64、darwin-x64、linux-x64、win32-x64 四份已验收的 VSIX。当前尚未上传，不把开关为 true 写成市场已发布；OpenVSX 是否执行以本轮工作流结果为准。
-- **证据边界**：本次发版前的平台修复专项与搜索 4 项复测、显式代理对照已通过；两项 QuickJS 20ms 超时仍未解决，完整 gate-fast 未重新转绿，详见 BLOCKED。本轮新增原生验收以 GitHub 工作流为准；不把构建/发布成功等同于全量测试或所有真实模型组合通过。
-- **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.93` 为基线，已核对 `git log ext-v0.1.93..HEAD` 及相关代码差异；新增 `0.1.95` 英文条目包含待发布 Windows 支持、Unix 路径/私有权限修复、checkpoint 开销优化与 macOS 退出进程组修复，注明 bundled CLI `0.1.79`。保留历史条目；必须与五个版本文件同一 release 提交，并在提交后读取 `git show HEAD:tomcat-vscode-ext/CHANGELOG.md` 确认。
+- **准备状态**：用户执行标准 `/release-cli-ext`；在 `eb1dc2ac` 上运行 `node scripts/release-version.mjs bump --all patch`，CLI `0.1.78 → 0.1.79`、EXT `0.1.94 → 0.1.95`，并 pin CLI `0.1.79`。五个版本源/镜像只改变业务版本，没有依赖变化，版本一致性检查通过。两个目标 tag 在起手时本地/远端均未占用，develop/main/master 均可快进同步；CLI/EXT tag guard 与差异检查已通过。
+- **执行边界**：release 提交已推送 develop，并以 fast-forward 同步 main/master；确认 CLI 四平台归档与 SHA256SUMS 就绪后才推 EXT 标签。保留既有 GitHub 构建、四平台原生安装验收和 Marketplace 发布流程；本地未额外跑产品测试、构建或安装。收尾仅回填状态，不移动标签、不替换资产；Cov% 未测量。
+- **发布结果**：release 提交 `ca1542117494d7f36a7a310b2d86cd69121a0007` 已推送三个分支，`cli-v0.1.79` / `ext-v0.1.95` 均指向它。CLI run `39179279520` 与 EXT run `39180141401` 成功；[CLI Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.79) 四份归档、[EXT Release](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.1.95) 五份 VSIX 及各自 SHA256SUMS 已公开。9 份实际下载包哈希通过；四平台原生安装验收通过，四个内置 CLI 与对应已发布归档一致，纯包不含 CLI。三个分支的 release 提交 version-sync 均通过。
+- **市场与更新**：沿用 `PUBLISH_MARKETPLACE=true` 与 OIDC；darwin-arm64、darwin-x64、linux-x64、win32-x64 四份包上传成功。08:30 +0800 匿名查询确认四平台 0.1.95 均为 Validated，公开 VSIX SHA256 与 GitHub 一致；先前查询的旧版本/未验证状态保留在本地记录，没有重复上传。OpenVSX 步骤 skipped，不称已发布；未测试用户本机的自动更新。
+- **证据边界**：发布与四平台安装门禁通过，不等于普通 CI 全绿。`main` 普通 CI 的 macOS 作业复现已知第 2 项 QuickJS 用例失败，这次为 `!vm.is_finished()` 断言；同 SHA 的 develop macOS 作业通过，具体根因仍待查。完整结果与日志见 `.agents/acceptance/release-0.1.79-0.1.95/release.md`；Node action/Ubuntu 镜像迁移、VSCE 文件数及 Azure CLI 版本解析告警保留。CI 截图由工作流留存，本轮未逐张复阅，不冒称真人首配、真实供应商组合或零告警。
+- **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.93` 为基线，已核对 `git log ext-v0.1.93..HEAD` 及相关代码差异；新增 `0.1.95` 英文条目包含待发布 Windows 支持、Unix 路径/私有权限修复、checkpoint 开销优化与 macOS 退出进程组修复，注明 bundled CLI `0.1.79`。保留历史条目；已与五个版本文件同一 release 提交，并在提交后读取 `git show HEAD:tomcat-vscode-ext/CHANGELOG.md` 确认。五份实际发布 VSIX 内的 CHANGELOG 与该提交逐字节一致。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 
@@ -146,9 +146,10 @@
 | 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
-| QuickJS 20ms 超时仍未解决（2026-10-19） | 当前 `code_vm_fanout_uses_independent_progress_windows_not_vm_wall_time` 与 `code_vm_polling_and_sibling_progress_cannot_renew_a_wrong_token_call` 两项仍保留失败；原 7 项中的四项搜索用例已通过 NO_PROXY 复验，凭据用例此前隔离环境后已通过 | 两项使用测试特设的 20ms，具体计时原因尚未定位；不能把旧产物或偶发通过当作已修复，也不凭默认 30s 就保证用户侧无影响。按用户要求本次仅提交，不重跑测试 |
-| 本轮平台验收边界（2026-10-19） | 两项修复的原生执行平台为 Intel macOS；本轮未在 Windows、Linux 或 Apple Silicon 原生复验 | 保留跨平台待验；此前 Windows CI 通过不覆盖本次尚未推送的修复，不据此放行跨平台发布 |
+| QuickJS 时间敏感失败仍未解决（2026-10-19） | 此前两项 20ms 超时保留；本次 main CI 的 `code_vm_polling_and_sibling_progress_cannot_renew_a_wrong_token_call` 再次失败于 `code_test.rs:125` 的 `!vm.is_finished()` 断言，lib 为 3345 passed / 1 failed / 5 ignored | 本次没有输出 20ms 超时，不能据此钉死同一根因；同 SHA 的 develop macOS 已通过，也不证明问题已修。保留原始日志与失败，不重复运行来掩盖结果 |
+| 本轮平台验收边界（2026-10-19） | 开发机专项验证为 Intel macOS；release-ext run `39180141401` 已通过 macOS ARM64/x64、Linux x64、Windows x64 四个平台的真实发布包原生安装验收 | 原生安装通过不替代完整 Rust 单测、所有 Linux 发行版或真实供应商验证；Windows Rust 普通 CI 与安装门禁分别记录 |
 | 本轮全量门禁记录（2026-10-19） | 平台修复后 gate-fast 原始结果为 lib 3342 passed / 4 failed / 5 ignored、parallel 376 passed / 3 failed、serial 50 passed；后续为定向隔离和复验 | 保留原始失败与后续通过记录，未重新执行完整门禁，不将定向 4/4 与代理对照通过写成全量全绿 |
+| 普通分支 CI（截至 2026-10-19 08:27 +0800） | develop `39179229183` 的 macOS/Ubuntu Rust 与 Windows 扩展通过；main `39179237764` 的 Ubuntu Rust/Windows 扩展通过、macOS Rust 失败；两边 Windows Rust 尚在运行 | 与已成功的 release 工作流分开，后续状态以对应 GitHub run 为准，不把尚未完成的作业写成通过 |
 | 历史安装包仍携带旧显示缺陷 | CLI 0.1.76 / EXT 0.1.92 正式三平台原生验收已通过拒写与重载后的状态断言；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 使用新版本接收修复；旧无状态记录中性展示，不改写历史，不再使用旧版本已知问题豁免 |
 | 市场更新验收边界 | 0.1.92 真实 OIDC 三平台上传、公开 hash 和保留 profile 的 0.1.89 → 0.1.92 正常市场更新已验证 | 不把 `--update-extensions` 当作无人值守定时更新，也不把 CI 受控模型当作真人首配/付费模型验证；长期总验收边界保留 |
 | 既有验证边界 | 历史发布覆盖三目标原生受控模型链路，本轮仅 macOS x64；未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |
