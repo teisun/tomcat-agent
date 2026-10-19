@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.95
+
+- Publish the Windows x64 support prepared for 0.1.94, with a bundled `tomcat.exe`, background Serve startup without a console window, Windows-aware `@` folder references, and process-tree cleanup for background commands and MCP servers. Install Git for Windows first: commands use Git Bash, never WSL. Windows ARM64 remains unsupported.
+- Fix HOME expansion on macOS and other Unix systems so a backslash in a filename is preserved rather than silently pointing to a different file.
+- Keep newly written credential files readable by their owner under restrictive Unix `umask` settings while retaining private permissions before any credential bytes are written. Existing credential files are not automatically repaired; Windows private access-list enforcement is unchanged.
+- Reduce Git process overhead and polling delays during checkpoint creation when editing or resending earlier messages. On macOS, stopping an already-exited process group no longer reports a spurious permission error.
+- Bundle CLI 0.1.79 in platform-specific packages. Pure-extension users must update their external CLI to receive these fixes.
+
 ## 0.1.94
 
 - Add Windows x64 (`win32-x64`): the Marketplace, OpenVSX and GitHub packages bundle `tomcat.exe` (CLI 0.1.78). Commands run through Git Bash from Git for Windows, which must be installed; WSL's `bash.exe` is never used. When Git Bash is missing, the command fails with installation instructions instead of falling back.

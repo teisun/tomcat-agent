@@ -1,10 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-19 08:00 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-19 08:03 +0800 | ACTIVE | develop | — |
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
 
-- **当前收口**：Windows 适配后的两项 macOS/Unix 回归与四项搜索测试的本地代理排除配置随本次本地提交纳入，具体实现、既有验收结果与未解决项见下方 DONE / INTERFACE / BLOCKED。按用户要求本次不重跑测试或构建；不升版、不推送、不发布，Cov% 未测量。以下保留此前 Windows 交付与发布事实，不作为本轮修复的 Windows 原生验收证据。
+- **当前收口**：Windows 适配后的两项 macOS/Unix 回归与四项搜索测试的本地代理排除配置已提交为 `eb1dc2ac`；该提交未重跑测试或构建。用户现已启动标准发版，执行进展以 CURRENT RELEASE 为准。下方保留此前 Windows 交付与发布事实，不作为本轮修复的 Windows 原生验收证据。
 
 - **范围**：按 `windows_平台适配_d3cab8bc` 实施 win32-x64 插件与终端 CLI 一等交付，提交 `80e7cc18`；明细、根因与证据只维护在 [feature-windows-support.md](feature-windows-support.md)。
 - **版本**：版本脚本统一递增 CLI `0.1.77 → 0.1.78`、EXT `0.1.93 → 0.1.94`，新 EXT pin CLI `0.1.78`；版本一致性检查通过。
@@ -14,18 +14,18 @@
 - **正式发布**：develop 已快进同步 main/master。首次 `cli-v0.1.78` 打在带 `[skip ci]` 的文档提交 `800829a7` 上，GitHub 因此跳过了 tag 推送触发的工作流，也没有生成 Release；已删除这个 tag，改打在 `712b09c5` 上。
   - **CLI 0.1.78 已发布**：release-cli run `39101877028` 成功，[GitHub Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.78) 含四平台归档（新增 `x86_64-pc-windows-msvc`）与 `SHA256SUMS`。
   - **EXT 0.1.94 暂停**：用户决定先手动验收，`ext-v0.1.94` 未推送，Marketplace/OpenVSX 未上传。手动验收用本机包 `%USERPROFILE%\.tomcat\temp\windows-acceptance\manual\tomcat-vscode-ext-0.1.94-win32-x64.vsix`：同一提交本机编译的 `tomcat.exe`，与包内 `extension/bin/tomcat.exe` 的 SHA256 一致；正式包内置的是 CI 编译的那份。
-  - **恢复发布时**：EXT tag 所指提交的说明不能带 `[skip ci]`；CLI 资产已就绪，可直接推 `ext-v0.1.94`。
+  - **本次恢复发布**：采用 CLI `0.1.79` / EXT `0.1.95`，不补打 `ext-v0.1.94`；新 EXT 必须等待 CLI 0.1.79 四平台资产就绪，标签提交不能带 `[skip ci]`。
 - **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径，以及 CI 暴露的问题，都在 `afbec1ff` 之后另行提交（`26af661d`、`a8a100f0`、`bb8c618f`），因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
-- **平台层收口**：按 `平台层收口整改_90f59927` 把业务层的平台 `cfg` 与系统 crate 调用清零，`infra/platform` 成为唯一平台差异层，由 `platform/tests/boundary_test.rs` 守护；预检两平台统一为后台安装。工作流 `windows-ci.yml` 改名为 `ci.yml`，rust gate-fast 扩成 Windows / Ubuntu / macOS 三平台矩阵（上文 windows-ci run 均为改名前的记录）。本改动随下一个 CLI 版本发布，暂停中的 `ext-v0.1.94` 仍从已验收的提交打 tag。明细与证据见 [feature-windows-support.md](feature-windows-support.md)「平台层收口」。
+- **平台层收口**：按 `平台层收口整改_90f59927` 把业务层的平台 `cfg` 与系统 crate 调用清零，`infra/platform` 成为唯一平台差异层，由 `platform/tests/boundary_test.rs` 守护；预检两平台统一为后台安装。工作流 `windows-ci.yml` 改名为 `ci.yml`，rust gate-fast 扩成 Windows / Ubuntu / macOS 三平台矩阵（上文 windows-ci run 均为改名前的记录）。本改动纳入本轮 CLI `0.1.79` / EXT `0.1.95`；`ext-v0.1.94` 保持未发布。明细与证据见 [feature-windows-support.md](feature-windows-support.md)「平台层收口」。
 
-### CURRENT RELEASE：CLI 0.1.77 / EXT 0.1.93
+### CURRENT RELEASE：CLI 0.1.79 / EXT 0.1.95
 
-- **准备状态**：用户执行标准 `/release-cli-ext`，在已提交的 `543a755a` 上由版本脚本统一递增 CLI `0.1.76 → 0.1.77`、EXT `0.1.92 → 0.1.93`，并 pin CLI `0.1.77`。五个版本文件只改必要版本镜像，无依赖变化；版本一致性及 CLI/EXT tag guard 已通过。目标标签起手时本地/远端均未占用，三个分支均可快进同步。
-- **执行边界**：已先提交并推送 develop、FF 同步 main/master；CLI 三平台归档和 SHA256SUMS 就绪后才推 EXT 标签。原有 GitHub 构建/原生安装验收与发布门禁保留，本地不额外重跑产品测试。收尾只补状态记录并同步三个分支，不移动标签、不重建或替换发布包。Cov% 未测量。
-- **发布结果**：发布提交 `8f88e8f8725249a9bea7cb653192ba2189bccd84` 已推送三个分支，两个正式标签均指向它。CLI run `39004223945` 与 EXT run `39004819368` 全部成功，三个分支 version-sync 均通过。GitHub 已公开 CLI 三平台归档、EXT 四份 VSIX 及各自 SHA256SUMS；7 份下载包校验通过。EXT 原生门禁覆盖三平台冷启动和 0.1.90 数据升级，六次 host 运行均通过；本地检查确认包身份／版本／pin 正确，三个内置 CLI 与对应发布归档字节一致，纯 VSIX 不含 CLI。
-- **市场与更新**：保留 `PUBLISH_MARKETPLACE=true` 与既有 OIDC 权限。三个平台于 05:09 UTC 上传成功；公开校验经历短暂等待，13:16 +0800 匿名查询已确认三个平台均为 0.1.93 且 `Validated`，公开元数据的 VSIX SHA256 与 GitHub 下载包一致。未重复上传、未重跑工作流；OpenVSX 步骤为 skipped，不称已发布。本轮未安装或替换本机 CLI，未重放本机 Marketplace 自动更新实验。
-- **证据边界**：本轮证据在 `.agents/acceptance/release-0.1.77-0.1.93/`，包含工作流、发布元数据、实际下载包、校验结果与市场观察。CI 截图仍是 CI 留存，不冒称已逐张人工复阅，也不冒称真人首配、真实付费对话或无人值守更新验证。CI 保留 Node 20／Ubuntu 镜像迁移、VSCE 文件数及 Azure CLI 版本解析提示；Linux 仍有 DBus/GPU、`/bin/zsh` 缺失和 weak GLIBC_2.39 告警，功能门禁通过不等于零告警或全 Linux 兼容。下方旧日期记录仅属历史。
-- **文档补录（2026-10-17 13:27 +0800）**：按各发布 tag 补齐 `tomcat-vscode-ext/CHANGELOG.md` 的 0.1.92／0.1.93 条目，并在 `.cursor/commands/release-cli-ext.md` 强制要求发版前更新日志、核对版本归属及 bundled CLI、确认内容进入 release 提交，漏项则停止。此前文档检查通过（任务 `1792214549276-a1b7ai`、`1792214792238-ioc33p`），历史条目未改；此次仅本地提交文档和状态，不重跑产品测试／构建，不升版／推送／打标签／发布。旧 VSIX 的 CHANGELOG 仍停留在 0.1.90，仓库补录不改变已发布资产，需随后续插件包交付。
+- **准备状态**：用户执行标准 `/release-cli-ext`；在 `eb1dc2ac` 上运行 `node scripts/release-version.mjs bump --all patch`，CLI `0.1.78 → 0.1.79`、EXT `0.1.94 → 0.1.95`，并 pin CLI `0.1.79`。五个版本源/镜像只改变业务版本，没有依赖变化，版本一致性检查通过。两个目标 tag 在起手时本地/远端均未占用，develop/main/master 均可快进同步；提交前还须通过 CLI/EXT tag guard。
+- **执行边界**：提交并推送 develop，以 fast-forward 同步 main/master；CLI 四平台归档与 SHA256SUMS 就绪后才能推 EXT 标签。保留既有 GitHub 构建、四平台原生安装验收和 Marketplace 发布流程，本地不额外重跑产品测试或构建；不安装或替换本机 CLI。Cov% 未测量。
+- **发布结果**：待本轮提交、推送和工作流完成后回填；不以本地版本校验或已有旧版 Release 代替本轮发布成功。
+- **市场与更新**：已核对 `PUBLISH_MARKETPLACE=true`，沿用既有 OIDC 权限；工作流将上传 darwin-arm64、darwin-x64、linux-x64、win32-x64 四份已验收的 VSIX。当前尚未上传，不把开关为 true 写成市场已发布；OpenVSX 是否执行以本轮工作流结果为准。
+- **证据边界**：本次发版前的平台修复专项与搜索 4 项复测、显式代理对照已通过；两项 QuickJS 20ms 超时仍未解决，完整 gate-fast 未重新转绿，详见 BLOCKED。本轮新增原生验收以 GitHub 工作流为准；不把构建/发布成功等同于全量测试或所有真实模型组合通过。
+- **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.93` 为基线，已核对 `git log ext-v0.1.93..HEAD` 及相关代码差异；新增 `0.1.95` 英文条目包含待发布 Windows 支持、Unix 路径/私有权限修复、checkpoint 开销优化与 macOS 退出进程组修复，注明 bundled CLI `0.1.79`。保留历史条目；必须与五个版本文件同一 release 提交，并在提交后读取 `git show HEAD:tomcat-vscode-ext/CHANGELOG.md` 确认。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 
