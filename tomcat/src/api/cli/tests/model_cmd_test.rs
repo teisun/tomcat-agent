@@ -117,6 +117,87 @@ fn run_model_add_list_remove_and_key_roundtrip() {
 
 #[test]
 #[serial(env_lock)]
+fn run_model_numeric_provider_default_key_roundtrip() {
+    use crate::core::llm::auth::{clear_managed_credentials_for_test, refresh_managed_credentials};
+    use crate::core::llm::AuthStore;
+
+    clear_managed_credentials_for_test();
+    with_temp_home(|| {
+        let work_dir = tempfile::tempdir().expect("tempdir");
+        let cfg = test_config(work_dir.path());
+        let id = "114215206196/relay-test";
+        let env_name = "PROVIDER_114215206196_API_KEY";
+
+        run_model(
+            ModelSub::Add {
+                id: id.to_string(),
+                api: "openai".to_string(),
+                provider: "114215206196".to_string(),
+                model_name: Some("relay-test".to_string()),
+                api_key_env: None,
+                base_url: Some("http://114.215.206.196:3000/v1".to_string()),
+                vision: false,
+                files: false,
+                tools: true,
+                reasoning: false,
+                web_search: false,
+                context_window: None,
+                context_window_options: vec![],
+                max_output_tokens: None,
+                description: None,
+                thinking_format: None,
+            },
+            &cfg,
+        )
+        .expect("add IP relay with an implicit key slot");
+
+        let catalog = ModelCatalog::load(&cfg).expect("load catalog");
+        let inserted = list_model_views(&catalog)
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .expect("inserted model");
+        assert_eq!(inserted.api_key_env, env_name);
+        assert!(!inserted.key_present);
+
+        run_model(
+            ModelSub::Key {
+                sub: ModelKeySub::Set {
+                    provider: "114215206196".to_string(),
+                    value: Some("relay-secret".to_string()),
+                },
+            },
+            &cfg,
+        )
+        .expect("set key by numeric provider");
+
+        let env_path = work_dir.path().join("assets").join(".env");
+        let env_text = std::fs::read_to_string(&env_path).expect("read .env");
+        assert!(env_text
+            .lines()
+            .any(|line| line == "PROVIDER_114215206196_API_KEY=relay-secret"));
+        // Read from disk again rather than relying on the cache populated by key set.
+        clear_managed_credentials_for_test();
+        refresh_managed_credentials(&env_path).expect("reload saved credentials");
+        let catalog = ModelCatalog::load(&cfg).expect("reload catalog after key");
+        let entry = catalog.lookup(id).expect("reloaded model");
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.provider, "114215206196");
+        assert_eq!(entry.api_key_env, None);
+        let keyed = list_model_views(&catalog)
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .expect("keyed model view");
+        assert_eq!(keyed.api_key_env, env_name);
+        assert!(keyed.key_present);
+        let credential = AuthStore.get(entry, None).expect("resolve saved relay key");
+        assert_eq!(credential.env_name, env_name);
+        assert_eq!(credential.value, "relay-secret");
+    });
+    clear_managed_credentials_for_test();
+}
+
+#[test]
+#[serial(env_lock)]
 fn run_model_default_persists_selected_model_to_config() {
     let work_dir = tempfile::tempdir().expect("tempdir");
     with_tomcat_config_in_home(work_dir.path(), || {

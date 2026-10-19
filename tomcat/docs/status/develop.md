@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-19 08:30 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-19 11:07 +0800 | ACTIVE | develop | — |
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
 
@@ -66,6 +66,7 @@
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-10-19]** IP 中转站自动凭证槽修复：GUI `envNameForRelaySlug` 与 Rust `env_name_for_provider` 仅在规范化名称以数字开头时添加 `PROVIDER_`，使报告地址派生为 `PROVIDER_114215206196_API_KEY`；provider、模型 ID、显式槽优先级与冲突编号规则保持不变。5 个生产/测试文件及两处 status 全部纳入本次本地提交。此前 GUI 35/35、Rust auth 7/7、CLI 5/5、隔离环境后的 admin 28/28，以及 GUI 类型检查、目标 Rust 格式检查通过；CLI 新用例实际保存并清缓存重读 `.env`，确认 keyPresent 与 AuthStore 取回 Key。桌面/窄屏共 4 套 PNG/ARIA/console 已读取，真实设置组件使用模拟宿主，不冒充后端持久化或完整 VS Code E2E。按用户要求本次不重跑测试、构建或视觉验收，Cov% 未测量；未升版、未推送或发布。本地记录 `.agents/acceptance/ip-relay.md` 与临时脚本/截图按既有忽略规则保留，不强制纳入 Git。
 - [✓] **[P1，2026-10-19]** macOS/Unix 回归修复：`normalize_path` 只剥离本机分隔符，避免把合法反斜杠文件名指向另一个文件；私有原子写入保留创建时的 0600 保护，并在第一字节前按句柄补足被 umask 扣除的属主权限。此前两项用例均完成红→绿，平台模块 54/54、env_file 2/2、OAuth 7/7 通过；平台修复后的严格 Clippy 复验通过。
 - [✓] **[P1，2026-10-19]** 四项 hosted web-search 测试不再清空本地代理排除，`NO_PROXY`/`no_proxy` 均设为 `127.0.0.1,localhost,::1`；原第 4–7 项定向复测 4/4、显式 OpenAI 代理对照 1/1 通过，原断言与超时未放宽。上述记录来自本次提交前的实施验收，不代表重新跑过全量门禁；7 个源码/测试文件及两处 status 全部纳入。本地报告 `.agents/acceptance/windows-macos-regression/fixes.md` 与临时验收产物按既有全局忽略规则保留，不强制加入 Git。
 - [✓] **[P1，2026-10-17]** 会话菜单收起优化完成并纳入本次本地提交：`SessionBar` 展开期补非捕获 window blur 监听及对称清理，选择会话（含当前会话）立即关闭并归还触发按钮焦点；外部关闭不抢焦点，置顶／展开更多／删除确认与取消的连续管理不变。生产仅新增 5 行，不改 CLI、会话恢复、草稿、协议或样式。此前先在基线复现两处真实红框点击失焦但菜单仍开，修复后 GUI 聚焦 96/96、真实 Dev Host 菜单用例与既有管理用例各 1/1、lint、harness 类型检查和构建通过；两张全景 PNG／ARIA／console 已读取，capture-time 记录无 error/exception。首次宿主取证在状态采集阶段超时，删除测试中多余的双动画帧等待后通过，生产逻辑与断言未放宽。已交付不含 CLI 的 `tomcat-vscode-ext-0.1.92-session-menu-pure.vsix`（1,798,478 字节，SHA256 `27bc0aa4e596e78c0d86128e79a9c2686754b6b41a28d3ef27564888dbc59c93`），构建新鲜度、包完整性及入口文件字节一致性检查通过。上述均为此前实施／打包记录；本次按用户要求不跑测试、不构建，Cov% 未测量；不升版、不推送或发布。本地证据 `.agents/acceptance/session-menu-dismissal/` 与 VSIX 按既有忽略规则保留，不强制加入 Git。
@@ -104,6 +105,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-10-19 IP 中转站**：无新增接口、配置键、存储格式或依赖；仅改变数字开头的自动默认槽名，严格校验 `^[A-Z_][A-Z0-9_]*$` 不变。旧数字 provider 若使用默认槽，须重新配置 Key 或把启动器注入变量改为 `PROVIDER_<规范化名称>_API_KEY`；合法显式槽不变，不新增自动迁移或旧名回退。
 - **2026-10-19 平台兼容修复**：无新增 API、配置键、存储格式或依赖；Unix 的反斜杠保留为文件名字符，Windows 的两种分隔符行为不变。私有写入沿用创建→设权限→写入→原子发布流程，Windows DACL 与普通文件写入逻辑不变；NO_PROXY 改动仅在四个测试环境夹具内，不修改用户系统代理。
 - **2026-10-17 会话菜单收起**：无新增生产接口／协议。新增关闭触发来自用户选择或页面失焦，不随会话快照更新触发；既有框外点击／Escape 等关闭行为保留，会话身份仍等宿主确认。删除弹窗沿用暂停关闭监听，置顶／删除管理和草稿保存流程不变。
 - **2026-10-17 会话恢复**：无新增接口或存储格式；仅补齐显式切换已打开会话时的 scope 级 current 持久化。写失败沿用 dispatcher 错误帧且不切内存 active，registry setter 仍只负责内存；不新增前端选中态。
@@ -139,6 +141,7 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| IP 中转站验收边界（2026-10-19） | 此前 admin 首轮 26/28，两个删除 Key 用例继承本机 FCODEX_API_KEY/DEEPSEEK_API_KEY；仅对子进程移除这两个变量后 28/28，未修改凭证文件或断言 | 保留环境失败记录；浏览器使用模拟宿主，未访问报告 IP 或验证真实中转站认证；本次提交按要求不跑测试，不称全仓门禁通过 |
 | 会话菜单交付范围 | 已完成真实 Dev Host + fake Serve 的焦点／菜单验收并交付纯 VSIX；安装升级用例同步语义且类型检查通过 | Agent 未安装该 VSIX，不将源码宿主验证或用户请求提交等同于完整安装包／真实 CLI 验收；首次取证超时与后续通过记录均保留 |
 | 会话恢复范围 | 保留同 agent／项目 scope 级共享 current；用户已反馈本次修复验收通过 | 不承诺多个窗口各自独立恢复；尚未正式发布，不把用户验收反馈表述为 Agent 已采集主窗口截图／日志 |
 | 本轮既有格式与代理环境问题 | 全仓 fmt 的 17 个文件格式差异与 HEAD 一致；命令模块首轮 6 项本地 HTTP 测试受代理环境影响 | 不并入无关格式化；补本机 NO_PROXY 后同一二进制 6/6 复验通过，保留首轮失败，不冒称一次聚合全绿 |

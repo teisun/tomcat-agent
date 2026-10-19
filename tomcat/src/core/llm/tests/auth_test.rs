@@ -25,6 +25,17 @@ fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
 }
 
 #[test]
+fn numeric_start_provider_env_names_get_a_prefix_without_changing_valid_names() {
+    for (provider, expected) in [
+        ("114215206196", "PROVIDER_114215206196_API_KEY"),
+        ("2001db81", "PROVIDER_2001DB81_API_KEY"),
+        ("_123", "_123_API_KEY"),
+    ] {
+        assert_eq!(env_name_for_provider(provider), expected, "{provider}");
+    }
+}
+
+#[test]
 #[serial(env_lock)]
 fn per_provider_env_prefers_provider_specific_api_key() {
     clear_managed_credentials_for_test();

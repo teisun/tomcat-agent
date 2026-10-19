@@ -103,10 +103,11 @@ export function envNameForRelaySlug(slug: string, occupied: Iterable<string> = [
   if (!normalized) {
     return "";
   }
+  const stem = /^[0-9]/.test(normalized) ? `PROVIDER_${normalized}` : normalized;
   const taken = new Set(occupied);
-  let candidate = `${normalized}_API_KEY`;
+  let candidate = `${stem}_API_KEY`;
   for (let ordinal = 2; taken.has(candidate); ordinal += 1) {
-    candidate = `${normalized}_${ordinal}_API_KEY`;
+    candidate = `${stem}_${ordinal}_API_KEY`;
   }
   return candidate;
 }

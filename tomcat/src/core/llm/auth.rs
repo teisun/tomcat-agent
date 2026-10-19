@@ -105,7 +105,12 @@ pub fn env_name_for_provider(provider: &str) -> String {
             }
         })
         .collect::<String>();
-    format!("{}_API_KEY", normalized)
+    let prefix = if normalized.starts_with(|ch: char| ch.is_ascii_digit()) {
+        "PROVIDER_"
+    } else {
+        ""
+    };
+    format!("{prefix}{normalized}_API_KEY")
 }
 
 pub fn missing_key_message(

@@ -55,9 +55,21 @@ describe("relayDerive", () => {
     });
 
     expect(deriveRelayFields("http://127.0.0.1:4000/v1", "gpt-oss")).toMatchObject({
-      apiKeyEnv: "127001_API_KEY",
+      apiKeyEnv: "PROVIDER_127001_API_KEY",
       id: "127001/gpt-oss",
       provider: "127001",
+    });
+
+    expect(deriveRelayFields("http://114.215.206.196:3000/v1", "relay-test")).toMatchObject({
+      apiKeyEnv: "PROVIDER_114215206196_API_KEY",
+      id: "114215206196/relay-test",
+      provider: "114215206196",
+    });
+
+    expect(deriveRelayFields("http://[2001:db8::1]:3000/v1", "relay-test")).toMatchObject({
+      apiKeyEnv: "PROVIDER_2001DB81_API_KEY",
+      id: "2001db81/relay-test",
+      provider: "2001db81",
     });
 
     const idn = deriveRelayFields("https://例子.测试/v1", "glm");
@@ -82,6 +94,7 @@ describe("relayDerive", () => {
   it("names one slot per key, independent of protocol, and numbers taken names", () => {
     expect(envNameForRelaySlug("chatanywhere")).toBe("CHATANYWHERE_API_KEY");
     expect(envNameForRelaySlug("local_llm")).toBe("LOCAL_LLM_API_KEY");
+    expect(envNameForRelaySlug("127001", ["PROVIDER_127001_API_KEY"])).toBe("PROVIDER_127001_2_API_KEY");
     expect(envNameForRelaySlug("fcodex", ["FCODEX_API_KEY"])).toBe("FCODEX_2_API_KEY");
     expect(envNameForRelaySlug("fcodex", ["FCODEX_API_KEY", "FCODEX_2_API_KEY"])).toBe("FCODEX_3_API_KEY");
     expect(envNameForRelaySlug("openai", ["OPENAI_API_KEY"])).toBe("OPENAI_2_API_KEY");
