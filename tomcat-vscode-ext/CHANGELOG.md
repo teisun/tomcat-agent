@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.96
+
+- Fix configuring relay endpoints that use IP addresses: automatically derived API key environment-variable names starting with a digit now receive a `PROVIDER_` prefix in both Settings and the CLI. Keep strict environment-variable validation, provider labels, model IDs, and key-slot collision numbering unchanged.
+- If a numeric-start provider previously used an implicit default key slot, re-save its API key after upgrading or rename the launcher-injected variable to `PROVIDER_<NORMALIZED_PROVIDER>_API_KEY`. Existing valid explicit key slots are unchanged; old default names are not automatically migrated or used as a fallback.
+- Bundle CLI 0.1.80 in platform-specific packages. Pure-extension users must update their external CLI to receive the default-key-slot fix.
+
 ## 0.1.95
 
 - Publish the Windows x64 support prepared for 0.1.94, with a bundled `tomcat.exe`, background Serve startup without a console window, Windows-aware `@` folder references, and process-tree cleanup for background commands and MCP servers. Install Git for Windows first: commands use Git Bash, never WSL. Windows ARM64 remains unsupported.

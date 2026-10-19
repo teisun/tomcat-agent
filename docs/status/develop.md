@@ -2,6 +2,8 @@
 
 本分支的唯一状态表维护在 [tomcat/docs/status/develop.md](../../tomcat/docs/status/develop.md)，与现有状态汇总目录保持一致；元数据、Cov%、DONE、INTERFACE 和 BLOCKED 均以该文件为准，此处不维护副本。
 
+2026-10-19 11:11 +0800，启动 CLI `0.1.80` / EXT `0.1.96` 标准发版，新 EXT 内置 CLI `0.1.80`。版本脚本统一 patch +1，五个版本文件只改业务版本，版本一致性与 CLI/EXT tag guard 通过；CHANGELOG 已按实际发布的 `ext-v0.1.95` 基线补齐 IP 中转站修复及旧默认槽升级提醒，并与版本文件同批提交。待按三个分支快进同步、CLI 资产就绪后发布 EXT 的顺序执行；本地不额外跑产品测试、构建或安装，远端既有发布门禁照常。执行结果以唯一状态表 CURRENT RELEASE 为准，Cov% 未测量。
+
 2026-10-19 11:07 +0800，IP 中转站自动凭证槽修复及回归测试纳入本次本地提交：仅数字开头的派生名添加 `PROVIDER_`，严格校验、provider 与模型 ID 不变；旧默认槽需重新配置 Key，不自动迁移。此前聚焦测试 GUI 35、auth 7、CLI 5、隔离环境后 admin 28 项通过，宽窄屏 4 套截图/ARIA/console 已检查；首轮 admin 的环境变量干扰与模拟宿主边界保留在唯一状态表。按用户要求本次不跑测试、不构建，Cov% 未测量；未升版、未推送或发布。本地验收记录 `.agents/acceptance/ip-relay.md` 不强制纳入 Git。
 
 2026-10-19 08:30 +0800，CLI `0.1.79` / EXT `0.1.95` 标准发版完成，EXT 内置 CLI `0.1.79`。发布提交 `ca1542117494d7f36a7a310b2d86cd69121a0007` 已推送 develop/main/master，两个标签均指向该提交；先确认 CLI 四平台资产齐全，再发布 EXT。GitHub 四份 CLI 归档、五份 VSIX 及各自 SHA256SUMS 已公开，9 份下载包校验通过；四平台原生安装验收通过，包内 CLI 与对应归档一致，CHANGELOG 与发布提交一致。Marketplace 四平台已公开且全部 Validated，哈希与 GitHub 一致；OpenVSX 跳过。本地未额外跑产品测试、构建或安装。普通 CI 仍有已知 QuickJS 用例失败，不称全量全绿；详情与证据见唯一状态表及 `.agents/acceptance/release-0.1.79-0.1.95/release.md`，Cov% 未测量。
