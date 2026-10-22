@@ -1,5 +1,6 @@
 use super::*;
 use common::serve::{spawn_routed_openai_stream_server, ScriptedOpenAiServer, ScriptedPart};
+use std::path::Path;
 
 fn provider() -> ScriptedOpenAiServer {
     spawn_routed_openai_stream_server(|request| {

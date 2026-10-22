@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
 import { runCommand } from "./runCommand";
-import { runVsCodeGuiTests, windowTestProxy } from "./vscodeLaunchEnv";
+import { minimumVsCodeVersion, runVsCodeGuiTests, windowTestProxy } from "./vscodeLaunchEnv";
 import { setupRealServeFixture, serveFixtureEnvironment } from "./realServeFixture";
 import { setupSharedServiceLifecycle } from "./sharedServiceLifecycle";
 import { readExternalObservationFixture } from "../src/test/suite/support/externalObservationFixture";
@@ -168,7 +168,7 @@ process.exit(result.status ?? 1);
 
     await fs.access(extensionTestsPath);
     const vscodeExecutablePath = process.platform === "win32" && !process.env.VSCODE_EXECUTABLE_PATH
-      ? await downloadAndUnzipVSCode({ version: "1.101.0" }) : resolveVsCodeExecutable();
+      ? await downloadAndUnzipVSCode({ version: await minimumVsCodeVersion() }) : resolveVsCodeExecutable();
     let artifacts: string | undefined;
     await runVsCodeGuiTests(async (options: Parameters<typeof runTests>[0]) => {
       artifacts = options.extensionTestsEnv?.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;

@@ -27,6 +27,14 @@ export function windowTestProxy(env: NodeJS.ProcessEnv): string | undefined {
   return env[name]; // No fallback or NO_PROXY emulation; an absent value keeps the default fixture.
 }
 
+/** Use the extension's declared minimum, as the packaged-extension runner does. */
+export async function minimumVsCodeVersion(): Promise<string> {
+  const manifest = JSON.parse(await fs.readFile(path.resolve(__dirname, "../package.json"), "utf8"));
+  const version = manifest.engines.vscode.replace(/^\^/, "");
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) throw new Error(`Cannot resolve minimum VS Code version: ${version}`);
+  return version;
+}
+
 let guiLaunchActive = false;
 
 export async function withVsCodeGuiEnvironment<T>(

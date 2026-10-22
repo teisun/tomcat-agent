@@ -10,6 +10,7 @@ import { downloadAndUnzipVSCode } from "@vscode/test-electron";
 import { withWindowsSystemProxy } from "./windowsSystemProxy";
 import { resolveCargoCommand } from "./resolveCargoCommand";
 import { runCommand } from "./runCommand";
+import { minimumVsCodeVersion } from "./vscodeLaunchEnv";
 
 const extensionRoot = path.resolve(__dirname, "..");
 const rustRoot = path.resolve(extensionRoot, "../tomcat");
@@ -24,7 +25,7 @@ async function main() {
   for (const name of Object.keys(env)) if (/^(http|https|all|no)_proxy$/i.test(name)) delete env[name];
   // Build the GUI first: gen:wire builds Rust without the MCP fixture feature.
   // Finish all builds before changing system proxy; nextest can then run offline.
-  env.VSCODE_EXECUTABLE_PATH = process.env.VSCODE_EXECUTABLE_PATH ?? await downloadAndUnzipVSCode({ version: "1.101.0" });
+  env.VSCODE_EXECUTABLE_PATH = process.env.VSCODE_EXECUTABLE_PATH ?? await downloadAndUnzipVSCode({ version: await minimumVsCodeVersion() });
   runCommand("npm", ["run", "build"], { cwd: extensionRoot });
   const built = await exec(resolveCargoCommand(), ["test", "--locked", "--features", "test-streamable-http-server", "--test", "serve_shared_e2e", "--no-run", "--message-format=json"],
     { cwd: rustRoot, env, timeout: 3_600_000, maxBuffer: 32 * 1024 * 1024 });
