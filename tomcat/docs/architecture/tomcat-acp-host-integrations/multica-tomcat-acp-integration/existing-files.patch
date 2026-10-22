@@ -1,0 +1,132 @@
+diff --git a/packages/core/types/agent.ts b/packages/core/types/agent.ts
+index 38d67a6cf659f29590de9702f0165873f0818137..8db282ebb3fa0fa38d91c82c53e81e8ea1fb67b8 100644
+--- a/packages/core/types/agent.ts
++++ b/packages/core/types/agent.ts
+@@ -124,6 +124,7 @@ export const RUNTIME_PROFILE_PROTOCOL_FAMILIES = [
+   "qoder",
+   "qoderclicn",
+   "traecli",
++  "tomcat",
+   "grok",
+   "qwen",
+   "qwenpaw",
+diff --git a/server/internal/daemon/agents_probe.go b/server/internal/daemon/agents_probe.go
+index 6e596d96bb9020e697cf934b87ddc4b8282f29e6..fe78d7b96d662a072092f49a1c81e7240b8d028a 100644
+--- a/server/internal/daemon/agents_probe.go
++++ b/server/internal/daemon/agents_probe.go
+@@ -218,6 +218,9 @@ var probeAgentCLIs = func() map[string]AgentEntry {
+ 	if e, ok := probe("MULTICA_HERMES_PATH", "hermes", "MULTICA_HERMES_MODEL"); ok {
+ 		agents["hermes"] = e
+ 	}
++	if e, ok := probe("MULTICA_TOMCAT_PATH", "tomcat", "MULTICA_TOMCAT_MODEL"); ok {
++		agents["tomcat"] = e
++	}
+ 	if e, ok := probe("MULTICA_PI_PATH", "pi", "MULTICA_PI_MODEL"); ok {
+ 		agents["pi"] = e
+ 	}
+diff --git a/server/internal/daemon/config.go b/server/internal/daemon/config.go
+index d90b46c1e4b42ba72ba26d51c0cd09cbeecc02c8..8e8dca479314b102b8e1448c321f03c988ca1880 100644
+--- a/server/internal/daemon/config.go
++++ b/server/internal/daemon/config.go
+@@ -973,6 +973,7 @@ func isExecutableFile(path string) bool {
+ // descriptor registry (agent.BuiltinRuntimeCommands) so adding a new fork
+ // doesn't require editing this list by hand.
+ var defaultAgentCommandNames = append([]string{
++	"tomcat",
+ 	"claude", "codex", "opencode", "codearts", "deveco", "openclaw", "hermes",
+ 	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "dsh", "kiro-cli", "codebuddy", "agy", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode", "muse", "dim", "zeroclaw",
+ }, agent.BuiltinRuntimeCommands()...)
+diff --git a/server/internal/daemon/execenv/context.go b/server/internal/daemon/execenv/context.go
+index ac748c9a316747aef6a89e634b140bc5510ec0e4..c0caf1f29403c4a3953b1e510bbeb5c916bb961b 100644
+--- a/server/internal/daemon/execenv/context.go
++++ b/server/internal/daemon/execenv/context.go
+@@ -413,6 +413,8 @@ func skillsDirPath(workDir, provider string) string {
+ 	case "mcode":
+ 		// MiniMax Code discovers project-level skills from .minimax/skills/.
+ 		return filepath.Join(workDir, ".minimax", "skills")
++	case "tomcat":
++		return filepath.Join(workDir, ".agents", "skills")
+ 	case "muse":
+ 		// Muse's native project root: https://meta-models.github.io/muse-code-sdk/next/guides/extend/skills/
+ 		return filepath.Join(workDir, ".agents", "skills")
+diff --git a/server/internal/daemon/execenv/runtime_config.go b/server/internal/daemon/execenv/runtime_config.go
+index 76e6e338b7716bc1040a7a6906411c3c806b14e1..d2149cfb2320a52a589a81fe13a044a0ecd9d5af 100644
+--- a/server/internal/daemon/execenv/runtime_config.go
++++ b/server/internal/daemon/execenv/runtime_config.go
+@@ -215,7 +215,7 @@ func runtimeConfigPath(workDir, provider string) string {
+ 		return filepath.Join(workDir, "CODEBUDDY.md")
+ 	case "qwen":
+ 		return filepath.Join(workDir, "QWEN.md")
+-	case "codex", "copilot", "opencode", "codearts", "deveco", "openclaw", "hermes", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw", "mcode", "muse", "dim", "zeroclaw":
++	case "codex", "copilot", "opencode", "codearts", "deveco", "openclaw", "hermes", "tomcat", "pi", "cursor", "kimi", "reasonix", "dsh", "kiro", "antigravity", "qoder", "qoderclicn", "traecli", "grok", "qwenpaw", "mcode", "muse", "dim", "zeroclaw":
+ 		return filepath.Join(workDir, "AGENTS.md")
+ 	default:
+ 		return ""
+diff --git a/server/pkg/agent/agent.go b/server/pkg/agent/agent.go
+index cb1fb1236bd1a5854861c9a5a634cf1d06f34df4..41d3f04db5dd3869fac34998e7ac635ab36f6926 100644
+--- a/server/pkg/agent/agent.go
++++ b/server/pkg/agent/agent.go
+@@ -391,6 +391,7 @@ var SupportedTypes = []string{
+ 	"qoder",
+ 	"qoderclicn",
+ 	"traecli",
++	"tomcat",
+ 	"grok",
+ 	"qwen",
+ 	"qwenpaw",
+@@ -493,6 +494,8 @@ func New(agentType string, cfg Config) (Backend, error) {
+ 		return &qoderBackend{cfg: cfg, defaultExecutable: qoderDefaultBinary(agentType)}, nil
+ 	case "traecli":
+ 		return &traecliBackend{cfg: cfg}, nil
++	case "tomcat":
++		return &tomcatBackend{cfg: cfg}, nil
+ 	case "grok":
+ 		return &grokBackend{cfg: cfg}, nil
+ 	case "qwen":
+@@ -546,6 +549,7 @@ var launchHeaders = map[string]string{
+ 	"qoder":       "qodercli --acp",
+ 	"qoderclicn":  "qoderclicn --acp",
+ 	"traecli":     "traecli acp serve",
++	"tomcat":      "tomcat acp",
+ 	"grok":        "grok agent stdio",
+ 	"qwen":        "qwen -p (stream-json)",
+ 	"qwenpaw":     "qwenpaw acp",
+diff --git a/server/pkg/agent/launch.go b/server/pkg/agent/launch.go
+index 22a26feeb6f63338ae44989770511c6ce07453b3..eaa5ff89c481c469214ed2aa9bd6c3779a50171d 100644
+--- a/server/pkg/agent/launch.go
++++ b/server/pkg/agent/launch.go
+@@ -464,6 +464,7 @@ var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
+ 	"qwenpaw":     qwenpawBlockedArgs,
+ 	"reasonix":    reasonixBlockedArgs,
+ 	"traecli":     traecliBlockedArgs,
++	"tomcat":      tomcatBlockedArgs,
+ 	"dim":         dimBlockedArgs,
+ 	"zeroclaw":    zeroclawBlockedArgs,
+ }
+diff --git a/server/pkg/agent/models.go b/server/pkg/agent/models.go
+index d058d5ffcc4fbe594e56ce2723ebe3b60adccb2b..bb1da3a71b4ea0b5dfdee694e6b78dd0ddb7275d 100644
+--- a/server/pkg/agent/models.go
++++ b/server/pkg/agent/models.go
+@@ -290,6 +290,10 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
+ 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+ 			return discoverCodebuddyModels(ctx, runtimeCmd)
+ 		})
++	case "tomcat":
++		// Preserve the configured runtime default and manual model IDs. Listing
++		// must not start the shared service or create a throwaway conversation.
++		return Catalog{Models: []Model{}}, nil
+ 	case "qwen":
+ 		// Qwen Code has no account-independent headless model catalog. An
+ 		// empty list keeps the runtime default and manual model entry available
+diff --git a/server/pkg/agent/version.go b/server/pkg/agent/version.go
+index 89affd99dffe0023d148e3d241754c4607132a6b..4c73882d4a566683632591a29916f55ad6ab5a4f 100644
+--- a/server/pkg/agent/version.go
++++ b/server/pkg/agent/version.go
+@@ -25,6 +25,7 @@ var MinVersions = map[string]string{
+ 	"dim":         "0.3.10",  // cross-run session/load: per-process lock releases on graceful exit
+ 	"mcode":       "0.1.2",   // ACP v1 session/new, prompt, MCP capability forwarding
+ 	"muse":        "1.4.10",  // MSP stable surface: session/start, turn/start, item stream
++	"tomcat":      "0.1.80",  // Requires the ACP-enabled build; semver alone is not a capability probe.
+ 	"zeroclaw":    "0.8.0",   // persistent ACP sessions and session/resume were added in 0.8.0
+ 	// opencode: honors TMPDIR/TMP/TEMP from 1.1.54. Earlier builds ignore all
+ 	// three when their embedded Bun runtime extracts a native module, writing

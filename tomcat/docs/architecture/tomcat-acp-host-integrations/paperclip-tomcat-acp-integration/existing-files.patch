@@ -1,0 +1,461 @@
+diff --git a/cli/package.json b/cli/package.json
+index b623ca5a8982ebcc145a22c602d58b8084721949..b9b7df12bfa05a4e973093b56a296e92ac1fb9a9 100644
+--- a/cli/package.json
++++ b/cli/package.json
+@@ -46,6 +46,7 @@
+     "@paperclipai/adapter-kimi-local": "workspace:*",
+     "@paperclipai/adapter-opencode-local": "workspace:*",
+     "@paperclipai/adapter-pi-local": "workspace:*",
++    "@paperclipai/adapter-tomcat-local": "workspace:*",
+     "@paperclipai/adapter-openclaw-gateway": "workspace:*",
+     "@paperclipai/adapter-utils": "workspace:*",
+     "@paperclipai/db": "workspace:*",
+diff --git a/cli/src/adapters/registry.ts b/cli/src/adapters/registry.ts
+index 7dfa12db95ae8a7f067d3aecbdc97cd0156366fd..7e0a3acb8ba9de012ba2ef32e058102d22f8eaaa 100644
+--- a/cli/src/adapters/registry.ts
++++ b/cli/src/adapters/registry.ts
+@@ -4,6 +4,7 @@ import { printCodexStreamEvent } from "@paperclipai/adapter-codex-local/cli";
+ import { printCursorStreamEvent } from "@paperclipai/adapter-cursor-local/cli";
+ import { printCursorCloudEvent } from "@paperclipai/adapter-cursor-cloud/cli";
+ import { printGeminiStreamEvent } from "@paperclipai/adapter-gemini-local/cli";
++import { printTomcatStreamEvent } from "@paperclipai/adapter-tomcat-local/cli";
+ import { printGrokStreamEvent } from "@paperclipai/adapter-grok-local/cli";
+ import { printKimiStreamEvent } from "@paperclipai/adapter-kimi-local/cli";
+ import { formatStdoutEvent as printHermesGatewayStreamEvent } from "@paperclipai/hermes-paperclip-adapter/gateway/cli";
+@@ -44,6 +45,11 @@ const cursorCloudCLIAdapter: CLIAdapterModule = {
+   formatStdoutEvent: printCursorCloudEvent,
+ };
+ 
++const tomcatLocalCLIAdapter: CLIAdapterModule = {
++  type: "tomcat_local",
++  formatStdoutEvent: printTomcatStreamEvent,
++};
++
+ const geminiLocalCLIAdapter: CLIAdapterModule = {
+   type: "gemini_local",
+   formatStdoutEvent: printGeminiStreamEvent,
+@@ -83,6 +89,7 @@ const adaptersByType = new Map<string, CLIAdapterModule>(
+     cursorLocalCLIAdapter,
+     cursorCloudCLIAdapter,
+     geminiLocalCLIAdapter,
++    tomcatLocalCLIAdapter,
+     grokLocalCLIAdapter,
+     kimiLocalCLIAdapter,
+     hermesGatewayCLIAdapter,
+diff --git a/packages/adapter-utils/src/acpx-engine/constants.ts b/packages/adapter-utils/src/acpx-engine/constants.ts
+index 47a67eb143f4d108734f4dee2d20a545a93e199c..6a6246c03dee07a0ec2b314e8577ca37b7bb46b0 100644
+--- a/packages/adapter-utils/src/acpx-engine/constants.ts
++++ b/packages/adapter-utils/src/acpx-engine/constants.ts
+@@ -61,6 +61,7 @@ export const ACPX_ADAPTER_AGENT_IDS = {
+   claude_local: "claude",
+   codex_local: "codex",
+   gemini_local: "gemini",
++  tomcat_local: "tomcat",
+   kimi_local: "kimi",
+   custom_acp: "custom",
+ } as const;
+diff --git a/packages/adapter-utils/src/acpx-engine/execute.ts b/packages/adapter-utils/src/acpx-engine/execute.ts
+index 425f802e1538c7058da8ebc6e67645c738092041..95521be466f45b61fa3b52f60ea4b705cf78a8bd 100644
+--- a/packages/adapter-utils/src/acpx-engine/execute.ts
++++ b/packages/adapter-utils/src/acpx-engine/execute.ts
+@@ -2293,7 +2293,7 @@ async function buildRuntime(input: {
+       : null,
+     // Qualified built-in ACP harnesses reconnect to the supplied MCP servers
+     // on session/load. Keep their conversation identity independent of tools.
+-    mcpServers: ["claude", "codex", "grok", "gemini", "kimi"].includes(acpxAgent) ? [] : mcpIdentity,
++    mcpServers: ["claude", "codex", "grok", "gemini", "kimi", "tomcat"].includes(acpxAgent) ? [] : mcpIdentity,
+     secretManifestHash: shortHash(secretManifest),
+     // Fold the resolved adapter env (all applied user-configured values —
+     // plain, secret_ref, and stable PAPERCLIP_* config such as an explicit
+diff --git a/packages/shared/src/constants.ts b/packages/shared/src/constants.ts
+index 90246aa6f8b0173231966171f94fb5cadd9ae987..bf319dc7278f738cbaa6cdbc267f90067a6cfaab 100644
+--- a/packages/shared/src/constants.ts
++++ b/packages/shared/src/constants.ts
+@@ -32,6 +32,7 @@ export const AGENT_ADAPTER_TYPES = [
+   "paperclip_runner",
+   "cursor_cloud",
+   "gemini_local",
++  "tomcat_local",
+   "grok_local",
+   "hermes_gateway",
+   "hermes_local",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index ec7f50c4639714062c251304880f7e7b77d64d0d..bb92deef578404685c40e6ab0ab229b691b26475 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -110,6 +110,9 @@ importers:
+       '@paperclipai/adapter-pi-local':
+         specifier: workspace:*
+         version: link:../packages/adapters/pi-local
++      '@paperclipai/adapter-tomcat-local':
++        specifier: workspace:*
++        version: link:../packages/adapters/tomcat-local
+       '@paperclipai/adapter-utils':
+         specifier: workspace:*
+         version: link:../packages/adapter-utils
+@@ -395,6 +398,19 @@ importers:
+         specifier: ^7.0.2
+         version: 7.0.2
+ 
++  packages/adapters/tomcat-local:
++    dependencies:
++      '@paperclipai/adapter-utils':
++        specifier: workspace:*
++        version: link:../../adapter-utils
++    devDependencies:
++      '@types/node':
++        specifier: ^24.0.0
++        version: 24.13.3
++      typescript:
++        specifier: ^7.0.2
++        version: 7.0.2
++
+   packages/db:
+     dependencies:
+       '@paperclipai/shared':
+@@ -971,6 +987,9 @@ importers:
+       '@paperclipai/adapter-pi-local':
+         specifier: workspace:*
+         version: link:../packages/adapters/pi-local
++      '@paperclipai/adapter-tomcat-local':
++        specifier: workspace:*
++        version: link:../packages/adapters/tomcat-local
+       '@paperclipai/adapter-utils':
+         specifier: workspace:*
+         version: link:../packages/adapter-utils
+@@ -1210,6 +1229,9 @@ importers:
+       '@paperclipai/adapter-pi-local':
+         specifier: workspace:*
+         version: link:../packages/adapters/pi-local
++      '@paperclipai/adapter-tomcat-local':
++        specifier: workspace:*
++        version: link:../packages/adapters/tomcat-local
+       '@paperclipai/adapter-utils':
+         specifier: workspace:*
+         version: link:../packages/adapter-utils
+diff --git a/server/package.json b/server/package.json
+index 8ef255259c54a0b8bb0599fe597b04a43cb40615..1ddeac1de77f59c4433f424c602058276fc8f98c 100644
+--- a/server/package.json
++++ b/server/package.json
+@@ -73,6 +73,7 @@
+     "@paperclipai/adapter-openclaw-gateway": "workspace:*",
+     "@paperclipai/adapter-opencode-local": "workspace:*",
+     "@paperclipai/adapter-pi-local": "workspace:*",
++    "@paperclipai/adapter-tomcat-local": "workspace:*",
+     "@paperclipai/adapter-utils": "workspace:*",
+     "@paperclipai/db": "workspace:*",
+     "@paperclipai/hermes-paperclip-adapter": "workspace:*",
+diff --git a/server/src/adapters/builtin-adapter-types.ts b/server/src/adapters/builtin-adapter-types.ts
+index 58c2e95b6d733962f86dca17eed2f52308e5151f..cfac543fbe5e8338012952f4627d141a21191e47 100644
+--- a/server/src/adapters/builtin-adapter-types.ts
++++ b/server/src/adapters/builtin-adapter-types.ts
+@@ -9,6 +9,7 @@ export const BUILTIN_ADAPTER_TYPES = new Set([
+   "cursor_cloud",
+   "cursor",
+   "gemini_local",
++  "tomcat_local",
+   "grok_local",
+   "hermes_gateway",
+   "hermes_local",
+diff --git a/server/src/adapters/registry.ts b/server/src/adapters/registry.ts
+index 9ba27985378f5bf86c7239cf93f9728129ba60f5..cb63b0c2e8cd29a3e2adfbcded4704aec9942e4d 100644
+--- a/server/src/adapters/registry.ts
++++ b/server/src/adapters/registry.ts
+@@ -71,6 +71,15 @@ import {
+   agentConfigurationDoc as geminiAgentConfigurationDoc,
+   models as geminiModels,
+ } from "@paperclipai/adapter-gemini-local";
++import {
++  execute as tomcatExecute,
++  testEnvironment as tomcatTestEnvironment,
++  sessionCodec as tomcatSessionCodec,
++  getConfigSchema as getTomcatConfigSchema,
++  listTomcatSkills,
++  syncTomcatSkills,
++} from "@paperclipai/adapter-tomcat-local/server";
++import { models as tomcatModels, agentConfigurationDoc as tomcatAgentConfigurationDoc } from "@paperclipai/adapter-tomcat-local";
+ import {
+   execute as grokExecute,
+   listGrokSkills,
+@@ -251,6 +260,24 @@ const grokLoginCapability: AdapterLoginCapability = {
+   },
+ };
+ 
++const tomcatLocalAdapter: ServerAdapterModule = {
++  type: "tomcat_local",
++  execute: tomcatExecute,
++  testEnvironment: tomcatTestEnvironment,
++  sessionCodec: tomcatSessionCodec,
++  getConfigSchema: getTomcatConfigSchema,
++  listSkills: listTomcatSkills,
++  syncSkills: syncTomcatSkills,
++  models: tomcatModels,
++  agentConfigurationDoc: tomcatAgentConfigurationDoc,
++  acp: { agentId: "tomcat", skillsMode: "ephemeral", prerequisites: { nodeRange: ">=24.11.0" } },
++  runtimeToolDelivery: "native_mcp",
++  supportsLocalAgentJwt: true,
++  supportsToolRefreshOnResume: true,
++  supportsInstructionsBundle: false,
++  requiresMaterializedRuntimeSkills: false,
++};
++
+ const claudeLocalAdapter: ServerAdapterModule = {
+   type: "claude_local",
+   runtimeToolDelivery: "native_mcp",
+@@ -911,6 +938,7 @@ function registerBuiltInAdapters() {
+     cursorCloudAdapter,
+     cursorLocalAdapter,
+     geminiLocalAdapter,
++    tomcatLocalAdapter,
+     grokLocalAdapter,
+     kimiLocalAdapter,
+     hermesGatewayAdapter,
+diff --git a/server/src/services/agent-identity.ts b/server/src/services/agent-identity.ts
+index 462c0393931eae568307bbb81e1457273cd9434f..f62ae227bbe136a0081928c1c7440a2b405f19cd 100644
+--- a/server/src/services/agent-identity.ts
++++ b/server/src/services/agent-identity.ts
+@@ -83,6 +83,6 @@ export function supportsManagedAgentIdentity(
+   }
+   return new Set([
+     "process", "claude_local", "codex_local", "cursor_cloud",
+-    "gemini_local", "grok_local", "hermes_local", "kimi_local", "opencode_local", "pi_local", "cursor",
++    "gemini_local", "tomcat_local", "grok_local", "hermes_local", "kimi_local", "opencode_local", "pi_local", "cursor",
+   ]).has(adapterType);
+ }
+diff --git a/server/src/services/conversation-continuation.ts b/server/src/services/conversation-continuation.ts
+index 36e8b7a48040d0ccfb70b162464cae45f2d80406..0d0a91cdd0cd30ab582ad93fdf683574e4017a73 100644
+--- a/server/src/services/conversation-continuation.ts
++++ b/server/src/services/conversation-continuation.ts
+@@ -9,7 +9,7 @@ import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
+ // replay the action itself, so those adapters retain their recovery contract.
+ export const CONVERSATION_ADAPTER_TYPES = [
+   "claude_local", "codex_local", "cursor", "gemini_local", "opencode_local",
+-  "pi_local", "grok_local", "kimi_local", "hermes_local",
++  "pi_local", "grok_local", "kimi_local", "hermes_local", "tomcat_local",
+ ] as const;
+ 
+ export function isConversationAdapter(adapterType: string): boolean {
+diff --git a/tsconfig.json b/tsconfig.json
+index 994ee490fb97be7cc0954f4dfd88cf0723290e6c..8b0d5808484818cf1f0021450a4fb3193241c272 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -15,6 +15,7 @@
+     { "path": "./packages/adapters/openclaw-gateway" },
+     { "path": "./packages/adapters/opencode-local" },
+     { "path": "./packages/adapters/pi-local" },
++    { "path": "./packages/adapters/tomcat-local" },
+     { "path": "./server" },
+     { "path": "./ui" },
+     { "path": "./cli" }
+diff --git a/ui/package.json b/ui/package.json
+index 279b2553b14a47266557764cf8a37d73a71bdac4..19a9a349ccb8119814138db6e3fb959d739ca569 100644
+--- a/ui/package.json
++++ b/ui/package.json
+@@ -46,6 +46,7 @@
+     "@paperclipai/adapter-openclaw-gateway": "workspace:*",
+     "@paperclipai/adapter-opencode-local": "workspace:*",
+     "@paperclipai/adapter-pi-local": "workspace:*",
++    "@paperclipai/adapter-tomcat-local": "workspace:*",
+     "@paperclipai/adapter-utils": "workspace:*",
+     "@paperclipai/hermes-paperclip-adapter": "workspace:*",
+     "@paperclipai/shared": "workspace:*",
+diff --git a/ui/src/adapters/adapter-display-registry.ts b/ui/src/adapters/adapter-display-registry.ts
+index d56c6a9210981229c6465f5d2b9519b835764b6a..ff113c5e4774bfb2e1d2a9567430e2fbbbd4a961 100644
+--- a/ui/src/adapters/adapter-display-registry.ts
++++ b/ui/src/adapters/adapter-display-registry.ts
+@@ -87,6 +87,11 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
+     icon: Cpu,
+     experimental: true,
+   },
++  tomcat_local: {
++    label: "Tomcat",
++    description: "Tomcat shared-service ACP harness",
++    icon: Bot,
++  },
+   gemini_local: {
+     label: "Gemini CLI",
+     description: "Gemini CLI harness",
+diff --git a/ui/src/adapters/registry.ts b/ui/src/adapters/registry.ts
+index 85ee9e02401ad50740b92e2c56106f25133c72f4..aee001605a4107de219dce2d94cc4880ca95e4c1 100644
+--- a/ui/src/adapters/registry.ts
++++ b/ui/src/adapters/registry.ts
+@@ -5,6 +5,7 @@ import { paperclipRunnerUIAdapter } from "./paperclip-runner";
+ import { cursorCloudUIAdapter } from "./cursor-cloud";
+ import { cursorLocalUIAdapter } from "./cursor";
+ import { geminiLocalUIAdapter } from "./gemini-local";
++import { tomcatLocalUIAdapter } from "./tomcat-local";
+ import { grokLocalUIAdapter } from "./grok-local";
+ import { kimiLocalUIAdapter } from "./kimi-local";
+ import { hermesGatewayUIAdapter } from "./hermes-gateway";
+@@ -59,6 +60,7 @@ function registerBuiltInUIAdapters() {
+     paperclipRunnerUIAdapter,
+     cursorCloudUIAdapter,
+     geminiLocalUIAdapter,
++    tomcatLocalUIAdapter,
+     grokLocalUIAdapter,
+     kimiLocalUIAdapter,
+     hermesGatewayUIAdapter,
+diff --git a/ui/src/adapters/use-adapter-capabilities.ts b/ui/src/adapters/use-adapter-capabilities.ts
+index a3da3d9e830821b5875c8c834e826144ca9f13d5..dbefa7e8bc38cbcdff5e647154c85aa23388dbcb 100644
+--- a/ui/src/adapters/use-adapter-capabilities.ts
++++ b/ui/src/adapters/use-adapter-capabilities.ts
+@@ -20,6 +20,7 @@ const ALL_FALSE: AdapterCapabilities = {
+  * Reconcile the two together if any adapter's login flow changes.
+  */
+ const KNOWN_DEFAULTS: Record<string, AdapterCapabilities> = {
++  tomcat_local: { supportsInstructionsBundle: false, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true },
+   claude_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true, login: { panelMode: "submitted_browser_code", timeoutPolicy: "fixed" } },
+   codex_local: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: true, requiresMaterializedRuntimeSkills: false, supportsAcp: true, login: { panelMode: "displayed_code", timeoutPolicy: "caller_bounded" } },
+   paperclip_runner: { supportsInstructionsBundle: true, supportsSkills: true, supportsLocalAgentJwt: false, requiresMaterializedRuntimeSkills: false, supportsAcp: false },
+diff --git a/ui/src/components/RuntimeTestCard.tsx b/ui/src/components/RuntimeTestCard.tsx
+index 66c4b033d9d1afdb08501e36e0a452c03e2ba1b1..055e6698f2fc9938ecc7652cacc87f3b7a998f5d 100644
+--- a/ui/src/components/RuntimeTestCard.tsx
++++ b/ui/src/components/RuntimeTestCard.tsx
+@@ -38,6 +38,14 @@ const copy = {
+   },
+ } as const;
+ 
++const runtimeCopy = {
++  idle: { title: "Test your runtime", description: "Check the installed executable and local service without sending a model request.", action: "Run test" },
++  running: { title: "Checking runtime", description: "Checking the executable and local service…", action: "Testing…" },
++  pass: { title: "Runtime checks passed", description: "Model credentials are checked when a task runs. Review the details below.", action: "Test again" },
++  warn: { title: "Runtime needs attention", description: "Review the runtime details before assigning work.", action: "Test again" },
++  fail: { title: "Runtime check failed", description: "Check the executable and local service configuration, then try again.", action: "Retry test" },
++} as const;
++
+ const prerequisiteCopy = {
+   idle: { title: "Check prerequisites", description: "Check instance settings and public connection configuration.", action: "Check setup" },
+   running: { title: "Checking prerequisites", description: "Checking instance settings and public connection configuration…", action: "Checking…" },
+@@ -59,14 +67,14 @@ export function RuntimeTestCard({
+   error?: string | null;
+   onTest: () => void;
+   disabled?: boolean;
+-  variant?: "connection" | "prerequisites";
++  variant?: "connection" | "prerequisites" | "runtime";
+ }) {
+   const missingRuntime = state === "fail"
+     ? result?.checks.find(check => check.code === "acpx_runtime_package_missing")
+     : undefined;
+   const content = missingRuntime
+     ? { ...copy.fail, title: "Runtime missing", description: missingRuntime.message }
+-    : (variant === "prerequisites" ? prerequisiteCopy : copy)[state];
++    : (variant === "prerequisites" ? prerequisiteCopy : variant === "runtime" ? runtimeCopy : copy)[state];
+   const Icon =
+     state === "running"
+       ? Loader2
+diff --git a/ui/src/components/TaskChatThread.tsx b/ui/src/components/TaskChatThread.tsx
+index d41d9f609ae10e2f498104e32d67191aeab71190..58147900d8e7cd39f2afef64b8db8026ae8b318b 100644
+--- a/ui/src/components/TaskChatThread.tsx
++++ b/ui/src/components/TaskChatThread.tsx
+@@ -584,7 +584,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
+         run.execution.cause === "legacy_execution_requires_reconciliation" &&
+         [
+           "claude_local", "codex_local", "cursor", "gemini_local", "opencode_local",
+-          "pi_local", "grok_local", "kimi_local", "hermes_local",
++          "pi_local", "grok_local", "kimi_local", "hermes_local", "tomcat_local",
+         ].includes(run.adapterType ?? "")
+       ) return false;
+       return [
+diff --git a/ui/src/components/new-agent/NewAgentSetup.tsx b/ui/src/components/new-agent/NewAgentSetup.tsx
+index 388602d59ad8274d76c9ec44ad447c80feeb9a10..af2b1c48c1d3b617e568d3fa62d696fafe48d066 100644
+--- a/ui/src/components/new-agent/NewAgentSetup.tsx
++++ b/ui/src/components/new-agent/NewAgentSetup.tsx
+@@ -136,6 +136,7 @@ function Setup({
+         ? "opencode_local"
+         : runnerProvider === "codex" ? "codex_local" : runnerProvider
+     : adapterType;
++  const ConfigFields = getUIAdapter(adapterType).ConfigFields;
+   const connectionAdapter =
+     brandType === "claude_local" || brandType === "codex_local" || brandType === "grok_local"
+       ? brandType
+@@ -152,6 +153,7 @@ function Setup({
+   const [kimiModel, setKimiModel] = useState("");
+   const [kimiBaseUrl, setKimiBaseUrl] = useState("");
+   const [kimiProtocol, setKimiProtocol] = useState("kimi");
++  const [adapterSchemaValues, setAdapterSchemaValues] = useState<Record<string, unknown>>({});
+   const [screen, setScreen] = useState<"connect" | "runtime" | "saved">(
+     createdAgentId ? "saved" : connectionAdapter ? "connect" : "runtime",
+   );
+@@ -286,6 +288,9 @@ function Setup({
+         : "Could not resolve the environment.";
+   }
+   const environment = envs.data?.find((env) => env.id === environmentId);
++  if (adapterType === "tomcat_local" && (managedOnly || forced.forced || (environment && environment.driver !== "local"))) {
++    environmentError = "Tomcat requires a local environment that shares the project's files with its service. Select a local environment.";
++  }
+   const adapters = useQuery({
+     queryKey: queryKeys.adapters.availability(companyId, environmentId),
+     queryFn: () => adaptersApi.list({ companyId, environmentId }),
+@@ -376,6 +381,7 @@ function Setup({
+       thinkingEffort: effort,
+       dangerouslyBypassSandbox: adapterType === "codex_local" && runner === "legacy",
+       envBindings: nextConnection?.env ?? {},
++      ...(adapterType === "tomcat_local" ? { adapterSchemaValues } : {}),
+       ...(isRunner
+         ? {
+             adapterSchemaValues: {
+@@ -1168,6 +1174,22 @@ function Setup({
+                             </Field>
+                           </div>
+                         )}
++                        {adapterType === "tomcat_local" && <details className="space-y-3">
++                          <summary className="cursor-pointer text-sm text-muted-foreground">Advanced</summary>
++                          <div className="grid gap-5 sm:grid-cols-2">
++                            <ConfigFields
++                              companyId={companyId} adapterType={adapterType} mode="create" isCreate hideModel
++                              values={{ ...defaultCreateValues, adapterType, adapterSchemaValues }}
++                              set={patch => {
++                                if (patch.adapterSchemaValues) {
++                                  setAdapterSchemaValues(patch.adapterSchemaValues);
++                                  resetTest();
++                                }
++                              }}
++                              config={{}} eff={(_group, _field, original) => original} mark={() => {}} models={[]}
++                            />
++                          </div>
++                        </details>}
+                         {adapterType === "codex_local" && <details className="space-y-3">
+                           <summary className="cursor-pointer text-sm text-muted-foreground">Advanced</summary>
+                           <CodexRunnerSelect value={runner} disabled={busy}
+@@ -1198,7 +1220,7 @@ function Setup({
+                               Default: {environmentLabel}
+                             </option>
+                             {(envs.data ?? [])
+-                              .filter((env) => env.status === "active" && (!managedOnly || env.driver !== "local"))
++                              .filter((env) => env.status === "active" && (!managedOnly || env.driver !== "local") && (adapterType !== "tomcat_local" || env.driver === "local"))
+                               .map((env) => (
+                                 <option key={env.id} value={env.id}>
+                                   {environmentDisplayLabel(env)}
+@@ -1209,7 +1231,7 @@ function Setup({
+                       )}
+                     </fieldset>
+                     <RuntimeTestCard
+-                      variant={isDot ? "prerequisites" : "connection"}
++                      variant={isDot ? "prerequisites" : adapterType === "tomcat_local" ? "runtime" : "connection"}
+                       state={testState}
+                       result={result}
+                       error={error}
+diff --git a/ui/src/components/task-chat/composer-run-settings.ts b/ui/src/components/task-chat/composer-run-settings.ts
+index 382676ad13a2e9cec254f74417e4fe9d48f2b518..e72900e4d211783290dac2a1bb9f0cfbfe611872 100644
+--- a/ui/src/components/task-chat/composer-run-settings.ts
++++ b/ui/src/components/task-chat/composer-run-settings.ts
+@@ -18,6 +18,7 @@ export const EFFORT_LABELS: Record<string, string> = {
+ };
+ 
+ const MODEL_ADAPTERS = new Set([
++  "tomcat_local",
+   "claude_local", "codex_local", "opencode_local", "pi_local", "kimi_local",
+   "gemini_local", "cursor", "cursor_cloud", "grok_local", "hermes_local", "paperclip_runner",
+ ]);
+diff --git a/ui/src/lib/agent-setup-fields.ts b/ui/src/lib/agent-setup-fields.ts
+index e0c6b70b7ef264cc5aca354f7d1db52cfa0fd9ac..2a277076880839ad3f495ec863d20f00e8bdfc19 100644
+--- a/ui/src/lib/agent-setup-fields.ts
++++ b/ui/src/lib/agent-setup-fields.ts
+@@ -44,6 +44,7 @@ export function setupEfforts(adapter: string, model = ""): string[] {
+ }
+ 
+ export const SETUP_LOGIN_HINTS: Record<string, string> = {
++  tomcat_local: "Uses Tomcat's existing model and credential configuration on this host. Project tasks supply the working directory through Paperclip's existing project workspace settings. No model request is made by the connection test.",
+   cursor:
+     "Use a Cursor API key, or run agent login on the selected environment's host.",
+   gemini_local:

@@ -1,0 +1,106 @@
+diff --git a/packages/views/runtimes/components/runtime-profile-catalog.test.ts b/packages/views/runtimes/components/runtime-profile-catalog.test.ts
+index ab0fb81804e50d8040179acfe37682c7c6d5d1f5..eabea465e937765d6ff6f91fa4026c8c6ee68129 100644
+--- a/packages/views/runtimes/components/runtime-profile-catalog.test.ts
++++ b/packages/views/runtimes/components/runtime-profile-catalog.test.ts
+@@ -32,6 +32,12 @@ function profile(
+ }
+ 
+ describe("buildRuntimeCatalog", () => {
++  it("includes Tomcat in the existing built-in catalog", () => {
++    expect(buildRuntimeCatalog([]).builtins).toContainEqual(
++      expect.objectContaining({ id: "builtin:tomcat", protocolFamily: "tomcat" }),
++    );
++  });
++
+   it("keeps custom profiles separate from built-in protocol families", () => {
+     const catalog = buildRuntimeCatalog([
+       profile("prof-1", "Team Codex", "2026-01-02T00:00:00Z"),
+diff --git a/packages/views/runtimes/components/runtime-profiles-dialog.test.tsx b/packages/views/runtimes/components/runtime-profiles-dialog.test.tsx
+index 6a4cfe45f914f91e4ee722a3f51ed57ec969661a..47e7f2643c06376cfb9705ca6e9ec1734b948876 100644
+--- a/packages/views/runtimes/components/runtime-profiles-dialog.test.tsx
++++ b/packages/views/runtimes/components/runtime-profiles-dialog.test.tsx
+@@ -185,6 +185,21 @@ describe("RuntimeProfilesDialog", () => {
+     ).not.toBeInTheDocument();
+   });
+ 
++  it("creates a Tomcat target through the existing runtime form", async () => {
++    renderDialog({ intent: "create" });
++    fireEvent.click(screen.getByRole("button", { name: /^tomcat$/i }));
++    fireEvent.change(screen.getByLabelText("Display name"), {
++      target: { value: "Team Tomcat" },
++    });
++    fireEvent.change(screen.getByLabelText("Command"), {
++      target: { value: "tomcat" },
++    });
++    fireEvent.click(screen.getByRole("button", { name: "Create runtime" }));
++    await waitFor(() => expect(mutationState.createProfile).toHaveBeenCalledWith({
++      display_name: "Team Tomcat", runtime_type: "tomcat", command_name: "tomcat", fixed_args: [],
++    }));
++  });
++
+   it("creates an Oh-My-Pi compatibility target without a client protocol mapping", async () => {
+     renderDialog({ intent: "create" });
+     fireEvent.click(screen.getByRole("button", { name: "Oh-My-Pi" }));
+diff --git a/scripts/agent-cli-command-names.txt b/scripts/agent-cli-command-names.txt
+index c8893f36fd91468a281178dd5a4dc1008c06b227..4dacae17524fd4104a3f5190a356bb607a0c7742 100644
+--- a/scripts/agent-cli-command-names.txt
++++ b/scripts/agent-cli-command-names.txt
+@@ -23,5 +23,6 @@ qoderclicn
+ qwen
+ qwenpaw
+ reasonix
++tomcat
+ traecli
+ zeroclaw
+diff --git a/server/internal/daemon/config_test.go b/server/internal/daemon/config_test.go
+index 76a3d648ae1fc6af48768b589113d395bac6c4e9..2f337364653ae861f5c407a1923e4936af233712 100644
+--- a/server/internal/daemon/config_test.go
++++ b/server/internal/daemon/config_test.go
+@@ -1614,6 +1614,7 @@ func pinNonCodexAgentsToMissingPaths(t *testing.T) {
+ 		"MULTICA_OPENCODE_PATH",
+ 		"MULTICA_OPENCLAW_PATH",
+ 		"MULTICA_HERMES_PATH",
++		"MULTICA_TOMCAT_PATH",
+ 		"MULTICA_PI_PATH",
+ 		"MULTICA_CURSOR_PATH",
+ 		"MULTICA_COPILOT_PATH",
+diff --git a/server/internal/daemon/execenv/runtime_config_test.go b/server/internal/daemon/execenv/runtime_config_test.go
+index 8fe7c94a2c412bdab9d5a400cdd71c761e8fcdea..161a3b87a53f4dbf19eff296befb78473afcffa7 100644
+--- a/server/internal/daemon/execenv/runtime_config_test.go
++++ b/server/internal/daemon/execenv/runtime_config_test.go
+@@ -1087,6 +1087,7 @@ func TestInjectRuntimeConfigPreservesUserContent(t *testing.T) {
+ 		{"kiro", "AGENTS.md"},
+ 		{"antigravity", "AGENTS.md"},
+ 		{"muse", "AGENTS.md"},
++		{"tomcat", "AGENTS.md"},
+ 		{"qwen", "QWEN.md"},
+ 	}
+ 	for _, tc := range cases {
+@@ -1468,6 +1469,7 @@ func TestCleanupRuntimeConfigByProvider(t *testing.T) {
+ 		{"kiro", "AGENTS.md"},
+ 		{"antigravity", "AGENTS.md"},
+ 		{"muse", "AGENTS.md"},
++		{"tomcat", "AGENTS.md"},
+ 		{"qwen", "QWEN.md"},
+ 	}
+ 	for _, tc := range cases {
+diff --git a/server/internal/daemon/execenv/sidecar_manifest_test.go b/server/internal/daemon/execenv/sidecar_manifest_test.go
+index 72eff2d1ab0fe702f3f5f359564b178591f5d540..f2049ffa572588c6f2fed163b16d2bc52baf238c 100644
+--- a/server/internal/daemon/execenv/sidecar_manifest_test.go
++++ b/server/internal/daemon/execenv/sidecar_manifest_test.go
+@@ -151,6 +151,7 @@ var allFileBasedProviders = []string{
+ 	"codearts",
+ 	"openclaw",
+ 	"hermes",
++	"tomcat",
+ 	"pi",
+ 	"omp",
+ 	"cursor",
+@@ -645,6 +646,7 @@ var sameSlugSkillProviderCases = []struct {
+ 	{"kiro", filepath.Join(".kiro", "skills", "issue-review")},
+ 	{"antigravity", filepath.Join(".agents", "skills", "issue-review")},
+ 	{"muse", filepath.Join(".agents", "skills", "issue-review")},
++	{"tomcat", filepath.Join(".agents", "skills", "issue-review")},
+ 	{"qwen", filepath.Join(".qwen", "skills", "issue-review")},
+ 	{"hermes", filepath.Join(".agent_context", "skills", "issue-review")},
+ }

@@ -1,0 +1,7 @@
+{
+  "command": "/opt/tomcat/bin/tomcat",
+  "cwd": "/srv/workspaces/example-project",
+  "model": "default",
+  "permissionMode": "deny-all",
+  "nonInteractivePermissions": "deny"
+}

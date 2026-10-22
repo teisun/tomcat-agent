@@ -1,0 +1,198 @@
+diff --git a/scripts/run-vitest-stable.mjs b/scripts/run-vitest-stable.mjs
+index 7f283c9acabf302a58a4361d7f45c353dfc9bdc8..3b68ad1fb90d5a8c26c624b4f78cf885dc6c96a7 100644
+--- a/scripts/run-vitest-stable.mjs
++++ b/scripts/run-vitest-stable.mjs
+@@ -31,6 +31,7 @@ const nonServerProjects = [
+   "@paperclipai/adapter-cursor-cloud",
+   "@paperclipai/adapter-cursor-local",
+   "@paperclipai/adapter-gemini-local",
++  "@paperclipai/adapter-tomcat-local",
+   "@paperclipai/adapter-grok-local",
+   "@paperclipai/hermes-paperclip-adapter",
+   "@paperclipai/adapter-kimi-local",
+diff --git a/server/src/adapters/registry.test.ts b/server/src/adapters/registry.test.ts
+index b59f7ffc878aba32963f9eb6a0a5856fd3b76423..1c4198e70578e239bd42a3a223a394a0ce12ad2a 100644
+--- a/server/src/adapters/registry.test.ts
++++ b/server/src/adapters/registry.test.ts
+@@ -68,6 +68,7 @@ describe("built-in runtime connection tool delivery", () => {
+     ["cursor_cloud", "invocation_context"],
+     ["cursor", "environment"],
+     ["gemini_local", "environment"],
++    ["tomcat_local", "native_mcp"],
+     ["grok_local", "environment"],
+     ["hermes_gateway", "invocation_context"],
+     ["hermes_local", "environment"],
+@@ -94,6 +95,23 @@ describe("built-in runtime connection tool delivery", () => {
+ });
+ 
+ 
++describe("Tomcat registration", () => {
++  it("exposes local ACP and ephemeral skills without claiming managed instruction or login support", () => {
++    const adapter = requireServerAdapter("tomcat_local");
++    expect(adapter).toMatchObject({
++      runtimeToolDelivery: "native_mcp", supportsLocalAgentJwt: true,
++      supportsToolRefreshOnResume: true, supportsInstructionsBundle: false,
++      requiresMaterializedRuntimeSkills: false,
++      acp: { agentId: "tomcat", skillsMode: "ephemeral" },
++      models: [{ id: "default", label: "Tomcat configured default" }],
++    });
++    expect(adapter.loginCapability).toBeUndefined();
++    expect(adapter.listSkills).toEqual(expect.any(Function));
++    expect(adapter.syncSkills).toEqual(expect.any(Function));
++    expect(adapter.getConfigSchema).toEqual(expect.any(Function));
++  });
++});
++
+ describe("native ACPX environment checks", () => {
+   beforeEach(() => {
+     probeInstallation.mockReset().mockResolvedValue(undefined);
+diff --git a/server/src/services/conversation-continuation.test.ts b/server/src/services/conversation-continuation.test.ts
+index 31166bfa59f2ff9ae8e82d448d1a6ee916304f8b..dd78e7a1cba53a60a6fa84a3da173e4293de5fdb 100644
+--- a/server/src/services/conversation-continuation.test.ts
++++ b/server/src/services/conversation-continuation.test.ts
+@@ -3,9 +3,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
+ import { and, eq } from "drizzle-orm";
+ import { agents, companies, createDb, heartbeatRuns, issues, issueRecoveryActions, type Db } from "@paperclipai/db";
+ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
+-import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
++import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker, isConversationAdapter, runUsedConversationAdapter } from "./conversation-continuation.js";
+ import { deliverExecutionStatuses } from "./execution-status-delivery.js";
+ 
++it("registers Tomcat as a conversation adapter without classifying process actions as conversations", () => {
++  expect(isConversationAdapter("tomcat_local")).toBe(true);
++  expect(isConversationAdapter("process")).toBe(false);
++  expect(isConversationAdapter("http")).toBe(false);
++});
++
+ const support = await getEmbeddedPostgresTestSupport();
+ const describePostgres = support.supported ? describe : describe.skip;
+ if (!support.supported) console.warn(`Skipping execution identity regressions: ${support.reason}`);
+@@ -60,6 +66,25 @@ describePostgres("execution identity query contracts", () => {
+     await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, legacy.id));
+     expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toBeNull();
+   });
++  it("keeps Tomcat historical continuation subject to the existing ownership gate", async () => {
++    const f = await fixture();
++    const stopped = await run(f, { issueId: f.issueId }, null, process.pid);
++    const [historical] = await db.update(heartbeatRuns).set({
++      runnerProfileJson: { adapterDispatch: { adapterType: "tomcat_local" } },
++    }).where(eq(heartbeatRuns.id, stopped.id)).returning();
++    expect(await runUsedConversationAdapter(db, historical)).toBe(true);
++    expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId))
++      .toMatchObject({ runId: stopped.id, cause: "execution_owner_active" });
++    await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, stopped.id));
++    expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toBeNull();
++    const [action] = await db.insert(issueRecoveryActions).values({
++      companyId: f.companyId, sourceIssueId: f.issueId, kind: "active_run_watchdog", status: "resolved", ownerType: "board",
++      cause: "legacy_execution_requires_reconciliation", fingerprint: "tomcat-history", evidence: { runId: stopped.id }, nextAction: "Fixture",
++    }).returning();
++    const matches = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions)
++      .where(and(eq(issueRecoveryActions.companyId, f.companyId), conversationRecoveryActionPredicate()));
++    expect(matches).toEqual([{ id: action.id }]);
++  });
+   it("delivers canonical same-company task IDs and keeps malformed IDs private", async () => {
+     const f = await fixture(), foreign = await fixture();
+     const contexts: unknown[] = [f.issueId, f.issueId.toUpperCase(), "bad", `{${f.issueId}}`, f.issueId.replaceAll("-", ""), null, 42, {}, [f.issueId], foreign.issueId];
+diff --git a/ui/src/components/TaskChatThread.test.tsx b/ui/src/components/TaskChatThread.test.tsx
+index 59bf338dadc2836985f6693bd757083ba1657d42..99eccb67d93e4216fdbf9d7b13e1e3f0afd1136c 100644
+--- a/ui/src/components/TaskChatThread.test.tsx
++++ b/ui/src/components/TaskChatThread.test.tsx
+@@ -2709,7 +2709,7 @@ describe("TaskChatThread runtime transcript selection", () => {
+ 
+   it.each([
+     ...["claude_local", "codex_local", "cursor", "gemini_local", "opencode_local",
+-      "pi_local", "grok_local", "kimi_local", "hermes_local"].flatMap((adapterType) =>
++      "pi_local", "grok_local", "kimi_local", "hermes_local", "tomcat_local"].flatMap((adapterType) =>
+       ["failed", "timed_out"].map((status) => ({ adapterType, status, runtimeMode: "legacy" as const,
+         cause: "legacy_execution_requires_reconciliation", canRetry: true }))),
+     { adapterType: "paperclip_runner", status: "failed", runtimeMode: "native" as const,
+diff --git a/ui/src/pages/NewAgent.test.tsx b/ui/src/pages/NewAgent.test.tsx
+index 49cf8f2ac3ec92ee04266da30f23c67b54f33465..1593095ad4a61b76d3b85ab0ad85fe0ec5c50d5d 100644
+--- a/ui/src/pages/NewAgent.test.tsx
++++ b/ui/src/pages/NewAgent.test.tsx
+@@ -7,6 +7,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
+ import { queryKeys } from "@/lib/queryKeys";
+ import { NewAgent } from "./NewAgent";
+ import { ApiError } from "@/api/client";
++import { getConfigSchema as getTomcatConfigSchema } from "../../../packages/adapters/tomcat-local/src/server/config-schema";
++import { invalidateConfigSchemaCache } from "@/adapters/schema-config-fields";
+ 
+ const api = vi.hoisted(() => ({
+   get: vi.fn(),
+@@ -200,6 +202,64 @@ afterEach(async () => {
+   container.remove();
+ });
+ describe("New agent setup", () => {
++  it("saves Tomcat schema settings and a custom model without requiring provider login", async () => {
++    state.adapters.push({ type: "tomcat_local", loaded: true, disabled: false });
++    invalidateConfigSchemaCache("tomcat_local");
++    const fetchSchema = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, json: async () => getTomcatConfigSchema() } as Response);
++    try {
++      await render("tomcat_local");
++      await settle();
++      await act(async () => container.querySelector<HTMLElement>("summary")!.click());
++      expect(container.querySelector('input[type="password"]')).toBeNull();
++      await fill("Model", "my-local-model");
++      const command = container.querySelector<HTMLInputElement>("details input")!;
++      expect(command.value).toBe("tomcat");
++      await act(async () => {
++        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(command, "/opt/bin/tomcat");
++        command.dispatchEvent(new Event("input", { bubbles: true }));
++      });
++      await click("Run test");
++      expect(container.textContent).toContain("Runtime checks passed");
++      await click("Finish setup");
++      expect(api.testEnvironment).toHaveBeenCalledTimes(1);
++      expect(api.hire.mock.calls[0][1]).toMatchObject({
++        adapterType: "tomcat_local",
++        adapterConfig: { command: "/opt/bin/tomcat", model: "my-local-model", permissionMode: "approve-all", nonInteractivePermissions: "deny" },
++      });
++    } finally {
++      fetchSchema.mockRestore();
++      invalidateConfigSchemaCache("tomcat_local");
++    }
++  });
++
++  it("blocks a saved remote default for Tomcat without changing it, and lets the user choose local", async () => {
++    state.adapters.push({ type: "tomcat_local", loaded: true, disabled: false });
++    settings.get.mockResolvedValue({ defaultEnvironmentId: "remote-1" });
++    envApi.list.mockResolvedValue([
++      { id: "local-1", name: "Local", driver: "local", status: "active", config: {} },
++      { id: "remote-1", name: "Remote", driver: "ssh", status: "active", config: {} },
++    ]);
++    invalidateConfigSchemaCache("tomcat_local");
++    const fetchSchema = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, json: async () => getTomcatConfigSchema() } as Response);
++    try {
++      await render("tomcat_local");
++      expect(container.textContent).toContain("Tomcat requires a local environment");
++      const finish = [...container.querySelectorAll("button")].find(button => button.textContent === "Finish setup")!;
++      expect(finish.disabled).toBe(true);
++      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Environment"]')!;
++      expect([...select.options].map(option => option.value)).toEqual(["", "local-1"]);
++      await act(async () => { select.value = "local-1"; select.dispatchEvent(new Event("change", { bubbles: true })); });
++      await settle();
++      await click("Run test");
++      await click("Finish setup");
++      expect(api.testEnvironment).toHaveBeenLastCalledWith("company-1", "tomcat_local", expect.objectContaining({ environmentId: "local-1" }));
++      expect(api.hire).toHaveBeenCalledTimes(1);
++    } finally {
++      fetchSchema.mockRestore();
++      invalidateConfigSchemaCache("tomcat_local");
++    }
++  });
++
+   it("records an explicit legacy choice when it matches the Windows default, then preserves it on Linux", async () => {
+     settings.get.mockResolvedValue({ defaultEnvironmentId: "local-1" });
+     envApi.list.mockResolvedValue([
+diff --git a/vitest.config.ts b/vitest.config.ts
+index d91485c593514453366917a4808e64880889340f..a3aeac661574972cc118bc732c8f5f00f0212ba4 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -15,6 +15,7 @@ export default defineConfig({
+       "packages/adapters/cursor-cloud",
+       "packages/adapters/cursor-local",
+       "packages/adapters/gemini-local",
++      "packages/adapters/tomcat-local",
+       "packages/adapters/grok-local",
+       "packages/adapters/hermes",
+       "packages/adapters/kimi-local",
