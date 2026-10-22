@@ -52,7 +52,7 @@ pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
 pub(crate) use self::workspace_state::runtime_tail_provider;
 
-const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A resumed process may send a zero-input request only after it has repaired a
 /// persisted `ask_question` tail into a completed tool result. An assistant-ended

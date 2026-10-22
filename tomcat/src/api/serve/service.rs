@@ -31,7 +31,8 @@ use crate::{AppConfig, AppError};
 pub(crate) const LOCAL_PROTOCOL_VERSION: u32 = 1;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
-const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+// Includes the existing 30s checkpoint flush plus turn/child/MCP shutdown.
+const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 const HELLO_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

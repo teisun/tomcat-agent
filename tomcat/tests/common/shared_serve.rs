@@ -45,6 +45,23 @@ impl ServiceFixture {
 }
 impl Drop for ServiceFixture {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            let path = self.0.home_path.join(".tomcat/agents/main/serve/serve.log");
+            match std::fs::read_to_string(&path) {
+                Ok(log) => {
+                    let lines: Vec<_> = log.lines().collect();
+                    eprintln!(
+                        "isolated service log {}:\n{}",
+                        path.display(),
+                        lines[lines.len().saturating_sub(100)..].join("\n")
+                    );
+                }
+                Err(error) => eprintln!(
+                    "cannot read isolated service log {}: {error}",
+                    path.display()
+                ),
+            }
+        }
         let result = self.command().args(["serve", "stop"]).output();
         if !matches!(&result, Ok(output) if output.status.success()) {
             eprintln!(
@@ -136,7 +153,8 @@ impl NativeClient {
 pub fn output_json(output: Output) -> Value {
     assert!(
         output.status.success(),
-        "command failed: stdout={} stderr={}",
+        "command failed ({}): stdout={} stderr={}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

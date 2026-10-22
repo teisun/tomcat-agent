@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-22 10:05 +0800 | ACTIVE | feature/shared-serve-acp | — |
+| Nibbles | 2026-10-22 15:50 +0800 | ACTIVE | feature/shared-serve-acp | — |
 
 ### CURRENT INTEGRATION：共享后台与 Paperclip/Multica ACP 接入（2026-10-22）
 
@@ -11,10 +11,12 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 ```
 
 - **交付范围**：共享服务生命周期、标准 ACP、显式会话 cwd、原项目隔离、只读旁观、控制断开取消并等待真实子进程停止；ACP 问题放入普通回复，Native 保留提问面板。按复核计划修正慢读完整输出、协议/CLI 版本门槛、准入锁与迁移说明；未新增续跑/WebSocket 或按会话代理机制。
-- **本机自动化验收完成**：最新 Rust gate-fast exit 0：lib 3422 PASS / 5 ignored，parallel integration 379 PASS / 27 skipped，serial integration 86 PASS / 3 skipped，fmt/严格 Clippy 通过；扩展 core 800、GUI 865、完整默认 devhost 43 PASS / 7 条件场景 pending。仍有效的扩展集成 236 PASS / 1 skipped 与宿主相关测试复用，不把跳过项计为通过。
+- **首轮本机自动化验收完成（本次 CI 修复的相关复验另记）**：Rust gate-fast exit 0：lib 3422 PASS / 5 ignored，parallel integration 379 PASS / 27 skipped，serial integration 86 PASS / 3 skipped，fmt/严格 Clippy 通过；扩展 core 800、GUI 865、完整默认 devhost 43 PASS / 7 条件场景 pending。仍有效的扩展集成 236 PASS / 1 skipped 与宿主相关测试复用，不把跳过项计为通过。
 - **实际操作**：本地真正启动 Paperclip、Multica，以受控模型完成任务、取消、原会话续接及工作树清理；真实 `0.1.80` / 测试构建 `0.1.81` CLI 均跑宿主任务，真实 VS Code 版本提示、重启、恢复以及关窗后同一后台存活已留 PNG/ARIA/console/实例证据。另在 Multica `TOMC-10` 实际完成两轮 DeepSeek 问答，同会话、同评论线程继续；首轮 4 次工具尝试均被隔离权限拒绝，不声称零工具调用。授权两轮已用完，临时真实密钥已清除，测试配置已恢复。
 - **代理边界**：正式共享后台统一保存的 `llm.proxy` 或系统代理；仅窗口测试入口可显式写入隔离 `llm.proxy`，ACP 环境不转换，子进程环境原样保留。macOS 系统代理按用户要求仅只读打印 IP/端口，未改全局设置，不将它算作请求链路实测。
-- **提交与后续**：本次准备提交并推送 `feature/shared-serve-acp`，不合并主干、不升版、不发布。三平台 GitHub CI 尚待取得；Windows 必须补实跑系统代理、Win32 Job、假 ACP 宿主及真实 VS Code 退出后存活证据，失败由 Agent 修复重跑。两宿主仅本地集成，不推宿主远端、不建 fork。无关宿主基线失败保留，不声称两宿主全仓全绿；Cov% 未测量。
+- **提交与 CI**：`f6e627f6` 已推送 `feature/shared-serve-acp`，首轮 run `39709693529` 的 Linux Rust、Windows 扩展通过；macOS Rust、Windows Rust与 Windows 专项失败，未关闭门禁。当前补修 HTTP 测试 socket 模式、测试连接环境、Windows 管道关闭观测及 Node 启动链路；检查点清理复用原 CLI 的 30s 预算，ACP/管理关闭等待 60s，Multica 宽限 65s，超时仍失败并保留句柄。并发启动一次非零退出的原因尚待新增退出码/服务日志定位，不能算已解决。
+- **本批 CI 修复的本机证据**：Rust 定向库 251 PASS、ACP 两目标 26 PASS、共享服务 10 PASS / 2 ignored，strict all-target Clippy/fmt/diff check PASS；扩展启动器/代理相关 17 PASS及严格 TS 检查；Multica Tomcat 单测与显式当前 CLI 的真实注册 backend 执行/取消/续接通过（本地受控 HTTP 模型）。容量用例初版误读列表权限的失败、首次冷编译期代理用例超时、Go helper 等待不足均留档并定向复验。未再付费调用模型；完整 gate-fast 的同修订结果由下一轮 CI 补齐。
+- **执行边界**：修复后补本机相关回归，再推送同一功能分支重跑三平台；Windows 仍须实际系统代理、Win32 Job、假 ACP 宿主和真实 VS Code 退出后存活证据。不合并主干、不升版、不发布；两宿主只做本地集成，不推远端、不建 fork。无关宿主基线失败保留，Cov% 未测量。
 - **证据**：架构及迁移见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)，本机完整日志索引见 `.agents/acceptance/shared-serve-acp.md`；本地截图、临时脚本与凭据不纳入 Git。
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）

@@ -53,7 +53,8 @@ pub fn prompt(client: &mut ServeChild, id: &str, session: &str, text: &str) {
     );
 }
 pub fn close(client: ServeChild) {
-    let output = client.wait_for_exit(WAIT);
+    // Only teardown needs to outlast the forwarder's 60s cleanup deadline.
+    let output = client.wait_for_exit(Duration::from_secs(65));
     assert!(output.status.success(), "ACP exit: {output:?}");
     for line in String::from_utf8(output.stdout).unwrap().lines() {
         let frame: Value = serde_json::from_str(line)

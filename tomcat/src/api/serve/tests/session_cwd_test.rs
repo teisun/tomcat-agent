@@ -46,6 +46,7 @@ async fn session_cwd_reaches_model_and_tools() {
         std::fs::create_dir_all(cwd.join("nested")).unwrap();
         let cwd = crate::infra::platform::canonicalize(cwd).unwrap();
         std::fs::write(cwd.join("value.txt"), format!("before ONLY_{label}\n")).unwrap();
+        let pwd = if cfg!(windows) { "pwd -W" } else { "pwd" };
         let (provider, requests) = RecordingMockLlm::new(vec![
             call(
                 "read",
@@ -65,12 +66,12 @@ async fn session_cwd_reaches_model_and_tools() {
             call(
                 "bash",
                 "bash",
-                serde_json::json!({"command":"pwd; printf bash > bash-marker", "cwd":""}),
+                serde_json::json!({"command":format!("{pwd}; printf bash > bash-marker"), "cwd":""}),
             ),
             call(
                 "relative-bash",
                 "bash",
-                serde_json::json!({"command":"pwd; printf child > child-marker", "cwd":"nested"}),
+                serde_json::json!({"command":format!("{pwd}; printf child > child-marker"), "cwd":"nested"}),
             ),
             call(
                 "search",
@@ -88,7 +89,13 @@ async fn session_cwd_reaches_model_and_tools() {
             ],
         ]);
         let (writer, output) = spawn_buffered_writer(&cfg.serve);
-        let connection = ServeState::connect(runtime.clone(), writer);
+        let connection = ServeState::connect_with_source(
+            runtime.clone(),
+            writer,
+            None,
+            crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
+            None,
+        );
         connection.initialized.store(true, Ordering::SeqCst);
         let mut slot = create_session_slot(
             connection.clone(),
@@ -182,7 +189,10 @@ async fn session_cwd_reaches_model_and_tools() {
         assert!(tools.contains(&format!("ONLY_{label}")));
         assert!(!tools.contains(if *label == "A" { "ONLY_B" } else { "ONLY_A" }));
         assert!(
-            tools.contains(cwd.to_str().unwrap()),
+            tools
+                .replace("\\\\", "/")
+                .replace('\\', "/")
+                .contains(&cwd.to_string_lossy().replace('\\', "/")),
             "pwd must report the session directory: {tools}"
         );
         assert_eq!(slot.cwd.as_deref(), cwd.to_str());

@@ -25,7 +25,7 @@ pub(crate) fn run(
         forward(stream, input, tokio::io::stdout()).await
     });
     // Tokio stdout may be doing a blocking OS pipe write if the host stopped
-    // reading. Do not turn the explicit 10s close deadline into an infinite
+    // reading. Do not turn the explicit close deadline into an infinite
     // runtime-drop wait. All actual agent work lives in the service, not here.
     runtime.shutdown_background();
     result
@@ -91,8 +91,9 @@ where
     tokio::select! {
         result = &mut exchange => result,
         _ = closing.cancelled() => {
-            tokio::time::timeout(Duration::from_secs(10), &mut exchange).await
-                .map_err(|_| AppError::Config("ACP cleanup acknowledgement timed out after 10s; task cleanup is not confirmed".into()))?
+            // Leave room for the 30s checkpoint flush and actual child/MCP exit.
+            tokio::time::timeout(Duration::from_secs(60), &mut exchange).await
+                .map_err(|_| AppError::Config("ACP cleanup acknowledgement timed out after 60s; task cleanup is not confirmed".into()))?
         }
     }
 }

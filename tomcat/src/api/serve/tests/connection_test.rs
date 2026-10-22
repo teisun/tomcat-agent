@@ -866,7 +866,13 @@ fn shared_runtime(max_sessions: usize) -> (Arc<runtime::ServeRuntime>, tempfile:
 
 fn connect(runtime: &Arc<runtime::ServeRuntime>) -> (Arc<ServeState>, SharedWriterBuffer) {
     let (writer, buffer) = spawn_buffered_writer(&runtime.cfg.serve);
-    let state = ServeState::connect(runtime.clone(), writer);
+    let state = ServeState::connect_with_source(
+        runtime.clone(),
+        writer,
+        None,
+        crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
+        None,
+    );
     state.initialized.store(true, Ordering::SeqCst);
     (state, buffer)
 }
@@ -1241,6 +1247,64 @@ async fn observer_writes_and_forged_approvals_are_rejected_without_affecting_con
     cleanup_session_slot(&a, &slot, SlotCleanup::Close)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn disconnect_waits_for_slow_checkpoints_and_retains_timed_out_writers() {
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(2);
+    let (connection, _) = connect(&runtime);
+    new_shared(&connection, work.path(), "new").await;
+    let slot = runtime
+        .registry
+        .get(&connection.active_session_id().unwrap())
+        .unwrap();
+    let (release, pending) = tokio::sync::oneshot::channel();
+    slot.ctx
+        .session_runtime
+        .checkpoint_record_tasks
+        .lock()
+        .push(tokio::spawn(async move {
+            pending.await.unwrap();
+        }));
+    // A short failed drain must keep the writer reachable for real disconnect cleanup.
+    assert!(
+        !crate::api::chat::drain_checkpoint_record_tasks(
+            &slot.ctx,
+            std::time::Duration::from_millis(10),
+        )
+        .await
+    );
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .checkpoint_record_tasks
+            .lock()
+            .len(),
+        1
+    );
+    let mut closing = tokio::spawn(async move { connection.disconnect().await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(4), &mut closing)
+            .await
+            .is_err(),
+        "checkpoint cleanup must not use the 3s turn-stop deadline"
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(*slot.controller.lock(), None);
+    assert!(slot
+        .ctx
+        .session_runtime
+        .checkpoint_record_tasks
+        .lock()
+        .is_empty());
+    runtime.stop_all().await.unwrap();
 }
 
 #[tokio::test]

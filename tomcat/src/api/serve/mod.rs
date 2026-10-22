@@ -680,7 +680,14 @@ pub(super) async fn cancel_and_wait(
     if slot.is_busy() {
         return Err("stop_timeout");
     }
-    if !drain_checkpoint_record_tasks(&slot.ctx, SESSION_SHUTDOWN_TIMEOUT).await {
+    // Deferred Git writes have the same budget as CLI checkpoint shutdown, not
+    // the short foreground-cancellation budget. Keep ownership on timeout.
+    if !drain_checkpoint_record_tasks(
+        &slot.ctx,
+        crate::api::chat::CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT,
+    )
+    .await
+    {
         return Err("stop_timeout");
     }
     if let Some(turn) = slot.turn_state.lock().as_mut() {

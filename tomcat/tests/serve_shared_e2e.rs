@@ -472,24 +472,33 @@ async fn completed_connections_do_not_exhaust_slots_and_history_can_be_reopened(
     fx.configure(|cfg| cfg.serve.max_sessions = 2);
     let info = fx.action("start");
     let mut first = None;
+    let mut observer = Client::connect(&info).await;
+    observer.new_session(&fx.0.workspace).await;
     for _ in 0..5 {
         let mut client = Client::connect(&info).await;
         let id = client.new_session(&fx.0.workspace).await;
-        first.get_or_insert(id);
-        client.0.shutdown().await.unwrap();
-        // EOF means cleanup finished, not just that the OS accepted the half-close.
-        let mut rest = Vec::new();
-        tokio::time::timeout(
-            WAIT,
-            tokio::io::AsyncReadExt::read_to_end(&mut client.0, &mut rest),
-        )
+        first.get_or_insert(id.clone());
+        // Windows named-pipe shutdown() only flushes; it is not a half-close.
+        // Close the real handle, then wait until another connection can take control.
+        // A read-only list reports current ownership, not whether takeover is possible.
+        drop(client);
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let reply = observer
+                    .request(json!({"type":"switch_session", "sessionId":id, "id":"released"}))
+                    .await;
+                assert_eq!(reply["success"], true, "{reply}");
+                if reply["payload"]["access"] == "control" {
+                    break;
+                }
+                assert_eq!(reply["payload"]["access"], "observe", "{reply}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .unwrap()
-        .unwrap();
+        .expect("EOF must release control before the next capacity admission");
     }
-    let mut client = Client::connect(&info).await;
-    client.new_session(&fx.0.workspace).await;
-    let restored = client.request(json!({"type":"switch_session", "id":"reopen", "sessionId":first.unwrap(), "cwd":fx.0.workspace})).await;
+    let restored = observer.request(json!({"type":"switch_session", "id":"reopen", "sessionId":first.unwrap(), "cwd":fx.0.workspace})).await;
     assert_eq!(
         restored["success"], true,
         "eviction must preserve history: {restored}"
@@ -596,7 +605,8 @@ fn restricted_acp_host(
     std::fs::write(&script, r#"
 const { spawn } = require('node:child_process');
 process.stdin.once('data', () => {
-  const child = spawn(process.argv[2], ['acp'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  // Do not add libuv's inner Job: inherit the actual restrictive host Job unchanged.
+  const child = spawn(process.argv[2], ['acp'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: true });
   let error = '';
   child.stderr.on('data', data => { error += data; });
   child.stdout.pipe(process.stdout);

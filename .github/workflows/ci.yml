@@ -164,7 +164,8 @@ jobs:
       # The ignored Rust controls must each execute one test, followed by a real
       # VS Code task, GUI process exit, and non-starting probe of the same service.
       - name: Verify system proxy and window lifecycle
-        run: npx --no-install tsx scripts/run-windows-system-proxy.ts
+        shell: bash
+        run: node --import tsx scripts/run-windows-system-proxy.ts
       - name: Upload proxy requests, GUI and lifecycle evidence
         if: always()
         uses: actions/upload-artifact@v4

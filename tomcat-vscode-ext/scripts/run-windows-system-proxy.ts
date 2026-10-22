@@ -15,6 +15,32 @@ const extensionRoot = path.resolve(__dirname, "..");
 const rustRoot = path.resolve(extensionRoot, "../tomcat");
 const exec = promisify(execFile);
 
+// Avoid adding libuv child Jobs around the service-bearing tests. `execFile`
+// does not forward detached to spawn; detached here still inherits host policy.
+export async function runServiceTest(file: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }) {
+  return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(file, args, { ...options, detached: process.platform === "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    let failure: Error | undefined;
+    const append = (data: Buffer, stream: "stdout" | "stderr") => {
+      if (failure) return;
+      if (stream === "stdout") stdout += String(data); else stderr += String(data);
+      if (stdout.length + stderr.length > 16 * 1024 * 1024) {
+        failure = new Error("Acceptance command output exceeded 16 MiB");
+        child.kill();
+      }
+    };
+    child.stdout.on("data", data => append(data, "stdout"));
+    child.stderr.on("data", data => append(data, "stderr"));
+    child.once("error", error => { failure = error; });
+    child.once("close", (code, signal) => {
+      if (failure || code !== 0 || child.killed) {
+        reject(Object.assign(failure ?? new Error(`Acceptance command failed: ${file} (${code}, ${signal})`), { stdout, stderr }));
+      } else resolve({ stdout, stderr });
+    });
+  });
+}
+
 async function main() {
   assert.equal(process.platform, "win32", "Windows acceptance only");
   assert.equal(process.env.GITHUB_ACTIONS, "true", "never mutate personal-machine proxy settings");
@@ -87,8 +113,8 @@ async function main() {
     const test = async (name: string, mode: "on" | "off") => {
       let output = "";
       try {
-        const result = await exec(testExe, [name, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
-          { cwd: rustRoot, env: { ...env, TOMCAT_SYSTEM_PROXY_ACCEPTANCE: mode }, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+        const result = await runServiceTest(testExe, [name, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
+          { cwd: rustRoot, env: { ...env, TOMCAT_SYSTEM_PROXY_ACCEPTANCE: mode }, timeout: 120_000 });
         output = result.stdout + result.stderr;
         assert.match(output, /test result: ok\. 1 passed; 0 failed; 0 ignored;/, "zero matches/skips do not count");
       } catch (error) {
@@ -109,8 +135,8 @@ async function main() {
       const windowStart = requests.length;
       const guiEnv = { ...env, TOMCAT_E2E_SHARED_LIFECYCLE: "1", TOMCAT_E2E_SYSTEM_PROXY: "1", TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifacts };
       try {
-        const gui = await exec(process.execPath, [path.join(extensionRoot, "node_modules/tsx/dist/cli.mjs"), path.join(__dirname, "run-vscode-devhost.ts")],
-          { cwd: extensionRoot, env: guiEnv, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 });
+        const gui = await runServiceTest(process.execPath, ["--import", "tsx", path.join(__dirname, "run-vscode-devhost.ts")],
+          { cwd: extensionRoot, env: guiEnv, timeout: 600_000 });
         await fs.writeFile(path.join(artifacts, "vscode-launch.log"), gui.stdout + gui.stderr);
       } catch (error) {
         await fs.writeFile(path.join(artifacts, "vscode-launch.log"), String(error) + String((error as { stdout?: string }).stdout ?? "") + String((error as { stderr?: string }).stderr ?? ""));
@@ -133,4 +159,4 @@ async function main() {
     if (mcp.exitCode === null && mcp.signalCode === null && !mcpError) { const exited = once(mcp, "exit"); mcp.kill(); await exited; }
   }
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });

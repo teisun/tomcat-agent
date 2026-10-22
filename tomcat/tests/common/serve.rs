@@ -466,6 +466,7 @@ where
             let route = route.clone();
             let captured = captured.clone();
             workers.push(thread::spawn(move || {
+                stream.set_nonblocking(false).expect("blocking routed response socket");
                 stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
                 stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
                 let request = read_http_request_with_shutdown(&mut stream, Some(&stop));
@@ -530,6 +531,11 @@ fn spawn_scripted_openai_stream_server_internal(
                 }
                 Err(err) => panic!("accept mock request: {err}"),
             };
+            // accept() can inherit O_NONBLOCK on macOS/Windows. This fixture uses
+            // blocking read/write_all, including deliberate slow-reader backpressure.
+            stream
+                .set_nonblocking(false)
+                .expect("blocking response socket");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("stream read timeout");
