@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -18,6 +17,8 @@ async fn system_proxy_off_cannot_reach_remote_model() {
         std::env::var("TOMCAT_SYSTEM_PROXY_ACCEPTANCE").as_deref(),
         Ok("off")
     );
+    #[cfg(windows)]
+    assert_system_proxy_test_job();
     let fx = ServiceFixture::new("http://tomcat-system-model.invalid:9");
     let mut client = Client::connect(&fx.action("start")).await;
     let reply = client
@@ -48,6 +49,8 @@ async fn system_proxy_routes_native_and_acp_model_and_remote_mcp() {
         std::env::var("TOMCAT_SYSTEM_PROXY_ACCEPTANCE").as_deref(),
         Ok("on")
     );
+    #[cfg(windows)]
+    assert_system_proxy_test_job();
     let mcp_url = std::env::var("TOMCAT_SYSTEM_PROXY_MCP_URL").unwrap();
     assert!(mcp_url.starts_with("http://tomcat-system-mcp.invalid:"));
     let server = spawn_scripted_openai_stream_server_with_auto_title((0..2).flat_map(|_| vec![
@@ -506,6 +509,43 @@ async fn completed_connections_do_not_exhaust_slots_and_history_can_be_reopened(
 }
 
 #[cfg(windows)]
+fn assert_system_proxy_test_job() {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectExtendedLimitInformation, QueryInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    };
+    assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+    // Reuse nextest's BREAKAWAY_OK test Job. Do not modify the runner's Job
+    // or the deliberately restrictive host Job tested elsewhere in this file.
+    // SAFETY: this Win32 output structure contains only zero-valid POD fields.
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: null selects this process's immediate Job; the output buffer has
+    // the exact Win32 structure and remains alive for the synchronous call.
+    let queried = unsafe {
+        QueryInformationJobObject(
+            std::ptr::null_mut(),
+            JobObjectExtendedLimitInformation,
+            (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&limits) as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(
+        queried,
+        0,
+        "query test Job: {}",
+        std::io::Error::last_os_error()
+    );
+    let flags = limits.BasicLimitInformation.LimitFlags;
+    println!("Windows acceptance immediate Job flags: {flags:#x}");
+    assert_ne!(
+        flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        0,
+        "run this acceptance through cargo nextest"
+    );
+}
+
+#[cfg(windows)]
 fn spawn_in_windows_job(
     command: std::process::Command,
     allow_breakaway: bool,
@@ -639,6 +679,8 @@ async fn restricted_acp_host_requires_prestart_then_completes_task_without_ownin
             sse_finish, sse_tool_call,
         },
     };
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
     let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![sse_tool_call("job-proof", "write", &json!({
             "path":"job-proof.txt","content":"real tool under restricted host","overwrite":false
@@ -686,8 +728,14 @@ async fn restricted_acp_host_requires_prestart_then_completes_task_without_ownin
         std::fs::read_to_string(fx.0.workspace.join("job-proof.txt")).unwrap(),
         "real tool under restricted host"
     );
-    drop(job); // Kill the real owner/relay tree, not just a made-up cancellation event.
-    assert!(!host.wait_for_exit(WAIT).status.success());
+    // Terminate the real Job with a known code: closing a Job does not promise a
+    // nonzero exit code, and wait_for_exit also closes stdin. This proves the
+    // owner was killed by the Job, not just gracefully ended by the helper's EOF.
+    // SAFETY: this test owns the live Job and its disposable host/relay processes.
+    let terminated = unsafe { TerminateJobObject(job.as_raw_handle(), 77) };
+    assert_ne!(terminated, 0, "{}", std::io::Error::last_os_error());
+    drop(job);
+    assert_eq!(host.wait_for_exit(WAIT).status.code(), Some(77));
     let after = fx.action("status"); // A read-only status must not start a replacement service.
     assert_eq!(after["instanceId"], before["instanceId"]);
     assert_eq!(after["pid"], before["pid"]);
@@ -779,6 +827,7 @@ async fn controller_eof_waits_for_its_shell_to_stop_without_stopping_the_other_s
         response, spawn_scripted_openai_stream_server_with_auto_title, sse_delta, sse_done,
         sse_finish, sse_tool_call,
     };
+    use tokio::io::AsyncWriteExt;
     let mut script = Vec::new();
     for name in ["a", "b"] {
         let args = json!({"command": format!("echo $$ > {name}.pid; while :; do printf t >> {name}.ticks; sleep 0.05; done"), "run_in_background":true});

@@ -1286,6 +1286,8 @@ Windows Multica 的受管 Job
 
 本期接受限制，不绕过宿主进程管理。只有 Windows 用户实际反馈预启动太麻烦时，再与 Multica 协商仅对 Tomcat 后端开放 `BREAKAWAY_OK`。按用户最新验收范围，GitHub 只运行 Tomcat 仓库的测试：`serve_shared_e2e.rs` 的真实 Win32 Job 用例、假 ACP 宿主或直接协议代码验证连接/取消/预启动后服务存活，以及真实 VS Code 退出后服务存活。两宿主仅在本机验证与 Tomcat 有关的适配器与任务，不创建 fork、不接入宿主远端 CI。模拟宿主不等于验证完整 Multica Windows 运行环境；必须准确记录此边界，本机 macOS 也不代签 Windows 结果。
 
+**Windows CI 启动边界。** 系统代理由原 Node 脚本串行保存/设置/恢复，两个 Rust 对照用例改由现有 nextest 直接运行，而非 Node 执行裸测试 exe；真实 VS Code 仍走原启动器。nextest 的 [`runner/windows.rs::create_job`](https://github.com/nextest-rs/nextest/blob/main/nextest-runner/src/runner/windows.rs) 给测试自己的 Job 设置 `BREAKAWAY_OK`；两个用例实际查询并记录当前 Job 标志，不符合就失败。[Node 22.23.3 的 `uv__init_global_job_handle`](https://github.com/nodejs/node/blob/v22.23.3/deps/uv/src/win/process.c#L69-L121) 还设置 `SILENT_BREAKAWAY_OK`，会影响下一级 Rust 子进程的继承，所以 runner 必须直接拥有被测 Rust 进程，而不是再包一层整个 Node 脚本。按 [Windows 嵌套 Job 规则](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)，脱离内层 Job 不代表脱离不允许脱离的外层 Job；本次没有修改 runner 的外层 Job、产品启动参数或受限宿主用例。先前自制 Node detached 包装未解决 CI 启动拒绝，已删除，恢复标准 `execFile`。若 nextest 或 runner 的 Job 条件改变，应重新核对这个测试入口，不能放宽宿主权限或跳过启动/存活断言；实际通过与否仍看同修订 CI 证据。
+
 ### 6.2 停止后继续：原会话不等于原任务续跑
 
 ```text

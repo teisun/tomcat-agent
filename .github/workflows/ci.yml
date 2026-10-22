@@ -156,6 +156,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tomcat -> target
+      - name: Install cargo-nextest for the acceptance process boundary
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - name: Install test dependencies
         run: |
           npm ci

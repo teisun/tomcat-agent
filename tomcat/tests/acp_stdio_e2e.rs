@@ -182,14 +182,28 @@ async fn official_client_selects_a_model_and_receives_a_real_stream() {
         .filter_map(|v| v["update"]["content"]["text"].as_str())
         .collect();
     assert_eq!(streamed, "hello from model");
-    let requests = serde_json::to_string(&server.captured_requests()).unwrap();
+    let requests: Vec<Value> = server
+        .captured_requests()
+        .iter()
+        .map(|request| serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap())
+        .collect();
+    let selected = requests
+        .iter()
+        .find(|request| request["model"] == "alternate-wire")
+        .expect("selected model must reach the provider");
+    let cwd = tomcat::normalize_path(fx.0.workspace.to_str().unwrap()).unwrap();
+    // Compare decoded text, not JSON-escaped Windows backslashes or 8.3 aliases.
     assert!(
-        requests.contains("alternate-wire"),
-        "selected model must reach the provider: {requests}"
-    );
-    assert!(
-        requests.contains(fx.0.workspace.to_str().unwrap()),
-        "session cwd must reach the model"
+        selected["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(cwd.to_str().unwrap()))
+            }),
+        "session cwd {cwd:?} must reach the model: {selected}"
     );
     assert_eq!(
         fx.action("status")["running"],
