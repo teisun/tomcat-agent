@@ -63,12 +63,15 @@ async function runCli(options: Omit<SharedConnectionOptions, "allowStart">, args
 }
 
 function serviceInfo(value: unknown): SharedServiceInfo {
-  const info = value as Partial<SharedServiceInfo> | null;
+  const info = value as (Partial<SharedServiceInfo> & { error?: unknown }) | null;
   if (!info || info.running !== true || info.service !== "tomcat" ||
       info.protocolVersion !== LOCAL_PROTOCOL_VERSION || typeof info.serverVersion !== "string" ||
       typeof info.instanceId !== "string" || !info.instanceId || typeof info.pid !== "number" ||
       typeof info.agentId !== "string" || typeof info.endpoint !== "string" || !info.endpoint) {
     throw new Error("Tomcat shared service is unavailable or has an incompatible protocol. Reconnect explicitly to start it.");
+  }
+  if (typeof info.error === "string") {
+    throw new Error(`Tomcat shared service rejected the connection: ${info.error}`);
   }
   return info as SharedServiceInfo;
 }
@@ -119,10 +122,21 @@ export const connectSharedService: SharedConnectionFactory = async (options) => 
         } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
       });
       socket.once("connect", () => {
+        const environment = { ...process.env, ...options.env };
+        if (process.platform === "win32") {
+          // Match Node's spawn/execFile: first case-insensitive key in sorted order,
+          // including undefined values that intentionally remove a variable.
+          const seen = new Set<string>();
+          for (const key of Object.keys(environment).sort()) {
+            const folded = key.toUpperCase();
+            if (seen.has(folded)) delete environment[key];
+            else seen.add(folded);
+          }
+        }
         // Do not log this envelope: it contains the controller's environment.
         socket.write(`${JSON.stringify({
           service: "tomcat", protocolVersion: LOCAL_PROTOCOL_VERSION, clientVersion: version,
-          protocol: "native", environment: { ...process.env, ...options.env },
+          protocol: "native", environment,
         })}\n`);
       });
       if (options.signal.aborted) abort();

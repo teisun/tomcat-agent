@@ -6,7 +6,9 @@ use common::serve::{
 };
 use common::shared_serve::ServiceFixture;
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio, time::Duration};
+#[cfg(unix)]
+use std::path::Path;
+use std::{process::Stdio, time::Duration};
 
 use common::acp::{close, initialize, new_session, ok, prompt, request, spawn, WAIT};
 
@@ -182,8 +184,7 @@ async fn official_client_selects_a_model_and_receives_a_real_stream() {
         .filter_map(|v| v["update"]["content"]["text"].as_str())
         .collect();
     assert_eq!(streamed, "hello from model");
-    let requests: Vec<Value> = server
-        .captured_requests()
+    let requests: Vec<Value> = common::serve::captured_non_title_requests(&server)
         .iter()
         .map(|request| serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap())
         .collect();
@@ -541,6 +542,7 @@ fn acp_proxy_environment_cannot_override_saved_proxy_even_after_session_load() {
     assert_eq!(fx.action("status")["instanceId"], started["instanceId"]);
 }
 
+#[cfg(unix)]
 fn wait_mcp_record(path: &Path) -> Value {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
@@ -558,6 +560,7 @@ fn wait_mcp_record(path: &Path) -> Value {
     }
 }
 
+#[cfg(unix)]
 fn private_mcp(fx: &ServiceFixture, label: &str, extra: &[&str]) -> Value {
     let node = std::process::Command::new("node")
         .args(["-p", "process.execPath"])

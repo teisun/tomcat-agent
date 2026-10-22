@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-22 16:47 +0800 | ACTIVE | feature/shared-serve-acp | — |
+| Nibbles | 2026-10-22 17:38 +0800 | ACTIVE | feature/shared-serve-acp | — |
 
 ### CURRENT INTEGRATION：共享后台与 Paperclip/Multica ACP 接入（2026-10-22）
 
@@ -17,9 +17,11 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **提交与 CI**：`f6e627f6` 已推送 `feature/shared-serve-acp`，首轮 run `39709693529` 的 Linux Rust、Windows 扩展通过；macOS Rust、Windows Rust与 Windows 专项失败，未关闭门禁。当前补修 HTTP 测试 socket 模式、测试连接环境、Windows 管道关闭观测及 Node 启动链路；检查点清理复用原 CLI 的 30s 预算，ACP/管理关闭等待 60s，Multica 宽限 65s，超时仍失败并保留句柄。并发启动一次非零退出的原因尚待新增退出码/服务日志定位，不能算已解决。
 - **本批 CI 修复的本机证据**：Rust 定向库 251 PASS、ACP 两目标 26 PASS、共享服务 10 PASS / 2 ignored，strict all-target Clippy/fmt/diff check PASS；扩展启动器/代理相关 17 PASS及严格 TS 检查；Multica Tomcat 单测与显式当前 CLI 的真实注册 backend 执行/取消/续接通过（本地受控 HTTP 模型）。容量用例初版误读列表权限的失败、首次冷编译期代理用例超时、Go helper 等待不足均留档并定向复验。未再付费调用模型；完整 gate-fast 的同修订结果由下一轮 CI 补齐。
 - **第二轮 CI**：`fe1169b0` / run `39743687050` 已取得 macOS、Linux Rust 和 Windows 扩展成功；Windows 专项仍在启动服务时 Access denied，`proxy-requests.json=[]`，不是代理功能已测失败。改为两个 Rust 对照直接交给 nextest（不再包整条 Node 链），并实际查询 Job 标志；删除无效的自制 Node 包装及只测该包装的 4 个用例，保留系统代理/受限宿主/窗口退出断言。不改产品或 Multica Job 策略，下一修订仍需三平台云端验证。
-- **宿主本地提交**：Paperclip `1f010b165`、Multica `e12a45e59`，均仅 `feat/tomcat-agent` 本地分支，无远端推送；Multica 隔离 API/web/daemon 已用原环境管理器停止，数据与证据保留。Paperclip 进程清理因启动器身份校验不符主动中止，未强杀；正式 Tomcat 后台未动。
+- **宿主本地提交**：Paperclip `1f010b165`、Multica `e12a45e59`，均仅 `feat/tomcat-agent` 本地分支，无远端推送；Multica 隔离 API/web/daemon 已用原环境管理器停止。Paperclip 首次清理因身份不符主动中止，重新确认真正启动器后已停止；四个所属端口均无监听，临时数据与证据保留，正式 Tomcat 后台未动。
 - **第二轮 Windows Rust 结论**：失败项缩到 Unix 导入未条件编译、模型 cwd 断言误查 JSON 转义、受限 Job 退出码假设三处；其余并行集成365 PASS、串行80 PASS。当前将导入移回 Unix 用例，cwd 比较解析后的请求文本，真实 Job 显式指定终止码77并精确断言，另一个关闭 Job 句柄用例保持原样。本轮新门禁结果仍待推送后取得，不把未跑的 Windows 分支算作本机通过。
 - **第三轮本机预检**：nextest 配置守卫6 PASS、Node→nextest 真实单用例1 PASS、官方 ACP 客户端/模型/cwd 用例1 PASS、两个受影响测试目标严格 Clippy、严格 TS、fmt/diff check、个人机器保护和 CI 接线检查通过；系统代理设置/恢复6 PASS仍有效。曾误用 crate 私有路径归一化入口的编译失败已改用既有公开 `normalize_path`，不为测试扩大产品 API。
+- **第三轮云端结果**：`1d9845dd` / run `39750873025`，macOS/Linux Rust和Windows扩展成功；Windows Rust集成365+82 PASS（cwd与真实Job均通过），但Clippy仍因两个Unix专用MCP夹具函数未条件编译而失败，已连同其Path导入收口为 `cfg(unix)`。Windows专项记录Job flags=`0x800`且关闭系统代理对照通过；开启对照被测试的 `NO_PROXY`/`no_proxy` 重名快照拒绝，未发代理请求、未执行GUI，不能计正向通过。
+- **第四轮修复与预检**：测试只发送合法环境并检查握手error；模型/cwd断言复用既有非标题请求筛选。扩展也补拒绝既有error的处理（先以真实socket用例证明旧版误报连接成功），Windows环境编码与Node实际子进程一致，保留排序后的首个大小写等价键及undefined删除语义；没有新协议字段、按会话代理或重试机制。Rust定向2 PASS、目标严格Clippy/fmt通过；扩展相关79 PASS，最终所属文件10 PASS/typecheck通过。真实Mac窗口1 PASS，PNG/ARIA/console已读，退出前后及禁止启动重连后同一PID/instanceId；Windows新分支仍待下一轮CI。
 - **执行边界**：修复后补本机相关回归，再推送同一功能分支重跑三平台；Windows 仍须实际系统代理、Win32 Job、假 ACP 宿主和真实 VS Code 退出后存活证据。不合并主干、不升版、不发布；两宿主只做本地集成，不推远端、不建 fork。无关宿主基线失败保留，Cov% 未测量。
 - **证据**：架构及迁移见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)，本机完整日志索引见 `.agents/acceptance/shared-serve-acp.md`；本地截图、临时脚本与凭据不纳入 Git。
 

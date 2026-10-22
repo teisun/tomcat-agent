@@ -11,7 +11,7 @@ import { connectSharedService, ServiceVersionMismatchError, type SharedConnectio
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture(options: { stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean; holdHello?: boolean } = {}) {
+async function fixture(options: { stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean; holdHello?: boolean; handshakeError?: string } = {}) {
   const root = await mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tc-connect-"));
   const endpoint = process.platform === "win32" ? String.raw`\\.\pipe\tc-connect-${randomUUID()}` : path.join(root, "serve.sock");
   const info: SharedServiceInfo = { service: "tomcat", running: true, protocolVersion: options.protocol ?? 1,
@@ -33,7 +33,8 @@ async function fixture(options: { stopped?: boolean; version?: string; protocol?
         return;
       }
       sawHello();
-      if (!options.holdHello) socket.write(JSON.stringify({ ...info, instanceId: options.changedIdentity ? "replacement" : info.instanceId }) + "\n");
+      if (!options.holdHello) socket.write(JSON.stringify({ ...info, instanceId: options.changedIdentity ? "replacement" : info.instanceId,
+        ...(options.handshakeError ? { error: options.handshakeError } : {}) }) + "\n");
     });
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(endpoint, resolve); });
@@ -46,9 +47,11 @@ async function fixture(options: { stopped?: boolean; version?: string; protocol?
   });
   const script = path.join(root, "cli.cjs");
   const log = path.join(root, "commands.jsonl");
+  const envLog = path.join(root, "case-environment.json");
   await writeFile(script, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
+fs.writeFileSync(${JSON.stringify(envLog)}, JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() === "TEST_ENV_CASE"))));
 console.log(args[0] === "--version" ? "tomcat 0.1.80" : ${JSON.stringify(JSON.stringify(options.stopped ? { service: "tomcat", running: false } : info))});
 `);
   const abort = new AbortController();
@@ -57,6 +60,7 @@ console.log(args[0] === "--version" ? "tomcat 0.1.80" : ${JSON.stringify(JSON.st
     allowStart: true, env: { TEST_CONTROLLER_VALUE: "private-value" }, onStderr: vi.fn(),
   };
   return { abort, connectOptions, received, helloReceived,
+    childEnvironment: async () => JSON.parse(await readFile(envLog, "utf8")),
     calls: async () => (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line)),
   };
 }
@@ -70,6 +74,18 @@ it("uses CLI discovery then native IPC with the controller environment, never lo
   expect((f.received[0].environment as Record<string, string>).TEST_CONTROLLER_VALUE).toBe("private-value");
   expect(f.connectOptions.onStderr).not.toHaveBeenCalled();
   connection.socket.destroy();
+});
+
+it.each(["upper", undefined])("encodes case aliases exactly as the actual CLI child receives them (%s)", async value => {
+  const f = await fixture();
+  f.connectOptions.env = { ...f.connectOptions.env, TEST_ENV_CASE: value, test_env_case: "lower" };
+  const connection = await connectSharedService(f.connectOptions);
+  try {
+    const sent = f.received[0].environment as Record<string, string>;
+    const aliases = Object.fromEntries(Object.entries(sent).filter(([key]) => key.toUpperCase() === "TEST_ENV_CASE"));
+    expect(aliases).toEqual(await f.childEnvironment());
+    expect(Object.keys(aliases)).toHaveLength(process.platform === "win32" ? (value === undefined ? 0 : 1) : (value === undefined ? 1 : 2));
+  } finally { connection.socket.destroy(); }
 });
 
 it("hands the paused handshake socket to the normal NDJSON reader", async () => {
@@ -101,6 +117,14 @@ it.each([{ version: "0.0.1", error: "service_version_mismatch" }, { protocol: 99
     expect(f.received).toHaveLength(0);
   },
 );
+
+it("rejects a service denial even when its identity and version match", async () => {
+  const f = await fixture({ handshakeError: "invalid_connection_environment" });
+  await expect(connectSharedService(f.connectOptions)).rejects.toThrow("invalid_connection_environment");
+  expect(f.received).toHaveLength(1);
+  expect(f.received[0].protocol).toBe("native");
+  expect(await f.calls()).toEqual([["--version"], ["serve", "start"]]);
+});
 
 it("rejects an instance change between discovery and socket handshake", async () => {
   const f = await fixture({ changedIdentity: true });

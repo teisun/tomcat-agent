@@ -77,11 +77,15 @@ async fn system_proxy_routes_native_and_acp_model_and_remote_mcp() {
     )
     .unwrap();
     let info = fx.action("start");
+    // Windows environment keys are case-insensitive: send one NO_PROXY entry,
+    // not a malformed snapshot with both NO_PROXY and no_proxy.
     let environment = json!({"HTTP_PROXY":"http://native.invalid:bad-port", "HTTPS_PROXY":"http://native.invalid:bad-port",
-        "ALL_PROXY":"http://native.invalid:bad-port", "NO_PROXY":"*", "no_proxy":"*"});
+        "ALL_PROXY":"http://native.invalid:bad-port", "NO_PROXY":"*"});
     let mut native =
         Client::open_with_environment(&info, env!("CARGO_PKG_VERSION"), environment).await;
-    assert_eq!(native.next().await["instanceId"], info["instanceId"]);
+    let hello = native.next().await;
+    assert_eq!(hello["instanceId"], info["instanceId"]);
+    assert!(hello.get("error").is_none(), "{hello}");
     native.send(json!({"type":"control_request","requestId":"init","subtype":"initialize","payload":{}})).await;
     native
         .until(|v| v["type"] == "control_response" && v["requestId"] == "init")
