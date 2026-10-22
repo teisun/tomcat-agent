@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-22 18:36 +0800 | ACTIVE | feature/shared-serve-acp | — |
+| Nibbles | 2026-10-22 19:25 +0800 | DONE | feature/shared-serve-acp | — |
 
 ### CURRENT INTEGRATION：共享后台与 Paperclip/Multica ACP 接入（2026-10-22）
 
@@ -9,6 +9,11 @@ Paperclip / Multica → 标准 ACP → 共享 Tomcat 后台
 VS Code            → 原生连接 → 同项目实时只读旁观
 正式 HTTP          → llm.proxy / 系统代理（不读入口 shell 代理）
 ```
+
+- **最终验收**：代码 `401b6f0cbd8be8478b5453815450f7ce6ada00e7` 的[同一轮 GitHub CI](https://github.com/teisun/tomcat-agent/actions/runs/39765237685)五项必需检查全部成功：macOS/Linux/Windows Rust、Windows扩展、Windows系统代理与真实窗口。下面保留各阶段原始记录；旧的待验/失败描述不是当前结论。文档收口不改产品、测试、依赖或CI配置，复用该代码修订的结果。
+- **云端实跑数**：macOS/Linux各为lib3424、并行集成379、串行86 PASS；Windows为lib3411、并行365、串行82 PASS；三平台fmt/严格all-target Clippy均通过。各平台原有lib5 ignored、集成27+3 skipped不计通过；两项系统代理专用用例由专项显式执行，均1 PASS。Windows扩展core803、GUI865 PASS。
+- **Windows实际证据**：win25-vs2026 / Node22.23.3 / VSCode1.106.0；13次实际代理请求，含Native/ACP模型、两次MCP tools/call与窗口模型请求，设置已逐值恢复。三条真实Job/受限ACP边界用例通过；真实窗口写文件并退出后，PID7200与instanceId `d1cc9b74-a5a9-4ff8-8b7c-f542c527ba18` 不变，禁止启动的Native重连成功。已读255×808 PNG、ARIA及console，任务/完成结果可见，窄栏省略与横向滚动保留，捕获范围内errors为空；不宣称全程宿主日志零错误，也不代表所有个人Windows环境。
+- **历史异常保留**：首轮生命周期用例曾在输出合法JSON后非零退出，原日志缺退出码，根因仍未证实；本轮该原用例在三平台均通过，增强诊断和原失败日志保留，不把补诊断说成已定位修复。不将宿主无关基线失败或未运行项目改记为通过。
 
 - **交付范围**：共享服务生命周期、标准 ACP、显式会话 cwd、原项目隔离、只读旁观、控制断开取消并等待真实子进程停止；ACP 问题放入普通回复，Native 保留提问面板。按复核计划修正慢读完整输出、协议/CLI 版本门槛、准入锁与迁移说明；未新增续跑/WebSocket 或按会话代理机制。
 - **首轮本机自动化验收完成（本次 CI 修复的相关复验另记）**：Rust gate-fast exit 0：lib 3422 PASS / 5 ignored，parallel integration 379 PASS / 27 skipped，serial integration 86 PASS / 3 skipped，fmt/严格 Clippy 通过；扩展 core 800、GUI 865、完整默认 devhost 43 PASS / 7 条件场景 pending。仍有效的扩展集成 236 PASS / 1 skipped 与宿主相关测试复用，不把跳过项计为通过。
@@ -24,7 +29,7 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **第四轮修复与预检**：测试只发送合法环境并检查握手error；模型/cwd断言复用既有非标题请求筛选。扩展也补拒绝既有error的处理（先以真实socket用例证明旧版误报连接成功），Windows环境编码与Node实际子进程一致，保留排序后的首个大小写等价键及undefined删除语义；没有新协议字段、按会话代理或重试机制。Rust定向2 PASS、目标严格Clippy/fmt通过；扩展相关79 PASS，最终所属文件10 PASS/typecheck通过。真实Mac窗口1 PASS，PNG/ARIA/console已读，退出前后及禁止启动重连后同一PID/instanceId；Windows新分支仍待下一轮CI。
 - **第四轮云端结果**：`48fd1407` / run `39757922309` 的macOS/Linux Rust和Windows扩展通过。Windows真实系统代理开关对照均通过，Native/ACP模型与远程MCP共10次代理请求（含2次tools/call）；GUI因下载VS Code1.101.0、低于扩展要求的1.106.0而未加载。Windows Rust并行365 PASS；我将父模块Path导入限制为Unix时漏看了技能子模块的glob借用，导致Clippy/串行组编译失败，不能计串行通过。
 - **第五轮修复与本机预检**：两个下载入口改读扩展engines.vscode的最低版本，不改兼容性声明或显式程序路径覆盖；技能测试自己导入Path，Unix专属MCP函数仍按平台编译。启动器/系统代理包装29 PASS、严格TS及build通过；Rust所属技能3 PASS、严格Clippy/fmt通过。真正VS Code1.106.0完成任务及关窗后同实例验活1 PASS，299px侧栏PNG/ARIA/console已读；只是测试接线修复，产品、代理来源、协议和断言不变。同修订Windows最终状态与制品仍由CI给出，不以本机结果代签。
-- **执行边界**：修复后补本机相关回归，再推送同一功能分支重跑三平台；Windows 仍须实际系统代理、Win32 Job、假 ACP 宿主和真实 VS Code 退出后存活证据。不合并主干、不升版、不发布；两宿主只做本地集成，不推远端、不建 fork。无关宿主基线失败保留，Cov% 未测量。
+- **执行边界**：Windows云端使用受控模型和假ACP宿主/直接协议，不安装Paperclip或Multica；两宿主只在本地实际启动验收及本地分支提交。未升版、合并主干或发布；真实模型授权已用完且未追加调用，本机系统代理未修改，原Tomcat后台未动。临时验收数据保留供复查，Cov%未测量。
 - **证据**：架构及迁移见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)，本机完整日志索引见 `.agents/acceptance/shared-serve-acp.md`；本地截图、临时脚本与凭据不纳入 Git。
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
